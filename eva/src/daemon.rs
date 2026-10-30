@@ -23,6 +23,33 @@ use tokio::{
     sync::{mpsc, oneshot, watch},
 };
 
+struct ErrorExpiry {
+    permit: AssistantPermit,
+    deadline: std::time::Instant,
+}
+impl ErrorExpiry {
+    fn closes(&self, now: std::time::Instant, current: Option<&AssistantPermit>) -> bool {
+        now >= self.deadline && current == Some(&self.permit)
+    }
+}
+fn keeps_verified_feedback(error: &io::Error, status: &Value) -> bool {
+    error.to_string() == "feedback_history_repair_failed"
+        && status["state"] == "responding"
+        && status["voice_fallback"] == true
+        && status["result_status"].as_str().is_some_and(|status| {
+            [
+                "succeeded",
+                "partial",
+                "clarify",
+                "noop",
+                "unknown",
+                "failed",
+                "cancelled",
+            ]
+            .contains(&status)
+        })
+}
+
 pub fn runtime_dir() -> io::Result<PathBuf> {
     let base = std::env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
@@ -234,7 +261,7 @@ pub async fn run(c: Config) -> io::Result<()> {
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let mut reconciliation: Option<tokio::task::JoinHandle<io::Result<()>>> = None;
     let mut last_reconcile = std::time::Instant::now();
-    let mut error_until: Option<std::time::Instant> = None;
+    let mut error_until: Option<ErrorExpiry> = None;
     let mut last_heartbeat = std::time::Instant::now() - Duration::from_secs(1);
     // Store recovery includes durable fsyncs and can wait on host I/O. Do not
     // start systemd's runtime watchdog until recovery, the control listener,
@@ -267,13 +294,14 @@ pub async fn run(c: Config) -> io::Result<()> {
                 let response=match request.request["command"].as_str().unwrap_or(""){
                     "status"=>json!({"success":true,"data":status,"assistant_permit":permit,"pid":std::process::id(),"configuration_id":c.fingerprint(),"model":c.openai.model,"wake_requested":wake_requested,"wake_generation":wake_generation,"wake_model":c.wake_word.model,"wake":wake_status}),
                     "undo" if permit.is_some() && request.request.get("assistant_permit").is_none_or(|requested|serde_json::to_value(permit.as_ref().unwrap()).is_ok_and(|p|p==*requested)) && ["listening","follow_up","responding"].contains(&status["state"].as_str().unwrap_or(""))=>{
+                        error_until=None;
                         stop(&mut worker,&mut cancellation).await;
                         // Both workers use this permit. Joining first and
                         // draining the old worker's pending UI patches prevents
                         // a delayed FollowUp from reopening the undo UI state.
                         while updates.try_recv().is_ok(){}
                         let p=permit.clone().unwrap();let cfg=c.clone();let storage=store.clone();let tx=updates_tx.clone();
-                        status=json!({"state":"executing","text":"正在撤销","microphone_active":false});
+                        status=json!({"state":"executing","text":"正在撤销","microphone_active":false,"task_progress":null});
                         worker=Some(tokio::spawn(async move {
                             let result=crate::executor::undo(&p,storage,&cfg).await?;
                             let _=tx.send(Update{permit:p.clone(),state:json!({"state":"responding","text":if result["status"]=="succeeded"{"已撤销可逆更改。"}else{"可逆更改未全部撤销。"},"microphone_active":false})}).await;
@@ -312,18 +340,28 @@ pub async fn run(c: Config) -> io::Result<()> {
                 if last_reconcile.elapsed()>=Duration::from_secs(2)&&reconciliation.as_ref().is_none_or(|t|t.is_finished()){
                     reconciliation=Some(tokio::spawn(crate::executor::reconcile(store.clone())));last_reconcile=std::time::Instant::now();
                 }
-                if error_until.is_some_and(|t|std::time::Instant::now()>=t){
-                    if let Some(p)=permit.take(){let _=command("set_assistant_status",json!({"assistant_permit":p,"state":"closing"})).await;}
+                if error_until.as_ref().is_some_and(|expiry|std::time::Instant::now()>=expiry.deadline){
+                    if error_until.as_ref().is_some_and(|expiry|expiry.closes(std::time::Instant::now(),permit.as_ref()))
+                        && let Some(p)=permit.take(){let _=command("set_assistant_status",json!({"assistant_permit":p,"state":"closing"})).await;}
                     error_until=None;
                 }
                 if worker.as_ref().is_some_and(|w|w.is_finished()) {
-                    if let Some(w)=worker.take(){match w.await{Ok(Ok(()))=>{},Ok(Err(e))=>{let (code,text)=crate::errors::describe(&e);status=json!({"state":"error","text":text,"error_code":code,"microphone_active":false});},Err(_)=>{status=json!({"state":"error","text":"Eva 会话已停止","microphone_active":false});}}}
-                    if status["state"]=="error" {
-                        if let Some(p)=permit.as_ref(){let _=command("set_assistant_status",json!({"assistant_permit":p,"state":"error","text":status["text"]})).await;}
-                        error_until=Some(std::time::Instant::now()+Duration::from_millis(1500));
+                    // A final verified result is queued before a fatal voice
+                    // delivery error. Consume it before deciding what to show.
+                    while let Ok(update)=updates.try_recv(){if let Some(p)=permit.as_ref(){update.apply(p,&mut status);}}
+                    let mut keep_feedback=false;
+                    if let Some(w)=worker.take(){match w.await{
+                        Ok(Ok(()))=>{},
+                        Ok(Err(e)) if keeps_verified_feedback(&e,&status)=>{status["microphone_active"]=json!(false);keep_feedback=true;},
+                        Ok(Err(e))=>{let (code,text)=crate::errors::describe(&e);status=json!({"state":"error","text":text,"error_code":code,"retryable":crate::errors::recovery(&e)!=crate::errors::Recovery::Permanent,"microphone_active":false});},
+                        Err(_)=>{status=json!({"state":"error","text":"Eva 会话已停止","microphone_active":false});}
+                    }}
+                    if status["state"]=="error" || keep_feedback {
+                        if let Some(p)=permit.as_ref(){let mut snapshot=status.clone();snapshot["assistant_permit"]=json!(p);let _=command("set_assistant_status",snapshot).await;}
+                        error_until=permit.clone().map(|permit|ErrorExpiry{permit,deadline:std::time::Instant::now()+Duration::from_secs(6)});
                     }else if let Some(p)=permit.take(){let _=command("set_assistant_status",json!({"assistant_permit":p,"state":"closing"})).await;}
                     cancellation=None;
-                    if status["state"]!="error"{status=json!({"state":"idle","text":"","microphone_active":false});}
+                    if status["state"]!="error" && !keep_feedback{status=json!({"state":"idle","text":"","microphone_active":false});}
                 }
                 if let Some(p)=permit.as_ref() && last_heartbeat.elapsed()>=Duration::from_secs(1){
                     status["undo_available"]=json!(heartbeat_undo_available(&c,&store,wm_instance.as_deref()));
@@ -424,6 +462,7 @@ pub async fn run(c: Config) -> io::Result<()> {
                 wm_instance=observed.as_ref().ok().and_then(|s|s["wm_instance_id"].as_str()).map(str::to_owned);
                 let next=observed.as_ref().ok().filter(|s|s["active"]==true).and_then(|s|serde_json::from_value::<AssistantPermit>(s["assistant_permit"].clone()).ok());
                 if next!=permit {
+                    error_until=None;
                     stop(&mut worker,&mut cancellation).await;permit=next;
                     status=json!({"state":"idle","text":"","microphone_active":false});
                     if let Some(p)=permit.clone(){
@@ -655,6 +694,43 @@ impl Drop for Watchdog {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn failed_voice_delivery_preserves_only_an_already_published_verified_outcome() {
+        let mut status = serde_json::json!({"state":"responding","result_status":"succeeded","voice_fallback":true,"text":"已切到第3个工作区"});
+        let failure = std::io::Error::other("feedback_history_repair_failed");
+        assert!(super::keeps_verified_feedback(&failure, &status));
+        assert!(!super::keeps_verified_feedback(
+            &std::io::Error::other("auth_failed"),
+            &status
+        ));
+        status["result_status"] = serde_json::json!("unknown");
+        assert!(super::keeps_verified_feedback(&failure, &status));
+        status["voice_fallback"] = serde_json::json!(false);
+        assert!(!super::keeps_verified_feedback(&failure, &status));
+        status["voice_fallback"] = serde_json::json!(true);
+        status["state"] = serde_json::json!("planning");
+        assert!(!super::keeps_verified_feedback(&failure, &status));
+    }
+    #[test]
+    fn reading_an_error_card_never_ends_a_new_retry_or_reactivated_session() {
+        let now = std::time::Instant::now();
+        let original = jwm_eva_core::protocol::AssistantPermit {
+            assistant_session_id: "original".into(),
+            generation: 1,
+        };
+        let retry = jwm_eva_core::protocol::AssistantPermit {
+            assistant_session_id: "retry".into(),
+            generation: 2,
+        };
+        let expiry = super::ErrorExpiry {
+            permit: original.clone(),
+            deadline: now + std::time::Duration::from_secs(6),
+        };
+        assert!(!expiry.closes(now + std::time::Duration::from_secs(5), Some(&original)));
+        assert!(expiry.closes(now + std::time::Duration::from_secs(6), Some(&original)));
+        assert!(!expiry.closes(now + std::time::Duration::from_secs(60), Some(&retry)));
+        assert!(!expiry.closes(now + std::time::Duration::from_secs(60), None));
+    }
     #[test]
     fn complete_source_fields_without_the_required_contract_never_open_wake_audio() {
         let mut source =

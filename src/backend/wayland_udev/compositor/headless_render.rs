@@ -11127,7 +11127,7 @@ fn eva_overlay_renders_persists_and_releases_without_a_window() {
         };
         let baseline = render(&mut compositor);
         compositor.set_eva_overlay(serde_json::json!({
-            "active":true,"state":"listening","text":"正在听",
+            "active":true,"state":"listening","text":"正在听","microphone_active":true,
             "level":0.65,"lease_remaining_ms":3000,"monitor_rect":[0,0,W,H]
         }));
         compositor
@@ -11185,6 +11185,266 @@ fn eva_overlay_renders_persists_and_releases_without_a_window() {
 }
 
 #[test]
+fn eva_microphone_level_and_verified_task_progress_have_separate_gpu_meters() {
+    let Some(_headless) = HeadlessGl::new(GlApi::Gles3) else {
+        return;
+    };
+    let gl = smithay::backend::renderer::gles::ffi::Gles2::load_with(|symbol| {
+        egl::get_proc_address(symbol) as *const c_void
+    });
+    const W: i32 = 640;
+    const H: i32 = 360;
+    unsafe {
+        let mut compositor = super::WaylandCompositor::new(&gl, W as u32, H as u32, false).unwrap();
+        let render = |c: &mut super::WaylandCompositor| {
+            c.force_full_redraw();
+            c.render_frame(&gl, &[], None, false, false, false, None, false);
+            read_fbo_frame(&gl, c.output_fbo, W, H)
+        };
+        let mut snapshot = serde_json::json!({"active":true,"state":"executing","text":"正在整理窗口","microphone_active":true,"level":0.0,"lease_remaining_ms":3000,"monitor_rect":[0,0,W,H],"task_progress":{"completed":1,"total":3,"current_step":2,"stage":"verifying","action":"move_window_to_tag"}});
+        compositor.set_eva_overlay(snapshot.clone());
+        compositor
+            .eva_overlay
+            .settle_motion_for_test(std::time::Instant::now());
+        let quiet = render(&mut compositor);
+        let now = std::time::Instant::now();
+        let card = compositor.eva_overlay.rect([W as f32, H as f32]);
+        let bars = compositor.eva_overlay.mic_bars(card, now);
+        assert_eq!(bars.len(), 5);
+        assert!(
+            bars.iter().all(|(_, active)| !*active),
+            "silence cannot create input activity"
+        );
+        let progress = compositor.eva_overlay.progress_fill(now).unwrap();
+        assert!((progress - 1.0 / 3.0).abs() < 0.001);
+        let [px, py, pw, ph] = compositor.eva_overlay.progress_rect(card).unwrap();
+        let blue = frame_pixel(
+            &quiet,
+            W as usize,
+            H as usize,
+            (px + pw / 6.0) as usize,
+            (py + ph / 2.0) as usize,
+        );
+        assert!(
+            blue[2] > blue[1] && blue[2] > blue[0],
+            "verified progress must have its blue rail: {blue:?}"
+        );
+        snapshot["level"] = serde_json::json!(0.8);
+        compositor.set_eva_overlay(snapshot.clone());
+        compositor.eva_overlay.settle_motion_for_test(now);
+        let speaking = render(&mut compositor);
+        let active = compositor
+            .eva_overlay
+            .mic_bars(card, std::time::Instant::now());
+        let mut changed = 0;
+        for ([x, y, w, h], active) in active {
+            if !active {
+                continue;
+            }
+            let (x, y) = ((x + w / 2.0) as usize, (y + h / 2.0) as usize);
+            let green = frame_pixel(&speaking, W as usize, H as usize, x, y);
+            assert!(
+                green[1] > green[0] && green[1] > green[2],
+                "microphone bars must remain distinct from progress: {green:?}"
+            );
+            changed += usize::from(green != frame_pixel(&quiet, W as usize, H as usize, x, y));
+        }
+        assert!(
+            changed >= 3,
+            "actual input updates did not reach the GPU meter"
+        );
+        assert_eq!(
+            speaking,
+            render(&mut compositor),
+            "quiet paints must not invent meter activity or task completion"
+        );
+        snapshot["microphone_active"] = serde_json::json!(false);
+        snapshot["state"] = serde_json::json!("unknown");
+        snapshot["task_progress"]["stage"] = serde_json::json!("unknown");
+        compositor.set_eva_overlay(snapshot);
+        compositor.eva_overlay.settle_motion_for_test(now);
+        render(&mut compositor);
+        assert!(
+            compositor
+                .eva_overlay
+                .mic_bars(card, std::time::Instant::now())
+                .is_empty()
+        );
+        assert!(
+            (compositor
+                .eva_overlay
+                .progress_fill(std::time::Instant::now())
+                .unwrap()
+                - progress)
+                .abs()
+                < 0.001,
+            "an unknown result cannot advance verified completion"
+        );
+        assert!(
+            compositor
+                .release_gpu_resources(&gl, super::CompositorOutputTextureOwnership::RawCompositor)
+        );
+    }
+}
+
+/// An opt-in visual artifact, captured by the real GLES compositor with
+/// synthetic local status. It does not open audio, connect an API or run JWM.
+#[test]
+#[ignore = "writes a themed GPU preview gallery; set JWM_EVA_GALLERY_DIR and require surfaceless GL"]
+fn eva_overlay_visual_gallery() {
+    let Some(_headless) = HeadlessGl::new(GlApi::Gles3) else {
+        return;
+    };
+    let gl = smithay::backend::renderer::gles::ffi::Gles2::load_with(|symbol| {
+        egl::get_proc_address(symbol) as *const c_void
+    });
+    let directory = std::env::var_os("JWM_EVA_GALLERY_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp/jwm-eva-ui-preview"));
+    std::fs::create_dir_all(&directory).unwrap();
+    struct RestoreConfig(std::sync::Arc<crate::config::Config>);
+    impl Drop for RestoreConfig {
+        fn drop(&mut self) {
+            crate::config::CONFIG.store(self.0.clone());
+        }
+    }
+    let restore = RestoreConfig(crate::config::CONFIG.load_full());
+    assert!(
+        crate::backend::compositor_font::ui_glyphs_available_for_test(
+            restore.0.system_ui_font(),
+            "中文"
+        ),
+        "visual preview requires real CJK outlines, not ASCII question-mark substitutes"
+    );
+    const W: u32 = 640;
+    const H: u32 = 360;
+    let cases = vec![
+        (
+            "standby",
+            serde_json::json!({"active":false,"visible":true,"state":"standby","text":"说 hi eva 开始对话","microphone_active":true,"level":0.0,"wake_requested":true}),
+        ),
+        (
+            "listening",
+            serde_json::json!({"active":true,"state":"listening","text":"想做什么，直接说就好","microphone_active":true,"level":0.68,"input_caption":{"text":"把浏览器放到右边，再把终端移到第三个工作区"}}),
+        ),
+        (
+            "clarify",
+            serde_json::json!({"active":true,"state":"follow_up","result_status":"clarify","text":"你想切换到哪个浏览器窗口？\n1. 工作文档　2. 个人浏览","microphone_active":true,"level":0.12,"followup_remaining_ms":12000}),
+        ),
+        (
+            "executing",
+            serde_json::json!({"active":true,"state":"executing","text":"正在整理窗口","microphone_active":true,"level":0.0,"task_progress":{"completed":1,"total":3,"current_step":2,"stage":"verifying","action":"move_window_to_tag"}}),
+        ),
+        (
+            "confirmation",
+            serde_json::json!({"active":true,"state":"confirming","microphone_active":false,"confirmation":{"total_actions":3,"display_items":[{"critical":"关闭窗口 w3@g42 · monitor m1","title":"工作文档 · 浏览器"},{"critical":"关闭窗口 w5@g42 · monitor m1","title":"终端 · 开发任务"},{"critical":"关闭窗口 w8@g42 · monitor m2","title":"笔记 · 本周计划"}]}}),
+        ),
+        (
+            "completed",
+            serde_json::json!({"active":true,"state":"follow_up","result_status":"succeeded","text":"浏览器已靠右，终端已移到第三个工作区。","microphone_active":true,"level":0.0,"followup_remaining_ms":15000,"undo_available":true,"task_progress":{"completed":2,"total":2,"current_step":2,"stage":"succeeded","action":"move_window_to_tag"}}),
+        ),
+        (
+            "unknown",
+            serde_json::json!({"active":true,"state":"follow_up","result_status":"unknown","text":"窗口已移动；播放器尚未回报结果，请先检查播放器。","microphone_active":true,"level":0.0,"followup_remaining_ms":15000,"task_progress":{"completed":1,"total":2,"current_step":2,"stage":"unknown","action":"media_control"}}),
+        ),
+        (
+            "error",
+            serde_json::json!({"active":true,"state":"error","error_code":"service_unavailable","retryable":true,"text":"语音连接已中断，请检查网络后重试。","microphone_active":false}),
+        ),
+    ];
+    let mut board = image::RgbaImage::new(W * 4, H * 4);
+    let mut manifest = Vec::new();
+    let mut index = 0;
+    for theme in ["glass", "glass-dark"] {
+        let mut config = (*restore.0).clone();
+        config
+            .set_value("appearance.ui_theme", &serde_json::json!(theme))
+            .unwrap();
+        crate::config::CONFIG.store(std::sync::Arc::new(config));
+        unsafe {
+            let mut compositor = super::WaylandCompositor::new(&gl, W, H, false).unwrap();
+            for (name, case) in &cases {
+                let mut snapshot = case.clone();
+                snapshot["lease_remaining_ms"] = serde_json::json!(3000);
+                snapshot["monitor_rect"] = serde_json::json!([0, 0, W, H]);
+                compositor.set_eva_overlay(snapshot);
+                compositor
+                    .eva_overlay
+                    .settle_motion_for_test(std::time::Instant::now());
+                compositor.force_full_redraw();
+                compositor.render_frame(&gl, &[], None, false, false, false, None, false);
+                let frame = read_fbo_frame(&gl, compositor.output_fbo, W as i32, H as i32);
+                let mut pixels = frame.clone();
+                let stride = W as usize * 4;
+                for row in 0..H as usize {
+                    pixels[row * stride..(row + 1) * stride].copy_from_slice(
+                        &frame[(H as usize - 1 - row) * stride..(H as usize - row) * stride],
+                    );
+                }
+                let screenshot = image::RgbaImage::from_raw(W, H, pixels).unwrap();
+                let filename = format!("{index:02}-{theme}-{name}.png");
+                screenshot.save(directory.join(&filename)).unwrap();
+                image::imageops::replace(
+                    &mut board,
+                    &screenshot,
+                    ((index % 4) as u32 * W) as i64,
+                    ((index / 4) as u32 * H) as i64,
+                );
+                manifest.push(serde_json::json!({"theme":theme,"state":name,"file":filename,"card_rect":compositor.eva_overlay.rect([W as f32,H as f32]),"microphone_level":compositor.eva_overlay.level(std::time::Instant::now()),"verified_progress":compositor.eva_overlay.progress_fill(std::time::Instant::now())}));
+                index += 1;
+            }
+            assert!(compositor.release_gpu_resources(
+                &gl,
+                super::CompositorOutputTextureOwnership::RawCompositor
+            ));
+            for (name, case) in cases.iter().filter(|(name, _)| {
+                matches!(*name, "standby" | "listening" | "clarify" | "confirmation")
+            }) {
+                const SW: u32 = 320;
+                const SH: u32 = 180;
+                let mut small = super::WaylandCompositor::new(&gl, SW, SH, false).unwrap();
+                let mut snapshot = case.clone();
+                snapshot["lease_remaining_ms"] = serde_json::json!(3000);
+                snapshot["monitor_rect"] = serde_json::json!([0, 0, SW, SH]);
+                small.set_eva_overlay(snapshot);
+                small
+                    .eva_overlay
+                    .settle_motion_for_test(std::time::Instant::now());
+                small.force_full_redraw();
+                small.render_frame(&gl, &[], None, false, false, false, None, false);
+                let frame = read_fbo_frame(&gl, small.output_fbo, SW as i32, SH as i32);
+                let mut pixels = frame.clone();
+                let stride = SW as usize * 4;
+                for row in 0..SH as usize {
+                    pixels[row * stride..(row + 1) * stride].copy_from_slice(
+                        &frame[(SH as usize - 1 - row) * stride..(SH as usize - row) * stride],
+                    );
+                }
+                let filename = format!("small-{theme}-{name}.png");
+                image::RgbaImage::from_raw(SW, SH, pixels)
+                    .unwrap()
+                    .save(directory.join(&filename))
+                    .unwrap();
+                let card = small.eva_overlay.rect([SW as f32, SH as f32]);
+                assert!(
+                    card[0] >= 0.
+                        && card[1] >= 0.
+                        && card[0] + card[2] <= SW as f32 + 0.1
+                        && card[1] + card[3] <= SH as f32 + 0.1
+                );
+                manifest.push(serde_json::json!({"theme":theme,"state":name,"file":filename,"size":[SW,SH],"card_rect":card}));
+                assert!(small.release_gpu_resources(
+                    &gl,
+                    super::CompositorOutputTextureOwnership::RawCompositor
+                ));
+            }
+        }
+    }
+    board.save(directory.join("eva-gallery.png")).unwrap();
+    std::fs::write(directory.join("manifest.json"),serde_json::to_vec_pretty(&serde_json::json!({"kind":"headless_gpu_eva_preview","renderer":"Wayland GLES3","real_audio":false,"real_api":false,"tile_size":[W,H],"cases":manifest})).unwrap()).unwrap();
+}
+
+#[test]
 fn eva_confirmation_eight_targets_have_visible_rows_and_clear_on_cancel() {
     let Some(_headless) = HeadlessGl::new(GlApi::Gles3) else {
         eprintln!("headless GL unavailable - skipping Eva confirmation pixel test");
@@ -11204,7 +11464,7 @@ fn eva_confirmation_eight_targets_have_visible_rows_and_clear_on_cancel() {
         };
         let baseline = render(&mut compositor);
         let items:Vec<_>=(1..=8).map(|n|serde_json::json!({"critical":format!("w{n}@g42 close_window → tag 8 · monitor m2"),"title":format!("本地窗口 {n}")})).collect();
-        compositor.set_eva_overlay(serde_json::json!({"active":true,"state":"confirming","lease_remaining_ms":3000,"monitor_rect":[0,0,W,H],"confirmation":{"total_actions":8,"display_items":items}}));
+        compositor.set_eva_overlay(serde_json::json!({"active":true,"state":"confirming","microphone_active":false,"lease_remaining_ms":3000,"monitor_rect":[0,0,W,H],"confirmation":{"total_actions":8,"display_items":items}}));
         compositor
             .eva_overlay
             .settle_motion_for_test(std::time::Instant::now());

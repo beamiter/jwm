@@ -2576,7 +2576,12 @@ impl Jwm {
             {
                 if !repeat {
                     match action {
-                        EvaLocalAction::Retry=>{self.eva_cancel("local_retry");self.eva_toggle(backend,&WMArgEnum::Int(0))?;},
+                        EvaLocalAction::Retry=>{
+                            if snapshot["active"]==false && snapshot["wake_requested"]==true {
+                                let response=self.eva_control(backend,&serde_json::json!({"action":"wake_enable"}));
+                                if !response.success {return Err(response.error.unwrap_or_else(||"语音唤醒暂不可重试".into()).into());}
+                            } else {self.eva_cancel("local_retry");self.eva_toggle(backend,&WMArgEnum::Int(0))?;}
+                        },
                         EvaLocalAction::Diagnostics=>self.eva_open_diagnostics(backend),
                         EvaLocalAction::Undo=>self.broadcast_ipc_event("assistant/local_action",serde_json::json!({"action":"undo","assistant_permit":snapshot["assistant_permit"]})),
                     }
@@ -5906,6 +5911,55 @@ mod tests {
         );
     }
 
+    #[test]
+    fn eva_retry_respects_standby_context_and_does_not_retry_permanent_errors() {
+        let (mut jwm, mut backend, input) = repeat_dispatch_fixture();
+        assert!(
+            jwm.eva_control(&mut backend, &serde_json::json!({"action":"wake_enable"}))
+                .success
+        );
+        let before = jwm.eva_overlay_snapshot();
+        let error = serde_json::json!({"wm_instance_id":before["wm_instance_id"],"wake_generation":before["wake_generation"],"enabled":true,"state":"error","error_code":"connect_timeout","retryable":true,"microphone_active":false,"text":"连接暂时不可用"});
+        assert!(jwm.eva_set_wake_status(&mut backend, &error).success);
+        dispatch_shell_test_key(
+            &mut jwm,
+            &mut backend,
+            &input,
+            keys::KEY_r,
+            Mods::ALT | Mods::CONTROL,
+            false,
+        );
+        let retry = jwm.eva_overlay_snapshot();
+        assert_eq!(
+            retry["active"], false,
+            "retrying standby must not activate standard conversation"
+        );
+        assert_eq!(retry["wake_requested"], true);
+        assert_ne!(retry["wake_generation"], before["wake_generation"]);
+        let permanent = serde_json::json!({"wm_instance_id":retry["wm_instance_id"],"wake_generation":retry["wake_generation"],"enabled":true,"state":"error","error_code":"auth_failed","retryable":false,"microphone_active":false,"text":"请检查凭据"});
+        assert!(jwm.eva_set_wake_status(&mut backend, &permanent).success);
+        assert!(
+            !jwm.effective_key_grabs()
+                .contains(&(Mods::ALT | Mods::CONTROL, keys::KEY_r))
+        );
+        assert!(
+            jwm.effective_key_grabs()
+                .contains(&(Mods::ALT | Mods::CONTROL, keys::KEY_i))
+        );
+        dispatch_shell_test_key(
+            &mut jwm,
+            &mut backend,
+            &input,
+            keys::KEY_r,
+            Mods::ALT | Mods::CONTROL,
+            false,
+        );
+        assert_eq!(
+            jwm.eva_overlay_snapshot()["wake_generation"],
+            retry["wake_generation"]
+        );
+        assert_eq!(jwm.eva_overlay_snapshot()["active"], false);
+    }
     #[test]
     fn eva_retry_undo_and_diagnostics_are_real_local_scoped_commands() {
         let (mut jwm, mut backend, input) = repeat_dispatch_fixture();

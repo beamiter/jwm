@@ -61,10 +61,15 @@ impl Update {
                 && self.state["turn_epoch"] == status["turn_epoch"])
                 .then(|| status.get("input_caption").cloned())
                 .flatten();
-            let progress = (matches!(
-                self.state["state"].as_str(),
-                Some("executing" | "responding")
-            ) && self.state["session_epoch"] == status["session_epoch"]
+            let result_progress = matches!(
+                self.state["result_status"].as_str(),
+                Some("succeeded" | "partial" | "unknown" | "failed" | "cancelled")
+            );
+            let keep_progress = self.state["state"] == "executing"
+                || (self.state["state"] == "responding"
+                    && (result_progress || self.state.get("result_status").is_none()));
+            let progress = (keep_progress
+                && self.state["session_epoch"] == status["session_epoch"]
                 && self.state["turn_epoch"] == status["turn_epoch"]
                 && self.state.get("task_progress").is_none())
             .then(|| status.get("task_progress").cloned())
@@ -103,6 +108,90 @@ struct Trace {
     caption: Option<CaptionSink>,
     spoken_reply: Option<String>,
     session_end: Option<crate::voice_control::SessionEnd>,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum ResultStatus {
+    Succeeded,
+    Partial,
+    Clarify,
+    Noop,
+    Unknown,
+    Failed,
+    Cancelled,
+}
+impl ResultStatus {
+    fn from_local_result(result: &Value) -> Self {
+        if result["status"] == "succeeded"
+            && let Some(steps) = result["steps"].as_array()
+        {
+            if steps.iter().any(unresolved_feedback_step) {
+                return if steps
+                    .iter()
+                    .any(|step| step["status"] == "succeeded" && !unresolved_feedback_step(step))
+                {
+                    Self::Partial
+                } else {
+                    Self::Unknown
+                };
+            }
+        }
+        match result["status"].as_str() {
+            Some("succeeded") => Self::Succeeded,
+            Some("partial") => Self::Partial,
+            Some("clarify") => Self::Clarify,
+            Some("noop") => Self::Noop,
+            Some("accepted" | "queued" | "in_flight" | "unknown") => Self::Unknown,
+            Some("cancelled") => Self::Cancelled,
+            _ => Self::Failed,
+        }
+    }
+}
+fn unresolved_feedback_step(step: &Value) -> bool {
+    matches!(
+        step["status"].as_str(),
+        Some("accepted" | "queued" | "in_flight" | "unknown")
+    ) || step["verified"]["playback_verified"] == false
+}
+/// Presentation can only reduce a contradictory success claim using the
+/// public local receipt projection. Execution records and permits stay intact.
+fn feedback_outcome(result: &Value, public_result: &Value) -> Value {
+    let mut outcome = result.clone();
+    if let Some(steps) = outcome["steps"].as_array_mut() {
+        for (index, step) in steps.iter_mut().enumerate() {
+            if step["status"] == "succeeded"
+                && unresolved_feedback_step(&public_result["steps"][index])
+            {
+                step["status"] = json!("unknown");
+            }
+        }
+    }
+    if result["status"] == "succeeded" {
+        outcome["status"] = json!(ResultStatus::from_local_result(public_result));
+    }
+    outcome
+}
+#[derive(Clone, Debug, Default)]
+struct LocalFeedback {
+    status: Option<ResultStatus>,
+    text: String,
+    voice_fallback: bool,
+    progress: Option<crate::progress::ExecutionProgress>,
+}
+impl LocalFeedback {
+    fn from_result(result: &Value, public_result: &Value) -> Self {
+        Self {
+            status: Some(ResultStatus::from_local_result(public_result)),
+            text: feedback_text(result),
+            voice_fallback: false,
+            progress: None,
+        }
+    }
+    fn mark_voice_fallback(&mut self) {
+        // Delivery is a separate UI hint. Repeating it in the outcome body
+        // obscures the verified result and can duplicate the overlay caption.
+        self.voice_fallback = true;
+    }
 }
 fn observe_receipt(
     c: &Config,
@@ -173,18 +262,72 @@ fn publish(
     level: f32,
     now_ms: u64,
 ) {
+    let _ = tx.try_send(Update {
+        permit: p.clone(),
+        state: status_snapshot(state, text, level, now_ms, None),
+    });
+}
+fn publish_feedback(
+    tx: &mpsc::Sender<Update>,
+    p: &AssistantPermit,
+    state: &Session,
+    feedback: &LocalFeedback,
+    level: f32,
+    now_ms: u64,
+) {
+    let _ = tx.try_send(Update {
+        permit: p.clone(),
+        state: status_snapshot(state, &feedback.text, level, now_ms, Some(feedback)),
+    });
+}
+async fn publish_feedback_final(
+    tx: &mpsc::Sender<Update>,
+    p: &AssistantPermit,
+    state: &Session,
+    feedback: &LocalFeedback,
+    now_ms: u64,
+) {
+    let _ = tx
+        .send(Update {
+            permit: p.clone(),
+            state: status_snapshot(state, &feedback.text, 0.0, now_ms, Some(feedback)),
+        })
+        .await;
+}
+fn feedback_connection_failed(error: &io::Error) -> bool {
+    matches!(
+        error.to_string().as_str(),
+        "realtime_disconnected"
+            | "realtime_write_failed"
+            | "realtime_write_timeout"
+            | "realtime_ping_failed"
+            | "realtime_ping_timeout"
+            | "auth_failed"
+            | "quota_exceeded"
+            | "model_access_denied"
+            | "realtime_request_rejected"
+    )
+}
+fn status_snapshot(
+    state: &Session,
+    text: &str,
+    level: f32,
+    now_ms: u64,
+    feedback: Option<&LocalFeedback>,
+) -> Value {
+    let feedback = feedback.filter(|_| matches!(state.state, State::Responding | State::FollowUp));
     let followup_deadline = state.follow_up_remaining_ms(now_ms).and_then(|remaining| {
         crate::context::monotonic_ns()
             .ok()?
             .checked_add(remaining.checked_mul(1_000_000)?)
     });
-    let _ = tx.try_send(Update {
-        permit: p.clone(),
-        state: json!({"state":state.state,"text":text,"level":level,
+    json!({"state":state.state,"text":text,"level":level,
             "session_epoch":state.session_epoch,"turn_epoch":state.turn_epoch,
             "microphone_active":state.capture_allowed(),
-            "followup_deadline_monotonic_ns":followup_deadline}),
-    });
+            "followup_deadline_monotonic_ns":followup_deadline,
+            "result_status":feedback.and_then(|feedback|feedback.status),
+            "voice_fallback":feedback.is_some_and(|feedback|feedback.voice_fallback),
+            "task_progress":feedback.filter(|_|state.state==State::Responding).and_then(|feedback|feedback.progress.as_ref())})
 }
 fn check_error(e: &Value) -> io::Result<()> {
     if e["type"] != "error" {
@@ -780,7 +923,7 @@ async fn conversation(
     let mut quiet_gate =
         input_discarded.then(|| crate::input::QuietGate::new(c.turn_detection.silence_duration_ms));
     let mut admission = PlanAdmission::default();
-    let mut followup_text = String::new();
+    let mut followup_feedback = LocalFeedback::default();
     loop {
         tokio::select! {biased;
             frame=next_frame(&mut pending_frames,&mut audio_rx),if capture.is_some() && initial_replay.is_none()=>{
@@ -804,8 +947,9 @@ async fn conversation(
                 if let Some(cap)=capture.as_ref(){cap.check()?;}
                 if state.upload_allowed(){input_gate.ensure_utterance_limit(frame.pcm.len()/2,c.interaction.max_utterance_ms)?;ws.append(&frame.pcm).await?;input_gate.uploaded(frame.pcm.len()/2,frame.captured,frame.timestamp_verified)?;}
                 if last_level.elapsed()>=Duration::from_millis(100){
-                    let text=if state.state==State::FollowUp{followup_text.as_str()}else{"正在听"};
-                    publish(tx,p,&state,text,frame.level,elapsed(start));last_level=Instant::now();
+                    if state.state==State::FollowUp {publish_feedback(tx,p,&state,&followup_feedback,frame.level,elapsed(start));}
+                    else {publish(tx,p,&state,"正在听",frame.level,elapsed(start));}
+                    last_level=Instant::now();
                 }
             },
             event=async {if let Some((item,_))=initial_replay.as_ref(){Ok(json!({"type":"input_audio_buffer.committed","item_id":item}))}else{ws.next().await}}=>{
@@ -828,6 +972,8 @@ async fn conversation(
                             match desktop.bind_onset(source.captured){Ok(binding)=>Some(binding),Err(error)=>{onset_error=Some(error.to_string());None}}
                         }else{onset_error=Some("audio_timestamp_unverified".into());None};
                         if !state.speech_started(epoch,elapsed(start)){return Err(io::Error::other("input_out_of_order"));}
+                        followup_feedback=LocalFeedback::default();
+                        publish(tx,p,&state,"正在听",0.0,elapsed(start));
                         trace.input.set_audio(id)?;
                         trace.labels=json!({"generation":p.generation,"session_epoch":epoch,"turn_id":state.turn_epoch,"model":c.openai.model});
                         trace.record("speech_started",&json!({}));
@@ -862,7 +1008,7 @@ async fn conversation(
                         let mut interrupt_gate=crate::audio::BargeInGate::default();
                         let interrupted = {
                             let remaining=Duration::from_millis(c.interaction.max_session_ms.saturating_sub(elapsed(start)));
-                            let turn = tokio::time::timeout(remaining, complete_turn(c,p,tx,store.clone(),ws,trace,&mut state,&context,focus_changed,&mut admission,epoch,start,&mut followup_text));
+                            let turn = tokio::time::timeout(remaining, complete_turn(c,p,tx,store.clone(),ws,trace,&mut state,&context,focus_changed,&mut admission,epoch,start,&mut followup_feedback));
                             tokio::pin!(turn);
                             tokio::select! {biased;
                                 onset=interrupt_input(&mut pending_frames,&mut audio_rx,capture.as_ref(),&mut interrupt_buffer,&mut interrupt_gate),if !c.interaction.half_duplex => { onset?; true },
@@ -870,6 +1016,15 @@ async fn conversation(
                             }
                         };
                         if interrupted {
+                            if trace.history_repair_failed {
+                                // An interrupt may cancel a backpressured final
+                                // UI send, but cannot reopen an unsynchronised
+                                // provider conversation after a verified result.
+                                if let Some(input)=capture.take(){input.stop().await;}
+                                pending_frames.clear();while audio_rx.try_recv().is_ok(){}
+                                publish_feedback_final(tx,p,&state,&followup_feedback,elapsed(start)).await;
+                                return Err(io::Error::other("feedback_history_repair_failed"));
+                            }
                             admission.cancel();
                             trace.spoken_reply=None;
                             // Never claim that an in-flight operation was undone.
@@ -878,6 +1033,7 @@ async fn conversation(
                             trace.input.finish_turn(&interrupted_result);
                             trace.record("speech_interrupted",&json!({"result":"remaining_steps_cancelled"}));
                             if !state.interrupt(epoch,elapsed(start)){return Err(io::Error::other("input_out_of_order"));}
+                            followup_feedback=LocalFeedback::default();
                             publish(tx,p,&state,"已打断，正在听",0.0,elapsed(start));
                             input_gate.request_clear();
                             resume_interrupted_input(c,ws,trace,&store,&mut input_gate,&mut pending_frames,&mut audio_rx,interrupt_buffer.into_iter().collect()).await?;
@@ -906,7 +1062,7 @@ async fn conversation(
                             resume_interrupted_input(c,ws,trace,&store,&mut input_gate,&mut pending_frames,&mut audio_rx,interrupt_buffer.into_iter().collect()).await?;
                         } else {ws.send(json!({"type":"input_audio_buffer.clear"})).await?;}
                         if capture.is_none(){capture=Some(Capture::start(&c.audio.input_device,audio_tx.clone())?);}
-                        publish(tx,p,&state,&followup_text,0.0,elapsed(start));
+                        publish_feedback(tx,p,&state,&followup_feedback,0.0,elapsed(start));
                     },
                     _=>{},
                 }
@@ -1079,7 +1235,7 @@ async fn complete_turn(
     admission: &mut PlanAdmission,
     epoch: u64,
     start: Instant,
-    followup_text: &mut String,
+    followup_feedback: &mut LocalFeedback,
 ) -> io::Result<()> {
     let (call_id, mut plan) = plan(
         c,
@@ -1172,35 +1328,70 @@ async fn complete_turn(
         "verification_completed",
         &json!({"result":result["status"]}),
     );
-    let text = feedback_text(&result);
-    publish(tx, p, &state, &text, 0.0, elapsed(start));
-    *followup_text = text.clone();
     let public_result = cloud_execution_result(&result, &plan, c, &context);
-    command("set_assistant_status",json!({"assistant_permit":p,"state":"responding","turn_epoch":state.turn_epoch,"session_epoch":state.session_epoch,"text":text,"level":0.0,"microphone_active":!c.interaction.half_duplex})).await?;
-    ws.send(function_output(&call_id, &public_result)).await?;
+    let outcome = feedback_outcome(&result, &public_result);
+    let public_result = cloud_execution_result(&outcome, &plan, c, context);
+    let mut feedback_state = LocalFeedback::from_result(&outcome, &public_result);
+    if plan.disposition == Disposition::Execute
+        && !matches!(
+            feedback_state.status,
+            Some(ResultStatus::Clarify | ResultStatus::Noop)
+        )
+    {
+        feedback_state.progress = crate::progress::ExecutionProgress::finished(&plan, &outcome);
+    }
+    publish_feedback(tx, p, &state, &feedback_state, 0.0, elapsed(start));
+    *followup_feedback = feedback_state.clone();
+    command("set_assistant_status",json!({"assistant_permit":p,"state":"responding","turn_epoch":state.turn_epoch,"session_epoch":state.session_epoch,"text":feedback_state.text,"result_status":feedback_state.status,"voice_fallback":false,"task_progress":feedback_state.progress,"level":0.0,"microphone_active":!c.interaction.half_duplex})).await?;
+    if ws
+        .send(function_output(&call_id, &public_result))
+        .await
+        .is_err()
+    {
+        feedback_state.mark_voice_fallback();
+        *followup_feedback = feedback_state.clone();
+        trace.history_repair_failed = true;
+        publish_feedback_final(tx, p, &state, &feedback_state, elapsed(start)).await;
+        return Err(io::Error::other("feedback_history_repair_failed"));
+    }
     if c.interaction.feedback == "voice"
-        || (c.interaction.feedback == "brief" && !simple_success(&result))
+        || (c.interaction.feedback == "brief" && !simple_success(&outcome))
     {
         // Cloud speech failure completes locally using the verified text.
         let feedback_result = feedback(c, ws, trace, store.clone(), &public_result).await;
-        if trace.history_repair_failed {
-            return Err(io::Error::other("feedback_history_repair_failed"));
-        }
-        if feedback_result.is_err() {
+        if feedback_result.is_err() || trace.history_repair_failed {
             crate::telemetry::mark("feedback_text_fallback", p.generation, state.turn_epoch);
+            feedback_state.mark_voice_fallback();
+            *followup_feedback = feedback_state.clone();
+            if feedback_result
+                .as_ref()
+                .is_err_and(feedback_connection_failed)
+            {
+                trace.history_repair_failed = true;
+            }
+            if trace.history_repair_failed {
+                publish_feedback_final(tx, p, &state, &feedback_state, elapsed(start)).await;
+                return Err(io::Error::other("feedback_history_repair_failed"));
+            }
+            publish_feedback(tx, p, &state, &feedback_state, 0.0, elapsed(start));
         }
     }
     if c.interaction.feedback == "beep"
-        || (c.interaction.feedback == "brief" && simple_success(&result))
+        || (c.interaction.feedback == "brief" && simple_success(&outcome))
     {
         let mut labels = trace.labels.clone();
         labels["phase"] = json!("local_tone");
         trace.record("feedback_audio_queued", &json!({"phase":"local_tone"}));
-        let tone = crate::feedback::tone(result["status"] == "succeeded", labels).await;
+        let tone = crate::feedback::tone(outcome["status"] == "succeeded", labels).await;
         trace.record(
             "playback_ended",
             &json!({"phase":"local_tone","result":if tone.is_ok(){"drained"}else{"text_fallback"}}),
         );
+        if tone.is_err() {
+            feedback_state.mark_voice_fallback();
+            publish_feedback(tx, p, &state, &feedback_state, 0.0, elapsed(start));
+            *followup_feedback = feedback_state.clone();
+        }
     }
     tokio::time::sleep(Duration::from_millis(c.audio.playback_tail_ms)).await;
     trace.input.complete_task(&public_result);
@@ -2486,6 +2677,18 @@ fn verified_step_feedback(step: &Value) -> Option<String> {
     }
 }
 fn feedback_text(result: &Value) -> String {
+    if result["status"] == "clarify" {
+        let question = result["question"]
+            .as_str()
+            .map(readable_feedback_question)
+            .filter(|question| !question.is_empty());
+        return question.unwrap_or_else(|| "请补充要操作的对象或目标。".into());
+    }
+    if result["status"] == "partial"
+        && let Some(steps) = result["steps"].as_array().filter(|steps| !steps.is_empty())
+    {
+        return partial_feedback(result, steps);
+    }
     if result["undo_scope"] == "reversible_changes" {
         if result["status"] == "succeeded" {
             return "已撤销可逆更改。".into();
@@ -2521,9 +2724,6 @@ fn feedback_text(result: &Value) -> String {
             .into();
         }
     }
-    if let Some(q) = result["question"].as_str() {
-        return q.to_owned();
-    }
     if result["status"] == "succeeded"
         && let Some(steps) = result["steps"]
             .as_array()
@@ -2557,6 +2757,66 @@ fn feedback_text(result: &Value) -> String {
         _ => "操作未完成。",
     }
     .into()
+}
+
+fn readable_feedback_question(text: &str) -> String {
+    text.chars().filter(|character|!matches!(*character,'\u{061c}'|'\u{200b}'..='\u{200f}'|'\u{202a}'..='\u{202e}'|'\u{2060}'..='\u{206f}'|'\u{feff}'))
+        .map(|character|if character.is_control(){' '}else{character}).take(160).collect::<String>().split_whitespace().collect::<Vec<_>>().join(" ")
+}
+fn partial_feedback(result: &Value, steps: &[Value]) -> String {
+    let completed = steps
+        .iter()
+        .filter(|step| step["status"] == "succeeded")
+        .count();
+    let uncertain = steps
+        .iter()
+        .filter(|step| {
+            matches!(
+                step["status"].as_str(),
+                Some("accepted" | "queued" | "in_flight" | "unknown")
+            )
+        })
+        .count();
+    let failed = steps
+        .iter()
+        .filter(|step| step["status"] == "failed")
+        .count();
+    let pending = result["unexecuted_steps"]
+        .as_u64()
+        .filter(|count| *count <= jwm_eva_core::actions::MAX_ACTIONS_PER_PLAN as u64);
+    let submitted = steps
+        .iter()
+        .filter(|step| step["dispatched"] != false)
+        .count();
+    let total = pending
+        .map(|pending| submitted as u64 + pending)
+        .filter(|total| {
+            *total <= jwm_eva_core::actions::MAX_ACTIONS_PER_PLAN as u64
+                && *total >= completed as u64
+                && *total > 0
+        });
+    let scope = if result["undo_scope"] == "reversible_changes" {
+        "撤销"
+    } else {
+        "完成"
+    };
+    let prefix = match total {
+        Some(total) => format!("已{scope} {completed}/{total} 步"),
+        None => format!("已{scope} {completed} 步"),
+    };
+    let mut parts = vec![prefix];
+    if uncertain > 0 {
+        parts.push(format!("{uncertain} 步结果尚未确认"));
+    }
+    if failed > 0 {
+        parts.push(format!("{failed} 步未完成"));
+    }
+    if let Some(pending) = pending.filter(|pending| *pending > 0) {
+        parts.push(format!("剩余 {pending} 步未执行"));
+    } else if pending.is_none() {
+        parts.push("后续步骤已停止".into());
+    }
+    format!("{}。", parts.join("，"))
 }
 
 pub async fn dry_run(c: &Config, text: &str, store: Arc<Mutex<Store>>) -> io::Result<Value> {
@@ -2990,7 +3250,7 @@ mod tests {
                 &mut PlanAdmission::default(),
                 epoch,
                 Instant::now(),
-                &mut String::new(),
+                &mut LocalFeedback::default(),
             )
             .await
             .unwrap();
@@ -3654,6 +3914,247 @@ mod tests {
             assert_eq!(public["steps"][0]["verified"]["playback_verified"], true);
             assert_eq!(public["steps"][0]["verified"]["completion"], completion);
         }
+    }
+
+    #[test]
+    fn result_status_follows_local_receipts_not_assistant_prose_or_audio_delivery() {
+        for (status, expected) in [
+            ("succeeded", ResultStatus::Succeeded),
+            ("partial", ResultStatus::Partial),
+            ("clarify", ResultStatus::Clarify),
+            ("noop", ResultStatus::Noop),
+            ("unknown", ResultStatus::Unknown),
+            ("accepted", ResultStatus::Unknown),
+            ("queued", ResultStatus::Unknown),
+            ("in_flight", ResultStatus::Unknown),
+            ("failed", ResultStatus::Failed),
+            ("cancelled", ResultStatus::Cancelled),
+        ] {
+            let result = json!({"status":status,"reason":"assistant claims everything succeeded","transcript":"a different outcome","steps":[]});
+            let mut feedback = LocalFeedback::from_result(&result, &result);
+            assert_eq!(feedback.status, Some(expected));
+            let text = feedback.text.clone();
+            feedback.mark_voice_fallback();
+            feedback.mark_voice_fallback();
+            assert_eq!(
+                feedback.status,
+                Some(expected),
+                "audio failure is not a desktop failure"
+            );
+            assert!(feedback.voice_fallback);
+            assert_eq!(feedback.text, text);
+        }
+        let pending = json!({"status":"succeeded","steps":[{"status":"succeeded","verified":{"playback_verified":false}}]});
+        assert_eq!(
+            ResultStatus::from_local_result(&pending),
+            ResultStatus::Unknown
+        );
+        let partial =
+            json!({"status":"succeeded","steps":[{"status":"succeeded"},{"status":"accepted"}]});
+        assert_eq!(
+            ResultStatus::from_local_result(&partial),
+            ResultStatus::Partial
+        );
+    }
+
+    #[test]
+    fn typed_feedback_retains_question_and_outcome_until_a_new_turn_starts() {
+        let mut state = configured(&Config::default());
+        let permit = AssistantPermit {
+            assistant_session_id: "feedback-session".into(),
+            generation: 1,
+        };
+        let epoch = state.activate(permit.clone(), 0).unwrap();
+        state.ready(epoch, 1);
+        state.speech_started(epoch, 2);
+        state.input_committed(epoch, state.turn_epoch, 3);
+        state.respond(epoch, state.turn_epoch, 4);
+        let result = json!({"status":"clarify","question":"  请选择\n 浏览器\u{202e}\u{0000}窗口？  ","steps":[]});
+        let feedback = LocalFeedback::from_result(&result, &result);
+        let responding = status_snapshot(&state, &feedback.text, 0.0, 4, Some(&feedback));
+        assert_eq!(responding["result_status"], "clarify");
+        assert_eq!(responding["text"], "请选择 浏览器 窗口？");
+        assert_eq!(responding["microphone_active"], true);
+        assert!(responding["task_progress"].is_null());
+        state.feedback_completed(epoch, state.turn_epoch, 5);
+        let followup = status_snapshot(&state, &feedback.text, 0.1, 6, Some(&feedback));
+        assert_eq!(followup["state"], "follow_up");
+        assert_eq!(followup["result_status"], "clarify");
+        assert_eq!(followup["text"], responding["text"]);
+        assert!(
+            followup["followup_deadline_monotonic_ns"]
+                .as_u64()
+                .is_some()
+        );
+        assert!(state.speech_started(epoch, 7));
+        let listening = status_snapshot(&state, "正在听", 0.2, 7, Some(&feedback));
+        assert!(listening["turn_epoch"].as_u64() > followup["turn_epoch"].as_u64());
+        assert!(listening["result_status"].is_null());
+        assert!(listening["task_progress"].is_null());
+        assert_eq!(listening["voice_fallback"], false);
+        let mut status = followup;
+        assert!(
+            Update {
+                permit: permit.clone(),
+                state: listening
+            }
+            .apply(&permit, &mut status)
+        );
+        assert_eq!(status["text"], "正在听");
+        assert!(status["result_status"].is_null());
+    }
+
+    #[test]
+    fn final_counts_are_receipt_grounded_and_never_leak_into_clarification_or_new_turn() {
+        let permit = AssistantPermit {
+            assistant_session_id: "progress-feedback".into(),
+            generation: 1,
+        };
+        let mut state = configured(&Config::default());
+        state.activate(permit.clone(), 0).unwrap();
+        state.state = State::Responding;
+        let result = json!({"status":"partial","unexecuted_steps":2,"steps":[{"status":"succeeded","dispatched":true},{"status":"unknown","dispatched":true}]});
+        let mut feedback = LocalFeedback::from_result(&result, &result);
+        feedback.progress = Some(crate::progress::ExecutionProgress {
+            completed: 1,
+            total: 4,
+            current_step: 2,
+            action: "set_layout".into(),
+            stage: crate::progress::Stage::Unknown,
+        });
+        let final_snapshot = status_snapshot(&state, &feedback.text, 0.0, 1, Some(&feedback));
+        assert_eq!(final_snapshot["result_status"], "partial");
+        assert_eq!(final_snapshot["task_progress"]["completed"], 1);
+        assert_eq!(final_snapshot["task_progress"]["stage"], "unknown");
+        assert_eq!(
+            final_snapshot["text"],
+            "已完成 1/4 步，1 步结果尚未确认，剩余 2 步未执行。"
+        );
+        let mut status = json!({"state":"executing","session_epoch":state.session_epoch,"turn_epoch":state.turn_epoch,"task_progress":{"completed":0,"total":4,"stage":"executing"}});
+        assert!(
+            Update {
+                permit: permit.clone(),
+                state: final_snapshot
+            }
+            .apply(&permit, &mut status)
+        );
+        assert_eq!(status["task_progress"]["completed"], 1);
+        state.state = State::FollowUp;
+        let followup = status_snapshot(&state, &feedback.text, 0.0, 2, Some(&feedback));
+        assert_eq!(followup["result_status"], "partial");
+        assert!(followup["task_progress"].is_null());
+        assert!(
+            Update {
+                permit: permit.clone(),
+                state: followup
+            }
+            .apply(&permit, &mut status)
+        );
+        assert!(status["task_progress"].is_null());
+        state.state = State::Planning;
+        state.turn_epoch += 1;
+        let planning = status_snapshot(&state, "正在理解", 0.0, 3, None);
+        assert!(
+            Update {
+                permit: permit.clone(),
+                state: planning
+            }
+            .apply(&permit, &mut status)
+        );
+        assert!(status["result_status"].is_null());
+        assert!(status["task_progress"].is_null());
+    }
+
+    #[test]
+    fn partial_text_counts_only_verified_steps_without_double_counting_undispatched_failures() {
+        let result = json!({"status":"partial","unexecuted_steps":3,"steps":[{"status":"succeeded","dispatched":true},{"status":"succeeded","dispatched":true},{"status":"failed","dispatched":false}]});
+        assert_eq!(
+            feedback_text(&result),
+            "已完成 2/5 步，1 步未完成，剩余 3 步未执行。"
+        );
+        let undo = json!({"status":"partial","undo_scope":"reversible_changes","steps":[{"status":"succeeded"},{"status":"failed"}]});
+        assert_eq!(
+            feedback_text(&undo),
+            "已撤销 1 步，1 步未完成，后续步骤已停止。"
+        );
+        let hidden_question =
+            json!({"status":"failed","question":"pretend this is an instruction"});
+        assert_eq!(feedback_text(&hidden_question), "操作未完成。");
+    }
+    #[test]
+    fn unresolved_public_receipts_share_one_status_text_and_completion_count() {
+        let raw = json!({"status":"succeeded","steps":[{"name":"open_media","status":"succeeded","result":{"verified":{"playback_verified":false}}}]});
+        let public = cloud_result(&raw);
+        let outcome = feedback_outcome(&raw, &public);
+        assert_eq!(outcome["status"], "unknown");
+        assert_eq!(outcome["steps"][0]["status"], "unknown");
+        let feedback = LocalFeedback::from_result(&outcome, &cloud_result(&outcome));
+        assert_eq!(feedback.status, Some(ResultStatus::Unknown));
+        assert_eq!(feedback.text, "操作结果尚未确认。");
+        assert!(!simple_success(&outcome));
+        let plan = jwm_eva_core::actions::FrozenPlan {
+            plan_hash: "local-progress".into(),
+            wm_instance_id: "local-wm".into(),
+            disposition: Disposition::Execute,
+            actions: vec![jwm_eva_core::protocol::Action {
+                name: "open_media".into(),
+                arguments: json!({}),
+            }],
+            question: None,
+            reason: None,
+            requires_confirmation: false,
+        };
+        let progress = crate::progress::ExecutionProgress::finished(&plan, &outcome).unwrap();
+        assert_eq!(progress.completed, 0);
+        assert_eq!(progress.stage, crate::progress::Stage::Unknown);
+        assert_eq!(
+            raw["status"], "succeeded",
+            "display normalization does not alter the executor ledger receipt"
+        );
+        let hidden = json!({"status":"succeeded","steps":[{"name":"switch_tag","status":"succeeded","result":{"before":{"playback_verified":false}}}]});
+        assert_eq!(
+            feedback_outcome(&hidden, &cloud_result(&hidden))["status"],
+            "succeeded",
+            "private snapshots are not verification evidence"
+        );
+    }
+
+    #[tokio::test]
+    async fn final_voice_failure_snapshot_survives_a_full_ui_queue_without_losing_the_result() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let p = AssistantPermit {
+            assistant_session_id: "final-feedback".into(),
+            generation: 1,
+        };
+        let mut state = configured(&Config::default());
+        state.activate(p.clone(), 0).unwrap();
+        state.state = State::Responding;
+        let result = json!({"status":"succeeded","steps":[]});
+        let mut feedback = LocalFeedback::from_result(&result, &result);
+        feedback.mark_voice_fallback();
+        let (tx, mut rx) = mpsc::channel(1);
+        publish(&tx, &p, &state, "queued older frame", 0.0, 1);
+        let delivered = Arc::new(AtomicBool::new(false));
+        let delivered2 = delivered.clone();
+        let sender = tokio::spawn(async move {
+            publish_feedback_final(&tx, &p, &state, &feedback, 2).await;
+            delivered2.store(true, Ordering::SeqCst);
+        });
+        tokio::task::yield_now().await;
+        assert!(!delivered.load(Ordering::SeqCst));
+        assert_eq!(rx.recv().await.unwrap().state["text"], "queued older frame");
+        let final_snapshot = rx.recv().await.unwrap().state;
+        sender.await.unwrap();
+        assert_eq!(final_snapshot["result_status"], "succeeded");
+        assert_eq!(final_snapshot["voice_fallback"], true);
+        assert_eq!(final_snapshot["text"], "已完成。");
+        assert!(feedback_connection_failed(&io::Error::other(
+            "realtime_disconnected"
+        )));
+        assert!(
+            !feedback_connection_failed(&io::Error::other("audio_playback_device_unavailable")),
+            "a repaired output-device failure may keep the safe text conversation"
+        );
     }
 
     #[test]

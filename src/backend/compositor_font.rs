@@ -67,16 +67,12 @@ static FALLBACK_FONTS: LazyLock<Mutex<Vec<FontArc>>> = LazyLock::new(|| Mutex::n
 static FALLBACK_MISSES: LazyLock<Mutex<HashSet<u32>>> =
     LazyLock::new(|| Mutex::new(HashSet::new()));
 
-fn query_font_path(args: &[&str]) -> Option<String> {
-    query_font_path_with_timeout(args, FONT_QUERY_TIMEOUT)
-        .ok()
-        .flatten()
-}
+const MAX_FONT_CANDIDATES: usize = 12;
 
-fn query_font_path_with_timeout(args: &[&str], timeout: Duration) -> Result<Option<String>, ()> {
+fn query_font_candidates(pattern: &str, timeout: Duration) -> Result<Vec<String>, ()> {
     let output = crate::external_command::output_with_limits(
         "fc-match",
-        args,
+        &["-s", "-f", "%{file}\n", "--", pattern],
         timeout,
         MAX_FONT_QUERY_OUTPUT_BYTES,
     )
@@ -84,13 +80,63 @@ fn query_font_path_with_timeout(args: &[&str], timeout: Duration) -> Result<Opti
     if !output.status.success() {
         return Err(());
     }
-    Ok(std::str::from_utf8(&output.stdout)
-        .map_err(|_| ())?
-        .lines()
-        .next()
-        .map(str::trim)
-        .filter(|path| !path.is_empty())
-        .map(str::to_owned))
+    parse_font_candidates(&output.stdout)
+}
+
+fn parse_font_candidates(output: &[u8]) -> Result<Vec<String>, ()> {
+    if output.len() > MAX_FONT_QUERY_OUTPUT_BYTES {
+        return Err(());
+    }
+    let text = std::str::from_utf8(output).map_err(|_| ())?;
+    let mut paths = Vec::new();
+    for path in text.lines().map(str::trim).filter(|path| !path.is_empty()) {
+        if !Path::new(path).is_absolute() || paths.iter().any(|known| known == path) {
+            continue;
+        }
+        paths.push(path.to_owned());
+        if paths.len() == MAX_FONT_CANDIDATES {
+            break;
+        }
+    }
+    Ok(paths)
+}
+
+fn first_usable_candidate<T>(
+    paths: &[String],
+    mut load: impl FnMut(&Path) -> Result<Option<T>, ()>,
+) -> Result<Option<T>, ()> {
+    let mut unavailable = false;
+    for path in paths.iter().take(MAX_FONT_CANDIDATES) {
+        match load(Path::new(path)) {
+            Ok(Some(font)) => return Ok(Some(font)),
+            Ok(None) => {}
+            Err(()) => unavailable = true,
+        }
+    }
+    // An unsupported/temporarily unreadable candidate is not evidence that
+    // the system has no glyph; do not poison the persistent miss cache.
+    if unavailable { Err(()) } else { Ok(None) }
+}
+
+fn load_font_candidates(
+    pattern: &str,
+    required: Option<char>,
+    timeout: Duration,
+) -> Result<Option<FontArc>, ()> {
+    let deadline = Instant::now() + timeout;
+    let paths = query_font_candidates(pattern, timeout)?;
+    let mut remaining = MAX_FONT_FILE_BYTES;
+    first_usable_candidate(&paths, |path| {
+        if Instant::now() >= deadline || remaining == 0 {
+            return Err(());
+        }
+        let bytes = read_regular_file_bounded(path, remaining.min(MAX_FONT_FILE_BYTES)).ok_or(())?;
+        remaining = remaining.saturating_sub(bytes.len());
+        let font = FontArc::try_from_vec(bytes).map_err(|_| ())?;
+        Ok(required
+            .is_none_or(|ch| font.glyph_id(ch).0 != 0)
+            .then_some(font))
+    })
 }
 
 fn read_regular_file_bounded(path: &Path, limit: usize) -> Option<Vec<u8>> {
@@ -110,10 +156,6 @@ fn read_regular_file_bounded(path: &Path, limit: usize) -> Option<Vec<u8>> {
     let mut bytes = Vec::with_capacity(capacity);
     file.take(sentinel_limit).read_to_end(&mut bytes).ok()?;
     (bytes.len() <= limit).then_some(bytes)
-}
-
-fn load_font_file(path: &Path) -> Option<FontArc> {
-    FontArc::try_from_vec(read_regular_file_bounded(path, MAX_FONT_FILE_BYTES)?).ok()
 }
 
 fn cache_ui_font_entry(
@@ -161,14 +203,7 @@ fn charset_pattern(ch: char) -> String {
 
 /// Load a font covering `ch`, if fontconfig can find one.
 fn load_fallback_font(ch: char, timeout: Duration) -> Result<Option<FontArc>, ()> {
-    let pattern = charset_pattern(ch);
-    let Some(path) = query_font_path_with_timeout(&["-f", "%{file}\n", &pattern], timeout)? else {
-        return Ok(None);
-    };
-    let font = load_font_file(Path::new(&path)).ok_or(())?;
-    // fc-match always answers with *something*; only keep it if it actually
-    // covers the character we asked about.
-    Ok((font.glyph_id(ch).0 != 0).then_some(font))
+    load_font_candidates(&charset_pattern(ch), Some(ch), timeout)
 }
 
 /// Which font draws a character.
@@ -332,10 +367,9 @@ fn load_ui_font(description: &str) -> Option<FontArc> {
     if let Some(cached) = UI_FONTS.lock().ok()?.get(&family).cloned() {
         return cached;
     }
-    let path = query_font_path(&["-f", "%{file}\n", "--", &family]);
-    let font = path
-        .as_deref()
-        .and_then(|path| load_font_file(Path::new(path)));
+    let font = load_font_candidates(&family, None, FONT_QUERY_TIMEOUT)
+        .ok()
+        .flatten();
     if let Ok(mut fonts) = UI_FONTS.lock() {
         if let Some(cached) = fonts.get(&family).cloned() {
             return cached;
@@ -343,6 +377,16 @@ fn load_ui_font(description: &str) -> Option<FontArc> {
         cache_ui_font_entry(&mut fonts, family, font.clone());
     }
     font
+}
+
+#[cfg(test)]
+pub(crate) fn ui_glyphs_available_for_test(description: &str, text: &str) -> bool {
+    let Some(primary) = load_ui_font(description) else {
+        return false;
+    };
+    let mut budget = FontLookupBudget::new();
+    text.chars()
+        .all(|ch| source_for_char(&primary, ch, &mut budget) != GlyphSource::Missing)
 }
 
 /// Transparent margin the rasterizer leaves on every side, so an overhanging
@@ -1026,6 +1070,61 @@ pub(crate) fn render_text_to_rgba(text: &str, scale: u32, fg: [u8; 4]) -> (Vec<u
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unsupported_first_font_does_not_hide_a_later_renderable_candidate() {
+        let candidates=parse_font_candidates(b"/fonts/default.woff2\n/fonts/default.woff2\n/fonts/native.ttf\n/fonts/not-needed.ttf\n").unwrap();
+        assert_eq!(candidates.len(), 3);
+        let mut tried = Vec::new();
+        let font = first_usable_candidate(&candidates, |path| {
+            tried.push(path.to_owned());
+            if path.ends_with("default.woff2") {
+                Err(())
+            } else {
+                Ok(Some("renderable"))
+            }
+        })
+        .unwrap();
+        assert_eq!(font, Some("renderable"));
+        assert_eq!(tried.len(), 2);
+        // Unsupported font data does not become a permanent no-glyph fact.
+        assert!(first_usable_candidate::<()>(&candidates, |_| Err(())).is_err());
+        assert_eq!(
+            first_usable_candidate::<()>(&candidates, |_| Ok(None)).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn candidate_queries_and_file_attempts_stay_bounded() {
+        let output = (0..100)
+            .map(|n| format!("/fonts/{n}.ttf\n"))
+            .collect::<String>();
+        assert_eq!(
+            parse_font_candidates(output.as_bytes()).unwrap().len(),
+            MAX_FONT_CANDIDATES
+        );
+        assert!(parse_font_candidates(&vec![b'a'; MAX_FONT_QUERY_OUTPUT_BYTES + 1]).is_err());
+        assert!(parse_font_candidates(&[0xff]).is_err());
+        assert!(
+            parse_font_candidates(b"relative/font.ttf\n\n")
+                .unwrap()
+                .is_empty()
+        );
+        let paths = (0..100)
+            .map(|n| format!("/fonts/{n}.ttf"))
+            .collect::<Vec<_>>();
+        let mut attempts = 0;
+        assert!(
+            first_usable_candidate::<()>(&paths, |_| {
+                attempts += 1;
+                Ok(None)
+            })
+            .unwrap()
+            .is_none()
+        );
+        assert_eq!(attempts, MAX_FONT_CANDIDATES);
+    }
 
     #[test]
     fn font_lookup_budget_caps_queries_and_respects_expiry() {

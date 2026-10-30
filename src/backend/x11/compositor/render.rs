@@ -3863,8 +3863,8 @@ impl<C: CompositorConnection> Compositor<C> {
         let ink = ui_theme::palette().osd_ink;
         let raster = self.eva_overlay.text_raster(now, width);
         let cache_key = format!(
-            "{width}|{text}|{font}|{ink:?}|{}|{}",
-            raster.width, raster.height
+            "{width}|{text}|{font}|{ink:?}|{}|{}|{}",
+            raster.width, raster.height, raster.layout_key
         );
         if self
             .eva_texture
@@ -3960,11 +3960,15 @@ impl<C: CompositorConnection> Compositor<C> {
         let now = std::time::Instant::now();
         let alpha = self.eva_overlay.alpha(now);
         let text = self.eva_overlay.label(now);
-        let fill = self.eva_overlay.level(now);
         let accent = self.eva_overlay.accent(now);
         let rect = self
             .eva_overlay
             .rect([self.screen_w as f32, self.screen_h as f32]);
+        let mic_bars = self.eva_overlay.mic_bars(rect, now);
+        let progress = self
+            .eva_overlay
+            .progress_fill(now)
+            .zip(self.eva_overlay.progress_rect(rect));
         self.eva_overlay.mark_drawn(now);
         self.update_eva_texture(&text, self.eva_overlay.text_width(rect[2]), now);
         let Some((tex, tw, th)) = self.eva_texture.as_ref().map(|(_, t, w, h)| (*t, *w, *h)) else {
@@ -3972,6 +3976,16 @@ impl<C: CompositorConnection> Compositor<C> {
         };
         let [x, y, w, h] = rect;
         let ui = ui_theme::palette();
+        let mic_color = if ui.osd_ink[..3]
+            .iter()
+            .map(|value| *value as u32)
+            .sum::<u32>()
+            < 384
+        {
+            [0.05, 0.50, 0.36, 1.0]
+        } else {
+            [0.16, 0.72, 0.56, 1.0]
+        };
         self.ensure_glass_backdrop(ui);
         unsafe {
             self.gl.bind_vertex_array(Some(self.quad_vao));
@@ -3997,13 +4011,26 @@ impl<C: CompositorConnection> Compositor<C> {
                 rail_height * 0.5,
                 [accent[0], accent[1], accent[2], alpha],
             );
-            if let Some(fill) = fill.filter(|_| w > 40.0 && h > 24.0) {
+            // Microphone input and verified task completion are separate
+            // measurements. Neither acquires time-driven/fake activity.
+            for ([bx, by, bw, bh], active) in mic_bars {
+                let color = if active { mic_color } else { ui.slider_track };
                 self.sysui_fill_rounded(
-                    x + 20.0,
-                    y + h - 12.0,
-                    w - 40.0,
-                    3.0,
-                    1.5,
+                    bx,
+                    by,
+                    bw,
+                    bh,
+                    bw.min(bh) * 0.5,
+                    [color[0], color[1], color[2], color[3] * alpha],
+                );
+            }
+            if let Some((fill, [px, py, pw, ph])) = progress {
+                self.sysui_fill_rounded(
+                    px,
+                    py,
+                    pw,
+                    ph,
+                    ph * 0.5,
                     [
                         ui.slider_track[0],
                         ui.slider_track[1],
@@ -4012,14 +4039,14 @@ impl<C: CompositorConnection> Compositor<C> {
                     ],
                 );
                 if fill > 0.0 {
-                    let c = accent;
+                    let width = pw * fill;
                     self.sysui_fill_rounded(
-                        x + 20.0,
-                        y + h - 12.0,
-                        (w - 40.0) * fill,
-                        3.0,
-                        1.5,
-                        [c[0], c[1], c[2], alpha],
+                        px,
+                        py,
+                        width,
+                        ph,
+                        (ph * 0.5).min(width * 0.5),
+                        [0.30, 0.49, 0.90, alpha],
                     );
                 }
             }

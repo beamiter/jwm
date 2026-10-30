@@ -145,9 +145,13 @@ async fn execute_with_step_budget(
     let mut dispatch_deadline = std::time::Instant::now() + step_budget;
     let previous_mutating_plan_hash = store.lock().unwrap().ledger.last_mutating_plan_hash.clone();
     for (index, action) in plan.actions.iter().enumerate() {
+        let completed = steps
+            .iter()
+            .filter(|step| crate::progress::verified_step(step))
+            .count();
         emit_progress(
             progress,
-            ExecutionProgress::at(plan, index, index, Stage::Preparing),
+            ExecutionProgress::at(plan, index, completed, Stage::Preparing),
         );
         if index > 0 {
             dispatch_deadline = std::time::Instant::now() + step_budget;
@@ -277,7 +281,7 @@ async fn execute_with_step_budget(
         }
         emit_progress(
             progress,
-            ExecutionProgress::at(plan, index, index, Stage::Executing),
+            ExecutionProgress::at(plan, index, completed, Stage::Executing),
         );
         crate::telemetry::event(
             "action_dispatched",
@@ -402,7 +406,7 @@ async fn execute_with_step_budget(
         };
         emit_progress(
             progress,
-            ExecutionProgress::at(plan, index, index, Stage::Verifying),
+            ExecutionProgress::at(plan, index, completed, Stage::Verifying),
         );
         let result = if matches!(
             action.name.as_str(),

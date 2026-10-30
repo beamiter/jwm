@@ -25,6 +25,15 @@ pub struct ExecutionProgress {
     pub action: String,
     pub stage: Stage,
 }
+/// A final playback receipt takes precedence over an earlier process-start
+/// read-back. Match the public receipt projection without exposing its data.
+pub(crate) fn verified_step(step: &Value) -> bool {
+    let playback = step["verified"]["playback_verified"]
+        .as_bool()
+        .or_else(|| step["result"]["verified"]["playback_verified"].as_bool())
+        .or_else(|| step["result"]["verified"]["read_back"]["playback_verified"].as_bool());
+    step["status"] == "succeeded" && playback != Some(false)
+}
 impl ExecutionProgress {
     pub fn at(plan: &FrozenPlan, index: usize, completed: usize, stage: Stage) -> Option<Self> {
         if plan.actions.is_empty()
@@ -50,15 +59,12 @@ impl ExecutionProgress {
     }
     pub fn finished(plan: &FrozenPlan, report: &Value) -> Option<Self> {
         let steps = report["steps"].as_array()?;
-        let completed = steps
-            .iter()
-            .filter(|step| step["status"] == "succeeded")
-            .count();
+        let completed = steps.iter().filter(|step| verified_step(step)).count();
         let uncertain = steps.iter().any(|step| {
             matches!(
                 step["status"].as_str(),
                 Some("unknown" | "accepted" | "queued" | "in_flight")
-            )
+            ) || (step["status"] == "succeeded" && !verified_step(step))
         });
         let stage = if uncertain {
             Stage::Unknown
@@ -139,5 +145,30 @@ mod tests {
         assert_eq!(progress.stage, Stage::Partial);
         assert!(ExecutionProgress::at(&p, 3, 0, Stage::Preparing).is_none());
         assert!(ExecutionProgress::at(&p, 0, 4, Stage::Preparing).is_none());
+    }
+    #[test]
+    fn playback_start_never_flashes_full_completion_before_final_feedback() {
+        let p = plan();
+        for verification in [
+            json!({"playback_verified": false}),
+            json!({"read_back": {"playback_verified": false}}),
+        ] {
+            let report = json!({"status":"succeeded","steps":[
+                {"status":"succeeded"}, {"status":"succeeded"},
+                {"status":"succeeded","result":{"verified":verification}}
+            ]});
+            let progress = ExecutionProgress::finished(&p, &report).unwrap();
+            assert_eq!(progress.completed, 2);
+            assert_eq!(progress.stage, Stage::Unknown);
+        }
+        let public = json!({"status":"succeeded","verified":{"playback_verified":false}});
+        assert!(!verified_step(&public));
+        let final_receipt = json!({"status":"succeeded","result":{"verified":{
+            "playback_verified":true,"read_back":{"playback_verified":false}
+        }}});
+        assert!(verified_step(&final_receipt));
+        assert!(verified_step(&json!({"status":"succeeded","result":{
+            "before":{"playback_verified":false}
+        }})));
     }
 }

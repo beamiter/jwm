@@ -131,6 +131,10 @@ pub(crate) struct EvaRuntime {
     lease_until: Option<Instant>,
     state: String,
     text: String,
+    result_status: Option<String>,
+    voice_fallback: bool,
+    error_code: Option<String>,
+    retryable: Option<bool>,
     level: f64,
     microphone_active: bool,
     wake_requested: bool,
@@ -138,6 +142,8 @@ pub(crate) struct EvaRuntime {
     wake_lease_until: Option<Instant>,
     wake_state: String,
     wake_text: String,
+    wake_error_code: Option<String>,
+    wake_retryable: Option<bool>,
     wake_microphone_active: bool,
     wake_level: f64,
     standby_allowed: bool,
@@ -177,6 +183,10 @@ impl Default for EvaRuntime {
             lease_until: None,
             state: "idle".into(),
             text: String::new(),
+            result_status: None,
+            voice_fallback: false,
+            error_code: None,
+            retryable: None,
             level: 0.,
             microphone_active: false,
             wake_requested: false,
@@ -184,6 +194,8 @@ impl Default for EvaRuntime {
             wake_lease_until: None,
             wake_state: "disabled".into(),
             wake_text: String::new(),
+            wake_error_code: None,
+            wake_retryable: None,
             wake_microphone_active: false,
             wake_level: 0.,
             standby_allowed: false,
@@ -240,6 +252,28 @@ fn bounded_identifier(s: &str) -> bool {
 }
 fn failure(code: &str) -> IpcResponse {
     IpcResponse::err(code)
+}
+fn ui_error_code(args: &Value) -> Result<Option<String>, &'static str> {
+    match args.get("error_code") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(code))
+            if !code.is_empty()
+                && code.len() <= 64
+                && code.bytes().all(|byte| {
+                    byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_'
+                }) =>
+        {
+            Ok(Some(code.clone()))
+        }
+        _ => Err("plan_invalid: error code"),
+    }
+}
+fn ui_retryable(args: &Value) -> Result<Option<bool>, &'static str> {
+    match args.get("retryable") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Bool(value)) => Ok(Some(*value)),
+        _ => Err("plan_invalid: retryable"),
+    }
 }
 fn canonical_layout(layout: &LayoutEnum) -> &str {
     match layout.0 {
@@ -329,6 +363,10 @@ impl Jwm {
         self.eva.error_microphone_off_confirmed = false;
         self.eva.state = "idle".into();
         self.eva.text.clear();
+        self.eva.result_status = None;
+        self.eva.voice_fallback = false;
+        self.eva.error_code = None;
+        self.eva.retryable = None;
         self.eva.level = 0.;
         self.eva.microphone_active = false;
         self.eva.task_progress = None;
@@ -624,6 +662,8 @@ impl Jwm {
         self.eva.wake_level = 0.;
         self.eva.wake_state = if enabled { "connecting" } else { "disabled" }.into();
         self.eva.wake_text.clear();
+        self.eva.wake_error_code = None;
+        self.eva.wake_retryable = None;
         self.broadcast_ipc_event(
             "assistant/wake_action",
             json!({
@@ -666,19 +706,35 @@ impl Jwm {
             .as_str()
             .unwrap_or("")
             .chars()
+            .map(|c| if c.is_whitespace() { ' ' } else { c })
             .filter(|c| !c.is_control())
             .take(160)
             .collect();
+        let error_code = match ui_error_code(args) {
+            Ok(code) => code,
+            Err(error) => return failure(error),
+        };
+        let retryable = match ui_retryable(args) {
+            Ok(value) => value,
+            Err(error) => return failure(error),
+        };
+        if state != "error" && (error_code.is_some() || retryable.is_some()) {
+            return failure("plan_invalid: wake error metadata state");
+        }
         let terminal_error = !enabled
             && state == "error"
             && !self.eva_active()
             && (self.eva.wake_state != state || self.eva.wake_text != text);
         self.eva.wake_state = state.into();
         self.eva.wake_text = text;
+        self.eva.wake_error_code = error_code;
+        self.eva.wake_retryable = retryable;
         if terminal_error {
             self.eva.state = "error".into();
             self.eva.text = self.eva.wake_text.clone();
-            self.eva.error_visible_until = Some(Instant::now() + Duration::from_secs(2));
+            self.eva.error_code = self.eva.wake_error_code.clone();
+            self.eva.retryable = self.eva.wake_retryable;
+            self.eva.error_visible_until = Some(Instant::now() + Duration::from_secs(6));
             self.eva.error_microphone_off_confirmed = !microphone;
         }
         self.eva.wake_microphone_active = microphone;
@@ -793,6 +849,7 @@ impl Jwm {
             !self.eva_active() && (self.eva.wake_requested || self.eva.wake_microphone_active);
         json!({"assistant_protocol":jwm_eva_core::protocol::assistant_protocol(),"active":self.eva_active(),"visible":self.eva_active() || standby || self.eva.error_visible_until.is_some_and(|t| t > Instant::now()),"monitor_rect":rect,"state":if standby {self.eva.wake_state.as_str()} else {self.eva.state.as_str()},"text":if standby {self.eva.wake_text.clone()} else {text},"level":if standby {self.eva.wake_level} else {self.eva.level},"microphone_active":if standby {Some(self.eva.wake_microphone_active)} else if self.eva.state=="error"&&self.eva.error_visible_until.is_some()&&!self.eva.error_microphone_off_confirmed{None}else{Some(self.eva.microphone_active)},
             "wake_requested":self.eva.wake_requested,"wake_generation":self.eva.wake_generation,"assistant_generation":self.eva.generation,"wake_enabled":self.eva.wake_requested,"wake_microphone_active":self.eva.wake_microphone_active,"standby_allowed":self.eva.standby_allowed,"standby_blocked_reason":self.eva.standby_blocked_reason,
+            "result_status":if standby {None}else{self.eva.result_status.clone()},"voice_fallback":!standby&&self.eva.voice_fallback,"error_code":if standby {self.eva.wake_error_code.clone()}else{self.eva.error_code.clone()},"retryable":if standby {self.eva.wake_retryable}else{self.eva.retryable},
             "undo_available":self.eva.undo_available,"input_caption":self.eva.input_caption,"task_progress":self.eva.task_progress,"turn_epoch":self.eva.status_turn_epoch,"confirmation":confirmation,"assistant_permit":self.eva.permit,"wm_instance_id":self.eva.instance,"activated_monotonic_ns":self.eva.activated_monotonic_ns,
             "followup_remaining_ms":self.eva.followup_deadline_ns.filter(|_|self.eva_active()&&matches!(self.eva.state.as_str(),"follow_up"|"followup")).map(|deadline|deadline.saturating_sub(monotonic_ns())/1_000_000),
             "lease_remaining_ms":self.eva.lease_until.map(|t|t.saturating_duration_since(Instant::now()).as_millis() as u64).unwrap_or(0)})
@@ -990,6 +1047,48 @@ impl Jwm {
         {
             return failure("assistant_status_turn_stale");
         }
+        let result_phase = matches!(state, "responding" | "follow_up" | "followup");
+        let same_turn = incoming_turn.is_some() && incoming_turn == self.eva.status_turn_epoch;
+        let result_status = match args.get("result_status") {
+            Some(Value::String(value))
+                if result_phase
+                    && incoming_turn.is_some()
+                    && [
+                        "succeeded",
+                        "partial",
+                        "clarify",
+                        "noop",
+                        "unknown",
+                        "failed",
+                        "cancelled",
+                    ]
+                    .contains(&value.as_str()) =>
+            {
+                Some(value.clone())
+            }
+            Some(Value::Null) => None,
+            None if result_phase && same_turn => self.eva.result_status.clone(),
+            None => None,
+            _ => return failure("plan_invalid: result status"),
+        };
+        let voice_fallback = match args.get("voice_fallback") {
+            Some(Value::Bool(false)) | Some(Value::Null) => false,
+            Some(Value::Bool(true)) if result_phase && incoming_turn.is_some() => true,
+            None if result_phase && same_turn => self.eva.voice_fallback,
+            None => false,
+            _ => return failure("plan_invalid: voice fallback"),
+        };
+        let error_code = match ui_error_code(args) {
+            Ok(code) => code,
+            Err(error) => return failure(error),
+        };
+        let retryable = match ui_retryable(args) {
+            Ok(value) => value,
+            Err(error) => return failure(error),
+        };
+        if state != "error" && (error_code.is_some() || retryable.is_some()) {
+            return failure("plan_invalid: error metadata state");
+        }
         let supplied_progress = match args.get("task_progress") {
             None => None,
             Some(Value::Null) => Some(None),
@@ -1087,15 +1186,25 @@ impl Jwm {
                 let Some(text) = value["text"].as_str() else {
                     return failure("plan_invalid: caption text");
                 };
-                let text:String=text.chars().filter(|c| !c.is_control() && !matches!(*c,'\u{061c}'|'\u{200e}'|'\u{200f}'|'\u{202a}'..='\u{202e}'|'\u{2066}'..='\u{2069}')).take(160).collect();
+                let text:String=text.chars().map(|c|if c.is_whitespace(){' '}else{c}).filter(|c| !c.is_control() && !matches!(*c,'\u{061c}'|'\u{200e}'|'\u{200f}'|'\u{202a}'..='\u{202e}'|'\u{2066}'..='\u{2069}')).take(160).collect();
+                let text = text.trim();
                 Some(json!({"item_id":item,"turn_epoch":turn,"text":text}))
             }
         };
+        self.eva.result_status = result_status;
+        self.eva.voice_fallback = voice_fallback;
+        self.eva.error_code = error_code;
+        self.eva.retryable = retryable;
         self.eva.state = state.into();
         self.eva.followup_deadline_ns = followup_deadline;
         self.eva.followup_turn_epoch = in_followup.then_some(followup_turn).flatten();
         if let Some(text) = args.get("text").and_then(Value::as_str) {
-            self.eva.text = text.chars().filter(|c| !c.is_control()).take(240).collect();
+            self.eva.text = text
+                .chars()
+                .map(|c| if c.is_whitespace() { ' ' } else { c })
+                .filter(|c| !c.is_control())
+                .take(240)
+                .collect();
         }
         if let Some(level) = args.get("level").and_then(Value::as_f64) {
             self.eva.level = level.clamp(0., 1.);
@@ -3463,6 +3572,73 @@ mod tests {
     use crate::core::models::WMClient;
     use crate::jwm::monitor::test_support::{DisplaySpyBackend, output};
 
+    #[test]
+    fn result_feedback_metadata_is_turn_scoped_and_cannot_authorize_operations() {
+        let (mut jwm, mut backend) = setup();
+        let permit = jwm.eva.permit.clone().unwrap();
+        for (index, status) in [
+            "succeeded",
+            "partial",
+            "clarify",
+            "noop",
+            "unknown",
+            "failed",
+            "cancelled",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let update = json!({"assistant_permit":permit,"state":"responding","turn_epoch":index+1,"result_status":status,"voice_fallback":true,"text":"本地\n结果","microphone_active":true});
+            assert!(jwm.eva_set_status(&mut backend, &update).success);
+            let snapshot = jwm.eva_overlay_snapshot();
+            assert_eq!(snapshot["result_status"], status);
+            assert_eq!(snapshot["voice_fallback"], true);
+            assert_eq!(snapshot["text"], "本地 结果");
+            let mut heartbeat = update;
+            heartbeat["state"] = json!("follow_up");
+            heartbeat.as_object_mut().unwrap().remove("result_status");
+            heartbeat.as_object_mut().unwrap().remove("voice_fallback");
+            assert!(jwm.eva_set_status(&mut backend, &heartbeat).success);
+            assert_eq!(jwm.eva_overlay_snapshot()["result_status"], status);
+        }
+        for invalid in [
+            json!("accepted"),
+            json!("execute_now"),
+            json!(true),
+            json!({"approved":true}),
+        ] {
+            assert!(!jwm.eva_set_status(&mut backend,&json!({"assistant_permit":permit,"state":"responding","turn_epoch":7,"result_status":invalid})).success);
+            assert_eq!(jwm.eva_overlay_snapshot()["result_status"], "cancelled");
+        }
+        assert!(jwm.eva_set_status(&mut backend,&json!({"assistant_permit":permit,"state":"listening","turn_epoch":8,"microphone_active":true})).success);
+        let snapshot = jwm.eva_overlay_snapshot();
+        assert!(snapshot["result_status"].is_null());
+        assert_eq!(snapshot["voice_fallback"], false);
+        assert!(!jwm.eva_set_status(&mut backend,&json!({"assistant_permit":permit,"state":"responding","turn_epoch":7,"result_status":"succeeded"})).success);
+        assert!(jwm.eva.operations.is_empty());
+        assert!(jwm.eva.confirmation.is_none());
+    }
+    #[test]
+    fn permanent_error_metadata_is_sanitized_and_not_carried_to_new_input() {
+        let (mut jwm, mut backend) = setup();
+        let permit = jwm.eva.permit.clone().unwrap();
+        let update = json!({"assistant_permit":permit,"state":"error","error_code":"budget_exceeded","retryable":false,"text":"已达到预算","microphone_active":false});
+        assert!(jwm.eva_set_status(&mut backend, &update).success);
+        let status = jwm.eva_overlay_snapshot();
+        assert_eq!(status["error_code"], "budget_exceeded");
+        assert_eq!(status["retryable"], false);
+        assert_eq!(status["microphone_active"], false);
+        let mut invalid = update.clone();
+        invalid["error_code"] = json!("secret\nwindow title");
+        assert!(!jwm.eva_set_status(&mut backend, &invalid).success);
+        invalid = update;
+        invalid["retryable"] = json!("yes");
+        assert!(!jwm.eva_set_status(&mut backend, &invalid).success);
+        assert!(jwm.eva_set_status(&mut backend,&json!({"assistant_permit":permit,"state":"listening","turn_epoch":1,"microphone_active":true})).success);
+        let next = jwm.eva_overlay_snapshot();
+        assert!(next["error_code"].is_null());
+        assert!(next["retryable"].is_null());
+    }
     fn setup() -> (Jwm, DisplaySpyBackend) {
         let mut backend = DisplaySpyBackend::new(vec![output(1, 0, 0, 1920, 1080)]);
         backend.eva_overlay_supported = true;

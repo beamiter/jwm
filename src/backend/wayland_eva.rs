@@ -39,14 +39,29 @@ impl EvaElement {
         let [x, y, w, h] = self.state.rect([size.0 as f32, size.1 as f32]);
         let (w, h) = (w.round().max(1.0) as usize, h.round().max(1.0) as usize);
         let label = self.state.label(now);
-        let level = self.state.level(now);
+        let mic_bars = self.state.mic_bars([0.0, 0.0, w as f32, h as f32], now);
+        let progress = self
+            .state
+            .progress_fill(now)
+            .zip(self.state.progress_rect([0.0, 0.0, w as f32, h as f32]));
         let ui = ui_theme::palette();
+        let mic_color = if ui.osd_ink[..3]
+            .iter()
+            .map(|value| *value as u32)
+            .sum::<u32>()
+            < 384
+        {
+            [0.05, 0.50, 0.36, 1.0]
+        } else {
+            [0.16, 0.72, 0.56, 1.0]
+        };
         let cfg = crate::config::CONFIG.load();
         let font = cfg.system_ui_font();
         let accent = self.state.accent(now);
+        let raster = self.state.text_raster(now, self.state.text_width(w as f32));
         let key = format!(
-            "{label}|{level:?}|{w}|{h}|{font}|{:?}|{:?}|{accent:?}",
-            ui.osd, ui.osd_ink
+            "{label}|{mic_bars:?}|{progress:?}|{w}|{h}|{font}|{:?}|{:?}|{:?}|{accent:?}|{}",
+            ui.osd, ui.osd_ink, ui.slider_track, raster.layout_key
         );
         if self.cached.as_ref().is_none_or(|(old, _)| old != &key) {
             let mut pixels = vec![0u8; w * h * 4];
@@ -67,7 +82,6 @@ impl EvaElement {
                     px[3] = (ui.osd[3] * 255.0) as u8;
                 }
             }
-            let raster = self.state.text_raster(now, self.state.text_width(w as f32));
             let (tw, th) = (raster.width as usize, raster.height as usize);
             let [tx, ty, rw, rh] = self.state.text_rect(
                 [0.0, 0.0, w as f32, h as f32],
@@ -97,19 +111,22 @@ impl EvaElement {
                 [(w - rail_width) / 2, 10.min(h / 6), rail_width, 2.min(h)],
                 accent,
             );
-            if let Some(level) = level.filter(|_| w > 40 && h > 24) {
-                paint_box(
-                    &mut pixels,
-                    (w, h),
-                    [20, h - 12, w - 40, 3],
-                    ui.slider_track,
-                );
-                paint_box(
-                    &mut pixels,
-                    (w, h),
-                    [20, h - 12, ((w - 40) as f32 * level) as usize, 3],
-                    accent,
-                );
+            for (rect, active) in mic_bars {
+                let color = if active { mic_color } else { ui.slider_track };
+                paint_box(&mut pixels, (w, h), pixel_rect(rect), color);
+            }
+            if let Some((fill, rect)) = progress {
+                paint_box(&mut pixels, (w, h), pixel_rect(rect), ui.slider_track);
+                if fill > 0.0 {
+                    let mut filled = rect;
+                    filled[2] *= fill;
+                    paint_box(
+                        &mut pixels,
+                        (w, h),
+                        pixel_rect(filled),
+                        [0.30, 0.49, 0.90, 1.0],
+                    );
+                }
             }
             self.cached = Some((
                 key,
@@ -135,6 +152,10 @@ impl EvaElement {
         )
         .ok()
     }
+}
+
+fn pixel_rect(rect: [f32; 4]) -> [usize; 4] {
+    rect.map(|value| value.round().max(0.0) as usize)
 }
 
 /// Blend into the premultiplied fallback card. Theme colors retain their own
