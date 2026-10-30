@@ -328,4 +328,68 @@ done
 for value in 0 -1 abc '2 --features backend-xcb' '2 3' 1.5; do
     check_invalid_args --jobs "$value"
 done
+
+# Exercise the default Tauri frontend hook, which parses NO_COLOR differently
+# from Cargo and rejects conventional non-boolean values such as "1".
+mkdir -p "$REPO/bars/tauri_leptos_bar/src-tauri"
+touch "$REPO/bars/tauri_leptos_bar/src-tauri/Cargo.toml" \
+    "$REPO/bars/tauri_leptos_bar/src-tauri/tauri.conf.json" \
+    "$REPO/bars/tauri_leptos_bar/Trunk.toml"
+cat > "$TEST_ROOT/bin/cargo" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ $* == 'tauri --version' ]]; then
+    printf 'tauri-cli 2.12.4\n'
+    exit 0
+fi
+[[ $* == 'tauri build --no-bundle -- --locked' ]] || exit 90
+trunk build --release --locked
+mkdir -p "$CARGO_TARGET_DIR/release"
+printf '#!/bin/sh\nexit 0\n' > "$CARGO_TARGET_DIR/release/tauri_leptos_bar"
+chmod +x "$CARGO_TARGET_DIR/release/tauri_leptos_bar"
+STUB
+cat > "$TEST_ROOT/bin/trunk" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "${NO_COLOR-unset}" > "$CASE_DIR/frontend-color"
+case ${NO_COLOR-unset} in
+    true|false|unset) ;;
+    *) echo "invalid NO_COLOR boolean: $NO_COLOR" >&2; exit 2 ;;
+esac
+[[ $SCENARIO != tauri-failure ]] || exit 42
+STUB
+cat > "$TEST_ROOT/bin/rustup" <<'STUB'
+#!/usr/bin/env bash
+printf 'wasm32-unknown-unknown\n'
+STUB
+chmod +x "$TEST_ROOT/bin/trunk" "$TEST_ROOT/bin/rustup"
+check_tauri_color() (
+    local input=$1 expected=$2 scenario=${3:-success} status=0
+    export CASE_DIR="$TEST_ROOT/tauri-$input-$scenario" SCENARIO=$scenario
+    mkdir -p "$CASE_DIR/home/.cargo" "$CASE_DIR/config/jwm"
+    printf '[status_bar]\nname = "custom_bar"\n' > "$CASE_DIR/config/jwm/config_x11.toml"
+    cp "$CASE_DIR/config/jwm/config_x11.toml" "$CASE_DIR/config/jwm/config_wayland.toml"
+    if [[ $input == unset ]]; then
+        unset NO_COLOR
+    else
+        export NO_COLOR="$input"
+    fi
+    JWM_BAR_NAME='' PATH="$TEST_ROOT/bin:$PATH" HOME="$CASE_DIR/home" \
+        CARGO_HOME="$CASE_DIR/home/.cargo" XDG_CONFIG_HOME="$CASE_DIR/config" \
+        bash "$REPO/scripts/install-jwm.sh" --skip-jwm > "$CASE_DIR/output.log" 2>&1 || status=$?
+    [[ $(cat "$CASE_DIR/frontend-color") == "$expected" ]] || fail "Tauri NO_COLOR=$input was not normalized"
+    if [[ $scenario == tauri-failure ]]; then
+        [[ $status == 42 && ! -e $CASE_DIR/system.log ]] || fail 'Tauri frontend failure was hidden or installed files'
+    else
+        [[ $status == 0 && -x $CASE_DIR/home/.cargo/bin/tauri_leptos_bar ]] || fail "Tauri NO_COLOR=$input failed to install"
+    fi
+    [[ ${NO_COLOR-unset} == "$input" ]] || fail 'installer changed caller color preference'
+)
+check_tauri_color 1 true
+check_tauri_color yes true
+check_tauri_color true true
+check_tauri_color false false
+check_tauri_color '' false
+check_tauri_color unset unset
+check_tauri_color 1 true tauri-failure
 printf 'test-install-jwm-build: PASS\n'

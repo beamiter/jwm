@@ -492,6 +492,16 @@ build_tauri_bar() {
     local tauri_args=(build --no-bundle)
     local build_env=(env "CARGO_TARGET_DIR=$target_dir")
 
+    # Trunk parses NO_COLOR as a boolean, including in Tauri's frontend hook.
+    # Accept conventional values such as NO_COLOR=1 without changing our caller.
+    if [[ -v NO_COLOR && $NO_COLOR != true && $NO_COLOR != false ]]; then
+        if [[ -n "$NO_COLOR" ]]; then
+            build_env+=(NO_COLOR=true)
+        else
+            build_env+=(NO_COLOR=false)
+        fi
+    fi
+
     if [[ ! -f "$tauri_dir/Cargo.toml" || ! -f "$tauri_dir/tauri.conf.json" ]]; then
         err "$bar 缺少完整的 src-tauri 构建入口"
         exit 1
