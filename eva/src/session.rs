@@ -2613,8 +2613,14 @@ async fn feedback(
                 trace.response = Some(id);
             }
             observe_receipt(c, trace, &store, &e).await?;
-            if e["response_id"].as_str() != trace.response.as_deref()
-                && e["response"]["id"].as_str() != trace.response.as_deref()
+            // No event owns playback until this request has an acknowledged
+            // response ID. Comparing absent IDs would let late audio from an
+            // interrupted response through before response.created arrives.
+            let Some(active_response) = trace.response.as_deref() else {
+                continue;
+            };
+            if e["response_id"].as_str() != Some(active_response)
+                && e["response"]["id"].as_str() != Some(active_response)
             {
                 continue;
             }
@@ -3297,6 +3303,17 @@ mod tests {
                     });
                     index += 1;
                     let id = format!("replay-response-{index}");
+                    for event in reply["before_created"].as_array().into_iter().flatten() {
+                        if socket
+                            .send(tokio_tungstenite::tungstenite::Message::Text(
+                                event.to_string().into(),
+                            ))
+                            .await
+                            .is_err()
+                        {
+                            break 'read;
+                        }
+                    }
                     if socket.send(tokio_tungstenite::tungstenite::Message::Text(json!({"type":"response.created","response":{"id":id,"metadata":value["response"]["metadata"]}}).to_string().into())).await.is_err(){break 'read;}
                     for prefix in reply["prefix"].as_array().into_iter().flatten() {
                         if socket
@@ -5133,6 +5150,47 @@ mod tests {
         );
         assert!(data.store.lock().unwrap().ledger.operations.is_empty());
         let _ = finish(ws, server).await;
+    }
+    #[tokio::test]
+    async fn feedback_rejects_unowned_events_before_and_after_response_created() {
+        // Invalid PCM is deliberate: accepting even one stale delta must fail
+        // before attempting to open any real audio device.
+        let stale = json!([
+            {"type":"response.output_audio.delta","response_id":"cancelled-response","item_id":"old-audio","content_index":0,"delta":"!invalid-base64!"},
+            {"type":"response.output_audio.delta","item_id":"unowned-audio","content_index":0,"delta":"!invalid-base64!"},
+            {"type":"response.output_audio_transcript.done","response_id":"cancelled-response","transcript":"old reply"},
+            {"type":"response.output_audio_transcript.done","transcript":"unowned reply"},
+            {"type":"response.done","response":{"status":"completed","output":[]}},
+            {"type":"response.done","response":{"id":"cancelled-response","status":"completed","output":[]}}
+        ]);
+        let data = TestStore::new();
+        let (mut ws, server) = replay(vec![json!({
+            "before_created":stale,"prefix":stale,"output":[]
+        })])
+        .await;
+        let mut actor = trace();
+        feedback(
+            &Config::default(),
+            &mut ws,
+            &mut actor,
+            data.store.clone(),
+            &json!({"status":"succeeded"}),
+        )
+        .await
+        .unwrap();
+        assert!(actor.spoken_reply.is_none());
+        assert!(actor.audio_items.is_empty());
+        assert!(actor.playback_history.is_none());
+        assert!(actor.response.is_none());
+        assert!(data.store.lock().unwrap().ledger.operations.is_empty());
+        let log = finish(ws, server).await;
+        assert_eq!(
+            log.iter()
+                .filter(|event| event["type"] == "response.create")
+                .count(),
+            1
+        );
+        assert!(!log.iter().any(|event| event["type"] == "response.cancel"));
     }
     #[tokio::test]
     async fn websocket_late_response_is_ignored_and_feedback_tool_never_executes() {

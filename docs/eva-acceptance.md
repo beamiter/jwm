@@ -516,3 +516,41 @@ PCM 打断原生播放，停止约 11 ms，先于落盘完成。两个原生音�
 改动尚未替换桌面上的二进制。
 补齐后的联合回归为 **300 passed / 0 failed / 6 ignored**，上述两项能力清单失败已消除；
 Clippy 沿用三类既有告警豁免后通过。实体打断仍待反馈。
+
+### master 9c8da887 后的离线事件归属回归
+
+本轮以 `9c8da8875de7d22d585cee395cb1e2c10e4ee9bd` 为基线，复核了上述
+撤销分类、任务状态、撤销执行器、Realtime 事件、原生播放队列和打断状态机。
+基线已包含撤销分类收窄及有界修复、PulseAudio 非零预缓冲和短尾音放行、
+自适应起声检测与慢盘隔离；这些不计作本轮新增实现。C06 的真实暂时超时根因
+仍未确认，实体 C10/C12 也没有新增通过证据。
+
+新增修复针对打断后的迟到反馈事件：在新请求收到 `response.created` 前，
+`trace.response` 为 None，旧比较式将缺失的事件 ID 与 None 比较，可能放行
+旧音频、无归属转写或无 ID 的结束事件。反馈现在必须先有已确认的响应 ID，
+再要求事件匹配该 ID；费用回执仍独立处理。没有修改桌面权限、撤销候选状态校验、
+执行回执或未知结果不重放规则。
+
+`session::tests::feedback_rejects_unowned_events_before_and_after_response_created`
+通过本地 WebSocket 在 `response.created` 前后注入迟到/缺失 ID 的音频、转写和
+结束事件，并断言不会创建播放历史、污染回复或派发操作。注入音频使用故意无效的
+base64，若被接受即失败，测试无需打开音频设备。恢复旧过滤式运行此测试明确得到
+`invalid_feedback_audio`；恢复修复后通过。它验证事件隔离，不代表现场打断成功。
+
+本轮环境为无桌面、无实体音频及无已配置 API 凭据的云端容器，Rust 1.99.1：
+
+| 验证 | 结果及边界 |
+|---|---|
+| Eva 全量 `--lib` | 227 passed / 4 failed / 5 ignored；四项 lifecycle 测试均在读取子进程 `/proc` start ticks 时得到 ENOENT |
+| Eva 排除上述四项环境受限测试 | 227 passed / 0 failed / 5 ignored / 4 filtered out；包括 C10 计划修复、轻声/字间停顿打断、回声拒绝、慢盘心跳与新事件隔离回归 |
+| `jwm_eva_core --lib` | 43 passed / 0 failed；包含撤销冲突与未知结果不可重放 |
+| `jwm_ipc_client --lib` | 8 passed / 9 failed；九项均在 Unix socket 创建/绑定处得到 EPERM，不能声明 IPC 集成通过 |
+| 私有 PulseAudio fixture | 未就绪；`module-native-protocol-unix` 创建 socket 得到 EPERM，未执行原生音频测试；不计为合成音频通过 |
+| 真实设备/API | 未执行；没有替代或覆盖原有实体失败记录 |
+| 格式与差异 | `cargo fmt -p jwm-eva --check`、`git diff --check` 通过 |
+| Clippy 全目标 | 豁免既有 `deprecated`、`collapsible_if`、`needless_borrow`、`large_enum_variant`、`chunks_exact_to_as_chunks` 后通过；未豁免最后一项时原有音频代码出现四处告警，不声明严格零告警 |
+
+复现新回归：`cargo test -p jwm-eva --lib feedback_rejects_unowned_events_before_and_after_response_created`。
+具备原生 Unix socket 和音频依赖的环境应继续执行 `eva/tests/native-pulse.sh`，
+然后在授权实体设备上复测“修改布局→撤销”及播放期间“别数了，关闭麦克风”，
+结合 `speech_interrupted`、响应取消、实际停止听感和资源释放共同验收。
