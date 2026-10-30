@@ -441,8 +441,8 @@ impl Host {
         handler: Arc<dyn Fn(Action) + Send + Sync>,
         managed: bool,
     ) -> Result<Self> {
-        let (conn, screen) =
-            x11rb::connect(None).context("four-edge panels require X11 or XWayland")?;
+        let (conn, screen) = xbar_core::x11_connection::connect(None)
+            .context("four-edge panels require X11 or XWayland")?;
         let conn = Rc::new(conn);
         let root = &conn.setup().roots[screen];
         // Prefer a true ARGB visual; the compositor blends the capsule and

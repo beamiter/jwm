@@ -31,8 +31,8 @@ def uinput_child():
         os.write(descriptor, b''.join(struct.pack('llHHi', sec, usec, kind, code, value)
                                      for kind, code, value in [*events, (0, 0, 0)]))
     def release():
-        frame([item for slot in range(3) for item in [(3, 0x2f, slot), (3, 0x39, -1)]]
-              + [(1, 0x14e, 0), (1, 0x14a, 0)])
+        frame([item for slot in range(5) for item in [(3, 0x2f, slot), (3, 0x39, -1)]]
+              + [(1, key, 0) for key in (0x145, 0x14d, 0x14e, 0x14f, 0x148, 0x14a)])
     try:
         for kind in (1, 3): ioctl(0x40045564, kind)  # UI_SET_EVBIT
         for key in (0x110, 0x145, 0x14d, 0x14e, 0x14f, 0x148, 0x14a):
@@ -50,8 +50,10 @@ def uinput_child():
             if request['op'] == 'release':
                 release()
             elif request['op'] == 'swipe':
-                points = [[3000, 2500], [4500, 2600], [6000, 2500]]
-                events = [(1, 0x14a, 1), (1, 0x14e, 1)]
+                fingers = request.get('fingers', 3)
+                assert fingers in (3, 4, 5)
+                points = [[2500 + slot * 1000, 2500 + (slot % 2) * 100] for slot in range(fingers)]
+                events = [(1, 0x14a, 1), (1, {3: 0x14e, 4: 0x14f, 5: 0x148}[fingers], 1)]
                 for slot, (x, y) in enumerate(points):
                     events += [(3, 0x2f, slot), (3, 0x39, slot + 1), (3, 0x35, x), (3, 0x36, y)]
                 events += [(3, 0, points[0][0]), (3, 1, points[0][1])]
@@ -81,6 +83,7 @@ def uinput_child():
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--live', action='store_true', help='exercise the current desktop, restoring its state')
+    parser.add_argument('--four-finger', action='store_true', help='also exercise window previews, expose and reversible show desktop')
     parser.add_argument('--evidence-dir', type=Path, default=Path('artifacts/touchpad/live-x11'))
     args = parser.parse_args()
     if not args.live: parser.error('--live is required for the current-desktop hardware fixture')
@@ -99,14 +102,21 @@ def main():
     bindings = {(item['fingers'], item['direction']): (item['function'], item['argument']) for item in gesture['bindings']}
     for direction, function, argument in [('left', 'loopview', -1), ('right', 'loopview', 1), ('up', 'minimize', 0), ('down', 'restore_preview', 0)]:
         assert bindings.get((3, direction)) == (function, argument), bindings
+    if args.four_finger:
+        for direction, function, argument in [('left', 'window_switcher', -1), ('right', 'window_switcher', 1), ('up', 'toggle_expose', 0), ('down', 'show_desktop', 0)]:
+            assert bindings.get((4, direction)) == (function, argument), bindings
     shell = msg('get_desktop_shell')
     host_pid = shell['host']['pid']
+    if host_pid is None:
+        pids = subprocess.check_output(['pgrep', '-u', str(os.getuid()), '-x', 'jwm'], text=True).split()
+        assert len(pids) == 1, 'No unique active JWM process for the fixture environment'
+        host_pid = int(pids[0])
     values = dict(item.split(b'=', 1) for item in Path(f'/proc/{host_pid}/environ').read_bytes().split(b'\0') if b'=' in item)
     env = dict(os.environ)
     for key in ('DISPLAY', 'XAUTHORITY', 'XDG_RUNTIME_DIR'):
         if key.encode() in values: env[key] = values[key.encode()].decode()
-    def run(*argv):
-        return subprocess.check_output(list(map(str, argv)), env=env, text=True, timeout=5).strip()
+    def run(*argv, timeout=5):
+        return subprocess.check_output(list(map(str, argv)), env=env, text=True, timeout=timeout).strip()
     def wait_for(probe, description):
         deadline = time.monotonic() + 7
         while time.monotonic() < deadline:
@@ -117,6 +127,10 @@ def main():
     def active(): return next(mon for mon in msg('get_monitors') if mon['focused'])
     original = active()
     before_windows = msg('get_windows')
+    if args.four_finger:
+        assert not any(window['monitor'] == original['num'] and window['is_sticky']
+                       and not (window['is_dock'] or window.get('is_desktop', False))
+                       for window in before_windows), 'The four-finger fixture requires a workspace without existing sticky application windows'
     original_window = next((window for window in before_windows if window['id'] == original['selected_id']), None)
     count = len(next(output for output in shell['outputs'] if output['id'] == original['num'])['snapshot']['tags'])
     occupied = 0
@@ -129,6 +143,7 @@ def main():
     helper_log = (args.evidence_dir / 'uinput.log').open('w')
     helper = subprocess.Popen(['sudo', '-n', sys.executable, str(Path(__file__).resolve()), '--uinput-child'], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=helper_log, text=True)
     fixture = None
+    extra_fixtures = []
     record = {'backend': gesture['backend'], 'runtime': gesture['runtime'], 'steps': [], 'status': 'running'}
     def reply():
         assert select.select([helper.stdout], [], [], 7)[0], 'uinput helper timed out'
@@ -139,8 +154,8 @@ def main():
         helper.stdin.write(json.dumps({'op': op, **kwargs}) + '\n'); helper.stdin.flush()
         result = reply()
         assert result == {'ok': op}, result
-    def swipe(moves):
-        command('swipe', moves=moves)
+    def swipe(moves, fingers=3):
+        command('swipe', moves=moves, fingers=fingers)
         command('release')
     try:
         created = reply(); record['virtual_touchpad'] = created['created']
@@ -181,9 +196,78 @@ def main():
         record['steps'].append({'minimize_restore_preview': 'passed', 'overlay': overlay})
         if shutil.which('import'):
             time.sleep(0.3)
-            run('import', '-window', 'root', args.evidence_dir / 'restore-preview.png')
+            run('import', '-limit', 'thread', '1', '-window', 'root', args.evidence_dir / 'restore-preview.png', timeout=20)
         run('xdotool', 'key', 'Return')
         wait_for(lambda: next((w for w in msg('get_windows') if w['id'] == window['id'] and not w['is_minimized']), None), 'confirm restores the selected fixture')
+        if args.four_finger:
+            fixture_windows = [window]
+            for number, color in enumerate(('#b5d8f3', '#e9c89c')):
+                extra_title = f'{title} window {number + 2}'
+                process = subprocess.Popen(['xmessage', '-name', 'JwmGestureFixture', '-title', extra_title,
+                    '-bg', color, '-buttons', 'Close:0', '-geometry', '640x360+100+100',
+                    'Four-finger gesture acceptance window'], env=env,
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                extra_fixtures.append(process)
+                fixture_windows.append(wait_for(lambda: next((w for w in msg('get_windows') if w['name'] == extra_title), None), 'extra fixture window'))
+            for x, y in positions:
+                run('xdotool', 'mousemove', x, y)
+                time.sleep(0.12)
+                for dx in (-1200, 1200):
+                    before = active()['selected_id']
+                    command('swipe', moves=[[dx, 0]], fingers=4)
+                    preview = wait_for(lambda: (value if (value := msg('get_gesture')).get('window_preview_active') else None), 'four-finger preview opens before release')
+                    assert active()['selected_id'] == before, 'window switch committed before lift'
+                    assert active()['active_tags'] == unused, 'window preview switched workspace'
+                    assert preview['window_preview_target'] != before
+                    if shutil.which('import') and (x, y) == positions[0] and dx < 0:
+                        time.sleep(0.25)
+                        run('import', '-limit', 'thread', '1', '-window', 'root', args.evidence_dir / 'window-switcher.png', timeout=20)
+                    command('release')
+                    wait_for(lambda: active()['selected_id'] == preview['window_preview_target'], 'finger lift switches to the previewed window')
+                    wait_for(lambda: not msg('get_system_ui')['active'], 'window preview closes')
+                record['steps'].append({'pointer': [x, y], 'four_finger_preview_switch': 'passed'})
+            before = active()['selected_id']
+            swipe([[-1200, 0], [1100, 0]], fingers=4)
+            wait_for(lambda: not msg('get_system_ui')['active'], 'reversal cancels window preview')
+            assert active()['selected_id'] == before
+            record['steps'].append({'four_finger_pull_back_cancel': 'passed'})
+            swipe([[0, -1200]], fingers=4)
+            wait_for(lambda: msg('get_effects')['expose'], 'four-finger up enters expose')
+            swipe([[-1200, 0]], fingers=4)
+            swipe([[1200, 0]], fingers=4)
+            assert msg('get_effects')['expose']
+            swipe([[0, 1200]], fingers=4)
+            wait_for(lambda: not msg('get_effects')['expose'], 'four-finger down confirms expose selection')
+            assert active()['active_tags'] == unused
+            swipe([[0, -1200]], fingers=4)
+            wait_for(lambda: msg('get_effects')['expose'], 'reopen expose')
+            before = active()['selected_id']
+            swipe([[0, -1200]], fingers=4)
+            wait_for(lambda: not msg('get_effects')['expose'], 'four-finger up cancels expose')
+            assert active()['selected_id'] == before
+            record['steps'].append({'four_finger_expose_browse_confirm_cancel': 'passed'})
+            msg('focus_window', {'id': fixture_windows[0]['id']})
+            msg('minimize')
+            wait_for(lambda: next(w for w in msg('get_windows') if w['id'] == fixture_windows[0]['id'])['is_minimized'], 'fixture starts pre-minimized')
+            msg('focus_window', {'id': fixture_windows[1]['id']})
+            before_focus = active()['selected_id']
+            owned = {w['id'] for w in fixture_windows}
+            assert active()['active_tags'] == unused, 'show desktop fixture left its isolated tag'
+            assert all(w['id'] in owned for w in msg('get_windows')
+                       if w['monitor'] == original['num'] and w['is_on_view']
+                       and not (w['is_dock'] or w.get('is_desktop', False) or w.get('is_status_bar', False))), 'Another application entered the test view'
+            before_minimized = {w['id']: w['is_minimized'] for w in msg('get_windows') if w['id'] in owned}
+            command('swipe', moves=[[0, 1200]], fingers=4)
+            assert not msg('get_gesture')['showing_desktop'], 'show desktop committed before finger lift'
+            command('release')
+            wait_for(lambda: msg('get_gesture')['showing_desktop'], 'four-finger down shows desktop')
+            assert all(w['is_minimized'] for w in msg('get_windows') if w['id'] in owned)
+            swipe([[0, 1200]], fingers=4)
+            wait_for(lambda: not msg('get_gesture')['showing_desktop'], 'four-finger down restores desktop snapshot')
+            after_minimized = {w['id']: w['is_minimized'] for w in msg('get_windows') if w['id'] in owned}
+            assert after_minimized == before_minimized, (before_minimized, after_minimized)
+            assert active()['selected_id'] == before_focus
+            record['steps'].append({'four_finger_show_desktop_exact_restore': 'passed'})
         record['status'] = 'passed'
     finally:
         if helper.poll() is None:
@@ -194,10 +278,14 @@ def main():
             except subprocess.TimeoutExpired: helper.kill(); helper.wait(timeout=3)
         helper_log.close()
         if fixture is not None:
-            if msg('get_system_ui').get('active'): run('xdotool', 'key', 'Escape')
-            fixture.terminate()
-            try: fixture.wait(timeout=3)
-            except subprocess.TimeoutExpired: fixture.kill(); fixture.wait(timeout=3)
+            if msg('get_system_ui').get('active') or msg('get_effects')['expose']:
+                run('xdotool', 'key', 'Escape')
+            if args.four_finger and msg('get_gesture').get('showing_desktop'):
+                msg('show_desktop')
+            for process in [*reversed(extra_fixtures), fixture]:
+                process.terminate()
+                try: process.wait(timeout=3)
+                except subprocess.TimeoutExpired: process.kill(); process.wait(timeout=3)
         msg('view', {'tag': original['active_tags']})
         run('xdotool', 'mousemove', pointer['X'], pointer['Y'])
         if original_window and any(w['id'] == original_window['id'] and w.get('pid') == original_window.get('pid') for w in msg('get_windows')):

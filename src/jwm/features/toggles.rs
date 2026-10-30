@@ -3153,6 +3153,7 @@ impl Jwm {
     /// Drop the panel, release its grabs, and restore a temporarily enabled
     /// compositor to the user's previous off state.
     pub(crate) fn close_system_ui(&mut self, backend: &mut dyn Backend) {
+        self.features.touchpad.detach_switcher();
         self.cancel_pointer_scroll(backend);
         self.cancel_touchpad_gesture(backend, false);
         // Whatever a rebuild had queued is moot, and leaving the flag set would
@@ -5570,6 +5571,9 @@ impl Jwm {
             return Err(format!("expose cannot open while {mode} is active").into());
         }
         if !self.features.expose_active {
+            if self.showing_desktop() {
+                self.show_desktop(backend, &WMArgEnum::Int(0))?;
+            }
             self.cancel_pointer_drag(backend);
         }
         // Collect windows visible on their monitor; eligibility filtering and

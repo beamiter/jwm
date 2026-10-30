@@ -296,6 +296,7 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "setmfact",
         "setnmaster",
         "sexp",
+        "show_desktop",
         "smov",
         "snap",
         "snap_window",
@@ -1741,6 +1742,7 @@ pub fn dispatch_command(name: &str, args: &Value) -> Result<(WMFuncType, WMArgEn
         "cycle_overview" | "cycle" => Ok((Jwm::cycle_overview, parse_int_arg(args, 1)?)),
         "toggle_magnifier" | "mag" => Ok((Jwm::toggle_magnifier, parse_int_arg(args, 0)?)),
         "toggle_peek" | "peek" => Ok((Jwm::toggle_peek, parse_int_arg(args, 0)?)),
+        "show_desktop" => Ok((Jwm::show_desktop, parse_int_arg(args, 0)?)),
         "toggle_annotation" | "annotate" => Ok((Jwm::toggle_annotation, parse_int_arg(args, 0)?)),
         "toggle_recording" | "record" => Ok((Jwm::toggle_recording, parse_int_arg(args, 0)?)),
         "adjust_recording_region" | "region" => {

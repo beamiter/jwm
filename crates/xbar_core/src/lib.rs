@@ -58,6 +58,8 @@ pub mod transport;
 #[cfg(all(feature = "runtime-linux", feature = "transport-shared"))]
 pub mod wake;
 pub mod web_layout;
+#[cfg(feature = "x11-connection")]
+pub mod x11_connection;
 
 /// Canonical entry point for the shared-memory wire protocol.
 ///

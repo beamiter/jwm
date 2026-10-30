@@ -517,7 +517,7 @@ impl X11rbBackend {
         // threads started below must inherit a blocked SIGCHLD, or one of them
         // can swallow the signal `run`'s signalfd is waiting for.
         let _sigchld_blocked = SigchldBlockedForSpawns::new();
-        let (raw_conn, screen_num) = x11rb::rust_connection::RustConnection::connect(None)?;
+        let (raw_conn, screen_num) = xbar_core::x11_connection::connect(None)?;
         let conn = Arc::new(raw_conn);
         use x11rb::connection::Connection;
         let screen = conn.setup().roots[screen_num].clone();

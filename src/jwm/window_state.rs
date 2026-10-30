@@ -2044,6 +2044,7 @@ impl Jwm {
                 log::warn!("could not clear minimized restore state for {win:?}: {error}");
             }
             self.clear_hidden_client_park_retry(client_key);
+            self.features.touchpad.forget_desktop_window(client_key);
         }
         self.broadcast_window_state_ipc(backend, client_key);
         let _ = was_fullscreen;

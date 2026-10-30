@@ -1557,6 +1557,7 @@ dependencies = [
  "serde",
  "sysinfo",
  "toml",
+ "x11rb",
 ]
 
 [[package]]

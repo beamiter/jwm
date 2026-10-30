@@ -27,6 +27,7 @@ provider-system = ["dep:sysinfo"]
 render-cairo = ["dep:anyhow", "dep:cairo-rs", "dep:image", "dep:pango", "dep:pango-sys", "dep:pangocairo"]
 runtime-linux = ["dep:libc", "dep:log"]
 transport-shared = ["dep:shared_structures"]
+x11-connection = ["dep:x11rb"]
 
 [dependencies]
 anyhow = { version = "1.0.103", optional = true }
@@ -44,6 +45,7 @@ alsa = { version = "0.12.0", optional = true }
 log = { version = "0.4.33", optional = true }
 flexi_logger = { version = "0.31.9", optional = true }
 libc = { version = "0.2.186", optional = true }
+x11rb = { version = "0.14", optional = true }
 
 # Only the formats JWM's own wallpaper loader accepts, and no rayon: a bar
 # decodes one image at startup, not a batch.

@@ -95,7 +95,7 @@ default = [
 # Both X11 transports use a separate XI2.4 connection for touchpad gestures,
 # with a seat-local libinput fallback for drivers without gesture classes.
 # rust-xcb's protocol XML predates XI2.4; keep this out of Wayland-only builds.
-x11-backends = ["dep:x11", "dep:x11rb-protocol", "dep:x11rb", "dep:input", "dep:udev", "dep:libloading"]
+x11-backends = ["dep:x11", "dep:x11rb-protocol", "dep:x11rb", "dep:input", "dep:udev", "dep:libloading", "xbar_core/x11-connection"]
 # Internal: shared Smithay Wayland frontend. Enabled through the per-backend
 # Wayland features; not selected directly.
 wayland-backends = ["dep:smithay"]

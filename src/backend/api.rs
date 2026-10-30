@@ -1208,9 +1208,12 @@ pub struct SystemUiOverlay {
     /// stay strings across this boundary — pixels never cross it. A payload
     /// without the field (any other panel, or none) retires the preview.
     pub side_preview: Option<String>,
-    /// The restore picker's highlighted minimized window. Its retained pixels
-    /// are drawn beside the list without restoring or moving the client.
+    /// The restore picker or window switcher's highlighted window. Live or
+    /// retained pixels are drawn without restoring, moving or focusing it.
     pub window_preview: Option<WindowId>,
+    /// Continue only this already-intercepted WM swipe while its preview is
+    /// drawn. A fresh Begin or another modal never inherits that ownership.
+    pub touchpad_swipe_id: Option<u64>,
     /// The search field is selected for replace after a click in it.
     pub query_selected: bool,
     /// While the pointer is dragging the list scroll track, the thumb sits

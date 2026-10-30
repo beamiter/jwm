@@ -2925,6 +2925,8 @@ mod tests {
     }
 
     struct RenderSpyBackend {
+        expose_selected: Option<WindowId>,
+        expose_moves: Vec<crate::backend::api::ExposeNavDirection>,
         swipe_active: bool,
         swipe_progress: Vec<(f32, i32)>,
         swipe_finishes: Vec<(bool, bool)>,
@@ -2994,6 +2996,8 @@ mod tests {
     impl RenderSpyBackend {
         fn new() -> Self {
             Self {
+                expose_selected: None,
+                expose_moves: Vec::new(),
                 swipe_active: false,
                 swipe_progress: Vec::new(),
                 swipe_finishes: Vec::new(),
@@ -3191,6 +3195,15 @@ mod tests {
         }
     }
     impl CompositorWorkspaceEffects for RenderSpyBackend {
+        fn compositor_expose_select(&mut self, window: Option<WindowId>) {
+            self.expose_selected = window;
+        }
+        fn compositor_expose_selected(&mut self) -> Option<WindowId> {
+            self.expose_selected
+        }
+        fn compositor_expose_move(&mut self, direction: crate::backend::api::ExposeNavDirection) {
+            self.expose_moves.push(direction);
+        }
         fn compositor_cancel_scroll(&mut self) {
             self.scroll_epoch = self.scroll_epoch.wrapping_add(1);
         }
@@ -7524,6 +7537,334 @@ mod tests {
         );
         assert_eq!(jwm.state.monitors[monitor].get_active_tags(), before);
         assert!(backend.swipe_progress.is_empty());
+    }
+
+    fn start_four_finger_swipe(
+        jwm: &mut Jwm,
+        backend: &mut RenderSpyBackend,
+        dx: f64,
+        dy: f64,
+    ) -> u64 {
+        use crate::backend::gesture_swipe::{SwipeInput, next_swipe_id};
+        let id = next_swipe_id();
+        send_test_swipe(
+            jwm,
+            backend,
+            SwipeInput::Begin {
+                id,
+                fingers: 4,
+                config_signature: crate::config::CONFIG.load().gesture_swipe_signature(),
+            },
+        );
+        send_test_swipe(
+            jwm,
+            backend,
+            SwipeInput::Update {
+                id,
+                dx,
+                dy,
+                time: 100,
+            },
+        );
+        id
+    }
+
+    fn end_four_finger_swipe(
+        jwm: &mut Jwm,
+        backend: &mut RenderSpyBackend,
+        id: u64,
+        cancelled: bool,
+    ) {
+        send_test_swipe(
+            jwm,
+            backend,
+            crate::backend::gesture_swipe::SwipeInput::End {
+                id,
+                cancelled,
+                time: 300,
+            },
+        );
+    }
+
+    #[test]
+    fn four_finger_window_preview_commits_only_at_release_and_never_minimizes_live_content() {
+        let (mut jwm, monitor, first, _) = jwm_with_tab_group();
+        let mut backend = RenderSpyBackend::new();
+        jwm.focus(&mut backend, Some(first)).unwrap();
+        let before = jwm.get_selected_client_key();
+        let tags = jwm.state.monitors[monitor].get_active_tags();
+        let id = start_four_finger_swipe(&mut jwm, &mut backend, 100.0, 0.0);
+        assert!(jwm.touchpad_switcher_active());
+        jwm.tick_touchpad_gesture(&mut backend);
+        assert!(
+            jwm.touchpad_switcher_active(),
+            "the touchpad owns its own modal preview"
+        );
+        assert_eq!(jwm.get_selected_client_key(), before);
+        assert_eq!(jwm.state.monitors[monitor].get_active_tags(), tags);
+        assert_eq!(
+            backend
+                .input_ops
+                .pointer_grabs
+                .load(AtomicOrdering::Relaxed),
+            0,
+            "taking a new pointer grab would cancel the native swipe"
+        );
+        assert_eq!(
+            backend
+                .system_ui_updates
+                .last()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .touchpad_swipe_id,
+            Some(id)
+        );
+        let target = jwm.features.system_ui.selected_switcher_window().unwrap();
+        assert_ne!(
+            Some(target),
+            before.map(|key| jwm.state.clients[key].win.raw())
+        );
+        assert_eq!(
+            backend
+                .system_ui_updates
+                .last()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .window_preview,
+            Some(WindowId::from_raw(target))
+        );
+        assert!(
+            backend.compositor_static_ensures.is_empty(),
+            "a live thumbnail cannot acquire minimized ownership"
+        );
+        end_four_finger_swipe(&mut jwm, &mut backend, id, false);
+        assert_eq!(
+            jwm.get_selected_client_key()
+                .map(|key| jwm.state.clients[key].win.raw()),
+            Some(target)
+        );
+        assert!(!jwm.features.system_ui.is_active());
+        assert!(!jwm.touchpad_switcher_active());
+        assert!(
+            backend
+                .input_ops
+                .pointer_ungrabs
+                .load(AtomicOrdering::Relaxed)
+                > 0
+        );
+        let selected = jwm.get_selected_client_key();
+        end_four_finger_swipe(&mut jwm, &mut backend, id, false);
+        assert_eq!(
+            jwm.get_selected_client_key(),
+            selected,
+            "duplicate release cannot switch again"
+        );
+    }
+
+    #[test]
+    fn four_finger_window_preview_reversal_cancel_and_focus_handoff_preserve_selection() {
+        use crate::backend::gesture_swipe::SwipeInput;
+        for cancellation in ["device", "reverse", "focus", "key", "panel"] {
+            let (mut jwm, _, first, second) = jwm_with_tab_group();
+            let mut backend = RenderSpyBackend::new();
+            jwm.focus(&mut backend, Some(first)).unwrap();
+            let id = start_four_finger_swipe(&mut jwm, &mut backend, -100.0, 0.0);
+            assert!(jwm.touchpad_switcher_active());
+            match cancellation {
+                "reverse" => send_test_swipe(
+                    &mut jwm,
+                    &mut backend,
+                    SwipeInput::Update {
+                        id,
+                        dx: 99.0,
+                        dy: 0.0,
+                        time: 180,
+                    },
+                ),
+                "focus" => jwm.focus(&mut backend, Some(second)).unwrap(),
+                "key" => jwm
+                    .handle_event(
+                        &mut backend,
+                        BackendEvent::KeyPress {
+                            keycode: 27,
+                            state: 0,
+                            time: 180,
+                            repeat: false,
+                        },
+                    )
+                    .unwrap(),
+                "panel" => {
+                    jwm.prepare_system_ui(
+                        &mut backend,
+                        "test incoming panel",
+                        crate::jwm::features::toggles::SystemUiPointerGrab::Buttons,
+                    )
+                    .unwrap();
+                    jwm.features.system_ui = crate::jwm::features::SystemUiState::clipboard_picker(
+                        &jwm.features.clipboard,
+                    );
+                }
+                _ => {}
+            }
+            end_four_finger_swipe(&mut jwm, &mut backend, id, cancellation == "device");
+            assert_eq!(
+                jwm.get_selected_client_key(),
+                Some(if cancellation == "focus" {
+                    second
+                } else {
+                    first
+                }),
+                "{cancellation}"
+            );
+            assert!(!jwm.touchpad_switcher_active());
+            if cancellation == "panel" {
+                assert!(
+                    jwm.features.system_ui.is_clipboard_picker(),
+                    "stale release cannot dismiss the incoming owner"
+                );
+            } else {
+                assert!(!jwm.features.system_ui.is_active(), "{cancellation}");
+            }
+        }
+    }
+
+    #[test]
+    fn four_finger_long_swipe_browses_the_frozen_snapshot_and_can_restore_a_minimized_choice() {
+        use crate::backend::gesture_swipe::SwipeInput;
+        let (mut jwm, monitor, first, second) = jwm_with_tab_group();
+        let mut backend = RenderSpyBackend::new();
+        let mut extra = crate::core::models::WMClient::new(WindowId::from_raw(0x303));
+        extra.mon = Some(monitor);
+        extra.state.tags = 1;
+        extra.geometry.w = 800;
+        extra.geometry.h = 600;
+        let third = jwm.insert_client(extra);
+        jwm.attach_to_monitor(third, monitor);
+        jwm.set_client_minimized(&mut backend, second, true)
+            .unwrap();
+        jwm.focus(&mut backend, Some(first)).unwrap();
+        let id = start_four_finger_swipe(&mut jwm, &mut backend, 90.0, 0.0);
+        let first_choice = jwm.features.system_ui.selected_switcher_window();
+        send_test_swipe(
+            &mut jwm,
+            &mut backend,
+            SwipeInput::Update {
+                id,
+                dx: 90.0,
+                dy: 0.0,
+                time: 150,
+            },
+        );
+        let second_choice = jwm.features.system_ui.selected_switcher_window();
+        assert_ne!(first_choice, second_choice);
+        assert_eq!(jwm.get_selected_client_key(), Some(first));
+        // Choose the minimized row with net displacement, without restoring it early.
+        let target = jwm.state.clients[second].win.raw();
+        if second_choice != Some(target) {
+            send_test_swipe(
+                &mut jwm,
+                &mut backend,
+                SwipeInput::Update {
+                    id,
+                    dx: -90.0,
+                    dy: 0.0,
+                    time: 180,
+                },
+            );
+        }
+        assert_eq!(
+            jwm.features.system_ui.selected_switcher_window(),
+            Some(target)
+        );
+        assert!(jwm.state.clients[second].state.is_hidden);
+        end_four_finger_swipe(&mut jwm, &mut backend, id, false);
+        assert!(!jwm.state.clients[second].state.is_hidden);
+        assert_eq!(jwm.get_selected_client_key(), Some(second));
+        assert!(!jwm.state.clients[third].state.is_hidden);
+    }
+
+    #[test]
+    fn four_finger_expose_gestures_browse_and_return_without_switching_tags() {
+        use crate::backend::api::ExposeNavDirection;
+        let (mut jwm, monitor, first, second) = jwm_with_tab_group();
+        let mut backend = RenderSpyBackend::new();
+        jwm.focus(&mut backend, Some(first)).unwrap();
+        let tags = jwm.state.monitors[monitor].get_active_tags();
+        let id = start_four_finger_swipe(&mut jwm, &mut backend, 0.0, -100.0);
+        assert!(!jwm.features.expose_active);
+        end_four_finger_swipe(&mut jwm, &mut backend, id, false);
+        assert!(jwm.features.expose_active);
+        for dx in [-100.0, 100.0] {
+            let id = start_four_finger_swipe(&mut jwm, &mut backend, dx, 0.0);
+            jwm.tick_touchpad_gesture(&mut backend);
+            end_four_finger_swipe(&mut jwm, &mut backend, id, false);
+        }
+        assert!(matches!(
+            backend.expose_moves.as_slice(),
+            [ExposeNavDirection::Left, ExposeNavDirection::Right]
+        ));
+        backend.expose_selected = Some(jwm.state.clients[second].win);
+        let id = start_four_finger_swipe(&mut jwm, &mut backend, 0.0, 100.0);
+        end_four_finger_swipe(&mut jwm, &mut backend, id, false);
+        assert!(!jwm.features.expose_active);
+        assert_eq!(jwm.get_selected_client_key(), Some(second));
+        assert_eq!(jwm.state.monitors[monitor].get_active_tags(), tags);
+        assert!(
+            !jwm.showing_desktop(),
+            "down in expose confirms instead of minimizing the workspace"
+        );
+    }
+
+    #[test]
+    fn four_finger_show_desktop_restores_only_its_snapshot_and_keeps_other_tags_untouched() {
+        let (mut jwm, monitor, first, second) = jwm_with_tab_group();
+        let mut backend = RenderSpyBackend::new();
+        jwm.set_client_minimized(&mut backend, second, true)
+            .unwrap();
+        jwm.focus(&mut backend, Some(first)).unwrap();
+        let id = start_four_finger_swipe(&mut jwm, &mut backend, 0.0, 100.0);
+        end_four_finger_swipe(&mut jwm, &mut backend, id, false);
+        assert!(jwm.showing_desktop());
+        assert!(jwm.state.clients[first].state.is_hidden);
+        assert!(jwm.state.clients[second].state.is_hidden);
+        let before = jwm.state.monitors[monitor].get_active_tags();
+        jwm.view(&mut backend, &WMArgEnum::UInt(2)).unwrap();
+        assert!(!jwm.showing_desktop());
+        jwm.show_desktop(&mut backend, &WMArgEnum::Int(0)).unwrap();
+        assert!(jwm.state.clients[first].state.is_hidden);
+        jwm.view(&mut backend, &WMArgEnum::UInt(before)).unwrap();
+        let id = start_four_finger_swipe(&mut jwm, &mut backend, 0.0, 100.0);
+        end_four_finger_swipe(&mut jwm, &mut backend, id, false);
+        assert!(!jwm.showing_desktop());
+        assert!(!jwm.state.clients[first].state.is_hidden);
+        assert!(
+            jwm.state.clients[second].state.is_hidden,
+            "a preexisting minimized window stays minimized"
+        );
+        assert_eq!(jwm.get_selected_client_key(), Some(first));
+    }
+
+    #[test]
+    fn show_desktop_relinquishes_a_manually_restored_or_retagged_window() {
+        for retagged in [false, true] {
+            let (mut jwm, _, first, second) = jwm_with_tab_group();
+            let mut backend = RenderSpyBackend::new();
+            jwm.focus(&mut backend, Some(first)).unwrap();
+            jwm.show_desktop(&mut backend, &WMArgEnum::Int(0)).unwrap();
+            if retagged {
+                jwm.state.clients[second].state.tags = 2;
+            } else {
+                jwm.set_client_minimized(&mut backend, second, false)
+                    .unwrap();
+                jwm.set_client_minimized(&mut backend, second, true)
+                    .unwrap();
+            }
+            jwm.show_desktop(&mut backend, &WMArgEnum::Int(0)).unwrap();
+            assert!(!jwm.state.clients[first].state.is_hidden);
+            assert!(jwm.state.clients[second].state.is_hidden);
+        }
     }
 
     #[test]
@@ -16422,6 +16763,7 @@ impl EventHandler for Jwm {
         backend: &mut dyn Backend,
         event: BackendEvent,
     ) -> Result<(), BackendError> {
+        let cancelling_touchpad_switcher = self.touchpad_switcher_active();
         if matches!(
             &event,
             BackendEvent::OutputAdded(_)
@@ -16447,6 +16789,15 @@ impl EventHandler for Jwm {
                 | BackendEvent::ButtonPress { .. }
         ) {
             self.cancel_touchpad_gesture(backend, false);
+            if cancelling_touchpad_switcher
+                && matches!(
+                    &event,
+                    BackendEvent::KeyPress { .. } | BackendEvent::ButtonPress { .. }
+                )
+            {
+                backend.request_render();
+                return Ok(());
+            }
         }
         // Lifecycle changes end our grab before another subsystem can take it.
         if matches!(

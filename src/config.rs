@@ -1559,14 +1559,18 @@ pub struct GestureSwipeConfig {
 
 fn default_gesture_swipe() -> Vec<GestureSwipeConfig> {
     [
-        ("left", "loopview", -1),
-        ("right", "loopview", 1),
-        ("up", "minimize", 0),
-        ("down", "restore_preview", 0),
+        (3, "left", "loopview", -1),
+        (3, "right", "loopview", 1),
+        (3, "up", "minimize", 0),
+        (3, "down", "restore_preview", 0),
+        (4, "left", "window_switcher", -1),
+        (4, "right", "window_switcher", 1),
+        (4, "up", "toggle_expose", 0),
+        (4, "down", "show_desktop", 0),
     ]
     .into_iter()
-    .map(|(direction, function, step)| GestureSwipeConfig {
-        fingers: 3,
+    .map(|(fingers, direction, function, step)| GestureSwipeConfig {
+        fingers,
         direction: direction.into(),
         function: function.into(),
         argument: ArgumentConfig::Int(step),
@@ -4398,6 +4402,7 @@ impl Config {
             "killclient" => Some(Jwm::killclient),
             "minimize" => Some(Jwm::minimize),
             "restore_preview" => Some(Jwm::restore_preview),
+            "show_desktop" => Some(Jwm::show_desktop),
             "toggle_shortcut_passthrough" => Some(Jwm::toggle_shortcut_passthrough),
             "zoom" => Some(Jwm::zoom),
             "snap_window" => Some(Jwm::snap_window),
@@ -8873,14 +8878,18 @@ mod tests {
     fn three_finger_swipes_default_to_tags_minimize_and_restore_preview() {
         let cfg = Config::default();
         let bindings = &cfg.behavior().gesture_swipe;
-        assert_eq!(bindings.len(), 4);
-        for (binding, (direction, function, step)) in bindings.iter().zip([
-            ("left", "loopview", -1),
-            ("right", "loopview", 1),
-            ("up", "minimize", 0),
-            ("down", "restore_preview", 0),
+        assert_eq!(bindings.len(), 8);
+        for (binding, (fingers, direction, function, step)) in bindings.iter().zip([
+            (3, "left", "loopview", -1),
+            (3, "right", "loopview", 1),
+            (3, "up", "minimize", 0),
+            (3, "down", "restore_preview", 0),
+            (4, "left", "window_switcher", -1),
+            (4, "right", "window_switcher", 1),
+            (4, "up", "toggle_expose", 0),
+            (4, "down", "show_desktop", 0),
         ]) {
-            assert_eq!(binding.fingers, 3);
+            assert_eq!(binding.fingers, fingers);
             assert_eq!(binding.direction, direction);
             assert_eq!(binding.function, function);
             assert!(matches!(binding.argument, ArgumentConfig::Int(value) if value == step));
@@ -8894,7 +8903,7 @@ mod tests {
         let mut table: toml::Table = toml::from_str(&serialized).unwrap();
         table.remove("gesture_swipe");
         let missing: BehaviorConfig = toml::Value::Table(table.clone()).try_into().unwrap();
-        assert_eq!(missing.gesture_swipe.len(), 4);
+        assert_eq!(missing.gesture_swipe.len(), 8);
         table.insert("gesture_swipe".into(), toml::Value::Array(Vec::new()));
         let disabled: BehaviorConfig = toml::Value::Table(table).try_into().unwrap();
         assert!(disabled.gesture_swipe.is_empty());

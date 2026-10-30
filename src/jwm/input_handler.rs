@@ -506,12 +506,33 @@ impl Jwm {
             .flatten()
             .and_then(|key| self.state.clients.get(key))
             .filter(|client| client.state.is_hidden)
-            .map(|client| client.win);
-        if let Some(window) = window_preview {
+            .map(|client| client.win)
+            .or_else(|| {
+                if !self.touchpad_switcher_active() {
+                    return None;
+                }
+                self.features
+                    .system_ui
+                    .selected_switcher_window()
+                    .and_then(|window| {
+                        self.wintoclient(crate::backend::common_define::WindowId::from_raw(window))
+                    })
+                    .and_then(|key| self.state.clients.get(key))
+                    .map(|client| client.win)
+            });
+        if let Some(window) = window_preview
+            && self
+                .wintoclient(window)
+                .and_then(|key| self.state.clients.get(key))
+                .is_some_and(|client| client.state.is_hidden)
+        {
             backend.compositor_ensure_minimized_window_visual(window);
         }
         backend.compositor_set_system_ui(active.then(|| {
             let mut parts = self.features.system_ui.overlay_parts();
+            if self.touchpad_switcher_active() {
+                parts.hint = "Slide to choose    Lift to switch    Pull back / Esc  cancel".into();
+            }
             if direct_command_from_launcher(&self.features.system_ui).is_some() {
                 let typed = parts
                     .query
@@ -578,6 +599,7 @@ impl Jwm {
                     .selected_wallpaper()
                     .map(str::to_string),
                 window_preview,
+                touchpad_swipe_id: self.touchpad_switcher_id(),
                 query_selected: self.system_ui_query_replace,
                 scroll_drag_t: self.system_ui_scroll_drag_t,
                 list_viewport: parts

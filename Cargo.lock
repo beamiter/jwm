@@ -6105,6 +6105,7 @@ dependencies = [
  "shared_structures",
  "sysinfo",
  "toml",
+ "x11rb 0.14.0",
 ]
 
 [[package]]

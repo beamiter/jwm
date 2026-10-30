@@ -1,4 +1,4 @@
-# Touchpad workspace swipes
+# Touchpad gestures
 
 In native Wayland (udev/DRM) and supported X11 sessions, three-finger swipes switch the
 selected monitor's tags by default: swipe left for the previous (left) tag and
@@ -12,6 +12,30 @@ The restore picker shows the highlighted window's retained thumbnail beside
 the list. Hover or keyboard navigation changes the thumbnail; clicking a row
 or the thumbnail, or pressing Enter, restores just that window. Escape leaves
 all minimized windows untouched.
+
+Four-finger gestures manage windows without changing tags:
+
+| Gesture | On the desktop | In window exposé |
+| --- | --- | --- |
+| Left / right | Preview the previous / next MRU window; lift to switch | Move the window highlight left / right |
+| Up | Open window exposé | Close exposé without changing focus |
+| Down | Show desktop; repeat to restore this view's windows | Return to the highlighted window |
+
+The four-finger window switcher shows a list and the selected window's live
+thumbnail (or retained thumbnail when minimized). A longer horizontal swipe
+browses further through the snapshot, one additional window per threshold.
+Pull back near the start or lift after a short swipe to cancel. Previewing
+never changes focus, restores a minimized client or changes its geometry.
+Only release commits the highlighted choice; Escape or another input owner
+cancels. Alt+Tab keeps its existing modifier-release behavior.
+
+Show desktop is a reversible minimize operation for visible applications on
+the selected monitor and active tag set. Previously minimized windows stay
+minimized. Repeating the gesture restores only the still-owned windows and
+the original focus, leaving other tags and monitors alone. Manually restored,
+retagged, moved or closed windows leave the snapshot; a failed restore remains
+retryable. Snapshots last for the current WM session. `show_desktop` also works
+over IPC. Opening exposé from the desktop restores that snapshot first.
 
 With JWM compositing and animations enabled, horizontal workspace swipes
 move the outgoing and incoming workspace images with your fingers. Pull back
@@ -43,6 +67,9 @@ Queued input cannot revive a gesture across that handoff. Cancellation due
 to a new input owner restores the live scene immediately; an ordinary
 cancelled or short release returns smoothly. A second device cannot finish
 or replace the first device's active workspace gesture.
+The four-finger switcher owns its own panel until lift; exposé accepts only
+its four-finger navigation/exit actions. Other modal interfaces still block
+workspace and window gestures, including queued input from a previous owner.
 
 Two-finger scrolling and unclaimed swipe/pinch/hold gestures continue to
 applications. A modal JWM interface owns its input instead. Native Wayland
@@ -63,6 +90,10 @@ gesture_swipe = [
   { fingers = 3, direction = "right", function = "loopview", argument = 1 },
   { fingers = 3, direction = "up", function = "minimize", argument = 0 },
   { fingers = 3, direction = "down", function = "restore_preview", argument = 0 },
+  { fingers = 4, direction = "left", function = "window_switcher", argument = -1 },
+  { fingers = 4, direction = "right", function = "window_switcher", argument = 1 },
+  { fingers = 4, direction = "up", function = "toggle_expose", argument = 0 },
+  { fingers = 4, direction = "down", function = "show_desktop", argument = 0 },
 ]
 ```
 
@@ -73,7 +104,8 @@ Swap the two arguments to reverse the direction. Three-, four- and
 five-finger bindings and the existing IPC action names remain configurable.
 
 Interactive previews are provided for horizontal `loopview` (also `loop_view`
-and `loop`) bindings with argument `1` or `-1`. Other bound actions, including
+and `loop`) and `window_switcher` (also `switcher`) bindings with argument
+`1` or `-1`. Other bound actions, including
 custom IPC actions, run once at release and retain their existing behavior.
 For example, `toggle_expose` can be bound to open or close exposé. Invalid or
 unknown action names do not claim a finger count.
@@ -98,6 +130,9 @@ be enabled. When the Xorg driver omits gesture classes, JWM can use its own
 gesture-only libinput context for the affected touchpads. The context never
 grabs a device and leaves pointer motion, clicks and scrolling with Xorg.
 Touchpads already exposed through XI2.4 are excluded from the fallback.
+The gesture connection and X11 shell also retain authenticated Linux abstract
+socket access when the server's filesystem socket path has disappeared. They
+use the same display and Xauthority lookup as the ordinary connection.
 
 The source/release installers ship `69-jwm-touchpad-gestures.rules`, granting
 the active local seat access only to touchpad event nodes without keyboard
@@ -123,6 +158,8 @@ capability. `runtime.operational` is false when the X11 hook failed, no capable
 device is present, or bindings are disabled; `runtime.reason` explains the
 state. `configured_fingers` lists configuration intent, while
 `intercepted_fingers` and `will_intercept` reflect current runtime support.
+`window_preview_active` and `window_preview_target` identify an in-progress
+touchpad window choice; `showing_desktop` reports the selected view's snapshot.
 An application's active grab can still temporarily prevent delivery.
 
 ## Validation
@@ -144,3 +181,7 @@ It restores the original tag, focus and pointer and archives its result and
 restore-picker capture under `artifacts/touchpad/live-x11`. Only creation of
 the virtual touchpad uses the short-lived sudo helper. This exercises the
 kernel/libinput/WM path; personal finger feel still needs the physical pad.
+Add `--four-finger` to test window previews and release-only focus changes at
+the same five positions, pull-back cancellation, exposé navigation/exit and
+exact desktop restoration with a pre-minimized fixture. This creates two more
+owned windows and requires no existing sticky applications on the test monitor.

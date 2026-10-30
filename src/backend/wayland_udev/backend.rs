@@ -735,6 +735,8 @@ struct SharedState {
     scroll_capture_active: bool,
     /// True while JWM's built-in launcher or lock screen owns all input.
     system_ui_grab_active: bool,
+    wm_swipe_panel: Option<u64>,
+    expose_gestures: bool,
     touch_routes: TouchRoutes,
     button_routes: ButtonRoutes,
     /// The toast cards the compositor drew on the last composited frame, in
@@ -771,10 +773,26 @@ impl Default for SharedState {
             screenshot_grab_active: false,
             scroll_capture_active: false,
             system_ui_grab_active: false,
+            wm_swipe_panel: None,
+            expose_gestures: false,
             touch_routes: TouchRoutes::default(),
             button_routes: ButtonRoutes::default(),
             toast_rects: Vec::new(),
         }
+    }
+}
+
+impl SharedState {
+    /// A panel may retain exactly the WM sequence that drew it. Expose owns
+    /// four-finger navigation; every other modal keeps all swipe tails out.
+    fn allows_wm_swipe(&self, id: u64, fingers: u32) -> bool {
+        self.session_active
+            && !self.scroll_capture_active
+            && if self.system_ui_grab_active {
+                !self.screenshot_grab_active && id != 0 && self.wm_swipe_panel == Some(id)
+            } else {
+                !self.screenshot_grab_active || (self.expose_gestures && fingers == 4)
+            }
     }
 }
 
@@ -3015,11 +3033,12 @@ impl UdevBackend {
                 .handle()
                 .insert_source(libinput_backend, move |event, _, state| {
                     reconcile_touch_routes(state, &shared);
-                    let gesture_modal = {
+                    let (gesture_modal, wm_swipe_allowed) = {
                         let s = shared.lock_safe();
-                        !s.session_active || (!state.session_locked && (s.screenshot_grab_active || s.system_ui_grab_active))
+                        (!s.session_active || (!state.session_locked && (s.screenshot_grab_active || s.system_ui_grab_active)),
+                        !state.session_locked && s.allows_wm_swipe(state.gesture_swipe_id, state.gesture_swipe.fingers))
                     };
-                    if gesture_modal { cancel_native_swipe(state); }
+                    if gesture_modal && !wm_swipe_allowed { cancel_native_swipe(state); }
                     // Notify idle tracker on any input activity
                     state.idle_notifier_state.notify_activity(&state.seat);
                     state.last_input = std::time::Instant::now();
@@ -3919,7 +3938,8 @@ impl UdevBackend {
                             state.gesture_swipe_device = Some(device);
                             let fingers = event.fingers();
                             let cfg = crate::config::CONFIG.load();
-                            let intercept = !gesture_modal && !state.session_locked && gesture_swipe_should_intercept(
+                            let accepts_begin = shared.lock_safe().allows_wm_swipe(0, fingers);
+                            let intercept = accepts_begin && !state.session_locked && gesture_swipe_should_intercept(
                                 fingers,
                                 &cfg.behavior().gesture_swipe,
                             );
@@ -3967,7 +3987,7 @@ impl UdevBackend {
                                 if state.gesture_swipe_id != 0 {
                                     pending_events.lock_safe().push_back(BackendEvent::GestureSwipe(crate::backend::gesture_swipe::SwipeInput::End {
                                         id: state.gesture_swipe_id,
-                                        cancelled: event.cancelled() || state.session_locked || gesture_modal,
+                                        cancelled: event.cancelled() || state.session_locked || (gesture_modal && !wm_swipe_allowed),
                                         time: event.time().millis(),
                                     }));
                                 }
@@ -5181,6 +5201,10 @@ impl CompositorWorkspaceEffects for UdevBackend {
         {
             let mut shared = self.shared.lock_safe();
             shared.system_ui_grab_active = overlay.is_some();
+            shared.wm_swipe_panel = overlay
+                .as_ref()
+                .filter(|ui| !ui.locked)
+                .and_then(|ui| ui.touchpad_swipe_id);
             let modal = shared.system_ui_grab_active
                 || shared.screenshot_grab_active
                 || !shared.session_active;
@@ -5424,6 +5448,7 @@ impl CompositorWorkspaceEffects for UdevBackend {
         active: bool,
         windows: Vec<(WindowId, i32, i32, u32, u32, String)>,
     ) {
+        self.shared.lock_safe().expose_gestures = active;
         if let Some(compositor) = self.compositor.as_mut() {
             let entries = windows
                 .into_iter()
@@ -10467,4 +10492,49 @@ fn query_connector_edid_metadata<D: drm::control::Device>(
         );
     }
     (None, None)
+}
+
+#[cfg(test)]
+mod touchpad_swipe_owner_tests {
+    use super::SharedState;
+
+    #[test]
+    fn native_touchpad_panel_retains_only_its_sequence_and_capture_still_revokes_it() {
+        let mut shared = SharedState::default();
+        assert!(shared.allows_wm_swipe(0, 3));
+        shared.system_ui_grab_active = true;
+        shared.wm_swipe_panel = Some(42);
+        assert!(shared.allows_wm_swipe(42, 4));
+        assert!(!shared.allows_wm_swipe(43, 4));
+        assert!(
+            !shared.allows_wm_swipe(0, 4),
+            "a fresh Begin cannot inherit the panel"
+        );
+        shared.screenshot_grab_active = true;
+        assert!(!shared.allows_wm_swipe(42, 4));
+        shared.screenshot_grab_active = false;
+        shared.scroll_capture_active = true;
+        assert!(!shared.allows_wm_swipe(42, 4));
+        shared.scroll_capture_active = false;
+        shared.session_active = false;
+        assert!(!shared.allows_wm_swipe(42, 4));
+    }
+
+    #[test]
+    fn native_expose_allows_four_finger_navigation_and_other_panels_keep_it_blocked() {
+        let mut shared = SharedState {
+            screenshot_grab_active: true,
+            expose_gestures: true,
+            ..Default::default()
+        };
+        assert!(shared.allows_wm_swipe(0, 4));
+        assert!(shared.allows_wm_swipe(42, 4));
+        assert!(!shared.allows_wm_swipe(0, 3));
+        assert!(!shared.allows_wm_swipe(0, 5));
+        shared.system_ui_grab_active = true;
+        assert!(!shared.allows_wm_swipe(42, 4));
+        shared.system_ui_grab_active = false;
+        shared.expose_gestures = false;
+        assert!(!shared.allows_wm_swipe(42, 4));
+    }
 }

@@ -85,7 +85,7 @@ impl GestureEventSource {
     }
 
     fn connect() -> GestureResult<Self> {
-        let (conn, screen) = x11rb::connect(None)?;
+        let (conn, screen) = xbar_core::x11_connection::connect(None)?;
         let root = conn.setup().roots[screen].root;
         let version = conn.xinput_xi_query_version(2, 4)?.reply()?;
         change_status(|status| {
