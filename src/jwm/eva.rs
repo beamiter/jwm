@@ -141,6 +141,7 @@ pub(crate) struct EvaRuntime {
     wake_microphone_active: bool,
     wake_level: f64,
     standby_allowed: bool,
+    standby_blocked_reason: Option<&'static str>,
     undo_available: bool,
     input_caption: Option<Value>,
     task_progress: Option<TaskProgress>,
@@ -186,6 +187,7 @@ impl Default for EvaRuntime {
             wake_microphone_active: false,
             wake_level: 0.,
             standby_allowed: false,
+            standby_blocked_reason: None,
             undo_available: false,
             input_caption: None,
             task_progress: None,
@@ -372,14 +374,24 @@ impl Jwm {
     }
     pub(crate) fn eva_tick(&mut self, backend: &mut dyn Backend) {
         self.eva_record_focus();
-        self.eva.standby_allowed = backend.compositor_supports_eva_overlay()
-            && self
+        self.eva.standby_blocked_reason = if !self.running.load(std::sync::atomic::Ordering::SeqCst)
+        {
+            Some("session_exiting")
+        } else if backend.compositor_session_locked()
+            || self.features.system_ui.is_locked()
+            || !self.features.monitor_lock.is_empty()
+        {
+            Some("session_locked")
+        } else if !backend.compositor_supports_eva_overlay()
+            || self
                 .eva_presentable_monitor(backend, self.state.sel_mon)
-                .is_some()
-            && !backend.compositor_session_locked()
-            && !self.features.system_ui.is_locked()
-            && self.features.monitor_lock.is_empty()
-            && self.running.load(std::sync::atomic::Ordering::SeqCst);
+                .is_none()
+        {
+            Some("overlay_unavailable")
+        } else {
+            None
+        };
+        self.eva.standby_allowed = self.eva.standby_blocked_reason.is_none();
         if self.eva.wake_requested && !self.eva.standby_allowed {
             self.eva_set_wake_requested(false);
         }
@@ -779,8 +791,8 @@ impl Jwm {
         };
         let standby =
             !self.eva_active() && (self.eva.wake_requested || self.eva.wake_microphone_active);
-        json!({"active":self.eva_active(),"visible":self.eva_active() || standby || self.eva.error_visible_until.is_some_and(|t| t > Instant::now()),"monitor_rect":rect,"state":if standby {self.eva.wake_state.as_str()} else {self.eva.state.as_str()},"text":if standby {self.eva.wake_text.clone()} else {text},"level":if standby {self.eva.wake_level} else {self.eva.level},"microphone_active":if standby {Some(self.eva.wake_microphone_active)} else if self.eva.state=="error"&&self.eva.error_visible_until.is_some()&&!self.eva.error_microphone_off_confirmed{None}else{Some(self.eva.microphone_active)},
-            "wake_requested":self.eva.wake_requested,"wake_generation":self.eva.wake_generation,"assistant_generation":self.eva.generation,"wake_enabled":self.eva.wake_requested,"wake_microphone_active":self.eva.wake_microphone_active,"standby_allowed":self.eva.standby_allowed,
+        json!({"assistant_protocol":jwm_eva_core::protocol::assistant_protocol(),"active":self.eva_active(),"visible":self.eva_active() || standby || self.eva.error_visible_until.is_some_and(|t| t > Instant::now()),"monitor_rect":rect,"state":if standby {self.eva.wake_state.as_str()} else {self.eva.state.as_str()},"text":if standby {self.eva.wake_text.clone()} else {text},"level":if standby {self.eva.wake_level} else {self.eva.level},"microphone_active":if standby {Some(self.eva.wake_microphone_active)} else if self.eva.state=="error"&&self.eva.error_visible_until.is_some()&&!self.eva.error_microphone_off_confirmed{None}else{Some(self.eva.microphone_active)},
+            "wake_requested":self.eva.wake_requested,"wake_generation":self.eva.wake_generation,"assistant_generation":self.eva.generation,"wake_enabled":self.eva.wake_requested,"wake_microphone_active":self.eva.wake_microphone_active,"standby_allowed":self.eva.standby_allowed,"standby_blocked_reason":self.eva.standby_blocked_reason,
             "undo_available":self.eva.undo_available,"input_caption":self.eva.input_caption,"task_progress":self.eva.task_progress,"turn_epoch":self.eva.status_turn_epoch,"confirmation":confirmation,"assistant_permit":self.eva.permit,"wm_instance_id":self.eva.instance,"activated_monotonic_ns":self.eva.activated_monotonic_ns,
             "followup_remaining_ms":self.eva.followup_deadline_ns.filter(|_|self.eva_active()&&matches!(self.eva.state.as_str(),"follow_up"|"followup")).map(|deadline|deadline.saturating_sub(monotonic_ns())/1_000_000),
             "lease_remaining_ms":self.eva.lease_until.map(|t|t.saturating_duration_since(Instant::now()).as_millis() as u64).unwrap_or(0)})
@@ -1373,7 +1385,7 @@ impl Jwm {
                 }
             }
         }
-        json!({"wm_pid":std::process::id(),"wm_start_ticks":process_start_ticks(),"observed_monotonic_ns":monotonic_ns(),"focus_history":self.eva.focus_history.iter().map(|(at,token)|json!({"at_monotonic_ns":at,"focus_token":token})).collect::<Vec<_>>(),"selected_monitor_history":self.eva.selected_monitor_history.iter().map(|(at,token)|json!({"at_monotonic_ns":at,"monitor_token":token})).collect::<Vec<_>>(),"protocol_version":1,"wm_instance_id":self.eva.instance,"wake_generation":self.eva.wake_generation,"assistant_permit":self.eva.permit,"session_unlocked":!self.features.system_ui.is_locked()&&self.features.monitor_lock.is_empty(),"activation_monitor_token":self.eva.activation_monitor.filter(|_|self.eva_active()).map(|m|self.eva_monitor_token(m)),"selected_monitor_token":self.state.sel_mon.map(|m|self.eva_monitor_token(m)),"focus_token":self.get_selected_client_key().map(|k|self.eva_window_token(k)),"tag_count":CONFIG.load().tags_length().min(32),"monitors":monitors,"windows":windows,"workspaces":workspaces})
+        json!({"assistant_protocol":jwm_eva_core::protocol::assistant_protocol(),"wm_pid":std::process::id(),"wm_start_ticks":process_start_ticks(),"observed_monotonic_ns":monotonic_ns(),"focus_history":self.eva.focus_history.iter().map(|(at,token)|json!({"at_monotonic_ns":at,"focus_token":token})).collect::<Vec<_>>(),"selected_monitor_history":self.eva.selected_monitor_history.iter().map(|(at,token)|json!({"at_monotonic_ns":at,"monitor_token":token})).collect::<Vec<_>>(),"protocol_version":1,"wm_instance_id":self.eva.instance,"wake_generation":self.eva.wake_generation,"assistant_permit":self.eva.permit,"session_unlocked":!self.features.system_ui.is_locked()&&self.features.monitor_lock.is_empty(),"activation_monitor_token":self.eva.activation_monitor.filter(|_|self.eva_active()).map(|m|self.eva_monitor_token(m)),"selected_monitor_token":self.state.sel_mon.map(|m|self.eva_monitor_token(m)),"focus_token":self.get_selected_client_key().map(|k|self.eva_window_token(k)),"tag_count":CONFIG.load().tags_length().min(32),"monitors":monitors,"windows":windows,"workspaces":workspaces})
     }
     pub(crate) fn eva_command_schema(&self) -> Value {
         let mut actions = serde_json::to_value(jwm_eva_core::actions::full_registry())
@@ -1412,7 +1424,7 @@ impl Jwm {
                 }
             }
         }
-        json!({"protocol_version":1,"guarded_execution":true,"context_tokens":true,"actions":actions})
+        json!({"assistant_protocol":jwm_eva_core::protocol::assistant_protocol(),"protocol_version":1,"guarded_execution":true,"context_tokens":true,"actions":actions})
     }
     pub(crate) fn eva_execution_status(
         &mut self,
@@ -3473,6 +3485,60 @@ mod tests {
         payload.as_object_mut().unwrap().remove("request_digest");
         value["request_digest"] = json!(jwm_eva_core::protocol::digest(&payload));
         value
+    }
+    #[test]
+    fn assistant_contract_is_coherent_across_native_schema_context_and_status() {
+        use jwm_eva_core::protocol::{
+            AssistantProtocolError, assistant_protocol, validate_assistant_protocol,
+        };
+        let (mut jwm, mut backend) = setup();
+        jwm.eva_tick(&mut backend);
+        let schema = jwm.eva_command_schema();
+        let context = jwm.eva_execution_context();
+        let status = jwm.eva_overlay_snapshot();
+        assert_eq!(schema["protocol_version"], 1);
+        assert_eq!(context["protocol_version"], 1);
+        for response in [&schema, &context, &status] {
+            assert_eq!(response["assistant_protocol"], assistant_protocol());
+            assert!(validate_assistant_protocol(response).is_ok());
+            let mut older = response.clone();
+            older.as_object_mut().unwrap().remove("assistant_protocol");
+            assert_eq!(
+                validate_assistant_protocol(&older),
+                Err(AssistantProtocolError::Missing)
+            );
+            let mut incomplete = response.clone();
+            incomplete["assistant_protocol"]["features"] = json!(["guarded_execution_v1"]);
+            assert!(matches!(
+                validate_assistant_protocol(&incomplete),
+                Err(AssistantProtocolError::MissingFeatures(_))
+            ));
+        }
+    }
+    #[test]
+    fn supported_assistant_contract_is_distinct_from_unavailable_overlay_or_locked_session() {
+        use jwm_eva_core::protocol::validate_assistant_protocol;
+        let (mut jwm, mut backend) = setup();
+        backend.eva_overlay_supported = false;
+        jwm.eva_tick(&mut backend);
+        let status = jwm.eva_overlay_snapshot();
+        assert!(validate_assistant_protocol(&status).is_ok());
+        assert_eq!(status["standby_allowed"], false);
+        assert_eq!(status["standby_blocked_reason"], "overlay_unavailable");
+        jwm.features.system_ui = crate::jwm::features::SystemUiState::lock();
+        jwm.eva_tick(&mut backend);
+        assert_eq!(
+            jwm.eva_overlay_snapshot()["standby_blocked_reason"],
+            "session_locked"
+        );
+        jwm.running
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        jwm.eva_tick(&mut backend);
+        assert_eq!(
+            jwm.eva_overlay_snapshot()["standby_blocked_reason"],
+            "session_exiting"
+        );
+        assert!(validate_assistant_protocol(&jwm.eva_execution_context()).is_ok());
     }
     #[test]
     fn finish_session_uses_only_the_bound_permit_and_preserves_a_newer_wake_toggle() {

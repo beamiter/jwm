@@ -79,8 +79,11 @@ fi
 
 install -d -m755 -- "$eva_prefix/bin" "$eva_config_dir" "$eva_unit_dir"
 install -m755 -- "$eva_binary" "$eva_prefix/bin/jwm-eva"
-if [[ ! -e $eva_config_dir/eva.toml ]]; then
+eva_existing_config=false
+if [[ ! -e $eva_config_dir/eva.toml && ! -L $eva_config_dir/eva.toml ]]; then
     install -m600 -- "$eva_repo/eva/dist/eva.toml" "$eva_config_dir/eva.toml"
+else
+    eva_existing_config=true
 fi
 # systemd ExecStart has its own quoting and expands percent specifiers.
 eva_exec="$eva_prefix/bin/jwm-eva"
@@ -120,4 +123,10 @@ if [[ $eva_enable == true ]]; then
 fi
 printf 'Eva installed: %s\nConfig preserved/created: %s\nUser unit: %s\n' \
     "$eva_prefix/bin/jwm-eva" "$eva_config_dir/eva.toml" "$eva_unit_dir/jwm-eva.service"
+if [[ $eva_existing_config == true ]]; then
+    printf 'Existing Eva configuration was kept unchanged. Preview the available profile migration:\n'
+    printf '  %q --config %q config migrate --check\n' "$eva_prefix/bin/jwm-eva" "$eva_config_dir/eva.toml"
+    printf 'After reviewing the preview, apply explicitly with a backup:\n'
+    printf '  %q --config %q config migrate --write\n' "$eva_prefix/bin/jwm-eva" "$eva_config_dir/eva.toml"
+fi
 printf 'Next: register the API credential, then run jwm-eva doctor. See eva/README.md.\n'

@@ -240,7 +240,11 @@ pub async fn run(c: Config) -> io::Result<()> {
     // start systemd's runtime watchdog until recovery, the control listener,
     // actor channels, signal handler and our own watchdog are all ready.
     notify_systemd("READY=1");
-    if c.wake_word.enabled {
+    if c.wake_word.enabled
+        && query("get_assistant_status", json!({}))
+            .await
+            .is_ok_and(|status| wake_source(&status).is_some())
+    {
         let _ = command("assistant_control", json!({"action":"wake_enable"})).await;
     }
     loop {
@@ -332,6 +336,7 @@ pub async fn run(c: Config) -> io::Result<()> {
                 wake_requested=observed.as_ref().is_ok_and(|s|s["wake_requested"]==true);
                 let standby_allowed=observed.as_ref().is_ok_and(|s|s["standby_allowed"]==true);
                 let current_source=observed.as_ref().ok().and_then(wake_source);
+                let wake_protocol_ready=current_source.is_some();
                 let recovery_changed=wake_recovery.observe(current_source.clone(),wake_requested);
                 if native_generation!=wake_generation || recovery_changed || active_wake_source.as_ref().is_some_and(|source|Some(source)!=current_source.as_ref()) {
                     stop_wake(&mut wake_worker,&mut wake_cancel).await;
@@ -390,7 +395,7 @@ pub async fn run(c: Config) -> io::Result<()> {
                     while wake_updates.try_recv().is_ok(){}
                     wake_recovery.pause();
                     wake_status=wake_recovery.status(recovery_ms(recovery_clock),crate::store::wall_ms()).unwrap_or_else(||json!({"state":if wake_requested{"paused"}else{"disabled"},"text":if wake_requested{"对话期间暂停唤醒监听"}else{"语音唤醒已关闭"},"microphone_active":false}));
-                } else if wake_worker.is_none() && wake_recovery.ready(recovery_ms(recovery_clock)) {
+                } else if wake_protocol_ready && wake_worker.is_none() && wake_recovery.ready(recovery_ms(recovery_clock)) {
                     let (cancel_tx,cancel_rx)=watch::channel(false);wake_cancel=Some(cancel_tx);
                     wake_status=json!({"state":"connecting","text":"正在连接语音唤醒","microphone_active":false});
                     if let Some(source)=observed.as_ref().ok().and_then(wake_source) {
@@ -398,7 +403,10 @@ pub async fn run(c: Config) -> io::Result<()> {
                         wake_worker=Some(tokio::spawn(crate::wake::run(c.clone(),source,wake_tx.clone(),store.clone(),cancel_rx)));
                     }
                 } else if wake_worker.is_none() && let Some(waiting)=wake_recovery.status(recovery_ms(recovery_clock),crate::store::wall_ms()) {wake_status=waiting;}
-                if wake_heartbeat.elapsed()>=Duration::from_secs(1) {
+                if !wake_protocol_ready && (wake_requested || c.wake_word.enabled) {
+                    wake_status=json!({"state":"error","text":"当前 JWM 缺少新版唤醒协议，请更新 JWM 并重新登录，再运行 jwm-eva doctor。","error_code":"version_incompatible","microphone_active":false,"retryable":false});
+                }
+                if wake_protocol_ready && wake_heartbeat.elapsed()>=Duration::from_secs(1) {
                     let mut update=wake_status.clone();update["wake_generation"]=json!(wake_generation);update["enabled"]=json!(wake_requested);update["wm_instance_id"]=observed.as_ref().ok().map(|s|s["wm_instance_id"].clone()).unwrap_or(Value::Null);
                     if command("set_assistant_wake_status",update).await.is_err() {
                         let had_wake_worker=wake_worker.is_some();let failed_source=active_wake_source.clone();
@@ -475,8 +483,12 @@ fn guarded_wake_disable(source: &crate::handoff::Source) -> Value {
     json!({"action":"wake_disable","wm_instance_id":source.wm_instance_id,"wake_generation":source.wake_generation,"assistant_generation":source.assistant_generation})
 }
 fn wake_source(snapshot: &Value) -> Option<crate::handoff::Source> {
+    jwm_eva_core::protocol::validate_assistant_protocol(snapshot).ok()?;
     Some(crate::handoff::Source {
-        wm_instance_id: snapshot["wm_instance_id"].as_str()?.to_owned(),
+        wm_instance_id: snapshot["wm_instance_id"]
+            .as_str()
+            .filter(|id| !id.is_empty())?
+            .to_owned(),
         wake_generation: snapshot["wake_generation"].as_u64()?,
         assistant_generation: snapshot["assistant_generation"].as_u64()?,
     })
@@ -644,10 +656,24 @@ impl Drop for Watchdog {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn complete_source_fields_without_the_required_contract_never_open_wake_audio() {
+        let mut source =
+            serde_json::json!({"wm_instance_id":"wm","wake_generation":3,"assistant_generation":7});
+        assert!(super::wake_source(&source).is_none());
+        source["assistant_protocol"] = jwm_eva_core::protocol::assistant_protocol();
+        assert!(super::wake_source(&source).is_some());
+        source["assistant_protocol"]["features"] =
+            serde_json::json!(jwm_eva_core::protocol::ASSISTANT_WAKE_FEATURES);
+        assert!(
+            super::wake_source(&source).is_none(),
+            "wake without a compatible conversation cannot start"
+        );
+    }
+    #[test]
     fn automatic_wake_stop_uses_the_failed_workers_complete_source() {
-        let old = serde_json::json!({"wm_instance_id":"old-wm","wake_generation":3,"assistant_generation":7});
+        let old = serde_json::json!({"assistant_protocol":jwm_eva_core::protocol::assistant_protocol(),"wm_instance_id":"old-wm","wake_generation":3,"assistant_generation":7});
         let frozen = super::wake_source(&old).unwrap();
-        let newer = serde_json::json!({"wm_instance_id":"restarted-wm","wake_generation":3,"assistant_generation":7});
+        let newer = serde_json::json!({"assistant_protocol":jwm_eva_core::protocol::assistant_protocol(),"wm_instance_id":"restarted-wm","wake_generation":3,"assistant_generation":7});
         assert_ne!(super::wake_source(&newer).unwrap(), frozen);
         let command = super::guarded_wake_disable(&frozen);
         assert_eq!(
@@ -661,7 +687,7 @@ mod tests {
     }
     #[test]
     fn stopped_worker_cannot_retry_after_cancel_or_a_source_change_until_authorized() {
-        let source=super::wake_source(&serde_json::json!({"wm_instance_id":"wm","wake_generation":3,"assistant_generation":7})).unwrap();
+        let source=super::wake_source(&serde_json::json!({"assistant_protocol":jwm_eva_core::protocol::assistant_protocol(),"wm_instance_id":"wm","wake_generation":3,"assistant_generation":7})).unwrap();
         let mut recovery = crate::retry::WakeRecovery::new(3000, 99);
         recovery.observe(Some(source.clone()), true);
         recovery.failed(&std::io::Error::other("connect_timeout"), 0);

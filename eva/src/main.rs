@@ -31,12 +31,32 @@ enum Command {
     Doctor {
         #[arg(long)]
         hold: bool,
+        /// Explicitly verify both configured cloud sessions without audio or inference.
+        #[arg(long)]
+        live: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommand,
     },
     DryRun {
         #[arg(long)]
         text: String,
     },
     Undo,
+}
+#[derive(Subcommand)]
+enum ConfigCommand {
+    /// Preview or apply a recognized historical bundled profile migration.
+    Migrate {
+        #[arg(long, conflicts_with = "write")]
+        check: bool,
+        /// Close editors/other configuration writers first; creates a private backup.
+        #[arg(long, conflicts_with = "check")]
+        write: bool,
+    },
 }
 #[derive(Clone, clap::ValueEnum)]
 enum WakeAction {
@@ -51,13 +71,21 @@ fn print(value: Value) {
 #[tokio::main(worker_threads = 2)]
 async fn main() {
     let args = Cli::parse();
-    let hold = matches!(&args.command, Command::Doctor { hold: true });
+    let hold = matches!(&args.command, Command::Doctor { hold: true, .. });
+    let live = matches!(&args.command, Command::Doctor { live: true, .. });
     let result = run(args).await;
     if let Err(error) = &result {
         eprintln!("jwm-eva: {error}");
     }
     if hold {
-        eprintln!("\n按 Enter 关闭诊断窗口。诊断不会打开麦克风或云端会话。");
+        eprintln!(
+            "\n按 Enter 关闭诊断窗口。{}",
+            if live {
+                "云端检查仅用于会话配置，不会采音或提交推理。"
+            } else {
+                "诊断未打开麦克风或云端会话。"
+            }
+        );
         let mut line = String::new();
         let _ = std::io::stdin().read_line(&mut line);
     }
@@ -71,6 +99,7 @@ async fn run(args: Cli) -> io::Result<()> {
     let c = if matches!(
         &args.command,
         Command::Cancel
+            | Command::Config { .. }
             | Command::Wake {
                 action: WakeAction::Disable
             }
@@ -79,9 +108,34 @@ async fn run(args: Cli) -> io::Result<()> {
     ) {
         Config::default()
     } else {
-        Config::load(args.config.as_deref())?
+        match Config::load(args.config.as_deref()) {
+            Ok(config) => config,
+            Err(error) if matches!(&args.command, Command::Doctor { .. }) => {
+                print(
+                    json!({"configuration":"invalid","ready":false,"microphone_opened":false,"cloud_connected":false,
+                    "live_requested":matches!(&args.command,Command::Doctor{live:true,..}),
+                    "checks":[{"id":"configuration","state":"error","message":"配置文件不可读取、格式无效或含不支持的设置。","recommendation":"检查 --config 路径、权限和示例配置；旧配置可先运行 config migrate --check。"}]}),
+                );
+                return Err(error);
+            }
+            Err(error) => return Err(error),
+        }
     };
     match args.command {
+        Command::Config {
+            command: ConfigCommand::Migrate { write, .. },
+        } => {
+            use jwm_eva::migration::{Mode, Status, migrate};
+            let path = args.config.unwrap_or_else(Config::path);
+            let report = migrate(&path, if write { Mode::Write } else { Mode::Check })?;
+            let manual = report.status == Status::ManualReview;
+            print(serde_json::to_value(&report).map_err(io::Error::other)?);
+            if manual {
+                return Err(io::Error::other(
+                    "configuration requires manual review; no file was changed",
+                ));
+            }
+        }
         Command::Daemon => daemon::run(c).await?,
         Command::Toggle => {
             daemon::ensure_running(&c).await?;
@@ -130,53 +184,63 @@ async fn run(args: Cli) -> io::Result<()> {
                 json!({"runtime":cap,"coverage":report,"command_schema":schema,"catalog_registration_is_not_live_acceptance":true}),
             );
         }
-        Command::Doctor { .. } => {
-            // Read the last atomic usage snapshot without taking the daemon's
-            // Store lock. This remains useful on quota/credential failures.
+        Command::Doctor { live, .. } => {
+            // Probes are independent and read-only. No activation, capture,
+            // playback, provider or inference starts without the explicit flag.
             let cost_config = c.clone();
-            let costs =
-                tokio::task::spawn_blocking(move || jwm_eva::cost_report::snapshot(&cost_config))
-                    .await
-                    .map_err(|_| io::Error::other("local cost diagnostics failed"))?;
-            let cap = executor::query("get_capabilities", json!({})).await;
-            let key = c.api_key().await;
             let input_device = c.audio.input_device.clone();
-            let audio = tokio::task::spawn_blocking(move || jwm_eva::audio::inspect(&input_device))
-                .await
-                .ok()
-                .and_then(Result::ok);
-            let audio_ready = audio
-                .as_ref()
-                .is_some_and(|a| a.input_available && a.output_available);
-            let context = executor::query("get_execution_context", json!({})).await;
-            let schema = executor::query("get_command_schema", json!({})).await;
-            let assistant = executor::query("get_assistant_status", json!({})).await;
-            let wake_protocol_ready = assistant.as_ref().is_ok_and(|v| {
-                v["wm_instance_id"]
-                    .as_str()
-                    .is_some_and(|id| !id.is_empty())
-                    && v["wake_generation"].is_u64()
-                    && v["assistant_generation"].is_u64()
-                    && v["standby_allowed"].is_boolean()
-            }) && context
-                .as_ref()
-                .is_ok_and(|v| v["selected_monitor_history"].is_array());
-            let protocol_ready = context.as_ref().is_ok_and(|v| v["protocol_version"] == 1)
-                && schema.as_ref().is_ok_and(|v| {
-                    v["protocol_version"] == 1
-                        && v["guarded_execution"] == true
-                        && v["context_tokens"] == true
-                });
-            print(
-                json!({"configuration":"valid","config_path":args.config.unwrap_or_else(Config::path),"model":c.openai.model,"wake_model":c.wake_word.model,"turn_detection":c.turn_detection.kind,"endpoint_eagerness":c.turn_detection.eagerness,"noise_reduction":c.audio.noise_reduction,"wake_protocol_ready":wake_protocol_ready,"credential_source":c.openai.api_key_source,"credential_available":key.is_ok(),"audio_backend":audio.as_ref().map(|a|a.backend),"audio_input_available":audio.as_ref().is_some_and(|a|a.input_available),"audio_output_available":audio.as_ref().is_some_and(|a|a.output_available),"native_audio_connected":audio.is_some(),"native_pipewire_connected":audio.as_ref().filter(|a|a.backend=="pipewire").map(|_|true),"ipc_connected":cap.is_ok(),"execution_protocol":context.as_ref().ok().map(|v|v["protocol_version"].clone()),"protocol_ready":protocol_ready,"microphone_opened":false,"cloud_connected":false,"local_costs":costs}),
+            let (costs, audio, cap, context, schema, assistant, key) = tokio::join!(
+                tokio::task::spawn_blocking(move || jwm_eva::cost_report::snapshot(&cost_config)),
+                tokio::task::spawn_blocking(move || jwm_eva::audio::inspect(&input_device)),
+                executor::query("get_capabilities", json!({})),
+                executor::query("get_execution_context", json!({})),
+                executor::query("get_command_schema", json!({})),
+                executor::query("get_assistant_status", json!({})),
+                c.api_key(),
             );
-            if key.is_err()
-                || !audio_ready
-                || !protocol_ready
-                || (c.wake_word.enabled && !wake_protocol_ready)
-            {
+            let audio = audio.ok().and_then(Result::ok);
+            let report = jwm_eva::diagnostics::evaluate(
+                &c,
+                jwm_eva::diagnostics::Inputs {
+                    credential_available: key.is_ok(),
+                    capabilities: cap.as_ref().ok(),
+                    schema: schema.as_ref().ok(),
+                    context: context.as_ref().ok(),
+                    assistant: assistant.as_ref().ok(),
+                    audio: audio.as_ref(),
+                },
+            );
+            let live_report = if live {
+                Some(match key.as_ref() {
+                    Ok(key) => jwm_eva::doctor::check_live(&c, key).await,
+                    Err(_) => jwm_eva::doctor::LiveReport::credential_unavailable(&c),
+                })
+            } else {
+                None
+            };
+            let ready = report.ready && live_report.as_ref().is_none_or(|report| report.ready);
+            let cloud_connected = live_report.as_ref().is_some_and(|report| {
+                report.checks.iter().any(|check| {
+                    check.attempted && !matches!(check.phase, jwm_eva::doctor::Phase::Connect)
+                })
+            });
+            print(
+                json!({"configuration":"valid","config_path":args.config.unwrap_or_else(Config::path),
+                "ready":ready,"model":c.openai.model,"wake_model":c.wake_word.model,
+                "turn_detection":c.turn_detection.kind,"endpoint_eagerness":c.turn_detection.eagerness,"noise_reduction":c.audio.noise_reduction,
+                "credential_source":c.openai.api_key_source,"credential_available":key.is_ok(),
+                "audio_backend":audio.as_ref().map(|audio|audio.backend),
+                "audio_input_available":audio.as_ref().is_some_and(|audio|audio.input_available),
+                "audio_output_available":audio.as_ref().is_some_and(|audio|audio.output_available),
+                "native_audio_connected":audio.is_some(),"native_pipewire_connected":audio.as_ref().filter(|audio|audio.backend=="pipewire").map(|_|true),
+                "ipc_connected":cap.is_ok(),"execution_protocol":context.as_ref().ok().map(|value|value["protocol_version"].clone()),
+                "protocol_ready":report.protocol_ready,"wake_protocol_ready":report.wake_protocol_ready,"checks":report.checks,
+                "microphone_opened":false,"cloud_connected":cloud_connected,"live_requested":live,"live":live_report,
+                "local_costs":costs.ok()}),
+            );
+            if !ready {
                 return Err(io::Error::other(
-                    "doctor found missing dependencies, credentials or JWM protocol; no audio or cloud session was opened",
+                    "doctor found unavailable or incompatible components; see checks and recommendations",
                 ));
             }
         }
@@ -194,4 +258,56 @@ async fn run(args: Cli) -> io::Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn cloud_diagnostics_and_config_writes_require_explicit_flags() {
+        let ordinary = Cli::try_parse_from(["jwm-eva", "doctor", "--json"]).unwrap();
+        assert!(matches!(
+            ordinary.command,
+            Command::Doctor { live: false, .. }
+        ));
+        let live = Cli::try_parse_from(["jwm-eva", "doctor", "--live", "--hold"]).unwrap();
+        assert!(matches!(
+            live.command,
+            Command::Doctor {
+                live: true,
+                hold: true,
+                ..
+            }
+        ));
+        let preview = Cli::try_parse_from(["jwm-eva", "config", "migrate"]).unwrap();
+        assert!(matches!(
+            preview.command,
+            Command::Config {
+                command: ConfigCommand::Migrate { write: false, .. }
+            }
+        ));
+        assert!(
+            Cli::try_parse_from(["jwm-eva", "config", "migrate", "--check", "--write"]).is_err()
+        );
+    }
+    #[tokio::test]
+    async fn invalid_selected_config_stops_live_diagnostics_before_any_probe() {
+        let path = std::env::temp_dir().join(format!(
+            "eva-missing-doctor-{}-{}.toml",
+            std::process::id(),
+            jwm_eva::store::wall_ms()
+        ));
+        let error = run(Cli {
+            config: Some(path.clone()),
+            command: Command::Doctor {
+                live: true,
+                hold: false,
+                json: true,
+            },
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+        assert!(!path.exists());
+    }
 }

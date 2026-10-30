@@ -37,7 +37,7 @@ struct Detection {
     wake: bool,
 }
 
-fn settings(c: &Config) -> Value {
+pub fn session_settings(c: &Config) -> Value {
     json!({"type":"realtime","instructions":"You only detect a spoken wake phrase. Never execute commands or converse.",
         "output_modalities":["text"],"tools":[],"tool_choice":"none",
         "audio":{"input":{"format":{"type":"audio/pcm","rate":24000},"transcription":null,"noise_reduction":input_noise_reduction(c),
@@ -123,7 +123,7 @@ async fn listen(
     }
     let key = c.api_key().await?;
     let mut ws = Realtime::connect(c, &key).await?;
-    let expected = settings(c);
+    let expected = session_settings(c);
     tokio::time::timeout(Duration::from_millis(c.openai.connect_timeout_ms), async {
         loop {
             let event = ws.next().await?;
@@ -466,7 +466,7 @@ mod tests {
     #[test]
     fn wake_session_has_no_automatic_response_transcription_or_desktop_tool() {
         let c = Config::default();
-        let s = settings(&c);
+        let s = session_settings(&c);
         assert_eq!(s["tools"], json!([]));
         assert_eq!(s["tool_choice"], "none");
         assert_eq!(

@@ -4,6 +4,109 @@ use sha2::{Digest, Sha256};
 
 pub const PROTOCOL_VERSION: u32 = 1;
 
+/// Additive assistant contract, independent from the guarded request envelope.
+/// Feature names version their semantics; later revisions may add features
+/// without changing the meaning of these existing names.
+pub const ASSISTANT_PROTOCOL_REVISION: u32 = 1;
+pub const ASSISTANT_REQUIRED_FEATURES: &[&str] = &[
+    "guarded_execution_v1",
+    "wake_source_identity_v1",
+    "wake_onset_monitor_history_v1",
+    "voice_session_finish_v1",
+    "verified_task_progress_v1",
+];
+pub const ASSISTANT_EXECUTION_FEATURES: &[&str] = &[
+    "guarded_execution_v1",
+    "voice_session_finish_v1",
+    "verified_task_progress_v1",
+];
+pub const ASSISTANT_WAKE_FEATURES: &[&str] =
+    &["wake_source_identity_v1", "wake_onset_monitor_history_v1"];
+
+pub fn assistant_protocol() -> Value {
+    serde_json::json!({"revision":ASSISTANT_PROTOCOL_REVISION,"features":ASSISTANT_REQUIRED_FEATURES})
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AssistantProtocolError {
+    Missing,
+    Malformed,
+    RevisionUnsupported { found: u32, required: u32 },
+    MissingFeatures(Vec<String>),
+}
+impl std::fmt::Display for AssistantProtocolError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Missing => f.write_str("assistant_protocol_missing"),
+            Self::Malformed => f.write_str("assistant_protocol_malformed"),
+            Self::RevisionUnsupported { .. } => {
+                f.write_str("assistant_protocol_revision_unsupported")
+            }
+            Self::MissingFeatures(features) => write!(
+                f,
+                "assistant_protocol_missing_features:{}",
+                features.join(",")
+            ),
+        }
+    }
+}
+impl std::error::Error for AssistantProtocolError {}
+
+/// Validate a complete native query response. Do not infer support from the
+/// guarded envelope version, action names or the presence of runtime fields.
+pub fn validate_assistant_protocol(document: &Value) -> Result<(), AssistantProtocolError> {
+    validate_assistant_features(document, ASSISTANT_REQUIRED_FEATURES)
+}
+
+/// Unknown future features and later additive revisions are compatible; an
+/// omitted, malformed or incomplete advertisement never grants support.
+pub fn validate_assistant_features(
+    document: &Value,
+    required: &[&str],
+) -> Result<(), AssistantProtocolError> {
+    let contract = document
+        .get("assistant_protocol")
+        .ok_or(AssistantProtocolError::Missing)?;
+    let object = contract
+        .as_object()
+        .ok_or(AssistantProtocolError::Malformed)?;
+    let revision = object
+        .get("revision")
+        .and_then(Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+        .ok_or(AssistantProtocolError::Malformed)?;
+    if revision < ASSISTANT_PROTOCOL_REVISION {
+        return Err(AssistantProtocolError::RevisionUnsupported {
+            found: revision,
+            required: ASSISTANT_PROTOCOL_REVISION,
+        });
+    }
+    let features = object
+        .get("features")
+        .and_then(Value::as_array)
+        .ok_or(AssistantProtocolError::Malformed)?;
+    let mut names = std::collections::BTreeSet::new();
+    for feature in features {
+        let name = feature
+            .as_str()
+            .filter(|name| !name.is_empty())
+            .ok_or(AssistantProtocolError::Malformed)?;
+        if !names.insert(name) {
+            return Err(AssistantProtocolError::Malformed);
+        }
+    }
+    let missing: Vec<String> = required
+        .iter()
+        .filter(|name| !names.contains(**name))
+        .map(|name| (*name).to_owned())
+        .collect();
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(AssistantProtocolError::MissingFeatures(missing))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AssistantPermit {
@@ -95,6 +198,70 @@ impl GuardedRequest {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn assistant_protocol_does_not_infer_new_support_from_the_old_guarded_version() {
+        let old =
+            json!({"protocol_version":1,"guarded_execution":true,"actions":[],"wake_generation":0});
+        assert_eq!(
+            validate_assistant_protocol(&old),
+            Err(AssistantProtocolError::Missing)
+        );
+        let mut current = old;
+        current["assistant_protocol"] = assistant_protocol();
+        assert!(validate_assistant_protocol(&current).is_ok());
+        current["assistant_protocol"]["features"]
+            .as_array_mut()
+            .unwrap()
+            .pop();
+        assert_eq!(
+            validate_assistant_protocol(&current),
+            Err(AssistantProtocolError::MissingFeatures(vec![
+                "verified_task_progress_v1".into()
+            ]))
+        );
+        assert!(validate_assistant_features(&current, ASSISTANT_WAKE_FEATURES).is_ok());
+    }
+    #[test]
+    fn assistant_contract_rejects_malformed_or_old_advertisements() {
+        for contract in [
+            Value::Null,
+            json!(true),
+            json!({}),
+            json!({"revision":"1","features":[]}),
+            json!({"revision":1,"features":"all"}),
+            json!({"revision":1,"features":["guarded_execution_v1",true]}),
+            json!({"revision":1,"features":[""]}),
+            json!({"revision":1,"features":["guarded_execution_v1","guarded_execution_v1"]}),
+        ] {
+            assert_eq!(
+                validate_assistant_protocol(&json!({"assistant_protocol":contract})),
+                Err(AssistantProtocolError::Malformed)
+            );
+        }
+        assert!(matches!(
+            validate_assistant_protocol(
+                &json!({"assistant_protocol":{"revision":0,"features":ASSISTANT_REQUIRED_FEATURES}})
+            ),
+            Err(AssistantProtocolError::RevisionUnsupported { .. })
+        ));
+    }
+    #[test]
+    fn later_additive_revisions_and_unknown_features_keep_existing_semantics() {
+        let mut contract = assistant_protocol();
+        contract["revision"] = json!(ASSISTANT_PROTOCOL_REVISION + 1);
+        contract["features"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!("future_feature_v1"));
+        contract["future_metadata"] = json!({"supported":true});
+        assert!(validate_assistant_protocol(&json!({"assistant_protocol":contract})).is_ok());
+        let wake_only = json!({"assistant_protocol":{"revision":ASSISTANT_PROTOCOL_REVISION,"features":ASSISTANT_WAKE_FEATURES}});
+        assert!(validate_assistant_features(&wake_only, ASSISTANT_WAKE_FEATURES).is_ok());
+        assert!(matches!(
+            validate_assistant_protocol(&wake_only),
+            Err(AssistantProtocolError::MissingFeatures(_))
+        ));
+    }
     #[test]
     fn digest_canonicalizes_nested_keys() {
         assert_eq!(

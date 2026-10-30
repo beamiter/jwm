@@ -40,7 +40,7 @@ bash scripts/install-eva.sh --help
 
 按快捷键激活时，Eva 自动连接当前用户的原生音频后端：真实 PulseAudio 服务使用原生 PulseAudio 采集和播放；PipeWire 桌面继续使用原生 PipeWire。无需停止 PulseAudio、切换全局音频服务或手动启用设备。会话结束和取消会断开本次音频流。开启唤醒监听后，正常对话结束会重新进入 mini 待机；关闭唤醒监听后，Idle 不保留麦克风流。
 
-`jwm-eva doctor` 显示 `audio_backend`、输入和输出设备是否可用，以及 `wake_model`、`turn_detection`、`endpoint_eagerness`、`noise_reduction` 和 `wake_protocol_ready`；诊断只读，不打开音频流。`wake_protocol_ready=false` 表示当前 JWM 尚不支持所需的唤醒交接标识，需要更新并重新登录本次构建的 JWM 会话。启动配置开启唤醒时，该检查失败会使 doctor 报错；未开启唤醒时，普通快捷键会话仍可独立使用。PipeWire 后端需要真实 `Audio/Source` 与 `Audio/Sink` 节点，不能用仅有摄像头或屏幕视频的连接代替。PulseAudio 后端只连接当前用户的本机 Unix socket，拒绝把扬声器 monitor 当作麦克风；显式指定的输入设备消失时结束该句，不悄悄切到别的设备。
+`jwm-eva doctor` 默认检查所选配置、凭据是否可读取、音频设备和 JWM 协议，并显示本地费用；只查询设备，不打开音频流或云端会话。报告包括 `audio_backend`、输入和输出设备、模型、断句与降噪设置，并按具体故障给出修复建议。PipeWire 后端需要真实 `Audio/Source` 与 `Audio/Sink` 节点，不能用仅有摄像头或屏幕视频的连接代替。PulseAudio 后端只连接当前用户的本机 Unix socket，拒绝把扬声器 monitor 当作麦克风；显式指定的输入设备消失时结束该句，不悄悄切到别的设备。
 
 API 凭据默认从 Secret Service 读取；在桌面会话中运行下面命令，按提示输入 key（不会写入配置文件）：
 
@@ -101,7 +101,19 @@ function = "eva_wake_toggle"
 
 暂时故障的重连以 `[wake_word].reconnect_ms` 为初始间隔，指数增加并加入 ±20% 抖动，最长等待 60 秒；限流至少冷却 30 秒。连续失败达到 8 次后停止，最多自动重试 7 次。稳定监听 5 秒、成功唤醒、正常轮换连接或用户重新开启会重置失败计数；状态查询短暂失败不会清空已安排的等待。凭据、模型权限、配置、日预算或账户额度错误会直接关闭唤醒请求，修正后需用快捷键或 `jwm-eva wake enable` 重新开启。`status --json` 的 `wake.retry_state`、`retry_attempt`、`retry_limit`、`retry_in_ms` 和 `error_code` 可用于区分等待重试与已停止；浮层显示重连倒计时。
 
-安装器保留已有 `eva.toml`。升级后需对照 [示例配置](dist/eva.toml) 更新模型、对应费率和交互选项，已有 mini 模型配置不会自动升级成标准版。`[future_wake_word]` 作为旧配置段名仍兼容，新配置使用 `[wake_word]`，两者不要同时填写。设置 `enabled = true` 可在服务启动时进入待机。
+安装器保留已有 `eva.toml`，已有 mini 模型配置不会自动升级成标准版。可先运行 `jwm-eva config migrate --check` 检查；省略 `--check` 也只检查。只有明确识别为旧版内置配置组合时，`--write` 才迁移模型、对应费率与交互默认值，先创建权限为 `0600` 的原始内容备份，再原子替换配置。凭据来源及路径、应用登记、隐私和预算设置保留；自定义模型、费率或交互设置需要对照 [示例配置](dist/eva.toml) 手动审阅，工具不会猜测覆盖。报告只列涉及的字段名、文件与备份路径，不读取凭据或调用 API。
+
+写入前请关闭编辑器和其他配置写入程序。报告中的 `concurrent_writes_supported = false` 表示不支持并发写入；工具会检查已检测到的变化并保留备份，但不提供与其他编辑器之间的文件事务。
+
+迁移命令支持全局 `--config` 选择文件；写入或手动修改后，重启服务使配置生效：
+
+```bash
+jwm-eva --config /absolute/path/eva.toml config migrate --check
+jwm-eva --config /absolute/path/eva.toml config migrate --write
+systemctl --user restart jwm-eva.service
+```
+
+报告的 `current` 表示无需迁移，`ready` 表示可迁移，`migrated` 表示已备份并写入，`manual_review` 表示需手动处理。`[future_wake_word]` 作为旧配置段名仍兼容，新配置使用 `[wake_word]`，两者不要同时填写。设置 `enabled = true` 可在服务启动时进入待机。
 
 长指令默认最多 120 秒、每轮最多 32 个动作、最多 8 轮能力发现/规划；超过能力范围或目标不明确时，Eva 会澄清。窗口标题可以用于语义匹配，最终执行仍绑定实际窗口和显示器引用。所有操作都受当前 JWM 的能力目录和本地执行校验约束；模型不能绕过确认、调用任意 shell 或使用不存在的功能。
 
@@ -130,7 +142,9 @@ journalctl --user -u jwm-eva.service -f
 
 `dry-run` 会显示模型并执行一次有界云端规划与本地校验，始终关闭桌面修改权限，可能产生 API 费用。`capabilities` 同时报告名字登记和用户语义能力，不能把别名数当作独立功能数。设备和媒体的 `accepted` 表示已提交；只有真实后置条件或带关联标识的完成回执才能变成 `succeeded`。超时的 `unknown` 不会自动重发。
 
-`doctor` 同时只读显示本机当日已结算、在途预留和未知费用，按模型与价格版本汇总，并给出官方账户用量/额度入口。它不会调用模型、采集声音或修改账本；本地估算不代表整个账户的总账。
+`doctor` 默认只读显示本机当日已结算、在途预留和未知费用，按模型与价格版本汇总，并给出官方账户用量/额度入口。本地估算不代表整个账户的总账。用 `jwm-eva --config /absolute/path/eva.toml doctor --live` 可显式检查该配置及凭据来源对应的对话模型和 mini 模型的云端连接与配置回执；只建立会话，不采集或上传声音、不请求模型回答、不操作桌面。普通 doctor 中的“凭据可读取”不等于云端认证或模型权限已通过；live 握手通过也不等于语音理解、播放、打断或功能执行已通过。
+
+JWM 在命令 schema、执行上下文和助手状态中提供附加的 `assistant_protocol` 版本信息：当前最低 `revision = 1`；标准版会话要求受保护执行、语音会话结束和已核验任务进度特性，mini 唤醒另外要求来源身份与起声显示器历史特性。已有桌面执行 `protocol_version = 1` 保持不变；只有旧字段存在仍不足以证明新版兼容。doctor 遇到缺少版本或特性时会提示更新 JWM，并安装 Eva 后重新登录或重启对应服务。`standby_allowed` 单独表示当前锁屏、输出或会话状态是否允许待机，不代表协议版本。`standby_blocked_reason` 会区分 `overlay_unavailable`、`session_locked` 和 `session_exiting`；已支持协议但浮层不可用或正在锁屏时，应恢复相应运行条件，不能把它当作版本不兼容。
 
 修改配置后重启 `jwm-eva.service`。`toggle`、`wake`、`dry-run` 和 `undo` 会核对客户端所选配置与运行中 daemon 的配置，避免模型、凭据来源或预算设置不一致；显式指定的 `--config` 文件缺失会报错。取消和状态查询在配置损坏时仍可使用。预算默认采用系统本地时区，示例配置显式选择 `Asia/Shanghai`，也支持 `UTC`。
 
@@ -163,7 +177,7 @@ cargo test --locked --offline -p jwm --lib jwm::eva::tests -- --test-threads=1
 bash scripts/test-install-eva.sh
 ```
 
-有凭据时可显式执行仅连接和配置的实时契约检查。该测试依次检查代码中 `Config::default()` 的标准版与 `wake_config()` 的 mini 模型，不读取已安装的 `eva.toml`、Secret Service 或 `api_key_file`，并要求当前测试进程的 `OPENAI_API_KEY`。它不采集声音、不操作桌面，也不替代使用实际安装配置的语音演示。
+有凭据时可显式执行仅连接和配置的实时契约检查。开发测试与 `doctor --live` 复用握手逻辑，分别检查对话与唤醒模型；开发测试默认读取正常配置路径（文件不存在时使用内置默认值），也可通过 `JWM_EVA_LIVE_CONFIG=/absolute/path/eva.toml` 选择文件；测试凭据始终由当前进程的 `OPENAI_API_KEY` 提供。日常检查已安装配置及 Secret Service、文件或环境凭据来源时，使用 `doctor --live`。两者都不采集声音、不上传音频、不请求模型回答、不操作桌面，也不替代使用实际安装配置的语音演示。
 
 先完成上面的构建环境准备，再在同一 Bash 中使用临时子 shell 输入密钥。密钥不会进入命令历史或命令参数，子 shell 结束后不保留此环境变量：
 

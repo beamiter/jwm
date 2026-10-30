@@ -232,7 +232,7 @@ pub fn validate_pcm(pcm: &[u8]) -> io::Result<()> {
     }
     Ok(())
 }
-fn session_settings(c: &Config) -> Value {
+pub fn session_settings(c: &Config) -> Value {
     json!({"type":"realtime","instructions":INSTRUCTIONS,"output_modalities":["text"],
         "audio":{"input":{"format":{"type":"audio/pcm","rate":24000},
             "transcription":if c.openai.input_transcription {json!({"model":"gpt-transcribe"})} else {Value::Null},

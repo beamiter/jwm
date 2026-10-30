@@ -257,6 +257,11 @@ async fn runtime_actions() -> io::Result<Vec<String>> {
         }
     }
     let schema = query("get_command_schema", json!({})).await?;
+    jwm_eva_core::protocol::validate_assistant_features(
+        &schema,
+        jwm_eva_core::protocol::ASSISTANT_EXECUTION_FEATURES,
+    )
+    .map_err(|error| io::Error::other(format!("version_incompatible: {error}")))?;
     if schema["protocol_version"] != 1
         || schema["guarded_execution"] != true
         || schema["context_tokens"] != true
@@ -336,6 +341,11 @@ pub async fn run_with_handoff(
     if context["assistant_permit"] != serde_json::to_value(&p)? {
         return Err(io::Error::other("assistant_permit_mismatch"));
     }
+    jwm_eva_core::protocol::validate_assistant_features(
+        &context,
+        jwm_eva_core::protocol::ASSISTANT_EXECUTION_FEATURES,
+    )
+    .map_err(|error| io::Error::other(format!("version_incompatible: {error}")))?;
     let available_actions =
         tokio::select! {value=runtime_actions()=>value?,_=cancel.changed()=>return Ok(())};
     let start = Instant::now();
