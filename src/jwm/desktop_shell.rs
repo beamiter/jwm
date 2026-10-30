@@ -8,10 +8,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use slotmap::Key as _;
 use xbar_core::desktop_shell::{SHELL_PROTOCOL_VERSION, ShellOutput, ShellSnapshot, ShellTask};
-use xbar_core::{BarEvent, BarModel, ModelConfig, MonitorGeometry, WmCommand};
+use xbar_core::{BarEvent, BarModel, ModelConfig, MonitorGeometry, ThemeMode, WmCommand};
 
 use super::{Jwm, wm_session_id};
 use crate::backend::api::Backend;
+use crate::backend::compositor_common::ui_theme::UiTheme;
 use crate::config::CONFIG;
 use crate::ipc::IpcResponse;
 
@@ -20,6 +21,15 @@ const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(10);
 const HEALTH_INTERVAL: Duration = Duration::from_secs(1);
 const STATE_INTERVAL: Duration = Duration::from_millis(100);
 const MAX_PANELS: usize = 128 * 3;
+
+/// Managed edges use the same light/dark material as the compositor's menus.
+/// Parse through UiTheme so aliases and unknown-value fallback stay identical.
+fn desktop_shell_theme(name: &str) -> ThemeMode {
+    match UiTheme::from_config(name) {
+        UiTheme::Glass | UiTheme::Paper => ThemeMode::Light,
+        _ => ThemeMode::Dark,
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -390,6 +400,7 @@ impl Jwm {
             let mut model = BarModel::new(ModelConfig {
                 tag_count: cfg.tags_length(),
                 resolve_client_icons: false,
+                initial_theme: desktop_shell_theme(cfg.ui_theme()),
                 ..ModelConfig::default()
             })
             .expect("validated bar model configuration");
@@ -673,6 +684,30 @@ impl Jwm {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn managed_edges_follow_menu_theme_including_aliases_and_fallback() {
+        for name in [
+            "glass",
+            "glass-light",
+            "frosted",
+            "paper",
+            "light",
+            "unknown",
+        ] {
+            assert_eq!(desktop_shell_theme(name), ThemeMode::Light, "{name}");
+        }
+        for name in [
+            "glass-dark",
+            "glass_dark",
+            "aurora",
+            "nord",
+            "tokyo-night",
+            "material",
+        ] {
+            assert_eq!(desktop_shell_theme(name), ThemeMode::Dark, "{name}");
+        }
+    }
+
     #[test]
     fn output_epoch_changes_when_a_surviving_monitor_slot_gets_a_different_connector() {
         let mut host = DesktopShellSupervisor::default();

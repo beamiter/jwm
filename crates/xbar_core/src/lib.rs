@@ -48,6 +48,7 @@ pub mod notifier;
 pub mod placement;
 pub mod presentation;
 pub mod runtime;
+pub mod shell_palette;
 pub mod surface;
 #[cfg(feature = "provider-system")]
 pub mod system_monitor;

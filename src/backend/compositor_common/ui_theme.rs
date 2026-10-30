@@ -39,6 +39,7 @@
 //! than with the window radius its pixmap uses.
 
 use crate::backend::common_define::{ArgbColor, ColorScheme};
+use xbar_core::shell_palette::ShellPalette;
 
 /// Which design language the compositor's own surfaces follow.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -289,6 +290,8 @@ pub(crate) struct UiPalette {
     pub(crate) panel_ring_alpha: f32,
     /// Ring thickness in pixels.
     pub(crate) ring_width: f32,
+    /// Modal accents may follow the shell family instead of the window ring.
+    selection_accent: Option<[f32; 4]>,
     /// Alpha of the selection pill under the highlighted list row.
     pub(crate) selection_alpha: f32,
 
@@ -325,6 +328,12 @@ pub(crate) struct UiPalette {
 }
 
 impl UiPalette {
+    /// Menus opened from the default shell retain its accent. Alternate themes
+    /// continue to use the configured window accent.
+    pub(crate) fn panel_accent(&self, configured: [f32; 4]) -> [f32; 4] {
+        self.selection_accent.unwrap_or(configured)
+    }
+
     /// Resolve the base fill of a text-bearing card in the renderer's domain.
     ///
     /// The authored palette is tuned for the legacy encoded-sRGB path. A
@@ -615,6 +624,7 @@ pub(crate) const MATERIAL: UiPalette = UiPalette {
     ring_alpha: 0.55,
     panel_ring_alpha: 0.95,
     ring_width: 1.0,
+    selection_accent: None,
     selection_alpha: 0.26,
 
     title_ink: [214, 228, 255, 255],
@@ -665,24 +675,24 @@ pub(crate) const GLASS: UiPalette = UiPalette {
         grain: 0.014,
     }),
 
-    // White veil over the blurred backdrop. The modal panel carries the most
-    // text, so it takes the heaviest one.
-    card: [1.0, 1.0, 1.0, 0.62],
-    panel: [1.0, 1.0, 1.0, 0.64],
-    toast: [1.0, 1.0, 1.0, 0.62],
-    osd: [1.0, 1.0, 1.0, 0.62],
+    // A cool veil ties summoned cards to the four-edge shell. The modal
+    // panel carries the most text, so it takes the heaviest coverage.
+    card: [0.94, 0.98, 1.0, 0.62],
+    panel: ShellPalette::LIGHT.panel,
+    toast: [0.94, 0.98, 1.0, 0.62],
+    osd: [0.94, 0.98, 1.0, 0.62],
     // Raised controls go lighter still; recessed tracks go dark, the way
     // they do on a light material.
     chip: [1.0, 1.0, 1.0, 0.55],
-    field: [1.0, 1.0, 1.0, 0.50],
-    track: [0.0, 0.0, 0.0, 0.12],
-    slider_track: [0.0, 0.0, 0.0, 0.14],
+    field: ShellPalette::LIGHT.field,
+    track: [0.06, 0.16, 0.29, 0.12],
+    slider_track: [0.06, 0.16, 0.29, 0.14],
     // The optics already separate the panel, so the scrim only needs to keep
     // the desktop from competing for attention.
-    scrim: [0.04, 0.05, 0.08, 0.28],
+    scrim: [0.04, 0.08, 0.14, 0.28],
     lock_backdrop: [0.10, 0.11, 0.14, 1.0],
     // Wide and faint: an ambient occlusion pool rather than an elevation cue.
-    shadow: [0.0, 0.0, 0.0, 0.26],
+    shadow: [0.04, 0.12, 0.22, 0.26],
     shadow_spread_scale: 1.5,
     // No accent ring: the shader's own rim hairline already outlines the
     // sheet, and the ring program draws a *circular* rounded rect, which would
@@ -690,20 +700,21 @@ pub(crate) const GLASS: UiPalette = UiPalette {
     ring_alpha: 0.0,
     panel_ring_alpha: 0.0,
     ring_width: 1.0,
-    // An accent wash has to work harder to show on a light surface.
-    selection_alpha: 0.42,
+    // Blue selection stays translucent so dark text retains its contrast.
+    selection_accent: Some(ShellPalette::LIGHT.accent),
+    selection_alpha: 0.26,
 
-    title_ink: [22, 26, 34, 255],
-    chip_ink: [48, 52, 64, 255],
-    label_ink: [40, 44, 54, 255],
-    value_ink: [16, 20, 28, 255],
-    panel_title_ink: [20, 24, 32, 255],
-    query_ink: [12, 16, 24, 255],
-    item_ink: [26, 30, 40, 255],
+    title_ink: ShellPalette::ink8(ShellPalette::LIGHT.ink),
+    chip_ink: [30, 45, 64, 255],
+    label_ink: [30, 44, 62, 255],
+    value_ink: [12, 30, 54, 255],
+    panel_title_ink: ShellPalette::ink8(ShellPalette::LIGHT.ink),
+    query_ink: [12, 30, 54, 255],
+    item_ink: [22, 36, 56, 255],
     // Keyboard hints are normal-size guidance, so they need the same 4.5:1
     // minimum as rows. The divider and placement supply the quieter hierarchy.
-    hint_ink: [44, 48, 60, 255],
-    osd_ink: [16, 20, 28, 255],
+    hint_ink: ShellPalette::ink8(ShellPalette::LIGHT.muted_ink),
+    osd_ink: [12, 30, 54, 255],
     card_radius: 22.0,
     chip_radius: 11.0,
     panel_radius: 26.0,
@@ -715,7 +726,7 @@ pub(crate) const GLASS: UiPalette = UiPalette {
     meter_h: 5.0,
 };
 
-/// The same glass optics under a graphite veil — macOS's dark vibrancy rather
+/// The same glass optics under a blue graphite veil — macOS's dark vibrancy rather
 /// than iOS's light sheet. Geometry and metrics are shared with [`GLASS`]; only
 /// the veil, the inks and the rim's warmth differ.
 pub(crate) const GLASS_DARK: UiPalette = UiPalette {
@@ -736,14 +747,14 @@ pub(crate) const GLASS_DARK: UiPalette = UiPalette {
         grain: 0.016,
     }),
 
-    card: [0.10, 0.12, 0.16, 0.78],
-    panel: [0.09, 0.11, 0.15, 0.79],
-    toast: [0.10, 0.12, 0.16, 0.78],
-    osd: [0.10, 0.12, 0.16, 0.78],
+    card: [0.07, 0.14, 0.24, 0.78],
+    panel: ShellPalette::DARK.panel,
+    toast: [0.07, 0.14, 0.24, 0.78],
+    osd: [0.07, 0.14, 0.24, 0.78],
     // Authored dark controls retain their text contrast in both blend domains;
     // a translucent white wash became much too bright on the linear path.
-    chip: [0.18, 0.20, 0.26, 0.92],
-    field: [0.15, 0.17, 0.23, 0.90],
+    chip: ShellPalette::DARK.control_top,
+    field: ShellPalette::DARK.field,
     track: [1.0, 1.0, 1.0, 0.22],
     slider_track: [1.0, 1.0, 1.0, 0.24],
     scrim: [0.02, 0.03, 0.05, 0.34],
@@ -755,6 +766,7 @@ pub(crate) const GLASS_DARK: UiPalette = UiPalette {
     ring_alpha: 0.0,
     panel_ring_alpha: 0.0,
     ring_width: 1.0,
+    selection_accent: Some(ShellPalette::DARK.accent),
     selection_alpha: 0.34,
 
     title_ink: [244, 248, 255, 255],
@@ -763,8 +775,8 @@ pub(crate) const GLASS_DARK: UiPalette = UiPalette {
     value_ink: [250, 252, 255, 255],
     panel_title_ink: [246, 250, 255, 255],
     query_ink: [252, 253, 255, 255],
-    item_ink: [238, 243, 252, 255],
-    hint_ink: [216, 224, 240, 255],
+    item_ink: ShellPalette::ink8(ShellPalette::DARK.ink),
+    hint_ink: ShellPalette::ink8(ShellPalette::DARK.muted_ink),
     osd_ink: [250, 252, 255, 255],
     card_radius: 22.0,
     chip_radius: 11.0,
@@ -815,6 +827,7 @@ pub(crate) const AURORA: UiPalette = UiPalette {
     ring_alpha: 0.0,
     panel_ring_alpha: 0.0,
     ring_width: 1.0,
+    selection_accent: None,
     selection_alpha: 0.36,
 
     title_ink: [240, 240, 255, 255],
@@ -860,6 +873,7 @@ pub(crate) const NORD: UiPalette = UiPalette {
     ring_alpha: 0.55,
     panel_ring_alpha: 0.95,
     ring_width: 1.0,
+    selection_accent: None,
     selection_alpha: 0.28,
 
     title_ink: [236, 239, 244, 255],
@@ -902,6 +916,7 @@ pub(crate) const TOKYO_NIGHT: UiPalette = UiPalette {
     ring_alpha: 0.55,
     panel_ring_alpha: 0.95,
     ring_width: 1.0,
+    selection_accent: None,
     selection_alpha: 0.26,
 
     title_ink: [192, 202, 245, 255],
@@ -949,6 +964,7 @@ pub(crate) const PAPER: UiPalette = UiPalette {
     panel_ring_alpha: 0.8,
     ring_width: 1.0,
     // An accent wash has to work harder on a light surface, as in [`GLASS`].
+    selection_accent: None,
     selection_alpha: 0.32,
 
     title_ink: [28, 27, 24, 255],
@@ -1251,6 +1267,58 @@ mod tests {
         }
     }
 
+    #[test]
+    fn default_menus_share_the_shell_accent_and_other_themes_keep_custom_accents() {
+        let custom = [0.9, 0.2, 0.4, 1.0];
+        assert_eq!(GLASS.panel_accent(custom), ShellPalette::LIGHT.accent);
+        assert_eq!(GLASS_DARK.panel_accent(custom), ShellPalette::DARK.accent);
+        for theme in [
+            UiTheme::Aurora,
+            UiTheme::Material,
+            UiTheme::Nord,
+            UiTheme::TokyoNight,
+            UiTheme::Paper,
+        ] {
+            assert_eq!(theme.palette().panel_accent(custom), custom);
+        }
+    }
+
+    /// The menu's blue pill paints under its existing body ink. Its opacity
+    /// must preserve readable text over both extreme wallpapers and in both
+    /// compositors' blend domains, including when backdrop glass is unavailable.
+    #[test]
+    fn default_menu_selection_keeps_rows_and_queries_readable() {
+        for theme in [UiTheme::Glass, UiTheme::GlassDark] {
+            let p = theme.palette();
+            let mut selection = p.panel_accent([0.0; 4]);
+            selection[3] = p.selection_alpha;
+            for linear in [false, true] {
+                for glass_available in [false, true] {
+                    let bounds = p.glass.filter(|_| glass_available).map_or([0.0; 2], |g| {
+                        [-g.grain * 0.5, g.sheen * 0.55 + g.grain * 0.5]
+                    });
+                    for backdrop in [[0.0; 3], [1.0; 3]] {
+                        for light in bounds {
+                            let fill = p.readable_surface_fill(p.panel, linear, glass_available);
+                            let color = composite_fill(fill, backdrop, linear, light);
+                            let color = composite_fill(selection, color, linear, 0.0);
+                            for ink in [p.item_ink, p.query_ink] {
+                                let ink = ink.map(|c| f32::from(c) / 255.0);
+                                let text = composite_fill(ink, color, linear, 0.0);
+                                let (a, b) = (srgb_luminance(color), srgb_luminance(text));
+                                let ratio = (a.max(b) + 0.05) / (a.min(b) + 0.05);
+                                assert!(
+                                    ratio >= 4.5,
+                                    "{theme:?} selection: {ratio:.3}:1; linear={linear}, glass={glass_available}, backdrop={backdrop:?}, light={light}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// The light material only works if its veil is heavy enough that even a
     /// black desktop lands well above the dark ink underneath it. Model the
     /// worst case — backdrop 0, so the surface is exactly the veil — and
@@ -1263,13 +1331,8 @@ mod tests {
             veil[0] > 0.9 && veil[1] > 0.9 && veil[2] > 0.9,
             "the light material's veil must be white, got {veil:?}"
         );
-        // Worst case: mix(black, white, coverage) == coverage, in sRGB.
-        let surface = relative_luminance([
-            (veil[3] * 255.0) as u8,
-            (veil[3] * 255.0) as u8,
-            (veil[3] * 255.0) as u8,
-            255,
-        ]);
+        // Measure the actual cool veil over black, including its tint.
+        let surface = relative_luminance(worst_case_fill(veil, glass.item_ink));
         let ink = relative_luminance(glass.item_ink);
         let contrast = (surface + 0.05) / (ink + 0.05);
         assert!(

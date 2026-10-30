@@ -41,6 +41,19 @@ configuration first pins all enabled edges; the next press auto-hides them.
 Existing explicit modes and legacy four-edge pinned layouts remain respected.
 The IPC equivalent is `jwm-tool msg toggle_desktop_shell_mode --raw`.
 
+The default Glass and GlassDark menus share the edge panels' cool glass palette,
+blue accent and ink hierarchy. Text-heavy menus use a denser veil for contrast;
+the edge controls retain their lighter backdrop. Selected menu rows keep a
+translucent blue wash so their text remains readable. Edge controls distinguish
+hover and press without moving their click targets, and sliders keep a visible
+handle even at zero.
+
+Managed left/right/bottom panels follow the live `appearance.ui_theme` light/dark
+choice, including Theme menu changes, on the existing refresh cycle (within
+about one second). They no longer override it with the standalone `XBAR_CONFIG`
+theme. The selected primary bar retains its own toolkit/theme configuration.
+Alternate compositor themes retain their configured accent colors.
+
 Top bars share the `tao_glow_bar` header profile: launcher, numbered workspaces,
 centered client title and compact status indicators. Each monitor displays the
 union of its occupied tags and its active tags, in their original numeric order.
@@ -102,6 +115,18 @@ Run the parameterized native fixture after building current JWM, host and bar:
 python3 scripts/test-shared-sidebar-shell-x11.py --bar tao_pixels_bar --backend xcb
 python3 scripts/test-shared-sidebar-shell-x11.py --bar tauri_leptos_bar --backend x11rb
 ```
+
+Add `--submenu-themes --theme light` (or `dark`) to capture the Hub, Theme,
+Applications, Notifications and Calendar menus, exercise native back navigation,
+and verify a persisted Theme-menu change updates the managed edge snapshot
+without replacing its host. The fixture changes only its private configuration.
+Menu captures require ImageMagick `import` and read the final composited X11
+display: ordinary compositor IPC screenshots deliberately exclude modal chrome.
+The evidence records each capture's source.
+Install the configured UI and icon fonts for visual acceptance. On a test host
+without the configured family, `--ui-font 'DejaVu Sans 11'` selects an installed
+TrueType family in the private fixture only; symbol fallback still needs an
+installed Font Awesome or Nerd Font.
 
 The fixture uses a private Xvfb, Unix socket and configuration. Evidence includes
 actual process IDs, registered output/roles, compositor screenshots, test steps

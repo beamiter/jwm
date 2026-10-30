@@ -88,11 +88,15 @@ def main():
     parser.add_argument("--size", default="1280x800")
     parser.add_argument("--theme", choices=("light", "dark"), default="light")
     parser.add_argument("--deep", action="store_true")
+    parser.add_argument("--ui-font", help="optional private system UI font override for visual fixtures")
+    parser.add_argument("--submenu-themes", action="store_true", help="capture Hub child pages and verify live theme changes without replacing the shared host")
     parser.add_argument("--workarea-only", action="store_true", help="run real external-strut, fullscreen and one-switch rollback acceptance after the standard smoke")
     parser.add_argument("--topology-only", action="store_true", help="run logical output/monitor lock acceptance after the standard smoke")
     parser.add_argument("--legacy-four-edge", action="store_true", help="exercise migration from status_bar.layout=four-edge without an explicit desktop_shell table")
     parser.add_argument("--legacy-edge-shell", action="store_true", help="exercise live legacy xbar edge_shell migration")
     args = parser.parse_args()
+    if args.submenu_themes and not shutil.which("import"):
+        parser.error("--submenu-themes requires ImageMagick import for final composited X11 display captures")
     bar_dir = ROOT / "bars" / args.bar
     bar_bin = (args.bar_bin or bar_dir / ("src-tauri/target/debug" if (bar_dir / "src-tauri").is_dir() else "target/debug") / args.bar).resolve()
     second_bin = (args.second_bar_bin or ROOT / "bars" / args.second_bar / "target/debug" / args.second_bar).resolve()
@@ -444,18 +448,25 @@ def main():
             time.sleep(0.15)
             run("xdotool", "mousemove", width // 2, height // 2)
 
-        def capture(name):
-            queued = msg("take_screenshot_fullscreen")
-            source = Path(queued["path"])
-            assert source.is_relative_to(work / "pictures")
-            wait_for(lambda: source.is_file() and source.stat().st_size > 32, "compositor screenshot")
-            data = source.read_bytes()
-            assert data[:8] == b"\x89PNG\r\n\x1a\n" and struct.unpack(">II", data[16:24]) == (width, height)
+        def capture(name, final_display=False):
             destination = evidence / f"{name}.png"
-            destination.write_bytes(data)
+            if final_display:
+                # IPC screenshots intentionally run before modal chrome. Read
+                # the final composited X11 display for menu visual acceptance.
+                run("import", "-window", "root", destination)
+                data = destination.read_bytes()
+            else:
+                queued = msg("take_screenshot_fullscreen")
+                source = Path(queued["path"])
+                assert source.is_relative_to(work / "pictures")
+                wait_for(lambda: source.is_file() and source.stat().st_size > 32, "compositor screenshot")
+                data = source.read_bytes()
+                destination.write_bytes(data)
+            assert data[:8] == b"\x89PNG\r\n\x1a\n" and struct.unpack(">II", data[16:24]) == (width, height)
             artifact_name = str(destination.relative_to(ROOT))
             if artifact_name not in result.setdefault("screenshots", []):
                 result["screenshots"].append(artifact_name)
+            result.setdefault("screenshot_sources", {})[artifact_name] = "composited_x11_display" if final_display else "compositor_ipc_scene"
             return destination
 
         def record(step):
@@ -594,6 +605,11 @@ def main():
                                "wallpaper_effect": '"off"', "wallpaper_colors": "false",
                                "status_bar_height": "42", "status_bar_padding": "5"}.items():
                 text = re.sub(r'(?m)^' + key + r' = .*$', f'{key} = {value}', text)
+            if args.ui_font:
+                text = re.sub(r'(?m)^system_ui_font = .*$', 'system_ui_font = ' + json.dumps(args.ui_font), text)
+                result["ui_font"] = args.ui_font
+            ui_theme = "glass-dark" if args.theme == "dark" else "glass"
+            text = re.sub(r'(?m)^ui_theme = .*$', 'ui_theme = "' + ui_theme + '"', text)
             config.write_text(text)
             run(args.bin_dir / "jwm", "--backend", args.backend, "--check-config")
             wm = spawn("dbus-run-session", "--", args.bin_dir / "jwm", "--backend", args.backend)
@@ -653,6 +669,65 @@ def main():
             result["top_render"] = {"changed_pixels": changed_pixels, "region": region,
                                     "tauri_frontend_ready": args.bar.startswith("tauri_"), "tauri_frontend_rendered": args.bar.startswith("tauri_")}
             record("primary toolkit surface paints visible content above the fixed wallpaper")
+            if args.submenu_themes:
+                def key_and_wait(key, kind):
+                    # XTest can publish MappingNotify on connect. Match the
+                    # shortcut fixture's delay while JWM reinstalls its grabs.
+                    run("xdotool", "key", "--clearmodifiers", "--delay", "120", key)
+                    last_ui = {}
+                    def expected_panel():
+                        nonlocal last_ui
+                        last_ui = msg("get_system_ui")
+                        return last_ui.get("kind") == kind
+                    try:
+                        wait_for(expected_panel, "native key opens " + str(kind))
+                    except AssertionError as error:
+                        raise AssertionError(f"{error}; observed UI={last_ui}") from error
+
+                # The IPC reference captures announce completion with a
+                # five-second toast; let it expire before reviewing menu chrome.
+                time.sleep(5.2)
+                desktop_display = Image.open(capture("desktop-display", final_display=True)).convert("RGB")
+                menu_region = (width // 4, 48, 3 * width // 4, 3 * height // 4)
+                def capture_menu(name):
+                    destination = capture(name, final_display=True)
+                    painted = Image.open(destination).convert("RGB").crop(menu_region)
+                    changed = sum(1 for pixel in ImageChops.difference(painted, desktop_display.crop(menu_region)).getdata() if max(pixel) >= 16)
+                    assert changed >= 1000, (name, "menu absent from final display capture", changed)
+                    result.setdefault("menu_render", {})[name] = {"changed_pixels": changed, "region": menu_region}
+
+                key_and_wait("alt+F10", "control_center")
+                time.sleep(0.8)
+                capture_menu("shell-hub")
+                for shortcut, kind in [("t", "theme_picker"), ("a", "launcher"),
+                                       ("n", "notification_center"), ("d", "calendar")]:
+                    key_and_wait(shortcut, kind)
+                    time.sleep(0.8)
+                    capture_menu(kind)
+                    key_and_wait("Escape", "control_center")
+                record("native Hub children open and Escape returns to Hub")
+                key_and_wait("t", "theme_picker")
+                # Glass and GlassDark are adjacent in the public Theme picker.
+                next_theme = "Light" if args.theme == "dark" else "Dark"
+                run("xdotool", "key", "Up" if args.theme == "dark" else "Down")
+                run("xdotool", "key", "Return")
+                wait_for(lambda: state()["outputs"][0]["snapshot"]["theme"] == next_theme,
+                         "theme choice reaches shared edge snapshot")
+                assert state()["host"]["pid"] == host_pid, "theme selection must preserve shared host"
+                wait_for(lambda: not msg("get_system_ui")["active"], "applying a theme closes the picker")
+                key_and_wait("alt+F10", "control_center")
+                key_and_wait("t", "theme_picker")
+                time.sleep(0.8)
+                capture_menu("theme-switched")
+                # Theme selection persists only into this fixture's private TOML.
+                assert re.search(r'(?m)^ui_theme\s*=\s*"' + ("glass" if args.theme == "dark" else "glass-dark") + '"', config.read_text())
+                key_and_wait("Escape", "control_center")
+                key_and_wait("Escape", None)
+                set_config("appearance.ui_theme", ui_theme)
+                wait_for(lambda: state()["outputs"][0]["snapshot"]["theme"] == ("Dark" if args.theme == "dark" else "Light"),
+                         "initial fixture theme restored")
+                assert state()["host"]["pid"] == host_pid
+                record("Theme picker updates menu and edge theme live, persists choice and keeps shared host PID")
             profile_idle(host_pid, primary_pid)
             # Workspace selection through the physical left panel, rather than
             # an IPC substitute: the second workspace is a shared painter cell.

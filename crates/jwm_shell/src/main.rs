@@ -106,10 +106,7 @@ fn main() -> Result<()> {
         let sampled = runtime.snapshot();
         let mut rows = Vec::new();
         for output in &snapshot.outputs {
-            let mut view = output.snapshot.clone();
-            view.audio = sampled.audio;
-            view.audio_device = sampled.audio_device.clone();
-            view.brightness = sampled.brightness;
+            let view = with_local_providers(output.snapshot.clone(), &sampled);
             let state = ShellState {
                 output: output.geometry,
                 snapshot: view,
@@ -246,16 +243,7 @@ fn main() -> Result<()> {
                     outputs.remove(&output.id);
                 }
                 identities.insert(output.id, metadata);
-                let mut view = output.snapshot.clone();
-                view.audio = sampled.audio;
-                view.audio_device = sampled.audio_device.clone();
-                view.brightness = sampled.brightness;
-                view.battery = sampled.battery;
-                view.network = sampled.network.clone();
-                view.system = sampled.system;
-                view.system_details = sampled.system_details.clone();
-                view.time = sampled.time.clone();
-                view.theme = sampled.theme;
+                let view = with_local_providers(output.snapshot.clone(), &sampled);
                 let tasks = output
                     .tasks
                     .iter()
@@ -393,6 +381,21 @@ fn full_snapshot() -> Result<ShellSnapshot> {
         serde_json::from_value(ipc::request("get_desktop_shell", Value::Null)?)?;
     snapshot.validate().map_err(anyhow::Error::msg)?;
     Ok(snapshot)
+}
+
+/// Hardware samples are local; desktop appearance and window/media state belong
+/// to the supervisor. In particular, XBAR_CONFIG's standalone theme must not
+/// overwrite a live theme selection made in the desktop's Theme menu.
+fn with_local_providers(mut view: BarSnapshot, sampled: &BarSnapshot) -> BarSnapshot {
+    view.audio = sampled.audio;
+    view.audio_device = sampled.audio_device.clone();
+    view.brightness = sampled.brightness;
+    view.battery = sampled.battery;
+    view.network = sampled.network.clone();
+    view.system = sampled.system;
+    view.system_details = sampled.system_details.clone();
+    view.time = sampled.time.clone();
+    view
 }
 fn register(
     session: u64,
@@ -662,6 +665,25 @@ fn launch(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn local_hardware_samples_preserve_live_desktop_theme() {
+        for theme in [xbar_core::ThemeMode::Light, xbar_core::ThemeMode::Dark] {
+            let mut view = xbar_core::BarModel::default().snapshot();
+            view.theme = theme;
+            view.client_name = "managed window".into();
+            let mut sampled = xbar_core::BarModel::default().snapshot();
+            sampled.theme = match theme {
+                xbar_core::ThemeMode::Light => xbar_core::ThemeMode::Dark,
+                xbar_core::ThemeMode::Dark => xbar_core::ThemeMode::Light,
+            };
+            sampled.audio.volume_percent = Some(xbar_core::Percent::from_whole(37).unwrap());
+            let merged = with_local_providers(view, &sampled);
+            assert_eq!(merged.theme, theme);
+            assert_eq!(merged.client_name, "managed window");
+            assert_eq!(merged.audio.volume_percent, sampled.audio.volume_percent);
+        }
+    }
+
     #[test]
     fn dock_commands_preserve_captured_session_generation_and_actual_anchor() {
         let view = BarRuntime::default().snapshot();

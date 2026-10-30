@@ -2990,7 +2990,7 @@ impl<C: CompositorConnection> Compositor<C> {
             (x, y)
         };
 
-        let accent = self.border_gradient_color_a;
+        let accent = ui.panel_accent(self.border_gradient_color_a);
         // The lock card hides the desktop by design, and the clear below makes
         // the captured backdrop describe nothing that is still on screen — so
         // it draws solid even under the glass theme.

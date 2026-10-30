@@ -2,6 +2,7 @@ use super::{Action, Hit, Panel};
 use anyhow::Result;
 use cairo::{Context, LinearGradient};
 use xbar_core::model::{BarSnapshot, ShellRoute, TagId, UserAction};
+use xbar_core::shell_palette::{Color, ShellPalette};
 pub(crate) struct Painter<'a> {
     pub(crate) ctx: &'a Context,
     pub(crate) panel: &'a mut Panel,
@@ -12,11 +13,50 @@ pub(crate) struct Painter<'a> {
 
 impl Painter<'_> {
     fn ink(&self) {
-        if self.dark {
-            self.ctx.set_source_rgb(0.89, 0.95, 1.0);
+        color(self.ctx, ShellPalette::for_dark(self.dark).ink);
+    }
+
+    fn control_surface(
+        &self,
+        rect: [f64; 4],
+        selected: bool,
+        hovered: bool,
+        pressed: bool,
+    ) -> Result<()> {
+        let [x, y, w, h] = rect;
+        let palette = ShellPalette::for_dark(self.dark);
+        rounded(self.ctx, x, y, w, h, 14.0);
+        let gradient = LinearGradient::new(x, y, x, y + h);
+        let (top, bottom) = if selected {
+            (palette.accent, palette.selection)
         } else {
-            self.ctx.set_source_rgb(0.06, 0.16, 0.29);
+            (palette.control_top, palette.control_bottom)
+        };
+        gradient_stop(&gradient, 0.0, top);
+        gradient_stop(&gradient, 1.0, bottom);
+        self.ctx.set_source(&gradient)?;
+        self.ctx.fill_preserve()?;
+        // A wash changes luminance without moving the painted or input bounds.
+        // Press wins over hover in both appearances, including selected cells.
+        if pressed || hovered {
+            color(
+                self.ctx,
+                if pressed {
+                    palette.pressed
+                } else if selected {
+                    // Selected cells carry white ink: hover deepens the blue
+                    // rather than bleaching the foreground's contrast away.
+                    [0.02, 0.08, 0.18, 0.14]
+                } else {
+                    palette.hover
+                },
+            );
+            self.ctx.fill_preserve()?;
         }
+        color(self.ctx, palette.rim);
+        self.ctx.set_line_width(0.8);
+        self.ctx.stroke()?;
+        Ok(())
     }
     fn button(
         &mut self,
@@ -31,7 +71,7 @@ impl Painter<'_> {
             .panel
             .pressed
             .as_ref()
-            .is_some_and(|hit| hit.action == action);
+            .is_some_and(|hit| hit.action == action && hit.rect == rect);
         // A layered soft shadow gives each glass control lift without moving
         // either its painted bounds or its input target during hover.
         for (spread, alpha) in [(2.0, 0.025), (1.0, 0.045)] {
@@ -46,24 +86,7 @@ impl Painter<'_> {
             self.ctx.set_source_rgba(0.12, 0.34, 0.58, alpha);
             self.ctx.fill()?;
         }
-        rounded(self.ctx, x, y, w, h, 14.0);
-        let gradient = LinearGradient::new(x, y, x, y + h);
-        if selected {
-            gradient.add_color_stop_rgba(0.0, 0.08, 0.43, 0.94, 1.0);
-            gradient.add_color_stop_rgba(1.0, 0.03, 0.39, 0.95, 1.0);
-        } else if self.dark {
-            gradient.add_color_stop_rgba(0.0, 0.52, 0.70, 0.92, if hovered { 0.28 } else { 0.15 });
-            gradient.add_color_stop_rgba(1.0, 0.22, 0.36, 0.55, 0.18);
-        } else {
-            gradient.add_color_stop_rgba(0.0, 1.0, 1.0, 1.0, if hovered { 0.77 } else { 0.57 });
-            gradient.add_color_stop_rgba(1.0, 0.80, 0.91, 1.0, if pressed { 0.72 } else { 0.34 });
-        }
-        self.ctx.set_source(&gradient)?;
-        self.ctx.fill_preserve()?;
-        self.ctx
-            .set_source_rgba(1.0, 1.0, 1.0, if selected { 0.30 } else { 0.48 });
-        self.ctx.set_line_width(0.8);
-        self.ctx.stroke()?;
+        self.control_surface(rect, selected, hovered, pressed)?;
         if selected {
             self.ctx.set_source_rgb(1.0, 1.0, 1.0);
         } else {
@@ -92,9 +115,22 @@ impl Painter<'_> {
 
     fn flat_button(&mut self, rect: [f64; 4], label: &str, action: Action) -> Result<()> {
         let [x, y, w, h] = rect;
-        if self.panel.hovered == Some(self.panel.hits.len()) {
+        let pressed = self
+            .panel
+            .pressed
+            .as_ref()
+            .is_some_and(|hit| hit.action == action && hit.rect == rect);
+        if pressed || self.panel.hovered == Some(self.panel.hits.len()) {
+            let palette = ShellPalette::for_dark(self.dark);
             rounded(self.ctx, x, y, w, h, 12.0);
-            self.ctx.set_source_rgba(1.0, 1.0, 1.0, 0.30);
+            color(
+                self.ctx,
+                if pressed {
+                    palette.pressed
+                } else {
+                    palette.hover
+                },
+            );
             self.ctx.fill()?;
         }
         self.ink();
@@ -112,7 +148,7 @@ impl Painter<'_> {
     }
 
     fn rule(&self, x: f64, y: f64, w: f64) -> Result<()> {
-        self.ctx.set_source_rgba(0.14, 0.38, 0.64, 0.22);
+        color(self.ctx, ShellPalette::for_dark(self.dark).divider);
         self.ctx.move_to(x, y);
         self.ctx.line_to(x + w, y);
         self.ctx.set_line_width(1.0);
@@ -172,7 +208,7 @@ impl Painter<'_> {
                 if self.snapshot.active_tag == Some(tag) {
                     self.ctx.set_source_rgba(1.0, 1.0, 1.0, 0.95);
                 } else {
-                    self.ctx.set_source_rgba(0.08, 0.37, 0.64, 0.86);
+                    color(self.ctx, ShellPalette::for_dark(self.dark).ink);
                 }
                 self.ctx.arc(
                     bx + size - 10.0,
@@ -235,15 +271,16 @@ impl Painter<'_> {
             if cy + sh + 70.0 > y + h {
                 break;
             }
-            rounded(self.ctx, bx, cy, size, sh, 18.0);
-            let gradient = LinearGradient::new(bx, cy, bx, cy + sh);
-            gradient.add_color_stop_rgba(0.0, 1.0, 1.0, 1.0, if self.dark { 0.18 } else { 0.49 });
-            gradient.add_color_stop_rgba(1.0, 0.76, 0.88, 1.0, if self.dark { 0.13 } else { 0.30 });
-            self.ctx.set_source(&gradient)?;
-            self.ctx.fill_preserve()?;
-            self.ctx.set_source_rgba(1.0, 1.0, 1.0, 0.30);
-            self.ctx.set_line_width(0.8);
-            self.ctx.stroke()?;
+            let palette = ShellPalette::for_dark(self.dark);
+            let hovered = self.panel.hovered.is_some_and(|index| {
+                index == self.panel.hits.len() || index == self.panel.hits.len() + 1
+            });
+            let pressed = self
+                .panel
+                .pressed
+                .as_ref()
+                .is_some_and(|hit| hit.slider.is_some_and(|(is_audio, ..)| is_audio == audio));
+            self.control_surface([bx, cy, size, sh], false, hovered, pressed)?;
             self.ink();
             symbol(self.ctx, label, [bx, cy + 2.0, size, 32.0])?;
             self.panel.hits.push(Hit {
@@ -260,8 +297,7 @@ impl Painter<'_> {
             let top = cy + 40.0;
             let length = sh - 54.0;
             rounded(self.ctx, bx + (size - 12.0) / 2.0, top, 12.0, length, 6.0);
-            self.ctx
-                .set_source_rgba(1.0, 1.0, 1.0, if self.dark { 0.30 } else { 0.68 });
+            color(self.ctx, palette.track);
             self.ctx.fill()?;
             if let Some(value) = value {
                 let fill = length * value.as_f64() / 100.0;
@@ -274,9 +310,22 @@ impl Painter<'_> {
                         fill,
                         6.0,
                     );
-                    self.ctx.set_source_rgb(0.12, 0.50, 1.0);
+                    color(self.ctx, palette.accent);
                     self.ctx.fill()?;
                 }
+                // A small handle makes the current level legible even at 0%.
+                self.ctx.arc(
+                    bx + size / 2.0,
+                    top + length - fill,
+                    3.5,
+                    0.0,
+                    std::f64::consts::TAU,
+                );
+                self.ctx.set_source_rgb(1.0, 1.0, 1.0);
+                self.ctx.fill_preserve()?;
+                color(self.ctx, palette.accent);
+                self.ctx.set_line_width(1.2);
+                self.ctx.stroke()?;
             } else {
                 self.ink();
                 text(
@@ -378,12 +427,7 @@ impl Painter<'_> {
                 11.5,
                 false,
             )?;
-            self.ctx.set_source_rgba(
-                if self.dark { 0.80 } else { 0.15 },
-                if self.dark { 0.88 } else { 0.30 },
-                if self.dark { 0.97 } else { 0.47 },
-                0.88,
-            );
+            color(self.ctx, ShellPalette::for_dark(self.dark).muted_ink);
             text(
                 self.ctx,
                 self.snapshot
@@ -417,7 +461,7 @@ impl Painter<'_> {
                 "next",
                 Action::MediaNext,
             )?;
-            self.ctx.set_source_rgba(0.10, 0.34, 0.58, 0.22);
+            color(self.ctx, ShellPalette::for_dark(self.dark).divider);
             self.ctx.move_to(x + media_width + 8.0, cy + 7.0);
             self.ctx.line_to(x + media_width + 8.0, cy + size - 7.0);
             self.ctx.stroke()?;
@@ -499,7 +543,7 @@ impl Painter<'_> {
                 "⌕",
                 Action::Model(UserAction::OpenShellHub(ShellRoute::Applications)),
             )?;
-            self.ctx.set_source_rgba(0.10, 0.34, 0.58, 0.22);
+            color(self.ctx, ShellPalette::for_dark(self.dark).divider);
             self.ctx.move_to(x + w - 88.0, cy + 7.0);
             self.ctx.line_to(x + w - 88.0, cy + size - 7.0);
             self.ctx.stroke()?;
@@ -587,13 +631,21 @@ impl Painter<'_> {
             )?;
         }
         if task.is_minimized {
-            self.ctx.set_source_rgba(0.10, 0.38, 0.65, 0.72);
+            color(self.ctx, ShellPalette::for_dark(self.dark).muted_ink);
             self.ctx
                 .arc(x + w - 9.0, y + h - 8.0, 1.8, 0.0, std::f64::consts::TAU);
             self.ctx.fill()?;
         }
         Ok(())
     }
+}
+
+fn color(ctx: &Context, [r, g, b, a]: Color) {
+    ctx.set_source_rgba(r.into(), g.into(), b.into(), a.into());
+}
+
+fn gradient_stop(gradient: &LinearGradient, offset: f64, [r, g, b, a]: Color) {
+    gradient.add_color_stop_rgba(offset, r.into(), g.into(), b.into(), a.into());
 }
 
 pub(crate) fn rounded(ctx: &Context, x: f64, y: f64, w: f64, h: f64, r: f64) {
@@ -656,14 +708,10 @@ fn text(
 /// highlight. The host supplies the rounded clip and the real desktop backdrop.
 pub(crate) fn material(ctx: &Context, rect: [f64; 4], dark: bool) -> Result<()> {
     let [x, y, _, h] = rect;
+    let palette = ShellPalette::for_dark(dark);
     let tint = LinearGradient::new(x, y, x, y + h);
-    if dark {
-        tint.add_color_stop_rgba(0.0, 0.09, 0.18, 0.30, 0.84);
-        tint.add_color_stop_rgba(1.0, 0.05, 0.12, 0.22, 0.77);
-    } else {
-        tint.add_color_stop_rgba(0.0, 0.80, 0.92, 1.0, 0.64);
-        tint.add_color_stop_rgba(1.0, 0.72, 0.86, 1.0, 0.56);
-    }
+    gradient_stop(&tint, 0.0, palette.sheet_top);
+    gradient_stop(&tint, 1.0, palette.sheet_bottom);
     ctx.set_source(&tint)?;
     ctx.paint()?;
     let sheen = LinearGradient::new(x, y, x, y + h.min(120.0));
@@ -986,6 +1034,57 @@ mod tests {
     use super::*;
     use xbar_core::edge_shell::{EdgeReveal, RevealMode};
     use xbar_core::{BarEdge, BarPlacement};
+
+    #[test]
+    fn control_feedback_is_visible_without_moving_the_click_target() {
+        let snapshot = xbar_core::model::BarModel::default().snapshot();
+        for dark in [false, true] {
+            for selected in [false, true] {
+                let mut frames = Vec::new();
+                for state in 0..3 {
+                    let mut surface =
+                        cairo::ImageSurface::create(cairo::Format::ARgb32, 64, 64).unwrap();
+                    let ctx = Context::new(&surface).unwrap();
+                    let mut panel = panel(BarEdge::Left, 0);
+                    panel.hovered = (state > 0).then_some(0);
+                    let action = Action::Files;
+                    let rect = [8.0, 8.0, 44.0, 44.0];
+                    if state == 2 {
+                        panel.pressed = Some(Hit {
+                            rect,
+                            action: action.clone(),
+                            slider: None,
+                            enabled: true,
+                            slider_value: None,
+                        });
+                    }
+                    Painter {
+                        ctx: &ctx,
+                        panel: &mut panel,
+                        snapshot: &snapshot,
+                        tasks: &[],
+                        dark,
+                    }
+                    .button(rect, "", action.clone(), selected)
+                    .unwrap();
+                    assert_eq!(panel.hits.len(), 1);
+                    assert_eq!(panel.hits[0].rect, rect);
+                    assert_eq!(panel.hits[0].action, action);
+                    drop(ctx);
+                    surface.flush();
+                    frames.push(surface.data().unwrap().to_vec());
+                }
+                assert_ne!(
+                    frames[0], frames[1],
+                    "missing hover: dark={dark}, selected={selected}"
+                );
+                assert_ne!(
+                    frames[1], frames[2],
+                    "missing press: dark={dark}, selected={selected}"
+                );
+            }
+        }
+    }
 
     fn panel(edge: BarEdge, offset: usize) -> Panel {
         Panel {
