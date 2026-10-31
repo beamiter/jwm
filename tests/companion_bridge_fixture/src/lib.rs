@@ -5,7 +5,7 @@ mod audio {
     #[derive(Clone)]
     pub struct PlaybackHistory;
     impl PlaybackHistory {
-        pub(crate) fn companion_snapshot(&self) -> Option<(u64, Option<u64>, bool)> {
+        pub(crate) fn companion_snapshot(&self) -> Option<(u64, Option<u64>, bool, Option<u64>)> {
             None
         }
     }

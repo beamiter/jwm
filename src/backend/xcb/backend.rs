@@ -2388,7 +2388,7 @@ impl Backend for XcbBackend {
         )?;
         compositor.set_present_manager(load_xcb_present_manager(self.conn.clone()));
         if let Some(signal) = self.compositor_loop_signal.clone() {
-            compositor.set_waterlily_loop_signal(signal);
+            compositor.set_event_loop_signal(signal);
         }
         self.replay_compositor_desired_state(&mut compositor);
         Self::seed_remote_capture_state(
@@ -2752,7 +2752,7 @@ impl Backend for XcbBackend {
         let loop_signal = event_loop.get_signal();
         self.compositor_loop_signal = Some(loop_signal.clone());
         if let Some(compositor) = self.compositor.as_mut() {
-            compositor.set_waterlily_loop_signal(loop_signal);
+            compositor.set_event_loop_signal(loop_signal);
         }
         let handle = event_loop.handle();
 

@@ -2,8 +2,8 @@
 //! No provider credentials, PCM, transcripts, execution permits or commands cross
 //! this bridge. The transport runs on its own thread, never an audio/UI callback.
 use crate::audio::PlaybackHistory;
-use companion_client::Client;
 use companion_protocol::{AudioState, Reply, Request};
+use companion_voice::Client;
 use std::{
     sync::{
         OnceLock,
@@ -13,10 +13,27 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[path = "companion/operations.rs"]
+mod operations;
+pub(crate) use operations::{
+    Owner as OperationOwner, Settlement as OperationSettlement, settled as operation_settled,
+    tracked as operation_tracked,
+};
+
+pub(crate) fn operation_owner(
+    session: &str,
+    labels: &serde_json::Value,
+    call: &str,
+    plan: &str,
+) -> Option<OperationOwner> {
+    OperationOwner::new(session, turn(labels)?, call, plan)
+}
+
 static BRIDGE: OnceLock<SyncSender<Event>> = OnceLock::new();
 static LOST: AtomicBool = AtomicBool::new(false);
-static FRAMES: AtomicU64 = AtomicU64::new(0);
+static CAPTURE_OBSERVED_NS: AtomicU64 = AtomicU64::new(0);
 static CAPTURING: AtomicBool = AtomicBool::new(false);
+static ACTIVATIONS: AtomicU64 = AtomicU64::new(1);
 enum Event {
     Acquire(String, tokio::sync::oneshot::Sender<bool>),
     Release(String),
@@ -27,6 +44,8 @@ enum Event {
     State(String, AudioState),
     Playback(String, PlaybackHistory),
     EndPlayback(String, u64, Option<u64>, bool),
+    Dialogue(companion_voice::dialogue::Record),
+    Operation(u64, companion_voice::dialogue::Record),
 }
 
 /// Held for the complete existing voice activation. Declared before audio and
@@ -68,7 +87,7 @@ pub(crate) async fn acquire(generation: u64) -> std::io::Result<VoiceLease> {
     if LOST.load(Ordering::Acquire) {
         return Err(std::io::Error::other("companion_voice_unavailable"));
     }
-    let id = format!("eva-{}-{generation}", std::process::id());
+    let id = activation_id(generation, &ACTIVATIONS)?;
     let mut lease = VoiceLease(Some(id.clone()));
     let (reply, receive) = tokio::sync::oneshot::channel();
     tx.try_send(Event::Acquire(id, reply))
@@ -85,6 +104,20 @@ pub(crate) async fn acquire(generation: u64) -> std::io::Result<VoiceLease> {
     // provider or device work was started. IPC loss retains the daemon lease.
 }
 
+fn activation_id(generation: u64, sequence: &AtomicU64) -> std::io::Result<String> {
+    // A WM restart can reuse its generation while this Eva process survives.
+    // A delayed release must never name a later activation's lease.
+    let activation = sequence
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+            value.checked_add(1)
+        })
+        .map_err(|_| std::io::Error::other("companion_voice_identity_exhausted"))?;
+    Ok(format!(
+        "eva-{}-{generation}-{activation}",
+        std::process::id()
+    ))
+}
+
 fn emit(event: Event) {
     if let Some(tx) = BRIDGE.get() {
         // Never silently pretend a dropped ledger event was delivered. A full
@@ -94,9 +127,30 @@ fn emit(event: Event) {
         }
     }
 }
-pub(crate) fn capture_frame() {
-    FRAMES.fetch_add(1, Ordering::Relaxed);
+pub(crate) fn capture_frame(captured: Instant, verified: bool) {
+    let observed = capture_timestamp(
+        captured,
+        verified,
+        Instant::now(),
+        companion_voice::boottime_ns(),
+    );
+    CAPTURE_OBSERVED_NS.store(observed.unwrap_or(0), Ordering::Release);
     CAPTURING.store(true, Ordering::Release);
+}
+fn capture_timestamp(
+    captured: Instant,
+    verified: bool,
+    now: Instant,
+    boot_ns: Option<u64>,
+) -> Option<u64> {
+    if !verified {
+        return None;
+    }
+    let age = now.checked_duration_since(captured)?;
+    if age >= Duration::from_millis(150) {
+        return None;
+    }
+    boot_ns?.checked_sub(u64::try_from(age.as_nanos()).ok()?)
 }
 pub(crate) fn capture_stopped() {
     CAPTURING.store(false, Ordering::Release);
@@ -124,6 +178,30 @@ pub(crate) fn playback_ended(
         emit(Event::EndPlayback(id, generated, played, !drained));
     }
 }
+pub(crate) fn dialogue(
+    session: &str,
+    labels: &serde_json::Value,
+    event: companion_voice::dialogue::Event,
+) {
+    if BRIDGE.get().is_none() {
+        return;
+    }
+    let Some((turn_id, observed_at_ns)) = turn(labels).zip(companion_voice::boottime_ns()) else {
+        LOST.store(true, Ordering::Release);
+        return;
+    };
+    let record = companion_voice::dialogue::Record {
+        voice_session_id: session.into(),
+        turn_id,
+        observed_at_ns,
+        event,
+    };
+    if record.valid() {
+        emit(Event::Dialogue(record));
+    } else {
+        LOST.store(true, Ordering::Release);
+    }
+}
 /// Called only from existing ordinary-thread telemetry milestones. Connection
 /// completion/model output are deliberately NOT evidence of listening/speaking.
 pub(crate) fn milestone(stage: &str, labels: &serde_json::Value) {
@@ -141,15 +219,26 @@ pub(crate) fn milestone(stage: &str, labels: &serde_json::Value) {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 struct Observation {
     id: String,
     state: AudioState,
     generated: u64,
     played: Option<u64>,
     interrupted: bool,
+    observed_at_ns: Option<u64>,
+}
+impl PartialEq for Observation {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+            && self.state == other.state
+            && self.generated == other.generated
+            && self.played == other.played
+            && self.interrupted == other.interrupted
+    }
 }
 impl Observation {
+    #[cfg(test)]
     fn request(&self) -> Request {
         Request::Audio {
             turn_id: self.id.clone(),
@@ -211,8 +300,7 @@ pub(crate) fn start() {
             let mut closed = std::collections::HashSet::new();
             let mut base_generated = 0;
             let mut base_played = Some(0);
-            let mut frames = FRAMES.load(Ordering::Acquire);
-            let mut last_capture = Instant::now() - Duration::from_secs(1);
+
             loop {
                 if !accepted {
                     if let Some(value) = current.as_ref() {
@@ -266,6 +354,14 @@ pub(crate) fn start() {
                                     client.disconnect();
                                     accepted = false;
                                 }
+                                Reply::OperationError { operation, .. }
+                                    if operation == "voice_dialogue" =>
+                                {
+                                    // The durable reference chain was rejected. Do not silently
+                                    // keep presenting later events as a complete observation.
+                                    LOST.store(true, Ordering::Release);
+                                    return;
+                                }
                                 _ => {}
                             }
                         }
@@ -306,7 +402,15 @@ pub(crate) fn start() {
                     }
                 }
                 while let Ok(event) = rx.try_recv() {
+                    let event = match event {
+                        Event::Operation(epoch, record) if operations::current(epoch) => {
+                            Event::Dialogue(record)
+                        }
+                        Event::Operation(..) => continue,
+                        event => event,
+                    };
                     match event {
+                        Event::Operation(..) => unreachable!("operation epoch checked above"),
                         Event::Context(id, reply) => {
                             if !accepted || contexts.contains_key(&id) || contexts.len() >= 4 {
                                 let _ = reply.send(Err(std::io::Error::other(
@@ -379,6 +483,7 @@ pub(crate) fn start() {
                                     current.as_mut().filter(|v| !closed.contains(&v.id))
                                 {
                                     value.state = state;
+                                    value.observed_at_ns = companion_voice::boottime_ns();
                                 }
                                 history = None;
                             } else if current.as_ref().is_none_or(|value| value.id != id) {
@@ -388,10 +493,12 @@ pub(crate) fn start() {
                                     generated: 0,
                                     played: None,
                                     interrupted: false,
+                                    observed_at_ns: companion_voice::boottime_ns(),
                                 });
                                 history = None;
                             } else if let Some(value) = current.as_mut() {
                                 value.state = state;
+                                value.observed_at_ns = companion_voice::boottime_ns();
                             }
                         }
                         Event::Playback(id, view) => {
@@ -409,6 +516,7 @@ pub(crate) fn start() {
                                     generated: 0,
                                     played: None,
                                     interrupted: false,
+                                    observed_at_ns: companion_voice::boottime_ns(),
                                 });
                             }
                             base_generated = current.as_ref().map_or(0, |v| v.generated);
@@ -423,12 +531,31 @@ pub(crate) fn start() {
                                 value.played =
                                     base_played.zip(played).map(|(a, b)| a.saturating_add(b));
                                 value.interrupted = interrupted;
+                                value.observed_at_ns = companion_voice::boottime_ns();
                                 value.state = if interrupted {
                                     AudioState::Cancelling
                                 } else {
                                     AudioState::Thinking
                                 };
                                 history = None;
+                            }
+                        }
+                        Event::Dialogue(record) => {
+                            let late_result = matches!(
+                                record.event,
+                                companion_voice::dialogue::Event::ToolResult { .. }
+                                    | companion_voice::dialogue::Event::OperationSettled { .. }
+                            );
+                            if !accepted
+                                || (!late_result
+                                    && (closed.contains(&record.turn_id)
+                                        || current
+                                            .as_ref()
+                                            .is_none_or(|value| value.id != record.turn_id)))
+                                || client.send_dialogue(record).is_err()
+                            {
+                                LOST.store(true, Ordering::Release);
+                                return;
                             }
                         }
                     }
@@ -440,30 +567,36 @@ pub(crate) fn start() {
                         }
                     }
                 }
-                let now_frames = FRAMES.load(Ordering::Acquire);
-                if now_frames != frames {
-                    frames = now_frames;
-                    last_capture = Instant::now();
-                }
                 if let Some(value) = current.as_mut() {
                     if !matches!(
                         value.state,
                         AudioState::Stopped | AudioState::Error | AudioState::Cancelling
                     ) {
                         let mut playing = false;
+                        let mut playback_at = None;
                         if let Some(view) = history.as_ref() {
-                            if let Some((generated, played, drained)) = view.companion_snapshot() {
+                            if let Some((generated, played, drained, observed_at)) =
+                                view.companion_snapshot()
+                            {
                                 playing = is_playing(generated, played, drained);
+                                playback_at = observed_at;
                                 value.generated = base_generated.saturating_add(generated);
                                 value.played =
                                     base_played.zip(played).map(|(a, b)| a.saturating_add(b));
                             }
                         }
-                        value.state = observed_state(
-                            playing,
-                            CAPTURING.load(Ordering::Acquire)
-                                && last_capture.elapsed() < Duration::from_millis(150),
-                        );
+                        let capture_at = CAPTURE_OBSERVED_NS.load(Ordering::Acquire);
+                        let now = companion_voice::boottime_ns();
+                        let capturing = CAPTURING.load(Ordering::Acquire)
+                            && now.is_some_and(|now| capture_is_recent(capture_at, now));
+                        value.state = observed_state(playing, capturing);
+                        value.observed_at_ns = if playing {
+                            playback_at
+                        } else if capturing {
+                            Some(capture_at)
+                        } else {
+                            now
+                        };
                     }
                     if accepted && !deliver(&mut client, value, &mut last_sent, &mut closed) {
                         accepted = false;
@@ -523,13 +656,14 @@ impl Reconnecting {
         }
     }
     fn disconnect(&mut self) {
+        operations::disconnected();
         self.client = None;
         self.retry_at = Instant::now() + self.delay;
         self.delay = (self.delay * 2).min(Duration::from_secs(5));
     }
     fn poll(&mut self) -> std::io::Result<Vec<Reply>> {
         if self.client.is_none() && Instant::now() >= self.retry_at {
-            match Client::connect_eva(&self.path, self.session.clone(), self.source.clone()) {
+            match Client::connect_dialogue(&self.path, self.session.clone(), self.source.clone()) {
                 Ok(c) => self.client = Some(c),
                 Err(e) => {
                     self.disconnect();
@@ -553,6 +687,27 @@ impl Reconnecting {
             }
         }
     }
+    fn send_observation(&mut self, value: &Observation) -> std::io::Result<bool> {
+        let observed_at_ns = value
+            .observed_at_ns
+            .ok_or_else(|| std::io::Error::other("voice_clock_unavailable"))?;
+        let result = self
+            .client
+            .as_mut()
+            .ok_or_else(|| std::io::Error::other("companion_disconnected"))?
+            .send_audio(companion_voice::Audio {
+                turn_id: value.id.clone(),
+                state: value.state,
+                generated_samples: value.generated,
+                played_samples: value.played,
+                interrupted: value.interrupted,
+                observed_at_ns,
+            });
+        if result.is_err() {
+            self.disconnect();
+        }
+        result
+    }
     fn send(&mut self, request: Request) -> std::io::Result<()> {
         let result = self
             .client
@@ -564,24 +719,54 @@ impl Reconnecting {
         }
         result
     }
+    fn send_dialogue(&mut self, record: companion_voice::dialogue::Record) -> std::io::Result<()> {
+        let result = self
+            .client
+            .as_mut()
+            .ok_or_else(|| std::io::Error::other("companion_disconnected"))
+            .and_then(|client| client.send_dialogue(record));
+        if result.is_err() {
+            self.disconnect();
+        }
+        result
+    }
 }
 fn deliver(
     client: &mut Reconnecting,
     value: &Observation,
-    last_sent: &mut Option<Observation>,
+    last_sent: &mut Option<(Observation, Instant)>,
     closed: &mut std::collections::HashSet<String>,
 ) -> bool {
-    if closed.contains(&value.id) || last_sent.as_ref() == Some(value) {
+    if closed.contains(&value.id) || !delivery_due(last_sent.as_ref(), value, Instant::now()) {
         return true;
     }
-    if closed.len() >= 100_000 || client.send(value.request()).is_err() {
+    if closed.len() >= 100_000 {
         return false;
     }
-    *last_sent = Some(value.clone());
+    match client.send_observation(value) {
+        Ok(false) => return true,
+        Err(_) => return false,
+        Ok(true) => {}
+    }
+    *last_sent = Some((value.clone(), Instant::now()));
     if matches!(value.state, AudioState::Stopped | AudioState::Error) || value.interrupted {
         closed.insert(value.id.clone());
     }
     true
+}
+fn delivery_due(last: Option<&(Observation, Instant)>, value: &Observation, now: Instant) -> bool {
+    last.is_none_or(|(previous, sent)| {
+        previous != value
+            || (matches!(value.state, AudioState::Listening | AudioState::Speaking)
+                && now.saturating_duration_since(*sent)
+                    >= Duration::from_nanos(companion_voice::REFRESH_NS))
+    })
+}
+fn capture_is_recent(observed: u64, now: u64) -> bool {
+    observed > 0
+        && now
+            .checked_sub(observed)
+            .is_some_and(|age| age < 150_000_000)
 }
 fn is_playing(generated: u64, played: Option<u64>, drained: bool) -> bool {
     !drained && played.is_some_and(|n| n > 0 && n < generated)
@@ -598,6 +783,97 @@ fn observed_state(playing: bool, capture_recent: bool) -> AudioState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn old_or_unverified_pcm_cannot_be_relabelled_with_arrival_time() {
+        let now = Instant::now();
+        assert_eq!(
+            capture_timestamp(
+                now - Duration::from_millis(20),
+                true,
+                now,
+                Some(1_000_000_000)
+            ),
+            Some(980_000_000)
+        );
+        assert!(
+            capture_timestamp(now - Duration::from_secs(1), true, now, Some(1_000_000_000))
+                .is_none()
+        );
+        assert!(capture_timestamp(now, false, now, Some(1_000_000_000)).is_none());
+        assert!(
+            capture_timestamp(
+                now + Duration::from_millis(1),
+                true,
+                now,
+                Some(1_000_000_000)
+            )
+            .is_none()
+        );
+    }
+    #[test]
+    fn captured_frames_expire_across_suspend_and_cannot_use_future_time() {
+        assert!(capture_is_recent(1, 149_999_999));
+        assert!(!capture_is_recent(1, 150_000_001));
+        assert!(!capture_is_recent(0, 1));
+        assert!(!capture_is_recent(2, 1));
+    }
+    #[test]
+    fn unchanged_live_states_refresh_but_quiet_or_closed_states_do_not() {
+        let at = Instant::now();
+        for state in [AudioState::Listening, AudioState::Speaking] {
+            let value = Observation {
+                id: "t".into(),
+                state,
+                generated: 100,
+                played: Some(20),
+                interrupted: false,
+                observed_at_ns: Some(1),
+            };
+            let last = (value.clone(), at);
+            assert!(!delivery_due(
+                Some(&last),
+                &value,
+                at + Duration::from_nanos(companion_voice::REFRESH_NS - 1)
+            ));
+            assert!(delivery_due(
+                Some(&last),
+                &value,
+                at + Duration::from_nanos(companion_voice::REFRESH_NS)
+            ));
+        }
+        for state in [AudioState::Thinking, AudioState::Stopped, AudioState::Error] {
+            let value = Observation {
+                id: "t".into(),
+                state,
+                generated: 100,
+                played: None,
+                interrupted: false,
+                observed_at_ns: Some(1),
+            };
+            assert!(!delivery_due(
+                Some(&(value.clone(), at)),
+                &value,
+                at + Duration::from_secs(1)
+            ));
+        }
+    }
+    #[test]
+    fn activation_identity_does_not_reuse_a_restarted_wm_generation() {
+        let sequence = AtomicU64::new(1);
+        let first = activation_id(7, &sequence).unwrap();
+        let second = activation_id(7, &sequence).unwrap();
+        assert_ne!(first, second);
+        assert!(companion_protocol::identifier(&first));
+        assert!(companion_protocol::identifier(&second));
+    }
+    #[test]
+    fn exhausted_activation_identity_fails_closed() {
+        let sequence = AtomicU64::new(u64::MAX - 1);
+        assert!(activation_id(u64::MAX, &sequence).is_ok());
+        assert!(activation_id(0, &sequence).is_err());
+        assert!(activation_id(u64::MAX, &sequence).is_err());
+        assert_eq!(sequence.load(Ordering::Relaxed), u64::MAX);
+    }
     #[test]
     fn generated_is_not_audibly_played() {
         assert_eq!(observed_state(false, false), AudioState::Thinking);
@@ -620,6 +896,7 @@ mod tests {
             generated: 24000,
             played: None,
             interrupted: false,
+            observed_at_ns: Some(1),
         };
         let encoded = serde_json::to_value(observation.request()).unwrap();
         assert_eq!(encoded["generated_samples"], 24000);

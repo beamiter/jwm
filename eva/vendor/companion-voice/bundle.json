@@ -1,0 +1,12 @@
+{
+  "schema": 1,
+  "feature": "linux_boottime_ns_v1",
+  "dialogue_version": 2,
+  "public_companion_base": "9aa569540091524d637a7115b64c587b9177a55b",
+  "files_sha256": {
+    "src/lib.rs": "24ee5b5bd20be44d1426e5e4db2a12b54538b72be03f5d03ae8a2cd02d5d629f",
+    "src/dialogue.rs": "96548d8ad3c46a2311188b2a9e858ef10431062cf9d22d55f792d46925cf8fd4",
+    "LICENSE": "df864a86870c22b4a37004850372cd147b82495362f64676fecbe28f27f58d42",
+    "Cargo.toml": "34b195b66b77f53331e9ac3249159a3872b4f0a166a82403d4c638177eead5d1"
+  }
+}

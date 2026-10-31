@@ -329,6 +329,17 @@ pub struct BargeInGate {
     echo_frames: u64,
     peak: f32,
     max_voiced: u32,
+    since: Option<Instant>,
+    last_source: Option<Instant>,
+    sequence_source: Option<Instant>,
+    rejected_frames: u64,
+    discontinuities: u64,
+}
+/// Keep replay buffering under the same source-time decision as interruption.
+pub struct BargeInObservation {
+    pub interrupted: bool,
+    pub retain_frame: bool,
+    pub reset_buffer: bool,
 }
 impl Default for BargeInGate {
     fn default() -> Self {
@@ -348,12 +359,24 @@ impl BargeInGate {
             echo_frames: 0,
             peak: 0.0,
             max_voiced: 0,
+            since: None,
+            last_source: None,
+            sequence_source: None,
+            rejected_frames: 0,
+            discontinuities: 0,
+        }
+    }
+    pub fn with_noise_since(noise: &InputNoise, since: Instant) -> Self {
+        Self {
+            since: Some(since),
+            ..Self::with_noise(noise)
         }
     }
     pub fn reset(&mut self) {
         self.speech_window = 0;
         self.echo_probe.clear();
         self.echo_detected = false;
+        self.sequence_source = None;
     }
     pub fn echo_detected(&self) -> bool {
         self.echo_detected
@@ -362,9 +385,57 @@ impl BargeInGate {
     pub fn statistics(&self) -> serde_json::Value {
         serde_json::json!({"input_frames":self.frames,"noise_frames":self.noise_frames,"above_threshold_frames":self.above_threshold,
             "echo_frames":self.echo_frames,"peak_level":self.peak,"threshold_level":self.threshold,
-            "max_voiced_frames":self.max_voiced})
+            "max_voiced_frames":self.max_voiced,"rejected_source_frames":self.rejected_frames,
+            "source_discontinuities":self.discontinuities})
     }
-    pub fn observe(&mut self, frame: &Frame) -> bool {
+    pub fn observe(&mut self, frame: &Frame) -> BargeInObservation {
+        self.observe_at(frame, Instant::now())
+    }
+    pub(crate) fn observe_at(&mut self, frame: &Frame, now: Instant) -> BargeInObservation {
+        // Arrival time cannot make queued PCM current. Only native timestamps
+        // after this turn's commit may interrupt it or enter its replay buffer.
+        let age = now.checked_duration_since(frame.captured);
+        let delta = self
+            .last_source
+            .and_then(|last| frame.captured.checked_duration_since(last));
+        if !frame.timestamp_verified
+            || frame.pcm.len() != FRAME_BYTES
+            || age.is_none_or(|age| age > Duration::from_millis(250))
+            || self.since.is_some_and(|since| frame.captured < since)
+            || self.last_source.is_some()
+                && delta.is_none_or(|delta| delta < Duration::from_millis(15))
+        {
+            self.frames = self.frames.saturating_add(1);
+            self.rejected_frames = self.rejected_frames.saturating_add(1);
+            self.reset();
+            return BargeInObservation {
+                interrupted: false,
+                retain_frame: false,
+                reset_buffer: true,
+            };
+        }
+        // Framer already rejects discontinuous native chunks. Check again at
+        // this consumer boundary: draining, dropped work and phase changes can
+        // omit frames even when each individual native chunk was valid.
+        let continuous = self
+            .sequence_source
+            .is_some_and(|last| frame.captured.duration_since(last) <= Duration::from_millis(25));
+        if !continuous {
+            if self.sequence_source.is_some() {
+                self.discontinuities = self.discontinuities.saturating_add(1);
+            }
+            self.reset();
+        }
+        self.last_source = Some(frame.captured);
+        self.sequence_source = Some(frame.captured);
+        let interrupted = self.observe_signal(frame);
+        BargeInObservation {
+            interrupted,
+            retain_frame: !self.echo_detected,
+            reset_buffer: !continuous || self.echo_detected,
+        }
+    }
+    fn observe_signal(&mut self, frame: &Frame) -> bool {
         if !frame.level.is_finite() || frame.level <= self.threshold {
             return self.observe_with_reference(frame, &[]);
         }
@@ -710,7 +781,7 @@ impl Framer {
                 pcm,
             };
 
-            crate::companion::capture_frame();
+            crate::companion::capture_frame(frame.captured, frame.timestamp_verified);
             tx.try_send(Ok(frame))
                 .map_err(|_| io::Error::other("audio_buffer_overflow"))?;
             // Every older partial chunk has now been consumed. All remaining
@@ -1130,6 +1201,7 @@ struct Output {
     received_samples: u64,
     segments: Vec<Segment>,
     clock: Option<(Instant, u64)>,
+    clock_boottime_ns: Option<u64>,
     telemetry: Option<serde_json::Value>,
     companion_labels: Option<serde_json::Value>,
     first_played: bool,
@@ -1245,16 +1317,32 @@ fn edits(state: &Output, now: Instant) -> Vec<HistoryEdit> {
 }
 impl PlaybackHistory {
     /// Nonblocking metadata only; a contended audio queue yields no evidence.
-    pub(crate) fn companion_snapshot(&self) -> Option<(u64, Option<u64>, bool)> {
+    pub(crate) fn companion_snapshot(&self) -> Option<(u64, Option<u64>, bool, Option<u64>)> {
         let s = self.state.try_lock().ok()?;
         let played = if s.drained {
             Some(s.submitted / 2)
         } else {
             s.clock
                 .filter(|(at, _)| at.elapsed() <= Duration::from_millis(100))
+                .filter(|_| {
+                    s.clock_boottime_ns
+                        .zip(companion_voice::boottime_ns())
+                        .is_some_and(|(at, now)| {
+                            now.checked_sub(at).is_some_and(|age| age <= 100_000_000)
+                        })
+                })
                 .map(|(_, n)| n)
         };
-        Some((s.received_samples, played, s.drained))
+        Some((
+            s.received_samples,
+            played,
+            s.drained,
+            if s.drained {
+                None
+            } else {
+                played.and(s.clock_boottime_ns)
+            },
+        ))
     }
     pub fn items(&self) -> Vec<String> {
         self.state
@@ -1504,6 +1592,7 @@ fn playback_loop(
         state.clone(),
         notify.clone(),
     );
+    let completed_state = state.clone();
     let _listener = stream
         .add_local_listener_with_user_data(())
         .state_changed(move |_, _, old, new| {
@@ -1511,7 +1600,17 @@ fn playback_loop(
                 || (matches!(new, pw::stream::StreamState::Unconnected)
                     && !matches!(old, pw::stream::StreamState::Unconnected))
             {
-                fail(&state_fault, "playback_unavailable");
+                // The loop disconnects after the actual drained callback.
+                // That successful teardown can race finish() waking up. It
+                // must not retroactively fail already confirmed playback;
+                // errors before drained remain errors and are never cleared.
+                if !completed_state
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .drained
+                {
+                    fail(&state_fault, "playback_unavailable");
+                }
             }
         })
         .param_changed(move |_, _, id, param| validate_format(id, param, &param_fault))
@@ -1591,6 +1690,7 @@ fn playback_loop(
             if let Some(samples) = samples {
                 let previous = s.clock.map_or(0, |(_, p)| p);
                 s.clock = Some((Instant::now(), previous.max(samples)));
+                s.clock_boottime_ns = companion_voice::boottime_ns();
             }
             claim_first_played(&mut s, samples)
         };
@@ -1629,6 +1729,38 @@ fn playback_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn companion_playback_requires_recent_boot_inclusive_timing() {
+        let now = companion_voice::boottime_ns().unwrap();
+        let state = Arc::new(Mutex::new(Output {
+            received_samples: 2400,
+            submitted: 960,
+            clock: Some((Instant::now(), 240)),
+            clock_boottime_ns: Some(now),
+            ..Output::default()
+        }));
+        let history = PlaybackHistory {
+            state: state.clone(),
+        };
+        assert_eq!(
+            history.companion_snapshot(),
+            Some((2400, Some(240), false, Some(now)))
+        );
+        for timestamp in [None, Some(now - 200_000_000), Some(now + 1_000_000_000)] {
+            state.lock().unwrap().clock_boottime_ns = timestamp;
+            assert_eq!(
+                history.companion_snapshot(),
+                Some((2400, None, false, None))
+            );
+        }
+        // A previously verified drain remains a historical fact, never ongoing speaking.
+        state.lock().unwrap().drained = true;
+        assert_eq!(
+            history.companion_snapshot(),
+            Some((2400, Some(480), true, None))
+        );
+    }
+
     #[test]
     fn verified_chunks_recover_after_an_unaligned_unknown_startup_prefix() {
         let source = Instant::now();
@@ -2040,6 +2172,12 @@ mod native_tests {
         let played = history
             .played_samples()
             .expect("native device clock was unavailable");
+        let (generated, observed, drained, timestamp) = history.companion_snapshot().unwrap();
+        assert!(!drained && observed.is_some_and(|n| n > 0 && n <= generated));
+        assert!(companion_voice::fresh(
+            timestamp.unwrap(),
+            companion_voice::boottime_ns().unwrap()
+        ));
         assert!(
             played > 4_800 && played < 24_000,
             "played offset must come from device progress, got {played}"
@@ -2118,6 +2256,117 @@ mod barge_in_tests {
             );
         }
         noise
+    }
+
+    #[test]
+    fn invalid_source_frames_cannot_trigger_an_interruption() {
+        for kind in ["stale", "unverified", "future", "malformed"] {
+            let mut gate = BargeInGate::default();
+            for index in 0..6 {
+                let mut input = frame(&voice(index + 500));
+                match kind {
+                    "stale" => input.captured -= Duration::from_secs(1),
+                    "unverified" => input.timestamp_verified = false,
+                    "future" => input.captured += Duration::from_secs(1),
+                    "malformed" => input.pcm.truncate(2),
+                    _ => unreachable!(),
+                }
+                let observed = gate.observe(&input);
+                assert!(!observed.interrupted, "{kind} frame triggered interruption");
+                assert!(!observed.retain_frame, "{kind} frame entered replay buffer");
+                assert!(observed.reset_buffer);
+            }
+            assert_eq!(gate.statistics()["rejected_source_frames"], 6);
+            assert_eq!(gate.statistics()["above_threshold_frames"], 0);
+        }
+    }
+
+    #[test]
+    fn source_time_accepts_fresh_batched_frames_at_the_age_boundary() {
+        let now = Instant::now();
+        let start = now - Duration::from_millis(250);
+        let mut gate = BargeInGate::default();
+        for index in 0..6 {
+            let mut input = frame(&voice(index + 500));
+            input.captured = start + Duration::from_millis(u64::from(index) * 20);
+            // All frames arrive in one batch, but their native clock proves
+            // 120 ms of distinct PCM. Do not count callback/polling intervals.
+            let observed = gate.observe_at(&input, now);
+            assert_eq!(observed.interrupted, index == 5);
+            assert!(observed.retain_frame);
+            assert_eq!(observed.reset_buffer, index == 0);
+        }
+        assert_eq!(gate.statistics()["rejected_source_frames"], 0);
+
+        let mut input = frame(&voice(700));
+        input.captured = start - Duration::from_millis(1);
+        let observed = BargeInGate::default().observe_at(&input, now);
+        assert!(!observed.interrupted && !observed.retain_frame && observed.reset_buffer);
+    }
+
+    #[test]
+    fn duplicate_reordered_and_overlapping_source_frames_reset_evidence() {
+        let start = Instant::now();
+        let mut gate = BargeInGate::default();
+        let mut input = frame(&voice(600));
+        for ms in [0, 20, 40, 60, 80] {
+            input.captured = start + Duration::from_millis(ms);
+            assert!(!gate.observe_at(&input, input.captured).interrupted);
+        }
+        for ms in [80, 60, 81] {
+            input.captured = start + Duration::from_millis(ms);
+            let observed = gate.observe_at(&input, start + Duration::from_millis(100));
+            assert!(!observed.interrupted && !observed.retain_frame && observed.reset_buffer);
+        }
+        for index in 0..6 {
+            input.captured = start + Duration::from_millis(100 + index * 20);
+            let observed = gate.observe_at(&input, input.captured);
+            assert_eq!(observed.interrupted, index == 5);
+            assert_eq!(observed.reset_buffer, index == 0);
+        }
+        // Resetting accumulation must not let already consumed PCM be reused.
+        gate.reset();
+        let observed = gate.observe_at(&input, input.captured);
+        assert!(!observed.retain_frame);
+        assert_eq!(gate.statistics()["rejected_source_frames"], 4);
+    }
+
+    #[test]
+    fn missing_source_frames_cannot_join_separate_speech_bursts() {
+        let start = Instant::now();
+        let mut gate = BargeInGate::default();
+        let mut input = frame(&voice(800));
+        for ms in [0, 20, 40, 60, 80] {
+            input.captured = start + Duration::from_millis(ms);
+            assert!(!gate.observe_at(&input, input.captured).interrupted);
+        }
+        for index in 0..6 {
+            input.captured = start + Duration::from_millis(200 + index * 20);
+            let observed = gate.observe_at(&input, input.captured);
+            assert_eq!(observed.interrupted, index == 5);
+            assert_eq!(observed.reset_buffer, index == 0);
+        }
+        assert_eq!(gate.statistics()["source_discontinuities"], 1);
+    }
+
+    #[test]
+    fn turn_boundary_rejects_previous_input_and_preserves_onset_during_context_query() {
+        let commit = Instant::now();
+        let query_finished = commit + Duration::from_millis(200);
+        let mut gate = BargeInGate::with_noise_since(&InputNoise::default(), commit);
+        let mut input = frame(&voice(900));
+        for ms in [120, 100, 80, 60, 40, 20] {
+            input.captured = commit - Duration::from_millis(ms);
+            let observed = gate.observe_at(&input, commit);
+            assert!(!observed.interrupted && !observed.retain_frame);
+        }
+        for index in 0..6 {
+            input.captured = commit + Duration::from_millis(index * 20);
+            let observed = gate.observe_at(&input, query_finished);
+            assert_eq!(observed.interrupted, index == 5);
+            assert!(observed.retain_frame);
+        }
+        assert_eq!(gate.statistics()["rejected_source_frames"], 6);
     }
 
     fn harmonic_frame(harmonics: [f64; 3], amplitude: f64) -> Vec<i16> {

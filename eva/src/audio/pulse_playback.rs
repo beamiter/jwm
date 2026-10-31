@@ -134,6 +134,7 @@ fn publish_clock(
         let previous = state.clock.map_or(0, |(_, samples)| samples);
         let proven = samples.max(previous);
         state.clock = Some((at, proven));
+        state.clock_boottime_ns = companion_voice::boottime_ns();
         (claim_first_played(&mut state, Some(samples)), proven)
     };
     if let Some((labels, samples)) = first_played {
@@ -617,6 +618,9 @@ mod tests {
                 .unwrap();
             playback.write_item("unheard-tail", 0, &chunk).await.unwrap();
             tokio::time::sleep(Duration::from_millis(350)).await;
+            let (generated, observed, drained, timestamp) = history.companion_snapshot().unwrap();
+            assert!(!drained && observed.is_some_and(|n| n > 0 && n <= generated));
+            assert!(companion_voice::fresh(timestamp.unwrap(), companion_voice::boottime_ns().unwrap()));
             let stopped = Instant::now();
             drop(playback);
             assert!(stopped.elapsed() < Duration::from_millis(200));
@@ -668,7 +672,7 @@ mod tests {
                     }
                     frame.level = super::super::rms(&frame.pcm);
                     peak = peak.max(frame.level);
-                    if gate.observe(&frame) { break; }
+                    if gate.observe(&frame).interrupted { break; }
                 }
             });
             tokio::pin!(onset);

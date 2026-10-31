@@ -5,6 +5,7 @@ edition = "2024"
 publish = false
 [workspace]
 [dependencies]
+companion-voice = { path = "../../eva/vendor/companion-voice" }
 companion-client = { git = "https://github.com/beamiter/jcompanion.git", rev = "9aa569540091524d637a7115b64c587b9177a55b" }
 companion-protocol = { git = "https://github.com/beamiter/jcompanion.git", rev = "9aa569540091524d637a7115b64c587b9177a55b" }
 serde_json = "1"

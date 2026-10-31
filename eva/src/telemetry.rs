@@ -26,6 +26,8 @@ pub fn fields(fields: &serde_json::Value) -> serde_json::Value {
         "peak_level",
         "threshold_level",
         "max_voiced_frames",
+        "rejected_source_frames",
+        "source_discontinuities",
         // Standby upload gate counters: frame counts only, never audio.
         "uploaded_frames",
         "suppressed_frames",
@@ -41,6 +43,8 @@ pub fn fields(fields: &serde_json::Value) -> serde_json::Value {
                 | "above_threshold_frames"
                 | "echo_frames"
                 | "max_voiced_frames"
+                | "rejected_source_frames"
+                | "source_discontinuities"
                 | "uploaded_frames"
                 | "suppressed_frames"
                 | "gate_openings" => value.is_u64(),
@@ -89,12 +93,20 @@ mod tests {
     fn signal_diagnostics_accept_only_aggregate_numbers() {
         let filtered = super::fields(&serde_json::json!({
             "input_frames":100,"noise_frames":50,"threshold_level":0.006,
+            "rejected_source_frames":7,"source_discontinuities":2,
             "peak_level":"private speech","echo_frames":[123,456],
             "pcm":[1,2,3],"transcript":"private speech","reference":[4,5,6]
         }));
         assert_eq!(
             filtered,
-            serde_json::json!({"input_frames":100,"noise_frames":50,"threshold_level":0.006})
+            serde_json::json!({"input_frames":100,"noise_frames":50,"threshold_level":0.006,
+                "rejected_source_frames":7,"source_discontinuities":2})
+        );
+        assert_eq!(
+            super::fields(&serde_json::json!({
+                "rejected_source_frames":-1,"source_discontinuities":"private speech"
+            })),
+            serde_json::json!({})
         );
     }
 

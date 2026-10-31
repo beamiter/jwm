@@ -257,6 +257,45 @@ async fn observe_receipt(
     Ok(())
 }
 impl Trace {
+    fn dialogue(&self, event: companion_voice::dialogue::Event) {
+        if let Some(session) = self.companion_session.as_deref() {
+            crate::companion::dialogue(session, &self.labels, event);
+        }
+    }
+    fn dialogue_response(
+        &self,
+        response_id: &str,
+        phase: companion_voice::dialogue::Phase,
+        response: &Value,
+    ) {
+        use companion_voice::dialogue::{Event, ResponseStatus};
+        let status = match response["status"].as_str() {
+            Some("completed") => ResponseStatus::Completed,
+            Some("incomplete") => ResponseStatus::Incomplete,
+            Some("cancelled") => ResponseStatus::Cancelled,
+            Some("failed") => ResponseStatus::Failed,
+            _ => return,
+        };
+        self.dialogue(Event::ResponseCompleted {
+            response_id: response_id.into(),
+            phase,
+            status,
+        });
+    }
+    fn dialogue_result(
+        &self,
+        call_id: &str,
+        output: &Value,
+        receipts: &Value,
+        outcome: companion_voice::dialogue::Outcome,
+    ) {
+        self.dialogue(companion_voice::dialogue::Event::ToolResult {
+            call_id: call_id.into(),
+            result_digest: jwm_eva_core::protocol::digest(output),
+            outcome,
+            operations: dialogue_operations(output, receipts),
+        });
+    }
     fn record(&self, stage: &str, extra: &Value) {
         let mut fields = self.labels.as_object().cloned().unwrap_or_default();
         if let Some(extra) = extra.as_object() {
@@ -276,6 +315,37 @@ impl Trace {
             });
         }
     }
+}
+
+fn dialogue_outcome(status: &Value) -> companion_voice::dialogue::Outcome {
+    use companion_voice::dialogue::Outcome;
+    match status.as_str() {
+        Some("succeeded") => Outcome::Succeeded,
+        Some("failed") => Outcome::Failed,
+        Some("partial") => Outcome::Partial,
+        Some("cancelled") => Outcome::Cancelled,
+        Some("noop") => Outcome::Noop,
+        Some("clarify") => Outcome::Clarify,
+        _ => Outcome::Unknown,
+    }
+}
+fn dialogue_operations(
+    output: &Value,
+    receipts: &Value,
+) -> Vec<companion_voice::dialogue::Operation> {
+    receipts["steps"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .enumerate()
+        .filter_map(|(index, step)| {
+            Some(companion_voice::dialogue::Operation {
+                operation_id: step["operation_id"].as_str()?.into(),
+                // The feedback projection may reduce an unproven success to unknown.
+                outcome: dialogue_outcome(&output["steps"][index]["status"]),
+            })
+        })
+        .collect()
 }
 fn publish(
     tx: &mpsc::Sender<Update>,
@@ -692,7 +762,22 @@ async fn run_with_handoff_owned(
     // run_scoped has dropped the conversation future and every local audio
     // owner. Only now may native authority/overlay be retired or wake disabled.
     let finish_result = if let Some(end) = completed_session_end(&mut trace, &result, &cancel) {
-        finish_session_with(&end, &p, |args| command("assistant_control", args)).await
+        let finished =
+            finish_session_with(&end, &p, |args| command("assistant_control", args)).await;
+        if let Some(call) = trace.labels["call_id"].as_str() {
+            let status = if finished.is_ok() {
+                "succeeded"
+            } else {
+                "unknown"
+            };
+            trace.dialogue_result(
+                call,
+                &json!({"status":status,"effect":"eva_session_control"}),
+                &Value::Null,
+                dialogue_outcome(&json!(status)),
+            );
+        }
+        finished
     } else {
         Ok(())
     };
@@ -1107,7 +1192,9 @@ async fn conversation(
                         if let Some(sink)=trace.caption.as_mut(){sink.committed=Some((item.clone(),state.turn_epoch));}
                         if c.interaction.half_duplex {if let Some(cap)=capture.take(){cap.check()?;cap.stop().await;}}
                         if replay_commit.is_none() {while audio_rx.try_recv().is_ok(){}}
-                        trace.record("input_committed",&json!({}));publish(tx,p,&state,"正在理解",0.0,elapsed(start));
+                        trace.record("input_committed",&json!({}));
+                        trace.dialogue(companion_voice::dialogue::Event::InputCommitted { item_id: item.clone() });
+                        publish(tx,p,&state,"正在理解",0.0,elapsed(start));
                         let commit_at=replay_commit.unwrap_or_else(Instant::now);
                         let verified=if let Some(binding)=onset_binding.as_ref(){desktop.verify_commit(binding,commit_at).await}else{Err(io::Error::other(onset_error.as_deref().unwrap_or("local_onset_unavailable")))};
                         let (mut context,focus_changed)=match verified {
@@ -1123,7 +1210,7 @@ async fn conversation(
                         crate::context::planning_monitor_scope(&mut context)?;
                         context["available_actions"]=json!(&available_actions);
                         let mut interrupt_buffer=std::collections::VecDeque::new();
-                        let mut interrupt_gate=BargeInDiagnostics::new(&input_noise,&trace.labels,!c.interaction.half_duplex);
+                        let mut interrupt_gate=BargeInDiagnostics::new(&input_noise,&trace.labels,!c.interaction.half_duplex,commit_at);
                         let work_result = {
                             let remaining=Duration::from_millis(c.interaction.max_session_ms.saturating_sub(elapsed(start)));
                             let turn = tokio::time::timeout(remaining, complete_turn(c,p,tx,store.clone(),ws,trace,&mut state,&context,focus_changed,&mut admission,epoch,start,&mut followup_feedback));
@@ -1276,9 +1363,14 @@ struct BargeInDiagnostics {
     result: &'static str,
 }
 impl BargeInDiagnostics {
-    fn new(noise: &crate::audio::InputNoise, labels: &Value, enabled: bool) -> Self {
+    fn new(
+        noise: &crate::audio::InputNoise,
+        labels: &Value,
+        enabled: bool,
+        since: Instant,
+    ) -> Self {
         Self {
-            gate: crate::audio::BargeInGate::with_noise(noise),
+            gate: crate::audio::BargeInGate::with_noise_since(noise, since),
             labels: json!({
                 "generation":labels["generation"],
                 "session_epoch":labels["session_epoch"],
@@ -1312,6 +1404,21 @@ impl BargeInDiagnostics {
             self.last_report = now;
             self.record("barge_in_progress", "monitoring");
         }
+    }
+
+    fn observe(&mut self, frame: Frame, buffered: &mut std::collections::VecDeque<Frame>) -> bool {
+        let observation = self.gate.observe(&frame);
+        if observation.reset_buffer {
+            buffered.clear();
+        }
+        if !observation.retain_frame {
+            return false;
+        }
+        if buffered.len() == 26 {
+            buffered.pop_front();
+        }
+        buffered.push_back(frame);
+        observation.interrupted
     }
 
     fn finish(&mut self, result: &io::Result<bool>) {
@@ -1350,16 +1457,7 @@ async fn interrupt_input(
             frame=next_frame(pending,receiver)=>frame.ok_or_else(||io::Error::other("audio_unavailable"))??,
         };
         capture.check()?;
-        let interrupted = diagnostics.gate.observe(&frame);
-        if diagnostics.gate.echo_detected() {
-            buffered.clear();
-            continue;
-        }
-        if buffered.len() == 26 {
-            buffered.pop_front();
-        }
-        buffered.push_back(frame);
-        if interrupted {
+        if diagnostics.observe(frame, buffered) {
             return Ok(());
         }
     }
@@ -1447,6 +1545,7 @@ async fn complete_turn(
         state.turn_epoch,
     )
     .await?;
+    trace.labels["call_id"] = json!(call_id);
     if trace.session_end.is_some() {
         return Ok(());
     }
@@ -1458,6 +1557,9 @@ async fn complete_turn(
         "validation_completed",
         &json!({"call_id":call_id,"plan_hash":plan.plan_hash,"result":"validated"}),
     );
+    let operation_owner = trace.companion_session.as_deref().and_then(|session| {
+        crate::companion::operation_owner(session, &trace.labels, &call_id, &plan.plan_hash)
+    });
     if plan.actions.len() > c.execution.max_actions_per_turn {
         return Err(io::Error::other("too_many_actions"));
     }
@@ -1517,11 +1619,21 @@ async fn complete_turn(
         crate::telemetry::mark("execution_started", p.generation, state.turn_epoch);
         publish(tx, p, &state, "正在执行", 0.0, elapsed(start));
         if plan.actions.len() == 1 && plan.actions[0].name == "undo_last_plan" {
-            executor::undo(p, store.clone(), c)
+            executor::undo_observed(p, store.clone(), c, operation_owner.as_ref())
                 .await
                 .or_else(|error| undo_refusal(&error).ok_or(error))?
         } else {
-            execute_plan_observed(c, p, tx, &state, &plan, confirmation, store.clone()).await?
+            execute_plan_observed(
+                c,
+                p,
+                tx,
+                &state,
+                &plan,
+                confirmation,
+                store.clone(),
+                operation_owner.as_ref(),
+            )
+            .await?
         }
     };
     state.respond(epoch, state.turn_epoch, elapsed(start));
@@ -1532,6 +1644,12 @@ async fn complete_turn(
     let public_result = cloud_execution_result(&result, &plan, c, &context);
     let outcome = feedback_outcome(&result, &public_result);
     let public_result = cloud_execution_result(&outcome, &plan, c, context);
+    trace.dialogue_result(
+        &call_id,
+        &public_result,
+        &outcome,
+        dialogue_outcome(&public_result["status"]),
+    );
     let mut feedback_state = LocalFeedback::from_result(&outcome, &public_result);
     if plan.disposition == Disposition::Execute
         && !matches!(
@@ -1644,9 +1762,11 @@ async fn execute_plan_observed(
     plan: &jwm_eva_core::actions::FrozenPlan,
     confirmation: Option<String>,
     store: Arc<Mutex<Store>>,
+    owner: Option<&crate::companion::OperationOwner>,
 ) -> io::Result<Value> {
     let (progress_tx, mut progress_rx) = watch::channel(None);
-    let execution = executor::execute_with_progress(plan, p, confirmation, store, c, &progress_tx);
+    let execution =
+        executor::execute_observed(plan, p, confirmation, store, c, Some(&progress_tx), owner);
     tokio::pin!(execution);
     loop {
         tokio::select! {biased;
@@ -2079,6 +2199,20 @@ async fn plan(
             .and_then(|call| {
                 call.ok_or_else(|| tool_output_error("missing_final_tool_call", &event))
             });
+        trace.dialogue_response(
+            &id,
+            if repair_used {
+                companion_voice::dialogue::Phase::SchemaRepair
+            } else if call
+                .as_ref()
+                .is_ok_and(|call| call.name == "eva_describe_actions")
+            {
+                companion_voice::dialogue::Phase::Discovery
+            } else {
+                companion_voice::dialogue::Phase::Plan
+            },
+            &event["response"],
+        );
         {
             let phase = if repair_used {
                 "schema_repair"
@@ -2121,12 +2255,28 @@ async fn plan(
         if !seen_calls.insert(call.call_id.clone()) {
             return Err(io::Error::other("tool_call_already_consumed"));
         }
+        trace.dialogue(companion_voice::dialogue::Event::ToolCall {
+            response_id: id.clone(),
+            call_id: call.call_id.clone(),
+            tool: if call.name == "eva_describe_actions" {
+                companion_voice::dialogue::Tool::DescribeActions
+            } else {
+                companion_voice::dialogue::Tool::SubmitPlan
+            },
+            arguments_digest: jwm_eva_core::protocol::digest(&json!(call.arguments)),
+        });
         if call.name == "eva_describe_actions" {
             let categories = match describe_categories(&call.arguments) {
                 Ok(categories) => categories,
                 Err(error) => {
                     let code = crate::errors::session_code(&error);
                     trace.record("discovery_rejected", &json!({"result":code}));
+                    trace.dialogue_result(
+                        &call.call_id,
+                        &json!({"status":"plan_invalid","error":code,"executed":false}),
+                        &Value::Null,
+                        companion_voice::dialogue::Outcome::Rejected,
+                    );
                     note_round(
                         trace,
                         json!({"response_id":id,"phase":"discovery","outcome":"rejected","error":code,"arguments":bounded_arguments(&call.arguments)}),
@@ -2178,6 +2328,12 @@ async fn plan(
             }
             selected = by_name.into_values().collect();
             let output = json!({"status":"described","actions":descriptors,"desktop":discovery_context(context,&categories).await?,"available_application_ids":applications});
+            trace.dialogue_result(
+                &call.call_id,
+                &output,
+                &Value::Null,
+                companion_voice::dialogue::Outcome::Described,
+            );
             ws.send(function_output(&call.call_id, &output)).await?;
             frozen_input.extend(crate::planning_input::tool_pair(
                 &call.name,
@@ -2269,6 +2425,12 @@ async fn plan(
                 trace.record(
                     "plan_rejected",
                     &json!({"result":crate::errors::plan_code(error)}),
+                );
+                trace.dialogue_result(
+                    &call.call_id,
+                    &json!({"status":"plan_invalid","error":error.to_string(),"executed":false}),
+                    &Value::Null,
+                    companion_voice::dialogue::Outcome::Rejected,
                 );
                 note_round(
                     trace,
@@ -2997,6 +3159,12 @@ async fn feedback(
                     .await?;
             }
             if e["type"] == "response.done" {
+                let completed_response = active_response.to_owned();
+                trace.dialogue_response(
+                    active_response,
+                    companion_voice::dialogue::Phase::Feedback,
+                    &e["response"],
+                );
                 trace.response = None;
                 if e["response"]["status"] != "completed" {
                     return Err(io::Error::other("feedback_failed"));
@@ -3021,6 +3189,16 @@ async fn feedback(
                         .join(" ");
                     (!text.is_empty()).then(|| bounded_reply(&text))
                 });
+                if let Some(reply) = trace
+                    .spoken_reply
+                    .as_ref()
+                    .filter(|reply| !reply.is_empty())
+                {
+                    trace.dialogue(companion_voice::dialogue::Event::ReplyGenerated {
+                        response_id: completed_response,
+                        content_digest: jwm_eva_core::protocol::digest(&json!(reply)),
+                    });
+                }
                 return Ok(());
             }
         }
@@ -3444,6 +3622,8 @@ mod tests {
                 assert_eq!(record["input_frames"], 3);
                 assert_eq!(record["above_threshold_frames"], 2);
                 assert_eq!(record["max_voiced_frames"], 2);
+                assert_eq!(record["rejected_source_frames"], 0);
+                assert_eq!(record["source_discontinuities"], 0);
                 assert_eq!(record["phase"], "barge_in");
                 for key in record.as_object().unwrap().keys() {
                     assert!(
@@ -3466,6 +3646,8 @@ mod tests {
                             "peak_level",
                             "threshold_level",
                             "max_voiced_frames",
+                            "rejected_source_frames",
+                            "source_discontinuities",
                         ]
                         .contains(&key.as_str()),
                         "unexpected diagnostic field {key}"
@@ -3473,6 +3655,49 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn barge_in_replay_buffer_drops_rejected_and_discontinuous_audio() {
+        let now = Instant::now();
+        let start = now - Duration::from_millis(240);
+        let mut diagnostics = BargeInDiagnostics::new(
+            &crate::audio::InputNoise::default(),
+            &json!({}),
+            false,
+            start,
+        );
+        let mut buffered = std::collections::VecDeque::new();
+        let frame = |captured| Frame {
+            captured,
+            timestamp_verified: true,
+            pcm: vec![1; 960],
+            level: 0.01,
+        };
+        for ms in [0, 20, 40, 60, 80] {
+            assert!(!diagnostics.observe(frame(start + Duration::from_millis(ms)), &mut buffered));
+        }
+        assert_eq!(buffered.len(), 5);
+        assert!(!diagnostics.observe(frame(now - Duration::from_secs(1)), &mut buffered));
+        assert!(buffered.is_empty());
+
+        assert!(!diagnostics.observe(frame(start + Duration::from_millis(100)), &mut buffered));
+        assert_eq!(buffered.len(), 1);
+        // A missing 20 ms frame starts a new buffer as well as a new gate window.
+        assert!(!diagnostics.observe(frame(start + Duration::from_millis(140)), &mut buffered));
+        assert_eq!(buffered.len(), 1);
+        for index in 1..6 {
+            let captured = start + Duration::from_millis(140 + index * 20);
+            assert_eq!(
+                diagnostics.observe(frame(captured), &mut buffered),
+                index == 5
+            );
+        }
+        assert_eq!(buffered.len(), 6);
+        assert_eq!(
+            buffered.front().unwrap().captured,
+            start + Duration::from_millis(140)
+        );
     }
 
     #[test]
@@ -3490,15 +3715,17 @@ mod tests {
                 let (ready, wait_ready) = tokio::sync::oneshot::channel();
                 let (cancel, mut cancelled_rx) = watch::channel(false);
                 let work = async move {
+                    let source_start = Instant::now() - Duration::from_millis(80);
                     let mut diagnostics = BargeInDiagnostics::new(
                         &crate::audio::InputNoise::default(),
                         &json!({"generation":7,"session_epoch":8,"turn_id":9,
                             "model":"must not leak","transcript":"private speech","pcm":[1,2]}),
                         mode != "disabled",
+                        source_start,
                     );
-                    for level in [0.01, 0.002, 0.01] {
+                    for (index, level) in [0.01, 0.002, 0.01].into_iter().enumerate() {
                         diagnostics.gate.observe(&Frame {
-                            captured: Instant::now(),
+                            captured: source_start + Duration::from_millis(index as u64 * 20),
                             timestamp_verified: true,
                             pcm: vec![0; 960],
                             level,
@@ -5539,6 +5766,344 @@ mod tests {
             );
         }
         finish(ws, server).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires the private daemon from jcompanion/tests/voice_dialogue_pipeline.py"]
+    async fn companion_dialogue_pipeline_to_private_daemon() {
+        private_dialogue_pipeline(false).await;
+    }
+    #[tokio::test]
+    #[ignore = "requires the private daemon and IPC stand-in from jcompanion/tests/voice_dialogue_pipeline.py"]
+    async fn companion_delayed_receipt_to_original_dialogue() {
+        private_dialogue_pipeline(true).await;
+    }
+
+    struct ReceiptFixture {
+        mode: Arc<std::sync::atomic::AtomicU8>,
+        dispatches: Arc<std::sync::atomic::AtomicUsize>,
+        queries: Arc<std::sync::atomic::AtomicUsize>,
+        stop: Arc<std::sync::atomic::AtomicBool>,
+        thread: Option<std::thread::JoinHandle<()>>,
+    }
+    impl ReceiptFixture {
+        fn start(context: Value) -> Self {
+            use std::io::{BufRead, Write};
+            use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
+            let path = std::path::PathBuf::from(std::env::var_os("JWM_SOCKET").unwrap());
+            assert!(
+                path.to_string_lossy()
+                    .starts_with("/tmp/eva-dialogue-pipeline-")
+            );
+            let listener = std::os::unix::net::UnixListener::bind(path).unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let mode = Arc::new(AtomicU8::new(0));
+            let dispatches = Arc::new(AtomicUsize::new(0));
+            let queries = Arc::new(AtomicUsize::new(0));
+            let stop = Arc::new(AtomicBool::new(false));
+            let (m, d, q, s) = (
+                mode.clone(),
+                dispatches.clone(),
+                queries.clone(),
+                stop.clone(),
+            );
+            let thread = std::thread::spawn(move || {
+                while !s.load(Ordering::Acquire) {
+                    let (mut stream, _) = match listener.accept() {
+                        Ok(pair) => pair,
+                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                            std::thread::sleep(Duration::from_millis(1));
+                            continue;
+                        }
+                        Err(error) => panic!("private IPC accept failed: {error}"),
+                    };
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(2)))
+                        .unwrap();
+                    let mut text = String::new();
+                    std::io::BufReader::new(stream.try_clone().unwrap())
+                        .read_line(&mut text)
+                        .unwrap();
+                    let request: Value = serde_json::from_str(&text).unwrap();
+                    let value = if request["query"] == "get_execution_context" {
+                        context.clone()
+                    } else if request["command"] == "guarded_execute" {
+                        assert_eq!(request["args"]["wm_instance_id"], context["wm_instance_id"]);
+                        assert_eq!(
+                            request["args"]["action"]["arguments"]["window_token"],
+                            "private-window-2"
+                        );
+                        d.fetch_add(1, Ordering::SeqCst);
+                        json!({"operation_id":request["args"]["operation_id"],"status":"accepted"})
+                    } else if request["query"] == "get_execution_status" {
+                        assert_eq!(request["args"]["wm_instance_id"], context["wm_instance_id"]);
+                        q.fetch_add(1, Ordering::SeqCst);
+                        let mode = m.load(Ordering::Acquire);
+                        json!({"operation_id":if mode==1{json!("wrong-operation")}else{request["args"]["operation_id"].clone()},
+                            "status":if mode==0{"unknown"}else{"succeeded"},"verified":{"maximized":true}})
+                    } else {
+                        panic!("unexpected private IPC request: {request}")
+                    };
+                    writeln!(stream, "{}", json!({"success":true,"data":value})).unwrap();
+                }
+            });
+            Self {
+                mode,
+                dispatches,
+                queries,
+                stop,
+                thread: Some(thread),
+            }
+        }
+    }
+    impl Drop for ReceiptFixture {
+        fn drop(&mut self) {
+            self.stop.store(true, std::sync::atomic::Ordering::Release);
+            if let Some(thread) = self.thread.take() {
+                thread.join().unwrap();
+            }
+        }
+    }
+
+    async fn private_dialogue_pipeline(delayed: bool) {
+        assert_eq!(
+            std::env::var("JWM_EVA_DIALOGUE_PIPELINE_TEST").as_deref(),
+            Ok("1")
+        );
+        crate::companion::start();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let lease = loop {
+            match crate::companion::acquire(7001).await {
+                Ok(lease) => break lease,
+                Err(_) if Instant::now() < deadline => {
+                    tokio::time::sleep(Duration::from_millis(50)).await
+                }
+                Err(error) => panic!("private companion acquisition failed: {error}"),
+            }
+        };
+        let session = lease.session_id().unwrap().to_owned();
+        crate::companion::context(&session).await.unwrap();
+        let data = TestStore::new();
+        let mut config = Config::default();
+        config.execution.max_planning_rounds = 2;
+        config.undo.enabled = false;
+        let permit = AssistantPermit {
+            assistant_session_id: "private-receipt-permit".into(),
+            generation: 7001,
+        };
+        let mut context = desktop();
+        context["assistant_permit"] = json!(permit);
+        let fixture = delayed.then(|| ReceiptFixture::start(context.clone()));
+        let final_plan = if delayed {
+            json!({"disposition":"execute","actions":[{"name":"set_window_maximized","arguments":{"window_ref":"w2","enabled":true}}],"question":null,"reason":null})
+        } else {
+            json!({"disposition":"noop","actions":[],"question":null,"reason":"No desktop change requested"})
+        };
+        let (mut ws, server) = replay(vec![
+            tool("eva_describe_actions", "discover", json!({"categories":["windows"]})),
+            tool("eva_submit_plan", "final", final_plan),
+            json!({"output":[{"type":"message","status":"completed","content":[{"type":"output_audio","transcript":"The operation result is not confirmed yet."}]}]}),
+        ]).await;
+        let mut actor = trace();
+        actor.companion_session = Some(session.clone());
+        actor.labels = json!({"generation":7001,"session_epoch":1,"turn_id":1});
+        actor.input = crate::planning_input::FrozenInput::default();
+        actor.input.set_audio("owned-A").unwrap();
+        crate::companion::milestone("speech_started", &actor.labels);
+        actor.dialogue(companion_voice::dialogue::Event::InputCommitted {
+            item_id: "owned-A".into(),
+        });
+        let (call, frozen) = plan(
+            &config,
+            &mut ws,
+            &mut actor,
+            data.store.clone(),
+            &context,
+            &mut PlanAdmission::default(),
+            1,
+            1,
+        )
+        .await
+        .unwrap();
+        let result = if delayed {
+            assert_eq!(frozen.disposition, Disposition::Execute);
+            let owner = crate::companion::operation_owner(
+                &session,
+                &actor.labels,
+                &call,
+                &frozen.plan_hash,
+            )
+            .unwrap();
+            let result = executor::execute_observed(
+                &frozen,
+                &permit,
+                None,
+                data.store.clone(),
+                &config,
+                None,
+                Some(&owner),
+            )
+            .await
+            .unwrap();
+            assert_eq!(result["status"], "accepted");
+            result
+        } else {
+            assert_eq!(frozen.disposition, Disposition::Noop);
+            json!({"status":frozen.disposition,"steps":[]})
+        };
+        actor.dialogue_result(&call, &result, &result, dialogue_outcome(&result["status"]));
+        ws.send(function_output(&call, &result)).await.unwrap();
+        feedback(&config, &mut ws, &mut actor, data.store.clone(), &result)
+            .await
+            .unwrap();
+        assert!(actor.spoken_reply.is_some());
+        assert_eq!(
+            data.store.lock().unwrap().ledger.operations.len(),
+            usize::from(delayed)
+        );
+        let log = finish(ws, server).await;
+        let outputs = log
+            .iter()
+            .filter(|value| value["item"]["type"] == "function_call_output")
+            .collect::<Vec<_>>();
+        assert_eq!(outputs.len(), 2);
+        assert_eq!(outputs[0]["item"]["call_id"], "discover");
+        assert_eq!(outputs[1]["item"]["call_id"], "final");
+        drop(lease);
+        let profile =
+            std::path::PathBuf::from(std::env::var_os("JWM_EVA_DIALOGUE_PROFILE").unwrap());
+        assert!(
+            profile
+                .to_string_lossy()
+                .starts_with("/tmp/eva-dialogue-pipeline-")
+        );
+        if let Some(fixture) = fixture.as_ref() {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                let ready = std::fs::read(profile.join("dialogue-index.json"))
+                    .ok()
+                    .and_then(|v| serde_json::from_slice::<Value>(&v).ok())
+                    .is_some_and(|v| v["turns"][0]["entry"]["finished"] == true);
+                if ready {
+                    break;
+                }
+                assert!(Instant::now() < deadline);
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            let acquire_deadline = Instant::now() + Duration::from_secs(5);
+            let newer = loop {
+                match crate::companion::acquire(7002).await {
+                    Ok(lease) => break lease,
+                    Err(_) if Instant::now() < acquire_deadline => {
+                        tokio::time::sleep(Duration::from_millis(20)).await
+                    }
+                    Err(error) => panic!("new private voice activation failed: {error}"),
+                }
+            };
+            let labels = json!({"generation":7002,"session_epoch":2,"turn_id":1});
+            crate::companion::milestone("speech_started", &labels);
+            crate::companion::dialogue(
+                newer.session_id().unwrap(),
+                &labels,
+                companion_voice::dialogue::Event::InputCommitted {
+                    item_id: "new-input".into(),
+                },
+            );
+            use std::sync::atomic::Ordering;
+            fixture.mode.store(1, Ordering::Release);
+            executor::reconcile(data.store.clone()).await.unwrap();
+            assert_eq!(
+                data.store
+                    .lock()
+                    .unwrap()
+                    .ledger
+                    .operations
+                    .values()
+                    .next()
+                    .unwrap()
+                    .state,
+                jwm_eva_core::ledger::OperationState::Unknown
+            );
+            fixture.mode.store(2, Ordering::Release);
+            executor::reconcile(data.store.clone()).await.unwrap();
+            executor::reconcile(data.store.clone()).await.unwrap();
+            assert_eq!(
+                data.store
+                    .lock()
+                    .unwrap()
+                    .ledger
+                    .operations
+                    .values()
+                    .next()
+                    .unwrap()
+                    .state,
+                jwm_eva_core::ledger::OperationState::Succeeded
+            );
+            let operation_id = data
+                .store
+                .lock()
+                .unwrap()
+                .ledger
+                .operations
+                .keys()
+                .next()
+                .unwrap()
+                .clone();
+            assert!(!crate::companion::operation_tracked(&operation_id));
+            assert_eq!(fixture.dispatches.load(Ordering::Acquire), 1);
+            assert_eq!(fixture.queries.load(Ordering::Acquire), 2);
+            drop(newer);
+            std::fs::write(
+                profile.parent().unwrap().join("execution-probe.json"),
+                json!({"dispatches":1,"status_queries":2,"wrong_receipt_rejected":true,
+                    "new_activation_started_before_settlement":true,"model_requests":3})
+                .to_string(),
+            )
+            .unwrap();
+        }
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let recorded = std::fs::read(profile.join("dialogue-events.json"))
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
+            let history = std::fs::read(profile.join("dialogue-index.json"))
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
+            if recorded.as_ref().is_some_and(|v| {
+                v["turns"][0]["events"]
+                    .as_array()
+                    .is_some_and(|events| events.len() == if delayed { 12 } else { 9 })
+            }) && history
+                .as_ref()
+                .is_some_and(|v| v["turns"][0]["entry"]["finished"] == true)
+            {
+                let history = history.unwrap();
+                let entry = &history["turns"][0]["entry"];
+                assert_eq!(entry["generated"], true);
+                assert_eq!(entry["displayed"], false);
+                assert_eq!(entry["audio"]["confirmed_played_samples"], 0);
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "shared dialogue chain was not committed"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    #[test]
+    fn dialogue_operation_references_never_promote_accepted_or_unproven_results() {
+        let receipts = json!({"steps":[{"operation_id":"one","status":"succeeded","arguments":"private"},{"operation_id":"two","status":"accepted"}]});
+        let output = json!({"steps":[{"status":"unknown"},{"status":"accepted"}]});
+        let events = dialogue_operations(&output, &receipts);
+        assert_eq!(events.len(), 2);
+        assert!(
+            events
+                .iter()
+                .all(|event| event.outcome == companion_voice::dialogue::Outcome::Unknown)
+        );
+        assert!(!serde_json::to_string(&events).unwrap().contains("private"));
     }
 
     #[tokio::test]

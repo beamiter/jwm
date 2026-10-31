@@ -199,6 +199,9 @@ impl<C: CompositorConnection> Compositor<C> {
     // ----- Window management -----
 
     pub(crate) fn add_window(&mut self, x11_win: u32, x: i32, y: i32, w: u32, h: u32) {
+        if let Some(sync) = self.frame_sync.as_mut() {
+            sync.track(x11_win);
+        }
         if w == 0 || h == 0 {
             return;
         }
@@ -562,6 +565,9 @@ impl<C: CompositorConnection> Compositor<C> {
     /// close fade (and close particles), but must never target the Dock with a
     /// genie animation merely because that effect is configured.
     pub(crate) fn remove_window(&mut self, x11_win: u32) {
+        if let Some(sync) = self.frame_sync.as_mut() {
+            sync.forget(x11_win);
+        }
         self.minimized_window_metadata.remove(&x11_win);
         self.discard_minimized_visual(x11_win);
         self.retire_window(x11_win, WindowRetirement::Closed);
@@ -574,6 +580,9 @@ impl<C: CompositorConnection> Compositor<C> {
     /// redirection first when fullscreen direct presentation was active so a
     /// later unswallow can import the remapped window normally.
     pub(crate) fn discard_window_silently(&mut self, x11_win: u32) {
+        if let Some(sync) = self.frame_sync.as_mut() {
+            sync.forget(x11_win);
+        }
         let retry_redirect = take_direct_presentation_marker(
             &mut self.unredirected_window,
             x11_win,

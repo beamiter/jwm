@@ -960,7 +960,7 @@ impl<'a> CursorGuard<'a> {
                         && holder != self_task_id
                         && attempts % Self::LIVENESS_CHECK_INTERVAL == 0
                         && !process_alive(holder)
-                        && !deadline.is_some_and(|deadline| Instant::now() >= deadline)
+                        && deadline.is_none_or(|deadline| Instant::now() < deadline)
                         && cursor
                             .lock
                             .compare_exchange(

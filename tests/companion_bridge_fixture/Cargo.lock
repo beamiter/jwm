@@ -48,6 +48,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "companion-voice"
+version = "0.1.0"
+dependencies = [
+ "companion-client",
+ "companion-protocol",
+ "libc",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "eva-character-atlas"
 version = "0.1.0"
 source = "git+https://github.com/beamiter/jcompanion.git?rev=9aa569540091524d637a7115b64c587b9177a55b#9aa569540091524d637a7115b64c587b9177a55b"
@@ -60,6 +71,7 @@ dependencies = [
  "arc-swap",
  "companion-client",
  "companion-protocol",
+ "companion-voice",
  "eva-character-atlas",
  "libc",
  "log",

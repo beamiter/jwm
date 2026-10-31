@@ -115,7 +115,7 @@ fn serial_executor_retains_partial_truth_and_never_replays_unknown_mutations() {
                                 };
                                 json!({"success":true,"data":{"operation_id":operation_id,"status":status,"verified":{"read_back":read_back}}})
                             } else {
-                                json!({"success":true,"data":{"status":if mode=="late_receipt"{"succeeded"}else{"unknown"},"verified":{"minimized":true}}})
+                                json!({"success":true,"data":{"operation_id":request["args"]["operation_id"],"status":if mode=="late_receipt"{"succeeded"}else{"unknown"},"verified":{"minimized":true}}})
                             }
                         } else {
                             panic!("unexpected IPC request: {request}")

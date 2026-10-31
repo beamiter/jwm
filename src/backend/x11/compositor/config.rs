@@ -97,6 +97,7 @@ impl<C: CompositorConnection> Compositor<C> {
 
     pub(crate) fn needs_render(&self) -> bool {
         if self.needs_render
+            || self.frame_sync.as_ref().is_some_and(frame_sync::FrameSync::pending)
             || crate::backend::compositor_common::bar_wallpaper::needs_frame()
             || self.damage_render_pending
             // Only when a capture is actually due. Reporting the whole

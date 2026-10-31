@@ -596,7 +596,15 @@ fn volume_camera(
 }
 
 impl<C: CompositorConnection> Compositor<C> {
-    pub(crate) fn set_waterlily_loop_signal(&mut self, signal: calloop::LoopSignal) {
+    pub(crate) fn set_event_loop_signal(&mut self, signal: calloop::LoopSignal) {
+        if self.frame_sync.is_none() {
+            self.frame_sync = super::frame_sync::FrameSync::start(
+                self.root,
+                self.cm_selection_owner,
+                self.windows.keys().copied().collect(),
+                signal.clone(),
+            );
+        }
         self.waterlily_loop_signal = Some(signal.clone());
         if let Some(ipc) = &self.waterlily_ipc {
             ipc.set_loop_signal(signal);

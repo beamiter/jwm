@@ -89,7 +89,8 @@ source_rejected detected not_detected sent owned unowned reserving reserved asso
 PHASES = set("plan feedback discovery schema_repair wake desktop local_tone barge_in".split())
 NUMBERS = set("""generation wake_generation session_epoch turn_id utc_ms monotonic_ns cost_microusd
 source_activation_ns played_samples input_frames noise_frames above_threshold_frames
-echo_frames peak_level threshold_level max_voiced_frames uploaded_frames
+echo_frames peak_level threshold_level max_voiced_frames rejected_source_frames
+source_discontinuities uploaded_frames
 suppressed_frames gate_openings""".split())
 IDENTIFIERS = set("response_id call_id plan_hash operation_id".split())
 ID_PATTERN = re.compile(r"[A-Za-z0-9_.:/-]{1,160}\Z")

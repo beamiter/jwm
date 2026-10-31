@@ -73,6 +73,15 @@ fn tfp_budget_skip_needs_followup_frame(dirty: bool, bound: bool, audio_synced: 
     dirty && bound && !audio_synced
 }
 
+/// Keep focused/bar priority separate, while ordinary clients take turns even
+/// when a large update consumes the entire per-frame import budget.
+fn rotate_ordinary_tfp_order(order: &mut [u32], last_served: Option<u32>) {
+    if let Some(index) = last_served.and_then(|last| order.iter().position(|win| *win == last)) {
+        let next = (index + 1) % order.len();
+        order.rotate_left(next);
+    }
+}
+
 fn minimized_dock_requires_composition(
     has_targeted_cached_visual: bool,
     has_preview: bool,
@@ -4712,6 +4721,7 @@ impl<C: CompositorConnection> Compositor<C> {
         focused: Option<u32>,
     ) -> bool {
         if self.needs_postprocess()
+            || self.frame_sync.as_ref().is_some_and(|sync| sync.needs_composition(scene))
             || self.needs_final_brightness()
             || self.screenshot_requests.has_pending()
             || screenshot_freeze_requires_composition(
@@ -5490,6 +5500,19 @@ impl<C: CompositorConnection> Compositor<C> {
         // P6A: Process deferred X11 operations at start of render frame
         self.process_deferred_x11_ops();
 
+        // A completed native client frame needs a scene update even without
+        // XDamage. Capture its counter BEFORE importing/sampling its pixmap;
+        // a later counter must never label an earlier texture as presented.
+        let sync_snapshot = self.frame_sync.as_mut().map(|sync| sync.take_snapshot());
+        if let Some(snapshot) = &sync_snapshot {
+            for window in snapshot.frames.keys() {
+                if let Some(wt) = self.windows.get_mut(window) {
+                    wt.dirty = true;
+                }
+            }
+            explicit_render |= !snapshot.frames.is_empty();
+        }
+
         // Update GPU load cache with hysteresis: update if delta > 5% or elapsed > 0.5s
         let current_gpu_load = {
             let target_frame_time_ms = 1000.0 / 60.0;
@@ -6090,8 +6113,7 @@ impl<C: CompositorConnection> Compositor<C> {
         let mut tfp_order = std::mem::take(&mut self.scratch_tfp_order);
         tfp_order.clear();
         tfp_order.reserve(scene.len());
-        let mut focused_in_scene = false;
-        if let Some(fw) = focused {
+        if let Some(fw) = focused.filter(|focused| scene.iter().any(|entry| entry.0 == *focused)) {
             tfp_order.push(fw);
         }
         for &(win, _, _, _, _) in scene {
@@ -6104,20 +6126,18 @@ impl<C: CompositorConnection> Compositor<C> {
                 tfp_order.push(win);
             }
         }
+        let ordinary_start = tfp_order.len();
         for &(win, _, _, _, _) in scene {
-            if Some(win) == focused {
-                focused_in_scene = true;
-            } else if !self
-                .windows
-                .get(&win)
-                .is_some_and(|wt| is_status_bar_class(&wt.class_name, frame_status_bar_name))
+            if Some(win) != focused
+                && !self
+                    .windows
+                    .get(&win)
+                    .is_some_and(|wt| is_status_bar_class(&wt.class_name, frame_status_bar_name))
             {
                 tfp_order.push(win);
             }
         }
-        if focused.is_some() && !focused_in_scene {
-            tfp_order.remove(0);
-        }
+        rotate_ordinary_tfp_order(&mut tfp_order[ordinary_start..], self.tfp_last_served);
 
         let mut tfp_budget_exhausted = false;
         let mut tfp_budget_deferred = false;
@@ -6208,6 +6228,9 @@ impl<C: CompositorConnection> Compositor<C> {
                         }
                     }
                     wt.dirty = false;
+                    if !latency_critical {
+                        self.tfp_last_served = Some(win);
+                    }
 
                     // Mark frame rendered in audio sync manager
                     if wt.audio_sync_target.is_some() {
@@ -8924,6 +8947,32 @@ impl<C: CompositorConnection> Compositor<C> {
         let presented_scene_copied =
             self.capture_presented_scene_candidate(use_scissor.then_some(damage_scissor));
 
+        let sync_frames: Vec<_> = sync_snapshot
+            .as_ref()
+            .into_iter()
+            .flat_map(|snapshot| {
+                scene.iter().filter_map(|&(window, _, _, _, _)| {
+                    let frame = snapshot.frames.get(&window)?;
+                    let wt = self.windows.get(&window)?;
+                    // Deferred/budget-skipped/failed imports retain dirty. Their
+                    // old image is not evidence for the new client's frame.
+                    (!wt.dirty
+                        && !wt.fading_out
+                        && wt.binding.is_some()
+                        && !self
+                            .genie_active
+                            .iter()
+                            .any(|animation| animation.x11_win == window))
+                    .then_some(*frame)
+                })
+            })
+            .collect();
+        let sync_drawn = if sync_frames.is_empty() {
+            0
+        } else {
+            frame_sync::monotonic_micros()
+        };
+
         // Swap the selected platform surface. EGL receives the original damage
         // rectangles converted to its bottom-left coordinate convention.
         let swap_damage = (!swap_damage_rects.is_empty()).then_some(swap_damage_rects.as_slice());
@@ -8958,6 +9007,14 @@ impl<C: CompositorConnection> Compositor<C> {
             self.context_current = false;
             self.needs_render = true;
             return false;
+        }
+        let sync_swapped = if sync_drawn == 0 {
+            0
+        } else {
+            frame_sync::monotonic_micros()
+        };
+        if let Some(sync) = self.frame_sync.as_mut() {
+            sync.swapped(sync_frames, sync_drawn, sync_swapped);
         }
         if presented_scene_copied {
             self.presented_scene_status
@@ -9084,7 +9141,7 @@ mod tests {
         dirty_below_requires_full_blur_redraw, edge_effects_require_composition,
         intersect_gl_scissors, is_opaque_occluder, minimized_dock_requires_composition,
         off_scene_damage_is_visible, presented_scene_copy_plan, rect_covers_output,
-        resolve_and_draw_each, screenshot_freeze_change_needed,
+        resolve_and_draw_each, rotate_ordinary_tfp_order, screenshot_freeze_change_needed,
         screenshot_freeze_requires_composition, tags_grid_label_key,
         tfp_budget_skip_needs_followup_frame, tfp_refresh_is_latency_critical, toast_input_shape,
         transformed_overlays_require_full_redraw, transition_capture_plan, wallpaper_blend_plan,
@@ -9531,6 +9588,30 @@ mod tests {
             !frame.contains(&format!("has_dirty|={};", "damage_wakeup")),
             "an unconditional damage wakeup turns hidden-tag damage into full redraws"
         );
+    }
+
+    #[test]
+    fn ordinary_tfp_clients_receive_service_under_a_one_client_frame_budget() {
+        let mut last_served = None;
+        let mut served = std::collections::HashSet::new();
+        for _ in 0..3 {
+            let mut order = [10, 11, 20, 21, 22];
+            rotate_ordinary_tfp_order(&mut order[2..], last_served);
+            assert_eq!(&order[..2], &[10, 11], "focused/bar priority is unchanged");
+            // Even if the first ordinary import exhausts every frame's budget,
+            // all ordinary clients must still receive actual refresh service.
+            served.insert(order[2]);
+            last_served = Some(order[2]);
+        }
+        assert_eq!(served, [20, 21, 22].into_iter().collect());
+        let mut remaining = [20, 22];
+        rotate_ordinary_tfp_order(&mut remaining, Some(21));
+        assert_eq!(
+            remaining,
+            [20, 22],
+            "a removed last client cannot block service"
+        );
+        rotate_ordinary_tfp_order(&mut [], last_served);
     }
 
     #[test]

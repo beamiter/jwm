@@ -934,6 +934,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "companion-voice"
+version = "0.1.0"
+dependencies = [
+ "companion-client",
+ "companion-protocol",
+ "libc 0.2.191",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "concurrent-queue"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2398,6 +2409,7 @@ dependencies = [
  "clap",
  "companion-client",
  "companion-protocol",
+ "companion-voice",
  "futures-util",
  "jwm_eva_core",
  "jwm_ipc_client",

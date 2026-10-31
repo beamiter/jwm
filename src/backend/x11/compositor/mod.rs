@@ -2,6 +2,7 @@ mod annotations;
 mod astronomy_wallpaper;
 mod effects;
 mod expose;
+mod frame_sync;
 mod jelly_renderer;
 mod solar_system_wallpaper;
 #[cfg(all(test, feature = "wayland-backends"))]
@@ -430,6 +431,7 @@ where
     vsync_method: VsyncMethod,
     /// GLX_OML_sync_control for per-window MSC-based vblank timing
     oml: Option<oml_sync_control::OmlSyncControl>,
+    frame_sync: Option<frame_sync::FrameSync>,
     /// Audio sync manager for per-window audio-video synchronization
     audio_sync: audio_sync::AudioSyncManager,
     /// Present extension for per-window independent presentation
@@ -1163,6 +1165,8 @@ where
     scratch_blur_dirty: Vec<u32>,
     scratch_blur_damage: Vec<DirtyRect>,
     scratch_tfp_order: Vec<u32>,
+    /// Last ordinary client actually refreshed, for budgeted round-robin service.
+    tfp_last_served: Option<u32>,
     scratch_refresh_wins: Vec<u32>,
     scratch_new_pixmaps: Vec<(u32, u32)>,
     /// Flattened EGL damage rectangles: x, bottom-left y, width, height.
@@ -1204,6 +1208,7 @@ unsafe impl<C: CompositorConnection> Send for Compositor<C> {}
 
 impl<C: CompositorConnection> Drop for Compositor<C> {
     fn drop(&mut self) {
+        self.frame_sync.take();
         self.clear_overview_snapshots();
         if let Some(renderer) = self.jelly_renderer.take() {
             renderer.destroy(&self.gl);

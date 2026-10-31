@@ -95,6 +95,7 @@ pub async fn execute(
         c,
         std::time::Duration::from_secs(22),
         None,
+        None,
     )
     .await
 }
@@ -114,6 +115,29 @@ pub async fn execute_with_progress(
         c,
         std::time::Duration::from_secs(22),
         Some(progress),
+        None,
+    )
+    .await
+}
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn execute_observed(
+    plan: &FrozenPlan,
+    permit: &AssistantPermit,
+    confirmation: Option<String>,
+    store: Arc<Mutex<Store>>,
+    c: &Config,
+    progress: Option<&tokio::sync::watch::Sender<Option<crate::progress::ExecutionProgress>>>,
+    owner: Option<&crate::companion::OperationOwner>,
+) -> io::Result<Value> {
+    execute_with_step_budget(
+        plan,
+        permit,
+        confirmation,
+        store,
+        c,
+        std::time::Duration::from_secs(22),
+        progress,
+        owner,
     )
     .await
 }
@@ -134,6 +158,7 @@ async fn execute_with_step_budget(
     c: &Config,
     step_budget: std::time::Duration,
     progress: Option<&tokio::sync::watch::Sender<Option<crate::progress::ExecutionProgress>>>,
+    owner: Option<&crate::companion::OperationOwner>,
 ) -> io::Result<Value> {
     use crate::progress::{ExecutionProgress, Stage};
     let dispatch_cancelled = Arc::new(AtomicBool::new(false));
@@ -284,6 +309,14 @@ async fn execute_with_step_budget(
             steps.push(json!({"name":action.name,"operation_id":id,"status":"failed","dispatched":false,"ledger_error":detail,"result":failure}));
             break;
         }
+        if let Some(owner) = owner {
+            owner.register(
+                &id,
+                &plan.wm_instance_id,
+                &jwm_eva_core::protocol::digest(&json!(action)),
+                &request.request_digest,
+            );
+        }
         if std::time::Instant::now() >= dispatch_deadline {
             crate::lifecycle::forget(&id);
             let failure = json!({"status":"cancelled","error":"execution_deadline_expired","dispatched":false});
@@ -293,7 +326,9 @@ async fn execute_with_step_budget(
                     .ledger
                     .record_result(&saved_id, OperationState::Cancelled, saved_failure)
                     .map_err(io::Error::other)
-                    .and_then(|()| storage.save())
+                    .and_then(|()| storage.save())?;
+                publish_settlement(storage, &saved_id);
+                Ok(())
             })
             .await;
             if let Err(error) = saved {
@@ -417,7 +452,9 @@ async fn execute_with_step_budget(
                     .ledger
                     .record_result(&saved_id, operation_state, saved_result)
                     .map_err(io::Error::other)
-                    .and_then(|()| storage.save())
+                    .and_then(|()| storage.save())?;
+                publish_settlement(storage, &saved_id);
+                Ok(())
             })
             .await
         };
@@ -655,6 +692,8 @@ async fn persist_settlement(
             .and_then(|()| store.save());
         if let Err(error) = saved {
             result["ledger_error"] = json!(error.to_string());
+        } else {
+            publish_settlement(store, &id);
         }
         Ok((result, dispatched))
     })
@@ -665,6 +704,44 @@ async fn persist_settlement(
             dispatched,
         )
     })
+}
+fn publish_settlement(store: &Store, id: &str) {
+    if !crate::companion::operation_tracked(id) {
+        return;
+    }
+    let Some(record) = store.ledger.operations.get(id) else {
+        return;
+    };
+    let Some(result) = record.result.as_ref() else {
+        return;
+    };
+    let outcome = stored_outcome(record);
+    crate::companion::operation_settled(crate::companion::OperationSettlement {
+        id,
+        plan: &record.plan_hash,
+        instance: &record.wm_instance_id,
+        action_digest: &jwm_eva_core::protocol::digest(&json!(record.action)),
+        result_digest: &jwm_eva_core::protocol::digest(result),
+        outcome,
+    });
+}
+
+fn stored_outcome(record: &OperationRecord) -> companion_voice::dialogue::Outcome {
+    use companion_voice::dialogue::Outcome;
+    let result = record.result.as_ref().unwrap_or(&Value::Null);
+    let playback_verified = result["verified"]["playback_verified"]
+        .as_bool()
+        .or_else(|| result["verified"]["read_back"]["playback_verified"].as_bool());
+    match record.state {
+        OperationState::Succeeded
+            if result["status"] == "succeeded" && playback_verified != Some(false) =>
+        {
+            Outcome::Succeeded
+        }
+        OperationState::Failed if result["status"] == "failed" => Outcome::Failed,
+        OperationState::Cancelled if result["status"] == "cancelled" => Outcome::Cancelled,
+        _ => Outcome::Unknown,
+    }
 }
 
 fn operation_state(result: &Value) -> OperationState {
@@ -846,6 +923,14 @@ pub async fn undo(
     store: Arc<Mutex<Store>>,
     c: &Config,
 ) -> io::Result<Value> {
+    undo_observed(permit, store, c, None).await
+}
+pub(crate) async fn undo_observed(
+    permit: &AssistantPermit,
+    store: Arc<Mutex<Store>>,
+    c: &Config,
+    owner: Option<&crate::companion::OperationOwner>,
+) -> io::Result<Value> {
     if !c.undo.enabled {
         return Err(io::Error::other("undo_disabled"));
     }
@@ -890,7 +975,17 @@ pub async fn undo(
     };
     let mut undo_config = c.clone();
     undo_config.undo.enabled = false;
-    let mut result = execute(&plan, permit, None, store.clone(), &undo_config).await?;
+    let owner = owner.map(|owner| owner.with_plan(&plan.plan_hash));
+    let mut result = execute_observed(
+        &plan,
+        permit,
+        None,
+        store.clone(),
+        &undo_config,
+        None,
+        owner.as_ref(),
+    )
+    .await?;
     // A compound plan can also contain irreversible effects. Compensation
     // reports only the reversible changes that were actually restored.
     result["undo_scope"] = json!("reversible_changes");
@@ -1099,6 +1194,16 @@ pub async fn reconcile(store: Arc<Mutex<Store>>) -> io::Result<()> {
             .await
         };
         let (state, value) = match receipt {
+            Ok(v)
+                if !matches!(action.as_str(), "quit" | "restart")
+                    && v["status"] != "unknown"
+                    && v["operation_id"].as_str() != Some(id.as_str()) =>
+            {
+                (
+                    OperationState::Unknown,
+                    json!({"status":"unknown","error":"historical_receipt_identity_mismatch"}),
+                )
+            }
             Ok(v) => {
                 let st = match v["status"].as_str().unwrap_or("") {
                     "succeeded" => OperationState::Succeeded,
@@ -1143,6 +1248,7 @@ pub async fn reconcile(store: Arc<Mutex<Store>>) -> io::Result<()> {
                     .record_result(&id, state, projected)
                     .map_err(io::Error::other)?;
                 s.save()?;
+                publish_settlement(&s, &id);
             }
             Ok(())
         })
@@ -1155,6 +1261,32 @@ pub async fn reconcile(store: Arc<Mutex<Store>>) -> io::Result<()> {
 #[cfg(test)]
 mod undo_tests {
     use super::*;
+    #[test]
+    fn shared_receipts_require_confirmed_status_and_playback_evidence() {
+        use companion_voice::dialogue::Outcome;
+        let mut record = OperationRecord {
+            operation_id: "op".into(),
+            plan_hash: "plan".into(),
+            wm_instance_id: "wm".into(),
+            action: Action {
+                name: "open_media".into(),
+                arguments: json!({}),
+            },
+            state: OperationState::Succeeded,
+            result: Some(json!({"status":"accepted"})),
+            created_ms: 1,
+        };
+        assert_eq!(stored_outcome(&record), Outcome::Unknown);
+        record.result = Some(json!({"status":"succeeded","verified":{"playback_verified":false}}));
+        assert_eq!(stored_outcome(&record), Outcome::Unknown);
+        record.result = Some(
+            json!({"status":"succeeded","verified":{"playback_verified":true,"read_back":{"playback_verified":false}}}),
+        );
+        assert_eq!(stored_outcome(&record), Outcome::Succeeded);
+        record.state = OperationState::Failed;
+        record.result = Some(json!({"status":"failed"}));
+        assert_eq!(stored_outcome(&record), Outcome::Failed);
+    }
     #[tokio::test]
     async fn late_undo_bookkeeping_cannot_rewind_a_newer_or_already_cleared_frontier() {
         let dir = [std::path::PathBuf::from("/dev/shm"), std::env::temp_dir()]

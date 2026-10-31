@@ -1,5 +1,28 @@
 # Eva 实施与验收账本
 
+2026-10-31 延迟回执增量：已持久化的操作意图在派发前绑定原 voice activation／turn／call。
+异步收尾和只读 reconciliation 将已保存回执追加到原操作；不会补发操作或更换归属。
+历史查询返回错误 operation ID 时保留 Unknown；断线后的关联不能在新连接冒领。
+私有链路验证了一次实际执行器派发、两次只读查询及新语音 activation 之后的旧回执补录。
+IPC 端点为 stand-in，未调用官方 API 或操作真实桌面。引用协议 v2／历史 schema 2 的
+兼容边界与证据见
+[`delayed-receipts-8819d34`](../../eva-companion-acceptance/2026-10-31/delayed-receipts-8819d34/validation.json)。
+
+2026-10-31 共享对话引用增量：在原规划／执行／反馈路径关联输入、response、tool call、
+结果摘要及 operation ID，使用显式协商的 dialogue version。生成回复的摘要、前端展示和
+实际播放分别记录，不以 response.done 推断用户已听见。私有 loopback 链路与真实协调者
+完成九条关联事件，所用计划为 Noop；仍不作为真实桌面执行、官方模型或实体设备通过。
+详细范围及证据见
+[`dialogue-events-8ab53f6`](../../eva-companion-acceptance/2026-10-31/dialogue-events-8ab53f6/validation.json)。
+
+2026-10-31 增量：本地打断检测及下一轮回放缓存共用原生帧来源时间校验，拒绝过期、
+未来、未验证、格式错误和重复／逆序帧；断帧清空语音及回声累计。以输入提交时刻为
+新回合边界，仍接受随后等待桌面上下文时产生的新插话。311 项普通自动测试通过，
+另在隔离 PipeWire 24/48 kHz 和 PulseAudio 图上执行 6 项原生测试；这不是实体设备
+或官方模型语音验收。证据与增量源码见
+[`barge-source-time-496cd31`](../../eva-companion-acceptance/2026-10-31/barge-source-time-496cd31/validation.json)。
+以下较早冻结记录保留其原有二进制和范围，不能扩展为当前完整方案已经完成。
+
 本账本对应 `JWM_Eva_Voice_Assistant_Design_v1.md`。源码、编译通过、本地确定性测试、真实桌面验证和真实模型验证是不同证据；只有覆盖相应要求的证据才可标为通过。本文件不把未接入 API 的测试写成云端成功，也不把全部名字已登记写成全部用户能力已验收。
 
 ## 验收状态与证据边界
