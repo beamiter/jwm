@@ -15,7 +15,7 @@ case "$graph_rate" in
     24000|48000) ;;
     *) echo 'JWM_EVA_TEST_GRAPH_RATE must be 24000 or 48000' >&2; exit 2 ;;
 esac
-for executable in pipewire pw-cli pw-dump python3 rg; do
+for executable in pipewire pw-cli pw-dump pw-record python3 rg; do
     command -v "$executable" >/dev/null || { echo "missing test dependency: $executable" >&2; exit 1; }
 done
 session_manager=pipewire-media-session
@@ -31,6 +31,7 @@ mkdir -m700 "$runtime_dir/config" "$runtime_dir/state" "$runtime_dir/data" "$run
 mkdir -m700 "$runtime_dir/config/media-session.d"
 pw_pid=0
 manager_pid=0
+monitor_pid=0
 stop_child() {
     local child=$1
     (( child > 0 )) || return 0
@@ -44,6 +45,7 @@ stop_child() {
 }
 cleanup() {
     local result=$?
+    stop_child "$monitor_pid"
     stop_child "$manager_pid"
     stop_child "$pw_pid"
     if (( result != 0 )) || [[ "${JWM_EVA_KEEP_AUDIO_TEST:-0}" == 1 ]]; then
@@ -98,8 +100,8 @@ context.objects = [
         node.driver = false
         node.want-driver = true
         media.class = Audio/Sink
-        audio.channels = 1
-        audio.position = [ MONO ]
+        audio.channels = 2
+        audio.position = [ FL FR ]
         node.pause-on-idle = false
     } }
     { factory = adapter args = {
@@ -157,6 +159,9 @@ context.modules = [
     { name = libpipewire-module-session-manager }
 ]
 CONFIG
+# pw-record uses the realtime client configuration name; keep it just as
+# isolated as Eva's native client instead of falling back to user settings.
+cp "$runtime_dir/config/client.conf" "$runtime_dir/config/client-rt.conf"
 # Only link the synthetic nodes. The stock media-session configuration may
 # enable ALSA, Bluetooth, camera or portal discovery and must not be loaded.
 cat > "$runtime_dir/config/media-session.d/media-session.conf" <<'CONFIG'
@@ -286,6 +291,38 @@ if [[ $fixture_only == true ]]; then
     echo "Private PipeWire fixture verified; ${graph_rate}Hz synthetic source/sink (Rust tests intentionally not run)"
 else
     echo "Native PipeWire graph rate: ${graph_rate}Hz (client PCM remains 24000Hz)"
+    # Record both sink monitor channels. A mono-only sink hides unpositioned
+    # playback being routed to only one side of stereo headphones.
+    pw-record --target jwm-eva-test-sink --rate 24000 --channels 2 \
+        --channel-map stereo --format s16 \
+        --properties 'node.name=jwm-eva-test-monitor stream.capture.sink=true' - \
+        >"$runtime_dir/stereo.pcm" 2>"$runtime_dir/monitor.log" &
+    monitor_pid=$!
+    monitor_ready=false
+    for _ in {1..100}; do
+        kill -0 "$monitor_pid" 2>/dev/null || { cat "$runtime_dir/monitor.log" >&2; exit 1; }
+        "${pw_dump_command[@]}" > "$runtime_dir/monitor-graph.json"
+        if python3 - "$runtime_dir/monitor-graph.json" <<'PY'
+import json
+import sys
+
+objects = json.load(open(sys.argv[1]))
+nodes = {item["info"]["props"].get("node.name"): item["id"]
+         for item in objects if item.get("type") == "PipeWire:Interface:Node"}
+sink, monitor = (nodes.get(name) for name in ("jwm-eva-test-sink", "jwm-eva-test-monitor"))
+links = [item["info"] for item in objects if item.get("type") == "PipeWire:Interface:Link"]
+ready = sink is not None and monitor is not None and sum(
+    link.get("output-node-id") == sink and link.get("input-node-id") == monitor
+    and link.get("state") == "active" for link in links) == 2
+sys.exit(0 if ready else 1)
+PY
+        then
+            monitor_ready=true
+            break
+        fi
+        sleep 0.02
+    done
+    [[ $monitor_ready == true ]] || { echo 'stereo sink monitor never linked' >&2; exit 1; }
     if [[ -n "${JWM_EVA_AUDIO_TEST_BINARY:-}" ]]; then
         test_command=("$JWM_EVA_AUDIO_TEST_BINARY")
         test_separator=()
@@ -303,6 +340,24 @@ else
         }
         "${test_command[@]}" "$test_name" "${test_separator[@]}" --ignored --exact --test-threads=1 --nocapture
     done
+    stop_child "$monitor_pid"
+    monitor_pid=0
+    python3 - "$runtime_dir/stereo.pcm" <<'PY'
+import math
+import struct
+import sys
+
+pcm = open(sys.argv[1], "rb").read()
+if not pcm or len(pcm) % 4:
+    raise SystemExit("missing or incomplete stereo monitor PCM")
+frames = list(struct.iter_unpack("<hh", pcm))
+energy = [sum(frame[channel] ** 2 for frame in frames) for channel in (0, 1)]
+rms = [math.sqrt(value / len(frames)) / 32768 for value in energy]
+error = sum((left - right) ** 2 for left, right in frames)
+if min(rms) < 0.001 or error > max(energy) * 0.0001:
+    raise SystemExit(f"mono feedback must reach both stereo channels equally: RMS={rms}")
+print(f"Stereo sink monitor verified: left RMS={rms[0]:.5f}, right RMS={rms[1]:.5f}")
+PY
 fi
 # The native streams must have been destroyed at the resource boundary.
 if "${pw_cli_command[@]}" ls Node | rg -q 'node.name = "jwm-eva\.(capture|playback)"'; then

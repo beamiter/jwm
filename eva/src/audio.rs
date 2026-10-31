@@ -841,6 +841,11 @@ fn format_pod() -> io::Result<Vec<u8>> {
     info.set_format(spa::param::audio::AudioFormat::S16LE);
     info.set_rate(RATE);
     info.set_channels(1);
+    // Unpositioned mono is routed as AUX0 and can reach only the left side
+    // of a stereo sink. Explicit MONO lets PipeWire remix to both ears.
+    let mut position = [0; spa::sys::SPA_AUDIO_MAX_CHANNELS as usize];
+    position[0] = spa::sys::SPA_AUDIO_CHANNEL_MONO;
+    info.set_position(position);
     spa::pod::serialize::PodSerializer::serialize(
         std::io::Cursor::new(Vec::new()),
         &spa::pod::Value::Object(spa::pod::Object {
@@ -2345,10 +2350,15 @@ mod native_tests {
         let mut playback = Playback::start().unwrap();
         playback.set_telemetry(serde_json::json!({"phase":"native_test","generation":1}));
         let playback_state = playback.state.clone();
-        playback
-            .write(&vec![0; RATE as usize * 2 / 5])
-            .await
-            .unwrap(); // 200 ms.
+        // The fixture records a stereo sink monitor and checks that this
+        // nonzero mono signal reaches both channels with equal amplitude.
+        let pcm = (0..RATE / 5)
+            .flat_map(|sample| {
+                let phase = sample as f32 * std::f32::consts::TAU * 440.0 / RATE as f32;
+                ((phase.sin() * 4096.0) as i16).to_le_bytes()
+            })
+            .collect::<Vec<_>>();
+        playback.write(&pcm).await.unwrap(); // 200 ms.
         assert_eq!(playback.played_samples(), None);
         let started = Instant::now();
         playback.finish().await.expect("native drain failed");
