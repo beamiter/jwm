@@ -1,3 +1,32 @@
+## 2026-10-31 — Eva: live voice verification round, voice-aware barge-in, tool_choice fix
+
+- Live X11 session with a USB microphone and headphones (PipeWire), gpt-realtime
+  plus gpt-realtime-mini. Passed on the final builds: V01, V03, V04, W01,
+  V05–V10; V11 partial (clarify + positional answer worked, the closing turn hit
+  one `unexpected_tool_output`). Record: docs/eva-e2e-20261031.json.
+- Barge-in: energy-only detection fired on traffic rumble and on the user's own
+  utterance tail. Now speech-band level (250 Hz 4th-order high-pass, 6x the
+  calibrated band floor, min 0.002) plus 80–400 Hz pitch periodicity (10/15
+  band frames, 7/15 pitched), armed only after 160 ms of quiet post-commit.
+  Tuned on a labelled live recording (rumble/typing/taps: 0 triggers). Very
+  low-gain microphones (speech band < 0.002) now need more input gain.
+- Interrupted speech was always dropped as `unowned`: server VAD padding
+  reached behind the clear floor. Replay now appends local lead-in silence;
+  `speech_start_rejected` logs the category. Clear wait 2 s → 8 s (slow
+  downlinks drain the cancelled reply first).
+- Duplicate `activation_received` after close: the daemon invalidates the
+  in-flight status read and ignores the permit it just retired.
+- Named `tool_choice` makes gpt-realtime(-mini) answer with a text message
+  (probed live); wake detection always failed and planning repair rounds were
+  doomed. Both use `"required"` now.
+- Planner: trailing retraction → noop; never simulate a non-preloaded action
+  (close was turned into minimize / move-to-tag); one discovery redirect on
+  `action_schema_not_loaded`; multi-candidate window groups carry a clarify cue;
+  targeted repair hint for `plan_text_too_long`. Confirmation cards are spoken.
+- Open: closing-turn `unexpected_tool_output` (shape counters now logged);
+  close requests with a named workspace still over-clarify ~2/3 in dry-run;
+  V12–V20, W02–W05, F01–F07 and the 241-case corpus were not run.
+
 ## 2026-10-30 — Eva: warm Realtime session, offline report, placeholder cleanup
 
 - Baseline from the new `jwm-eva report` over today's journal (45 sessions,

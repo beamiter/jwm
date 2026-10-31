@@ -179,10 +179,15 @@ fn window_groups(context: &Value, desktop: &Value, include_windows: bool) -> Val
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect::<Vec<_>>();
-        groups.insert(
-            family.into(),
-            json!({"window_refs":refs,"unique":complete && unclassified.is_empty() && refs.len() == 1}),
-        );
+        let mut group = json!({"window_refs":refs,"unique":complete && unclassified.is_empty() && refs.len() == 1});
+        if refs.len() > 1 {
+            // Data-level cue: the model otherwise picks "the one on this
+            // workspace" for a bare "the browser" despite the rule.
+            group["if_user_did_not_specify_which"] = json!(
+                "clarify_listing_these_candidates; also before closing, local confirmation does not replace it"
+            );
+        }
+        groups.insert(family.into(), group);
     }
     json!({"status":if complete {"complete"} else {"incomplete"},"groups":groups,"unclassified_window_refs":unclassified})
 }

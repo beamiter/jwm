@@ -26,8 +26,19 @@ pub fn fields(fields: &serde_json::Value) -> serde_json::Value {
         "peak_level",
         "threshold_level",
         "max_voiced_frames",
+        "pitched_frames",
+        "max_pitched_frames",
+        "tail_frames",
         "rejected_source_frames",
         "source_discontinuities",
+        // Rejected model output shape: item counts only, never content.
+        "output_items",
+        "function_calls",
+        "submit_calls",
+        "describe_calls",
+        "other_calls",
+        "incomplete_calls",
+        "message_items",
         // Standby upload gate counters: frame counts only, never audio.
         "uploaded_frames",
         "suppressed_frames",
@@ -43,11 +54,21 @@ pub fn fields(fields: &serde_json::Value) -> serde_json::Value {
                 | "above_threshold_frames"
                 | "echo_frames"
                 | "max_voiced_frames"
+                | "pitched_frames"
+                | "max_pitched_frames"
+                | "tail_frames"
                 | "rejected_source_frames"
                 | "source_discontinuities"
                 | "uploaded_frames"
                 | "suppressed_frames"
-                | "gate_openings" => value.is_u64(),
+                | "gate_openings"
+                | "output_items"
+                | "function_calls"
+                | "submit_calls"
+                | "describe_calls"
+                | "other_calls"
+                | "incomplete_calls"
+                | "message_items" => value.is_u64(),
                 "peak_level" | "threshold_level" => value
                     .as_f64()
                     .is_some_and(|level| level.is_finite() && level >= 0.0),

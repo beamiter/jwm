@@ -1112,6 +1112,7 @@ pub fn ipc_catalog() -> Vec<CatalogEntry> {
         ("get_execution_status", "query"),
         ("get_command_schema", "query"),
         ("get_assistant_status", "query"),
+        ("get_companion_desktop_state", "query"),
         ("assistant", "subscription"),
     ] {
         if !catalog.iter().any(|e| e.name == name && e.kind == kind) {

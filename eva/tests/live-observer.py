@@ -29,7 +29,7 @@ feedback_text_fallback first_feedback_playback input_committed plan_completed
 plan_normalized plan_rejected plan_reserve_started plan_reserve_completed
 plan_reserve_expired plan_request_sent plan_response_created plan_response_associated
 plan_response_completed playback_ended resources_released session_failed
-speech_interrupted speech_started speech_stopped standby_gate_summary
+speech_interrupted speech_start_rejected speech_started speech_stopped standby_gate_summary
 tool_output_rejected unowned_input_ignored usage_cleanup_failed usage_settled
 validation_completed verification_completed warm_connect_failed warm_handoff
 warm_lost warm_ready warm_rotated warm_stale warm_taken
@@ -85,13 +85,15 @@ local_cancel permanent_error retry_exhausted native_disabled session_exiting
 cache_grace_expired native_snapshot_expired native_snapshot_invalid
 native_snapshot_pending native_snapshot_superseded wake_status_unavailable wake_status_timeout late_result_discarded
 proof_expired lease_confirmed observed stale_result_discarded transport_unavailable
-source_rejected detected not_detected sent owned unowned reserving reserved associated""".split()) | STATES
+source_rejected detected not_detected sent owned unowned reserving reserved associated
+awaiting_clear below_floor beyond_written not_new""".split()) | STATES
 PHASES = set("plan feedback discovery schema_repair wake desktop local_tone barge_in".split())
 NUMBERS = set("""generation wake_generation session_epoch turn_id utc_ms monotonic_ns cost_microusd
 source_activation_ns played_samples input_frames noise_frames above_threshold_frames
 echo_frames peak_level threshold_level max_voiced_frames rejected_source_frames
 source_discontinuities uploaded_frames
-suppressed_frames gate_openings""".split())
+suppressed_frames gate_openings pitched_frames max_pitched_frames tail_frames
+output_items function_calls submit_calls describe_calls other_calls incomplete_calls message_items""".split())
 IDENTIFIERS = set("response_id call_id plan_hash operation_id".split())
 ID_PATTERN = re.compile(r"[A-Za-z0-9_.:/-]{1,160}\Z")
 STOP = False

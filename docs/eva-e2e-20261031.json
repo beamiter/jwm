@@ -1,0 +1,219 @@
+{
+  "schema_version": 1,
+  "date": "2026-10-31/2026-11-01 (Asia/Shanghai)",
+  "source_base": "ec4c0da7 + this commit",
+  "environment": {
+    "desktop": "JWM X11 (x11rb) live user session, single monitor DP-0",
+    "audio": "PipeWire 1.0.5; input USB Newmine dedicated microphone; output HDMI sink to headphones",
+    "models": {
+      "conversation": "gpt-realtime",
+      "wake": "gpt-realtime-mini"
+    },
+    "turn_detection": "semantic_vad (auto); noise_reduction near_field",
+    "budget": "[budget].enabled=false at the user's request; costs still recorded",
+    "network": "WireGuard VPN; node str-sin303 (RTT ~510 ms, 10-40% loss) blocked realtime upload; node str-vie301 (RTT ~252 ms, 0% loss, ~250 KB/s up) used for all results"
+  },
+  "privacy": "no raw audio, transcripts or window titles; the labelled 47 s calibration recording was analysed locally for per-frame counts and deleted",
+  "automated": {
+    "eva_core_eva_ipc_client": "387 passed / 0 failed / 12 ignored",
+    "jwm_eva_server": "57 passed (unchanged JWM)",
+    "clippy": "same 20 pre-existing findings as baseline, none new",
+    "fmt_diff_check": "pass"
+  },
+  "cases": [
+    {
+      "case_id": "V01",
+      "attempt": 1,
+      "time": "21:56:35",
+      "generation": 1,
+      "cloud": "warm",
+      "result": "受阻",
+      "reason": "network: str-sin303 RTT~510ms loss 10-40%, warm socket cwnd=2 -> realtime_write_timeout 3s after ready; user saw 等待服务超时",
+      "binary": "d51e9455"
+    },
+    {
+      "case_id": "V01",
+      "attempt": 2,
+      "time": "22:02:15",
+      "generation": 3,
+      "cloud": "warm",
+      "activation_to_ready_ms": 599,
+      "result": "部分通过",
+      "observed": "turn1 false barge-in during planning 0.7s after speech_stopped (6 frames, peak 0.014, threshold 0.0038, echo 0) cancelled plan; user repeated; turn2 noop counting played; barge-in at 22:02:39.8 stopped playback (17 frames, peak 0.126); but interrupting speech '别数了，关闭麦克风' -> unowned_input_ignored, no turn3; session closed 8.4s later by first-speech timeout, not by voice command; duplicate activation_received (same source ns) right after release flashed 'connecting'",
+      "user": "基本正常；第一遍说完出现被打断了",
+      "binary": "d51e9455"
+    },
+    {
+      "case_id": "V03",
+      "attempt": 1,
+      "time": "22:06:25",
+      "generation": 4,
+      "cloud": "warm",
+      "activation_to_ready_ms": 531,
+      "result": "失败",
+      "observed": "noop counting reply; 1.1s into playback false barge-in (7 frames above 0.00384, peak 0.075, echo 0); user did not speak; session closed 8.3s later by first-speech timeout; duplicate activation_received after release",
+      "acoustic_check": "1.5s -16dBFS sweep on HDMI->headphones: mic peak 0.004 (= noise floor) => headphone leak < -34 dB, false trigger unlikely to be echo",
+      "binary": "d51e9455"
+    },
+    {
+      "case_id": "V03",
+      "note": "user confirmed: heard the test tone (leak measurement valid); low vehicle-passing rumble at the false trigger moment => ambient low-frequency noise, not echo, not speech"
+    },
+    {
+      "case_id": "CAL-voice",
+      "time": "22:5x",
+      "note": "labelled 47s calibration recording (silence/speech/keys/taps/soft/quiet) replayed through new gate: noise segments 0 triggers, speech 9, soft 6; params: HPF 250Hz 4th order, threshold max(6*p20,0.002), periodicity>=0.55 lag 80-400Hz, 10/15 band frames + 7/15 pitched; recording deleted after analysis"
+    },
+    {
+      "case_id": "V01",
+      "attempt": 3,
+      "time": "22:39:41",
+      "generation": 5,
+      "cloud": "warm",
+      "binary": "de644a8c",
+      "result": "失败",
+      "observed": "no false barge-in during planning (fix A ok); genuine barge-in at 22:39:55.42 stopped playback (peak 0.083, 15 band frames before 7 pitched); then interrupt_clear_timeout after 2s: cleared ack queued behind cancelled reply's audio deltas on slow downlink (first delta->response.done 7.7s); session failed",
+      "user": "2 说完等待服务超时",
+      "fix": "INTERRUPT_CLEAR_TIMEOUT 2s->8s, buffer 150->400 frames; telemetry whitelist pitched_frames; installed 72dcd2ee"
+    },
+    {
+      "case_id": "V01",
+      "attempt": 4,
+      "time": "22:43:12",
+      "generation": 6,
+      "cloud": "warm",
+      "activation_to_ready_ms": 513,
+      "binary": "72dcd2ee",
+      "result": "通过",
+      "observed": "genuine barge-in during counting 22:43:34.32 (peak 0.052, 10 band/8 pitched frames) stopped playback; interrupting speech became turn 3 (B fixed), plan normalized session_closing_task_metadata, session ended by voice at 22:43:39.3; Idle, wake disabled, eva PipeWire nodes 0; no duplicate activation after release (C fixed); no self-recovery beyond follow-up window",
+      "note": "turn-1 planning-phase trigger 0.5s after speech_stopped (16 band/7 pitched, peak 0.015), server saw no speech for 4.5s, user repeated request; source unknown (no local tone in planning) - asked user",
+      "user": "成功"
+    },
+    {
+      "case_id": "V01",
+      "note": "user confirmed turn-1 was interrupted again after the first sentence => committed-utterance tail (semantic end before acoustic end). Fix: gate arms only after 160ms quiet post-commit (tail_frames stat). 386 passed/0 failed/12 ignored; clippy unchanged (20 baseline). Installed d9043460"
+    },
+    {
+      "case_id": "V03",
+      "attempt": 2,
+      "time": "22:53:36",
+      "generation": 7,
+      "cloud": "warm",
+      "activation_to_ready_ms": 889,
+      "binary": "d9043460",
+      "result": "通过",
+      "observed": "no planning-phase trigger (tail_frames 8, armed after quiet); counting 1-10 played (7.8s) and user heard it fully; '结束这次对话' spoken as playback was draining its tail -> barge-in (peak 0.126, 15 band/7 pitched) -> turn 2 -> session closed at 22:53:54.5; Idle, eva PipeWire nodes 0",
+      "user": "成功"
+    },
+    {
+      "case_id": "W01/V04",
+      "attempt": 1,
+      "time": "22:55:26",
+      "binary": "d9043460",
+      "result": "失败",
+      "observed": "3x 'hi eva' uploaded via standby gate (wake_speech_started owned, detection requested/created, usage 10 text tokens) but wake_failed plan_invalid each time",
+      "root_cause": "live probe: named tool_choice {type:function,name:...} makes gpt-realtime-mini AND gpt-realtime reply with a text message containing the JSON args instead of a function_call (both in-conversation and conversation:none); tool_choice 'required' returns a proper function_call. Same defect hits planning repair/after-discovery rounds.",
+      "fix": "wake detection + planning use tool_choice 'required' (single tool); wake diag keeps precise tool-call codes; 386/0/12; installed c66fad1b"
+    },
+    {
+      "case_id": "W01",
+      "attempt": 2,
+      "time": "23:06:30",
+      "binary": "c66fad1b",
+      "result": "通过",
+      "observed": "standby suppressed 691 frames (13.8s) vs uploaded 128 (2.56s, one gate opening) before 'hi eva'; mini detection 'detected' 23:06:45.70; activation_received 120ms later; warm handoff ready +397ms; mini wake cost $0.0005 billed separately"
+    },
+    {
+      "case_id": "V04",
+      "attempt": 1,
+      "time": "23:06:45",
+      "generation": "9,10",
+      "binary": "c66fad1b",
+      "result": "通过",
+      "observed": "gen9: wake greeting, '现在几点' answered (noop, playback drained), '先这样，再见' -> session closed 23:07:09.2 and wake stayed enabled (back to mini standby); 5s later 'hi eva' detected again -> gen10; '关闭麦克风' (barge-in 80ms after drain) -> session closed + wake_disabled_observed native_disabled; Idle, wake disabled, eva PipeWire nodes 0"
+    },
+    {
+      "case_id": "V05",
+      "attempt": 1,
+      "time": "23:14:23",
+      "generation": 11,
+      "binary": "c66fad1b",
+      "result": "通过",
+      "observed": "turn1 switch_tag -> tag 3 verified succeeded; turn2 set_layout verified succeeded: only tag 3 changed tile->scrolling (tags 1/2/9 unchanged); user then switched back to tag 1 (turn3 switch_tag succeeded) and closed (turn4). Restored tag 3 -> tile via command_batch; view tag 1"
+    },
+    {
+      "case_id": "V06",
+      "attempt": 1,
+      "time": "23:16:22",
+      "generation": 12,
+      "binary": "c66fad1b",
+      "result": "通过",
+      "observed": "single plan, ordered: move_window_to_tag (verified succeeded) then switch_tag (verified succeeded); moved window = test xterm id 133 (unchanged) now tags=128 (tag 8); feedback interrupted by '结束这次对话' -> closed; user returned to tag 1 manually afterwards; restored xterm to tag 1 via command_batch"
+    },
+    {
+      "case_id": "V07",
+      "attempt": 1,
+      "time": "23:18:26",
+      "generation": 13,
+      "binary": "c66fad1b",
+      "result": "通过",
+      "observed": "single action move_window_to_tag (verified) xterm 133 -> tags=4 (tag 3); no switch_tag; view stayed on tag 1; focus fell back to frost (JWM default after the window left). Separately tag 1 layout monocle->tile (prev_layout monocle) during the window - not from Eva (no set_layout dispatched; executor doesn't touch layout; no auto-layout feature) - asked user"
+    },
+    {
+      "case_id": "V08",
+      "attempt": 1,
+      "time": "23:20:27",
+      "generation": 14,
+      "binary": "c66fad1b",
+      "result": "通过",
+      "observed": "utterance 23:20:28.9-31.5 with xterm focused; user clicked frost right after; plan 2.1s later dispatched move_window_to_tag verified on the original xterm 133 (now tag 3); frost (newly focused) stayed on tag 1 and focused"
+    },
+    {
+      "case_id": "V09",
+      "attempt": 1,
+      "time": "23:21:33",
+      "generation": 15,
+      "binary": "c66fad1b",
+      "result": "失败",
+      "observed": "'不要切换桌面，取消' noop OK; '把这个关掉……算了，别关了' (full utterance in turn 2 after barge-in) -> set_window_minimized executed on xterm (cancellation violation; also close substituted by minimize, bypassing confirmation). Restored by focus_window.",
+      "root_cause": "prompt example '不要关闭，把它收起来 => 只最小化' overgeneralized; model also substitutes loaded actions for non-preloaded killclient (minimize / move-to-tag 'simulating close'); schema repair round forbade discovery",
+      "fix": "instructions: trailing retraction => noop, no gentler substitute; loaded_actions is a subset, discover missing actions, never simulate/substitute; killclient named in windows category; one discovery redirect on action_schema_not_loaded (test not_loaded_action_redirects_to_discovery_instead_of_a_substitute). Real-model dry-run: 4/4 close -> killclient confirm=True (3 responses), 4/4 negations noop, 5/5 common commands single response. installed (prompt v3)"
+    },
+    {
+      "case_id": "V09",
+      "attempt": 2,
+      "time": "23:35:23",
+      "generation": 17,
+      "binary": "f2b7ab51",
+      "result": "通过",
+      "observed": "turn1 不要切换桌面，取消 -> noop; turn2 把这个关掉……算了，别关了 -> noop; turn3 close; zero actions dispatched; xterm tag 1 not minimized; layouts unchanged; resources released"
+    },
+    {
+      "case_id": "V10",
+      "attempt": 1,
+      "time": "23:38:37",
+      "generation": 18,
+      "binary": "f2b7ab51",
+      "result": "通过",
+      "observed": "turn1 (去第三个桌面) was a discovery response, interrupted by the continuation before any dispatch; turn2 single switch_tag verified; JWM tag/view mask 16 (tag 5); no Eva dispatch to tag 3 (other tag/view events were manual navigation outside the session, untimestamped)"
+    },
+    {
+      "case_id": "V11",
+      "attempt": 1,
+      "time": "23:41:01",
+      "generation": "19,20",
+      "binary": "f2b7ab51",
+      "result": "失败",
+      "observed": "gen19: clarify question too long (plan_text_too_long) twice -> session failed plan_invalid. gen20: speech understood as 切掉浏览器 (dry-run reproduces identical discovery->killclient timing); four turns each produced a confirmation-class killclient plan shown as a silent card; user never confirmed; confirmation_expired. Local confirmation gate prevented any close.",
+      "fixes": "repair hint for plan_text_too_long (repair now succeeds); multi-candidate window groups carry if_user_did_not_specify_which=clarify cue; instructions: clarify before close when several candidates. dry-run: 切到/切掉/关掉/把浏览器关闭 -> clarify; 切到二号桌面的浏览器 -> focus; 关掉标题是新标签页的那个 -> killclient confirm; 关掉二号桌面的浏览器 1/3 execute, 2/3 over-clarify (model variance, no wrong mutation)",
+      "open": "confirmation card is silent in a voice flow - proposed spoken confirmation prompt, awaiting user decision"
+    }
+  ],
+  "not_run": [
+    "V02 (passed 10-30, not repeated on this build)",
+    "V12-V20",
+    "W02-W05",
+    "F01-F07",
+    "M01-M08 incl. 241-case corpus"
+  ]
+}

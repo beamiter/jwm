@@ -551,6 +551,10 @@ pub async fn run(c: Config) -> io::Result<()> {
     let mut worker: Option<tokio::task::JoinHandle<io::Result<()>>> = None;
     let mut cancellation: Option<watch::Sender<bool>> = None;
     let mut permit: Option<AssistantPermit> = None;
+    // A snapshot issued before JWM processed our own close still reports the
+    // closed permit active. It is never a new activation; real activations
+    // always carry a new generation.
+    let mut retired: Option<AssistantPermit> = None;
     let mut wm_instance: Option<String> = None;
     let mut status = json!({"state":"idle","text":"","level":0.0,"microphone_active":false});
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
@@ -724,7 +728,7 @@ pub async fn run(c: Config) -> io::Result<()> {
                 }
                 if error_until.as_ref().is_some_and(|expiry|std::time::Instant::now()>=expiry.deadline){
                     if error_until.as_ref().is_some_and(|expiry|expiry.closes(std::time::Instant::now(),permit.as_ref()))
-                        && let Some(p)=permit.take(){let _=command("set_assistant_status",json!({"assistant_permit":p,"state":"closing"})).await;}
+                        && let Some(p)=permit.take(){let _=command("set_assistant_status",json!({"assistant_permit":p.clone(),"state":"closing"})).await;native_poll.invalidate();retired=Some(p);}
                     error_until=None;
                 }
                 if worker.as_ref().is_some_and(|w|w.is_finished()) {
@@ -741,7 +745,7 @@ pub async fn run(c: Config) -> io::Result<()> {
                     if status["state"]=="error" || keep_feedback {
                         if let Some(p)=permit.as_ref(){let mut snapshot=status.clone();snapshot["assistant_permit"]=json!(p);let _=command("set_assistant_status",snapshot).await;}
                         error_until=permit.clone().map(|permit|ErrorExpiry{permit,deadline:std::time::Instant::now()+Duration::from_secs(6)});
-                    }else if let Some(p)=permit.take(){let _=command("set_assistant_status",json!({"assistant_permit":p,"state":"closing"})).await;}
+                    }else if let Some(p)=permit.take(){let _=command("set_assistant_status",json!({"assistant_permit":p.clone(),"state":"closing"})).await;native_poll.invalidate();retired=Some(p);}
                     cancellation=None;
                     if status["state"]!="error" && !keep_feedback{status=json!({"state":"idle","text":"","microphone_active":false});}
                 }
@@ -853,7 +857,7 @@ pub async fn run(c: Config) -> io::Result<()> {
                 }
                 if observed.is_ok() {
                   wm_instance=observed.as_ref().ok().and_then(|s|s["wm_instance_id"].as_str()).map(str::to_owned);
-                  let next=observed.as_ref().ok().filter(|s|s["active"]==true).and_then(|s|serde_json::from_value::<AssistantPermit>(s["assistant_permit"].clone()).ok());
+                  let next=observed.as_ref().ok().filter(|s|s["active"]==true).and_then(|s|serde_json::from_value::<AssistantPermit>(s["assistant_permit"].clone()).ok()).filter(|next|retired.as_ref()!=Some(next));
                   if next!=permit {
                     error_until=None;
                     stop(&mut worker,&mut cancellation).await;permit=next;
@@ -950,6 +954,11 @@ fn wake_diagnostic_error_code(error: &io::Error) -> &'static str {
         "wake_response_timeout" => "wake_response_timeout",
         "wake_configuration_mismatch" => "wake_configuration_mismatch",
         "wake_input_queue_full" => "wake_input_queue_full",
+        "response_not_completed" => "response_not_completed",
+        "expected_exactly_one_tool_call" => "expected_exactly_one_tool_call",
+        "unexpected_tool_output" => "unexpected_tool_output",
+        "invalid_call_id" => "invalid_call_id",
+        "invalid_tool_arguments" => "invalid_tool_arguments",
         _ => crate::errors::session_code(error),
     }
 }
@@ -1523,6 +1532,20 @@ mod tests {
         tokio::task::yield_now().await;
         assert!(poll.take_ready().await.is_none());
         assert_eq!(poll.cached(), Some(&activated));
+    }
+
+    #[tokio::test]
+    async fn read_issued_before_our_own_close_cannot_reactivate_the_closed_permit() {
+        // The actor closes a permit, then a status read that JWM answered
+        // before processing that close arrives still reporting it active.
+        let mut poll = super::NativeStatusPoll::default();
+        let (send, receive) = tokio::sync::oneshot::channel();
+        poll.start_with(async { Ok(receive.await.unwrap()) });
+        poll.invalidate();
+        send.send(native_fixture(7, 9, true)).unwrap();
+        tokio::task::yield_now().await;
+        assert!(poll.take_ready().await.is_none());
+        assert!(poll.cached().is_none());
     }
 
     #[tokio::test]

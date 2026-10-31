@@ -39,6 +39,10 @@ struct UploadedFrame {
     end: u64,
     captured: Instant,
     timestamp_verified: bool,
+    /// Local silence appended after a clear acknowledgement, before replayed
+    /// barge-in audio. Server VAD prefix padding landing here belongs to the
+    /// next real frame; the silence itself never supplies an onset time.
+    lead_in: bool,
 }
 const MAX_UPLOADED_RANGES: usize = 32_768;
 #[derive(Default)]
@@ -92,9 +96,32 @@ impl InputGate {
             end,
             captured,
             timestamp_verified,
+            lead_in: false,
         });
         self.written = end;
         Ok(())
+    }
+    /// Record successfully appended local lead-in silence. It is uploaded
+    /// only after the clear acknowledgement, so it lies above the floor.
+    pub fn uploaded_lead_in(&mut self, samples: usize) -> io::Result<()> {
+        self.uploaded(samples, Instant::now(), false)?;
+        if let Some(frame) = self.frames.back_mut() {
+            frame.lead_in = true;
+        }
+        Ok(())
+    }
+    /// Fixed diagnostic category for a VAD start that was not attributed.
+    pub fn start_rejection(&self, audio_start_ms: u64) -> &'static str {
+        let sample = audio_start_ms.saturating_mul(24);
+        if self.awaiting_clear {
+            "awaiting_clear"
+        } else if sample < self.floor {
+            "below_floor"
+        } else if sample >= self.written {
+            "beyond_written"
+        } else {
+            "not_new"
+        }
     }
     /// Bound the complete owned utterance using successful PCM appends, not
     /// when its delayed VAD event happened to arrive. The caller includes any
@@ -135,14 +162,24 @@ impl InputGate {
         if sample < self.floor || sample >= self.written {
             return Ok(None);
         }
-        let Some(frame) = self
+        let Some(index) = self
             .frames
             .iter()
-            .find(|frame| frame.start <= sample && sample < frame.end)
+            .position(|frame| frame.start <= sample && sample < frame.end)
         else {
             return Ok(None);
         };
-        let offset = sample - frame.start;
+        // Padding inside lead-in silence starts at the first real frame after
+        // it. Without such a frame there is no audio to attribute.
+        let (frame, offset) = if self.frames[index].lead_in {
+            match self.frames.iter().skip(index).find(|frame| !frame.lead_in) {
+                Some(frame) => (frame, 0),
+                None => return Ok(None),
+            }
+        } else {
+            (&self.frames[index], sample - self.frames[index].start)
+        };
+        let owned_start = frame.start + offset;
         let duration = Duration::new(
             offset / 24_000,
             ((offset % 24_000) * 1_000_000_000 / 24_000) as u32,
@@ -155,7 +192,7 @@ impl InputGate {
             timestamp_verified: frame.timestamp_verified,
         };
         if self.start(id, turn)? {
-            self.pending_start_sample = Some(sample);
+            self.pending_start_sample = Some(owned_start);
             Ok(Some(onset))
         } else {
             Ok(None)
@@ -302,6 +339,46 @@ mod tests {
             gate.request_clear();
             gate.cleared();
         }
+    }
+    #[test]
+    fn lead_in_absorbs_vad_padding_after_a_clear_without_crossing_the_floor() {
+        let native = Instant::now();
+        let mut gate = InputGate::default();
+        for index in 0..100 {
+            gate.uploaded(480, native + Duration::from_millis(index * 20), true)
+                .unwrap();
+        }
+        gate.request_clear();
+        gate.cleared();
+        // 600 ms of local silence, then the replayed interruption onset.
+        for _ in 0..30 {
+            gate.uploaded_lead_in(480).unwrap();
+        }
+        let replay = native + Duration::from_secs(9);
+        gate.uploaded(480, replay, true).unwrap();
+        gate.uploaded(480, replay + Duration::from_millis(20), true)
+            .unwrap();
+        // Padding reaching back across the clear is still never guessed.
+        assert!(gate.start_at("old", 2, 1999).unwrap().is_none());
+        assert_eq!(gate.start_rejection(1999), "below_floor");
+        // Padding inside the lead-in starts at the first replayed frame.
+        let onset = gate.start_at("barge", 2, 2300).unwrap().unwrap();
+        assert_eq!(onset.captured, replay);
+        assert!(onset.timestamp_verified);
+        assert!(gate.matches("barge", 2));
+        assert_eq!(gate.start_rejection(2300), "not_new");
+
+        // Lead-in alone carries no audio to attribute.
+        let mut gate = InputGate::default();
+        gate.uploaded(480, native, true).unwrap();
+        gate.request_clear();
+        gate.cleared();
+        gate.uploaded_lead_in(480).unwrap();
+        assert!(gate.start_at("silence", 2, 25).unwrap().is_none());
+        // A start inside replayed audio keeps its exact offset.
+        gate.uploaded(480, replay, true).unwrap();
+        let onset = gate.start_at("speech", 2, 45).unwrap().unwrap();
+        assert_eq!(onset.captured, replay + Duration::from_millis(5));
     }
     #[test]
     fn padding_is_allowed_at_zero_but_never_guessed_across_a_clear_floor() {
