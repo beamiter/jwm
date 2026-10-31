@@ -61,6 +61,15 @@ enum Command {
 }
 #[derive(Subcommand)]
 enum ConfigCommand {
+    /// Interactively save an OpenAI API key and update the selected configuration.
+    ApiKey {
+        /// Skip the storage-choice prompt (the key is still entered privately).
+        #[arg(long, value_enum)]
+        storage: Option<jwm_eva::credentials::Storage>,
+        /// Save the credential without restarting jwm-eva.service.
+        #[arg(long)]
+        no_restart: bool,
+    },
     /// Preview or apply a recognized historical bundled profile migration.
     Migrate {
         #[arg(long, conflicts_with = "write")]
@@ -135,6 +144,31 @@ async fn run(args: Cli) -> io::Result<()> {
         }
     };
     match args.command {
+        Command::Config {
+            command:
+                ConfigCommand::ApiKey {
+                    storage,
+                    no_restart,
+                },
+        } => {
+            let path = args.config.unwrap_or_else(Config::path);
+            let saved = jwm_eva::credentials::configure(&path, storage).await?;
+            println!("API key 已保存，配置已更新：{}", saved.config.display());
+            if let Some(path) = saved.key_file {
+                println!("密钥文件（仅当前用户可读写）：{}", path.display());
+            }
+            if no_restart {
+                println!("已跳过服务重启（--no-restart）。");
+            } else {
+                println!("正在重启 jwm-eva.service…");
+                jwm_eva::credentials::restart_service().await?;
+                println!("jwm-eva.service 已重启并处于运行状态。");
+            }
+            println!(
+                "验证连接：jwm-eva --config '{}' doctor --live",
+                saved.config.to_string_lossy().replace('\'', "'\\''")
+            );
+        }
         Command::Config {
             command: ConfigCommand::Migrate { write, .. },
         } => {

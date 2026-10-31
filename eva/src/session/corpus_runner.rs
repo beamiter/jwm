@@ -504,6 +504,7 @@ async fn evaluate() -> io::Result<()> {
                 .collect::<BTreeSet<_>>();
             let started = Instant::now();
             let mut trace = Trace {
+                companion_session: None,
                 input: crate::planning_input::FrozenInput::default(),
                 response: None,
                 audio_items: vec![],

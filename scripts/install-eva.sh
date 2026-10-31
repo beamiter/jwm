@@ -129,4 +129,4 @@ if [[ $eva_existing_config == true ]]; then
     printf 'After reviewing the preview, apply explicitly with a backup:\n'
     printf '  %q --config %q config migrate --write\n' "$eva_prefix/bin/jwm-eva" "$eva_config_dir/eva.toml"
 fi
-printf 'Next: register the API credential, then run jwm-eva doctor. See eva/README.md.\n'
+printf 'Next: run jwm-eva config api-key (restarts Eva automatically), then jwm-eva doctor --live. See eva/README.md.\n'

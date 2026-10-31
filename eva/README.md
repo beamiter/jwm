@@ -46,7 +46,33 @@ bash scripts/install-eva.sh --help
 
 `jwm-eva doctor` 默认检查所选配置、凭据是否可读取、音频设备和 JWM 协议，并显示本地费用；只查询设备，不打开音频流或云端会话。报告包括 `audio_backend`、输入和输出设备、模型、断句与降噪设置，并按具体故障给出修复建议。PipeWire 后端需要真实 `Audio/Source` 与 `Audio/Sink` 节点，不能用仅有摄像头或屏幕视频的连接代替。PulseAudio 后端只连接当前用户的本机 Unix socket，拒绝把扬声器 monitor 当作麦克风；显式指定的输入设备消失时结束该句，不悄悄切到别的设备。
 
-API 凭据默认从 Secret Service 读取；在桌面会话中运行下面命令，按提示输入 key（不会写入配置文件）：
+首次配置或更换 API key，在终端运行：
+
+```bash
+jwm-eva config api-key
+```
+
+命令会提示选择保存方式并隐藏密钥输入，自动更新 `eva.toml` 的凭据设置，保留其他设置和注释。默认使用当前配置旁的 `openai.key`（若已指定绝对 `api_key_file` 则继续使用），文件权限为 `0600`；也可选择系统钥匙串。密钥不写入 TOML、不作为命令参数传递，也不会回显。空输入、Ctrl-C 或 Ctrl-D 取消，不保存密钥、不重启服务。保存成功后自动执行 `systemctl --user restart jwm-eva.service`，再检查服务是否运行；只有两步均成功才显示重启成功。重启失败会返回非零状态，但保留已保存的密钥和配置，并提示重试方法，无需重新输入密钥。不要同时用其他编辑器修改配置；检测到并发变化会停止保存。
+
+可指定保存方式，或用全局 `--config` 选择另一份配置：
+
+```bash
+jwm-eva config api-key --storage file
+jwm-eva config api-key --storage secret-service
+jwm-eva --config /absolute/path/eva.toml config api-key --no-restart
+```
+
+只保存、不重启服务时使用 `--no-restart`，例如配置一份尚未被服务使用的自定义文件。默认重启的是 `jwm-eva.service`，自定义配置须确保该服务也使用同一路径。保存操作不调用 API；自动重启后的 daemon 会按其配置进行连接预热或唤醒待机。
+
+命令完成后可进一步验证 API 连接：
+
+```bash
+jwm-eva doctor --live
+```
+
+`doctor --live` 只检查云端连接与配置回执，不采音、不提交推理。自定义配置应使用相同的 `--config` 路径运行检查，并确保服务也使用该配置。
+
+系统钥匙串需要 `secret-tool` 和可用、已解锁的 Secret Service；Debian/Ubuntu/Mint 可用 `sudo apt install libsecret-tools gnome-keyring` 安装。也可手动保存密钥（默认凭据来源为 `secret_service`）：
 
 ```bash
 secret-tool store --label='JWM Eva OpenAI API' service jwm-eva provider openai
@@ -190,6 +216,13 @@ eva_import_pipewire_env
 cargo test --locked --offline -p jwm_eva_core -p jwm-eva -p jwm_ipc_client
 cargo test --locked --offline -p jwm --lib jwm::eva::tests -- --test-threads=1
 bash scripts/test-install-eva.sh
+```
+
+交互式凭据配置的终端测试使用临时目录和占位密钥，覆盖隐藏输入、取消、密钥轮换、文件权限和钥匙串失败，不连接真实服务：
+
+```bash
+cargo build --locked --offline --release -p jwm-eva
+python3 eva/tests/api-key-pty.py target/release/jwm-eva
 ```
 
 真实模型语料入口默认忽略，需要明确启用；先停止 Eva daemon 以释放真实费用账本的独占锁。入口在独立子进程中把 `JWM_SOCKET` 固定为私有只读测试服务，桌面发现只读取虚构场景，任何命令都会拒绝。它复用生产规划、参数校验与真实费用预留/结算，不采集声音、不执行动作，也不验证真实桌面后置状态。

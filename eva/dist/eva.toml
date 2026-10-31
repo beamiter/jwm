@@ -1,6 +1,6 @@
 # ~/.config/jwm/eva.toml — unknown fields are errors.
-# This file contains no credential. Register an OpenAI API key in Secret Service:
-# secret-tool store --label='JWM Eva OpenAI API' service jwm-eva provider openai
+# This file contains no credential. Set up an OpenAI API key interactively:
+# jwm-eva config api-key
 [service]
 enabled = true
 instance_scope = "graphical_session"

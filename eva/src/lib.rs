@@ -4,6 +4,7 @@ mod companion;
 pub mod config;
 pub mod context;
 pub mod cost_report;
+pub mod credentials;
 pub mod daemon;
 pub mod diagnostics;
 pub mod doctor;
