@@ -38,6 +38,7 @@ pub enum Action {
     Volume(f64),
     Rate(f64),
     Loop(String),
+    Shuffle(bool),
     Fullscreen(bool),
     Raise,
     Quit,
@@ -158,6 +159,8 @@ impl Worker {
             "playlist",
             "loop-file",
             "loop-playlist",
+            "shuffle",
+            "play-direction",
         ]
         .iter()
         .enumerate()
@@ -647,14 +650,26 @@ impl Mpv {
                     .map(|_| ())
             }
             Action::Next => {
-                if self.snapshot().can_next() {
+                let state = self.snapshot();
+                if state.can_next() && state.playlist_pos == Some(state.playlist.len() - 1) {
+                    self.command(json!(["set_property", "playlist-pos", 0]))
+                        .map(|_| ())
+                } else if state.can_next() {
                     self.command(json!(["playlist-next", "weak"])).map(|_| ())
                 } else {
                     Ok(())
                 }
             }
             Action::Previous => {
-                if self.snapshot().can_previous() {
+                let state = self.snapshot();
+                if state.can_previous() && state.playlist_pos == Some(0) {
+                    self.command(json!([
+                        "set_property",
+                        "playlist-pos",
+                        state.playlist.len() - 1
+                    ]))
+                    .map(|_| ())
+                } else if state.can_previous() {
                     self.command(json!(["playlist-prev", "weak"])).map(|_| ())
                 } else {
                     Ok(())
@@ -697,11 +712,32 @@ impl Mpv {
                 .map(|_| ())
             }
             Action::Rate(rate) => {
-                if !rate.is_finite() || !(0.25..=4.0).contains(&rate) {
-                    return Err("rate must be between 0.25 and 4".into());
+                if !rate.is_finite() || !(0.25..=4.0).contains(&rate.abs()) {
+                    return Err("rate magnitude must be between 0.25 and 4".into());
                 }
-                self.command(json!(["set_property", "speed", rate]))
+                let state = self.snapshot();
+                if rate < 0.0 && state.loaded && !state.seekable {
+                    return Err("reverse playback requires a seekable file".into());
+                }
+                self.command(json!([
+                    "set_property",
+                    "play-direction",
+                    if rate < 0.0 { "backward" } else { "forward" }
+                ]))?;
+                self.command(json!(["set_property", "speed", rate.abs()]))
                     .map(|_| ())
+            }
+            Action::Shuffle(enabled) => {
+                let already = self.get("shuffle")?.as_bool().unwrap_or(false);
+                if enabled != already {
+                    self.command(json!([if enabled {
+                        "playlist-shuffle"
+                    } else {
+                        "playlist-unshuffle"
+                    }]))?;
+                    self.command(json!(["set_property", "shuffle", enabled]))?;
+                }
+                Ok(())
             }
             Action::Loop(status) => {
                 let (file, playlist) = match status.as_str() {
@@ -1018,6 +1054,56 @@ mod tests {
             s.path.ends_with("video.mp4") && s.status() == "Playing" && s.position_us > 50_000
         })
         .await;
+        controller.submit(Action::Next).await.unwrap();
+        wait_for(&controller, |s| {
+            s.path.ends_with(".wav") && s.status() == "Playing"
+        })
+        .await;
+        controller.submit(Action::Previous).await.unwrap();
+        wait_for(&controller, |s| {
+            s.path.ends_with("video.mp4") && s.status() == "Playing"
+        })
+        .await;
+        controller
+            .submit(Action::Loop("Track".into()))
+            .await
+            .unwrap();
+        wait_for(&controller, |s| s.loop_status() == "Track").await;
+        controller
+            .submit(Action::SetPosition {
+                track: controller.snapshot().track_path(),
+                position: 3_400_000,
+            })
+            .await
+            .unwrap();
+        wait_for(&controller, |s| s.position_us > 3_100_000).await;
+        wait_for(&controller, |s| {
+            s.position_us < 1_000_000 && s.status() == "Playing"
+        })
+        .await;
+        controller.submit(Action::Pause).await.unwrap();
+        wait_for(&controller, |s| s.status() == "Paused").await;
+        controller
+            .submit(Action::SetPosition {
+                track: controller.snapshot().track_path(),
+                position: 2_500_000,
+            })
+            .await
+            .unwrap();
+        wait_for(&controller, |s| s.position_us > 2_200_000).await;
+        controller.submit(Action::Rate(-1.0)).await.unwrap();
+        wait_for(&controller, |s| s.playback_rate() == -1.0).await;
+        controller.submit(Action::Play).await.unwrap();
+        wait_for(&controller, |s| {
+            s.status() == "Playing" && s.position_us < 1_900_000
+        })
+        .await;
+        controller.submit(Action::Rate(1.0)).await.unwrap();
+        wait_for(&controller, |s| s.playback_rate() == 1.0).await;
+        controller.submit(Action::Shuffle(true)).await.unwrap();
+        wait_for(&controller, |s| s.shuffle).await;
+        controller.submit(Action::Shuffle(false)).await.unwrap();
+        wait_for(&controller, |s| !s.shuffle).await;
         controller.submit(Action::Quit).await.unwrap();
         tokio::time::timeout(Duration::from_secs(4), done)
             .await
@@ -1026,6 +1112,108 @@ mod tests {
             .unwrap();
         assert!(!controller.snapshot().alive);
         let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[tokio::test]
+    async fn real_mpv_common_audio_containers_and_wave_encodings() {
+        if std::env::var_os("RUN_JWM_MPV_TESTS").is_none() {
+            return;
+        }
+        let directory =
+            std::env::temp_dir().join(format!("jwm-audio-formats-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let mut files = Vec::new();
+        for (name, codec, options) in [
+            ("pcm16.wav", "pcm_s16le", vec![]),
+            ("pcm24.wav", "pcm_s24le", vec![]),
+            ("pcm32.wav", "pcm_s32le", vec![]),
+            ("float32.wav", "pcm_f32le", vec![]),
+            ("rf64.wav", "pcm_s16le", vec!["-rf64", "always"]),
+            ("wave64.w64", "pcm_s16le", vec![]),
+            ("lossless.flac", "flac", vec![]),
+            ("music.mp3", "libmp3lame", vec![]),
+            ("music.mp2", "mp2", vec![]),
+            ("music.aac", "aac", vec![]),
+            ("music.m4a", "aac", vec![]),
+            ("apple-lossless.m4a", "alac", vec![]),
+            ("music.ogg", "libvorbis", vec![]),
+            ("music.opus", "libopus", vec![]),
+            ("music.wv", "wavpack", vec![]),
+            ("music.wma", "wmav2", vec![]),
+            ("music.aiff", "pcm_s16be", vec![]),
+            ("music.au", "pcm_mulaw", vec![]),
+            ("music.caf", "pcm_s16le", vec![]),
+            ("music.tta", "tta", vec![]),
+            ("music.ac3", "ac3", vec![]),
+            ("music.eac3", "eac3", vec![]),
+            ("music.mka", "flac", vec![]),
+        ] {
+            let path = directory.join(name);
+            let output = Command::new("ffmpeg")
+                .args([
+                    "-nostdin",
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-y",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "sine=frequency=440:duration=2",
+                    "-c:a",
+                    codec,
+                ])
+                .args(options)
+                .arg(&path)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "generate {name}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            files.push(path);
+        }
+        // Content probing must also work for a filename with no recognized suffix.
+        for name in ["recording", "recording.unknown"] {
+            let path = directory.join(name);
+            std::fs::copy(&files[0], &path).unwrap();
+            files.push(path);
+        }
+        let (controller, worker) = Controller::new();
+        let done = worker.spawn_inner(
+            Open {
+                files: vec![],
+                enqueue: false,
+                mode: Mode::Music,
+            },
+            true,
+        );
+        for path in &files {
+            let path = path.to_str().unwrap();
+            controller
+                .submit(Action::Open(Open {
+                    files: vec![path.to_owned()],
+                    enqueue: false,
+                    mode: Mode::Music,
+                }))
+                .await
+                .unwrap();
+            wait_for(&controller, |state| {
+                state.path == path
+                    && state.status() == "Playing"
+                    && state.position_us > 0
+                    && state.duration_us.is_some_and(|duration| duration > 0)
+            })
+            .await;
+        }
+        controller.submit(Action::Quit).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(4), done)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

@@ -104,8 +104,109 @@ local function toggle(name)
     offset, selected = 0, 1
     draw()
 end
+local function repeating(name)
+    local value=mp.get_property_native(name,'no')
+    return value=='inf' or value=='yes' or value==true or (tonumber(value) or 0)>0
+end
+local function repeat_mode()
+    return repeating('loop-file') and 'One' or repeating('loop-playlist') and 'All' or 'Off'
+end
+local function playing_backward()
+    local direction=mp.get_property_native('play-direction','forward')
+    return direction=='backward' or direction=='-'
+end
+local function cycle_repeat()
+    local mode=repeat_mode()
+    mp.set_property('loop-file',mode=='Off' and 'inf' or 'no')
+    mp.set_property('loop-playlist',mode=='One' and 'inf' or 'no')
+    mp.osd_message('Repeat: '..repeat_mode(),2); draw()
+end
+local function shuffle_queue()
+    local enabled=mp.get_property_native('shuffle',false)
+    if #mp.get_property_native('playlist',{})<2 then mp.osd_message('Add at least two files to shuffle.',2); return end
+    local ok,err=mp.commandv(enabled and 'playlist-unshuffle' or 'playlist-shuffle')
+    if not ok then mp.osd_message('Cannot reorder queue: '..tostring(err),3); return end
+    mp.set_property('shuffle',enabled and 'no' or 'yes')
+    mp.osd_message(enabled and 'Original queue restored' or 'Queue shuffled',2); draw()
+end
+local function queue_reversed()
+    if mp.get_property_native('shuffle',false) then return false end
+    local list=mp.get_property_native('playlist',{})
+    if #list<2 then return false end
+    for i=2,#list do if not list[i].id or not list[i-1].id or list[i].id>list[i-1].id then return false end end
+    return true
+end
+local function queue_order_name()
+    if mp.get_property_native('shuffle',false) then return 'Shuffled' end
+    if queue_reversed() then return 'Reverse' end
+    local list=mp.get_property_native('playlist',{})
+    for i=2,#list do
+        if list[i].id and list[i-1].id and list[i].id<list[i-1].id then return 'Custom' end
+    end
+    return 'Original'
+end
+local function reverse_queue()
+    local list=mp.get_property_native('playlist',{})
+    if #list<2 then mp.osd_message('Add at least two files to reverse the queue.',2); return end
+    local reverse=not queue_reversed()
+    mp.set_property('shuffle','no')
+    -- Entry IDs retain insertion order even for duplicate filenames. Moving
+    -- entries keeps the current decoder, playback position and pause state.
+    local ordered={}
+    for i,entry in ipairs(list) do ordered[i]=entry end
+    table.sort(ordered,function(a,b) return reverse and a.id>b.id or not reverse and a.id<b.id end)
+    for target,entry in ipairs(ordered) do
+        local current=mp.get_property_native('playlist',{})
+        for index,value in ipairs(current) do
+            if value.id==entry.id and index~=target then
+                local ok,err=mp.commandv('playlist-move',index-1,target-1)
+                if not ok then mp.osd_message('Cannot reorder queue: '..tostring(err),3); return end
+                break
+            elseif value.id==entry.id then break end
+        end
+    end
+    mp.osd_message(reverse and 'Queue reversed · current track kept' or 'Original queue order restored',2); draw()
+end
+local function toggle_direction()
+    local backward=playing_backward()
+    if not backward and (idle() or not mp.get_property_native('seekable',false)) then
+        mp.osd_message('Open a seekable file to reverse playback.',3); return
+    end
+    -- Pause while replacing the pending direction-change seek at time zero,
+    -- otherwise the decoder can reach EOF before the end-position seek lands.
+    local from_start=not backward and number('time-pos')<.1 and number('duration')>0
+    local paused=mp.get_property_native('pause',false)
+    if from_start then mp.set_property('pause','yes') end
+    local ok,err=mp.set_property('play-direction',backward and 'forward' or 'backward')
+    if ok and from_start then ok,err=mp.commandv('seek',math.max(0,number('duration')-.1),'absolute+exact') end
+    if from_start then mp.set_property('pause',paused and 'yes' or 'no') end
+    if not ok then mp.osd_message('Playback direction unavailable: '..tostring(err),3); return end
+    mp.osd_message(backward and 'Forward playback' or 'Reverse playback',2); draw()
+end
+local function step_queue(delta)
+    local list=mp.get_property_native('playlist',{})
+    local pos=number('playlist-pos',-1)
+    if pos<0 or #list==0 then return end
+    local target=pos+delta
+    if repeating('loop-playlist') and #list>1 then target=target % #list end
+    if target>=0 and target<#list then mp.set_property_number('playlist-pos',target) end
+end
 local function items()
-    if panel == 'Queue' then
+    if panel == 'Playback' then
+        local shuffled=mp.get_property_native('shuffle',false)
+        local backward=playing_backward()
+        return {
+            {label='Repeat  ·  '..repeat_mode()..'   (R)',current=repeat_mode()~='Off',action=cycle_repeat},
+            {label='Queue order  ·  '..queue_order_name(),current=queue_reversed(),action=reverse_queue},
+            {label='Shuffle  ·  '..(shuffled and 'On' or 'Off'),current=shuffled,action=shuffle_queue},
+            {label='Playback  ·  '..(backward and 'Reverse' or 'Forward'),current=backward,action=toggle_direction},
+            {label='Play queue from first entry',action=function()
+                if #mp.get_property_native('playlist',{})>0 then mp.set_property_number('playlist-pos',0); mp.set_property('pause','no') end
+            end},
+            {label='Previous track   (<)',action=function() step_queue(-1) end},
+            {label='Next track   (>)',action=function() step_queue(1) end},
+        }
+    elseif panel == 'Queue' then
         local list = {}
         for i, entry in ipairs(mp.get_property_native('playlist', {})) do
             local index = i - 1
@@ -262,6 +363,9 @@ draw = function()
             seg(3,6,10,6); seg(10,6,12,9); seg(12,9,21,9); seg(21,9,21,20); seg(21,20,3,20); seg(3,20,3,6)
         elseif name=='queue' then
             for i=0,2 do seg(4,6+i*6,6,6+i*6); seg(10,6+i*6,21,6+i*6) end
+        elseif name=='repeat' then
+            seg(4,8,4,5); seg(4,5,20,5); seg(20,5,20,10); seg(16,7,20,11); seg(20,11,23,7)
+            seg(20,16,20,19); seg(20,19,4,19); seg(4,19,4,14); seg(1,17,4,13); seg(4,13,8,17)
         elseif name=='subtitles' then box(3,4,21,17); seg(7,17,7,21); seg(7,21,12,17); seg(7,9,17,9); seg(7,13,13,13)
         elseif name=='volume' or name=='mute' then
             poly({{3,9},{7,9},{12,4},{12,20},{7,15},{3,15}})
@@ -340,6 +444,9 @@ draw = function()
         icon('play',24,23,C.white,12)
         text(51,20,'JWM Player',15,C.white)
         button(151,12,32,32,'hide',toggle_bars,'Hide bars · H')
+        button(193,12,34,32,'repeat',function() toggle('Playback') end,
+            'Playback modes · Ctrl+P',panel=='Playback' or repeat_mode()~='Off'
+                or mp.get_property_native('shuffle',false) or playing_backward())
         local header_y,bh = 12,32
         local windows_x = width-106
         rect(windows_x,header_y,92,bh,C.panel,75,7)
@@ -382,7 +489,7 @@ draw = function()
         button(screenx,bottom,34,34,'screen',function() mp.commandv('cycle','ontop') end,'Always on top',mp.get_property_native('ontop',false))
         button(subx,bottom,34,34,'subtitles',function() toggle('Subtitles') end,'Subtitles · S',panel=='Subtitles')
         button(speedx,bottom,36,34,nil,function() toggle('Speed') end,'Playback speed',panel=='Speed')
-        text(speedx+18,bottom+17,string.format('%g×',number('speed',1)),13,C.white,5)
+        text(speedx+18,bottom+17,string.format('%s%g×',playing_backward() and '−' or '',number('speed',1)),13,C.white,5)
         local sx,sw = 206,subx-226
         local duration,position = number('duration'),number('time-pos')
         local fraction = duration>0 and clamp(position/duration,0,1) or 0
@@ -432,6 +539,7 @@ draw = function()
             text(x+16,y+291,string.format('%d–%d / %d',offset+1,math.min(offset+PAGE_ROWS,#list),#list),11,C.muted)
         end
         local hint = panel=='Subtitles' and 'J: cycle   V: visibility   Z/X: delay'
+            or panel=='Playback' and 'Queue order and playback direction are separate'
             or panel=='Settings' and 'Bars: Auto / Always / Hidden · H restores'
             or '↑ / ↓: select    Enter: apply    Esc: close'
         text(x+16,y+318,hint,10,C.muted)
@@ -485,6 +593,13 @@ mp.set_key_bindings({
 mp.add_key_binding('l','jwm-queue',function() toggle('Queue') end)
 mp.add_key_binding('s','jwm-subtitles',function() toggle('Subtitles') end)
 mp.add_key_binding('Ctrl+o','jwm-open',open_files)
+mp.add_key_binding('Ctrl+p','jwm-playback',function() toggle('Playback') end)
+mp.add_key_binding('r','jwm-repeat',cycle_repeat)
+mp.add_key_binding('Ctrl+r','jwm-reverse-queue',reverse_queue)
+mp.add_key_binding('Ctrl+Shift+s','jwm-shuffle',shuffle_queue)
+mp.add_key_binding('Ctrl+Shift+r','jwm-reverse-playback',toggle_direction)
+mp.add_key_binding('<','jwm-previous',function() step_queue(-1) end)
+mp.add_key_binding('>','jwm-next',function() step_queue(1) end)
 mp.add_key_binding('h','jwm-toggle-bars',toggle_bars)
 mp.add_key_binding('Ctrl+h','jwm-cycle-bars',cycle_bars)
 mp.add_key_binding('mouse_move','jwm-pointer',function()
@@ -505,7 +620,8 @@ mp.add_key_binding('mouse_leave','jwm-pointer-leave',function()
     draw()
 end)
 for _,property in ipairs({'osd-dimensions','playlist','track-list','sid','hwdec','pause','fullscreen',
-    'idle-active','duration','volume','mute','speed','ontop','sub-visibility','window-maximized'}) do
+    'idle-active','duration','volume','mute','speed','ontop','sub-visibility','window-maximized',
+    'loop-file','loop-playlist','shuffle','play-direction','playlist-pos'}) do
     mp.observe_property(property,'native',draw)
 end
 -- Decoder position updates can arrive at video frame rate. Ten UI updates per
@@ -520,6 +636,7 @@ mp.add_periodic_timer(.25,function()
 end)
 mp.register_script_message('jwm-queue',function() toggle('Queue') end)
 mp.register_script_message('jwm-subtitles',function() toggle('Subtitles') end)
+mp.register_script_message('jwm-playback',function() toggle('Playback') end)
 mp.register_event('shutdown',function()
     if chooser then mp.abort_async_command(chooser) end
     overlay:remove()

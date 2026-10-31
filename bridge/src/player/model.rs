@@ -30,6 +30,8 @@ pub struct State {
     pub playlist: Vec<Track>,
     pub loop_file: bool,
     pub loop_playlist: bool,
+    pub shuffle: bool,
+    pub backward: bool,
     pub seek_serial: u64,
     pub error_serial: u64,
     pub error: Option<String>,
@@ -58,6 +60,8 @@ impl Default for State {
             playlist: Vec::new(),
             loop_file: false,
             loop_playlist: false,
+            shuffle: false,
+            backward: false,
             seek_serial: 0,
             error_serial: 0,
             error: None,
@@ -99,12 +103,21 @@ impl State {
     }
 
     pub fn can_next(&self) -> bool {
-        self.playlist_pos
-            .is_some_and(|pos| pos + 1 < self.playlist.len())
+        self.playlist_pos.is_some_and(|pos| {
+            pos + 1 < self.playlist.len()
+                || (self.loop_playlist && self.playlist.len() > 1 && pos < self.playlist.len())
+        })
     }
 
     pub fn can_previous(&self) -> bool {
-        self.playlist_pos.is_some_and(|pos| pos > 0)
+        self.playlist_pos.is_some_and(|pos| {
+            pos < self.playlist.len()
+                && (pos > 0 || (self.loop_playlist && self.playlist.len() > 1))
+        })
+    }
+
+    pub fn playback_rate(&self) -> f64 {
+        if self.backward { -self.rate } else { self.rate }
     }
 
     pub fn loop_status(&self) -> &'static str {
@@ -224,6 +237,8 @@ impl State {
             "loop-playlist" => {
                 self.loop_playlist = value == "inf" || value.as_i64().is_some_and(|n| n > 0)
             }
+            "shuffle" => self.shuffle = value.as_bool().unwrap_or(false),
+            "play-direction" => self.backward = value == "backward" || value == "-",
             _ => {}
         }
     }
@@ -233,6 +248,30 @@ impl State {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn repeat_edges_shuffle_and_signed_rate_follow_observed_state() {
+        let mut state = State::default();
+        state.property(
+            "playlist",
+            &json!([{"id":1,"filename":"a"},{"id":2,"filename":"b"}]),
+        );
+        state.property("playlist-pos", &json!(1));
+        assert!(!state.can_next());
+        state.property("loop-playlist", &json!("inf"));
+        assert!(state.can_next());
+        state.property("playlist-pos", &json!(0));
+        assert!(state.can_previous());
+        state.property("loop-playlist", &json!("no"));
+        assert!(!state.can_previous());
+        state.property("shuffle", &json!(true));
+        state.property("speed", &json!(1.5));
+        state.property("play-direction", &json!("backward"));
+        assert!(state.shuffle);
+        assert_eq!(state.playback_rate(), -1.5);
+        state.property("play-direction", &json!("forward"));
+        assert_eq!(state.playback_rate(), 1.5);
+    }
 
     #[test]
     fn loaded_and_error_events_determine_status() {

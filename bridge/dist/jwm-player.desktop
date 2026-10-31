@@ -11,5 +11,5 @@ Terminal=false
 StartupNotify=false
 StartupWMClass=jwm-player
 Categories=AudioVideo;Audio;Player;
-MimeType=audio/mpeg;audio/flac;audio/x-flac;audio/ogg;audio/opus;audio/x-wav;audio/wav;audio/mp4;audio/aac;audio/x-aiff;audio/x-ms-wma;
+MimeType=audio/mpeg;audio/mp2;audio/flac;audio/x-flac;audio/ogg;audio/opus;audio/x-opus+ogg;audio/x-vorbis+ogg;audio/x-flac+ogg;audio/x-speex+ogg;audio/x-speex;audio/vnd.wave;audio/x-wav;audio/wav;audio/wave;audio/mp4;audio/x-m4a;audio/x-m4b;audio/aac;audio/x-aiff;audio/x-aifc;audio/x-ms-wma;audio/x-ape;audio/x-wavpack;audio/x-tta;audio/x-musepack;audio/x-matroska;audio/basic;audio/x-caf;audio/AMR;audio/AMR-WB;audio/ac3;audio/eac3;audio/vnd.dts;audio/x-dsf;audio/x-dff;
 Keywords=Music;Audio;Recordings;Playlist;

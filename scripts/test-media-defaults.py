@@ -46,6 +46,7 @@ with tempfile.TemporaryDirectory(prefix="jwm-media-test-") as directory:
         "[Desktop Entry]\nType=Application\nName=Original player\n"
         "Exec=/bin/true %F\nMimeType=" + ";".join(expected) + ";\n"
     )
+    assert "audio/vnd.wave" in expected, "canonical WAV MIME must be registered"
     shared = config_home / "mimeapps.list"
     original = "# User defaults shared with Ubuntu\n[Default Applications]\n" + "".join(
         f"{mime}=original.desktop;\n" for mime in expected
@@ -82,7 +83,8 @@ with tempfile.TemporaryDirectory(prefix="jwm-media-test-") as directory:
     if shutil.which("gio") and shutil.which("xdg-mime"):
         for session in ("jwm", "JWM", "ubuntu:GNOME", "GNOME"):
             session_env = dict(env, XDG_CURRENT_DESKTOP=session)
-            for mime in ("audio/mpeg", "video/mp4", "video/x-matroska"):
+            for mime in ("audio/mpeg", "audio/vnd.wave", "audio/x-wav", "audio/x-wavpack",
+                         "audio/x-ms-wma", "audio/mp4", "video/mp4", "video/x-matroska"):
                 desktop_id = expected[mime].rstrip(";") if session.lower() == "jwm" else "original.desktop"
                 gio = subprocess.run(["gio", "mime", mime], env=session_env, capture_output=True, text=True, check=True)
                 assert gio.stdout.splitlines()[0].endswith(": " + desktop_id), (session, mime, gio.stdout)

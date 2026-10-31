@@ -54,6 +54,15 @@ arguments. Paths are passed as arguments, never evaluated as shell commands.
 The helper reuses one player per D-Bus session; ordinary opens replace the
 queue, while `--enqueue` appends. With no files it opens or raises the player.
 
+File-manager associations and MPRIS cover WAV (including the canonical
+`audio/vnd.wave` type), MP3/MP2, FLAC, Ogg/Vorbis/Opus/Speex, AAC/M4A/M4B/ALAC,
+AIFF/AIFC, WMA, APE, WavPack, TTA, Musepack, Matroska audio, AU, CAF, AMR,
+AC-3/E-AC-3, DTS and DSD. WAV is a container: PCM 16/24/32-bit, floating-point
+PCM and RF64 variants are decoded by mpv/FFmpeg. Opening a local file through
+the command line, drag-and-drop or Ctrl+O does not require a recognized
+extension; mpv probes the contents. Actual codec availability depends on the
+installed mpv/FFmpeg build, and damaged or DRM-protected files may not play.
+
 ## Playback controls
 
 The player is an ordinary Wayland/X11 window, so it can be tiled, floated,
@@ -78,6 +87,26 @@ when the pointer leaves the slider. The top bar provides **Open files**,
 Drag the unused header area to move the borderless window, subject to the
 compositor's normal window policy.
 
+The repeat-arrow button beside the player name opens **Playback** (**Ctrl+P**).
+It provides **Repeat Off / One / All**, reversible queue order, shuffle,
+forward/reverse audio and video playback, play from the first queue entry,
+and previous/next controls. Repeat One loops the current file; Repeat All
+loops the queue, including explicit next/previous across either end. Queue
+reordering preserves the currently playing entry, position and pause state;
+choose **Play queue from first entry** to start at the new beginning. Duplicate
+filenames retain their separate queue entries, and toggling reverse order
+back restores insertion order. Shuffle can also be controlled over MPRIS.
+
+**Queue order** reverses the list; **Playback Reverse** runs the current file's
+timeline backwards. Switching at the beginning starts reverse playback near
+the end. Non-seekable inputs reject reverse playback; returning to Forward
+remains available even if reverse decoding fails or the player becomes idle. Reverse playback uses
+[mpv's play-direction support](https://mpv.io/manual/stable/#options-play-direction)
+and may be slower or less smooth for some codecs. Changing speed retains the
+selected direction; returning to Forward restores normal time progression.
+MPRIS reports reverse playback as a negative Rate and supports signed rates
+from -4× to -0.25× and 0.25× to 4×.
+
 Queue entries can be selected directly, with paging for large queues; arrow
 keys and Enter work while a panel is open, Page Up/Down change pages, and Escape
 closes it. Settings includes hardware decoding, subtitle visibility/delay,
@@ -101,6 +130,11 @@ installs its UI; no third-party scripts or downloaded artwork are loaded.
 | --- | --- |
 | Play / pause | Space |
 | Open local files | Ctrl+O |
+| Playback modes | Ctrl+P |
+| Cycle repeat Off → One → All | R |
+| Reverse / restore queue order | Ctrl+R |
+| Shuffle / restore pre-shuffle order | Ctrl+Shift+S |
+| Reverse / forward current audio or video | Ctrl+Shift+R |
 | Hide / restore both control bars | H |
 | Cycle bars: Auto / Always / Hidden | Ctrl+H |
 | Seek | Left / Right arrows |

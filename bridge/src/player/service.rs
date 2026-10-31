@@ -27,6 +27,23 @@ struct Root(Controller, bool);
 struct Player(Controller);
 struct Native(Controller, bool);
 
+// File-manager associations and MPRIS must advertise the same formats. In
+// particular shared-mime-info identifies ordinary WAV as audio/vnd.wave.
+fn desktop_mime_types() -> Vec<&'static str> {
+    [
+        include_str!("../../dist/jwm-player.desktop"),
+        include_str!("../../dist/jwm-video.desktop"),
+    ]
+    .into_iter()
+    .flat_map(str::lines)
+    .filter_map(|line| line.strip_prefix("MimeType="))
+    .flat_map(|types| types.split(';'))
+    .filter(|mime| !mime.is_empty())
+    .collect::<std::collections::BTreeSet<_>>()
+    .into_iter()
+    .collect()
+}
+
 fn string(value: impl Into<String>) -> OwnedValue {
     OwnedValue::from(Str::from(value.into()))
 }
@@ -147,21 +164,7 @@ impl Root {
     }
     #[zbus(property)]
     fn supported_mime_types(&self) -> Vec<&str> {
-        vec![
-            "audio/mpeg",
-            "audio/flac",
-            "audio/ogg",
-            "audio/opus",
-            "audio/x-wav",
-            "audio/mp4",
-            "audio/aac",
-            "video/mp4",
-            "video/x-matroska",
-            "video/webm",
-            "video/mpeg",
-            "video/quicktime",
-            "video/x-msvideo",
-        ]
+        desktop_mime_types()
     }
     #[zbus(property)]
     fn fullscreen(&self) -> bool {
@@ -226,7 +229,7 @@ impl Player {
     }
     #[zbus(property)]
     fn rate(&self) -> f64 {
-        self.0.snapshot().rate
+        self.0.snapshot().playback_rate()
     }
     #[zbus(property)]
     async fn set_rate(&self, rate: f64) -> zbus::fdo::Result<()> {
@@ -234,17 +237,11 @@ impl Player {
     }
     #[zbus(property)]
     fn shuffle(&self) -> bool {
-        false
+        self.0.snapshot().shuffle
     }
     #[zbus(property)]
-    fn set_shuffle(&self, shuffle: bool) -> zbus::fdo::Result<()> {
-        if shuffle {
-            Err(zbus::fdo::Error::NotSupported(
-                "shuffle is not supported".into(),
-            ))
-        } else {
-            Ok(())
-        }
+    async fn set_shuffle(&self, shuffle: bool) -> zbus::fdo::Result<()> {
+        self.0.submit(Action::Shuffle(shuffle)).await
     }
     #[zbus(property)]
     fn metadata(&self) -> HashMap<String, OwnedValue> {
@@ -264,7 +261,7 @@ impl Player {
     }
     #[zbus(property)]
     fn minimum_rate(&self) -> f64 {
-        0.25
+        -4.0
     }
     #[zbus(property)]
     fn maximum_rate(&self) -> f64 {
@@ -366,7 +363,8 @@ fn player_properties(state: &State) -> HashMap<String, OwnedValue> {
     HashMap::from([
         ("PlaybackStatus".into(), string(state.status())),
         ("LoopStatus".into(), string(state.loop_status())),
-        ("Rate".into(), state.rate.into()),
+        ("Rate".into(), state.playback_rate().into()),
+        ("Shuffle".into(), state.shuffle.into()),
         ("Volume".into(), state.volume.into()),
         ("Metadata".into(), metadata(state).into()),
         ("CanGoNext".into(), state.can_next().into()),
@@ -579,6 +577,36 @@ mod tests {
             file_uri(&state.path)
         );
         assert!(!player_properties(&state).contains_key("Position"));
+    }
+
+    #[test]
+    fn mpris_advertises_canonical_wave_and_common_audio_types() {
+        let (controller, _worker) = Controller::new();
+        let root = Root(controller, false);
+        let types = root.supported_mime_types();
+        for mime in [
+            "audio/vnd.wave",
+            "audio/x-wav",
+            "audio/wav",
+            "audio/flac",
+            "audio/x-wavpack",
+            "audio/x-ms-wma",
+            "audio/mp4",
+            "audio/x-m4b",
+            "audio/x-aiff",
+            "audio/AMR",
+            "audio/x-matroska",
+            "video/webm",
+        ] {
+            assert!(types.contains(&mime), "missing {mime}");
+        }
+        assert_eq!(
+            types.len(),
+            types
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

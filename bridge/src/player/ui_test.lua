@@ -4,13 +4,15 @@ local utils = require 'mp.utils'
 local bindings, messages, groups, observers, commands, pending, timers = {}, {}, {}, {}, {}, {}, {}
 local mouse_x, mouse_y, now, osd_w, osd_h = 0, 0, 0, 960, 600
 local props = {playlist={}, ['track-list']={}, sid='no', hwdec='auto-safe', fullscreen=false,
-    ['idle-active']=false, duration=120, ['time-pos']=30, volume=50, speed=1}
-for i=1,300 do props.playlist[i]={filename='/music/Track '..i..'.flac',current=i==1} end
+    ['idle-active']=false, seekable=true, ['play-direction']='forward', shuffle=false,
+    duration=120, ['time-pos']=30, volume=50, speed=1}
+for i=1,300 do props.playlist[i]={id=i,filename='/music/Track '..i..'.flac',current=i==1} end
 local overlay = {update=function() end,remove=function() end}
 local function set(name,value)
-    if name=='pause' then value=value=='yes' or value==true end
+    if name=='pause' or name=='shuffle' then value=value=='yes' or value==true end
     props[name]=value
     if observers[name] then observers[name]() end
+    return true
 end
 local mock = {
     create_osd_overlay=function() return overlay end,
@@ -24,6 +26,15 @@ local mock = {
         local args={...}; commands[#commands+1]=args
         if args[1]=='cycle' then set(args[2],not props[args[2]]) end
         if args[1]=='seek' then set('time-pos',args[2]) end
+        if args[1]=='playlist-move' then
+            local from,to=args[2]+1,args[3]+1
+            local entry=table.remove(props.playlist,from)
+            table.insert(props.playlist,from<to and to-1 or to,entry)
+        elseif args[1]=='playlist-shuffle' then
+            local list={}; for i=#props.playlist,1,-1 do list[#list+1]=props.playlist[i] end
+            props.playlist=list
+        elseif args[1]=='playlist-unshuffle' then table.sort(props.playlist,function(a,b) return a.id<b.id end) end
+        return true
     end,
     command_native_async=function(args,cb) pending[#pending+1]={args=args,cb=cb}; return #pending end,
     osd_message=function(value) commands[#commands+1]={'osd',value} end,
@@ -178,6 +189,33 @@ local ok,err=pcall(function()
     local count=#commands
     bindings['Ctrl+o'](); pending[4].cb(true,{status=0,stdout='https://example.com/video.mp4'})
     assert(#commands==count+1 and commands[#commands][1]=='osd','chooser rejects protocols')
+    props.playlist={{id=10,filename='duplicate.wav'},{id=20,filename='duplicate.wav',current=true},{id=30,filename='last.wav'}}
+    props['playlist-pos']=1; set('idle-active',false); set('pause',true); set('time-pos',30)
+    bindings['Ctrl+p']()
+    assert(overlay.data:find('Repeat  ·  Off',1,true))
+    bindings.r(); assert(props['loop-file']=='inf' and props['loop-playlist']=='no')
+    bindings.r(); assert(props['loop-file']=='no' and props['loop-playlist']=='inf')
+    bindings.r(); assert(props['loop-file']=='no' and props['loop-playlist']=='no')
+    bindings['Ctrl+r']()
+    assert(props.playlist[1].id==30 and props.playlist[3].id==10)
+    assert(props['time-pos']==30 and props.pause,'reordering preserves playback and pause')
+    bindings['Ctrl+r'](); assert(props.playlist[1].id==10 and props.playlist[3].id==30)
+    bindings['Ctrl+r'](); props.playlist[4]={id=40,filename='appended.wav'}; observers.playlist()
+    assert(overlay.data:find('Queue order  ·  Custom',1,true),'appending after reversal does not falsely claim original order')
+    props.playlist[4]=nil; bindings['Ctrl+r']()
+    bindings['Ctrl+Shift+s'](); assert(props.shuffle)
+    bindings['Ctrl+Shift+s'](); assert(not props.shuffle)
+    bindings['Ctrl+Shift+r'](); assert(props['play-direction']=='backward')
+    bindings['Ctrl+Shift+r'](); assert(props['play-direction']=='forward')
+    set('time-pos',0); bindings['Ctrl+Shift+r']()
+    assert(props['time-pos']>119 and props['play-direction']=='backward','reverse starts near end at time zero')
+    set('seekable',false); bindings['Ctrl+Shift+r']()
+    assert(props['play-direction']=='forward','forward recovery works even when reverse decoding becomes unavailable')
+    bindings['Ctrl+Shift+r']()
+    assert(props['play-direction']=='forward','nonseekable source refuses reverse playback')
+    set('loop-playlist','inf'); props['playlist-pos']=2
+    bindings['>'](); assert(props['playlist-pos']==0)
+    bindings['<'](); assert(props['playlist-pos']==2)
 end)
 package.loaded.mp=real
 package.loaded['mp.utils']=utils

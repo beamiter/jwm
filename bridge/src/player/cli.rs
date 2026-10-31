@@ -57,6 +57,8 @@ With no FILE, open or raise the player. Further launches reuse the same player.\
   --version   Show the helper version\n\
 Requires mpv and a D-Bus session. Local file:// URIs are accepted.\n\
 Ctrl+O: open files; Space: pause; arrows: seek; 9/0: volume; m: mute;\n\
+Ctrl+P: playback modes; r: repeat off/one/all; Ctrl+R: reverse queue;\n\
+Ctrl+Shift+S: shuffle; Ctrl+Shift+R: reverse audio/video playback;\n\
 f: fullscreen; l: queue; s: subtitles; </>: track; q: quit;\n\
 h: hide/restore bars; Ctrl+H: cycle Auto/Always/Hidden (music and video).";
 
