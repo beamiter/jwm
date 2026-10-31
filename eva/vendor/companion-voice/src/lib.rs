@@ -493,7 +493,7 @@ mod tests {
             &envelope(valid)
                 .iter()
                 .copied()
-                .chain([b' '].repeat(companion_protocol::MAX_FRAME))
+                .chain(b" ".repeat(companion_protocol::MAX_FRAME))
                 .collect::<Vec<_>>()
         )
         .is_err());
