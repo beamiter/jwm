@@ -2,10 +2,12 @@
   "schema": 1,
   "feature": "linux_boottime_ns_v1",
   "dialogue_version": 2,
+  "text_dialogue_version": 3,
   "public_companion_base": "9aa569540091524d637a7115b64c587b9177a55b",
   "files_sha256": {
-    "src/lib.rs": "ccd184014ca707cc1b42bcaf2eeaff140f7c4257edccfd193e60612dcc2a13da",
+    "src/lib.rs": "45bd7b867251c0a543e6ecf58fa45340d3343f465140c21021cd622574826b64",
     "src/dialogue.rs": "96548d8ad3c46a2311188b2a9e858ef10431062cf9d22d55f792d46925cf8fd4",
+    "src/text.rs": "696852789adda77eed02ef98d2360437b7dc4ee97e28456e47bf3ab6f79e3302",
     "LICENSE": "df864a86870c22b4a37004850372cd147b82495362f64676fecbe28f27f58d42",
     "Cargo.toml": "34b195b66b77f53331e9ac3249159a3872b4f0a166a82403d4c638177eead5d1"
   }

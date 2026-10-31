@@ -262,6 +262,12 @@ impl Trace {
             crate::companion::dialogue(session, &self.labels, event);
         }
     }
+    /// Memory-only retention for an explicit host review; never persisted.
+    fn retain_reply(&self, reply: &str) {
+        if let Some(session) = self.companion_session.as_deref() {
+            crate::companion::reply_text(session, &self.labels, reply);
+        }
+    }
     fn dialogue_response(
         &self,
         response_id: &str,
@@ -309,6 +315,11 @@ impl Trace {
             return;
         };
         if let Some(caption) = crate::input::caption(event, item, *turn) {
+            if let (Some(session), Some(text)) =
+                (self.companion_session.as_deref(), caption["text"].as_str())
+            {
+                crate::companion::caption_text(session, &self.labels, *turn, text);
+            }
             let _ = sink.tx.try_send(Update {
                 permit: sink.permit.clone(),
                 state: json!({"input_caption":caption}),
@@ -3198,6 +3209,7 @@ async fn feedback(
                         response_id: completed_response,
                         content_digest: jwm_eva_core::protocol::digest(&json!(reply)),
                     });
+                    trace.retain_reply(reply);
                 }
                 return Ok(());
             }
@@ -5777,6 +5789,20 @@ mod tests {
     #[ignore = "requires the private daemon and IPC stand-in from jcompanion/tests/voice_dialogue_pipeline.py"]
     async fn companion_delayed_receipt_to_original_dialogue() {
         private_dialogue_pipeline(true).await;
+    }
+    #[tokio::test]
+    #[ignore = "requires the private daemon and host from jcompanion/tests/voice_dialogue_pipeline.py --voice-text"]
+    async fn companion_voice_text_review_from_private_daemon() {
+        private_dialogue_pipeline(false).await;
+        // The companion thread answers the host's review request from memory;
+        // keep this process (and its connection) alive until the harness
+        // has finished, then let every retained text vanish with it.
+        let done = std::path::PathBuf::from(std::env::var_os("JWM_EVA_VOICE_TEXT_DONE").unwrap());
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !done.exists() {
+            assert!(Instant::now() < deadline, "voice text harness deadline");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
     }
 
     struct ReceiptFixture {

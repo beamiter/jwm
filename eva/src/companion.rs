@@ -15,6 +15,8 @@ use std::{
 
 #[path = "companion/operations.rs"]
 mod operations;
+#[path = "companion/voice_text.rs"]
+mod voice_text;
 pub(crate) use operations::{
     Owner as OperationOwner, Settlement as OperationSettlement, settled as operation_settled,
     tracked as operation_tracked,
@@ -46,6 +48,9 @@ enum Event {
     EndPlayback(String, u64, Option<u64>, bool),
     Dialogue(companion_voice::dialogue::Record),
     Operation(u64, companion_voice::dialogue::Record),
+    /// (voice session, companion turn, text). Memory only; see voice_text.
+    ReplyText(String, String, String),
+    CaptionText(String, String, String),
 }
 
 /// Held for the complete existing voice activation. Declared before audio and
@@ -202,6 +207,33 @@ pub(crate) fn dialogue(
         LOST.store(true, Ordering::Release);
     }
 }
+/// Optional retention input. A full queue drops the text instead of
+/// invalidating the observation connection: unretained text is never offered.
+fn emit_text(event: Event) {
+    if let Some(tx) = BRIDGE.get() {
+        let _ = tx.try_send(event);
+    }
+}
+/// The bounded spoken reply of a completed feedback response.
+pub(crate) fn reply_text(session: &str, labels: &serde_json::Value, reply: &str) {
+    if let Some(turn) = turn(labels).filter(|_| BRIDGE.get().is_some()) {
+        emit_text(Event::ReplyText(session.into(), turn, reply.into()));
+    }
+}
+/// The provider caption of `turn_epoch`, only while that turn is current.
+pub(crate) fn caption_text(
+    session: &str,
+    labels: &serde_json::Value,
+    turn_epoch: u64,
+    caption: &str,
+) {
+    if labels["turn_id"].as_u64() != Some(turn_epoch) || BRIDGE.get().is_none() {
+        return;
+    }
+    if let Some(turn) = turn(labels) {
+        emit_text(Event::CaptionText(session.into(), turn, caption.into()));
+    }
+}
 /// Called only from existing ordinary-thread telemetry milestones. Connection
 /// completion/model output are deliberately NOT evidence of listening/speaking.
 pub(crate) fn milestone(stage: &str, labels: &serde_json::Value) {
@@ -300,6 +332,7 @@ pub(crate) fn start() {
             let mut closed = std::collections::HashSet::new();
             let mut base_generated = 0;
             let mut base_played = Some(0);
+            let mut retained = voice_text::Retained::default();
 
             loop {
                 if !accepted {
@@ -353,6 +386,7 @@ pub(crate) fn start() {
                                 Reply::Rejected { .. } => {
                                     client.disconnect();
                                     accepted = false;
+                                    retained.disconnected();
                                 }
                                 Reply::OperationError { operation, .. }
                                     if operation == "voice_dialogue" =>
@@ -368,6 +402,7 @@ pub(crate) fn start() {
                     }
                     Err(_) => {
                         accepted = false;
+                        retained.disconnected();
                         // Reconnection is not audio replay. A turn that lost
                         // observation remains unknown until a new local turn.
                         if let Some(value) = current.as_ref() {
@@ -382,6 +417,15 @@ pub(crate) fn start() {
                         last_sent = None;
                     }
                 }
+                while let Some(push) = client.take_push() {
+                    if let Some(answer) = retained.answer(push, Instant::now())
+                        && client.send_text(answer).is_err()
+                    {
+                        accepted = false;
+                        retained.disconnected();
+                    }
+                }
+                retained.prune(Instant::now());
                 if accepted {
                     for id in releases
                         .iter()
@@ -411,6 +455,14 @@ pub(crate) fn start() {
                     };
                     match event {
                         Event::Operation(..) => unreachable!("operation epoch checked above"),
+                        Event::ReplyText(session, turn, text) => {
+                            retained.reply(&session, &turn, &text, Instant::now());
+                            continue;
+                        }
+                        Event::CaptionText(session, turn, text) => {
+                            retained.caption(&session, &turn, &text, Instant::now());
+                            continue;
+                        }
                         Event::Context(id, reply) => {
                             if !accepted || contexts.contains_key(&id) || contexts.len() >= 4 {
                                 let _ = reply.send(Err(std::io::Error::other(
@@ -643,6 +695,10 @@ struct Reconnecting {
     client: Option<Client>,
     retry_at: Instant,
     delay: Duration,
+    /// Ask for dialogue version 3 until a coordinator rejects it before
+    /// acceptance; then keep references only (version 2).
+    text: bool,
+    accepted: bool,
 }
 impl Reconnecting {
     fn new(path: std::path::PathBuf, session: String, source: String) -> Self {
@@ -653,17 +709,26 @@ impl Reconnecting {
             client: None,
             retry_at: Instant::now(),
             delay: Duration::from_millis(250),
+            text: true,
+            accepted: false,
         }
     }
     fn disconnect(&mut self) {
         operations::disconnected();
         self.client = None;
+        self.accepted = false;
         self.retry_at = Instant::now() + self.delay;
         self.delay = (self.delay * 2).min(Duration::from_secs(5));
     }
     fn poll(&mut self) -> std::io::Result<Vec<Reply>> {
         if self.client.is_none() && Instant::now() >= self.retry_at {
-            match Client::connect_dialogue(&self.path, self.session.clone(), self.source.clone()) {
+            let (path, session, source) = (&self.path, self.session.clone(), self.source.clone());
+            let connected = if self.text {
+                Client::connect_dialogue_text(path, session, source)
+            } else {
+                Client::connect_dialogue(path, session, source)
+            };
+            match connected {
                 Ok(c) => self.client = Some(c),
                 Err(e) => {
                     self.disconnect();
@@ -676,7 +741,16 @@ impl Reconnecting {
         };
         match client.poll() {
             Ok(replies) => {
+                if !self.accepted
+                    && self.text
+                    && replies.iter().any(|r| {
+                        matches!(r, Reply::Rejected { reason } if reason == "unsupported_voice_dialogue")
+                    })
+                {
+                    self.text = false;
+                }
                 if replies.iter().any(|r| matches!(r, Reply::Accepted { .. })) {
+                    self.accepted = true;
                     self.delay = Duration::from_millis(250);
                 }
                 Ok(replies)
@@ -714,6 +788,24 @@ impl Reconnecting {
             .as_mut()
             .ok_or_else(|| std::io::Error::other("companion_disconnected"))
             .and_then(|c| c.send(request));
+        if result.is_err() {
+            self.disconnect();
+        }
+        result
+    }
+    fn take_push(&mut self) -> Option<companion_voice::text::Push> {
+        self.client.as_mut()?.take_push()
+    }
+    fn send_text(&mut self, answer: voice_text::Answer) -> std::io::Result<()> {
+        let client = self
+            .client
+            .as_mut()
+            .ok_or_else(|| std::io::Error::other("companion_disconnected"))?;
+        let result = match answer {
+            voice_text::Answer::Offer(offer) => client.send_text_offer(offer),
+            voice_text::Answer::Unavailable(id, reason) => client.send_text_unavailable(id, reason),
+            voice_text::Answer::Forgotten(id, count) => client.send_text_forgotten(id, count),
+        };
         if result.is_err() {
             self.disconnect();
         }

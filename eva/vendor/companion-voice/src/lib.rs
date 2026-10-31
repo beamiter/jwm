@@ -1,10 +1,12 @@
-//! Explicit voice timing and dialogue-reference extensions. No audio or provider work.
+//! Explicit voice timing, dialogue-reference and request-bound text extensions.
+//! No audio or provider work.
 use companion_client::Framed;
 use companion_protocol::{Envelope, Reply, Request, VERSION};
 use serde::{Deserialize, Serialize};
 use std::{io, os::unix::net::UnixStream, path::Path};
 
 pub mod dialogue;
+pub mod text;
 
 pub const CLOCK: &str = "linux_boottime_ns_v1";
 pub const MAX_AGE_NS: u64 = 250_000_000;
@@ -57,14 +59,37 @@ enum Body {
     Audio(Audio),
     #[serde(rename = "voice_dialogue")]
     Dialogue(dialogue::Record),
+    #[serde(rename = "voice_text_offer")]
+    TextOffer(text::Offer),
+    #[serde(rename = "voice_text_unavailable")]
+    TextUnavailable {
+        request_id: u64,
+        reason: text::Unavailable,
+    },
+    #[serde(rename = "voice_text_forgotten")]
+    TextForgotten { request_id: u64, count: u32 },
 }
 
 #[derive(Clone, Debug)]
 pub enum Extension {
     Hello,
-    HelloDialogue,
+    /// The negotiated dialogue version: references only, or with text.
+    HelloDialogue(u16),
     Audio(Audio),
     Dialogue(dialogue::Record),
+    TextOffer(text::Offer),
+    TextUnavailable {
+        request_id: u64,
+        reason: text::Unavailable,
+    },
+    TextForgotten {
+        request_id: u64,
+        count: u32,
+    },
+}
+/// Dialogue versions a coordinator accepts; the Accepted reply echoes one.
+pub fn dialogue_version_supported(version: u16) -> bool {
+    version == dialogue::VERSION || version == text::VERSION
 }
 
 /// The canonical decoder still validates the envelope, role identity and all
@@ -77,7 +102,15 @@ pub fn decode(bytes: &[u8]) -> Result<(Envelope, Option<Extension>), String> {
     let kind = value["body"]["type"].as_str();
     if !matches!(
         kind,
-        Some("eva_hello_clocked" | "eva_hello_dialogue" | "audio_clocked" | "voice_dialogue")
+        Some(
+            "eva_hello_clocked"
+                | "eva_hello_dialogue"
+                | "audio_clocked"
+                | "voice_dialogue"
+                | "voice_text_offer"
+                | "voice_text_unavailable"
+                | "voice_text_forgotten"
+        )
     ) {
         return companion_protocol::decode(bytes).map(|envelope| (envelope, None));
     }
@@ -89,9 +122,10 @@ pub fn decode(bytes: &[u8]) -> Result<(Envelope, Option<Extension>), String> {
         Body::HelloDialogue {
             clock,
             dialogue_version,
-        } if clock == CLOCK && dialogue_version == dialogue::VERSION => {
-            (Request::EvaHello, Extension::HelloDialogue)
-        }
+        } if clock == CLOCK && dialogue_version_supported(dialogue_version) => (
+            Request::EvaHello,
+            Extension::HelloDialogue(dialogue_version),
+        ),
         Body::HelloDialogue { .. } => return Err("unsupported_voice_dialogue".into()),
         Body::Audio(audio) => (
             Request::Audio {
@@ -114,6 +148,20 @@ pub fn decode(bytes: &[u8]) -> Result<(Envelope, Option<Extension>), String> {
             Extension::Dialogue(record),
         ),
         Body::Dialogue(_) => return Err("invalid_voice_dialogue".into()),
+        // Text answers carry no legacy meaning; Resync keeps the envelope
+        // checks while the role handler dispatches on the extension.
+        Body::TextOffer(offer) if offer.valid() => (Request::Resync, Extension::TextOffer(offer)),
+        Body::TextUnavailable { request_id, reason } if request_id > 0 => (
+            Request::Resync,
+            Extension::TextUnavailable { request_id, reason },
+        ),
+        Body::TextForgotten { request_id, count } if request_id > 0 => (
+            Request::Resync,
+            Extension::TextForgotten { request_id, count },
+        ),
+        Body::TextOffer(_) | Body::TextUnavailable { .. } | Body::TextForgotten { .. } => {
+            return Err("invalid_voice_text".into())
+        }
     };
     value["body"] = serde_json::to_value(legacy).map_err(|_| "voice_encoding")?;
     companion_protocol::decode(&serde_json::to_vec(&value).map_err(|_| "voice_encoding")?)
@@ -150,8 +198,11 @@ impl Accepted {
             dialogue_version: None,
         }
     }
-    pub fn with_dialogue(mut self) -> Self {
-        self.dialogue_version = Some(dialogue::VERSION);
+    pub fn with_dialogue(self) -> Self {
+        self.with_dialogue_version(dialogue::VERSION)
+    }
+    pub fn with_dialogue_version(mut self, version: u16) -> Self {
+        self.dialogue_version = Some(version);
         self
     }
 }
@@ -210,20 +261,29 @@ pub struct Client {
     session: String,
     boot: Option<String>,
     sequence: u64,
-    dialogue: bool,
+    /// Requested dialogue version; the acceptance must echo it exactly.
+    dialogue: Option<u16>,
+    pushes: std::collections::VecDeque<text::Push>,
 }
 impl Client {
     pub fn connect(path: &Path, session: String, source: String) -> io::Result<Self> {
-        Self::connect_with_dialogue(path, session, source, false)
+        Self::connect_with_dialogue(path, session, source, None)
     }
+    /// References only (dialogue version 2).
     pub fn connect_dialogue(path: &Path, session: String, source: String) -> io::Result<Self> {
-        Self::connect_with_dialogue(path, session, source, true)
+        Self::connect_with_dialogue(path, session, source, Some(dialogue::VERSION))
+    }
+    /// References plus request-bound text (version 3). A coordinator that
+    /// predates it rejects the hello with `unsupported_voice_dialogue`; the
+    /// caller may then reconnect with [`Client::connect_dialogue`].
+    pub fn connect_dialogue_text(path: &Path, session: String, source: String) -> io::Result<Self> {
+        Self::connect_with_dialogue(path, session, source, Some(text::VERSION))
     }
     fn connect_with_dialogue(
         path: &Path,
         session: String,
         source: String,
-        dialogue: bool,
+        dialogue: Option<u16>,
     ) -> io::Result<Self> {
         if !companion_protocol::identifier(&source) || !companion_protocol::identifier(&session) {
             return Err(invalid("invalid_voice_identity"));
@@ -235,17 +295,17 @@ impl Client {
             boot: None,
             sequence: 0,
             dialogue,
+            pushes: Default::default(),
         };
         client.send_body(
-            serde_json::to_value(if dialogue {
-                Body::HelloDialogue {
+            serde_json::to_value(match dialogue {
+                Some(dialogue_version) => Body::HelloDialogue {
                     clock: CLOCK.into(),
-                    dialogue_version: dialogue::VERSION,
-                }
-            } else {
-                Body::Hello {
+                    dialogue_version,
+                },
+                None => Body::Hello {
                     clock: CLOCK.into(),
-                }
+                },
             })
             .map_err(|_| invalid("encode"))?,
         )?;
@@ -283,10 +343,40 @@ impl Client {
         Ok(true)
     }
     pub fn send_dialogue(&mut self, record: dialogue::Record) -> io::Result<()> {
-        if self.boot.is_none() || !self.dialogue || !record.valid() {
+        if self.boot.is_none() || self.dialogue.is_none() || !record.valid() {
             return Err(invalid("voice_dialogue_not_negotiated_or_invalid"));
         }
         self.send_body(serde_json::to_value(Body::Dialogue(record)).map_err(|_| invalid("encode"))?)
+    }
+    /// True once a version-3 acceptance arrived on this connection.
+    pub fn text_negotiated(&self) -> bool {
+        self.boot.is_some() && self.dialogue == Some(text::VERSION)
+    }
+    /// The next coordinator text push, in arrival order.
+    pub fn take_push(&mut self) -> Option<text::Push> {
+        self.pushes.pop_front()
+    }
+    fn send_text(&mut self, body: Body) -> io::Result<()> {
+        if !self.text_negotiated() {
+            return Err(invalid("voice_text_not_negotiated"));
+        }
+        self.send_body(serde_json::to_value(body).map_err(|_| invalid("encode"))?)
+    }
+    pub fn send_text_offer(&mut self, offer: text::Offer) -> io::Result<()> {
+        if !offer.valid() {
+            return Err(invalid("invalid_voice_text_offer"));
+        }
+        self.send_text(Body::TextOffer(offer))
+    }
+    pub fn send_text_unavailable(
+        &mut self,
+        request_id: u64,
+        reason: text::Unavailable,
+    ) -> io::Result<()> {
+        self.send_text(Body::TextUnavailable { request_id, reason })
+    }
+    pub fn send_text_forgotten(&mut self, request_id: u64, count: u32) -> io::Result<()> {
+        self.send_text(Body::TextForgotten { request_id, count })
     }
     pub fn poll(&mut self) -> io::Result<Vec<Reply>> {
         self.io.flush()?;
@@ -301,7 +391,7 @@ impl Client {
                     || accepted.session_id != self.session
                     || accepted.clock != CLOCK
                     || accepted.max_age_ns != MAX_AGE_NS
-                    || accepted.dialogue_version != self.dialogue.then_some(dialogue::VERSION)
+                    || accepted.dialogue_version != self.dialogue
                     || !companion_protocol::identifier(&accepted.boot_id)
                     || !companion_protocol::identifier(&accepted.companion_id)
                 {
@@ -313,6 +403,16 @@ impl Client {
                     companion_id: accepted.companion_id,
                     session_id: accepted.session_id,
                 });
+            } else if matches!(
+                value["type"].as_str(),
+                Some("voice_text_request" | "voice_text_forget" | "voice_text_retention")
+            ) {
+                let push: text::Push = serde_json::from_value(value)
+                    .map_err(|_| invalid("invalid_voice_text_push"))?;
+                if !self.text_negotiated() || !push.valid() || self.pushes.len() >= 16 {
+                    return Err(invalid("voice_text_push_not_negotiated_or_invalid"));
+                }
+                self.pushes.push_back(push);
             } else {
                 if matches!(value["type"].as_str(), Some("accepted" | "host_accepted")) {
                     return Err(invalid("clocked_voice_handshake_required"));
@@ -499,14 +599,128 @@ mod tests {
         .is_err());
     }
     #[test]
+    fn text_pushes_need_a_version_three_acceptance() {
+        use std::{
+            io::{Read, Write},
+            os::unix::{fs::PermissionsExt, net::UnixListener},
+            time::{Duration, Instant},
+        };
+        let root = std::env::temp_dir().join(format!(
+            "voice-text-wire-{}-{}",
+            std::process::id(),
+            boottime_ns().unwrap()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let path = root.join("voice.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        fn frame(peer: &mut std::os::unix::net::UnixStream, value: serde_json::Value) {
+            let bytes = serde_json::to_vec(&value).unwrap();
+            peer.write_all(&(bytes.len() as u32).to_be_bytes()).unwrap();
+            peer.write_all(&bytes).unwrap();
+        }
+        fn read(peer: &mut std::os::unix::net::UnixStream) -> Vec<u8> {
+            let mut size = [0; 4];
+            peer.read_exact(&mut size).unwrap();
+            let mut input = vec![0; u32::from_be_bytes(size) as usize];
+            peer.read_exact(&mut input).unwrap();
+            input
+        }
+        let worker = std::thread::spawn(move || {
+            let (mut peer, _) = listener.accept().unwrap();
+            let hello: serde_json::Value = serde_json::from_slice(&read(&mut peer)).unwrap();
+            assert_eq!(hello["body"]["dialogue_version"], 3);
+            frame(
+                &mut peer,
+                serde_json::to_value(
+                    Accepted::new("boot".into(), "eva".into(), "s".into()).with_dialogue_version(3),
+                )
+                .unwrap(),
+            );
+            frame(
+                &mut peer,
+                serde_json::json!({"type":"voice_text_request","request_id":5,"voice_session_id":"activation","turn_id":"turn"}),
+            );
+            let (_, extension) = decode(&read(&mut peer)).unwrap();
+            let Some(Extension::TextOffer(offer)) = extension else {
+                panic!("text offer")
+            };
+            assert_eq!((offer.request_id, offer.reply.as_str()), (5, "好的"));
+        });
+        let mut client = Client::connect_dialogue_text(&path, "s".into(), "source".into()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let push = loop {
+            client.poll().unwrap();
+            if let Some(push) = client.take_push() {
+                break push;
+            }
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(1));
+        };
+        let text::Push::Request {
+            request_id,
+            voice_session_id,
+            turn_id,
+        } = push
+        else {
+            panic!("request push")
+        };
+        client
+            .send_text_offer(text::Offer {
+                request_id,
+                voice_session_id,
+                turn_id,
+                reply: "好的".into(),
+                caption: None,
+            })
+            .unwrap();
+        worker.join().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
     fn dialogue_requires_explicit_version_and_canonical_envelope() {
         let hello =
             r#"{"type":"eva_hello_dialogue","clock":"linux_boottime_ns_v1","dialogue_version":2}"#;
         assert!(matches!(
             decode(&envelope(hello)).unwrap().1,
-            Some(Extension::HelloDialogue)
+            Some(Extension::HelloDialogue(2))
         ));
-        assert!(decode(&envelope(&hello.replace("version\":2", "version\":3"))).is_err());
+        assert!(matches!(
+            decode(&envelope(&hello.replace("version\":2", "version\":3")))
+                .unwrap()
+                .1,
+            Some(Extension::HelloDialogue(3))
+        ));
+        assert!(decode(&envelope(&hello.replace("version\":2", "version\":4"))).is_err());
+        let offer = r#"{"type":"voice_text_offer","request_id":1,"voice_session_id":"activation","turn_id":"turn","reply":"好的","caption":null}"#;
+        assert!(matches!(
+            decode(&envelope(offer)).unwrap(),
+            (
+                Envelope {
+                    body: Request::Resync,
+                    ..
+                },
+                Some(Extension::TextOffer(_))
+            )
+        ));
+        assert!(decode(&envelope(&offer.replace("好的", "a\\nb"))).is_err());
+        assert!(decode(&envelope(
+            &offer.replace("\"request_id\":1", "\"request_id\":0")
+        ))
+        .is_err());
+        let gone =
+            r#"{"type":"voice_text_unavailable","request_id":2,"reason":"retention_paused"}"#;
+        assert!(matches!(
+            decode(&envelope(gone)).unwrap().1,
+            Some(Extension::TextUnavailable {
+                request_id: 2,
+                reason: text::Unavailable::RetentionPaused
+            })
+        ));
+        assert!(decode(&envelope(&gone.replace("retention_paused", "deleted"))).is_err());
+        let forgotten = r#"{"type":"voice_text_forgotten","request_id":3,"count":2,"text":"x"}"#;
+        assert!(decode(&envelope(forgotten)).is_err(), "unknown fields");
         let body = r#"{"type":"voice_dialogue","voice_session_id":"activation","turn_id":"turn","observed_at_ns":1,"event":{"kind":"input_committed","item_id":"input"}}"#;
         assert!(matches!(
             decode(&envelope(body)).unwrap().1,
