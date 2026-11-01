@@ -271,6 +271,7 @@ fi
 server_binary=${JWM_EVA_PIPEWIRE_SERVER:-pipewire}
 pw_cli_command=(pw-cli)
 pw_dump_command=(pw-dump)
+test_environment=()
 if [[ -z "${JWM_EVA_PIPEWIRE_SERVER:-}" && -n "${JWM_PIPEWIRE_PREFIX:-}" && -x "$JWM_PIPEWIRE_PREFIX/bin/pipewire" ]]; then
     server_binary="$JWM_PIPEWIRE_PREFIX/bin/pipewire"
 fi
@@ -305,6 +306,10 @@ if [[ -n "${JWM_PIPEWIRE_PREFIX:-}" && "$server_binary" == "$JWM_PIPEWIRE_PREFIX
     done
     pw_cli_command=("${server_environment[@]}" "LD_LIBRARY_PATH=$JWM_PIPEWIRE_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" "$JWM_PIPEWIRE_PREFIX/bin/pw-cli")
     pw_dump_command=("${server_environment[@]}" "LD_LIBRARY_PATH=$JWM_PIPEWIRE_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" "$JWM_PIPEWIRE_PREFIX/bin/pw-dump")
+    # Eva's build.rs links its native test binary to this private library too.
+    # Keep its modules paired with that library, while WirePlumber/pw-record
+    # retain the PATH installation's client environment.
+    test_environment=("${server_environment[@]}" "LD_LIBRARY_PATH=$JWM_PIPEWIRE_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}")
     "${server_environment[@]}" "LD_LIBRARY_PATH=$JWM_PIPEWIRE_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" "$server_binary" -c "$runtime_dir/pipewire.conf" >"$runtime_dir/server.log" 2>&1 &
 else
     "${server_environment[@]}" "$server_binary" -c "$runtime_dir/pipewire.conf" >"$runtime_dir/server.log" 2>&1 &
@@ -400,10 +405,10 @@ PY
     done
     [[ $monitor_ready == true ]] || { echo 'stereo sink monitor never linked' >&2; exit 1; }
     if [[ -n "${JWM_EVA_AUDIO_TEST_BINARY:-}" ]]; then
-        test_command=("$JWM_EVA_AUDIO_TEST_BINARY")
+        test_command=("${test_environment[@]}" "$JWM_EVA_AUDIO_TEST_BINARY")
         test_separator=()
     else
-        test_command=(cargo test --locked -p jwm-eva --lib --offline)
+        test_command=("${test_environment[@]}" cargo test --locked -p jwm-eva --lib --offline)
         test_separator=(--)
     fi
     # Do not run every ignored test: PulseAudio has its own private fixture.
