@@ -92,14 +92,20 @@ pub struct SileroDetector {
 impl SileroDetector {
     pub fn new(path: Option<&Path>) -> Result<Self, &'static str> {
         let model = if let Some(path) = path {
-            // Bound reads before trusting even a locally selected model file.
-            let file = std::fs::File::open(path).map_err(|_| "silero_model_unavailable")?;
-            if file
-                .metadata()
-                .map_err(|_| "silero_model_unavailable")?
-                .len()
-                != MODEL.len() as u64
-            {
+            // A configured FIFO/device is a readiness error, not permission
+            // to block the session actor waiting for a writer. Check the
+            // opened descriptor (not a racy pre-open metadata lookup).
+            use std::os::unix::fs::OpenOptionsExt;
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NONBLOCK)
+                .open(path)
+                .map_err(|_| "silero_model_unavailable")?;
+            let metadata = file.metadata().map_err(|_| "silero_model_unavailable")?;
+            if !metadata.is_file() {
+                return Err("silero_model_invalid_file");
+            }
+            if metadata.len() != MODEL.len() as u64 {
                 return Err("silero_model_checksum_mismatch");
             }
             use std::io::Read;

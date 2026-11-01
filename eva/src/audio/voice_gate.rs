@@ -24,12 +24,25 @@ pub struct VoiceEvidence {
 }
 impl VoiceEvidence {
     pub fn new(c: &Config) -> Self {
+        Self::with_enabled(c, c.audio.local_voice_detection)
+    }
+    fn with_enabled(c: &Config, enabled: bool) -> Self {
         let minimum = (c.audio.local_voice_min_ms / FRAME_MS) as u32;
         // Permit a few unvoiced consonants inside the confirmation window.
         let width = (minimum + 4).min(63);
+        let detector = if enabled {
+            LocalVoiceDetector::new(c)
+        } else {
+            LocalVoiceDetector::disabled(c)
+        };
+        let threshold = if detector.status.active == "silero" {
+            c.audio.silero_voice_threshold
+        } else {
+            c.audio.local_voice_threshold
+        };
         Self {
-            detector: LocalVoiceDetector::new(c),
-            threshold: c.audio.local_voice_threshold,
+            detector,
+            threshold,
             minimum,
             mask: (1u64 << width) - 1,
             window: 0,
@@ -107,7 +120,7 @@ impl UploadGate {
             openings: 0,
             silenced_frames: 0,
             rejected_frames: 0,
-            voice: VoiceEvidence::new(c),
+            voice: VoiceEvidence::with_enabled(c, enabled),
             preroll: VecDeque::new(),
             // Pre-roll precedes the whole confirmation window, including its
             // permitted unvoiced frames. Server padding must fit as well.
@@ -383,6 +396,19 @@ mod tests {
     }
 
     const SPEECH: &[u8] = include_bytes!("../../tests/fixtures/rnnoise-speech.s16le");
+
+    #[test]
+    fn threshold_uses_actual_neural_backend_and_preserves_legacy_rnnoise_tuning() {
+        let mut c = Config::default();
+        c.audio.silero_voice_threshold = 0.4;
+        c.audio.local_voice_threshold = 0.8;
+        c.audio.silero_model_path = Some("/nonexistent/eva-test-silero.onnx".into());
+        let evidence = VoiceEvidence::new(&c);
+        assert_eq!(evidence.detector_status().active, "rnnoise");
+        assert_eq!(evidence.threshold, 0.8);
+        c.audio.local_voice_backend = "rnnoise".into();
+        assert_eq!(VoiceEvidence::new(&c).threshold, 0.8);
+    }
 
     fn frame(pcm: &[u8], captured: Instant) -> Frame {
         Frame {

@@ -80,7 +80,7 @@ pub fn fields(fields: &serde_json::Value) -> serde_json::Value {
                     .is_some_and(|p| p.is_finite() && (0.0..=1.0).contains(&p)),
                 "voice_backend" | "voice_backend_requested" => value
                     .as_str()
-                    .is_some_and(|s| ["silero", "rnnoise", "unavailable"].contains(&s)),
+                    .is_some_and(|s| ["silero", "rnnoise", "unavailable", "disabled"].contains(&s)),
                 "voice_backend_degraded_reason" => {
                     value.is_null()
                         || value.as_str().is_some_and(|s| {
@@ -90,6 +90,7 @@ pub fn fields(fields: &serde_json::Value) -> serde_json::Value {
                                     | "silero_runtime_incompatible"
                                     | "silero_runtime_initialization_failed"
                                     | "silero_model_unavailable"
+                                    | "silero_model_invalid_file"
                                     | "silero_model_checksum_mismatch"
                                     | "silero_model_load_failed"
                                     | "silero_feature_unavailable"

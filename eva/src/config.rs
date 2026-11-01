@@ -47,6 +47,9 @@ section!(Audio {
     // An explicit neural fallback, reported in diagnostics, never an energy gate.
     local_voice_fallback: String = "rnnoise".into(),
     silero_model_path: Option<PathBuf> = None,
+    // Different models do not have interchangeable probability calibration.
+    // Keep the existing RNNoise tuning below when Silero is unavailable.
+    silero_voice_threshold: f32 = 0.50,
     local_voice_threshold: f32 = 0.65,
     local_voice_min_ms: u64 = 160,
     local_voice_preroll_ms: u64 = 400
@@ -253,6 +256,8 @@ impl Config {
             && self.audio.noise_reduction_strength.is_finite()
             && (0.0..=1.0).contains(&self.audio.noise_reduction_strength)
             && self.audio.local_voice_threshold.is_finite()
+            && self.audio.silero_voice_threshold.is_finite()
+            && (0.1..=0.95).contains(&self.audio.silero_voice_threshold)
             && ["silero", "rnnoise"].contains(&self.audio.local_voice_backend.as_str())
             && ["rnnoise", "none"].contains(&self.audio.local_voice_fallback.as_str())
             && self
@@ -451,6 +456,7 @@ mod tests {
         assert_eq!(c.audio.noise_reduction_strength, 1.0);
         assert!(c.audio.local_voice_detection);
         assert_eq!(c.audio.local_voice_backend, "silero");
+        assert_eq!(c.audio.silero_voice_threshold, 0.50);
         assert_eq!(c.audio.local_voice_fallback, "rnnoise");
         assert_eq!(c.audio.local_voice_threshold, 0.65);
         assert_eq!(c.audio.local_voice_min_ms, 160);
@@ -486,6 +492,9 @@ mod tests {
             let mut c = Config::default();
             c.audio.local_voice_threshold = threshold;
             assert!(c.validate().is_err(), "local threshold {threshold}");
+            c.audio.local_voice_threshold = 0.65;
+            c.audio.silero_voice_threshold = threshold;
+            assert!(c.validate().is_err(), "silero threshold {threshold}");
         }
         for duration in [0, 79, 90, 501, 520] {
             let mut c = Config::default();

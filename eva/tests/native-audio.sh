@@ -19,10 +19,27 @@ for executable in pipewire pw-cli pw-dump pw-record python3 rg; do
     command -v "$executable" >/dev/null || { echo "missing test dependency: $executable" >&2; exit 1; }
 done
 session_manager=pipewire-media-session
-if command -v wireplumber >/dev/null && [[ "$(wireplumber --version)" == *'libwireplumber 0.4.'* ]]; then
-    session_manager=wireplumber
+wireplumber_data=
+wireplumber_modules=
+if command -v wireplumber >/dev/null && [[ "$(wireplumber --version)" == *'libwireplumber 0.5.'* ]]; then
+    session_manager=wireplumber-0.5
+    # Also support a staged installation without adding it to the user's
+    # global data/module search paths. No configuration is loaded from HOME.
+    manager_prefix=$(cd "$(dirname "$(command -v wireplumber)")/.." && pwd -P)
+    wireplumber_data=${JWM_EVA_WIREPLUMBER_DATA_DIR:-$manager_prefix/share/wireplumber}
+    wireplumber_modules=${JWM_EVA_WIREPLUMBER_MODULE_DIR:-}
+    if [[ -z "$wireplumber_modules" ]]; then
+        for directory in "$manager_prefix"/lib/wireplumber-0.5 "$manager_prefix"/lib64/wireplumber-0.5 "$manager_prefix"/lib/*/wireplumber-0.5; do
+            if [[ -d "$directory" ]]; then wireplumber_modules=$directory; break; fi
+        done
+    fi
+    [[ -f "$wireplumber_data/wireplumber.conf" && -d "$wireplumber_modules" ]] || {
+        echo 'WirePlumber 0.5 test requires its installed wireplumber.conf, scripts and modules; set JWM_EVA_WIREPLUMBER_{DATA,MODULE}_DIR for a custom prefix' >&2; exit 1;
+    }
+elif command -v wireplumber >/dev/null && [[ "$(wireplumber --version)" == *'libwireplumber 0.4.'* ]]; then
+    session_manager=wireplumber-0.4
 elif ! command -v pipewire-media-session >/dev/null; then
-    echo 'missing compatible session manager: install WirePlumber 0.4 (Ubuntu 24.04) or pipewire-media-session' >&2
+    echo 'missing compatible session manager: install WirePlumber 0.4/0.5 or pipewire-media-session' >&2
     exit 1
 fi
 runtime_dir=$(mktemp -d /tmp/jwm-eva-pw-XXXXXX)
@@ -217,12 +234,56 @@ wireplumber.components = [
     { name = policy-node.lua, type = script/lua }
 ]
 CONFIG
+if [[ "$session_manager" == wireplumber-0.5 ]]; then
+    # Keep the installed version's component dependencies and settings schema,
+    # but select only policy. Definitions of hardware components are inert:
+    # the selected profile explicitly disables every monitor and external bus
+    # integration. No stock main profile or config fragments are inherited.
+    cp "$wireplumber_data/wireplumber.conf" "$runtime_dir/config/eva-native-wireplumber.conf"
+    cat >> "$runtime_dir/config/eva-native-wireplumber.conf" <<'CONFIG'
+override.context.properties = { support.dbus = false }
+override.context.modules = [
+    { name = libpipewire-module-protocol-native }
+    { name = libpipewire-module-metadata }
+]
+wireplumber.profiles = {
+    eva-native-test = {
+        inherits = [ policy, mixin.systemwide-session, mixin.stateless ]
+        hardware.audio = disabled
+        hardware.bluetooth = disabled
+        hardware.video-capture = disabled
+        monitor.alsa = disabled
+        monitor.alsa-midi = disabled
+        monitor.bluez = disabled
+        monitor.bluez-midi = disabled
+        monitor.v4l2 = disabled
+        monitor.libcamera = disabled
+        support.dbus = disabled
+        support.portal-permissionstore = disabled
+        support.reserve-device = disabled
+        support.logind = disabled
+        script.client.access-portal = disabled
+        metadata.sm-objects = disabled
+    }
+}
+CONFIG
+fi
 server_binary=${JWM_EVA_PIPEWIRE_SERVER:-pipewire}
 pw_cli_command=(pw-cli)
 pw_dump_command=(pw-dump)
 if [[ -z "${JWM_EVA_PIPEWIRE_SERVER:-}" && -n "${JWM_PIPEWIRE_PREFIX:-}" && -x "$JWM_PIPEWIRE_PREFIX/bin/pipewire" ]]; then
     server_binary="$JWM_PIPEWIRE_PREFIX/bin/pipewire"
 fi
+# A staged distribution binary has compiled-in /usr paths. Keep module
+# resolution paired with that binary without installing into the host system.
+server_path=$(command -v "$server_binary")
+server_prefix=$(cd "$(dirname "$server_path")/.." && pwd -P)
+for directory in "$server_prefix"/lib/pipewire-0.3 "$server_prefix"/lib64/pipewire-0.3 "$server_prefix"/lib/*/pipewire-0.3; do
+    if [[ -d "$directory" ]]; then export PIPEWIRE_MODULE_DIR=$directory; break; fi
+done
+for directory in "$server_prefix"/lib/spa-0.2 "$server_prefix"/lib64/spa-0.2 "$server_prefix"/lib/*/spa-0.2; do
+    if [[ -d "$directory" ]]; then export SPA_PLUGIN_DIR=$directory; break; fi
+done
 if [[ -n "${JWM_PIPEWIRE_PREFIX:-}" && "$server_binary" == "$JWM_PIPEWIRE_PREFIX/bin/pipewire" ]]; then
     # Old distribution pw-dump cannot serialize newer server parameter IDs.
     # Keep the inspection tools paired with the selected private server.
@@ -243,7 +304,11 @@ for _ in {1..100}; do
     kill -0 "$pw_pid" 2>/dev/null || { cat "$runtime_dir/server.log" >&2; exit 1; }
     sleep 0.02
 done
-if [[ "$session_manager" == wireplumber ]]; then
+if [[ "$session_manager" == wireplumber-0.5 ]]; then
+    WIREPLUMBER_CONFIG_DIR="$runtime_dir/config" WIREPLUMBER_DATA_DIR="$wireplumber_data" \
+        WIREPLUMBER_MODULE_DIR="$wireplumber_modules" wireplumber -c eva-native-wireplumber.conf \
+        -p eva-native-test >"$runtime_dir/manager.log" 2>&1 &
+elif [[ "$session_manager" == wireplumber-0.4 ]]; then
     WIREPLUMBER_CONFIG_DIR="$runtime_dir/config" wireplumber -c eva-native-wireplumber.conf >"$runtime_dir/manager.log" 2>&1 &
 else
     pipewire-media-session -c media-session.conf >"$runtime_dir/manager.log" 2>&1 &
@@ -293,7 +358,7 @@ else
     echo "Native PipeWire graph rate: ${graph_rate}Hz (client PCM remains 24000Hz)"
     # Record both sink monitor channels. A mono-only sink hides unpositioned
     # playback being routed to only one side of stereo headphones.
-    pw-record --target jwm-eva-test-sink --rate 24000 --channels 2 \
+    pw-record --raw --target jwm-eva-test-sink --rate 24000 --channels 2 \
         --channel-map stereo --format s16 \
         --properties 'node.name=jwm-eva-test-monitor stream.capture.sink=true' - \
         >"$runtime_dir/stereo.pcm" 2>"$runtime_dir/monitor.log" &
@@ -348,6 +413,8 @@ import struct
 import sys
 
 pcm = open(sys.argv[1], "rb").read()
+if pcm[:4] in (b"dns.", b".snd", b"RIFF", b"RF64", b"fLaC", b"OggS"):
+    raise SystemExit("sink monitor contains a container header; raw PCM is required")
 if not pcm or len(pcm) % 4:
     raise SystemExit("missing or incomplete stereo monitor PCM")
 frames = list(struct.iter_unpack("<hh", pcm))

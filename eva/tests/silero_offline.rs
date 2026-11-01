@@ -263,3 +263,39 @@ fn real_silero_accepts_soft_and_noisy_public_speech_and_a_short_segment() {
         }
     }
 }
+
+#[test]
+#[ignore = "requires installed CPU ONNX Runtime 1.22; no network, microphone or API"]
+fn real_silero_default_threshold_retains_a_brief_phrase_after_quiet() {
+    let mut gate = gate();
+    let start = Instant::now();
+    let mut source = vec![0; 960 * 20];
+    source.extend_from_slice(&SPEECH[28_800..57_600]);
+    source.extend_from_slice(&vec![0; 960 * 75]);
+    let mut emitted = Vec::new();
+    for (n, pcm) in source.chunks_exact(960).enumerate() {
+        emitted.extend(
+            gate.admit(
+                frame(pcm, start + Duration::from_millis(n as u64 * 20)),
+                false,
+            )
+            .unwrap(),
+        );
+    }
+    assert_eq!(
+        gate.openings, 1,
+        "600 ms public phrase should pass Silero's own default calibration"
+    );
+    for n in 20..50 {
+        let pcm = &source[n * 960..(n + 1) * 960];
+        let captured = start + Duration::from_millis(n as u64 * 20);
+        assert_eq!(
+            emitted
+                .iter()
+                .find(|f| f.captured == captured)
+                .expect("brief phrase prefix/tail")
+                .pcm,
+            pcm
+        );
+    }
+}

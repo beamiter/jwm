@@ -9,6 +9,7 @@ transcript is fetched or uploaded by inference, construction or reset.
 - License: https://github.com/snakers4/silero-vad/blob/v5.1.2/LICENSE
 - Model SHA-256: `2623a2953f6ff3d2c1e61740c6cdb7168133479b267dfef114a4a3cc5bdd788f`
 
+Only regular model files are accepted; opening a FIFO/device cannot block initialization.
 The exact size and SHA-256 are checked before loading. An optional absolute
 `audio.silero_model_path` must contain this same model, not an arbitrary ONNX
 graph. Replacing a model requires reviewing the streaming contract, license,
@@ -51,8 +52,18 @@ use a compatible locally installed CPU runtime, or explicitly use RNNoise.
 local_voice_detection = true
 local_voice_backend = "silero"    # or "rnnoise"
 local_voice_fallback = "rnnoise"  # or "none" to fail closed
+silero_voice_threshold = 0.50    # Silero-specific probability calibration
+local_voice_threshold = 0.65    # RNNoise/fallback calibration, preserves old tuning
 # silero_model_path = "/absolute/path/to/the/pinned/silero_vad.onnx"
 ```
+
+Silero and RNNoise scores are not calibrated interchangeably: thresholds are
+selected by the actual active backend, including fallback. Confirmation remains
+160 ms by default. A 600 ms public speech slice missed with the old common 0.65
+threshold now opens at 0.50 without opening seven synthetic noise controls.
+A 240 ms mid-sentence slice after 400 ms of quiet is still missed: the short-slice
+test without that leading quiet and with an 80 ms confirmation setting must not
+be presented as a guarantee for all short commands or actual Chinese words.
 
 `doctor` reports Silero readiness, a visible RNNoise fallback, or blocked
 upload. Aggregate gate telemetry contains `voice_backend`,
@@ -62,7 +73,8 @@ paths, audio or transcripts. A build with `--no-default-features` reports
 stream initialization. A model failure during a turn resets all local state
 and stops that turn; it never admits unclassified PCM or switches models in
 the middle of speech. Disabling `local_voice_detection` is an explicit choice
-to upload continuously, not a failure recovery mechanism.
+to upload continuously, not a failure recovery mechanism. A disabled gate does
+not open model files or initialize the native runtime.
 
 24 kHz mono S16LE is resampled with a stateful, anti-aliasing 2/3 FIR to 16 kHz,
 then accumulated into exactly 512 new samples per inference. The preceding

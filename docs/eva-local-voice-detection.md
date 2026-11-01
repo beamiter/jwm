@@ -26,7 +26,7 @@ flowchart TD
 - 默认内置 Silero VAD v5.1.2 ONNX 模型，MIT 许可与固定 SHA-256 随源码分发；通过本机 ONNX Runtime CPU API 22 推理，普通 Rust 消费线程执行，原生实时回调只做有界复制。无 Python 服务、GPU 或运行时模型下载。
 - 24 kHz、单声道、S16LE、20 ms 输入经有状态抗混叠 FIR 转为 16 kHz，累计为 512 个新样本的 32 ms 模型窗口，另保留 64 个上下文样本与 `[2,1,128]` 循环状态；输入不补零，原始上传 PCM 和时间戳不变。
 - 缺少 feature、运行库或模型，或者模型校验失败时，按 `local_voice_fallback = "rnnoise"` 显式降级到内置 `nnnoiseless 0.5.2`；该后端使用 24→48 kHz FIR 与频谱纯音/白噪声否决。设为 `"none"` 则阻止上传。`doctor` 和日志明确显示实际后端与固定降级原因，能量门控不算 Silero。模型来源、运行库安装与离线分发见 [eva/models/README.md](../eva/models/README.md)。
-- 默认分数门限 0.65，约 240 ms 窗口内需要 160 ms 有效人声证据，允许少量辅音或短间隙。非常短的单字、耳语和强混响仍需要实机调参。
+- Silero 默认分数门限 0.50（`silero_voice_threshold`），RNNoise 默认 0.65（`local_voice_threshold`），按实际后端选择；约 240 ms 窗口内需要 160 ms 有效人声证据，允许少量辅音或短间隙。非常短的单字、耳语和强混响仍需要实机调参。
 - 默认保留确认窗口之前 400 ms 的句首音频；缓存另覆盖确认时长、服务端 prefix padding 和少量余量。其总长度有上限，不会累积长期录音。
 - 模型只提供人声证据，不提供说话人身份、唤醒意图或桌面权限。电视、语音视频、其他人以及 Eva 回声都可能包含真实人声。
 
@@ -56,6 +56,7 @@ flowchart TD
 [audio]
 local_voice_detection = true
 local_voice_backend = "silero"
+silero_voice_threshold = 0.50
 local_voice_fallback = "rnnoise" # "none" 则缺依赖时禁止上传
 local_voice_threshold = 0.65
 local_voice_min_ms = 160
@@ -145,26 +146,48 @@ bash scripts/test.sh -p jwm-eva -p jwm_eva_core -p jwm_ipc_client
 | 唤醒词后不暂停直接说命令 | 移交片段连续、句首不丢失、仅执行一次 |
 | 设备切换、暂停恢复、网络延迟 | 不跨代复用音频、不失控上传、不重复执行 |
 
-## 本轮 Silero 与交互验收矩阵
+## 整体需求完成性矩阵（本轮复核）
 
-本轮独立云端继续实现；下面各项分别验收，历史结果不计作本轮完成证据。
+基线为 `add8bd72`，本轮在独立 Linux 云端实现和复核。下表区分已有行为、本轮修改与自动测试的实际边界；注册数量不等于语音理解准确率或真实桌面验收。没有调用真实 API，也没有操作用户桌面、麦克风或扬声器。
 
-| 范围 | 验收要求 | 本轮状态 |
-| --- | --- | --- |
-| 真实 Silero CPU | 真实 ONNX 模型推理；公开语音每帧首尾与时间戳保留；轻声/加噪/240 ms 片段；静音/纯音/白噪声/脉冲不上传；重置/无效与迟到音频 | 6 项真实模型测试通过；短片段使用 80 ms 确认配置 |
-| 缺依赖降级 | 缺模型/篡改模型/缺运行库/不兼容库/关闭 feature；显式 RNNoise 或严格阻止上传 | 默认完整套件与关闭 feature 套件均通过 |
-| 指令与 IPC | 注册覆盖、消歧/显式屏幕与工作区限定、多步结果核验、打断/暂停/取消/继续/撤销、迟到/重复回执、原始亮度档位读回 | 完整套件通过；IPC 目录覆盖、亮度量化、打断与撤销回归均包含在内 |
-| 工程验证 | 默认与关闭 Silero feature、Rust 1.89、格式、lint、安装器校验与重复安装 | Rust 1.89 构建通过；格式/安装冒烟通过；Clippy 20 处既有告警与干净 master 基线一致 |
-| 原生合成音频服务 | 私有 PipeWire/PulseAudio 图的采集/播放/取消及资源释放 | 私有 PulseAudio 两项通过且无遗留音频流；PipeWire 因缺 WirePlumber 0.4/media-session 测试策略未运行 |
-| 真实麦克风/扬声器 | 真实声学误检、回声、外放插话和短中文指令 | 未执行 |
-| 真实 API 与自然语言模型 | 真实语音指令理解、模型准确率、延迟与费用 | 未执行，需单独授权 |
-| 用户桌面 | 原生桌面执行与会话重启 | 未执行；本轮不控制用户桌面 |
+| 用户需求 | 实现归属与行为 | 本轮证据 | 未覆盖的边界 |
+| --- | --- | --- | --- |
+| 本地 Silero | 本轮新增真实 v5.1.2 ONNX CPU 后端；24→16 kHz 抗混叠 FIR、512 样本分帧、64 样本上下文与循环状态 | `silero_offline.rs` 7 项真实模型测试；重置后逐分数确定一致 | 单一公开录音与合成噪声不是总体误检率；aarch64 未执行 |
+| 前置门控、起止与短句首尾 | 上传状态机已有；本轮接入 Silero。原始 PCM/时间戳不变；本地门控不重复 commit；新 epoch 清空历史 | 真实模型逐帧首尾、半帧 handoff、迟到/重复/未验证来源、静音/纯音/噪声不上传均通过 | 240 ms 短片段使用 80 ms 确认；默认 160 ms 不保证极短单字召回，仍需设备调参 |
+| 缺依赖与失败降级 | 本轮新增分模型门限（Silero 0.50/RNNoise 0.65）、实际后端诊断与显式 RNNoise/严格阻止上传；独立复核后修复 FIFO 卡住初始化、关闭门控仍探测模型 | `voice_backend.rs` 缺库/不兼容/篡改模型/非普通文件/关闭 feature；FIFO 子进程有 2 秒上限 | 失败不自动换成能量门控；禁用门控是用户显式选择连续上传 |
+| 指令理解与 context | 已有口语/否定/修正规则、当前/前一窗口、最近已核验效果、相对屏幕与工作区；本轮新增明确屏幕/可见工作区候选与 sticky 信息 | `language.rs`、`context.rs`、`planning_input.rs`；候选不完整、焦点变化、对象替换均有回归 | 没有运行真实模型语义 corpus；自然语言规则与离线工具回包不能证明模型听懂全部指令 |
+| 候选消歧 | 已有多候选澄清与发现协议；本轮只为用户明确限定的屏幕/工作区缩小候选，裸称“浏览器”保留全部同类对象 | `explicit_window_scopes_keep_bare_ambiguity_and_include_sticky_windows`，含多可见工作区/缺范围数据 | 模型生成和理解编号澄清仍待真实 API 验收，候选数据不授予执行权限 |
+| 多步执行 | 已有最多 32 个冻结步骤，串行执行；每步重新校验许可/身份/当前状态，失败停止，accepted/partial/unknown 不当作成功 | `executor_ipc.rs` 11 个 Unix transport 场景；核心 plan 上限、32 步冻结与严格 schema 回归 | Unix 服务 stand-in 与 WM mock 不覆盖所有外部应用/真实桌面效果 |
+| 打断、取消与待续优先级 | 已有停止播放、取消旧响应/未派发步骤、clear fence 后回放新语音；本轮同接 Silero；pause 保留单一待续任务，cancel 清除提案但不擦除 unknown 效果屏障 | `planning_input` 14、`pending_task` 15、`input` 26 等独立复跑；播放历史截断/迟到事件与来源检查；私有音频测试 | 不能声称取消已撤销完成或在途动作；真实外放回声和用户插话仍未验收 |
+| 撤销与本地确认 | 已有 undo 必须 `task_intent=new`，独立于待续任务；只撤销最新可逆前沿、反序补偿、核验 expected_state，不能跳过更新/不确定操作；高风险动作仍需本地单次确认 | `undo_ipc.rs` 6 场景；ledger/undo 单元；WM `model_confirmation_never_authorizes_and_local_confirmation_is_single_use`、`undo_poststate_check_is_atomic_and_conflicts_do_not_modify_target` | 自动测试使用隔离 mock；真实确认 UI 操作未执行 |
+| IPC 回执与亮度量化 | 已有 master 修复，今回未重复实现。按 operation/sequence/device/raw target 核验，不相信乐观缓存或仅百分比；旧/错误/缺失回执不得完成操作 | 本轮根 JWM `jwm::eva::tests::` 57 项全部通过，含 `eva_quantized_brightness_requires_matching_sequence_device_and_raw_readback`；另有 Unix executor 场景 | 57 项使用 DisplaySpyBackend/测试控制队列，未写真实背光设备 |
+| PipeWire/PulseAudio | 原生采集/播放实现已有；本轮为私有测试适配 WP 0.5 policy-only profile、staged 模块路径；修复 pw-record 容器头误当 PCM | PipeWire 两项分别在 24/48 kHz 图执行，4 次通过；裸 PCM 左右声道相等；PulseAudio 两项通过；音频流/服务已释放 | 无硬件监视器、无用户音频图；合成服务不替代真实麦克风/扬声器 |
+| 安装、许可与工程 | 本轮内置模型和 MIT 通知、固定校验、显式离线运行库安装；正常安装携带通知/工具；已有配置保留 | Rust 1.89；默认/无 Silero feature；格式/安装升级/错误 archive 拒绝/重复安装通过 | x86_64 运行库安装已执行；aarch64 仅固定 hash，未运行 |
+| 用户验收与发布 | 本轮未进行 | 真实 API、私人音频、真实桌面均未执行；没有推送/PR | 真实 API/音频与远端发布需另获授权 |
 
-本轮完整默认套件为 424 passed / 0 failed / 18 ignored（Eva、共享核心、IPC client）；关闭 Silero feature 套件为 356 passed / 0 failed / 12 ignored（Eva）。真实 Silero 6 项和 PulseAudio 2 项分别显式运行，不能将重复覆盖的用例相加成唯一场景总数。严格 `clippy -D warnings` 因 20 处基线告警未通过；普通 Clippy 完成，对照干净 `add8bd72` 的告警种类及数量完全相同。
+默认完整 Eva/核心/IPC client 套件：427 passed / 0 failed / 19 ignored；关闭 Silero feature 的 Eva 套件：359 passed / 0 failed / 12 ignored。独立复核另外复跑交互 75 项、Unix IPC/undo 4 项，均与完整套件有重叠，不相加为唯一场景数。根 WM 57 项以 `--no-default-features` 的隔离后端运行，不表示 X11/Wayland 真实会话全部验收。真实 Silero 7 项、PipeWire 4 次、PulseAudio 2 项均显式执行；默认套件仍列 ignored 不等于这些显式运行失败。
 
-静态 IPC 清单为 227 个命令、151 个查询、25 个订阅主题（403 个名称均已登记，无未知项）；130 个语义动作、232 个规范能力条目中包含 45 个内部条目，187 个用户能力无未适配项。此清单来自现有注册与完成契约审计，不能等同于 403 种语音命令或真实桌面全部验收通过。
+现有自然语言 corpus 共 241 项，其中 225 项有静态夹具，16 项依赖多轮已核验历史或窗口实例销毁时序，保留 `blocked_fixture` 及各自理由；本轮未调用真实模型，不能将静态 corpus/schema 检查算成 241 项语义通过，详见 [Eva corpus 说明](../eva/README.md)。
 
-交互补充：`language_context.window_groups.*.explicit_scopes` 提供当前屏幕和当前可见工作区的候选。只有用户明确限定范围时才可缩小候选；裸称“浏览器”仍保留全部同类窗口，多候选必须澄清。粘滞窗口和同时显示多个工作区都保留候选。标题、候选数据和历史结果不构成执行授权。既有本地确认、逐步核验和未知结果禁止自动重试继续生效。
+静态 IPC 审计为 227 个命令、151 个查询、25 个订阅主题（403 个名称均已登记，无未知项）；130 个语义动作、232 个规范能力条目中含 45 个内部条目，187 个用户能力无未适配项。这是现有目录与完成契约审计，不能描述成 403 条语音指令实测通过。
+
+### 状态与优先级依据
+
+- [planning_input.rs](../eva/src/planning_input.rs) 的 `task_decision` 与 [pending_task.rs](../eva/src/pending_task.rs) 共同决定 pause/cancel/new/continue/revise：continue 仅允许原对象身份重新绑定后的有序剩余步骤，成功步骤不能重复，已接受/派发或未知步骤未核实前不能重试。独立新任务、取消与闲聊不能复活更旧任务。
+- [voice_control.rs](../eva/src/voice_control.rs) 与 [session.rs](../eva/src/session.rs) 分开处理任务和助手会话：取消任务仍可继续说话；standby/stop_listening 只能提交纯 noop，经本地许可/代次收尾。旧响应、字幕和 finish 不能关闭新轮。模型的确认措辞不产生本地确认 token。
+- [executor.rs](../eva/src/executor.rs)、[ledger.rs](../crates/jwm_eva_core/src/ledger.rs) 与 [JWM Eva 实现](../src/jwm/eva.rs) 核验实际回执和撤销前沿；插话只取消后续未执行工作，已完成/在途结果分别保留 succeeded/unknown。
+
+### 独立复核与失败记录
+
+独立 agent 只读审查并复现一个 P2：配置模型为无写者 FIFO 会阻塞初始化，关闭门控仍会触发该路径。已改成 `O_NONBLOCK` 打开后按同一个文件描述符检查普通文件，禁用门控不再创建模型，并以受超时保护的子进程回归关闭该问题。
+
+独立声学对照发现，沿用 RNNoise 的 0.65 门限会漏掉 600 ms 公开语音：240 ms 确认窗最多 5 个候选帧；0.60 仍漏检；0.55/0.50 可开门。已为 Silero 单独设置默认 0.50，保留 160 ms 确认与 RNNoise 旧门限/调参。新增默认 600 ms 语音的逐帧首尾回归，七类 4 秒合成噪声对照仍零开门（负例最高分 0.156）。旧 RNNoise 声学回归继续显式选择 RNNoise。另一个 240 ms 截断片段前导 400 ms 静音后仍仅 1 个候选帧，无法满足确认；记录为已知召回边界，不将无前导静音且 min80 的短片段测试推广为真实短词保证。部分测试将初始化耗时计入帧年龄也导致失败，现使用显式测试时钟，没有放宽运行时来源时效检查。
+
+PipeWire 初次因只支持 WP 0.4 被阻塞，随后修复 WP 0.5 配置依赖与 staged 模块路径。首轮双声道断言又失败；独立检查发现 24 字节 AU 容器头被当作 PCM，头后左右声道完全相同。现 `pw-record --raw` 并拒绝容器 magic，两种图率全部通过。测试日志仍保留 `pw-dump ProcessLatency` 非致命枚举警告与 sandbox 的线程命名只读警告，不将其隐去或声称所有 stderr 为空。
+
+严格 `clippy -D warnings` 未通过：基线与当前均为 20 处已有告警（session 16、companion 2、store 1、wake 1）。普通 Clippy 完成；对照干净 `add8bd72`，告警消息、文件与源片段逐项一致，新增代码无告警。没有扩展修复这 20 处无关代码。
+
+未执行的默认 ignored 用例保留原理由：4 项真实 API/模型/corpus 相关、3 项 jcompanion 私有宿主/daemon 管线、1 项本地标注录音；这些不因其余自动测试通过而转成成功。原生音频与 Silero 的 ignored 用例已按各自私有夹具显式运行，完整套件计数与额外运行分列。
 
 ## 主来源
 

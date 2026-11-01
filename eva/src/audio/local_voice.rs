@@ -19,6 +19,7 @@ pub struct Detection {
 }
 
 enum Backend {
+    Disabled,
     Rnnoise(Box<SpeechDetector>),
     #[cfg(feature = "silero")]
     Silero(Box<super::silero::SileroDetector>),
@@ -31,7 +32,20 @@ pub struct LocalVoiceDetector {
 }
 
 impl LocalVoiceDetector {
+    pub(crate) fn disabled(config: &Config) -> Self {
+        Self {
+            backend: Backend::Disabled,
+            status: DetectorStatus {
+                requested: config.audio.local_voice_backend.clone(),
+                active: "disabled",
+                degraded_reason: None,
+            },
+        }
+    }
     pub fn new(config: &Config) -> Self {
+        if !config.audio.local_voice_detection {
+            return Self::disabled(config);
+        }
         let requested = config.audio.local_voice_backend.clone();
         if requested == "rnnoise" {
             return Self {
@@ -77,6 +91,7 @@ impl LocalVoiceDetector {
 
     pub fn reset(&mut self) {
         match &mut self.backend {
+            Backend::Disabled => {}
             Backend::Rnnoise(detector) => detector.reset(),
             #[cfg(feature = "silero")]
             Backend::Silero(detector) => detector.reset(),
@@ -86,6 +101,7 @@ impl LocalVoiceDetector {
 
     pub fn process(&mut self, pcm: &[u8]) -> io::Result<Detection> {
         let result = match &mut self.backend {
+            Backend::Disabled => Err(io::Error::other("local_voice_detection_disabled")),
             Backend::Rnnoise(detector) => detector.process(pcm).map(|score| Detection {
                 probability: score.probability,
                 ready: score.ready,
