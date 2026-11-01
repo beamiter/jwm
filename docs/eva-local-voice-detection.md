@@ -153,7 +153,7 @@ bash scripts/test.sh -p jwm-eva -p jwm_eva_core -p jwm_ipc_client
 | 用户需求 | 实现归属与行为 | 本轮证据 | 未覆盖的边界 |
 | --- | --- | --- | --- |
 | 本地 Silero | 本轮新增真实 v5.1.2 ONNX CPU 后端；24→16 kHz 抗混叠 FIR、512 样本分帧、64 样本上下文与循环状态 | `silero_offline.rs` 8 项真实模型测试；重置后逐分数确定一致 | 单一公开录音与合成噪声不是总体误检率；aarch64 未执行 |
-| 前置门控、起止与短句首尾 | 上传状态机已有；本轮接入 Silero。原始 PCM/时间戳不变；本地门控不重复 commit；新 epoch 清空历史 | 真实模型逐帧首尾、半帧 handoff、迟到/重复/未验证来源、静音/纯音/噪声不上传均通过 | 240 ms 短片段使用 80 ms 确认；默认 160 ms 不保证极短单字召回，仍需设备调参 |
+| 前置门控、起止与短句首尾 | 上传状态机已有；本轮接入 Silero。原始 PCM/时间戳不变；本地门控不重复 commit；新 epoch 清空历史 | 真实模型逐帧首尾、半帧 handoff、迟到/重复/未验证来源、静音/纯音/噪声不上传均通过 | 240 ms 裁剪在 20/400 ms 前导静音下仍漏检，80 ms 确认也未消除；不保证极短单字召回，详见下方有界诊断 |
 | 缺依赖与失败降级 | 本轮新增分模型门限（Silero 0.50/RNNoise 0.65）、实际后端诊断与显式 RNNoise/严格阻止上传；独立复核后修复 FIFO 卡住初始化、关闭门控仍探测模型 | `voice_backend.rs` 缺库/不兼容/篡改模型/非普通文件/关闭 feature；FIFO 子进程有 2 秒上限 | 失败不自动换成能量门控；禁用门控是用户显式选择连续上传 |
 | 指令理解与 context | 已有口语/否定/修正规则、当前/前一窗口、最近已核验效果、相对屏幕与工作区；本轮新增明确屏幕/可见工作区候选与 sticky 信息 | `language.rs`、`context.rs`、`planning_input.rs`；候选不完整、焦点变化、对象替换均有回归 | 没有运行真实模型语义 corpus；自然语言规则与离线工具回包不能证明模型听懂全部指令 |
 | 候选消歧 | 已有多候选澄清与发现协议；本轮只为用户明确限定的屏幕/工作区缩小候选，裸称“浏览器”保留全部同类对象 | `explicit_window_scopes_keep_bare_ambiguity_and_include_sticky_windows`，含多可见工作区/缺范围数据 | 模型生成和理解编号澄清仍待真实 API 验收，候选数据不授予执行权限 |
@@ -163,7 +163,7 @@ bash scripts/test.sh -p jwm-eva -p jwm_eva_core -p jwm_ipc_client
 | IPC 回执与亮度量化 | 已有 master 修复，今回未重复实现。按 operation/sequence/device/raw target 核验，不相信乐观缓存或仅百分比；旧/错误/缺失回执不得完成操作 | 本轮根 JWM `jwm::eva::tests::` 57 项全部通过，含 `eva_quantized_brightness_requires_matching_sequence_device_and_raw_readback`；另有 Unix executor 场景 | 57 项使用 DisplaySpyBackend/测试控制队列，未写真实背光设备 |
 | PipeWire/PulseAudio | 原生采集/播放实现已有；本轮为私有测试适配 WP 0.5 policy-only profile、staged 模块路径；修复 pw-record 容器头误当 PCM | PipeWire 两项分别在 24/48 kHz 图执行，4 次通过；裸 PCM 左右声道相等；PulseAudio 两项通过；音频流/服务已释放 | 无硬件监视器、无用户音频图；合成服务不替代真实麦克风/扬声器 |
 | 安装、许可与工程 | 本轮内置模型和 MIT 通知、固定校验、显式离线运行库安装；正常安装携带通知/工具；已有配置保留 | Rust 1.89；默认/无 Silero feature；格式/安装升级/错误 archive 拒绝/重复安装通过 | x86_64 运行库安装已执行；aarch64 仅固定 hash，未运行 |
-| 用户验收与发布 | 本轮未进行 | 真实 API、私人音频、真实桌面均未执行；没有推送/PR | 真实 API/音频与远端发布需另获授权 |
+| 用户验收与发布 | 代码已按用户本轮授权快进发布到 `beamiter/jwm` 的 `master`；真实设备/API 验收未进行 | 发布后核对远端 SHA/文件树；对应提交的 GitHub Actions 单独跟进，不把本地通过当作 CI 全绿 | 真实 API、私人音频、真实桌面与 aarch64 执行仍未验收；没有创建 PR |
 
 默认完整 Eva/核心/IPC client 套件：427 passed / 0 failed / 21 ignored；关闭 Silero feature 的 Eva 套件：359 passed / 0 failed / 12 ignored。独立复核另外复跑交互 75 项、Unix IPC/undo 4 项，均与完整套件有重叠，不相加为唯一场景数。根 WM 57 项以 `--no-default-features` 的隔离后端运行，不表示 X11/Wayland 真实会话全部验收。真实 Silero 8 项及匹配语音回声 1 项、PipeWire 4 次、PulseAudio 2 项均显式执行；默认套件仍列 ignored 不等于这些显式运行失败。
 
