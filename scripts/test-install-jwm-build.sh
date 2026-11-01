@@ -12,6 +12,10 @@ cp "$ROOT/scripts/install-jwm.sh" "$ROOT/scripts/install-wallpapers.sh" "$ROOT/s
 cp "$ROOT/scripts/install-webkit-bar-launcher.sh" "$ROOT/scripts/run-with-webkit-transparent.sh" "$REPO/scripts/"
 cp "$ROOT/scripts/check-webkitgtk-version.sh" "$REPO/scripts/"
 cp "$ROOT/eva/dist/eva.toml" "$ROOT/eva/dist/jwm-eva.service" "$REPO/eva/dist/"
+mkdir -p "$REPO/eva/models/silero-v5.1.2" "$REPO/eva/tools"
+cp "$ROOT/eva/models/silero-v5.1.2/LICENSE" "$REPO/eva/models/silero-v5.1.2/"
+cp "$ROOT/eva/models/README.md" "$REPO/eva/models/"
+cp "$ROOT/eva/tools/install-silero-runtime.sh" "$REPO/eva/tools/"
 cat > "$REPO/scripts/ensure_pipewire.sh" <<'STUB'
 #!/usr/bin/env bash
 printf 'ensure-pipewire %s\n' "$*" >> "$CASE_DIR/eva.log"
