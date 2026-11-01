@@ -274,15 +274,26 @@ pw_dump_command=(pw-dump)
 if [[ -z "${JWM_EVA_PIPEWIRE_SERVER:-}" && -n "${JWM_PIPEWIRE_PREFIX:-}" && -x "$JWM_PIPEWIRE_PREFIX/bin/pipewire" ]]; then
     server_binary="$JWM_PIPEWIRE_PREFIX/bin/pipewire"
 fi
-# A staged distribution binary has compiled-in /usr paths. Keep module
-# resolution paired with that binary without installing into the host system.
-server_path=$(command -v "$server_binary")
-server_prefix=$(cd "$(dirname "$server_path")/.." && pwd -P)
-for directory in "$server_prefix"/lib/pipewire-0.3 "$server_prefix"/lib64/pipewire-0.3 "$server_prefix"/lib/*/pipewire-0.3; do
+# A staged distribution client has compiled-in /usr paths. Keep client module
+# resolution paired with the PATH installation, independently of a private
+# server. In particular, a system WirePlumber must not load the newer server's
+# modules using its older system libpipewire.
+client_path=$(command -v pipewire)
+client_prefix=$(cd "$(dirname "$client_path")/.." && pwd -P)
+for directory in "$client_prefix"/lib/pipewire-0.3 "$client_prefix"/lib64/pipewire-0.3 "$client_prefix"/lib/*/pipewire-0.3; do
     if [[ -d "$directory" ]]; then export PIPEWIRE_MODULE_DIR=$directory; break; fi
 done
-for directory in "$server_prefix"/lib/spa-0.2 "$server_prefix"/lib64/spa-0.2 "$server_prefix"/lib/*/spa-0.2; do
+for directory in "$client_prefix"/lib/spa-0.2 "$client_prefix"/lib64/spa-0.2 "$client_prefix"/lib/*/spa-0.2; do
     if [[ -d "$directory" ]]; then export SPA_PLUGIN_DIR=$directory; break; fi
+done
+server_path=$(command -v "$server_binary")
+server_prefix=$(cd "$(dirname "$server_path")/.." && pwd -P)
+server_environment=(env)
+for directory in "$server_prefix"/lib/pipewire-0.3 "$server_prefix"/lib64/pipewire-0.3 "$server_prefix"/lib/*/pipewire-0.3; do
+    if [[ -d "$directory" ]]; then server_environment+=("PIPEWIRE_MODULE_DIR=$directory"); break; fi
+done
+for directory in "$server_prefix"/lib/spa-0.2 "$server_prefix"/lib64/spa-0.2 "$server_prefix"/lib/*/spa-0.2; do
+    if [[ -d "$directory" ]]; then server_environment+=("SPA_PLUGIN_DIR=$directory"); break; fi
 done
 if [[ -n "${JWM_PIPEWIRE_PREFIX:-}" && "$server_binary" == "$JWM_PIPEWIRE_PREFIX/bin/pipewire" ]]; then
     # Old distribution pw-dump cannot serialize newer server parameter IDs.
@@ -292,11 +303,11 @@ if [[ -n "${JWM_PIPEWIRE_PREFIX:-}" && "$server_binary" == "$JWM_PIPEWIRE_PREFIX
             echo "missing private PipeWire test tool: $executable" >&2; exit 1;
         }
     done
-    pw_cli_command=(env "LD_LIBRARY_PATH=$JWM_PIPEWIRE_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" "$JWM_PIPEWIRE_PREFIX/bin/pw-cli")
-    pw_dump_command=(env "LD_LIBRARY_PATH=$JWM_PIPEWIRE_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" "$JWM_PIPEWIRE_PREFIX/bin/pw-dump")
-    LD_LIBRARY_PATH="$JWM_PIPEWIRE_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" "$server_binary" -c "$runtime_dir/pipewire.conf" >"$runtime_dir/server.log" 2>&1 &
+    pw_cli_command=("${server_environment[@]}" "LD_LIBRARY_PATH=$JWM_PIPEWIRE_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" "$JWM_PIPEWIRE_PREFIX/bin/pw-cli")
+    pw_dump_command=("${server_environment[@]}" "LD_LIBRARY_PATH=$JWM_PIPEWIRE_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" "$JWM_PIPEWIRE_PREFIX/bin/pw-dump")
+    "${server_environment[@]}" "LD_LIBRARY_PATH=$JWM_PIPEWIRE_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" "$server_binary" -c "$runtime_dir/pipewire.conf" >"$runtime_dir/server.log" 2>&1 &
 else
-    "$server_binary" -c "$runtime_dir/pipewire.conf" >"$runtime_dir/server.log" 2>&1 &
+    "${server_environment[@]}" "$server_binary" -c "$runtime_dir/pipewire.conf" >"$runtime_dir/server.log" 2>&1 &
 fi
 pw_pid=$!
 for _ in {1..100}; do
