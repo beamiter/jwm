@@ -1,0 +1,15 @@
+[Desktop Entry]
+Type=Application
+Name=JWM Notes
+Name[zh_CN]=JWM 备忘录
+Comment=Write notes and edit text files
+Comment[zh_CN]=记录备忘、自动保存并编辑文本文件
+Exec=jwm-notes -- %F
+TryExec=jwm-notes
+Icon=accessories-text-editor
+Terminal=false
+StartupNotify=true
+StartupWMClass=org.jwm.Notes
+Categories=Utility;TextEditor;
+MimeType=text/plain;text/markdown;text/x-markdown;
+Keywords=Notes;Memo;Text;Editor;备忘录;

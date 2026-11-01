@@ -16,7 +16,7 @@ def bundle(version, legacy=False):
  b=p/('bundle-'+version); payload=b/('payload/usr/local/lib/jwm/versions/'+version);payload.mkdir(parents=True)
  entries=manifest.read_text().splitlines()
  if legacy:
-  entries=[l for l in entries if not any(name in l for name in ['jwm-player','jwm-player.desktop','jwm-video.desktop','69-jwm-touchpad-gestures.rules'])]
+  entries=[l for l in entries if not any(name in l for name in ['jwm-player','jwm-player.desktop','jwm-video.desktop','69-jwm-touchpad-gestures.rules','jwm-notes','jwm-image-viewer','crates/jwm_apps/dist/'])]
  shutil.copy(patch,b/'install-release.sh');(b/'release-manifest.tsv').write_text('\n'.join(entries)+'\n');(b/'VERSION').write_text(version+'\n')
  for l in entries:
   if not l or l.startswith('#'):continue
@@ -53,7 +53,7 @@ exec '{shutil.which(stage)}' "$@"
 # Fail after the upgrade backed up a newly managed helper and changed current:
 # restoring only the core executable is insufficient; retry must see the old
 # stable-path and backup journals exactly, without an orphan helper destination.
-for failed_leaf in ['jwm-player','jwm-player.desktop','jwm-video.desktop']:
+for failed_leaf in ['jwm-player','jwm-player.desktop','jwm-video.desktop','jwm-notes','jwm-image-viewer','org.jwm.Notes.desktop','org.jwm.ImageViewer.desktop']:
  case=p/('extension-'+failed_leaf);root=case/'root';(root/'usr/local/bin').mkdir(parents=True)
  (root/'usr/local/bin/jwm-player').write_text('legacy-player\n')
  def invoke_extension(b,env=None): return subprocess.run(['bash',str(b/'install-release.sh'),'install','--destdir',str(root),'--replace'],env=env,capture_output=True,text=True,timeout=30)

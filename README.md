@@ -147,8 +147,16 @@ files and prints the commands to enable the service after login. Use `--skip-eva
 `--skip-jwm` for a bar-only installation. Eva can also be updated independently
 with `bash scripts/install-eva.sh`; see [Eva setup](eva/README.md).
 
-The source installer makes JWM Music and JWM Video the default audio/video
-players only in JWM sessions. It writes `~/.config/jwm-mimeapps.list` (or
+The source installer includes native Rust/GTK4 **JWM Notes** (`jwm-notes`) and
+**JWM Image Viewer** (`jwm-image-viewer`), requiring GTK 4.10+ (`libgtk-4-dev`
+on Ubuntu 24.04+). Notes provides searchable, automatically saved notes and a
+UTF-8 text editor. The viewer supports PNG, JPEG, WebP, GIF (first frame), BMP,
+TIFF, ICO and portable bitmaps, with zoom, rotation, fullscreen, drag and drop,
+and browsing adjacent images. See [native applications](docs/native-apps.md).
+
+The source installer makes these the default text/image applications alongside
+JWM Music and JWM Video for audio/video, only in JWM sessions.
+It writes `~/.config/jwm-mimeapps.list` (or
 `$XDG_CONFIG_HOME/jwm-mimeapps.list`), leaving the shared `mimeapps.list` and
 Ubuntu/GNOME defaults unchanged. Existing unrelated JWM associations are kept;
 a changed JWM-specific file is backed up as `jwm-mimeapps.list.bak`. Both X11

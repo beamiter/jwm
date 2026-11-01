@@ -8,6 +8,8 @@ built	jwm-support	bin/jwm-support	usr/local/bin/jwm-support	0755
 built	jwm-remote	bin/jwm-remote	-	0755
 built	jwm-bridge	bin/jwm-bridge	usr/local/bin/jwm-bridge	0755
 built	jwm-player	bin/jwm-player	usr/local/bin/jwm-player	0755
+built	jwm-notes	bin/jwm-notes	usr/local/bin/jwm-notes	0755
+built	jwm-image-viewer	bin/jwm-image-viewer	usr/local/bin/jwm-image-viewer	0755
 built	jwm-shell	bin/jwm-shell	usr/local/bin/jwm-shell	0755
 repo-file	scripts/jwm-toggle-sidebar-mode	bin/jwm-toggle-sidebar-mode	usr/local/bin/jwm-toggle-sidebar-mode	0755
 repo-file	packaging/69-jwm-touchpad-gestures.rules	share/udev/rules.d/69-jwm-touchpad-gestures.rules	usr/lib/udev/rules.d/69-jwm-touchpad-gestures.rules	0644
@@ -25,6 +27,8 @@ repo-file	jwm-wayland-debug.desktop	share/wayland-sessions/jwm-wayland-debug.des
 repo-file	bridge/dist/org.freedesktop.Notifications.service	share/dbus-1/services/org.freedesktop.Notifications.service	usr/share/dbus-1/services/org.freedesktop.Notifications.service	0644
 repo-file	bridge/dist/jwm-player.desktop	share/applications/jwm-player.desktop	usr/local/share/applications/jwm-player.desktop	0644
 repo-file	bridge/dist/jwm-video.desktop	share/applications/jwm-video.desktop	usr/local/share/applications/jwm-video.desktop	0644
+repo-file	crates/jwm_apps/dist/org.jwm.Notes.desktop	share/applications/org.jwm.Notes.desktop	usr/local/share/applications/org.jwm.Notes.desktop	0644
+repo-file	crates/jwm_apps/dist/org.jwm.ImageViewer.desktop	share/applications/org.jwm.ImageViewer.desktop	usr/local/share/applications/org.jwm.ImageViewer.desktop	0644
 repo-file	README.md	share/doc/jwm/README.md	-	0644
 repo-file	CHANGELOG.md	share/doc/jwm/CHANGELOG.md	-	0644
 repo-file	LICENSE	share/doc/jwm/LICENSE	-	0644

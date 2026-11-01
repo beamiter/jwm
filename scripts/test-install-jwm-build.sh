@@ -6,9 +6,10 @@ TEST_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/jwm-build-test.XXXXXXXX")
 TEST_HOST_PATH=$PATH
 trap 'rm -rf -- "$TEST_ROOT"' EXIT
 REPO="$TEST_ROOT/project space"
-mkdir -p "$REPO/scripts" "$REPO/bars/tao_glow_bar" "$REPO/bars/tao_pixels_bar" "$REPO/bars/tauri_leptos_bar" "$REPO/crates/jwm_shell" "$REPO/bridge/dist" "$REPO/eva/dist" "$REPO/assets/wallpapers" "$REPO/packaging" "$TEST_ROOT/bin"
+mkdir -p "$REPO/scripts" "$REPO/bars/tao_glow_bar" "$REPO/bars/tao_pixels_bar" "$REPO/bars/tauri_leptos_bar" "$REPO/crates/jwm_shell" "$REPO/crates/jwm_apps/dist" "$REPO/bridge/dist" "$REPO/eva/dist" "$REPO/assets/wallpapers" "$REPO/packaging" "$TEST_ROOT/bin"
 cp "$ROOT/packaging/69-jwm-touchpad-gestures.rules" "$REPO/packaging/"
 cp "$ROOT/scripts/install-jwm.sh" "$ROOT/scripts/install-wallpapers.sh" "$ROOT/scripts/jwm-toggle-sidebar-mode" "$ROOT/scripts/install-eva.sh" "$REPO/scripts/"
+cp "$ROOT/scripts/set-jwm-defaults.py" "$REPO/scripts/"
 cp "$ROOT/scripts/install-webkit-bar-launcher.sh" "$ROOT/scripts/run-with-webkit-transparent.sh" "$REPO/scripts/"
 cp "$ROOT/scripts/check-webkitgtk-version.sh" "$REPO/scripts/"
 cp "$ROOT/eva/dist/eva.toml" "$ROOT/eva/dist/jwm-eva.service" "$REPO/eva/dist/"
@@ -25,6 +26,8 @@ printf 'bundled fixture\n' > "$REPO/assets/wallpapers/01-fixture.png"
 touch "$REPO/bars/tao_glow_bar/Cargo.toml" "$REPO/bridge/Cargo.toml" "$REPO/bridge/dist/org.freedesktop.Notifications.service"
 touch "$REPO/bars/tao_pixels_bar/Cargo.toml" "$REPO/bars/tauri_leptos_bar/Cargo.toml" "$REPO/crates/jwm_shell/Cargo.toml"
 cp "$ROOT/bridge/dist/jwm-player.desktop" "$ROOT/bridge/dist/jwm-video.desktop" "$REPO/bridge/dist/"
+cp "$ROOT/crates/jwm_apps/dist/"*.desktop "$REPO/crates/jwm_apps/dist/"
+touch "$REPO/crates/jwm_apps/Cargo.toml"
 cat > "$TEST_ROOT/bin/cargo" <<'STUB'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -39,10 +42,15 @@ while (($#)); do
         --target-dir) target=$2; shift 2 ;;
         --release) profile=release; shift ;;
         -p) package=$2; shift 2 ;;
+        --manifest-path) [[ $2 != */jwm_apps/Cargo.toml ]] || package=jwm-apps; shift 2 ;;
         *) shift ;;
     esac
 done
 [[ $command == build ]] || exit 0
+if [[ $package == jwm-apps && $SCENARIO == apps-failure ]]; then
+    echo 'error: native apps compilation failure' >&2
+    exit 101
+fi
 if [[ $package == jwm-bridge && $SCENARIO == bridge-failure ]]; then
     echo 'error: bridge compilation failure' >&2
     exit 101
@@ -67,8 +75,9 @@ if [[ $package == jwm && $SCENARIO =~ ^(missing|repeated|ordinary|tee-cargo)$ ]]
     fi
 fi
 mkdir -p "$target/$profile"
-for binary in jwm jwm-tool jwm-support jwm-remote jwm-bridge jwm-player jwm-shell jwm-eva; do
+for binary in jwm jwm-tool jwm-support jwm-remote jwm-bridge jwm-player jwm-shell jwm-eva jwm-notes jwm-image-viewer; do
     [[ $SCENARIO != player-missing || $binary != jwm-player ]] || continue
+    [[ $SCENARIO != apps-missing || $binary != jwm-image-viewer ]] || continue
     printf '#!/bin/sh\nexit 0\n' > "$target/$profile/$binary"
     chmod +x "$target/$profile/$binary"
 done
@@ -80,6 +89,9 @@ if [[ $SCENARIO == install-failure && $* == *jwm-remote* ]]; then
     exit 73
 fi
 if [[ $SCENARIO == player-install-failure && $* == *jwm-player* ]]; then
+    exit 73
+fi
+if [[ $SCENARIO == apps-install-failure && $* == *jwm-image-viewer* ]]; then
     exit 73
 fi
 STUB
@@ -94,7 +106,8 @@ done
 STUB
 cat > "$TEST_ROOT/bin/pkg-config" <<'STUB'
 #!/usr/bin/env bash
-if [[ $SCENARIO == eva-deps-failure || $SCENARIO == eva-skip ]]; then exit 1; fi
+if [[ ( $SCENARIO == eva-deps-failure || $SCENARIO == eva-skip ) && $* == *libpulse* ]]; then exit 1; fi
+if [[ $SCENARIO == apps-deps-failure && $* == *gtk4* ]]; then exit 1; fi
 if [[ $SCENARIO == tauri-webkit-old ]]; then
     case "$*" in
         '--atleast-version=2.52.6 webkit2gtk-4.1') exit 1 ;;
@@ -185,17 +198,25 @@ run_case() {
         grep -Fq '<-p> <jwm-bridge> <--bins>' "$CASE_DIR/cargo.log" || fail 'bridge/player build missing'
         grep -Fq "$resolved/$mode/jwm" "$CASE_DIR/system.log" || fail 'artifact path mismatch'
         grep -Fq "install -m755 $resolved/$mode/jwm-player /usr/local/bin/" "$CASE_DIR/system.log" || fail 'player artifact not installed'
+        for binary in jwm-notes jwm-image-viewer; do
+            grep -Fq "install -m755 $resolved/native-apps/$mode/$binary /usr/local/bin/" "$CASE_DIR/system.log" || fail "native app artifact not installed: $binary"
+        done
+        for desktop in org.jwm.Notes.desktop org.jwm.ImageViewer.desktop; do
+            grep -Fq "install -Dm644 $REPO/crates/jwm_apps/dist/$desktop /usr/local/share/applications/$desktop" "$CASE_DIR/system.log" || fail "native app desktop entry missing: $desktop"
+        done
         grep -Fq '69-jwm-touchpad-gestures.rules /usr/lib/udev/rules.d/69-jwm-touchpad-gestures.rules' "$CASE_DIR/system.log" || fail 'touchpad access rule not installed'
         for desktop in jwm-player.desktop jwm-video.desktop; do
             grep -Fq "install -Dm644 $REPO/bridge/dist/$desktop /usr/local/share/applications/$desktop" "$CASE_DIR/system.log" || fail "player desktop entry missing: $desktop"
         done
         ! grep -Eq 'xdg-mime|/mimeapps\.list' "$CASE_DIR/system.log" || fail 'installer changed shared MIME defaults'
         if [[ $scenario == sudo-target ]]; then
-            grep -Fq -- "-u fixture-user python3 - $CASE_DIR/config/jwm-mimeapps.list $REPO/bridge/dist" "$CASE_DIR/system.log" || fail 'MIME defaults did not run as login user'
+            grep -Fq -- "-u fixture-user python3 $REPO/scripts/set-jwm-defaults.py $CASE_DIR/config/jwm-mimeapps.list $REPO/bridge/dist" "$CASE_DIR/system.log" || fail 'MIME defaults did not run as login user'
             grep -Fq -- '-u fixture-user timeout 8s /usr/local/bin/jwm-bridge reload' "$CASE_DIR/system.log" || fail 'bridge reload did not run as login user'
         else
             grep -Fxq 'audio/mpeg=jwm-player.desktop;' "$CASE_DIR/config/jwm-mimeapps.list" || fail 'JWM music default missing'
             grep -Fxq 'video/mp4=jwm-video.desktop;' "$CASE_DIR/config/jwm-mimeapps.list" || fail 'JWM video default missing'
+            grep -Fxq 'text/plain=org.jwm.Notes.desktop;' "$CASE_DIR/config/jwm-mimeapps.list" || fail 'JWM notes default missing'
+            grep -Fxq 'image/png=org.jwm.ImageViewer.desktop;' "$CASE_DIR/config/jwm-mimeapps.list" || fail 'JWM image default missing'
             grep -Fq 'bridge-reload 8s /usr/local/bin/jwm-bridge reload' "$CASE_DIR/system.log" || fail 'installed bridge did not reload its replaced D-Bus owner'
         fi
         if [[ $scenario == eva-skip ]]; then
@@ -233,8 +254,11 @@ run_case() {
             [[ $(cat "$CASE_DIR/config/jwm/wallpapers/01-fixture.png") == "bundled fixture" ]] || fail 'bundled wallpaper install missing'
         fi
     else
-        if [[ $scenario != bridge-failure && $scenario != install-failure && $scenario != player-missing && $scenario != player-install-failure && $scenario != eva-* ]]; then
+        if [[ $scenario != bridge-failure && $scenario != install-failure && $scenario != player-missing && $scenario != player-install-failure && $scenario != apps-* && $scenario != eva-* ]]; then
             [[ ! -e $CASE_DIR/system.log ]] || fail 'failed build installed system files'
+        fi
+        if [[ $scenario == apps-* ]]; then
+            [[ ! -e $CASE_DIR/config/jwm-mimeapps.list ]] || fail 'failed native app install changed defaults'
         fi
     fi
     local cleans
@@ -276,6 +300,10 @@ run_case bridge-failure release 'bridge failed target' 101
 run_case install-failure debug 'install failed target' 73
 run_case player-missing release 'missing player target' 1
 run_case player-install-failure release 'player install failed target' 73
+run_case apps-failure release 'apps failed target' 101
+run_case apps-missing debug 'apps missing target' 1
+run_case apps-install-failure release 'apps install failed target' 73
+run_case apps-deps-failure release 'apps missing GTK target' 1
 run_case eva-no-bus release 'Eva no session target' 0
 run_case eva-no-graphical debug 'Eva no graphical session target' 0
 run_case eva-skip debug 'Eva skipped target' 0 --skip-eva

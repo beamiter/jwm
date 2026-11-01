@@ -37,6 +37,13 @@ The source installer also sets them as the defaults in the target user's
 MIME defaults are unchanged. Release bundles only register the applications and
 leave the user's MIME configuration untouched.
 
+The same source installation also builds `jwm-notes` and `jwm-image-viewer`
+from the independent `crates/jwm_apps` package and sets text/image defaults in
+`jwm-mimeapps.list`. GTK >= 4.10 is required at build and runtime (Ubuntu 24.04+);
+the release runner uses Ubuntu 24.04. Release payloads include both binaries
+and their `org.jwm.Notes.desktop` / `org.jwm.ImageViewer.desktop` entries.
+See [native applications](../docs/native-apps.md) for storage and shortcuts.
+
 The release installer accepts additional stable helper paths while preserving
 every existing destination's target. Use the newer bundle's installer for
 upgrade, rollback, and uninstall. Rolling back to a pre-player payload leaves
@@ -55,7 +62,7 @@ pkgdesc="Tag-based WM/compositor with built-in shell (Wayland DRM primary)"
 arch=('x86_64')
 url="https://github.com/<org>/jwm"
 license=('MIT')
-depends=('libx11' 'libxkbcommon' 'wayland' 'mesa' 'libinput' 'seatd' 'alsa-lib' 'dbus')
+depends=('libx11' 'libxkbcommon' 'wayland' 'mesa' 'libinput' 'seatd' 'alsa-lib' 'dbus' 'gtk4>=4.10')
 optdepends=('mpv: JWM music and video playback')
 makedepends=('cargo' 'git' 'clang' 'pkgconf')
 provides=('jwm')
@@ -72,15 +79,18 @@ build() {
   cd jwm
   cargo build --locked --release --bins
   cargo build --locked --release -p jwm-bridge --bins
+  cargo build --locked --release --manifest-path crates/jwm_apps/Cargo.toml --target-dir target
 }
 
 package() {
   cd jwm
   install -Dm755 target/release/jwm target/release/jwm-tool \
     target/release/jwm-support target/release/jwm-remote \
-    target/release/jwm-bridge target/release/jwm-player -t "$pkgdir/usr/bin"
+    target/release/jwm-bridge target/release/jwm-player \
+    target/release/jwm-notes target/release/jwm-image-viewer -t "$pkgdir/usr/bin"
   install -Dm644 bridge/dist/jwm-player.desktop bridge/dist/jwm-video.desktop \
     -t "$pkgdir/usr/share/applications"
+  install -Dm644 crates/jwm_apps/dist/*.desktop -t "$pkgdir/usr/share/applications"
   install -Dm644 jwm-wayland.desktop \
     "$pkgdir/usr/share/wayland-sessions/jwm.desktop"
   install -Dm644 jwm-x11rb.desktop jwm-xcb.desktop -t "$pkgdir/usr/share/xsessions"

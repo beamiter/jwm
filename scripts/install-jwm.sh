@@ -153,7 +153,8 @@ usage() {
   - 完整安装默认同时构建 Eva，沿用 --mode、--jobs 和 CARGO_TARGET_DIR，安装到登录用户的 ~/.local/bin。
     保留已有 eva.toml；图形用户会话可用时启用并重启，否则仅安装文件并提示后续启用命令。
   - 音乐和视频播放运行时需要 mpv；缺少它不影响 JWM 的构建与安装。
-  - 通过用户配置目录中的 jwm-mimeapps.list 设置 JWM 会话的默认音视频播放器；Ubuntu/GNOME 的默认设置不变。
+  - 同时安装原生 jwm-notes 备忘录和 jwm-image-viewer 图片查看器（需要 GTK4 >= 4.10 开发库）。
+  - 通过用户配置目录中的 jwm-mimeapps.list 设置 JWM 会话的默认音视频、文本、图片应用；Ubuntu/GNOME 的默认设置不变。
   - jwm 通过 ~/.config/jwm/config_x11.toml 和 config_wayland.toml 的 status_bar.name
     在运行时选择 bar，切换 bar 不需要重编 jwm。
   - 完整安装还将内置静态壁纸复制到 ~/.config/jwm/wallpapers/（支持 XDG_CONFIG_HOME）；
@@ -372,68 +373,16 @@ install_jwm_media_defaults() {
     local config_dir destination
     config_dir=$(jwm_config_dir)
     destination="${config_dir%/jwm}/jwm-mimeapps.list"
-    local -a command=(python3 - "$destination" "$PROJECT_ROOT/bridge/dist")
+    local -a command=(python3 "$PROJECT_ROOT/scripts/set-jwm-defaults.py" "$destination"
+        "$PROJECT_ROOT/bridge/dist/jwm-player.desktop" "$PROJECT_ROOT/bridge/dist/jwm-video.desktop"
+        "$PROJECT_ROOT/crates/jwm_apps/dist/org.jwm.Notes.desktop"
+        "$PROJECT_ROOT/crates/jwm_apps/dist/org.jwm.ImageViewer.desktop")
     if [[ "$(id -u)" -eq 0 && -n "${SUDO_USER:-}" ]]; then
         command=(sudo -u "$SUDO_USER" "${command[@]}")
     fi
-
-    # Desktop-specific defaults take precedence over mimeapps.list only when
-    # XDG_CURRENT_DESKTOP includes jwm. Never rewrite the shared user defaults.
-    "${command[@]}" <<'PY'
-import configparser
-import io
-import os
-from pathlib import Path
-import shutil
-import stat
-import sys
-import tempfile
-
-destination = Path(os.path.normpath(sys.argv[1]))
-desktop_dir = Path(sys.argv[2])
-
-def read_config(text):
-    config = configparser.ConfigParser(interpolation=None, delimiters=("=",))
-    config.optionxform = str
-    config.read_string(text)
-    return config
-
-if destination.is_symlink():
-    raise SystemExit(f"Refusing to replace symlink: {destination}")
-previous = destination.read_bytes() if destination.exists() else None
-config = read_config(previous.decode("utf-8") if previous is not None else "")
-section = "Default Applications"
-if not config.has_section(section):
-    config.add_section(section)
-changed = previous is None
-for desktop_id in ("jwm-player.desktop", "jwm-video.desktop"):
-    desktop = read_config((desktop_dir / desktop_id).read_text(encoding="utf-8"))
-    for mime in desktop["Desktop Entry"]["MimeType"].split(";"):
-        if not mime:
-            continue
-        value = desktop_id + ";"
-        if config.get(section, mime, fallback=None) != value:
-            config.set(section, mime, value)
-            changed = True
-
-if changed:
-    output = io.StringIO()
-    config.write(output, space_around_delimiters=False)
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    mode = stat.S_IMODE(destination.stat().st_mode) if previous is not None else 0o644
-    fd, temporary = tempfile.mkstemp(prefix=".jwm-mimeapps-", dir=destination.parent)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(output.getvalue())
-        os.chmod(temporary, mode)
-        if previous is not None:
-            shutil.copy2(destination, str(destination) + ".bak")
-        os.replace(temporary, destination)
-    finally:
-        if os.path.exists(temporary):
-            os.unlink(temporary)
-PY
-    ok "已设置 JWM 会话的默认音视频播放器（其他桌面不变）: $destination"
+    # Desktop-specific defaults apply only when XDG_CURRENT_DESKTOP includes jwm.
+    "${command[@]}"
+    ok "已设置 JWM 会话的默认音视频、备忘录和图片应用（其他桌面不变）: $destination"
 }
 
 install_bundled_wallpapers() {
@@ -460,7 +409,7 @@ remove_jwm_cargo_bins() {
     local binary
 
     # JWM 不再安装到 cargo bin；清理历史版本遗留的 JWM 二进制。
-    for binary in jwm jwm-tool jwm-support jwm-remote jwm-player; do
+    for binary in jwm jwm-tool jwm-support jwm-remote jwm-player jwm-notes jwm-image-viewer; do
         if [[ -e "$bin_dir/$binary" ]]; then
             info "清理旧的 cargo bin/$binary ..."
             rm -f -- "$bin_dir/$binary"
@@ -648,6 +597,29 @@ build_and_install_shell() {
     local profile=release
     [[ "$BUILD_MODE" == release ]] || profile=debug
     install_system_binary "$JWM_TARGET_DIR/shell-host/$profile/jwm-shell" /usr/local/bin
+}
+
+# GUI dependencies have an independent lock, like the shared shell and bars.
+build_and_install_apps() {
+    info "构建原生备忘录和图片查看器（$BUILD_MODE 模式）..."
+    if ! pkg-config --atleast-version=4.10 gtk4; then
+        err "原生应用需要 GTK4 >= 4.10 开发库（Ubuntu 24.04+: libgtk-4-dev）"
+        return 1
+    fi
+    cargo build --locked --manifest-path "$PROJECT_ROOT/crates/jwm_apps/Cargo.toml" \
+        --target-dir "$JWM_TARGET_DIR/native-apps" "${CARGO_BUILD_MODE_ARGS[@]}" "${CARGO_JOBS_ARGS[@]}" --bins
+    local profile=release binary desktop
+    [[ "$BUILD_MODE" == release ]] || profile=debug
+    for binary in jwm-notes jwm-image-viewer; do
+        install_system_binary "$JWM_TARGET_DIR/native-apps/$profile/$binary" /usr/local/bin
+    done
+    for desktop in org.jwm.Notes.desktop org.jwm.ImageViewer.desktop; do
+        sudo install -Dm644 "$PROJECT_ROOT/crates/jwm_apps/dist/$desktop" "/usr/local/share/applications/$desktop"
+    done
+    if command -v update-desktop-database >/dev/null 2>&1; then
+        sudo update-desktop-database /usr/local/share/applications || \
+            warn "原生应用已安装，桌面应用缓存更新失败；可稍后运行 update-desktop-database"
+    fi
 }
 
 # Build with the main installer's profile/cache, then delegate user files and
@@ -879,7 +851,6 @@ build_and_install_bridge() {
         sudo update-desktop-database /usr/local/share/applications || \
             warn "播放器已安装，桌面应用缓存更新失败；可稍后运行 update-desktop-database"
     fi
-    install_jwm_media_defaults
     if ! command -v mpv >/dev/null 2>&1; then
         warn "音乐/视频播放需要 mpv；Debian/Ubuntu: sudo apt-get install mpv（JWM 已正常安装）"
     fi
@@ -980,6 +951,8 @@ build_and_install_jwm() {
     ok "jwm, jwm-tool, jwm-support, jwm-remote 安装完成: /usr/local/bin（未安装到 cargo bin）"
 
     build_and_install_bridge
+    build_and_install_apps
+    install_jwm_media_defaults
 
     info "安装 desktop 文件 ..."
     [[ -f jwm-x11rb.desktop ]]         && sudo install -m644 jwm-x11rb.desktop         /usr/share/xsessions/

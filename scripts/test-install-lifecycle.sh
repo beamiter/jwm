@@ -95,7 +95,8 @@ chmod 0751 -- "$DESTDIR/usr/local/bin/jwm"
 LEGACY_MANIFEST="$TMP_ROOT/release-manifest-v1.tsv"
 awk -F '\t' '
     NR == 1 { sub("format 2", "format 1") }
-    $1 == "built" && ($2 == "jwm-remote" || $2 == "jwm-player" || $2 == "jwm-shell" || $2 == "tauri_leptos_bar") { next }
+    $1 == "built" && ($2 == "jwm-remote" || $2 == "jwm-player" || $2 == "jwm-shell" || $2 == "tauri_leptos_bar" || $2 == "jwm-notes" || $2 == "jwm-image-viewer") { next }
+    $2 ~ /^crates\/jwm_apps\/dist\// { next }
     $2 == "bridge/dist/jwm-player.desktop" || $2 == "bridge/dist/jwm-video.desktop" || $2 == "scripts/jwm-toggle-sidebar-mode" { next }
     $2 == "packaging/69-jwm-touchpad-gestures.rules" { next }
     { print }
@@ -294,6 +295,8 @@ for required_path in \
     payload/usr/local/lib/jwm/versions/$PACKAGE_VERSION/bin/jwm-remote \
     payload/usr/local/lib/jwm/versions/$PACKAGE_VERSION/bin/jwm-bridge \
     payload/usr/local/lib/jwm/versions/$PACKAGE_VERSION/bin/jwm-player \
+    payload/usr/local/lib/jwm/versions/$PACKAGE_VERSION/bin/jwm-notes \
+    payload/usr/local/lib/jwm/versions/$PACKAGE_VERSION/bin/jwm-image-viewer \
     payload/usr/local/lib/jwm/versions/$PACKAGE_VERSION/bin/tao_glow_bar \
     payload/usr/local/lib/jwm/versions/$PACKAGE_VERSION/bin/tao_pixels_bar \
     payload/usr/local/lib/jwm/versions/$PACKAGE_VERSION/bin/jwm-shell \
@@ -304,6 +307,8 @@ for required_path in \
     payload/usr/local/lib/jwm/versions/$PACKAGE_VERSION/share/dbus-1/services/org.freedesktop.Notifications.service \
     payload/usr/local/lib/jwm/versions/$PACKAGE_VERSION/share/applications/jwm-player.desktop \
     payload/usr/local/lib/jwm/versions/$PACKAGE_VERSION/share/applications/jwm-video.desktop \
+    payload/usr/local/lib/jwm/versions/$PACKAGE_VERSION/share/applications/org.jwm.Notes.desktop \
+    payload/usr/local/lib/jwm/versions/$PACKAGE_VERSION/share/applications/org.jwm.ImageViewer.desktop \
     payload/usr/local/lib/jwm/versions/$PACKAGE_VERSION/share/doc/jwm/README.md \
     payload/usr/local/lib/jwm/versions/$PACKAGE_VERSION/share/doc/jwm/CHANGELOG.md \
     payload/usr/local/lib/jwm/versions/$PACKAGE_VERSION/share/doc/jwm/LICENSE \

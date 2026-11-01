@@ -1,0 +1,22 @@
+[package]
+name = "jwm-apps"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+description = "Native JWM notes and image viewer applications"
+license = "MIT"
+
+[[bin]]
+name = "jwm-notes"
+path = "src/bin/notes.rs"
+
+[[bin]]
+name = "jwm-image-viewer"
+path = "src/bin/image_viewer.rs"
+
+[dependencies]
+gtk = { package = "gtk4", version = "=0.11.4", features = ["v4_10"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "ico", "tiff", "pnm"] }
+
+[profile.dev]
+debug = 0

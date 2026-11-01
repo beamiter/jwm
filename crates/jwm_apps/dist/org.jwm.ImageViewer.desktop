@@ -1,0 +1,15 @@
+[Desktop Entry]
+Type=Application
+Name=JWM Image Viewer
+Name[zh_CN]=JWM 图片查看器
+Comment=View, zoom and rotate images
+Comment[zh_CN]=查看、缩放、旋转图片及浏览同目录图片
+Exec=jwm-image-viewer -- %F
+TryExec=jwm-image-viewer
+Icon=image-x-generic
+Terminal=false
+StartupNotify=true
+StartupWMClass=org.jwm.ImageViewer
+Categories=Graphics;Viewer;
+MimeType=image/png;image/jpeg;image/gif;image/webp;image/bmp;image/x-bmp;image/x-ms-bmp;image/tiff;image/vnd.microsoft.icon;image/x-icon;image/x-portable-anymap;image/x-portable-bitmap;image/x-portable-graymap;image/x-portable-pixmap;
+Keywords=Image;Photo;Picture;Viewer;图片;照片;

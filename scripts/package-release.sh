@@ -113,6 +113,8 @@ valid_stable_path() {
         usr/local/bin/jwm-support|\
         usr/local/bin/jwm-bridge|\
         usr/local/bin/jwm-player|\
+        usr/local/bin/jwm-notes|\
+        usr/local/bin/jwm-image-viewer|\
         usr/local/bin/jwm-shell|\
         usr/local/bin/jwm-toggle-sidebar-mode|\
         usr/lib/udev/rules.d/69-jwm-touchpad-gestures.rules|\
@@ -128,6 +130,8 @@ valid_stable_path() {
         usr/share/dbus-1/services/org.freedesktop.Notifications.service|\
         usr/local/share/applications/jwm-player.desktop|\
         usr/local/share/applications/jwm-video.desktop|\
+        usr/local/share/applications/org.jwm.Notes.desktop|\
+        usr/local/share/applications/org.jwm.ImageViewer.desktop|\
         usr/local/share/doc/jwm)
             return 0
             ;;
@@ -165,6 +169,7 @@ if ((SKIP_BUILD == 0)); then
     command -v cargo >/dev/null 2>&1 || die "cargo is required unless --no-build is used"
     cargo build --locked --release --bins --target-dir "$TARGET_DIR" --manifest-path "$PROJECT_ROOT/Cargo.toml"
     cargo build --locked --release --bins --target-dir "$TARGET_DIR" --manifest-path "$PROJECT_ROOT/bridge/Cargo.toml"
+    cargo build --locked --release --bins --target-dir "$TARGET_DIR" --manifest-path "$PROJECT_ROOT/crates/jwm_apps/Cargo.toml"
     cargo build --locked --release --bin tao_glow_bar --target-dir "$TARGET_DIR" --manifest-path "$PROJECT_ROOT/bars/tao_glow_bar/Cargo.toml"
     cargo build --locked --release --manifest-path "$PROJECT_ROOT/crates/jwm_shell/Cargo.toml" --target-dir "$TARGET_DIR"
     bash "$PROJECT_ROOT/scripts/build-leptos-bar.sh" "$TARGET_DIR"

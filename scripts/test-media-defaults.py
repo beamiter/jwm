@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check session-specific player defaults without installing on the host."""
+"""Check session-specific application defaults without installing on the host."""
 import configparser
 import os
 from pathlib import Path
@@ -32,12 +32,15 @@ with tempfile.TemporaryDirectory(prefix="jwm-media-test-") as directory:
     binary_dir = root / "bin"
     for path in (config_home, apps, binary_dir):
         path.mkdir(parents=True)
-    player = binary_dir / "jwm-player"
-    player.write_text("#!/bin/sh\nexit 0\n")
-    player.chmod(0o755)
+    for name in ("jwm-player", "jwm-notes", "jwm-image-viewer"):
+        binary = binary_dir / name
+        binary.write_text("#!/bin/sh\nexit 0\n")
+        binary.chmod(0o755)
     expected = {}
-    for desktop_id in ("jwm-player.desktop", "jwm-video.desktop"):
-        desktop = ROOT / "bridge/dist" / desktop_id
+    desktops = [*(ROOT / "bridge/dist").glob("*.desktop"),
+                *(ROOT / "crates/jwm_apps/dist").glob("*.desktop")]
+    for desktop in desktops:
+        desktop_id = desktop.name
         shutil.copy2(desktop, apps / desktop_id)
         for mime in parse(desktop.read_text())["Desktop Entry"]["MimeType"].split(";"):
             if mime:
@@ -53,7 +56,7 @@ with tempfile.TemporaryDirectory(prefix="jwm-media-test-") as directory:
     )
     shared.write_text(original)
     target = config_home / "jwm-mimeapps.list"
-    existing = "# Existing JWM preferences\n[Default Applications]\ntext/plain=editor.desktop;\naudio/mpeg=original.desktop;\n"
+    existing = "# Existing JWM preferences\n[Default Applications]\napplication/pdf=reader.desktop;\ntext/plain=editor.desktop;\naudio/mpeg=original.desktop;\n"
     target.write_text(existing)
     target.chmod(0o640)
     env = dict(os.environ, PROJECT_ROOT=str(ROOT), XDG_CONFIG_HOME=str(config_home),
@@ -68,7 +71,8 @@ with tempfile.TemporaryDirectory(prefix="jwm-media-test-") as directory:
     assert result.returncode == 0, result.stderr
     defaults = parse(target.read_text())["Default Applications"]
     assert all(defaults[mime] == desktop_id for mime, desktop_id in expected.items())
-    assert defaults["text/plain"] == "editor.desktop;"
+    assert defaults["text/plain"] == "org.jwm.Notes.desktop;"
+    assert defaults["application/pdf"] == "reader.desktop;"
     assert shared.read_text() == original
     assert target.stat().st_mode & 0o777 == 0o640
     backup = target.with_suffix(".list.bak")
@@ -84,7 +88,8 @@ with tempfile.TemporaryDirectory(prefix="jwm-media-test-") as directory:
         for session in ("jwm", "JWM", "ubuntu:GNOME", "GNOME"):
             session_env = dict(env, XDG_CURRENT_DESKTOP=session)
             for mime in ("audio/mpeg", "audio/vnd.wave", "audio/x-wav", "audio/x-wavpack",
-                         "audio/x-ms-wma", "audio/mp4", "video/mp4", "video/x-matroska"):
+                         "audio/x-ms-wma", "audio/mp4", "video/mp4", "video/x-matroska",
+                         "text/plain", "text/markdown", "image/png", "image/jpeg", "image/webp", "image/tiff"):
                 desktop_id = expected[mime].rstrip(";") if session.lower() == "jwm" else "original.desktop"
                 gio = subprocess.run(["gio", "mime", mime], env=session_env, capture_output=True, text=True, check=True)
                 assert gio.stdout.splitlines()[0].endswith(": " + desktop_id), (session, mime, gio.stdout)
@@ -93,6 +98,42 @@ with tempfile.TemporaryDirectory(prefix="jwm-media-test-") as directory:
         print("GIO and xdg-mime defaults in JWM and Ubuntu/GNOME: PASS")
     else:
         print("GIO/xdg-mime integration: SKIP (tools unavailable)")
+
+    # Exercise the actual user installer with private build artifacts. In
+    # particular, older xdg-utils cannot resolve unnecessarily quoted Exec
+    # paths, even though GIO accepts those entries.
+    cargo = binary_dir / "cargo"
+    cargo.write_text('''#!/usr/bin/env bash
+set -euo pipefail
+target= profile=debug
+while (($#)); do
+    case "$1" in
+        --target-dir) target=$2; shift 2 ;;
+        --release) profile=release; shift ;;
+        *) shift ;;
+    esac
+done
+mkdir -p "$target/$profile"
+for name in jwm-notes jwm-image-viewer; do
+    printf '#!/bin/sh\\nexit 0\\n' > "$target/$profile/$name"
+    chmod +x "$target/$profile/$name"
+done
+''')
+    cargo.chmod(0o755)
+    result = subprocess.run(["bash", str(ROOT / "scripts/install-native-apps.sh"), "--debug"],
+                            env=dict(env, CARGO_TARGET_DIR=str(root / "build")),
+                            capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert shared.read_text() == original
+    assert (root / ".local/bin/jwm-notes").is_file()
+    assert (root / ".local/bin/jwm-image-viewer").is_file()
+    if shutil.which("gio") and shutil.which("xdg-mime"):
+        for mime in ("text/plain", "image/png", "image/webp"):
+            expected_id = expected[mime].rstrip(";")
+            session_env = dict(env, XDG_CURRENT_DESKTOP="jwm")
+            value = subprocess.check_output(["xdg-mime", "query", "default", mime], env=session_env, text=True).strip()
+            assert value == expected_id, (mime, value)
+    print("User-only installation and xdg-utils Exec compatibility: PASS")
 
     target.unlink()
     assert install().returncode == 0

@@ -121,6 +121,8 @@ valid_stable_path() {
         usr/local/bin/jwm-support|\
         usr/local/bin/jwm-bridge|\
         usr/local/bin/jwm-player|\
+        usr/local/bin/jwm-notes|\
+        usr/local/bin/jwm-image-viewer|\
         usr/local/bin/jwm-shell|\
         usr/local/bin/jwm-toggle-sidebar-mode|\
         usr/lib/udev/rules.d/69-jwm-touchpad-gestures.rules|\
@@ -136,6 +138,8 @@ valid_stable_path() {
         usr/share/dbus-1/services/org.freedesktop.Notifications.service|\
         usr/local/share/applications/jwm-player.desktop|\
         usr/local/share/applications/jwm-video.desktop|\
+        usr/local/share/applications/org.jwm.Notes.desktop|\
+        usr/local/share/applications/org.jwm.ImageViewer.desktop|\
         usr/local/share/doc/jwm)
             return 0
             ;;

@@ -120,6 +120,8 @@ APT_EVA=(
 APT_BAR=(
     libglib2.0-dev libcairo2-dev libpango1.0-dev
     libgdk-pixbuf-2.0-dev libharfbuzz-dev libgtk-3-dev
+    # Native notes and image viewer use GTK >= 4.10 (Ubuntu 24.04+).
+    libgtk-4-dev
 )
 
 # Runtime helpers useful for nested testing / running a session.
