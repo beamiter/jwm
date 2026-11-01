@@ -374,7 +374,12 @@ else
     echo "Native PipeWire graph rate: ${graph_rate}Hz (client PCM remains 24000Hz)"
     # Record both sink monitor channels. A mono-only sink hides unpositioned
     # playback being routed to only one side of stereo headphones.
-    pw-record --raw --target jwm-eva-test-sink --rate 24000 --channels 2 \
+    # Older pw-record writes raw stdout directly and has no --raw switch;
+    # newer versions require the switch to avoid a libsndfile/AU header.
+    record_format_options=()
+    record_help=$(pw-record --help)
+    if [[ "$record_help" == *'--raw'* ]]; then record_format_options+=(--raw); fi
+    pw-record "${record_format_options[@]}" --target jwm-eva-test-sink --rate 24000 --channels 2 \
         --channel-map stereo --format s16 \
         --properties 'node.name=jwm-eva-test-monitor stream.capture.sink=true' - \
         >"$runtime_dir/stereo.pcm" 2>"$runtime_dir/monitor.log" &
