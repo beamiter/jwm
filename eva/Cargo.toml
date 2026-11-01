@@ -6,7 +6,15 @@ rust-version = "1.89"
 license = "MIT"
 description = "Native hotkey-activated Realtime voice assistant for JWM"
 
+[features]
+default = ["silero"]
+# Runtime is loaded locally; Cargo never downloads or links a native ORT binary.
+silero = ["dep:ort", "dep:libloading"]
+
 [dependencies]
+ort = { version = "=2.0.0-rc.10", default-features = false, features = ["std", "alternative-backend"], optional = true }
+libloading = { version = "0.8", optional = true }
+sha2 = "0.11"
 companion-voice = { path = "vendor/companion-voice" }
 companion-client = { git = "https://github.com/beamiter/jcompanion.git", rev = "9aa569540091524d637a7115b64c587b9177a55b" }
 companion-protocol = { git = "https://github.com/beamiter/jcompanion.git", rev = "9aa569540091524d637a7115b64c587b9177a55b" }

@@ -30,6 +30,9 @@ noise_reduction_strength = 1.0
 # Detect sustained human speech locally before uploading microphone audio.
 # Speech probability is not speaker identity: TV/dialogue may still be speech.
 local_voice_detection = true
+local_voice_backend = "silero" # "silero" (CPU ONNX Runtime) or embedded "rnnoise"
+local_voice_fallback = "rnnoise" # explicit neural fallback; "none" fails closed
+# silero_model_path = "/absolute/path/silero_vad.onnx" # optional; pinned checksum only
 local_voice_threshold = 0.65 # 0.1..0.95; tune against real speech and noise
 local_voice_min_ms = 160 # 80..500, in 20 ms steps
 local_voice_preroll_ms = 400 # 200..1000, in 20 ms steps; retain the first syllable

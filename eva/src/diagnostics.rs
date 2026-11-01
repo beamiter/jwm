@@ -47,6 +47,33 @@ pub fn evaluate(config: &Config, inputs: Inputs<'_>) -> Report {
             recommendation,
         })
     };
+    if config.audio.local_voice_detection {
+        let status = crate::audio::local_voice::LocalVoiceDetector::new(config).status;
+        let (state, message, recommendation) = match (status.active, status.degraded_reason) {
+            ("silero", None) => (State::Ready, "本地 Silero 模型与 CPU 推理后端可用。", None),
+            ("rnnoise", None) => (State::Ready, "已配置本地 RNNoise 神经语音门控。", None),
+            ("rnnoise", _) => (
+                State::Warning,
+                "Silero 不可用，已按配置降级为本地 RNNoise。",
+                Some(
+                    "检查 Silero 构建 feature、模型校验与 ONNX Runtime 1.22；安装后重启 Eva，详见 eva/models/README.md。",
+                ),
+            ),
+            _ => (
+                State::Blocked,
+                "本地语音检测不可用，音频上传将被阻止。",
+                Some("安装 ONNX Runtime 1.22 并检查模型；或显式选择 RNNoise 神经后端。"),
+            ),
+        };
+        add("local_voice", state, message, recommendation);
+    } else {
+        add(
+            "local_voice",
+            State::Warning,
+            "已显式关闭本地人声门控，采集音频将连续上传。",
+            Some("设 audio.local_voice_detection=true 启用本地神经门控。"),
+        );
+    }
     if ["gpt-realtime-2.1-mini", "gpt-realtime-mini"].contains(&config.openai.model.as_str())
         && config.interaction.half_duplex
         && config.interaction.feedback == "brief"
@@ -320,6 +347,18 @@ mod tests {
                 .iter()
                 .any(|check| check.id == "presentation" && check.message.contains("锁定"))
         );
+    }
+    #[test]
+    fn disabled_local_gate_does_not_probe_or_block_on_an_unused_model() {
+        let mut config = Config::default();
+        config.audio.local_voice_detection = false;
+        config.audio.local_voice_fallback = "none".into();
+        config.audio.silero_model_path = Some("/nonexistent/eva-test-silero.onnx".into());
+        let result = report(&config, &documents());
+        assert!(result.ready);
+        assert!(result.checks.iter().any(|check| check.id == "local_voice"
+            && check.state == State::Warning
+            && check.message.contains("连续上传")));
     }
     #[test]
     fn old_server_fields_alone_do_not_claim_new_features_are_ready() {

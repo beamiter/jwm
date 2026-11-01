@@ -1450,6 +1450,10 @@ impl BargeInDiagnostics {
         let mut fields = self.gate.statistics();
         if let Some(voice) = &self.voice {
             fields["voice_probability"] = json!(voice.probability);
+            fields["voice_backend"] = json!(voice.detector_status().active);
+            fields["voice_backend_requested"] = json!(voice.detector_status().requested);
+            fields["voice_backend_degraded_reason"] =
+                json!(voice.detector_status().degraded_reason);
         }
         fields.as_object_mut().unwrap().extend(
             self.labels
@@ -2841,7 +2845,7 @@ pub fn cloud_context_for_categories(context: &Value, categories: &[String]) -> V
     };
     let monitors=context["monitors"].as_array().into_iter().flatten().map(|m|json!({"monitor_ref":m["monitor_ref"],"visible_tag_numbers":tags(&m["visible_tag_mask"]),"layout":m["layout"],"locked":m["locked"],"tab_window_refs":m["tab_tokens"].as_array().into_iter().flatten().map(|token|context["windows"].as_array().and_then(|windows|windows.iter().find(|w|w["target_token"]==*token)).map(|w|w["window_ref"].clone()).unwrap_or(Value::Null)).collect::<Vec<_>>()})).collect::<Vec<_>>();
     let include_titles = categories.iter().any(|category| category == "windows");
-    let windows=context["windows"].as_array().into_iter().flatten().filter(|w|include_titles||w["window_ref"]==focus).take(128).map(|w|{let mut data=json!({"window_ref":w["window_ref"],"class":w["class"],"monitor_ref":monitor_ref(&w["monitor_token"]),"tag_numbers":tags(&w["tag_mask"]),"focused":w["focused"],"minimized":w["minimized"],"floating":w["floating"],"maximized":w["maximized"]});if include_titles{data["title"]=w["title"].clone();}data}).collect::<Vec<_>>();
+    let windows=context["windows"].as_array().into_iter().flatten().filter(|w|include_titles||w["window_ref"]==focus).take(128).map(|w|{let mut data=json!({"window_ref":w["window_ref"],"class":w["class"],"monitor_ref":monitor_ref(&w["monitor_token"]),"tag_numbers":tags(&w["tag_mask"]),"focused":w["focused"],"minimized":w["minimized"],"sticky":w["sticky"],"floating":w["floating"],"maximized":w["maximized"]});if include_titles{data["title"]=w["title"].clone();}data}).collect::<Vec<_>>();
     let workspaces=context["workspaces"].as_array().into_iter().flatten().map(|w|json!({"monitor_ref":monitor_ref(&w["monitor_token"]),"tag_number":w["tag_number"],"layout":w["layout"]})).collect::<Vec<_>>();
     let selected_monitor = context
         .get("activation_monitor_token")
@@ -3944,6 +3948,9 @@ mod tests {
                             "rejected_source_frames",
                             "source_discontinuities",
                             "voice_probability",
+                            "voice_backend",
+                            "voice_backend_requested",
+                            "voice_backend_degraded_reason",
                         ]
                         .contains(&key.as_str()),
                         "unexpected diagnostic field {key}"
@@ -3975,28 +3982,36 @@ mod tests {
         for ms in [0, 20, 40, 60, 80] {
             assert!(
                 !diagnostics
-                    .observe(frame(start + Duration::from_millis(ms)), &mut buffered)
+                    .observe_at(frame(start + Duration::from_millis(ms)), &mut buffered, now)
                     .unwrap()
             );
         }
         assert_eq!(buffered.len(), 5);
         assert!(
             !diagnostics
-                .observe(frame(now - Duration::from_secs(1)), &mut buffered)
+                .observe_at(frame(now - Duration::from_secs(1)), &mut buffered, now)
                 .unwrap()
         );
         assert!(buffered.is_empty());
 
         assert!(
             !diagnostics
-                .observe(frame(start + Duration::from_millis(100)), &mut buffered)
+                .observe_at(
+                    frame(start + Duration::from_millis(100)),
+                    &mut buffered,
+                    now
+                )
                 .unwrap()
         );
         assert_eq!(buffered.len(), 1);
         // A missing 20 ms frame starts a new buffer as well as a new gate window.
         assert!(
             !diagnostics
-                .observe(frame(start + Duration::from_millis(140)), &mut buffered)
+                .observe_at(
+                    frame(start + Duration::from_millis(140)),
+                    &mut buffered,
+                    now
+                )
                 .unwrap()
         );
         assert_eq!(buffered.len(), 1);
@@ -4004,7 +4019,11 @@ mod tests {
         // but never interrupts on its own.
         for index in 1..6 {
             let captured = start + Duration::from_millis(140 + index * 20);
-            assert!(!diagnostics.observe(frame(captured), &mut buffered).unwrap());
+            assert!(
+                !diagnostics
+                    .observe_at(frame(captured), &mut buffered, now)
+                    .unwrap()
+            );
         }
         assert_eq!(buffered.len(), 6);
         assert_eq!(
@@ -4122,7 +4141,8 @@ mod tests {
                 let (ready, wait_ready) = tokio::sync::oneshot::channel();
                 let (cancel, mut cancelled_rx) = watch::channel(false);
                 let work = async move {
-                    let source_start = Instant::now() - Duration::from_millis(80);
+                    let observed = Instant::now();
+                    let source_start = observed - Duration::from_millis(80);
                     let mut diagnostics = BargeInDiagnostics::new(
                         &Config::default(),
                         &crate::audio::InputNoise::default(),
@@ -4142,12 +4162,15 @@ mod tests {
                                     .to_le_bytes()
                             })
                             .collect();
-                        diagnostics.gate.observe(&Frame {
-                            captured: source_start + Duration::from_millis(index as u64 * 20),
-                            timestamp_verified: true,
-                            pcm,
-                            level: level as f32,
-                        });
+                        diagnostics.gate.observe_at(
+                            &Frame {
+                                captured: source_start + Duration::from_millis(index as u64 * 20),
+                                timestamp_verified: true,
+                                pcm,
+                                level: level as f32,
+                            },
+                            observed,
+                        );
                     }
                     let started = diagnostics.last_report;
                     // Many polls within one second must not emit extra rows.

@@ -43,6 +43,10 @@ section!(Audio {
     // A local speech probability gate runs before any captured audio is
     // uploaded. Its threshold is independent of the cloud VAD threshold.
     local_voice_detection: bool = true,
+    local_voice_backend: String = "silero".into(),
+    // An explicit neural fallback, reported in diagnostics, never an energy gate.
+    local_voice_fallback: String = "rnnoise".into(),
+    silero_model_path: Option<PathBuf> = None,
     local_voice_threshold: f32 = 0.65,
     local_voice_min_ms: u64 = 160,
     local_voice_preroll_ms: u64 = 400
@@ -249,6 +253,13 @@ impl Config {
             && self.audio.noise_reduction_strength.is_finite()
             && (0.0..=1.0).contains(&self.audio.noise_reduction_strength)
             && self.audio.local_voice_threshold.is_finite()
+            && ["silero", "rnnoise"].contains(&self.audio.local_voice_backend.as_str())
+            && ["rnnoise", "none"].contains(&self.audio.local_voice_fallback.as_str())
+            && self
+                .audio
+                .silero_model_path
+                .as_ref()
+                .is_none_or(|path| path.is_absolute())
             && (0.1..=0.95).contains(&self.audio.local_voice_threshold)
             && (80..=500).contains(&self.audio.local_voice_min_ms)
             && self.audio.local_voice_min_ms.is_multiple_of(20)
@@ -439,6 +450,8 @@ mod tests {
         assert_eq!(c.audio.noise_reduction, "far_field");
         assert_eq!(c.audio.noise_reduction_strength, 1.0);
         assert!(c.audio.local_voice_detection);
+        assert_eq!(c.audio.local_voice_backend, "silero");
+        assert_eq!(c.audio.local_voice_fallback, "rnnoise");
         assert_eq!(c.audio.local_voice_threshold, 0.65);
         assert_eq!(c.audio.local_voice_min_ms, 160);
         assert_eq!(c.audio.local_voice_preroll_ms, 400);
@@ -453,6 +466,17 @@ mod tests {
     }
     #[test]
     fn audio_gate_rejects_nonfinite_thresholds_and_misaligned_frame_durations() {
+        for (backend, fallback, path) in [
+            ("energy", "rnnoise", None),
+            ("silero", "upload", None),
+            ("silero", "none", Some("relative/model.onnx")),
+        ] {
+            let mut c = Config::default();
+            c.audio.local_voice_backend = backend.into();
+            c.audio.local_voice_fallback = fallback.into();
+            c.audio.silero_model_path = path.map(PathBuf::from);
+            assert!(c.validate().is_err());
+        }
         for strength in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -0.01, 1.01] {
             let mut c = Config::default();
             c.audio.noise_reduction_strength = strength;

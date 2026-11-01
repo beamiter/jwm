@@ -28,6 +28,8 @@ PATH="$eva_test_dir/fake-bin:$PATH" bash "$eva_repo/scripts/install-eva.sh" \
     --binary "$eva_test_dir/eva-binary" --prefix "$eva_prefix" \
     --config-dir "$eva_config_dir" --unit-dir "$eva_unit_dir" >"$eva_test_dir/first-install.log"
 [[ -x $eva_prefix/bin/jwm-eva ]]
+cmp -- "$eva_repo/eva/models/silero-v5.1.2/LICENSE" "$eva_prefix/share/jwm/eva/models/silero-v5.1.2/LICENSE"
+[[ -x $eva_prefix/share/jwm/eva/tools/install-silero-runtime.sh ]]
 [[ $(stat -c '%a' "$eva_config_dir/eva.toml") == 600 ]]
 rg -q '^\[openai\]$' "$eva_config_dir/eva.toml"
 rg -Fq "ExecStart=\"$eva_test_dir/user prefix with %% character/bin/jwm-eva\" --config \"$eva_config_dir/eva.toml\" daemon" "$eva_unit_dir/jwm-eva.service"

@@ -113,6 +113,7 @@ pub fn describe(error: &std::io::Error) -> (&'static str, &'static str) {
     } else if s.contains("utterance_timeout") || s.contains("utterance_too_long") {
         ("utterance_too_long", "语句过长，本次没有执行，请分开说。")
     } else if s.starts_with("speech_")
+        || s.starts_with("silero_")
         || s == "local_voice_invalid_probability"
         || s == "local_voice_detector_failed"
     {

@@ -1,8 +1,8 @@
-//! Local speech admission before any PCM leaves the process. RNNoise is used
+//! Local speech admission before any PCM leaves the process. A local neural model is used
 //! for its neural speech evidence; the original PCM is retained for the API's
 //! configured noise reducer. This avoids double denoising and preserves the
 //! native sample timestamps used to bind desktop focus.
-use super::{FRAME_BYTES, Frame, rms, speech::SpeechDetector};
+use super::{FRAME_BYTES, Frame, local_voice::LocalVoiceDetector, rms};
 use crate::config::Config;
 use std::{
     collections::VecDeque,
@@ -13,7 +13,7 @@ use std::{
 const FRAME_MS: u64 = 20;
 
 pub struct VoiceEvidence {
-    detector: SpeechDetector,
+    detector: LocalVoiceDetector,
     threshold: f32,
     minimum: u32,
     mask: u64,
@@ -28,7 +28,7 @@ impl VoiceEvidence {
         // Permit a few unvoiced consonants inside the confirmation window.
         let width = (minimum + 4).min(63);
         Self {
-            detector: SpeechDetector::new(),
+            detector: LocalVoiceDetector::new(c),
             threshold: c.audio.local_voice_threshold,
             minimum,
             mask: (1u64 << width) - 1,
@@ -47,6 +47,9 @@ impl VoiceEvidence {
         self.window = 0;
         self.candidate = false;
         self.confirmed = false;
+    }
+    pub fn detector_status(&self) -> &super::local_voice::DetectorStatus {
+        &self.detector.status
     }
     pub fn observe(&mut self, frame: &Frame) -> io::Result<()> {
         let score = self.detector.process(&frame.pcm)?;
@@ -161,6 +164,9 @@ impl UploadGate {
     }
     pub fn statistics(&self) -> serde_json::Value {
         serde_json::json!({"input_frames":self.total_frames,
+            "voice_backend":self.voice.detector.status.active,
+            "voice_backend_requested":self.voice.detector.status.requested,
+            "voice_backend_degraded_reason":self.voice.detector.status.degraded_reason,
             "uploaded_frames":self.uploaded_frames,"suppressed_frames":self.suppressed_frames(),
             "gate_openings":self.openings,"silenced_frames":self.silenced_frames,
             "rejected_source_frames":self.rejected_frames,"voice_probability":self.probability()})
@@ -172,7 +178,7 @@ impl UploadGate {
         io::Error::other(reason)
     }
     /// Reassemble a legal short handoff boundary without dropping the first
-    /// syllable or asking RNNoise to accept a non-native frame size. The native
+    /// syllable or asking the detector to accept a non-native frame size. The native
     /// timing tolerance matches Framer; arrival time never supplies provenance.
     fn complete_frame(
         &mut self,
@@ -368,6 +374,14 @@ fn wipe_frame(frame: &mut Frame) {
 mod tests {
     use super::*;
 
+    // These existing acoustic regressions are calibrated for RNNoise. Real
+    // Silero has its own explicit offline suite, including handoff and resets.
+    fn gate_config() -> Config {
+        let mut c = Config::default();
+        c.audio.local_voice_backend = "rnnoise".into();
+        c
+    }
+
     const SPEECH: &[u8] = include_bytes!("../../tests/fixtures/rnnoise-speech.s16le");
 
     fn frame(pcm: &[u8], captured: Instant) -> Frame {
@@ -397,7 +411,7 @@ mod tests {
         let pcm = speech_onset();
         let start = Instant::now();
         let mut at = start;
-        let mut gate = UploadGate::new(&Config::default());
+        let mut gate = UploadGate::new(&gate_config());
         let mut complete = Vec::new();
         // A server boundary left half of the first native frame. Following
         // native frames retain their original 20 ms shape and source clock.
@@ -433,7 +447,7 @@ mod tests {
         let pcm = speech_onset();
         let start = Instant::now();
         let mut at = start;
-        let mut gate = UploadGate::new(&Config::default());
+        let mut gate = UploadGate::new(&gate_config());
         let mut admitted = Vec::new();
         for part in std::iter::once(&pcm[..480]).chain(pcm[480..].chunks(FRAME_BYTES)) {
             admitted.extend(feed(&mut gate, &mut at, part, false));
@@ -467,7 +481,7 @@ mod tests {
 
     #[test]
     fn real_neural_gate_rejects_noise_tones_clicks_and_a_misleading_ui_meter() {
-        let mut gate = UploadGate::new(&Config::default());
+        let mut gate = UploadGate::new(&gate_config());
         let mut at = Instant::now();
         let mut seed = 23;
         let tone: Vec<u8> = (0..480)
@@ -502,7 +516,7 @@ mod tests {
 
     #[test]
     fn late_server_start_gets_silence_until_new_speech_is_confirmed_without_replaying_sources() {
-        let mut gate = UploadGate::new(&Config::default());
+        let mut gate = UploadGate::new(&gate_config());
         let mut at = Instant::now();
         let mut emitted = Vec::new();
         for pcm in speech_onset().chunks(FRAME_BYTES) {
@@ -557,7 +571,7 @@ mod tests {
     #[test]
     fn source_failures_clear_audio_and_never_disable_the_gate() {
         let start = Instant::now();
-        let mut gate = UploadGate::new(&Config::default());
+        let mut gate = UploadGate::new(&gate_config());
         let mut unknown = frame(&[1; FRAME_BYTES], start);
         unknown.timestamp_verified = false;
         assert!(gate.admit(unknown, false).unwrap().is_empty());
@@ -597,7 +611,7 @@ mod tests {
 
     #[test]
     fn reset_erases_bounded_preroll_and_pending_fragment() {
-        let mut gate = UploadGate::new(&Config::default());
+        let mut gate = UploadGate::new(&gate_config());
         let mut at = Instant::now();
         for _ in 0..150 {
             feed(&mut gate, &mut at, &[0; FRAME_BYTES], false);

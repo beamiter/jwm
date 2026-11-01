@@ -45,6 +45,9 @@ pub fn fields(fields: &serde_json::Value) -> serde_json::Value {
         "gate_openings",
         "silenced_frames",
         "voice_probability",
+        "voice_backend",
+        "voice_backend_requested",
+        "voice_backend_degraded_reason",
     ];
     let mut record = serde_json::Map::new();
     if let Some(fields) = fields.as_object() {
@@ -75,6 +78,24 @@ pub fn fields(fields: &serde_json::Value) -> serde_json::Value {
                 "voice_probability" => value
                     .as_f64()
                     .is_some_and(|p| p.is_finite() && (0.0..=1.0).contains(&p)),
+                "voice_backend" | "voice_backend_requested" => value
+                    .as_str()
+                    .is_some_and(|s| ["silero", "rnnoise", "unavailable"].contains(&s)),
+                "voice_backend_degraded_reason" => {
+                    value.is_null()
+                        || value.as_str().is_some_and(|s| {
+                            matches!(
+                                s,
+                                "silero_runtime_unavailable"
+                                    | "silero_runtime_incompatible"
+                                    | "silero_runtime_initialization_failed"
+                                    | "silero_model_unavailable"
+                                    | "silero_model_checksum_mismatch"
+                                    | "silero_model_load_failed"
+                                    | "silero_feature_unavailable"
+                            )
+                        })
+                }
                 "peak_level" | "threshold_level" => value
                     .as_f64()
                     .is_some_and(|level| level.is_finite() && level >= 0.0),
@@ -116,6 +137,23 @@ pub fn mark(stage: &str, generation: u64, turn: u64) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn backend_diagnostics_are_fixed_codes_never_paths_or_error_bodies() {
+        let fields = super::fields(&serde_json::json!({
+            "voice_backend":"silero", "voice_backend_requested":"silero",
+            "voice_backend_degraded_reason":null, "model_path":"private/path"
+        }));
+        assert_eq!(
+            fields,
+            serde_json::json!({"voice_backend":"silero","voice_backend_requested":"silero","voice_backend_degraded_reason":null})
+        );
+        assert_eq!(
+            super::fields(&serde_json::json!({
+                "voice_backend":"private path", "voice_backend_degraded_reason":"silero_private_secret"
+            })),
+            serde_json::json!({})
+        );
+    }
     #[test]
     fn signal_diagnostics_accept_only_aggregate_numbers() {
         let filtered = super::fields(&serde_json::json!({

@@ -180,6 +180,9 @@ fn window_groups(context: &Value, desktop: &Value, include_windows: bool) -> Val
             .into_iter()
             .collect::<Vec<_>>();
         let mut group = json!({"window_refs":refs,"unique":complete && unclassified.is_empty() && refs.len() == 1});
+        // Scope is evidence only when the user explicitly names it. A bare
+        // "the browser" must still see the complete, unfiltered candidate set.
+        group["explicit_scopes"] = candidate_scopes(desktop, &refs);
         if refs.len() > 1 {
             // Data-level cue: the model otherwise picks "the one on this
             // workspace" for a bare "the browser" despite the rule.
@@ -190,6 +193,54 @@ fn window_groups(context: &Value, desktop: &Value, include_windows: bool) -> Val
         groups.insert(family.into(), group);
     }
     json!({"status":if complete {"complete"} else {"incomplete"},"groups":groups,"unclassified_window_refs":unclassified})
+}
+
+fn candidate_scopes(desktop: &Value, refs: &[&str]) -> Value {
+    let Some(selected) = reference(&desktop["selected_monitor_ref"], 'm') else {
+        return json!({"status":"scope_unavailable","requires_explicit_user_scope":true});
+    };
+    let visible = desktop["monitors"]
+        .as_array()
+        .and_then(|monitors| monitors.iter().find(|m| m["monitor_ref"] == selected))
+        .and_then(|m| m["visible_tag_numbers"].as_array());
+    let mut monitor_refs = BTreeSet::new();
+    let mut workspace_refs = BTreeSet::new();
+    let mut complete = true;
+    for window in desktop["windows"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .take(128)
+    {
+        let Some(wref) = reference(&window["window_ref"], 'w').filter(|wref| refs.contains(wref))
+        else {
+            continue;
+        };
+        if reference(&window["monitor_ref"], 'm').is_none() {
+            complete = false;
+            continue;
+        }
+        if window["monitor_ref"] != selected {
+            continue;
+        }
+        monitor_refs.insert(wref);
+        let tags = window["tag_numbers"].as_array();
+        if tags.is_none() || visible.is_none_or(Vec::is_empty) {
+            complete = false;
+            continue;
+        }
+        if window["sticky"] == true
+            || tags.is_some_and(|tags| {
+                tags.iter()
+                    .any(|tag| visible.is_some_and(|v| v.contains(tag)))
+            })
+        {
+            workspace_refs.insert(wref);
+        }
+    }
+    json!({"status":if complete {"available"} else {"scope_incomplete"},
+        "requires_explicit_user_scope":true,"monitor_ref":selected,
+        "on_selected_monitor_refs":monitor_refs,"on_visible_workspaces_refs":workspace_refs})
 }
 
 fn rectangle(value: &Value) -> Option<[f64; 4]> {
@@ -486,6 +537,44 @@ mod tests {
         assert_eq!(unknown["status"], "complete");
         assert_eq!(unknown["unclassified_window_refs"], json!(["w3"]));
         assert_eq!(unknown["groups"]["browser"]["unique"], false);
+    }
+    #[test]
+    fn explicit_window_scopes_keep_bare_ambiguity_and_include_sticky_windows() {
+        let mut desktop = desktop();
+        desktop["windows"] = json!([
+            {"window_ref":"w1","class":"firefox","monitor_ref":"m1","tag_numbers":[3],"sticky":false},
+            {"window_ref":"w2","class":"chromium","monitor_ref":"m1","tag_numbers":[4],"sticky":false},
+            {"window_ref":"w3","class":"firefox","monitor_ref":"m2","tag_numbers":[3],"sticky":false},
+            {"window_ref":"w4","class":"chromium","monitor_ref":"m1","tag_numbers":[8],"sticky":true}
+        ]);
+        let context = json!({"windows":desktop["windows"]});
+        let groups = window_groups(&context, &desktop, true);
+        let browser = &groups["groups"]["browser"];
+        assert_eq!(browser["unique"], false);
+        assert_eq!(browser["window_refs"], json!(["w1", "w2", "w3", "w4"]));
+        let scopes = &browser["explicit_scopes"];
+        assert_eq!(scopes["status"], "available");
+        assert_eq!(scopes["requires_explicit_user_scope"], true);
+        assert_eq!(
+            scopes["on_selected_monitor_refs"],
+            json!(["w1", "w2", "w4"])
+        );
+        assert_eq!(scopes["on_visible_workspaces_refs"], json!(["w1", "w4"]));
+        desktop["monitors"][0]["visible_tag_numbers"] = json!([3, 4]);
+        assert_eq!(
+            candidate_scopes(&desktop, &["w1", "w2", "w3", "w4"])["on_visible_workspaces_refs"],
+            json!(["w1", "w2", "w4"])
+        );
+        desktop["windows"][0]["tag_numbers"] = Value::Null;
+        assert_eq!(
+            candidate_scopes(&desktop, &["w1"])["status"],
+            "scope_incomplete"
+        );
+        desktop["selected_monitor_ref"] = Value::Null;
+        assert_eq!(
+            candidate_scopes(&desktop, &["w1"])["status"],
+            "scope_unavailable"
+        );
     }
     #[test]
     fn monitor_directions_require_actual_geometry_and_keep_multiple_candidates() {

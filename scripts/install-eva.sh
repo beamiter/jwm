@@ -79,6 +79,13 @@ fi
 
 install -d -m755 -- "$eva_prefix/bin" "$eva_config_dir" "$eva_unit_dir"
 install -m755 -- "$eva_binary" "$eva_prefix/bin/jwm-eva"
+# The Silero weights are embedded in the binary; ship their MIT notice and
+# the explicit user-space runtime helper with both standalone/main installers.
+eva_assets="$eva_prefix/share/jwm/eva"
+install -d -m755 -- "$eva_assets/models/silero-v5.1.2" "$eva_assets/tools"
+install -m644 -- "$eva_repo/eva/models/silero-v5.1.2/LICENSE" "$eva_assets/models/silero-v5.1.2/LICENSE"
+install -m644 -- "$eva_repo/eva/models/README.md" "$eva_assets/models/README.md"
+install -m755 -- "$eva_repo/eva/tools/install-silero-runtime.sh" "$eva_assets/tools/install-silero-runtime.sh"
 eva_existing_config=false
 if [[ ! -e $eva_config_dir/eva.toml && ! -L $eva_config_dir/eva.toml ]]; then
     install -m600 -- "$eva_repo/eva/dist/eva.toml" "$eva_config_dir/eva.toml"
@@ -130,3 +137,4 @@ if [[ $eva_existing_config == true ]]; then
     printf '  %q --config %q config migrate --write\n' "$eva_prefix/bin/jwm-eva" "$eva_config_dir/eva.toml"
 fi
 printf 'Next: run jwm-eva config api-key (restarts Eva automatically), then jwm-eva doctor --live. See eva/README.md.\n'
+printf 'Optional local Silero CPU runtime (no automatic download): %s\n' "$eva_assets/tools/install-silero-runtime.sh"

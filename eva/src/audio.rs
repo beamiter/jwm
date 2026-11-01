@@ -19,8 +19,11 @@ use std::{
 };
 use tokio::sync::{Notify, mpsc};
 
+pub mod local_voice;
 mod pulse;
 mod pulse_playback;
+#[cfg(feature = "silero")]
+pub mod silero;
 pub mod speech;
 pub mod voice_gate;
 
