@@ -60,9 +60,10 @@ const float obliquity[8]=float[8](.034,177.4,23.44,25.19,3.1,26.7,97.8,28.3);
 vec3 body_axis(int body){
  if(ephemeris_enabled!=0)return normalize(body_axes[body]);
  if(body==0)return vec3(0.,1.,0.);
- float tilt=obliquity[body-1]*PI/180.;
+ int planet=clamp(body-1,0,7);
+ float tilt=obliquity[planet]*PI/180.;
  // Each illustrative orbit is inclined in the yz plane; tilt relative to it.
- vec3 orbital_normal=normalize(vec3(0.,orbit[body-1],-.025*float(body)));
+ vec3 orbital_normal=normalize(vec3(0.,orbit[planet],-.025*float(body)));
  return vec3(sin(tilt),0.,0.)+cos(tilt)*orbital_normal;
 }
 float hash(vec3 p){p=fract(p*.1031);p+=dot(p,p.yzx+33.33);return fract((p.x+p.y)*p.z);}
@@ -103,7 +104,15 @@ float crater_detail(vec3 q,float footprint){
  }
  return height;
 }
-vec3 center(int i){if(ephemeris_enabled!=0)return body_centers[i];if(i==0)return vec3(0);float a=orbit_phase[i-1];return vec3(cos(a)*orbit[i-1],sin(a)*.025*float(i),sin(a)*orbit[i-1]);}
+// Keep planet-only indices valid even for the Sun. NVIDIA's linker unrolls
+// body loops and diagnoses index -1 despite the preceding early return.
+vec3 center(int i){
+ if(ephemeris_enabled!=0)return body_centers[i];
+ if(i==0)return vec3(0);
+ int planet=clamp(i-1,0,7);
+ float a=orbit_phase[planet];
+ return vec3(cos(a)*orbit[planet],sin(a)*.025*float(i),sin(a)*orbit[planet]);
+}
 float sphere(vec3 ro,vec3 rd,vec3 c,float r){vec3 q=ro-c;float b=dot(q,rd),d=b*b-dot(q,q)+r*r;if(d<0.)return 1e5;float t=-b-sqrt(d);if(t>0.)return t;t=-b+sqrt(d);return t>0.?t:1e5;}
 vec3 spheroid_metric(vec3 v,vec3 axis,float ratio){
  return v+axis*((1./(ratio*ratio)-1.)*dot(v,axis));
@@ -134,7 +143,7 @@ vec3 surface_point(int body,vec3 n){
  vec3 axis=body_axis(body);
  vec3 x=normalize(cross(axis,vec3(0.,0.,1.)));
  vec3 z=cross(x,axis);
- return rotate_y(vec3(dot(n,x),dot(n,axis),dot(n,z)),spin_phase[body-1]);
+ return rotate_y(vec3(dot(n,x),dot(n,axis),dot(n,z)),spin_phase[clamp(body-1,0,7)]);
 }
 float ring_opacity(float r){
  return 1.-exp(-solar_ring_tau(r/radius[6],.0001));

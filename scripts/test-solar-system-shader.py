@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Render the production solar shader on surfaceless Mesa GL330 and GLES300.
+"""Render the production solar shader on surfaceless EGL GL330 and GLES300.
 
 Use --profile smoke for a short regression gate, --profile preview --api gl330
 for visual iteration, or the default full profile for the complete matrix.
 SOLAR_ASSET_DIR / --asset-dir can reuse a checked-out astronomy texture cache.
+Software Mesa is the default; LIBGL_ALWAYS_SOFTWARE=0 uses the native driver.
 """
 import argparse, ctypes as C, os, json, math, tempfile, subprocess, shutil, time, statistics, hashlib, datetime
 from pathlib import Path
@@ -125,6 +126,7 @@ for es in ((False,True) if args.api=='both' else (args.api=='gles300',)):
  assert current(d,surf,surf,ctx)
  version=gl('glGetString',C.c_char_p,[U])(0x1F02).decode()
  renderer=gl('glGetString',C.c_char_p,[U])(0x1F01).decode()
+ print(f'{kind}: renderer={renderer}; version={version}',flush=True)
  def compile(src,typ):
   sh=gl('glCreateShader',U,[U])(typ); b=prepare(src,es).encode(); ptr=C.c_char_p(b)
   gl('glShaderSource',None,[U,I,C.POINTER(C.c_char_p),C.POINTER(I)])(sh,1,C.byref(ptr),None)

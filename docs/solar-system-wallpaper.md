@@ -249,6 +249,15 @@ Preview still checks basic rendering, camera and canvas invariants; it is not
 a substitute for the regression gate. Neither short profile records benchmark
 timings.
 
+For native-driver coverage, run
+`LIBGL_ALWAYS_SOFTWARE=0 python3 scripts/test-solar-system-shader.py --profile smoke`.
+Check the printed renderer to confirm which GPU was selected. Software Mesa
+alone does not catch every driver linker error: NVIDIA can reject a constant
+negative planet-array index after unrolling the Sun's loop iteration, even
+behind an early return. Planet-only lookups therefore bound their indices
+independently of that branch. This avoids the `C1068: array index out of bounds`
+failure that otherwise leaves the entire scene on its static fallback.
+
 The default `--profile full` retains the complete regression matrix. It uses
 production Rust camera and phase helpers, verifies actual close-up cameras for the Sun and every planet,
 CPU/GPU picking agreement, full-axis views, panorama lens limits, filtered
