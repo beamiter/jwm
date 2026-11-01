@@ -25,6 +25,14 @@ start_candidate_grace_ms = 1500
 input_device = "default"
 # near_field: headset/close microphone; far_field: room microphone; off: disable API denoising.
 noise_reduction = "near_field"
+# Cloud suppression strength (0..1); independent of local speech detection.
+noise_reduction_strength = 1.0
+# Detect sustained human speech locally before uploading microphone audio.
+# Speech probability is not speaker identity: TV/dialogue may still be speech.
+local_voice_detection = true
+local_voice_threshold = 0.65 # 0.1..0.95; tune against real speech and noise
+local_voice_min_ms = 160 # 80..500, in 20 ms steps
+local_voice_preroll_ms = 400 # 200..1000, in 20 ms steps; retain the first syllable
 realtime_rate_hz = 24000
 channels = 1
 sample_format = "s16le"
@@ -41,6 +49,11 @@ api_key_source = "secret_service"
 # user service environment. Never put the key directly in this TOML file.
 voice = "marin"
 input_transcription = false
+# Optional caption hints, sent only when input_transcription = true. Leave
+# language unset for automatic detection. Captions never authorize commands.
+# input_transcription_language = "zh" # two-letter ISO-639-1 language code
+# input_transcription_keywords = ["Eva", "JWM", "Tag", "Anvil", "Forge", "Ember", "Frost"]
+# At most 16 short terms, 128 bytes each and 512 bytes total; no instructions.
 connect_timeout_ms = 8000
 plan_deadline_ms = 30000
 plan_max_output_tokens = 4096
@@ -61,9 +74,10 @@ keep_warm = true
 type = "semantic_vad"
 eagerness = "auto" # auto, low, medium, high; used only by semantic_vad
 # The following three settings apply to server_vad, including mini wake standby.
-threshold = 0.5
+# These are tuning starting points; existing user-specified values are retained.
+threshold = 0.65
 prefix_padding_ms = 300
-silence_duration_ms = 600
+silence_duration_ms = 650
 create_response = false
 interrupt_response = false
 

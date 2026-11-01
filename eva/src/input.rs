@@ -59,6 +59,9 @@ impl InputGate {
     pub fn speech_pending(&self) -> bool {
         self.pending.is_some()
     }
+    pub fn needs_lead_in(&self) -> bool {
+        self.floor > 0 && self.frames.is_empty()
+    }
     pub fn cleared(&mut self) {
         self.awaiting_clear = false;
     }

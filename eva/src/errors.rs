@@ -112,7 +112,19 @@ pub fn describe(error: &std::io::Error) -> (&'static str, &'static str) {
         )
     } else if s.contains("utterance_timeout") || s.contains("utterance_too_long") {
         ("utterance_too_long", "语句过长，本次没有执行，请分开说。")
-    } else if s.contains("input_audio_timestamp") || s.contains("input_out_of_order") {
+    } else if s.starts_with("speech_")
+        || s == "local_voice_invalid_probability"
+        || s == "local_voice_detector_failed"
+    {
+        (
+            "local_voice_detection_failed",
+            "本地人声检测未能完成，音频未继续上传，请重新开启 Eva。",
+        )
+    } else if s.contains("input_audio_timestamp")
+        || s.contains("input_out_of_order")
+        || s.starts_with("local_voice_audio_")
+        || s == "local_voice_invalid_audio_source"
+    {
         (
             "audio_sequence_invalid",
             "音频片段的顺序无法核对，请重新开始说一次。",

@@ -32,3 +32,9 @@ chrono = { version = "0.4", features = ["serde"] }
 url = "2"
 pipewire = { version = "0.10", features = ["v0_3_50"] }
 libpulse-binding = "2.30.1"
+# Built-in RNNoise weights: local speech probability and denoising, with no
+# model download, Python service, CLI, or device-specific native dependency.
+nnnoiseless = { version = "0.5.2", default-features = false }
+# Already used by nnnoiseless; inspect spectrum to reject pure tones and
+# broadband noise that its speech-probability head alone can misclassify.
+realfft = "3.5"

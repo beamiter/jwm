@@ -43,6 +43,8 @@ pub fn fields(fields: &serde_json::Value) -> serde_json::Value {
         "uploaded_frames",
         "suppressed_frames",
         "gate_openings",
+        "silenced_frames",
+        "voice_probability",
     ];
     let mut record = serde_json::Map::new();
     if let Some(fields) = fields.as_object() {
@@ -62,6 +64,7 @@ pub fn fields(fields: &serde_json::Value) -> serde_json::Value {
                 | "uploaded_frames"
                 | "suppressed_frames"
                 | "gate_openings"
+                | "silenced_frames"
                 | "output_items"
                 | "function_calls"
                 | "submit_calls"
@@ -69,6 +72,9 @@ pub fn fields(fields: &serde_json::Value) -> serde_json::Value {
                 | "other_calls"
                 | "incomplete_calls"
                 | "message_items" => value.is_u64(),
+                "voice_probability" => value
+                    .as_f64()
+                    .is_some_and(|p| p.is_finite() && (0.0..=1.0).contains(&p)),
                 "peak_level" | "threshold_level" => value
                     .as_f64()
                     .is_some_and(|level| level.is_finite() && level >= 0.0),

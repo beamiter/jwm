@@ -38,12 +38,24 @@ section!(Audio {
     chunk_ms: u64 = 20,
     connect_buffer_ms: u64 = 2000,
     playback_tail_ms: u64 = 200,
-    noise_reduction: String = "near_field".into()
+    noise_reduction: String = "near_field".into(),
+    noise_reduction_strength: f64 = 1.0,
+    // A local speech probability gate runs before any captured audio is
+    // uploaded. Its threshold is independent of the cloud VAD threshold.
+    local_voice_detection: bool = true,
+    local_voice_threshold: f32 = 0.65,
+    local_voice_min_ms: u64 = 160,
+    local_voice_preroll_ms: u64 = 400
 });
 section!(Openai {
     model: String = "gpt-realtime".into(), transport: String = "websocket".into(),
     api_key_source: String = "secret_service".into(), api_key_file: Option<PathBuf> = None,
-    voice: String = "marin".into(), input_transcription: bool = false, connect_timeout_ms: u64 = 8000,
+    voice: String = "marin".into(), input_transcription: bool = false,
+    // These optional hints affect captions only. ASR text is never evidence
+    // of a valid local speech turn or permission to execute a desktop action.
+    input_transcription_language: Option<String> = None,
+    input_transcription_keywords: Vec<String> = Vec::new(),
+    connect_timeout_ms: u64 = 8000,
     plan_deadline_ms: u64 = 30000, plan_max_output_tokens: u32 = 4096, feedback_max_output_tokens: u32 = 1024,
     // Spoken feedback for a verified desktop outcome is one or two sentences;
     // open conversation (noop) keeps the full feedback_max_output_tokens.
@@ -70,9 +82,11 @@ impl Default for TurnDetection {
         Self {
             kind: "semantic_vad".into(),
             eagerness: "auto".into(),
-            threshold: 0.5,
+            // Engineering starting points for acoustic endpointing. Existing
+            // TOML values remain authoritative through serde's field defaults.
+            threshold: 0.65,
             prefix_padding_ms: 300,
-            silence_duration_ms: 600,
+            silence_duration_ms: 650,
             create_response: false,
             interrupt_response: false,
         }
@@ -232,6 +246,14 @@ impl Config {
             && self.audio.sample_format == "s16le"
             && self.audio.chunk_ms == 20
             && ["near_field", "far_field", "off"].contains(&self.audio.noise_reduction.as_str())
+            && self.audio.noise_reduction_strength.is_finite()
+            && (0.0..=1.0).contains(&self.audio.noise_reduction_strength)
+            && self.audio.local_voice_threshold.is_finite()
+            && (0.1..=0.95).contains(&self.audio.local_voice_threshold)
+            && (80..=500).contains(&self.audio.local_voice_min_ms)
+            && self.audio.local_voice_min_ms.is_multiple_of(20)
+            && (200..=1000).contains(&self.audio.local_voice_preroll_ms)
+            && self.audio.local_voice_preroll_ms.is_multiple_of(20)
             && self.audio.playback_tail_ms <= 2000
             && self.undo.max_plans <= 20
             && self.undo.max_age_seconds <= 600
@@ -248,10 +270,35 @@ impl Config {
             && self.audio.connect_buffer_ms >= 20
             && self.openai.transport == "websocket"
             && !self.openai.model.is_empty()
+            && self
+                .openai
+                .input_transcription_language
+                .as_ref()
+                .is_none_or(|language| {
+                    language.len() == 2 && language.bytes().all(|byte| byte.is_ascii_lowercase())
+                })
+            && self.openai.input_transcription_keywords.len() <= 16
+            && self
+                .openai
+                .input_transcription_keywords
+                .iter()
+                .all(|keyword| {
+                    !keyword.trim().is_empty()
+                        && keyword.len() <= 128
+                        && !keyword.chars().any(char::is_control)
+                })
+            && self
+                .openai
+                .input_transcription_keywords
+                .iter()
+                .map(String::len)
+                .sum::<usize>()
+                <= 512
             && ["server_vad", "semantic_vad"].contains(&self.turn_detection.kind.as_str())
             && ["auto", "low", "medium", "high"].contains(&self.turn_detection.eagerness.as_str())
             && !self.turn_detection.create_response
             && !self.turn_detection.interrupt_response
+            && self.turn_detection.threshold.is_finite()
             && (0.0..=1.0).contains(&self.turn_detection.threshold)
             && self.wake_pricing.model == self.wake_word.model
             && !self.wake_word.model.is_empty()
@@ -375,6 +422,103 @@ fn valid_pricing(p: &Pricing) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn legacy_audio_config_adds_local_gate_without_overwriting_custom_endpointing() {
+        let c: Config = toml::from_str(
+            r#"
+            [audio]
+            noise_reduction = "far_field"
+            [turn_detection]
+            type = "server_vad"
+            threshold = 0.42
+            silence_duration_ms = 900
+            "#,
+        )
+        .unwrap();
+        assert!(c.validate().is_ok());
+        assert_eq!(c.audio.noise_reduction, "far_field");
+        assert_eq!(c.audio.noise_reduction_strength, 1.0);
+        assert!(c.audio.local_voice_detection);
+        assert_eq!(c.audio.local_voice_threshold, 0.65);
+        assert_eq!(c.audio.local_voice_min_ms, 160);
+        assert_eq!(c.audio.local_voice_preroll_ms, 400);
+        assert_eq!(c.turn_detection.threshold, 0.42);
+        assert_eq!(c.turn_detection.silence_duration_ms, 900);
+        assert_eq!(c.openai.model, "gpt-realtime");
+        assert_eq!(c.wake_word.model, "gpt-realtime-mini");
+        assert!(c.openai.input_transcription_language.is_none());
+        assert!(c.openai.input_transcription_keywords.is_empty());
+        assert_eq!(Config::default().turn_detection.threshold, 0.65);
+        assert_eq!(Config::default().turn_detection.silence_duration_ms, 650);
+    }
+    #[test]
+    fn audio_gate_rejects_nonfinite_thresholds_and_misaligned_frame_durations() {
+        for strength in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -0.01, 1.01] {
+            let mut c = Config::default();
+            c.audio.noise_reduction_strength = strength;
+            assert!(c.validate().is_err(), "strength {strength}");
+        }
+        for threshold in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, 0.0, 1.0] {
+            let mut c = Config::default();
+            c.audio.local_voice_threshold = threshold;
+            assert!(c.validate().is_err(), "local threshold {threshold}");
+        }
+        for duration in [0, 79, 90, 501, 520] {
+            let mut c = Config::default();
+            c.audio.local_voice_min_ms = duration;
+            assert!(c.validate().is_err(), "speech duration {duration}");
+        }
+        for duration in [0, 199, 210, 1001, 1020] {
+            let mut c = Config::default();
+            c.audio.local_voice_preroll_ms = duration;
+            assert!(c.validate().is_err(), "preroll duration {duration}");
+        }
+        for (strength, threshold, min_ms, preroll_ms) in
+            [(0.0, 0.1, 80, 200), (1.0, 0.95, 500, 1000)]
+        {
+            let mut c = Config::default();
+            c.audio.noise_reduction_strength = strength;
+            c.audio.local_voice_threshold = threshold;
+            c.audio.local_voice_min_ms = min_ms;
+            c.audio.local_voice_preroll_ms = preroll_ms;
+            assert!(c.validate().is_ok());
+        }
+        for value in ["nan", "inf", "-inf"] {
+            let c: Config =
+                toml::from_str(&format!("[audio]\nlocal_voice_threshold = {value}\n")).unwrap();
+            assert!(c.validate().is_err());
+        }
+    }
+    #[test]
+    fn caption_hints_are_optional_bounded_terms_and_language_codes() {
+        let mut c: Config = toml::from_str(
+            r#"
+            [openai]
+            input_transcription = true
+            input_transcription_language = "zh"
+            input_transcription_keywords = ["Eva", "JWM", "工作区", "Tag"]
+            "#,
+        )
+        .unwrap();
+        assert!(c.validate().is_ok());
+        for language in ["", "ZH", "zh-CN", "中文", " en", "en\n"] {
+            c.openai.input_transcription_language = Some(language.into());
+            assert!(c.validate().is_err(), "language {language:?}");
+        }
+        c.openai.input_transcription_language = None;
+        for keywords in [
+            vec![" ".into()],
+            vec!["Eva\nJWM".into()],
+            vec!["x".repeat(129)],
+            vec!["Tag".into(); 17],
+            vec!["x".repeat(128); 5],
+        ] {
+            c.openai.input_transcription_keywords = keywords;
+            assert!(c.validate().is_err());
+        }
+        c.openai.input_transcription_keywords.clear();
+        assert!(c.validate().is_ok());
+    }
     #[test]
     fn endpointing_and_denoising_support_legacy_settings_without_auto_responses() {
         let mut c = Config::default();

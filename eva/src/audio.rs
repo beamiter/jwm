@@ -21,6 +21,8 @@ use tokio::sync::{Notify, mpsc};
 
 mod pulse;
 mod pulse_playback;
+pub mod speech;
+pub mod voice_gate;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AudioBackend {
@@ -494,6 +496,10 @@ pub struct BargeInObservation {
     pub interrupted: bool,
     pub retain_frame: bool,
     pub reset_buffer: bool,
+    /// A source discontinuity invalidates recurrent neural state. Echo and
+    /// the previous utterance's tail only reset onset/replay evidence: the
+    /// detector must continue seeing them to recognize when speech ends.
+    pub reset_detector: bool,
 }
 impl Default for BargeInGate {
     fn default() -> Self {
@@ -561,10 +567,42 @@ impl BargeInGate {
             "rejected_source_frames":self.rejected_frames,
             "source_discontinuities":self.discontinuities})
     }
+    /// Acoustic-only compatibility/diagnostic path. Production voice
+    /// admission uses `observe_neural`; these energy/pitch checks alone do
+    /// not establish human speech.
     pub fn observe(&mut self, frame: &Frame) -> BargeInObservation {
         self.observe_at(frame, Instant::now())
     }
     pub(crate) fn observe_at(&mut self, frame: &Frame, now: Instant) -> BargeInObservation {
+        self.observe_checked(frame, now, None, None)
+    }
+    /// Accept sustained neural evidence while retaining the exact native
+    /// source, previous-turn tail, and echo protections of the acoustic path.
+    /// Soft or breathy speech must not also satisfy a high RMS/pitch floor.
+    pub fn observe_neural(
+        &mut self,
+        frame: &Frame,
+        speech: bool,
+        confirmed: bool,
+    ) -> BargeInObservation {
+        self.observe_neural_at(frame, speech, confirmed, Instant::now())
+    }
+    pub(crate) fn observe_neural_at(
+        &mut self,
+        frame: &Frame,
+        speech: bool,
+        confirmed: bool,
+        now: Instant,
+    ) -> BargeInObservation {
+        self.observe_checked(frame, now, Some((speech, confirmed)), None)
+    }
+    fn observe_checked(
+        &mut self,
+        frame: &Frame,
+        now: Instant,
+        neural: Option<(bool, bool)>,
+        reference: Option<&[i16]>,
+    ) -> BargeInObservation {
         // Arrival time cannot make queued PCM current. Only native timestamps
         // after this turn's commit may interrupt it or enter its replay buffer.
         let age = now.checked_duration_since(frame.captured);
@@ -585,6 +623,7 @@ impl BargeInGate {
                 interrupted: false,
                 retain_frame: false,
                 reset_buffer: true,
+                reset_detector: true,
             };
         }
         // Framer already rejects discontinuous native chunks. Check again at
@@ -602,25 +641,39 @@ impl BargeInGate {
         self.last_source = Some(frame.captured);
         self.sequence_source = Some(frame.captured);
         let armed = self.armed;
-        let interrupted = self.observe_signal(frame);
+        // A confirmation computed before discovering a gap cannot cross it.
+        // The caller resets its complete detector on reset_detector, and
+        // accumulates fresh neural onset evidence from the new source span.
+        let neural = neural.map(|(speech, confirmed)| (speech, confirmed && continuous));
+        let interrupted = if let Some(reference) = reference {
+            self.observe_evidence_with_reference(frame, reference, neural)
+        } else {
+            self.observe_signal(frame, neural)
+        };
         if !armed {
             // The previous utterance's tail must not reach the next turn.
             return BargeInObservation {
                 interrupted: false,
                 retain_frame: false,
                 reset_buffer: true,
+                reset_detector: !continuous,
             };
         }
         BargeInObservation {
             interrupted,
             retain_frame: !self.echo_detected,
             reset_buffer: !continuous || self.echo_detected,
+            reset_detector: !continuous,
         }
     }
-    fn observe_signal(&mut self, frame: &Frame) -> bool {
+    fn observe_signal(&mut self, frame: &Frame, neural: Option<(bool, bool)>) -> bool {
         let level = speech_band_level(&frame.pcm);
-        if !level.is_finite() || level <= self.threshold {
-            return self.observe_with_reference(frame, &[]);
+        let candidate = neural.map_or(
+            level.is_finite() && level > self.threshold,
+            |(speech, _)| speech,
+        );
+        if !candidate {
+            return self.observe_evidence_with_reference(frame, &[], neural);
         }
         let reference = RENDER_REFERENCE.get().and_then(|reference| {
             let reference = reference.lock().unwrap_or_else(|error| error.into_inner());
@@ -629,7 +682,7 @@ impl BargeInGate {
                 .filter(|at| at.elapsed() <= Duration::from_millis(2500))
                 .map(|_| reference.samples.iter().copied().collect::<Vec<_>>())
         });
-        self.observe_with_reference(frame, reference.as_deref().unwrap_or(&[]))
+        self.observe_evidence_with_reference(frame, reference.as_deref().unwrap_or(&[]), neural)
     }
     /// Native framing supplies consecutive 20 ms PCM. A matching pitch in one
     /// short frame somewhere in three seconds of output is not proof of echo;
@@ -644,13 +697,25 @@ impl BargeInGate {
             self.echo_probe.clear();
         }
     }
+    /// Existing waveform tests isolate the acoustic/echo sublayer. They do
+    /// not claim that artificial tones are accepted by the neural voice gate.
+    #[cfg(test)]
     fn observe_with_reference(&mut self, frame: &Frame, reference: &[i16]) -> bool {
+        self.observe_evidence_with_reference(frame, reference, None)
+    }
+    fn observe_evidence_with_reference(
+        &mut self,
+        frame: &Frame,
+        reference: &[i16],
+        neural: Option<(bool, bool)>,
+    ) -> bool {
         self.frames = self.frames.saturating_add(1);
         let level = speech_band_level(&frame.pcm);
         if level.is_finite() {
             self.peak = self.peak.max(level.clamp(0.0, 1.0));
         }
-        let candidate = level.is_finite() && level > self.threshold;
+        let acoustic_candidate = level.is_finite() && level > self.threshold;
+        let candidate = neural.map_or(acoustic_candidate, |(speech, _)| speech);
         // Pitch history must see every contiguous frame, quiet ones included.
         let periodicity = if frame.pcm.len() == FRAME_BYTES {
             self.voicing.observe(&frame.pcm)
@@ -658,7 +723,7 @@ impl BargeInGate {
             self.voicing.reset();
             0.0
         };
-        let pitched = candidate && periodicity >= VOICE_PERIODICITY;
+        let pitched = acoustic_candidate && periodicity >= VOICE_PERIODICITY;
         if !self.armed {
             self.tail_frames = self.tail_frames.saturating_add(1);
             self.quiet_frames = if candidate { 0 } else { self.quiet_frames + 1 };
@@ -667,7 +732,9 @@ impl BargeInGate {
             self.push_echo_probe(frame);
             return false;
         }
-        self.above_threshold = self.above_threshold.saturating_add(u64::from(candidate));
+        self.above_threshold = self
+            .above_threshold
+            .saturating_add(u64::from(acoustic_candidate));
         self.push_echo_probe(frame);
         self.echo_detected = candidate
             && self.echo_probe.len() == ECHO_PROBE_BYTES
@@ -688,7 +755,14 @@ impl BargeInGate {
         let pitch = self.voiced_window.count_ones();
         self.max_voiced = self.max_voiced.max(voiced);
         self.max_voiced_pitch = self.max_voiced_pitch.max(pitch);
-        voiced >= SPEECH_MIN_FRAMES && pitch >= VOICED_MIN_FRAMES
+        if let Some((speech, confirmed)) = neural {
+            // A full 100 ms contiguous probe must be available before any
+            // confirmed voice can interrupt; otherwise echo could slip
+            // through while its comparison window is still filling.
+            speech && confirmed && self.echo_probe.len() == ECHO_PROBE_BYTES
+        } else {
+            voiced >= SPEECH_MIN_FRAMES && pitch >= VOICED_MIN_FRAMES
+        }
     }
 }
 
@@ -2431,7 +2505,9 @@ mod barge_in_tests {
     use super::*;
 
     /// Replay a local labelled WAV (PCM16 mono, 24 or 48 kHz) through the
-    /// interruption gate. Noise is calibrated from the "silence" segment.
+    /// legacy acoustic interruption sublayer. This diagnostic does not
+    /// exercise the neural admission path or establish voice acceptance.
+    /// Noise is calibrated from the "silence" segment.
     /// Prints aggregate per-segment counts only; never PCM or transcripts.
     ///   JWM_EVA_VOICE_WAV=/path.wav
     ///   JWM_EVA_VOICE_SEGMENTS=silence:0-6,speech:6-16,keys:16-24
@@ -2600,6 +2676,166 @@ mod barge_in_tests {
             );
         }
         noise
+    }
+
+    #[test]
+    fn neural_barge_in_keeps_verified_quiet_speech_below_the_old_acoustic_floor() {
+        let recording = include_bytes!("../tests/fixtures/rnnoise-speech.s16le");
+        let mut evidence = voice_gate::VoiceEvidence::new(&crate::config::Config::default());
+        let noise = calibrated_noise(0.02);
+        let mut gate = BargeInGate::with_noise(&noise);
+        let mut acoustic = BargeInGate::with_noise(&noise);
+        let start = Instant::now();
+        let mut interrupted = false;
+        for (index, pcm) in recording[28_800..57_600]
+            .chunks_exact(FRAME_BYTES)
+            .enumerate()
+        {
+            let samples: Vec<i16> = pcm
+                .chunks_exact(2)
+                .map(|bytes| (f32::from(i16::from_le_bytes([bytes[0], bytes[1]])) * 0.1) as i16)
+                .collect();
+            let mut input = frame(&samples);
+            input.captured = start + Duration::from_millis(index as u64 * 20);
+            assert!(speech_band_level(&input.pcm) < gate.threshold);
+            assert!(!acoustic.observe_at(&input, input.captured).interrupted);
+            evidence.observe(&input).unwrap();
+            let observation = gate.observe_checked(
+                &input,
+                input.captured,
+                Some((evidence.candidate, evidence.confirmed)),
+                Some(&[]),
+            );
+            if observation.reset_detector {
+                evidence.reset();
+            } else if observation.reset_buffer {
+                evidence.reset_evidence();
+            }
+            interrupted |= observation.interrupted;
+        }
+        assert!(interrupted, "neural-confirmed soft speech must interrupt");
+        assert_eq!(gate.statistics()["above_threshold_frames"], 0);
+    }
+
+    #[test]
+    fn neural_barge_in_cannot_override_invalid_sources_or_cross_a_gap() {
+        let now = Instant::now();
+        for kind in [
+            "stale",
+            "unverified",
+            "future",
+            "malformed",
+            "previous_turn",
+        ] {
+            let mut gate = BargeInGate::with_noise_since(&InputNoise::default(), now);
+            gate.arm_for_test();
+            let mut input = voiced_at_level(8, 0.001);
+            input.captured = now;
+            match kind {
+                "stale" => input.captured -= Duration::from_secs(1),
+                "unverified" => input.timestamp_verified = false,
+                "future" => input.captured += Duration::from_secs(1),
+                "malformed" => input.pcm.truncate(2),
+                "previous_turn" => input.captured -= Duration::from_millis(20),
+                _ => unreachable!(),
+            }
+            let observation = gate.observe_checked(&input, now, Some((true, true)), Some(&[]));
+            assert!(
+                !observation.interrupted && !observation.retain_frame,
+                "{kind}"
+            );
+            assert!(
+                observation.reset_buffer && observation.reset_detector,
+                "{kind}"
+            );
+        }
+        let mut gate = BargeInGate::default();
+        let mut input = voiced_at_level(9, 0.001);
+        for index in 0..5 {
+            input.captured = now + Duration::from_millis(index * 20);
+            let observation =
+                gate.observe_checked(&input, input.captured, Some((true, true)), Some(&[]));
+            // Even an early neural confirmation waits for the 100 ms probe.
+            assert_eq!(observation.interrupted, index == 4);
+            assert_eq!(observation.reset_detector, index == 0);
+        }
+        input.captured = now + Duration::from_millis(300);
+        let gap = gate.observe_checked(&input, input.captured, Some((true, true)), Some(&[]));
+        assert!(!gap.interrupted && gap.reset_buffer && gap.reset_detector);
+        let duplicate = gate.observe_checked(&input, input.captured, Some((true, true)), Some(&[]));
+        assert!(!duplicate.interrupted && !duplicate.retain_frame && duplicate.reset_detector);
+        assert_eq!(gate.statistics()["source_discontinuities"], 1);
+    }
+
+    #[test]
+    fn neural_barge_in_preserves_tail_arming_without_resetting_the_detector() {
+        let start = Instant::now();
+        let mut gate = BargeInGate::with_noise_since(&calibrated_noise(0.02), start);
+        let mut quiet_voice = voiced_at_level(10, 0.001);
+        for index in 0..20 {
+            quiet_voice.captured = start + Duration::from_millis(index * 20);
+            let observation = gate.observe_checked(
+                &quiet_voice,
+                quiet_voice.captured,
+                Some((true, true)),
+                Some(&[]),
+            );
+            assert!(!observation.interrupted && !observation.retain_frame);
+            assert!(observation.reset_buffer);
+            assert_eq!(observation.reset_detector, index == 0);
+        }
+        assert!(!gate.armed, "soft previous-turn speech is still a tail");
+        // Non-speech can be loud. The neural decision, not its old RMS
+        // threshold, determines whether the preceding utterance has ended.
+        let mut background = signal_at_level(11, 0.5);
+        for index in 0..8 {
+            background.captured = start + Duration::from_millis(400 + index * 20);
+            let observation = gate.observe_checked(
+                &background,
+                background.captured,
+                Some((false, false)),
+                Some(&[]),
+            );
+            assert!(!observation.interrupted && !observation.retain_frame);
+            assert!(!observation.reset_detector);
+            assert_eq!(gate.armed, index == 7);
+        }
+        for index in 0..8 {
+            quiet_voice.captured = start + Duration::from_millis(560 + index * 20);
+            let observation = gate.observe_checked(
+                &quiet_voice,
+                quiet_voice.captured,
+                Some((true, index == 7)),
+                Some(&[]),
+            );
+            assert_eq!(observation.interrupted, index == 7);
+            assert!(observation.retain_frame && !observation.reset_detector);
+        }
+    }
+
+    #[test]
+    fn neural_barge_in_rejects_low_level_echo_after_a_contiguous_probe() {
+        let reference = harmonic_frame([1.0, 0.9, 0.7], 10_000.0).repeat(12);
+        let mut gate = BargeInGate::with_noise(&calibrated_noise(0.02));
+        let start = Instant::now();
+        for index in 0..12 {
+            let mut input = frame(&harmonic_frame([1.0, 0.9, 0.7], 60.0));
+            input.captured = start + Duration::from_millis(index * 20);
+            assert!(speech_band_level(&input.pcm) < gate.threshold);
+            let observation =
+                gate.observe_checked(&input, input.captured, Some((true, true)), Some(&reference));
+            assert!(
+                !observation.interrupted,
+                "confirmed echo must not interrupt"
+            );
+            assert_eq!(observation.reset_detector, index == 0);
+            if index >= 4 {
+                assert!(gate.echo_detected());
+                assert!(!observation.retain_frame && observation.reset_buffer);
+            }
+        }
+        assert_eq!(gate.statistics()["above_threshold_frames"], 0);
+        assert!(gate.statistics()["echo_frames"].as_u64().unwrap() >= 8);
     }
 
     #[test]

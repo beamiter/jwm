@@ -325,16 +325,34 @@ pub fn validate_pcm(pcm: &[u8]) -> io::Result<()> {
 pub fn session_settings(c: &Config) -> Value {
     json!({"type":"realtime","instructions":INSTRUCTIONS,"output_modalities":["text"],
         "audio":{"input":{"format":{"type":"audio/pcm","rate":24000},
-            "transcription":if c.openai.input_transcription {json!({"model":"gpt-transcribe"})} else {Value::Null},
+            "transcription":input_transcription_settings(c),
             "noise_reduction":input_noise_reduction(c),
             "turn_detection":turn_detection_settings(c)},
             "output":{"format":{"type":"audio/pcm","rate":24000},"voice":c.openai.voice}}})
 }
 pub fn input_noise_reduction(c: &Config) -> Value {
     match c.audio.noise_reduction.as_str() {
-        "near_field" | "far_field" => json!({"type":c.audio.noise_reduction}),
+        "near_field" | "far_field" => json!({
+            "type":c.audio.noise_reduction,
+            "strength":c.audio.noise_reduction_strength
+        }),
         _ => Value::Null,
     }
+}
+/// Optional ASR is a caption channel, separate from Realtime audio inference.
+/// Its hints cannot admit an audio turn or authorize a desktop operation.
+fn input_transcription_settings(c: &Config) -> Value {
+    if !c.openai.input_transcription {
+        return Value::Null;
+    }
+    let mut settings = json!({"model":"gpt-transcribe"});
+    if let Some(language) = &c.openai.input_transcription_language {
+        settings["language"] = json!(language);
+    }
+    if !c.openai.input_transcription_keywords.is_empty() {
+        settings["keywords"] = json!(c.openai.input_transcription_keywords);
+    }
+    settings
 }
 fn turn_detection_settings(c: &Config) -> Value {
     if c.turn_detection.kind == "semantic_vad" {
@@ -385,7 +403,15 @@ pub fn ready_custom(event: &Value, expected: &Value) -> bool {
     if let Some(noise) = expected.pointer("/audio/input/noise_reduction") {
         let actual_noise = &actual["audio"]["input"]["noise_reduction"];
         if (noise.is_null() && !actual_noise.is_null())
-            || (!noise.is_null() && actual_noise["type"] != noise["type"])
+            || (!noise.is_null()
+                && (actual_noise["type"] != noise["type"]
+                    || noise.get("strength").is_some_and(|strength| {
+                        // JSON permits both 1 and 1.0 for the same numeric
+                        // strength; compare numbers instead of their encoding.
+                        strength.as_f64().is_none_or(|expected_strength| {
+                            actual_noise["strength"].as_f64() != Some(expected_strength)
+                        })
+                    })))
         {
             return false;
         }
@@ -395,11 +421,16 @@ pub fn ready_custom(event: &Value, expected: &Value) -> bool {
             return false;
         }
     }
-    if expected["audio"]["input"]["transcription"].is_null() {
-        actual["audio"]["input"]["transcription"].is_null()
+    let expected_transcription = &expected["audio"]["input"]["transcription"];
+    let actual_transcription = &actual["audio"]["input"]["transcription"];
+    if expected_transcription.is_null() {
+        actual_transcription.is_null()
     } else {
-        actual["audio"]["input"]["transcription"]["model"]
-            == expected["audio"]["input"]["transcription"]["model"]
+        expected_transcription.as_object().is_some_and(|settings| {
+            settings
+                .iter()
+                .all(|(key, expected)| actual_transcription.get(key) == Some(expected))
+        })
     }
 }
 pub fn ready_with(event: &Value, c: &Config) -> bool {
@@ -686,6 +717,67 @@ mod tests {
         assert!(ready_with(&event, &c));
         event["session"]["audio"]["input"]["noise_reduction"] = json!({"type":"far_field"});
         assert!(!ready_with(&event, &c));
+    }
+    #[test]
+    fn denoising_readiness_requires_the_configured_strength() {
+        let mut c = Config::default();
+        c.audio.noise_reduction_strength = 0.8;
+        let mut event = json!({"type":"session.updated","session":session_settings(&c)});
+        assert!(ready_with(&event, &c));
+        for strength in [json!(1.0), json!("0.8"), Value::Null] {
+            event["session"]["audio"]["input"]["noise_reduction"]["strength"] = strength;
+            assert!(!ready_with(&event, &c));
+        }
+        event["session"]["audio"]["input"]["noise_reduction"] = json!({"type":"near_field"});
+        assert!(
+            !ready_with(&event, &c),
+            "an omitted strength is not confirmation"
+        );
+        c.audio.noise_reduction_strength = 1.0;
+        event["session"]["audio"]["input"]["noise_reduction"]["strength"] = json!(1);
+        assert!(ready_with(&event, &c), "1 and 1.0 are the same API number");
+        c.audio.noise_reduction = "off".into();
+        event["session"] = session_settings(&c);
+        assert!(event["session"]["audio"]["input"]["noise_reduction"].is_null());
+        assert!(ready_with(&event, &c));
+    }
+    #[test]
+    fn caption_hints_are_sent_only_when_enabled_and_verified_on_readiness() {
+        let mut c = Config::default();
+        c.openai.input_transcription_language = Some("zh".into());
+        c.openai.input_transcription_keywords = vec!["Eva".into(), "JWM".into()];
+        let disabled = session_settings(&c);
+        assert!(disabled["audio"]["input"]["transcription"].is_null());
+        c.openai.input_transcription = true;
+        let settings = session_settings(&c);
+        assert_eq!(
+            settings["audio"]["input"]["transcription"],
+            json!({"model":"gpt-transcribe","language":"zh","keywords":["Eva","JWM"]})
+        );
+        let mut event = json!({"type":"session.updated","session":settings});
+        assert!(ready_with(&event, &c));
+        for (field, value) in [
+            ("model", json!("whisper-1")),
+            ("language", json!("en")),
+            ("keywords", json!(["Eva"])),
+            ("language", Value::Null),
+            ("keywords", Value::Null),
+        ] {
+            event["session"] = session_settings(&c);
+            event["session"]["audio"]["input"]["transcription"][field] = value;
+            assert!(
+                !ready_with(&event, &c),
+                "changed {field} must not pass readiness"
+            );
+        }
+        c.openai.input_transcription_language = None;
+        c.openai.input_transcription_keywords.clear();
+        event["session"] = session_settings(&c);
+        // Optional server defaults do not invalidate an unspecified hint.
+        event["session"]["audio"]["input"]["transcription"]["language"] = Value::Null;
+        event["session"]["audio"]["input"]["transcription"]["keywords"] = json!([]);
+        assert!(ready_with(&event, &c));
+        assert!(input_transcription_settings(&c.wake_config()).is_null());
     }
     #[test]
     fn wake_retains_acoustic_vad_and_rejects_changed_endpoint_configuration() {

@@ -384,6 +384,39 @@ fn publish_feedback(
         state: status_snapshot(state, &feedback.text, level, now_ms, Some(feedback)),
     });
 }
+#[allow(clippy::too_many_arguments)]
+fn publish_listening(
+    tx: &mpsc::Sender<Update>,
+    p: &AssistantPermit,
+    state: &Session,
+    feedback: &LocalFeedback,
+    gate: &crate::audio::voice_gate::UploadGate,
+    level: f32,
+    now_ms: u64,
+) {
+    let text = if gate.enabled && !gate.open {
+        "本地检测人声，环境声不上传"
+    } else if gate.enabled {
+        "人声已确认，正在听"
+    } else {
+        "正在听"
+    };
+    let mut snapshot = if state.state == State::FollowUp && !feedback.text.is_empty() {
+        status_snapshot(state, &feedback.text, level, now_ms, Some(feedback))
+    } else {
+        status_snapshot(state, text, level, now_ms, None)
+    };
+    if gate.enabled {
+        snapshot["upload_gate"] = json!(if gate.open { "open" } else { "closed" });
+        snapshot["voice_probability"] = json!(gate.probability());
+        snapshot["uploaded_ms"] = json!(gate.uploaded_frames.saturating_mul(20));
+        snapshot["suppressed_ms"] = json!(gate.suppressed_frames().saturating_mul(20));
+    }
+    let _ = tx.try_send(Update {
+        permit: p.clone(),
+        state: snapshot,
+    });
+}
 async fn publish_feedback_final(
     tx: &mpsc::Sender<Update>,
     p: &AssistantPermit,
@@ -1098,38 +1131,42 @@ async fn conversation(
         pending_frames.extend(buffered.drain(..));
     }
     let mut input_gate = crate::input::InputGate::default();
+    let mut upload_gate = crate::audio::voice_gate::UploadGate::new(c);
     let mut input_noise = crate::audio::InputNoise::default();
     for frame in buffered {
-        if onset_at.is_none() {
-            input_noise.observe(crate::audio::speech_band_level(&frame.pcm));
+        if let Some(cap) = capture.as_ref() {
+            cap.check()?;
         }
-        if c.interaction.local_start_detection && frame.level > 0.025 && onset_at.is_none() {
-            onset_at = Some(frame.captured);
-            if !frame.timestamp_verified {
-                onset_error = Some("audio_timestamp_unverified".into());
+        let legacy_candidate = !upload_gate.enabled && frame.level > 0.025;
+        let captured = frame.captured;
+        let verified = frame.timestamp_verified;
+        let band_level = crate::audio::speech_band_level(&frame.pcm);
+        upload_local_frame(c, ws, &mut input_gate, &mut upload_gate, frame).await?;
+        if upload_gate.probability() < 0.2 {
+            input_noise.observe(band_level);
+        }
+        if let Some(at) = upload_gate
+            .take_onset()
+            .or(legacy_candidate.then_some(captured))
+        {
+            if onset_at.is_none() {
+                onset_at = Some(at);
+                if !verified {
+                    onset_error = Some("audio_timestamp_unverified".into());
+                }
+                match desktop.bind_onset(at) {
+                    Ok(binding) => onset_binding = Some(binding),
+                    Err(error) => onset_error = Some(error.to_string()),
+                };
             }
-            match desktop.bind_onset(frame.captured) {
-                Ok(binding) => onset_binding = Some(binding),
-                Err(error) => onset_error = Some(error.to_string()),
-            };
-            if frame.timestamp_verified {
+            if verified {
                 state.local_speech_candidate(
                     epoch,
-                    frame.captured.saturating_duration_since(start).as_millis() as u64,
+                    at.saturating_duration_since(start).as_millis() as u64,
                     elapsed(start),
                 );
             }
         }
-        if let Some(cap) = capture.as_ref() {
-            cap.check()?;
-        }
-        input_gate.ensure_utterance_limit(frame.pcm.len() / 2, c.interaction.max_utterance_ms)?;
-        ws.append(&frame.pcm).await?;
-        input_gate.uploaded(
-            frame.pcm.len() / 2,
-            frame.captured,
-            frame.timestamp_verified,
-        )?;
     }
     let mut tick = tokio::time::interval(Duration::from_millis(20));
     let mut last_level = Instant::now();
@@ -1142,27 +1179,32 @@ async fn conversation(
             frame=next_frame(&mut pending_frames,&mut audio_rx),if capture.is_some() && initial_replay.is_none()=>{
                 let frame=frame.ok_or_else(||io::Error::other("audio_unavailable"))??;
                 if let Some(cap)=capture.as_ref(){cap.check()?;}
-                if !input_gate.speech_pending() { input_noise.observe(crate::audio::speech_band_level(&frame.pcm)); }
                 if let Some(gate)=quiet_gate.as_mut(){
                     if gate.observe(frame.level){
-                        quiet_gate=None;input_gate.request_clear();ws.send(json!({"type":"input_audio_buffer.clear"})).await?;
+                        quiet_gate=None;upload_gate.reset();input_gate.request_clear();ws.send(json!({"type":"input_audio_buffer.clear"})).await?;
                         publish(tx,p,&state,"请重新说一次",0.0,elapsed(start));
                     }
                     continue;
                 }
-                if c.interaction.local_start_detection && frame.level>0.025 {
-                    if onset_at.is_none(){
-                        onset_at=Some(frame.captured);
-                        if !frame.timestamp_verified{onset_error=Some("audio_timestamp_unverified".into());}
-                        match desktop.bind_onset(frame.captured){Ok(binding)=>onset_binding=Some(binding),Err(error)=>onset_error=Some(error.to_string())};
+                let level=frame.level;
+                let captured=frame.captured;
+                let verified=frame.timestamp_verified;
+                let band_level=crate::audio::speech_band_level(&frame.pcm);
+                let legacy_candidate=!upload_gate.enabled && frame.level>0.025;
+                if state.upload_allowed(){
+                    upload_local_frame(c,ws,&mut input_gate,&mut upload_gate,frame).await?;
+                    if let Some(at)=upload_gate.take_onset().or(legacy_candidate.then_some(captured)) {
+                        if onset_at.is_none(){
+                            onset_at=Some(at);
+                            if !verified{onset_error=Some("audio_timestamp_unverified".into());}
+                            match desktop.bind_onset(at){Ok(binding)=>onset_binding=Some(binding),Err(error)=>onset_error=Some(error.to_string())};
+                        }
+                        if verified{state.local_speech_candidate(epoch,at.saturating_duration_since(start).as_millis()as u64,elapsed(start));}
                     }
-                    if frame.timestamp_verified{state.local_speech_candidate(epoch,frame.captured.saturating_duration_since(start).as_millis()as u64,elapsed(start));}
                 }
-                if let Some(cap)=capture.as_ref(){cap.check()?;}
-                if state.upload_allowed(){input_gate.ensure_utterance_limit(frame.pcm.len()/2,c.interaction.max_utterance_ms)?;ws.append(&frame.pcm).await?;input_gate.uploaded(frame.pcm.len()/2,frame.captured,frame.timestamp_verified)?;}
+                if !input_gate.speech_pending() && upload_gate.probability()<0.2 {input_noise.observe(band_level);}
                 if last_level.elapsed()>=Duration::from_millis(100){
-                    if state.state==State::FollowUp {publish_feedback(tx,p,&state,&followup_feedback,frame.level,elapsed(start));}
-                    else {publish(tx,p,&state,"正在听",frame.level,elapsed(start));}
+                    publish_listening(tx,p,&state,&followup_feedback,&upload_gate,level,elapsed(start));
                     last_level=Instant::now();
                 }
             },
@@ -1221,7 +1263,7 @@ async fn conversation(
                         crate::context::planning_monitor_scope(&mut context)?;
                         context["available_actions"]=json!(&available_actions);
                         let mut interrupt_buffer=std::collections::VecDeque::new();
-                        let mut interrupt_gate=BargeInDiagnostics::new(&input_noise,&trace.labels,!c.interaction.half_duplex,commit_at);
+                        let mut interrupt_gate=BargeInDiagnostics::new(c,&input_noise,&trace.labels,!c.interaction.half_duplex,commit_at);
                         let work_result = {
                             let remaining=Duration::from_millis(c.interaction.max_session_ms.saturating_sub(elapsed(start)));
                             let turn = tokio::time::timeout(remaining, complete_turn(c,p,tx,store.clone(),ws,trace,&mut state,&context,focus_changed,&mut admission,epoch,start,&mut followup_feedback));
@@ -1254,6 +1296,7 @@ async fn conversation(
                             if !state.interrupt(epoch,elapsed(start)){return Err(io::Error::other("input_out_of_order"));}
                             followup_feedback=LocalFeedback::default();
                             publish(tx,p,&state,"已打断，正在听",0.0,elapsed(start));
+                            upload_gate.reset();
                             input_gate.request_clear();
                             resume_interrupted_input(c,ws,trace,&store,&mut input_gate,&mut pending_frames,&mut audio_rx,interrupt_buffer.into_iter().collect()).await?;
                             onset_binding=None;onset_at=None;onset_error=None;
@@ -1274,6 +1317,7 @@ async fn conversation(
                         if next_context["assistant_permit"]!=serde_json::to_value(p)?||next_context["session_unlocked"]!=true{return Err(io::Error::other("assistant_permit_mismatch"));}
                         onset_binding=None;onset_at=None;onset_error=None;
                         crate::store::reserve_transcription(&store,&transcription_request(p,state.turn_epoch.wrapping_add(1)),c).await?;
+                        upload_gate.reset();
                         input_gate.request_clear();
                         if !c.interaction.half_duplex {
                             // Keep the onset even if feedback finished before the
@@ -1368,6 +1412,7 @@ async fn next_frame(
 /// store lock. Keep the label copy independent of the concurrently running turn.
 struct BargeInDiagnostics {
     gate: crate::audio::BargeInGate,
+    voice: Option<crate::audio::voice_gate::VoiceEvidence>,
     labels: Value,
     enabled: bool,
     last_report: Instant,
@@ -1375,6 +1420,7 @@ struct BargeInDiagnostics {
 }
 impl BargeInDiagnostics {
     fn new(
+        c: &Config,
         noise: &crate::audio::InputNoise,
         labels: &Value,
         enabled: bool,
@@ -1382,6 +1428,10 @@ impl BargeInDiagnostics {
     ) -> Self {
         Self {
             gate: crate::audio::BargeInGate::with_noise_since(noise, since),
+            voice: c
+                .audio
+                .local_voice_detection
+                .then(|| crate::audio::voice_gate::VoiceEvidence::new(c)),
             labels: json!({
                 "generation":labels["generation"],
                 "session_epoch":labels["session_epoch"],
@@ -1398,6 +1448,9 @@ impl BargeInDiagnostics {
             return;
         }
         let mut fields = self.gate.statistics();
+        if let Some(voice) = &self.voice {
+            fields["voice_probability"] = json!(voice.probability);
+        }
         fields.as_object_mut().unwrap().extend(
             self.labels
                 .as_object()
@@ -1417,13 +1470,42 @@ impl BargeInDiagnostics {
         }
     }
 
-    fn observe(&mut self, frame: Frame, buffered: &mut std::collections::VecDeque<Frame>) -> bool {
-        let observation = self.gate.observe(&frame);
+    fn observe(
+        &mut self,
+        frame: Frame,
+        buffered: &mut std::collections::VecDeque<Frame>,
+    ) -> io::Result<bool> {
+        self.observe_at(frame, buffered, Instant::now())
+    }
+    fn observe_at(
+        &mut self,
+        frame: Frame,
+        buffered: &mut std::collections::VecDeque<Frame>,
+        now: Instant,
+    ) -> io::Result<bool> {
+        let observation = if let Some(voice) = &mut self.voice {
+            if frame.timestamp_verified && frame.pcm.len() == 960 {
+                voice.observe(&frame)?;
+                self.gate
+                    .observe_neural_at(&frame, voice.continuing(), voice.confirmed, now)
+            } else {
+                self.gate.observe_neural_at(&frame, false, false, now)
+            }
+        } else {
+            self.gate.observe_at(&frame, now)
+        };
         if observation.reset_buffer {
             buffered.clear();
+            if let Some(voice) = &mut self.voice {
+                if observation.reset_detector {
+                    voice.reset();
+                } else {
+                    voice.reset_evidence();
+                }
+            }
         }
         if !observation.retain_frame {
-            return false;
+            return Ok(false);
         }
         // One second of onset audio: enough for a short command spoken
         // straight into the interruption.
@@ -1431,7 +1513,7 @@ impl BargeInDiagnostics {
             buffered.pop_front();
         }
         buffered.push_back(frame);
-        observation.interrupted
+        Ok(observation.interrupted)
     }
 
     fn finish(&mut self, result: &io::Result<bool>) {
@@ -1470,10 +1552,51 @@ async fn interrupt_input(
             frame=next_frame(pending,receiver)=>frame.ok_or_else(||io::Error::other("audio_unavailable"))??,
         };
         capture.check()?;
-        if diagnostics.observe(frame, buffered) {
+        if diagnostics.observe(frame, buffered)? {
             return Ok(());
         }
     }
+}
+
+/// The only live PCM upload boundary for active conversations. Connecting
+/// buffers and interrupted/follow-up replay use this same function.
+async fn upload_local_frame(
+    c: &Config,
+    ws: &mut Realtime,
+    input: &mut crate::input::InputGate,
+    local: &mut crate::audio::voice_gate::UploadGate,
+    frame: Frame,
+) -> io::Result<()> {
+    let was_open = local.open;
+    let admitted = local.admit(frame, input.speech_pending())?;
+    if admitted.is_empty() {
+        return Ok(());
+    }
+    if input.needs_lead_in() {
+        // Only after local speech confirmation. Padding after a clear must
+        // map to the first real replay frame, not a previous input epoch.
+        let padding_ms = c.turn_detection.prefix_padding_ms.max(300) + 300;
+        let silence = vec![0u8; padding_ms as usize * 48];
+        for chunk in silence.chunks(960) {
+            ws.append(chunk).await?;
+            input.uploaded_lead_in(chunk.len() / 2)?;
+        }
+    }
+    for frame in admitted {
+        input.ensure_utterance_limit(frame.pcm.len() / 2, c.interaction.max_utterance_ms)?;
+        ws.append(&frame.pcm).await?;
+        input.uploaded(
+            frame.pcm.len() / 2,
+            frame.captured,
+            frame.timestamp_verified,
+        )?;
+    }
+    if local.enabled && !was_open && local.open {
+        let mut fields = local.statistics();
+        fields["phase"] = json!("listening");
+        crate::telemetry::event("local_voice_confirmed", &fields);
+    }
+    Ok(())
 }
 
 const INTERRUPT_CLEAR_TIMEOUT: Duration = Duration::from_secs(8);
@@ -1524,27 +1647,20 @@ async fn resume_interrupted_input(
             }
         }
     }).await.map_err(|_|io::Error::other("interrupt_clear_timeout"))??;
-    if !buffered.is_empty() {
-        // Server VAD reports audio_start_ms on the cumulative session timeline
-        // with prefix padding that does not stop at our clear floor. Replayed
-        // speech starts at once, so give that padding local silence to land in;
-        // InputGate maps it to the first replayed frame.
-        let lead_in_ms = c.turn_detection.prefix_padding_ms.max(300) + 300;
-        let silence = vec![0u8; lead_in_ms as usize * 48];
-        for chunk in silence.chunks(960) {
-            ws.append(chunk).await?;
-            input_gate.uploaded_lead_in(chunk.len() / 2)?;
-        }
-    }
-    for frame in buffered {
-        ws.append(&frame.pcm).await?;
-        input_gate.uploaded(
-            frame.pcm.len() / 2,
-            frame.captured,
-            frame.timestamp_verified,
-        )?;
-    }
+    // Both confirmed interruptions and unconfirmed follow-up candidates pass
+    // the same local gate in the listening loop. A completed reply must not
+    // turn its buffered room noise into a fresh cloud utterance.
+    prepend_replay(pending, buffered);
     Ok(())
+}
+
+fn prepend_replay(pending: &mut std::collections::VecDeque<Frame>, buffered: Vec<Frame>) {
+    // A clear acknowledgement can win the biased select before all of the
+    // newer pending frames are drained. The retained onset always precedes
+    // that remainder; appending it would reverse native source time.
+    let remaining = std::mem::take(pending);
+    pending.extend(buffered);
+    pending.extend(remaining);
 }
 
 // A turn future owns all planning, confirmation, execution and playback work.
@@ -3827,6 +3943,7 @@ mod tests {
                             "tail_frames",
                             "rejected_source_frames",
                             "source_discontinuities",
+                            "voice_probability",
                         ]
                         .contains(&key.as_str()),
                         "unexpected diagnostic field {key}"
@@ -3841,6 +3958,7 @@ mod tests {
         let now = Instant::now();
         let start = now - Duration::from_millis(240);
         let mut diagnostics = BargeInDiagnostics::new(
+            &Config::default(),
             &crate::audio::InputNoise::default(),
             &json!({}),
             false,
@@ -3855,28 +3973,138 @@ mod tests {
             level: 0.01,
         };
         for ms in [0, 20, 40, 60, 80] {
-            assert!(!diagnostics.observe(frame(start + Duration::from_millis(ms)), &mut buffered));
+            assert!(
+                !diagnostics
+                    .observe(frame(start + Duration::from_millis(ms)), &mut buffered)
+                    .unwrap()
+            );
         }
         assert_eq!(buffered.len(), 5);
-        assert!(!diagnostics.observe(frame(now - Duration::from_secs(1)), &mut buffered));
+        assert!(
+            !diagnostics
+                .observe(frame(now - Duration::from_secs(1)), &mut buffered)
+                .unwrap()
+        );
         assert!(buffered.is_empty());
 
-        assert!(!diagnostics.observe(frame(start + Duration::from_millis(100)), &mut buffered));
+        assert!(
+            !diagnostics
+                .observe(frame(start + Duration::from_millis(100)), &mut buffered)
+                .unwrap()
+        );
         assert_eq!(buffered.len(), 1);
         // A missing 20 ms frame starts a new buffer as well as a new gate window.
-        assert!(!diagnostics.observe(frame(start + Duration::from_millis(140)), &mut buffered));
+        assert!(
+            !diagnostics
+                .observe(frame(start + Duration::from_millis(140)), &mut buffered)
+                .unwrap()
+        );
         assert_eq!(buffered.len(), 1);
         // Constant PCM has no speech-band energy: it is retained for replay
         // but never interrupts on its own.
         for index in 1..6 {
             let captured = start + Duration::from_millis(140 + index * 20);
-            assert!(!diagnostics.observe(frame(captured), &mut buffered));
+            assert!(!diagnostics.observe(frame(captured), &mut buffered).unwrap());
         }
         assert_eq!(buffered.len(), 6);
         assert_eq!(
             buffered.front().unwrap().captured,
             start + Duration::from_millis(140)
         );
+    }
+
+    #[test]
+    fn neural_barge_in_session_preserves_detector_state_across_quiet_tail() {
+        let c = Config::default();
+        let start = Instant::now();
+        let mut at = start;
+        let mut diagnostics = BargeInDiagnostics::new(
+            &c,
+            &crate::audio::InputNoise::default(),
+            &json!({}),
+            false,
+            start,
+        );
+        let mut buffered = std::collections::VecDeque::new();
+        // Tail protection must not reset the recurrent model on every quiet
+        // frame. Otherwise it stays permanently unready and no voice follows.
+        for _ in 0..50 {
+            assert!(
+                !diagnostics
+                    .observe_at(
+                        Frame {
+                            captured: at,
+                            timestamp_verified: true,
+                            pcm: vec![0; 960],
+                            level: 0.0,
+                        },
+                        &mut buffered,
+                        at + Duration::from_millis(10)
+                    )
+                    .unwrap()
+            );
+            at += Duration::from_millis(20);
+        }
+        let mut interrupted = false;
+        for pcm in include_bytes!("../tests/fixtures/rnnoise-speech.s16le")[28_800..57_600]
+            .chunks_exact(960)
+        {
+            let soft: Vec<u8> = pcm
+                .chunks_exact(2)
+                .flat_map(|sample| (i16::from_le_bytes([sample[0], sample[1]]) / 10).to_le_bytes())
+                .collect();
+            interrupted |= diagnostics
+                .observe_at(
+                    Frame {
+                        captured: at,
+                        timestamp_verified: true,
+                        pcm: soft,
+                        level: 0.0,
+                    },
+                    &mut buffered,
+                    at + Duration::from_millis(10),
+                )
+                .unwrap();
+            at += Duration::from_millis(20);
+        }
+        assert!(
+            interrupted,
+            "a real soft utterance must interrupt after tail silence"
+        );
+        assert!(!buffered.is_empty());
+        assert!(buffered.iter().all(|frame| frame.timestamp_verified));
+    }
+
+    #[test]
+    fn clear_ack_before_pending_drain_keeps_replay_onset_in_source_order() {
+        let start = Instant::now();
+        let speech = include_bytes!("../tests/fixtures/rnnoise-speech.s16le");
+        let mut frames = speech
+            .chunks_exact(960)
+            .enumerate()
+            .map(|(index, pcm)| Frame {
+                captured: start + Duration::from_millis(index as u64 * 20),
+                timestamp_verified: true,
+                pcm: pcm.to_vec(),
+                level: 0.0,
+            })
+            .collect::<Vec<_>>();
+        let later = frames.split_off(20);
+        let mut pending: std::collections::VecDeque<_> = later.into_iter().collect();
+        // This is the branch where the clear ack arrives while pending still
+        // owns newer audio; the previous implementation appended the onset.
+        prepend_replay(&mut pending, frames);
+        let mut gate = crate::audio::voice_gate::UploadGate::new(&Config::default());
+        let mut last = None;
+        for frame in pending {
+            if let Some(at) = last {
+                assert_eq!(frame.captured - at, Duration::from_millis(20));
+            }
+            last = Some(frame.captured);
+            gate.admit(frame, false)
+                .expect("ordered replay must survive source validation");
+        }
+        assert!(gate.openings > 0, "replay must retain the real utterance");
     }
 
     #[test]
@@ -3896,6 +4124,7 @@ mod tests {
                 let work = async move {
                     let source_start = Instant::now() - Duration::from_millis(80);
                     let mut diagnostics = BargeInDiagnostics::new(
+                        &Config::default(),
                         &crate::audio::InputNoise::default(),
                         &json!({"generation":7,"session_epoch":8,"turn_id":9,
                             "model":"must not leak","transcript":"private speech","pcm":[1,2]}),
@@ -5284,7 +5513,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn interrupted_audio_waits_for_clear_and_old_tools_never_execute() {
+    async fn interrupted_audio_waits_for_clear_and_rechecks_noise_before_upload() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
@@ -5296,11 +5525,8 @@ mod tests {
             {
                 let event: Value = serde_json::from_str(&text).unwrap();
                 let clear = event["type"] == "input_audio_buffer.clear";
-                let append = event["type"] == "input_audio_buffer.append";
                 received.push(event);
                 if clear {
-                    // A complete-looking stale tool result carries no authority
-                    // in the cancellation/receipt drain.
                     for event in [
                         json!({"type":"response.done","response":{"id":"old-response","status":"cancelled","output":[{"type":"function_call","name":"eva_submit_plan","call_id":"old-call","arguments":"{}"}]}}),
                         json!({"type":"input_audio_buffer.cleared"}),
@@ -5312,16 +5538,6 @@ mod tests {
                             .await
                             .unwrap();
                     }
-                }
-                // Lead-in silence first; stop at the replayed (non-zero) frame.
-                if append
-                    && STANDARD
-                        .decode(received.last().unwrap()["audio"].as_str().unwrap())
-                        .unwrap()
-                        .iter()
-                        .any(|byte| *byte != 0)
-                {
-                    break;
                 }
             }
             received
@@ -5335,26 +5551,37 @@ mod tests {
         gate.uploaded(480, captured, true).unwrap();
         gate.request_clear();
         let (_tx, mut rx) = mpsc::channel(2);
-        let pcm = vec![3u8; 960];
+        let mut pending = std::collections::VecDeque::new();
         resume_interrupted_input(
             &Config::default(),
             &mut ws,
             &mut trace,
             &data.store,
             &mut gate,
-            &mut std::collections::VecDeque::new(),
+            &mut pending,
             &mut rx,
             vec![Frame {
                 captured,
                 timestamp_verified: true,
-                pcm: pcm.clone(),
+                pcm: vec![3u8; 960],
                 level: 0.1,
             }],
         )
         .await
         .unwrap();
+        assert_eq!(pending.len(), 1);
+        let mut local = crate::audio::voice_gate::UploadGate::new(&Config::default());
+        upload_local_frame(
+            &Config::default(),
+            &mut ws,
+            &mut gate,
+            &mut local,
+            pending.pop_front().unwrap(),
+        )
+        .await
+        .unwrap();
         assert!(gate.start_at("stale", 2, 0).unwrap().is_none());
-        assert!(gate.start_at("fresh", 2, 20).unwrap().is_some());
+        assert!(gate.start_at("noise", 2, 20).unwrap().is_none());
         assert!(data.store.lock().unwrap().ledger.operations.is_empty());
         assert!(trace.input.has_current());
         assert!(trace.response.is_none());
@@ -5363,21 +5590,93 @@ mod tests {
             .iter()
             .map(|event| event["type"].as_str().unwrap())
             .collect::<Vec<_>>();
-        assert_eq!(types[..2], ["response.cancel", "input_audio_buffer.clear"]);
-        assert!(
-            types[2..]
-                .iter()
-                .all(|kind| *kind == "input_audio_buffer.append")
+        assert_eq!(types, ["response.cancel", "input_audio_buffer.clear"]);
+    }
+
+    #[tokio::test]
+    async fn local_upload_boundary_preserves_verified_speech_and_post_clear_padding() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let mut received = Vec::new();
+            while let Some(Ok(tokio_tungstenite::tungstenite::Message::Text(text))) =
+                socket.next().await
+            {
+                received.push(serde_json::from_str::<Value>(&text).unwrap());
+            }
+            received
+        });
+        let mut ws = Realtime::connect_loopback(address).await.unwrap();
+        let c = Config::default();
+        let mut input = crate::input::InputGate::default();
+        let mut local = crate::audio::voice_gate::UploadGate::new(&c);
+        let start = Instant::now();
+        input.uploaded(480, start, true).unwrap();
+        input.request_clear();
+        input.cleared();
+        for index in 0..30 {
+            upload_local_frame(
+                &c,
+                &mut ws,
+                &mut input,
+                &mut local,
+                Frame {
+                    captured: start + Duration::from_millis(index * 20),
+                    timestamp_verified: true,
+                    pcm: vec![0; 960],
+                    level: 1.0,
+                },
+            )
+            .await
+            .unwrap();
+        }
+        assert_eq!(
+            local.uploaded_frames, 0,
+            "no PCM or padding before local speech"
         );
-        // 600 ms of silence (default 300 ms padding + 300 ms), then the onset.
-        let audio = received[2..]
+        for (index, pcm) in include_bytes!("../tests/fixtures/rnnoise-speech.s16le")
+            .chunks_exact(960)
+            .enumerate()
+        {
+            upload_local_frame(
+                &c,
+                &mut ws,
+                &mut input,
+                &mut local,
+                Frame {
+                    captured: start + Duration::from_millis(600 + index as u64 * 20),
+                    timestamp_verified: true,
+                    pcm: pcm.to_vec(),
+                    level: 0.0,
+                },
+            )
+            .await
+            .unwrap();
+        }
+        assert!(local.openings > 0);
+        assert!(input.start_at("stale", 2, 0).unwrap().is_none());
+        assert!(
+            input
+                .start_at("fresh", 2, 20)
+                .unwrap()
+                .unwrap()
+                .timestamp_verified
+        );
+        let received = finish(ws, server).await;
+        assert!(
+            received
+                .iter()
+                .all(|event| event["type"] == "input_audio_buffer.append")
+        );
+        let frames = received
             .iter()
             .map(|event| STANDARD.decode(event["audio"].as_str().unwrap()).unwrap())
             .collect::<Vec<_>>();
-        let (onset, lead_in) = audio.split_last().unwrap();
-        assert_eq!(lead_in.iter().map(Vec::len).sum::<usize>(), 600 * 48);
-        assert!(lead_in.iter().flatten().all(|byte| *byte == 0));
-        assert_eq!(onset, &pcm);
+        assert!(frames.len() > 30);
+        assert!(frames[..30].iter().flatten().all(|byte| *byte == 0));
+        assert!(frames[30..].iter().flatten().any(|byte| *byte != 0));
     }
 
     #[test]
