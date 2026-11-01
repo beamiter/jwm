@@ -25,7 +25,10 @@ esac
 library="$prefix/lib/libonnxruntime.so.1.22.0"
 verify_library() { printf '%s  %s\n' "$library_hash" "$library" | sha256sum --check --status; }
 if [[ -e "$prefix" ]]; then
-    [[ -f "$prefix/LICENSE" ]] && verify_library || { echo 'existing prefix does not match pinned runtime; choose a new directory' >&2; exit 1; }
+    if [[ ! -f "$prefix/LICENSE" ]] || ! verify_library; then
+        echo 'existing prefix does not match pinned runtime; choose a new directory' >&2
+        exit 1
+    fi
 else
     parent=$(dirname "$prefix")
     mkdir -p "$parent"
