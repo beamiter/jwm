@@ -61,6 +61,10 @@ Silero and RNNoise scores are not calibrated interchangeably: thresholds are
 selected by the actual active backend, including fallback. Confirmation remains
 160 ms by default. A 600 ms public speech slice missed with the old common 0.65
 threshold now opens at 0.50 without opening seven synthetic noise controls.
+The native RMS floor is evaluated on the same 32 ms window as the cached
+Silero decision, so trailing speech evidence is not erased by a later quiet
+20 ms native frame. This fixes the 100/200 ms prelude regressions without
+lowering the score or duration requirement.
 A 240 ms mid-sentence slice after 400 ms of quiet is still missed: the short-slice
 test without that leading quiet and with an 80 ms confirmation setting must not
 be presented as a guarantee for all short commands or actual Chinese words.

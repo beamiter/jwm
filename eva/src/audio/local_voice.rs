@@ -16,6 +16,9 @@ pub struct DetectorStatus {
 pub struct Detection {
     pub probability: f32,
     pub ready: bool,
+    /// RMS of the same input window as probability. A 32 ms Silero decision
+    /// can finish after a native 20 ms frame has already fallen quiet.
+    pub evidence_rms: f32,
 }
 
 enum Backend {
@@ -105,6 +108,7 @@ impl LocalVoiceDetector {
             Backend::Rnnoise(detector) => detector.process(pcm).map(|score| Detection {
                 probability: score.probability,
                 ready: score.ready,
+                evidence_rms: super::rms(pcm),
             }),
             #[cfg(feature = "silero")]
             Backend::Silero(detector) => detector.process(pcm),

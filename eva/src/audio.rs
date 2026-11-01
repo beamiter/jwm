@@ -2842,6 +2842,59 @@ mod barge_in_tests {
     }
 
     #[test]
+    #[cfg(feature = "silero")]
+    #[ignore = "requires installed CPU ONNX Runtime 1.22; public synthetic echo only, no devices/API"]
+    fn real_silero_barge_in_rejects_matched_public_speech_echo() {
+        use crate::{audio::voice_gate::VoiceEvidence, config::Config};
+        let pcm = include_bytes!("../tests/fixtures/rnnoise-speech.s16le");
+        let reference = pcm
+            .chunks_exact(2)
+            .map(|s| i16::from_le_bytes([s[0], s[1]]))
+            .collect::<Vec<_>>();
+        let mut c = Config::default();
+        c.audio.local_voice_fallback = "none".into();
+        let mut voiced = 0;
+        for matched in [false, true] {
+            let mut voice = VoiceEvidence::new(&c);
+            assert_eq!(voice.detector_status().active, "silero");
+            let mut gate = BargeInGate::default();
+            let start = Instant::now();
+            let mut interruptions = 0;
+            for (index, samples) in reference.chunks_exact(480).enumerate() {
+                let mut frame = frame(&samples.iter().map(|s| s / 4).collect::<Vec<_>>());
+                frame.captured = start + Duration::from_millis(index as u64 * 20);
+                voice.observe(&frame).unwrap();
+                voiced += u64::from(voice.confirmed);
+                let observed = gate.observe_checked(
+                    &frame,
+                    frame.captured,
+                    Some((voice.continuing(), voice.confirmed)),
+                    Some(if matched { &reference } else { &[] }),
+                );
+                interruptions += usize::from(observed.interrupted);
+                if matched {
+                    assert!(
+                        !observed.interrupted,
+                        "real neural speech evidence must not override matched render echo"
+                    );
+                }
+            }
+            if matched {
+                assert!(gate.statistics()["echo_frames"].as_u64().unwrap() > 0);
+            } else {
+                assert!(
+                    interruptions > 0,
+                    "same public speech must interrupt without a matching render reference"
+                );
+            }
+        }
+        assert!(
+            voiced > 0,
+            "this control must exercise real speech, not a rejected silent sample"
+        );
+    }
+
+    #[test]
     fn invalid_source_frames_cannot_trigger_an_interruption() {
         for kind in ["stale", "unverified", "future", "malformed"] {
             let mut gate = BargeInGate::default();

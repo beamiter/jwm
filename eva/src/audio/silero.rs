@@ -86,6 +86,7 @@ pub struct SileroDetector {
     state: [f32; 256],
     context: [f32; CONTEXT],
     probability: f32,
+    evidence_rms: f32,
     ready: bool,
 }
 
@@ -137,6 +138,7 @@ impl SileroDetector {
             state: [0.0; 256],
             context: [0.0; CONTEXT],
             probability: 0.0,
+            evidence_rms: 0.0,
             ready: false,
         })
     }
@@ -148,6 +150,7 @@ impl SileroDetector {
         self.state.fill(0.0);
         self.context.fill(0.0);
         self.probability = 0.0;
+        self.evidence_rms = 0.0;
         self.ready = false;
     }
 
@@ -193,6 +196,12 @@ impl SileroDetector {
                 return Err(io::Error::other("silero_output_invalid"));
             }
             self.probability = probability[0];
+            self.evidence_rms = (input[CONTEXT..]
+                .iter()
+                .map(|sample| sample * sample)
+                .sum::<f32>()
+                / WINDOW as f32)
+                .sqrt();
             self.state.copy_from_slice(state);
             self.context
                 .copy_from_slice(&input[input.len() - CONTEXT..]);
@@ -204,6 +213,7 @@ impl SileroDetector {
         Ok(Detection {
             probability: self.probability,
             ready: self.ready,
+            evidence_rms: self.evidence_rms,
         })
     }
 }

@@ -73,8 +73,10 @@ impl VoiceEvidence {
         // Do not trust the UI level supplied alongside PCM. A very low
         // absolute floor rejects digital residue without imposing a loudness
         // requirement on soft speech already recognized by the neural model.
-        self.candidate =
-            score.ready && score.probability >= self.threshold && rms(&frame.pcm) >= 0.0003;
+        self.candidate = score.ready
+            && score.probability >= self.threshold
+            && score.evidence_rms.is_finite()
+            && score.evidence_rms >= 0.0003;
         self.window = ((self.window << 1) | u64::from(self.candidate)) & self.mask;
         self.confirmed = self.candidate && self.window.count_ones() >= self.minimum;
         Ok(())

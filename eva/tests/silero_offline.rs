@@ -134,8 +134,8 @@ fn real_silero_reset_is_deterministic_and_invalid_input_erases_history() {
         .process(&[0; 960])
         .unwrap();
     assert_eq!(
-        (reset.probability, reset.ready),
-        (fresh.probability, fresh.ready)
+        (reset.probability, reset.ready, reset.evidence_rms),
+        (fresh.probability, fresh.ready, fresh.evidence_rms)
     );
     assert!(!reset.ready);
 }
@@ -297,5 +297,43 @@ fn real_silero_default_threshold_retains_a_brief_phrase_after_quiet() {
                 .pcm,
             pcm
         );
+    }
+}
+
+#[test]
+#[ignore = "requires installed CPU ONNX Runtime 1.22; no network, microphone or API"]
+fn real_silero_tail_evidence_uses_the_decision_window_at_different_native_phases() {
+    for lead_frames in [5, 10] {
+        let mut gate = gate();
+        let start = Instant::now();
+        let speech = &SPEECH[960 * 25..960 * 37];
+        let mut source = vec![0; 960 * lead_frames];
+        source.extend_from_slice(speech);
+        source.extend_from_slice(&vec![0; 960 * 60]);
+        let mut emitted = Vec::new();
+        for (index, pcm) in source.chunks_exact(960).enumerate() {
+            emitted.extend(
+                gate.admit(
+                    frame(pcm, start + Duration::from_millis(index as u64 * 20)),
+                    false,
+                )
+                .unwrap(),
+            );
+        }
+        assert_eq!(
+            gate.openings, 1,
+            "confirmed model window cannot lose its RMS merely because the current 20ms frame is quiet: lead={lead_frames}"
+        );
+        for (index, pcm) in speech.chunks_exact(960).enumerate() {
+            let at = start + Duration::from_millis((index + lead_frames) as u64 * 20);
+            assert_eq!(
+                emitted
+                    .iter()
+                    .find(|frame| frame.captured == at)
+                    .expect("phase regression must preserve original speech")
+                    .pcm,
+                pcm
+            );
+        }
     }
 }
