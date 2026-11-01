@@ -138,7 +138,8 @@ usage() {
   --gen-config                比较新旧默认模板字段，仅字段变化时备份并更新配置
   --skip-bar                  跳过 bar 安装
   --skip-jwm                  跳过 jwm 和 Eva 编译安装（仅处理 bar）
-  --skip-eva                  跳过 Eva 语音助手编译安装
+  --skip-eva                  跳过 Eva 语音助手编译安装（共享协调器仍安装）
+  JWM_COMPANION_BINARY=PATH    使用预编译的 jcompaniond，跳过固定版本构建
   单独安装/更新内置壁纸（无需编译）: bash scripts/install-wallpapers.sh
   -h, --help                  显示此帮助信息
 
@@ -428,6 +429,23 @@ install_system_binary() {
 
     sudo install -m755 "$src" "$dest_dir/"
 }
+
+# The coordinator is separate from the microphone/voice assistant. JWM owns
+# its graphical-session startup; installing it does not enable a login-wide unit.
+build_and_install_companion() (
+    if [[ -n "${JWM_COMPANION_BINARY:-}" ]]; then
+        [[ -x "$JWM_COMPANION_BINARY" ]] || { err "jcompaniond 不可执行: $JWM_COMPANION_BINARY"; return 1; }
+        sudo install -m755 "$JWM_COMPANION_BINARY" /usr/local/bin/jcompaniond
+        return
+    fi
+    local stage
+    stage=$(mktemp -d "${TMPDIR:-/tmp}/jwm-companion-install.XXXXXXXX")
+    trap 'rm -rf -- "$stage"' EXIT
+    info "编译共享 Eva 协调器（固定兼容版本）..."
+    cargo install --locked --git https://github.com/beamiter/jcompanion.git \
+        --rev ff38a6479c7b2d8e809a961ab72d4e79073576cf --root "$stage" jcompaniond
+    install_system_binary "$stage/bin/jcompaniond" /usr/local/bin
+)
 
 # ============================================================
 # 安装 bar 到 cargo bin
@@ -1062,6 +1080,7 @@ fi
 # 2. 处理 jwm
 if [[ "$SKIP_JWM" == false ]]; then
     build_and_install_jwm
+    build_and_install_companion
     install_bundled_wallpapers
     if [[ "$SKIP_EVA" == false ]]; then build_and_install_eva; fi
     # Only migrate the legacy cargo installation after every replacement and

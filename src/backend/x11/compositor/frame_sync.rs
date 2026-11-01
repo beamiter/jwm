@@ -1,4 +1,4 @@
-//! Opt-in extended X11 frame feedback. X11 I/O belongs to the worker; the
+//! Extended X11 frame feedback, enabled by default for shared Eva. X11 I/O belongs to the worker; the
 //! compositor consumes immutable counter snapshots and reports successful swaps.
 //! A swap timestamp is the protocol's permitted nearby presentation time, NOT
 //! physical scanout or a companion CompositorPresented retirement certificate.
@@ -22,6 +22,10 @@ use x11rb::{
     rust_connection::RustConnection,
     wrapper::ConnectionExt as _,
 };
+
+fn requested(shared_eva: bool, explicit: Option<&str>) -> bool {
+    explicit.map_or(shared_eva, |value| value == "1")
+}
 
 const LIMIT: usize = 4096;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -58,7 +62,13 @@ impl FrameSync {
         windows: Vec<u32>,
         signal: calloop::LoopSignal,
     ) -> Option<Self> {
-        if std::env::var("JWM_X11_FRAME_SYNC").as_deref() != Ok("1") {
+        if !requested(
+            crate::config::CONFIG
+                .load()
+                .behavior()
+                .eva_companion_enabled,
+            std::env::var("JWM_X11_FRAME_SYNC").ok().as_deref(),
+        ) {
             return None;
         }
         let wake = AsyncUpdateNotifier::new().ok()?;
@@ -626,6 +636,13 @@ fn worker(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn shared_eva_enables_feedback_without_overriding_an_explicit_opt_out() {
+        assert!(requested(true, None));
+        assert!(!requested(false, None));
+        assert!(!requested(true, Some("0")));
+        assert!(requested(false, Some("1")));
+    }
     #[test]
     fn only_even_observed_frames_of_the_same_window_generation_are_acknowledged() {
         let mut tracker = Tracker::default();

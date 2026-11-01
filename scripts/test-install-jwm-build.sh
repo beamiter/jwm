@@ -10,6 +10,11 @@ mkdir -p "$REPO/scripts" "$REPO/bars/tao_glow_bar" "$REPO/bars/tao_pixels_bar" "
 cp "$ROOT/packaging/69-jwm-touchpad-gestures.rules" "$REPO/packaging/"
 cp "$ROOT/scripts/install-jwm.sh" "$ROOT/scripts/install-wallpapers.sh" "$ROOT/scripts/jwm-toggle-sidebar-mode" "$ROOT/scripts/install-eva.sh" "$REPO/scripts/"
 cp "$ROOT/scripts/set-jwm-defaults.py" "$REPO/scripts/"
+# Use a private prebuilt companion; these tests exercise JWM's installer and
+# must never fetch or build an external repository.
+printf '#!/bin/sh\nexit 0\n' > "$TEST_ROOT/bin/fixture-jcompaniond"
+chmod +x "$TEST_ROOT/bin/fixture-jcompaniond"
+export JWM_COMPANION_BINARY="$TEST_ROOT/bin/fixture-jcompaniond"
 cp "$ROOT/scripts/install-webkit-bar-launcher.sh" "$ROOT/scripts/run-with-webkit-transparent.sh" "$REPO/scripts/"
 cp "$ROOT/scripts/check-webkitgtk-version.sh" "$REPO/scripts/"
 cp "$ROOT/eva/dist/eva.toml" "$ROOT/eva/dist/jwm-eva.service" "$REPO/eva/dist/"

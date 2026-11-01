@@ -619,6 +619,9 @@ impl ClientMoveResize {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BehaviorConfig {
+    /// Start/reuse the shared Eva coordinator with this graphical session.
+    #[serde(default = "default_true")]
+    pub eva_companion_enabled: bool,
     pub focus_follows_new_window: bool,
     /// Put a window back where its application was last closed. Disabled by
     /// default: new windows use the focused monitor's active tags, subject to
@@ -2407,6 +2410,7 @@ impl Default for Config {
                     ui_theme: default_ui_theme(),
                 },
                 behavior: BehaviorConfig {
+                    eva_companion_enabled: true,
                     focus_follows_new_window: false,
                     remember_closed_placement: false,
                     new_client_position: default_new_client_position(),
@@ -6121,6 +6125,9 @@ impl Config {
             }
             "behavior.wallpaper_dir" => self.inner.behavior.wallpaper_dir = as_string()?,
             "behavior.wallpaper_colors" => self.inner.behavior.wallpaper_colors = as_bool()?,
+            "behavior.eva_companion_enabled" => {
+                self.inner.behavior.eva_companion_enabled = as_bool()?
+            }
             "behavior.remember_closed_placement" => {
                 self.inner.behavior.remember_closed_placement = as_bool()?
             }
@@ -6630,6 +6637,27 @@ mod tests {
         key_function_is_repeatable, migrate_legacy_terminal_argument, parse_terminal_override,
         resolve_cursor_size, scene_linear_render_path_requested, x11_compositor_override,
     };
+
+    #[test]
+    fn eva_coordinator_defaults_on_and_preserves_explicit_disable() {
+        let cfg = Config::default();
+        assert!(cfg.behavior().eva_companion_enabled);
+        let serialized = toml::to_string(&cfg.inner).unwrap();
+        let omitted = serialized
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("eva_companion_enabled"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let legacy: TomlConfig = toml::from_str(&omitted).unwrap();
+        assert!(legacy.behavior.eva_companion_enabled);
+        let mut disabled = cfg;
+        disabled
+            .set_value("behavior.eva_companion_enabled", &serde_json::json!(false))
+            .unwrap();
+        let restored: TomlConfig =
+            toml::from_str(&toml::to_string(&disabled.inner).unwrap()).unwrap();
+        assert!(!restored.behavior.eva_companion_enabled);
+    }
 
     #[test]
     fn closed_placement_config_migration_preserves_only_explicit_opt_in() {

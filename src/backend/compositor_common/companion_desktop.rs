@@ -18,14 +18,15 @@ pub(crate) fn publish_locked(locked: bool) {
     LOCKED.store(locked, Ordering::Release);
     HAVE_STATE.store(true, Ordering::Release);
 }
-pub(crate) fn start() {
-    if ![
-        "JWM_COMPANION_OBSERVER",
-        "JWM_COMPANION_SCENE",
-        "JWM_EVA_COMPANION",
-    ]
-    .iter()
-    .any(|key| std::env::var(key).as_deref() == Ok("1"))
+pub(crate) fn start(default_enabled: bool) {
+    if !(default_enabled
+        || [
+            "JWM_COMPANION_OBSERVER",
+            "JWM_COMPANION_SCENE",
+            "JWM_EVA_COMPANION",
+        ]
+        .iter()
+        .any(|key| std::env::var(key).as_deref() == Ok("1")))
         || std::env::var_os("SSH_CONNECTION").is_some()
     {
         return;

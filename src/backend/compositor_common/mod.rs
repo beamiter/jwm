@@ -67,3 +67,5 @@ pub(crate) mod jelly_geometry;
 pub mod companion_scene;
 
 pub(crate) mod companion_desktop;
+
+pub(crate) mod companion_startup;

@@ -229,3 +229,28 @@ non-UTF-8 argument values and avoids rebuilding an argument vector on every
 in-process fallback restart.
 
 `jwm-tool health` prints compact `wayland` for startup operators.
+
+## Shared Eva coordinator
+
+JWM starts or reuses `jcompaniond` by default when the graphical event loop starts.
+All four terminals default to Shared Eva and only connect; they do not spawn a
+coordinator. `[behavior] eva_companion_enabled = false` disables JWM startup at
+the next JWM launch. The coordinator must be beside JWM, in `~/.local/bin`, or on
+PATH; `JWM_COMPANION_DAEMON` can name an absolute executable path. The installer
+installs a pinned compatible coordinator independently of the voice assistant;
+`JWM_COMPANION_BINARY` accepts a prebuilt coordinator at install time.
+
+Startup runs off the WM thread, reuses an already served default socket, and
+retains the daemon's profile/socket locks and authority journal. The daemon's
+private profile/log are `$XDG_STATE_HOME/jcompanion-eva` (otherwise
+`~/.local/state/jcompanion-eva`). An explicit `EVA_COMPANION_SOCKET` means an
+externally managed coordinator and suppresses JWM auto-start. Missing binaries,
+permissions, session mismatch or recovery blocks remain diagnostic failures;
+startup never removes a residence journal or starts a model/microphone.
+
+The default also connects JWM's lock/resume observer and enables its X11 extended
+frame feedback. `JWM_X11_FRAME_SYNC=0` remains an explicit feedback opt-out.
+The coordinator survives a healthy JWM restart in the same graphical session;
+this does not implement cross-session migration or uncertain-authority recovery.
+
+Native lifecycle limit (2026-11-01): an additional real X11 WM-restart probe reused the same coordinator PID and reconnected the observer, but the Anvil body stayed awaiting removal proof. Body resumption across WM restart is not accepted by the default-startup checkpoint; the failed raw report is preserved.

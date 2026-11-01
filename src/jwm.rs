@@ -2252,7 +2252,9 @@ impl Jwm {
     }
 
     pub fn run(&mut self, backend: &mut dyn Backend) -> Result<(), Box<dyn std::error::Error>> {
-        crate::backend::compositor_common::companion_desktop::start();
+        let shared_eva = CONFIG.load().behavior().eva_companion_enabled;
+        crate::backend::compositor_common::companion_startup::start(shared_eva);
+        crate::backend::compositor_common::companion_desktop::start(shared_eva);
         crate::backend::compositor_common::companion_scene::start(
             self.async_update_notifier.clone(),
         );
