@@ -1,4 +1,7 @@
-use crate::{action, button, error, local_path, note_title};
+use crate::{
+    action, error, local_path, note_title,
+    ui::{self, Icon, button},
+};
 use gtk::{gio, glib, prelude::*};
 use std::{
     cell::{Cell, RefCell},
@@ -140,38 +143,20 @@ fn open_window(app: &gtk::Application, file: Option<gio::File>, create_new: bool
         .default_width(960)
         .default_height(680)
         .build();
-    let header = gtk::HeaderBar::new();
     let title = gtk::Label::new(Some("备忘录"));
     title.set_ellipsize(gtk::pango::EllipsizeMode::End);
-    header.set_title_widget(Some(&title));
-    header.pack_start(&button(
-        "document-new-symbolic",
-        "新建备忘录 (Ctrl+N)",
-        "win.new",
-    ));
-    header.pack_start(&button(
-        "document-open-symbolic",
-        "打开文本文件 (Ctrl+O)",
-        "win.open",
-    ));
-    header.pack_end(&button(
-        "document-save-as-symbolic",
-        "另存为 / 导出 (Ctrl+Shift+S)",
-        "win.save-as",
-    ));
-    header.pack_end(&button(
-        "document-save-symbolic",
-        "保存 (Ctrl+S)",
-        "win.save",
-    ));
+    let header = ui::header(&window, Icon::Notes, "JWM 备忘录", &title);
+    let save = button(Icon::Save, "保存 (Ctrl+S)", "win.save");
+    let export = button(Icon::Export, "另存为 / 导出 (Ctrl+Shift+S)", "win.save-as");
+    let document_tools = ui::group(&[&save, &export]);
     if managed {
-        header.pack_end(&button(
-            "user-trash-symbolic",
-            "将备忘录移至废纸篓",
-            "win.trash",
-        ));
+        document_tools.append(&button(Icon::Trash, "将备忘录移至废纸篓", "win.trash"));
     }
-    window.set_titlebar(Some(&header));
+    header.pack_end(&document_tools);
+    header.pack_end(&ui::group(&[
+        &button(Icon::New, "新建备忘录 (Ctrl+N)", "win.new"),
+        &button(Icon::Folder, "打开文本文件 (Ctrl+O)", "win.open"),
+    ]));
     let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
     let body = gtk::Paned::new(gtk::Orientation::Horizontal);
     body.set_vexpand(true);
@@ -180,9 +165,10 @@ fn open_window(app: &gtk::Application, file: Option<gio::File>, create_new: bool
     body.set_shrink_start_child(false);
     let sidebar = gtk::Box::new(gtk::Orientation::Vertical, 8);
     sidebar.set_size_request(210, -1);
-    sidebar.add_css_class("sidebar");
+    sidebar.add_css_class("jwm-sidebar");
     let search = gtk::SearchEntry::builder()
         .placeholder_text("搜索备忘录")
+        .css_classes(["jwm-search"])
         .build();
     search.set_margin_top(12);
     search.set_margin_start(12);
@@ -204,8 +190,8 @@ fn open_window(app: &gtk::Application, file: Option<gio::File>, create_new: bool
     let editor = gtk::TextView::builder()
         .buffer(&buffer)
         .wrap_mode(gtk::WrapMode::WordChar)
-        .top_margin(28)
-        .bottom_margin(28)
+        .top_margin(32)
+        .bottom_margin(32)
         .left_margin(32)
         .right_margin(32)
         .accepts_tab(true)
@@ -218,15 +204,7 @@ fn open_window(app: &gtk::Application, file: Option<gio::File>, create_new: bool
         .build();
     body.set_end_child(Some(&scroll));
     root.append(&body);
-    let status = gtk::Label::builder()
-        .xalign(0.0)
-        .margin_start(16)
-        .margin_end(16)
-        .margin_top(8)
-        .margin_bottom(8)
-        .ellipsize(gtk::pango::EllipsizeMode::Middle)
-        .build();
-    status.add_css_class("dim-label");
+    let status = ui::status();
     root.append(&status);
     window.set_child(Some(&root));
     let notes = Rc::new(Notes {

@@ -1,4 +1,7 @@
-use crate::{action, button, error, local_path, neighbors};
+use crate::{
+    action, error, local_path, neighbors,
+    ui::{self, Icon, button},
+};
 use gtk::{gdk, gdk_pixbuf, gio, glib, prelude::*};
 use std::{
     cell::{Cell, RefCell},
@@ -75,44 +78,23 @@ pub fn open(app: &gtk::Application, files: Vec<gio::File>) {
         .build();
     let title = gtk::Label::new(Some("图片查看器"));
     title.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
-    let header = gtk::HeaderBar::new();
-    header.set_title_widget(Some(&title));
-    header.pack_start(&button(
-        "document-open-symbolic",
-        "打开图片 (Ctrl+O)",
-        "win.open",
-    ));
-    let previous = button("go-previous-symbolic", "上一张 (←)", "win.previous");
-    let next = button("go-next-symbolic", "下一张 (→)", "win.next");
-    header.pack_start(&previous);
-    header.pack_start(&next);
-    header.pack_end(&button(
-        "view-fullscreen-symbolic",
-        "全屏 (F11)",
-        "win.fullscreen",
-    ));
-    header.pack_end(&button(
-        "object-rotate-right-symbolic",
-        "顺时针旋转 (R)",
-        "win.rotate",
-    ));
-    header.pack_end(&button("zoom-fit-best-symbolic", "适应窗口 (F)", "win.fit"));
-    header.pack_end(&button(
-        "zoom-original-symbolic",
-        "原始大小 (1)",
-        "win.actual",
-    ));
-    header.pack_end(&button(
-        "zoom-in-symbolic",
-        "放大 (+ / Ctrl+滚轮)",
-        "win.zoom-in",
-    ));
-    header.pack_end(&button(
-        "zoom-out-symbolic",
-        "缩小 (- / Ctrl+滚轮)",
-        "win.zoom-out",
-    ));
-    window.set_titlebar(Some(&header));
+    let header = ui::header(&window, Icon::Image, "JWM 图片查看器", &title);
+    let previous = button(Icon::Previous, "上一张 (←)", "win.previous");
+    let next = button(Icon::Next, "下一张 (→)", "win.next");
+    let fullscreen = button(Icon::Fullscreen, "全屏 (F11)", "win.fullscreen");
+    header.pack_end(&ui::group(&[
+        &button(Icon::ZoomOut, "缩小 (- / Ctrl+滚轮)", "win.zoom-out"),
+        &button(Icon::ZoomIn, "放大 (+ / Ctrl+滚轮)", "win.zoom-in"),
+        &button(Icon::Actual, "原始大小 (1)", "win.actual"),
+        &button(Icon::Fit, "适应窗口 (F)", "win.fit"),
+        &button(Icon::Rotate, "顺时针旋转 (R)", "win.rotate"),
+        &fullscreen,
+    ]));
+    header.pack_end(&ui::group(&[
+        &button(Icon::Folder, "打开图片 (Ctrl+O)", "win.open"),
+        &previous,
+        &next,
+    ]));
     let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
     let picture = gtk::Picture::builder()
         .can_shrink(true)
@@ -130,20 +112,13 @@ pub fn open(app: &gtk::Application, files: Vec<gio::File>) {
         .margin_start(32)
         .margin_end(32)
         .build();
-    placeholder.add_css_class("dim-label");
+    placeholder.add_css_class("jwm-placeholder");
     let stack = gtk::Stack::builder().hexpand(true).vexpand(true).build();
+    stack.add_css_class("jwm-image-canvas");
     stack.add_named(&placeholder, Some("empty"));
     stack.add_named(&scroll, Some("image"));
     root.append(&stack);
-    let status = gtk::Label::builder()
-        .xalign(0.0)
-        .margin_start(16)
-        .margin_end(16)
-        .margin_top(8)
-        .margin_bottom(8)
-        .ellipsize(gtk::pango::EllipsizeMode::Middle)
-        .build();
-    status.add_css_class("dim-label");
+    let status = ui::status();
     root.append(&status);
     window.set_child(Some(&root));
     let viewer = Rc::new(Viewer {

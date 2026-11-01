@@ -2,6 +2,7 @@ use gtk::{gio, glib, prelude::*};
 use std::path::{Path, PathBuf};
 
 pub mod notes;
+mod ui;
 pub mod viewer;
 
 pub fn run(id: &str, name: &str, notes: bool) -> glib::ExitCode {
@@ -30,6 +31,7 @@ pub fn run(id: &str, name: &str, notes: bool) -> glib::ExitCode {
         .application_id(id)
         .flags(gio::ApplicationFlags::HANDLES_OPEN)
         .build();
+    app.connect_startup(|_| ui::install());
     app.connect_activate(move |app| {
         if let Some(window) = app.active_window() {
             window.present();
@@ -49,14 +51,6 @@ pub fn run(id: &str, name: &str, notes: bool) -> glib::ExitCode {
         }
     });
     app.run()
-}
-
-pub(crate) fn button(icon: &str, tooltip: &str, action: &str) -> gtk::Button {
-    gtk::Button::builder()
-        .icon_name(icon)
-        .tooltip_text(tooltip)
-        .action_name(action)
-        .build()
 }
 
 pub(crate) fn action(

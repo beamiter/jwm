@@ -93,6 +93,12 @@ def main():
                 result = subprocess.check_output(["import", "-window", str(identifier), "png:-"], env=env)
                 return Image.open(io.BytesIO(result)).convert("RGB")
 
+            def close_button(identifier):
+                image = screenshot(identifier)
+                command("xdotool", "mousemove", "--window", identifier, image.width - 34, 32,
+                        "click", "1")
+                time.sleep(.15)
+
             def color_bounds(identifier):
                 image = screenshot(identifier)
                 # Red/green test images have high saturation; the GTK chrome
@@ -119,7 +125,7 @@ def main():
                 if args.evidence_dir:
                     args.evidence_dir.mkdir(parents=True, exist_ok=True)
                     screenshot(notes_window).save(args.evidence_dir / "notes.png")
-                key("ctrl+w")
+                close_button(notes_window)
                 wait(lambda: notebook.poll() is not None, "Notebook did not exit after closing")
                 notebook = launch("jwm-notes")
                 notes_window = window("Second note.*JWM 备忘录")
@@ -150,6 +156,11 @@ def main():
                 assert external.read_text() == "Changed by another editor", "Save overwrote an external change"
                 assert editor.poll() is None, "Conflict killed the editor"
                 key("Return")  # Dismiss save error.
+                close_button(edit_window)
+                time.sleep(.2)
+                assert editor.poll() is None, "Header close discarded unsaved edits"
+                key("Escape")  # Cancel the unsaved-changes prompt.
+                assert external.read_text() == "Changed by another editor", "Header close overwrote the conflict"
                 print("Explicit text save, encoding preservation and external conflict: PASS", flush=True)
                 editor.terminate()
                 editor.wait(3)
@@ -178,12 +189,13 @@ def main():
                 if args.evidence_dir:
                     time.sleep(.2)
                     screenshot(image_window).save(args.evidence_dir / "image-viewer.png")
-                key("ctrl+w")
+                close_button(image_window)
                 wait(lambda: viewer.poll() is not None, "Viewer did not exit after closing")
                 print("Image rendering, actual size, rotation, zoom, WebP and directory wrap: PASS", flush=True)
                 log.flush()
                 contents = (work / "apps.log").read_text()
-                assert "panicked" not in contents and "CRITICAL" not in contents, contents
+                assert all(error not in contents for error in
+                           ("panicked", "CRITICAL", "Theme parser error")), contents
             finally:
                 for process in reversed(processes):
                     if process.poll() is None:

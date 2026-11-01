@@ -8,6 +8,20 @@ then registers their defaults in `$XDG_CONFIG_HOME/jwm-mimeapps.list` (normally
 preferences are preserved. Release bundles register Open With entries; as with
 the player, they do not modify user MIME preferences.
 
+Both apps share JWM Player's dark charcoal surfaces, pale blue accent, compact
+line icons, 32-pixel buttons and grouped header actions. The GTK stylesheet and
+icon drawing live in `crates/jwm_apps/src/ui.css` and `src/ui.rs`; no Lua or mpv
+runtime is needed for these apps. Native GTK text editing, input methods, file
+dialogs and keyboard shortcuts are retained.
+
+The app name sits on the left, the document title in the middle, and file/view
+actions and minimize/maximize/close controls on the right. Drag empty header
+space to move the window, double-click to maximize/restore, or right-click for
+the desktop's window menu, according to the desktop's GTK titlebar settings.
+The close button follows the same save/prompt path as Ctrl+W. Header actions
+remain visible while editing; the image viewer's native fullscreen mode hides
+the titlebar, and Escape returns to the window.
+
 ## Notes
 
 Run `jwm-notes` for the notebook, or `jwm-notes -- FILE…` to edit text files.
