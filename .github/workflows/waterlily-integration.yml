@@ -14,7 +14,8 @@ on:
       - src/jwm.rs
       - src/jwm/event_dispatcher.rs
       - src/jwm/features/toggles.rs
-      - waterlily/**
+      - scripts/waterlily.sh
+      - scripts/test-waterlily-helper.py
       - tools/validate_waterlily_shaders.py
       - docs/waterlily.md
       - .github/workflows/waterlily-integration.yml
@@ -33,7 +34,8 @@ on:
       - src/jwm.rs
       - src/jwm/event_dispatcher.rs
       - src/jwm/features/toggles.rs
-      - waterlily/**
+      - scripts/waterlily.sh
+      - scripts/test-waterlily-helper.py
       - tools/validate_waterlily_shaders.py
       - docs/waterlily.md
       - .github/workflows/waterlily-integration.yml
@@ -98,16 +100,6 @@ jobs:
         with:
           components: rustfmt
 
-      - name: Install the locked Julia version
-        uses: julia-actions/setup-julia@da908477b5db94c10ffce8cfea9f2b3b9d5db687  # v3.0.3
-        with:
-          version: "1.12.6"
-
-      - name: Cache Julia packages
-        uses: julia-actions/cache@9353db09a0f2bbbdec6f41791918c75d37391b36  # v3.5.0
-        with:
-          delete-old-caches: "false"
-
       - name: Check WaterLily integration formatting
         run: cargo fmt --all -- --check
 
@@ -117,23 +109,8 @@ jobs:
       - name: Compile embedded WaterLily postprocess shader
         run: python3 tools/validate_waterlily_shaders.py
 
-      - name: Parse Julia worker sources
-        run: |
-          mapfile -t julia_sources < <(find waterlily -type f -name '*.jl' -print)
-          julia --startup-file=no -e \
-            'foreach(path -> Meta.parseall(read(path, String)), ARGS)' \
-            "${julia_sources[@]}"
-
-      - name: Test Julia WaterLily worker
-        env:
-          JULIA_NUM_THREADS: auto
-        run: |
-          set -euo pipefail
-          test -f waterlily/Manifest.toml
-          julia --startup-file=no --project=waterlily -e \
-            'using Pkg; Pkg.instantiate(); Pkg.test(; allow_reresolve=false)'
-          git diff --exit-code -- \
-            waterlily/Project.toml waterlily/Manifest.toml
+      - name: Test external provider compatibility helper
+        run: python3 scripts/test-waterlily-helper.py
 
       - name: Check all targets
         run: cargo check --locked --all-targets
@@ -147,42 +124,3 @@ jobs:
           JWM_REQUIRE_HEADLESS_GL: "1"
           LIBGL_ALWAYS_SOFTWARE: "1"
         run: cargo test --locked --lib jelly_geometry
-
-  julia-1-10-compat:
-    name: Julia 1.10 compatibility canary
-    runs-on: ubuntu-24.04
-    timeout-minutes: 60
-    steps:
-      - name: Check out source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Install exact Julia 1.10
-        uses: julia-actions/setup-julia@da908477b5db94c10ffce8cfea9f2b3b9d5db687  # v3.0.3
-        with:
-          version: "1.10.12"
-
-      - name: Cache Julia packages
-        uses: julia-actions/cache@9353db09a0f2bbbdec6f41791918c75d37391b36  # v3.5.0
-        with:
-          delete-old-caches: "false"
-
-      # This canary intentionally resolves from Project.toml on the declared
-      # compatibility floor. The primary job remains locked to Julia 1.12.6.
-      - name: Resolve and test the compatibility floor in a temporary copy
-        env:
-          JULIA_NUM_THREADS: auto
-        shell: bash
-        run: |
-          set -euo pipefail
-          compat_project="$RUNNER_TEMP/waterlily-julia-1.10"
-          cp -R waterlily "$compat_project"
-          rm -f -- "$compat_project/Manifest.toml"
-          # With no manifest, instantiate resolves the compatibility project
-          # and bootstraps General on a cold depot. resolve alone assumes the
-          # registry already exists and fails before installing dependencies.
-          julia --startup-file=no --project="$compat_project" -e \
-            'using Pkg; Pkg.instantiate(); Pkg.test()'
-          git diff --exit-code -- \
-            waterlily/Project.toml waterlily/Manifest.toml

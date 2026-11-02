@@ -17,6 +17,10 @@ class WaterLilyHelperTests(unittest.TestCase):
         self.addCleanup(self.directory.cleanup)
         self.root = Path(self.directory.name)
         self.log = self.root / "calls.jsonl"
+        self.project = self.root / "provider with spaces"
+        self.project.mkdir()
+        (self.project / "Project.toml").write_text('name = "JwmWaterLily"\n')
+        (self.project / "runner.jl").write_text("# test fixture\n")
         stub = self.root / "executable with spaces"
         stub.write_text("""#!/usr/bin/env python3
 import json, os, sys
@@ -31,7 +35,7 @@ sys.exit(int(os.environ.get('JULIA_EXIT', '0')))
 """)
         stub.chmod(0o700)
         self.env = dict(os.environ, JWM_TOOL=str(stub), JULIA=str(stub),
-                        CALL_LOG=str(self.log))
+                        CALL_LOG=str(self.log), JWM_WATERLILY_PROJECT=str(self.project))
 
     def run_helper(self, *args, enabled=False, connected=False, status=None, **env):
         self.env["STATUS_JSON"] = json.dumps(status if status is not None else {
@@ -59,17 +63,18 @@ sys.exit(int(os.environ.get('JULIA_EXIT', '0')))
         calls = self.calls()
         self.assertEqual(calls[:2], [["msg", "get_waterlily_status", "--raw"],
                                      ["msg", "toggle_waterlily"]])
-        self.assertEqual(calls[2], [f"--project={SCRIPT.parent.parent / 'waterlily'}",
-                                    "--threads=auto", str(SCRIPT.parent.parent / "waterlily/runner.jl"),
+        self.assertEqual(calls[2], [f"--project={self.project}",
+                                    "--threads=auto", str(self.project / "runner.jl"),
                                     "--device", "auto"])
 
     def test_runner_arguments_and_project_preserve_boundaries(self):
-        project = "/tmp/project space"
+        project = str(self.project)
         result = self.run_helper("start", "--case", "dance", "--socket", "/tmp/socket space",
                                  enabled=True, JWM_WATERLILY_PROJECT=project)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(len(self.calls()), 2)
         self.assertEqual(self.calls()[-1][0], f"--project={project}")
+        self.assertEqual(self.calls()[-1][2], str(self.project / "runner.jl"))
         self.assertEqual(self.calls()[-1][-4:], ["--case", "dance", "--socket", "/tmp/socket space"])
 
     def test_start_reuses_connected_worker_idempotently(self):
@@ -130,6 +135,18 @@ sys.exit(int(os.environ.get('JULIA_EXIT', '0')))
 
     def test_missing_julia_does_not_toggle(self):
         result = self.run_helper("start", JULIA=str(self.root / "missing"))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(len(self.calls()), 1)
+
+    def test_missing_external_provider_never_toggles_or_spawns(self):
+        result = self.run_helper("start", JWM_WATERLILY_PROJECT=str(self.root / "missing"))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("beamiter/juliafun", result.stderr)
+        self.assertEqual(len(self.calls()), 1)
+
+    def test_incomplete_provider_never_toggles_or_spawns(self):
+        (self.project / "runner.jl").unlink()
+        result = self.run_helper("start")
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(len(self.calls()), 1)
 

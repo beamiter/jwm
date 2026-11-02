@@ -19,6 +19,7 @@
 #   OUT_DIR       output directory       (default: ~/Videos/jwm-waterlily)
 #   SIM_SIZE      worker --sim-size      (default: 1280x800)
 #   WORKER_FPS    worker --fps           (default: 30)
+#   JWM_WATERLILY_PROJECT provider project (default: ../juliafun/waterlily)
 #   CASE_DWELL    seconds per case       (default: 12)
 #   PALETTE_DWELL seconds per palette    (default: 10)
 #   STYLUS_DWELL  seconds per stylus palette (fluent/sith/mica) (default: 40)
@@ -41,6 +42,7 @@ for act in ${ACTS//,/ }; do
 done
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+WATERLILY_PROJECT="${JWM_WATERLILY_PROJECT:-$REPO/../juliafun/waterlily}"
 OUT_DIR="${OUT_DIR:-$HOME/Videos/jwm-waterlily}"
 SIM_SIZE="${SIM_SIZE:-1280x800}"
 # 轨迹速度在仿真网格坐标系里才有意义(像素→网格的 x/y 比例不同)。
@@ -322,9 +324,13 @@ ensure_worker() {
         echo "Check that worker and its target display before retrying." >&2
         exit 1
     fi
+    [[ -f $WATERLILY_PROJECT/Project.toml && -f $WATERLILY_PROJECT/runner.jl ]] || {
+        echo "WaterLily moved to beamiter/juliafun; set JWM_WATERLILY_PROJECT to its waterlily directory" >&2
+        exit 1
+    }
     gpu_preflight
     log "starting WaterLily worker (--sim-size $SIM_SIZE --fps $WORKER_FPS, device auto)"
-    nohup julia --project="$REPO/waterlily" "$REPO/waterlily/runner.jl" \
+    nohup julia --project="$WATERLILY_PROJECT" "$WATERLILY_PROJECT/runner.jl" \
         --device auto --fps "$WORKER_FPS" --sim-size "$SIM_SIZE" \
         >"$WORKER_LOG" 2>&1 &
     SPAWNED_WORKER_PID=$!

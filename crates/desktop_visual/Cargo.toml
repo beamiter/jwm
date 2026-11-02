@@ -1,0 +1,11 @@
+[package]
+name = "desktop_visual"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+license = "MIT"
+description = "Bounded, out-of-process desktop visual frame transport"
+repository = "https://github.com/beamiter/jwm"
+
+[dependencies]
+libc = "0.2.186"

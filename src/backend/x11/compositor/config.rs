@@ -210,6 +210,9 @@ impl<C: CompositorConnection> Compositor<C> {
         {
             return true;
         }
+        if self.desktop_visual_pending() {
+            return true;
+        }
         // The worker wake thread must be observable even while fullscreen
         // unredirect/direct-scanout has stopped regular XDamage rendering.
         if self

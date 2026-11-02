@@ -3,8 +3,6 @@
 /video-demo/demo-client/target
 /video-demo/generated
 /video-demo/tmp
-/waterlily/LocalPreferences.toml
-/waterlily/.cuda-toolkit/
 __pycache__/
 **/*.rs.bk
 *.pdb

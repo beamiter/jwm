@@ -12,6 +12,7 @@
 # packages loaded standalone, and every bar fails with "current package
 # believes it's in a workspace when it's not".
 members = [
+    "crates/desktop_visual",
     "eva",
     "crates/jwm_eva_core",
     "crates/jwm_ipc_client",
@@ -158,6 +159,7 @@ path = "tools/jwm_remote.rs"
 required-features = ["remote-x11"]
 
 [dependencies]
+desktop_visual = { path = "crates/desktop_visual" }
 companion-client = { git = "https://github.com/beamiter/jcompanion.git", rev = "9aa569540091524d637a7115b64c587b9177a55b" }
 companion-protocol = { git = "https://github.com/beamiter/jcompanion.git", rev = "9aa569540091524d637a7115b64c587b9177a55b" }
 eva-character-atlas = { git = "https://github.com/beamiter/jcompanion.git", rev = "9aa569540091524d637a7115b64c587b9177a55b" }

@@ -7,6 +7,7 @@ mod jelly_renderer;
 mod solar_system_wallpaper;
 #[cfg(all(test, feature = "wayland-backends"))]
 pub(crate) use jelly_renderer::check_pipeline_for_test as check_jelly_pipeline_for_test;
+mod desktop_visual;
 mod overview;
 mod pipeline;
 mod platform;
@@ -706,7 +707,10 @@ where
     magnifier_zoom: f32,
     magnifier_uniforms: MagnifierUniforms,
 
-    // --- WaterLily simulation layer ---
+    // --- Generic, data-only desktop visual extension ---
+    desktop_visual: Option<desktop_visual::DesktopVisualLayer>,
+
+    // --- Legacy WaterLily consumer compatibility ---
     waterlily_program: glow::Program,
     waterlily_uniforms: WaterlilyUniforms,
     /// Ray-marching program for volumetric (version-2) frames.
@@ -1209,6 +1213,9 @@ unsafe impl<C: CompositorConnection> Send for Compositor<C> {}
 impl<C: CompositorConnection> Drop for Compositor<C> {
     fn drop(&mut self) {
         self.frame_sync.take();
+        if let Some(layer) = self.desktop_visual.take() {
+            layer.destroy(&self.gl);
+        }
         self.clear_overview_snapshots();
         if let Some(renderer) = self.jelly_renderer.take() {
             renderer.destroy(&self.gl);

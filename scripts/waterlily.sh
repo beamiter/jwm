@@ -16,6 +16,8 @@ status   Print the WaterLily status JSON.
 Runner options: --case, --device, --fps, --sim-size, --socket, --frame-file,
                 --jelly-detail (each followed by a value).
 Environment: JWM_TOOL, JULIA, JWM_WATERLILY_PROJECT override executable/project paths.
+The provider now lives in beamiter/juliafun/waterlily, not in JWM. A sibling
+../juliafun checkout is discovered by default; otherwise set JWM_WATERLILY_PROJECT.
 EOF
 }
 
@@ -95,8 +97,10 @@ case "$action" in
         fi
         julia=${JULIA:-julia}
         command -v "$julia" >/dev/null 2>&1 || fail 'Julia not found; instantiate the waterlily project first'
-        project=${JWM_WATERLILY_PROJECT:-$repo/waterlily}
+        project=${JWM_WATERLILY_PROJECT:-$repo/../juliafun/waterlily}
+        [[ -f $project/Project.toml && -f $project/runner.jl ]] ||
+            fail 'WaterLily moved to beamiter/juliafun; set JWM_WATERLILY_PROJECT to its waterlily directory'
         if [[ $enabled == 0 ]]; then "$JWM_TOOL" msg toggle_waterlily; fi
-        exec "$julia" "--project=$project" --threads=auto "$repo/waterlily/runner.jl" \
+        exec "$julia" "--project=$project" --threads=auto "$project/runner.jl" \
             --device auto "${runner_args[@]}" ;;
 esac

@@ -4734,6 +4734,8 @@ impl<C: CompositorConnection> Compositor<C> {
             || self.recording_active
             || self.remote_capture_active
             || self.recording_region_overlay.is_some()
+            || self.desktop_visual_visible()
+            || self.desktop_visual_pending()
             || self.waterlily_visible()
             || self.waterlily_layer_dirty
             || self.transition_start.is_some()
@@ -5478,24 +5480,33 @@ impl<C: CompositorConnection> Compositor<C> {
 
         // Consume the newest completed simulation frame before deciding whether
         // fullscreen may bypass the compositor.
-        if self
-            .waterlily_ipc
-            .as_ref()
-            .is_some_and(WaterlilyIpc::has_pending)
+        // A producer can publish between the pending observation and poll.
+        // When the generic endpoint exists, establish the context before any
+        // possible frame upload/retirement rather than relying on a racy hint.
+        if (self.desktop_visual.is_some()
+            || self
+                .waterlily_ipc
+                .as_ref()
+                .is_some_and(WaterlilyIpc::has_pending))
             && !self.context_current
         {
             if let Err(error) = self.graphics.make_current() {
                 log::error!(
                     "{}: {error}",
-                    self.renderer_ctx("waterlily: make context current")
+                    self.renderer_ctx("external visual: make context current")
                 );
                 self.needs_render = true;
                 return false;
             }
             self.context_current = true;
         }
+        self.poll_desktop_visual();
         self.poll_waterlily_frame();
-        let waterlily_layer_dirty = self.waterlily_layer_dirty;
+        let external_layer_dirty = self.waterlily_layer_dirty
+            || self
+                .desktop_visual
+                .as_ref()
+                .is_some_and(|layer| layer.dirty);
 
         // P6A: Process deferred X11 operations at start of render frame
         self.process_deferred_x11_ops();
@@ -5899,7 +5910,7 @@ impl<C: CompositorConnection> Compositor<C> {
         // A WaterLily publication changes only its native-size overlay region,
         // but it is still sufficient reason to render when no client texture
         // changed.
-        has_dirty |= waterlily_layer_dirty;
+        has_dirty |= external_layer_dirty;
         explicit_render |= std::mem::take(&mut self.needs_render);
         damage_wakeup |= std::mem::take(&mut self.damage_render_pending);
         // XDamage is a reason to enter the frame, but not a request to redraw
@@ -5996,7 +6007,7 @@ impl<C: CompositorConnection> Compositor<C> {
         // both the blur cache and partial framebuffer repair.
         let transition_only = self.transition_active()
             && !astronomy_changed
-            && !waterlily_layer_dirty
+            && !external_layer_dirty
             && !self.overview_active
             && !self.expose_active
             && !expose_animating
@@ -6012,7 +6023,7 @@ impl<C: CompositorConnection> Compositor<C> {
             && !tilt_pending
             && !attention_active;
         let uncached_blur_source_changed = astronomy_changed
-            || waterlily_layer_dirty
+            || external_layer_dirty
             || self.transition_active()
             || self.overview_active
             || self.expose_active
@@ -8163,6 +8174,7 @@ impl<C: CompositorConnection> Compositor<C> {
         // remains click-through and cannot take keyboard focus.
         let waterlily_backdrop = self.prepare_waterlily_backdrop(use_scissor);
         self.render_waterlily_layer(&proj, waterlily_backdrop);
+        self.render_desktop_visual(&proj);
 
         // Tick tilt after the render loop has set tilt_target from the focused window.
         // If no focused window set tilt_target this frame, it keeps 0 from the reset
@@ -9024,6 +9036,9 @@ impl<C: CompositorConnection> Compositor<C> {
         }
         self.buffer_age_damage_history.record(frame_damage);
         self.waterlily_layer_dirty = false;
+        if let Some(layer) = self.desktop_visual.as_mut() {
+            layer.dirty = false;
+        }
 
         // Genie completion owns native texture teardown/cache transfer. Do it
         // only after the exact terminal mesh sampled above has reached the

@@ -44,8 +44,10 @@ not a new tiling paradigm and not a feature-count race.
 - [Music and video playback](docs/media-playback.md) from the Shell Hub, with
   searchable local libraries, playlists, a native player window, and shared
   media keys / now-playing controls (`mpv` runtime).
+- Opt-in, data-only [desktop visual extensions](docs/desktop-visual.md): any
+  program can publish bounded RGBA images through the independent SDK/protocol.
 - Full-screen WaterLily.jl simulation frames on the X11RB/XCB compositor,
-  produced externally on CPU, CUDA, or ROCm.
+  produced by [juliafun/waterlily](https://github.com/beamiter/juliafun/tree/master/waterlily) on CPU, CUDA, or ROCm (no Julia dependency in JWM).
 - Live configuration reload and a newline-delimited JSON IPC API exposed through
   `jwm-tool`.
 - Authenticated JWM-to-JWM remote viewing and XTEST control for trusted X11

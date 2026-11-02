@@ -12,7 +12,8 @@ RUST_LOG=debug \
 target/debug/jwm
 
 # Julia producer. The simulation is scaled by JWM to the complete Xephyr output.
-julia --project=waterlily --threads=auto waterlily/runner.jl \
+WATERLILY_PROJECT=${JWM_WATERLILY_PROJECT:-../juliafun/waterlily}
+julia --project="$WATERLILY_PROJECT" --threads=auto "$WATERLILY_PROJECT/runner.jl" \
   --case wander \
   --device auto \
   --fps 30 \

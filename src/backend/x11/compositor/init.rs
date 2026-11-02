@@ -320,6 +320,18 @@ impl<C: CompositorConnection> Compositor<C> {
             }
         };
 
+        let desktop_visual = if desktop_visual::DesktopVisualLayer::enabled() {
+            match desktop_visual::DesktopVisualLayer::new::<C>(&gl, screen_w, screen_h) {
+                Ok(layer) => Some(layer),
+                Err(error) => {
+                    log::warn!("compositor: desktop visual extension disabled: {error}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         // WaterLily is a separate, input-transparent compositor layer. Keeping
         // it out of the post-process shader prevents its dimensions and updates
         // from changing how client windows are sampled or color processed.
@@ -1161,6 +1173,7 @@ impl<C: CompositorConnection> Compositor<C> {
             magnifier_radius: finite_clamp(behavior.magnifier_radius, 1.0, 4096.0, 200.0),
             magnifier_zoom: finite_clamp(behavior.magnifier_zoom, 1.0, 32.0, 2.0),
             magnifier_uniforms,
+            desktop_visual,
             // External WaterLily simulation layer
             waterlily_program,
             waterlily_uniforms,

@@ -605,6 +605,9 @@ impl<C: CompositorConnection> Compositor<C> {
                 signal.clone(),
             );
         }
+        if let Some(layer) = &self.desktop_visual {
+            layer.set_loop_signal(signal.clone());
+        }
         self.waterlily_loop_signal = Some(signal.clone());
         if let Some(ipc) = &self.waterlily_ipc {
             ipc.set_loop_signal(signal);

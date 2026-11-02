@@ -212,3 +212,19 @@ The GTK3 compatibility patch has an optimization-sensitive regression:
 `./scripts/test.sh --manifest-path tests/glib_backport/Cargo.toml --release`.
 It uses synthetic strings only; see `vendor/glib/JWM-BACKPORT.md` for upstream
 provenance and the version-based audit warning that remains applicable.
+
+## Desktop visual extension boundary
+
+Changes to `crates/desktop_visual`, the X11 generic consumer or producer SDKs run:
+
+```sh
+cargo test --locked -p desktop_visual --all-targets
+cargo clippy --locked -p desktop_visual --all-targets --no-deps -- -D warnings
+python3 -m unittest discover -s extensions/desktop_visual -p 'test_*.py' -v
+python3 scripts/test-desktop-visual-gl.py
+```
+
+The native IPC cases require private Unix sockets. An explicit sandbox skip is
+not a pass; retain the unskipped CI gate. The EGL check is software shader QA,
+not a real compositor/driver smoke. WaterLily simulation tests now live with the
+provider in `beamiter/juliafun/waterlily`; JWM retains compatibility-consumer tests.
