@@ -75,6 +75,16 @@ impl RenderContext {
         }
     }
 
+    pub(crate) fn set_wgpu_backends(&mut self, backends: wgpu::Backends) -> bool {
+        if !self.devices.is_empty() {
+            return false;
+        }
+        let mut descriptor = wgpu::InstanceDescriptor::from_env_or_default();
+        descriptor.backends = backends;
+        self.instance = Instance::new(&descriptor);
+        true
+    }
+
     pub(crate) fn set_wgpu_device_options(
         &mut self,
         features: wgpu::Features,
@@ -188,7 +198,7 @@ impl RenderContext {
                 && device_handle.adapter.get_info().name.contains("AMD"))
             {
                 tracing::info!(
-                    "using premultiplied blitting for native ARGB GLES or Windows AMD fallback"
+                    "using premultiplied blitting for native X11 ARGB or Windows AMD fallback"
                 );
                 TextureBlitterBuilder::new(&device_handle.device, format)
                     .blend_state(PREMUL_BLEND_STATE)
@@ -414,13 +424,15 @@ mod tests {
 }
 
 /// Vello's intermediate texture is straight-alpha. Native X11 ARGB needs
-/// premultiplied pixels even when GLES reports only an Opaque WSI surface.
+/// premultiplied pixels even when the WSI reports only an Opaque surface.
 fn native_x11_premultiplied_blit(
     native_argb: bool,
     backend: wgpu::Backend,
     modes: &[CompositeAlphaMode],
 ) -> bool {
-    native_argb && backend == wgpu::Backend::Gl && modes.contains(&CompositeAlphaMode::Opaque)
+    native_argb
+        && matches!(backend, wgpu::Backend::Gl | wgpu::Backend::Vulkan)
+        && modes.contains(&CompositeAlphaMode::Opaque)
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
@@ -514,7 +526,7 @@ mod native_alpha_tests {
     use super::native_x11_premultiplied_blit;
     use wgpu::{Backend, CompositeAlphaMode as Alpha};
     #[test]
-    fn only_verified_native_argb_gles_opaque_needs_extra_premultiplication() {
+    fn only_native_argb_gles_or_vulkan_opaque_needs_extra_premultiplication() {
         assert!(native_x11_premultiplied_blit(
             true,
             Backend::Gl,
@@ -525,7 +537,7 @@ mod native_alpha_tests {
             Backend::Gl,
             &[Alpha::Opaque]
         ));
-        assert!(!native_x11_premultiplied_blit(
+        assert!(native_x11_premultiplied_blit(
             true,
             Backend::Vulkan,
             &[Alpha::Opaque]

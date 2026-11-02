@@ -21,6 +21,19 @@ A plain reinstall preserves the existing `status_bar.name`; explicit `--bar`
 updates both JWM configuration files. `JWM_BAR_NAME` selects the installer
 default and explicit `--bar` takes precedence.
 
+`xilem_bar` follows JWM's live `behavior.blur_status_bar`: `false` gives a
+clear background, while `true` enables compositor blur with a 55% tint. An
+explicit `background_opacity` in `~/.config/xbar/config.toml` overrides the tint.
+Text and workspace controls retain their own opacity. Without a compositor or
+verified native alpha, the bar keeps a solid fallback. The alpha probe uses
+Masonry's WGPU version and adapter selection. Vulkan's `Opaque` capability is
+checked against a real presented ARGB pixel; drivers that retain alpha can keep
+GPU acceleration. If that check fails, it probes GLES and selects it for both
+stages when native ARGB is verified. Explicit `WGPU_BACKEND` choices remain
+authoritative. Startup logs record both probe and renderer adapters. Verify the
+X11 pixels and live blur toggle with
+`python3 scripts/test-xilem-background.py` after building the binaries.
+
 ### Optional Tauri bars
 
 `tauri_leptos_bar` remains available as a Tauri/WebKit window with a Leptos

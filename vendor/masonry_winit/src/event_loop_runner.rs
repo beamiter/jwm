@@ -437,6 +437,16 @@ impl MasonryState<'_> {
         }
     }
 
+    /// Select the WGPU backends before the first surface/device is created.
+    ///
+    /// Call from [`AppDriver::on_start`] after verifying that the chosen backend
+    /// supports the application's native window (for example, X11 ARGB).
+    /// Other instance options still follow the environment. Returns `false`
+    /// after a device has been created, without changing existing resources.
+    pub fn set_wgpu_backends(&mut self, backends: wgpu::Backends) -> bool {
+        self.render_cx.set_wgpu_backends(backends)
+    }
+
     /// Configure how Masonry requests the WGPU device (features and limits).
     ///
     /// This must be called before the first surface/device is created (i.e. before the first

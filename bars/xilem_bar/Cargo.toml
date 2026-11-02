@@ -13,13 +13,14 @@ log = "0.4"
 anyhow = "1"
 futures-lite = "2"
 raw-window-handle = "0.6"
-wgpu = "30"
-x11rb = { version = "0.14", features = ["allow-unsafe-code", "dl-libxcb"] }
+# The alpha probe must use the same WGPU API/backend selection as Masonry.
+wgpu = "28"
+x11rb = { version = "0.14", features = ["allow-unsafe-code", "dl-libxcb", "composite"] }
 xbar_core = { path = "../../crates/xbar_core", default-features = false, features = ["clock-chrono", "config-toml", "glass", "logging-flexi", "provider-alsa", "provider-battery-sysfs", "provider-brightnessctl", "provider-network-sysfs", "provider-system", "transport-shared"] }
 xbar_linux_actions = { path = "../../crates/xbar_core/crates/xbar_linux_actions" }
 
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 
-# Preserve Masonry/Vello while correctly premultiplying verified X11 ARGB GLES output.
+# Preserve Masonry/Vello while correctly premultiplying native X11 ARGB output.
 [patch."https://github.com/linebender/xilem"]
 masonry_winit = { path = "../../vendor/masonry_winit" }

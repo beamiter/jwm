@@ -32,8 +32,10 @@ use raw_window_handle::{
     WindowHandle, XcbDisplayHandle, XcbWindowHandle,
 };
 use x11rb::connection::Connection as _;
+use x11rb::protocol::composite::ConnectionExt as _;
 use x11rb::protocol::xproto::{
-    ColormapAlloc, ConnectionExt as _, CreateWindowAux, VisualClass, WindowClass,
+    ColormapAlloc, ConnectionExt as _, CreateWindowAux, ImageFormat, ImageOrder, VisualClass,
+    WindowClass,
 };
 use x11rb::xcb_ffi::XCBConnection;
 
@@ -187,10 +189,11 @@ struct GeometryDriver<D> {
     bridge: Arc<GeometryBridge>,
     windows: HashMap<WindowId, AppliedWindowState>,
     presentation: xbar_core::presentation::PresentationConfig,
+    wgpu_backends: Option<wgpu::Backends>,
 }
 
 impl<D> GeometryDriver<D> {
-    fn new(inner: D, bridge: Arc<GeometryBridge>) -> Self {
+    fn new(inner: D, bridge: Arc<GeometryBridge>, wgpu_backends: Option<wgpu::Backends>) -> Self {
         Self {
             inner,
             bridge,
@@ -198,6 +201,7 @@ impl<D> GeometryDriver<D> {
             presentation: xbar_core::config::BarConfig::load_default()
                 .unwrap_or_default()
                 .presentation,
+            wgpu_backends,
         }
     }
 
@@ -280,6 +284,12 @@ impl<D: AppDriver> AppDriver for GeometryDriver<D> {
     }
 
     fn on_start(&mut self, state: &mut MasonryState) {
+        if let Some(backends) = self.wgpu_backends.take() {
+            assert!(
+                state.set_wgpu_backends(backends),
+                "configure WGPU before first redraw"
+            );
+        }
         self.inner.on_start(state);
     }
 
@@ -288,6 +298,9 @@ impl<D: AppDriver> AppDriver for GeometryDriver<D> {
     }
 
     fn on_wgpu_ready(&mut self, wgpu: &WgpuContext<'_>) {
+        // Keep the probe and renderer on one WGPU version at compile time.
+        let adapter: &wgpu::Adapter = wgpu.adapter;
+        info!("renderer adapter: {:?}", adapter.get_info());
         self.inner.on_wgpu_ready(wgpu);
     }
 }
@@ -354,22 +367,98 @@ impl HasWindowHandle for ProbeTarget {
     }
 }
 
-/// Native X11 ARGB may retain alpha even when GLES advertises Opaque.
-/// Keep non-ARGB and other backends on the toolkit's existing WSI policy.
+/// Native X11 ARGB may retain alpha even when the WSI advertises Opaque.
+/// Vulkan additionally requires proof from a real presented native pixel.
 fn native_argb_alpha_supported(
     native_argb: bool,
     backend: wgpu::Backend,
     modes: &[wgpu::CompositeAlphaMode],
+    opaque_alpha_verified: bool,
 ) -> bool {
     native_argb
         && (modes.contains(&wgpu::CompositeAlphaMode::PreMultiplied)
             || modes.contains(&wgpu::CompositeAlphaMode::PostMultiplied)
-            || (backend == wgpu::Backend::Gl && modes.contains(&wgpu::CompositeAlphaMode::Opaque)))
+            || (modes.contains(&wgpu::CompositeAlphaMode::Opaque)
+                && (backend == wgpu::Backend::Gl
+                    || (backend == wgpu::Backend::Vulkan && opaque_alpha_verified))))
+}
+
+/// Some X11 Vulkan drivers advertise only Opaque but retain native ARGB pixels.
+/// Verify a real presented pixel instead of inferring support from that enum.
+/// The tiny override-redirect window stays entirely outside the screen.
+fn verify_vulkan_argb_alpha(
+    conn: &XCBConnection,
+    window: u32,
+    adapter: &wgpu::Adapter,
+    surface: &wgpu::Surface<'_>,
+) -> anyhow::Result<bool> {
+    conn.composite_query_version(0, 4)?.reply()?;
+    let (device, queue) =
+        futures_lite::future::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))?;
+    let Some(mut config) = surface.get_default_config(adapter, 2, 2) else {
+        return Ok(false);
+    };
+    config.alpha_mode = wgpu::CompositeAlphaMode::Opaque;
+    surface.configure(&device, &config);
+    conn.map_window(window)?.check()?;
+    conn.flush()?;
+    let frame = surface.get_current_texture()?;
+    let view = frame.texture.create_view(&Default::default());
+    let mut encoder = device.create_command_encoder(&Default::default());
+    {
+        let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color {
+                        r: 0.125,
+                        g: 0.125,
+                        b: 0.125,
+                        a: 0.5,
+                    }),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            ..Default::default()
+        });
+    }
+    queue.submit([encoder.finish()]);
+    frame.present();
+    device.poll(wgpu::PollType::wait_indefinitely())?;
+    for _ in 0..10 {
+        let pixmap = conn.generate_id()?;
+        conn.composite_name_window_pixmap(window, pixmap)?.check()?;
+        let sample = conn
+            .get_image(ImageFormat::Z_PIXMAP, pixmap, 0, 0, 1, 1, u32::MAX)?
+            .reply();
+        conn.free_pixmap(pixmap)?;
+        let sample = sample?;
+        if let Ok(bytes) = <[u8; 4]>::try_from(sample.data.as_slice()) {
+            let pixel = if conn.setup().image_byte_order == ImageOrder::LSB_FIRST {
+                u32::from_le_bytes(bytes)
+            } else {
+                u32::from_be_bytes(bytes)
+            };
+            let alpha = pixel >> 24;
+            if (126..=129).contains(&alpha) {
+                info!("native Vulkan ARGB pixel verified: alpha={alpha}/255");
+                return Ok(true);
+            }
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    Ok(false)
 }
 
 /// Probe a server-verified ARGB window on an owned native display.
-/// GLES may advertise only Opaque while retaining that native alpha channel.
-fn surface_alpha_capable(conn: Arc<XCBConnection>, screen_num: usize) -> bool {
+/// Opaque-only native output requires the platform-specific alpha evidence above.
+fn surface_alpha_capable(
+    conn: Arc<XCBConnection>,
+    screen_num: usize,
+    backends: Option<wgpu::Backends>,
+) -> bool {
     let Some(screen) = conn.setup().roots.get(screen_num) else {
         return false;
     };
@@ -378,10 +467,11 @@ fn surface_alpha_capable(conn: Arc<XCBConnection>, screen_num: usize) -> bool {
         .iter()
         .find(|depth| depth.depth == 32)
         .and_then(|depth| {
-            depth
-                .visuals
-                .iter()
-                .find(|visual| visual.class == VisualClass::TRUE_COLOR)
+            depth.visuals.iter().find(|visual| {
+                visual.class == VisualClass::TRUE_COLOR
+                    && (visual.red_mask, visual.green_mask, visual.blue_mask)
+                        == (0xff0000, 0xff00, 0xff)
+            })
         })
         .map(|visual| visual.visual_id)
     else {
@@ -398,8 +488,8 @@ fn surface_alpha_capable(conn: Arc<XCBConnection>, screen_num: usize) -> bool {
     {
         return false;
     }
-    // The window is never mapped; it exists only so the surface has a real
-    // depth-32 drawable to be judged against.
+    // Vulkan's pixel probe may map this entirely off-screen window. Other
+    // paths only need a real depth-32 drawable for capability queries.
     let aux = CreateWindowAux::new()
         .background_pixel(0)
         .border_pixel(0)
@@ -410,10 +500,10 @@ fn surface_alpha_capable(conn: Arc<XCBConnection>, screen_num: usize) -> bool {
             32,
             window,
             screen.root,
-            0,
-            0,
-            1,
-            1,
+            -2,
+            -2,
+            2,
+            2,
             0,
             WindowClass::INPUT_OUTPUT,
             visual_id,
@@ -446,29 +536,41 @@ fn surface_alpha_capable(conn: Arc<XCBConnection>, screen_num: usize) -> bool {
         window,
         visual_id,
     };
-    // Env-aware, like the instance masonry itself will build: a `WGPU_BACKEND`
-    // override must steer the probe onto the same backend it steers vello onto.
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_with_display_handle_from_env(
-        Box::new(target.clone()),
-    ));
+    // Match Masonry's WGPU version, instance descriptor and adapter policy.
+    // A separate WGPU major or display-handle policy can select Vulkan here
+    // while Masonry uses GLES, incorrectly forcing a depth-24 opaque window.
+    let mut descriptor = wgpu::InstanceDescriptor::from_env_or_default();
+    if let Some(backends) = backends {
+        descriptor.backends = backends;
+    }
+    let instance = wgpu::Instance::new(&descriptor);
     let capable = instance
         .create_surface(target)
         .ok()
         .and_then(|surface| {
-            let adapter = futures_lite::future::block_on(instance.request_adapter(
-                &wgpu::RequestAdapterOptions {
-                    power_preference: wgpu::PowerPreference::LowPower,
-                    compatible_surface: Some(&surface),
-                    force_fallback_adapter: false,
-                    ..Default::default()
-                },
-            ))
+            let adapter = futures_lite::future::block_on(
+                wgpu::util::initialize_adapter_from_env_or_default(&instance, Some(&surface)),
+            )
             .ok()?;
-            Some(native_argb_alpha_supported(
+            let modes = surface.get_capabilities(&adapter).alpha_modes;
+            let opaque_alpha_verified = adapter.get_info().backend == wgpu::Backend::Vulkan
+                && modes.contains(&wgpu::CompositeAlphaMode::Opaque)
+                && verify_vulkan_argb_alpha(&conn, window, &adapter, &surface)
+                    .unwrap_or_else(|error| {
+                        warn!("native Vulkan ARGB pixel probe failed: {error}");
+                        false
+                    });
+            let capable = native_argb_alpha_supported(
                 native_argb,
                 adapter.get_info().backend,
-                &surface.get_capabilities(&adapter).alpha_modes,
-            ))
+                &modes,
+                opaque_alpha_verified,
+            );
+            info!(
+                "alpha probe: adapter={:?}, modes={modes:?}, native_argb={native_argb}, translucent={capable}",
+                adapter.get_info(),
+            );
+            Some(capable)
         })
         .unwrap_or(false);
     // Both the borrowed surface and its display-owning instance are gone
@@ -551,9 +653,6 @@ impl XilemBar {
             xbar_core::config::BarConfig::default()
         });
         let header = app_config.presentation.apply_desktop_header_profile();
-        if header {
-            app_config.background_opacity = app_config.background_opacity.or(Some(0.58));
-        }
         // The horizontal header follows the shared theme. Keep the legacy
         // preference when no shared configuration exists, and on side bars.
         let shared_theme = header
@@ -2016,12 +2115,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // alpha — gets a solid window; anything else would paint a wash over
     // undefined memory. A failed X connection (native Wayland, no Xwayland)
     // counts as "no compositor" for the same reason.
+    let mut wgpu_backends = None;
     let translucent = if x11rb::xcb_ffi::load_libxcb().is_ok() {
         match XCBConnection::connect(None) {
             Ok((conn, screen_num)) => {
                 let conn = Arc::new(conn);
-                compositor_active(&conn, screen_num)
-                    && surface_alpha_capable(Arc::clone(&conn), screen_num)
+                if !compositor_active(&conn, screen_num) {
+                    false
+                } else if surface_alpha_capable(Arc::clone(&conn), screen_num, None) {
+                    true
+                } else if wgpu::Backends::from_env().is_none()
+                    && surface_alpha_capable(conn, screen_num, Some(wgpu::Backends::GL))
+                {
+                    // Some X11 Vulkan drivers only expose opaque surfaces.
+                    // Use verified native ARGB GLES, for both probe and renderer.
+                    wgpu_backends = Some(wgpu::Backends::GL);
+                    info!("using verified GLES alpha instead of an opaque default backend");
+                    true
+                } else {
+                    false
+                }
             }
             Err(_) => false,
         }
@@ -2071,7 +2184,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     masonry_winit::app::run_with(
         event_loop,
         windows,
-        GeometryDriver::new(driver, geometry_bridge),
+        GeometryDriver::new(driver, geometry_bridge, wgpu_backends),
         masonry::theme::default_property_set(),
     )?;
     Ok(())
@@ -2084,16 +2197,23 @@ mod alpha_probe_tests {
     #[test]
     fn opaque_gles_requires_a_verified_native_argb_window() {
         let advertised = [Alpha::Opaque];
-        assert!(native_argb_alpha_supported(true, Backend::Gl, &advertised));
+        assert!(native_argb_alpha_supported(
+            true,
+            Backend::Gl,
+            &advertised,
+            false
+        ));
         assert!(!native_argb_alpha_supported(
             false,
             Backend::Gl,
-            &advertised
+            &advertised,
+            false,
         ));
         assert!(!native_argb_alpha_supported(
             true,
             Backend::Vulkan,
-            &advertised
+            &advertised,
+            false,
         ));
         assert_eq!(advertised, [Alpha::Opaque]);
     }
@@ -2102,13 +2222,40 @@ mod alpha_probe_tests {
         assert!(!native_argb_alpha_supported(
             false,
             Backend::Gl,
-            &[Alpha::PreMultiplied]
+            &[Alpha::PreMultiplied],
+            false,
         ));
-        assert!(!native_argb_alpha_supported(true, Backend::Gl, &[]));
+        assert!(!native_argb_alpha_supported(true, Backend::Gl, &[], true));
         assert!(native_argb_alpha_supported(
             true,
             Backend::Vulkan,
-            &[Alpha::PreMultiplied]
+            &[Alpha::PreMultiplied],
+            false,
+        ));
+    }
+    #[test]
+    fn opaque_vulkan_requires_both_native_argb_and_presented_pixel_proof() {
+        for (native_argb, verified, expected) in [
+            (true, true, true),
+            (true, false, false),
+            (false, true, false),
+            (false, false, false),
+        ] {
+            assert_eq!(
+                native_argb_alpha_supported(
+                    native_argb,
+                    Backend::Vulkan,
+                    &[Alpha::Opaque],
+                    verified
+                ),
+                expected,
+            );
+        }
+        assert!(!native_argb_alpha_supported(
+            true,
+            Backend::Dx12,
+            &[Alpha::Opaque],
+            true
         ));
     }
 }
