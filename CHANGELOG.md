@@ -5,7 +5,7 @@ monorepo use independent Semantic Versions.
 
 ## [Unreleased]
 
-### Shared desktop sidebars and the Leptos default
+### Shared desktop sidebars and the Xilem default
 
 - JWM supervises an independent `jwm-shell` process for common left, right and
   bottom panels, while each selected status bar retains its own top frontend.
@@ -13,9 +13,11 @@ monorepo use independent Semantic Versions.
 - Sidebars use independent versioned IPC, output and window identities,
   bounded updates and session-owned process recovery. Replacing a top bar
   retains the shared Dock projection and host lifetime.
-- `tauri_leptos_bar` is the built-in and installer default. Its Rust/Wasm
-  entrypoint and reproducible locks are included with the standalone host in
-  release bundles. Native-process coverage is recorded per frontend/backend.
+- `xilem_bar` is the built-in, source-installer and release-bundle default.
+  It uses native Xilem/Masonry/Vello rendering and builds with Cargo. The
+  Leptos/Tauri frontend remains selectable. Release manifest format 3 requires
+  Xilem and the standalone host while retaining format-1/2 install compatibility.
+  Native-process coverage is recorded per frontend/backend.
 - All horizontal headers use the TaoGlow profile with original numeric tag
   labels. Each monitor shows occupied tags plus its actual selected tags,
   including an empty selected tag; right-click toggles the workspace view.

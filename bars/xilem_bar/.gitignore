@@ -1,2 +1,2 @@
 /target
-/Cargo.lock
+# Track Cargo.lock for reproducible builds of the default desktop frontend.

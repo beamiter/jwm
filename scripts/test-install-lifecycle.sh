@@ -94,8 +94,8 @@ chmod 0751 -- "$DESTDIR/usr/local/bin/jwm"
 # original managed paths and restore collisions only with explicit --replace.
 LEGACY_MANIFEST="$TMP_ROOT/release-manifest-v1.tsv"
 awk -F '\t' '
-    NR == 1 { sub("format 2", "format 1") }
-    $1 == "built" && ($2 == "jwm-remote" || $2 == "jwm-player" || $2 == "jwm-shell" || $2 == "tauri_leptos_bar" || $2 == "jwm-notes" || $2 == "jwm-image-viewer") { next }
+    NR == 1 { sub("format 3", "format 1") }
+    $1 == "built" && ($2 == "jwm-remote" || $2 == "jwm-player" || $2 == "jwm-shell" || $2 == "xilem_bar" || $2 == "tauri_leptos_bar" || $2 == "jwm-notes" || $2 == "jwm-image-viewer") { next }
     $2 ~ /^crates\/jwm_apps\/dist\// { next }
     $2 == "bridge/dist/jwm-player.desktop" || $2 == "bridge/dist/jwm-video.desktop" || $2 == "scripts/jwm-toggle-sidebar-mode" { next }
     $2 == "packaging/69-jwm-touchpad-gestures.rules" { next }
@@ -105,16 +105,34 @@ awk -F '\t' '
 BUNDLE_V1=$(make_fake_bundle 1.0.0 release-v1 "$LEGACY_MANIFEST")
 BUNDLE_V2=$(make_fake_bundle 2.0.0 release-v2 "$MANIFEST")
 
-# Format 2 cannot silently omit the shared host or the selected default.
-for missing in jwm-shell tauri_leptos_bar; do
+# Format 3 cannot silently omit the shared host or the selected default.
+for missing in jwm-shell xilem_bar; do
     reduced="$TMP_ROOT/manifest-missing-$missing.tsv"
     awk -F '\t' -v missing="$missing" '$2 != missing { print }' "$MANIFEST" > "$reduced"
     incomplete=$(make_fake_bundle "3.0.0-missing-$missing" incomplete "$reduced")
     if bash "$incomplete/install-release.sh" install --destdir "$DESTDIR" --replace > "$TMP_ROOT/missing-$missing.log" 2>&1; then
-        fail "format 2 accepted missing required executable: $missing"
+        fail "format 3 accepted missing required executable: $missing"
     fi
     grep -Fq "manifest omits required destination: usr/local/bin/$missing" "$TMP_ROOT/missing-$missing.log" || fail "missing-$missing was rejected for the wrong reason"
 done
+
+# The new default must not prevent installation/rollback of format-2 bundles
+# that shipped the former Leptos default.
+LEPTOS_MANIFEST="$TMP_ROOT/release-manifest-v2.tsv"
+awk -F '\t' '
+    NR == 1 { sub("format 3", "format 2") }
+    $1 == "built" && $2 == "xilem_bar" { next }
+    { print }
+' "$MANIFEST" > "$LEPTOS_MANIFEST"
+LEPTOS_BUNDLE=$(make_fake_bundle 1.5.0 legacy-leptos "$LEPTOS_MANIFEST")
+COMPAT_ROOT="$TMP_ROOT/leptos-compat-root"
+bash "$LEPTOS_BUNDLE/install-release.sh" install --destdir "$COMPAT_ROOT"
+bash "$BUNDLE_V2/install-release.sh" install --destdir "$COMPAT_ROOT"
+[[ -x $COMPAT_ROOT/usr/local/bin/xilem_bar ]] || fail 'upgrade omitted Xilem default'
+[[ -x $COMPAT_ROOT/usr/local/bin/tauri_leptos_bar ]] || fail 'upgrade broke saved Leptos configurations'
+bash "$BUNDLE_V2/install-release.sh" rollback --destdir "$COMPAT_ROOT"
+[[ -x $COMPAT_ROOT/usr/local/bin/tauri_leptos_bar ]] || fail 'rollback lost legacy Leptos default'
+bash "$BUNDLE_V2/install-release.sh" uninstall --destdir "$COMPAT_ROOT"
 
 # Bundle extraction metadata is untrusted input. A privileged installation
 # must not preserve a user's writable or set-id modes in the immutable tree.
@@ -278,6 +296,8 @@ HASH_TWO=$(sha256sum -- "$ARCHIVE_TWO" | awk '{print $1}')
 BUNDLE_NAME=${ARCHIVE_NAME%.tar.gz}
 tar -tzf "$ARCHIVE_ONE" > "$TMP_ROOT/archive-contents.txt"
 for license_path in \
+    share/licenses/masonry_winit/LICENSE \
+    share/licenses/masonry_winit/JWM-ALPHA-PATCH.md \
     share/doc/jwm/third-party/smithay/LICENSE.txt \
     share/doc/jwm/third-party/smithay/JWM_BACKPORT.patch \
     share/doc/jwm/third-party/glib/LICENSE \
@@ -301,6 +321,7 @@ for required_path in \
     payload/usr/local/lib/jwm/versions/$PACKAGE_VERSION/bin/tao_pixels_bar \
     payload/usr/local/lib/jwm/versions/$PACKAGE_VERSION/bin/jwm-shell \
     payload/usr/local/lib/jwm/versions/$PACKAGE_VERSION/bin/jwm-toggle-sidebar-mode \
+    payload/usr/local/lib/jwm/versions/$PACKAGE_VERSION/bin/xilem_bar \
     payload/usr/local/lib/jwm/versions/$PACKAGE_VERSION/bin/tauri_leptos_bar \
     payload/usr/local/lib/jwm/versions/$PACKAGE_VERSION/share/xsessions/jwm-x11rb.desktop \
     payload/usr/local/lib/jwm/versions/$PACKAGE_VERSION/share/wayland-sessions/jwm-wayland.desktop \

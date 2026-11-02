@@ -6,7 +6,7 @@ TEST_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/jwm-build-test.XXXXXXXX")
 TEST_HOST_PATH=$PATH
 trap 'rm -rf -- "$TEST_ROOT"' EXIT
 REPO="$TEST_ROOT/project space"
-mkdir -p "$REPO/scripts" "$REPO/bars/tao_glow_bar" "$REPO/bars/tao_pixels_bar" "$REPO/bars/tauri_leptos_bar" "$REPO/crates/jwm_shell" "$REPO/crates/jwm_apps/dist" "$REPO/bridge/dist" "$REPO/eva/dist" "$REPO/assets/wallpapers" "$REPO/packaging" "$TEST_ROOT/bin"
+mkdir -p "$REPO/scripts" "$REPO/bars/tao_glow_bar" "$REPO/bars/xilem_bar" "$REPO/bars/tao_pixels_bar" "$REPO/bars/tauri_leptos_bar" "$REPO/crates/jwm_shell" "$REPO/crates/jwm_apps/dist" "$REPO/bridge/dist" "$REPO/eva/dist" "$REPO/assets/wallpapers" "$REPO/packaging" "$TEST_ROOT/bin"
 cp "$ROOT/packaging/69-jwm-touchpad-gestures.rules" "$REPO/packaging/"
 cp "$ROOT/scripts/install-jwm.sh" "$ROOT/scripts/install-wallpapers.sh" "$ROOT/scripts/jwm-toggle-sidebar-mode" "$ROOT/scripts/install-eva.sh" "$REPO/scripts/"
 cp "$ROOT/scripts/set-jwm-defaults.py" "$REPO/scripts/"
@@ -29,7 +29,7 @@ printf 'PKG_CONFIG_PATH=%s/pipewire/lib/pkgconfig\nJWM_PIPEWIRE_PREFIX=%s/pipewi
 STUB
 printf 'bundled fixture\n' > "$REPO/assets/wallpapers/01-fixture.png"
 touch "$REPO/bars/tao_glow_bar/Cargo.toml" "$REPO/bridge/Cargo.toml" "$REPO/bridge/dist/org.freedesktop.Notifications.service"
-touch "$REPO/bars/tao_pixels_bar/Cargo.toml" "$REPO/bars/tauri_leptos_bar/Cargo.toml" "$REPO/crates/jwm_shell/Cargo.toml"
+touch "$REPO/bars/xilem_bar/Cargo.toml" "$REPO/bars/tao_pixels_bar/Cargo.toml" "$REPO/bars/tauri_leptos_bar/Cargo.toml" "$REPO/crates/jwm_shell/Cargo.toml"
 cp "$ROOT/bridge/dist/jwm-player.desktop" "$ROOT/bridge/dist/jwm-video.desktop" "$REPO/bridge/dist/"
 cp "$ROOT/crates/jwm_apps/dist/"*.desktop "$REPO/crates/jwm_apps/dist/"
 touch "$REPO/crates/jwm_apps/Cargo.toml"
@@ -336,7 +336,7 @@ check_bar_selection() {
     grep -Fq "\"$expected_config\"" "$CASE_DIR/config/jwm/config_wayland.toml" || fail "$name ignored the Wayland bar configuration"
     [[ ! -e $CASE_DIR/eva-systemctl.log && ! -e $CASE_DIR/eva.log ]] || fail '--skip-jwm touched Eva'
 }
-check_bar_selection default '' tauri_leptos_bar
+check_bar_selection default '' xilem_bar
 check_bar_selection environment tao_pixels_bar tao_pixels_bar
 check_bar_selection argument tao_glow_bar tao_pixels_bar --bar tao_pixels_bar
 check_bar_selection argument-over-environment tao_pixels_bar tao_glow_bar --bar tao_glow_bar
@@ -422,7 +422,7 @@ check_tauri_color() (
     fi
     JWM_BAR_NAME='' PATH="$TEST_ROOT/bin:$PATH" HOME="$CASE_DIR/home" \
         CARGO_HOME="$CASE_DIR/home/.cargo" XDG_CONFIG_HOME="$CASE_DIR/config" \
-        bash "$REPO/scripts/install-jwm.sh" --skip-jwm > "$CASE_DIR/output.log" 2>&1 || status=$?
+        bash "$REPO/scripts/install-jwm.sh" --bar tauri_leptos_bar --skip-jwm > "$CASE_DIR/output.log" 2>&1 || status=$?
     [[ $(cat "$CASE_DIR/frontend-color") == "$expected" ]] || fail "Tauri NO_COLOR=$input was not normalized"
     if [[ $scenario == tauri-failure ]]; then
         [[ $status == 42 && ! -e $CASE_DIR/system.log ]] || fail 'Tauri frontend failure was hidden or installed files'
@@ -454,7 +454,7 @@ check_tauri_private_runtime() (
     printf '#!/bin/sh\nprintf "original bar\\n"\n' > "$destination"
     chmod +x "$destination"
     for generation in 1 2; do
-        JWM_BAR_NAME='' bash "$REPO/scripts/install-jwm.sh" --skip-jwm --skip-eva > "$CASE_DIR/install-$generation.log" 2>&1
+        JWM_BAR_NAME='' bash "$REPO/scripts/install-jwm.sh" --bar tauri_leptos_bar --skip-jwm --skip-eva > "$CASE_DIR/install-$generation.log" 2>&1
         grep -Fq JWM_PRIVATE_WEBKIT_LAUNCHER "$destination" || fail 'Tauri upgrade dropped private runtime launcher'
         [[ -x $prefix/libexec/jwm/tauri_leptos_bar ]] || fail 'private bar executable missing'
         [[ -x $prefix/bin/run-with-webkit-transparent.sh ]] || fail 'launcher depends on the source checkout'
@@ -483,9 +483,13 @@ shift 8
 exec "$@"
 STUB
     chmod +x "$TEST_ROOT/bin/bwrap"
+    # Account for runtime library paths appended by the host's shell startup,
+    # while still requiring the launcher to preserve that exact inherited path.
+    local inherited_path
+    inherited_path=$(LD_LIBRARY_PATH=/inherited bash -c 'printf "%s" "$LD_LIBRARY_PATH"')
     LD_LIBRARY_PATH=/inherited "$destination" 'argument with spaces' "\$HOME" '' > "$CASE_DIR/launch-output"
     mapfile -t forwarded < "$CASE_DIR/launch-output"
-    [[ ${forwarded[0]} == "$prefix/lib:/inherited" && ${forwarded[1]} == 'argument with spaces' &&
+    [[ ${forwarded[0]} == "$prefix/lib:$inherited_path" && ${forwarded[1]} == 'argument with spaces' &&
        ${forwarded[2]} == "\$HOME" && ${#forwarded[@]} == 4 && -z ${forwarded[3]} ]] || fail 'private runtime changed library path or arguments'
     if WEBKIT_INSTALL_PREFIX="$prefix" bash "$REPO/scripts/install-webkit-bar-launcher.sh" "$destination" "$destination" 2>/dev/null; then
         fail 'launcher was accepted as the real bar executable'

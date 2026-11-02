@@ -31,7 +31,7 @@ def main():
     parser.add_argument("--bin-dir", type=Path, default=ROOT / "target/release")
     parser.add_argument("--shell-bin", type=Path, default=ROOT / "crates/jwm_shell/target/debug/jwm-shell")
     parser.add_argument("--client-bin", type=Path, default=ROOT / "crates/jwm_shell/target/debug/examples/native_shell_client")
-    parser.add_argument("--bar", default="tauri_leptos_bar")
+    parser.add_argument("--bar", default="xilem_bar")
     parser.add_argument("--bar-bin", type=Path)
     parser.add_argument("--second-bar", default="tao_pixels_bar")
     parser.add_argument("--second-bar-bin", type=Path)

@@ -8,17 +8,31 @@ configuration, interaction and geometry contract is in
 
 ## Official bar
 
-**`tauri_leptos_bar`** is the JWM default. It preserves a native Tauri/WebKit
-window with a Leptos frontend. Linux builds require WebKitGTK **2.52.6 or newer**
-(the `webkit2gtk-4.1` API),
-Trunk, the `wasm32-unknown-unknown` Rust target and Tauri CLI 2:
+**`xilem_bar`** is the JWM default. It is a native Rust frontend using
+Xilem, Masonry and Vello, built with Cargo. The independent `jwm-shell` process
+continues to own the shared left, right and bottom panels.
+
+```bash
+bash scripts/bootstrap_deps.sh
+scripts/install-jwm.sh --bar xilem_bar
+```
+
+A plain reinstall preserves the existing `status_bar.name`; explicit `--bar`
+updates both JWM configuration files. `JWM_BAR_NAME` selects the installer
+default and explicit `--bar` takes precedence.
+
+### Optional Tauri bars
+
+`tauri_leptos_bar` remains available as a Tauri/WebKit window with a Leptos
+frontend. Its Linux builds require WebKitGTK **2.52.6 or newer** (the
+`webkit2gtk-4.1` API), Trunk, the `wasm32-unknown-unknown` Rust target and Tauri CLI 2:
 
 ```bash
 bash scripts/bootstrap_deps.sh --with-tauri
 rustup target add wasm32-unknown-unknown
 cargo install trunk --version 0.22.1 --locked
 cargo install tauri-cli --version 2.12.4 --locked
-scripts/install-jwm.sh -b tauri_leptos_bar
+scripts/install-jwm.sh --bar tauri_leptos_bar
 ```
 
 All six `tauri_*_bar` hosts enforce this minimum in `build.rs`, including direct
@@ -28,10 +42,6 @@ set `PKG_CONFIG_PATH` for a private SDK. A private runtime alone does not supply
 development metadata or bypass the minimum. Older or missing SDKs stop the
 build with the required and detected versions. See the
 [WebKitGTK fix and SDK notes](../vendor/webkitgtk/README.md).
-
-A plain reinstall preserves the existing `status_bar.name`; explicit `--bar`
-updates both JWM configuration files. `JWM_BAR_NAME` selects the installer
-default and explicit `--bar` takes precedence.
 
 On NVIDIA X11 sessions, JWM launches Tauri bars with
 `WEBKIT_DMABUF_RENDERER_FORCE_SHM=1` by default. This retains WebKit's
@@ -98,7 +108,7 @@ status_bar_height = 48 # Physical thickness: height at top/bottom, width at left
 status_bar_padding = 4
 
 [status_bar]
-name = "tauri_leptos_bar"
+name = "xilem_bar"
 show_bar = true
 position = "top" # top, bottom, left, right
 

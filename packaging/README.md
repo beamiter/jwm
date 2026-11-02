@@ -14,13 +14,16 @@ points so external packagers can pick the project up after the first
 | Checksums / provenance | `SHA256SUMS` + `actions/attest` |
 
 Prefer installing the Wayland session (`jwm-wayland.desktop`) and the official
-bar `tauri_leptos_bar` and the independent `jwm-shell` host. See [hardware-validation](../docs/hardware-validation.md)
+bar `xilem_bar` and the independent `jwm-shell` host. See [hardware-validation](../docs/hardware-validation.md)
 before calling a package "stable".
 
-Manifest format 2 requires both `jwm-shell` and `tauri_leptos_bar` in the
-versioned payload and stable executable map. Missing either is a failed
-installation. The installer continues to accept format 1 for rollback to
-older releases; runtime shell registration also checks the IPC protocol version.
+Manifest format 3 requires both `jwm-shell` and `xilem_bar` in the versioned
+payload and stable executable map. Missing either is a failed installation.
+The installer also accepts format 2 (the former `tauri_leptos_bar` default) and
+format 1 for older releases. Upgrade and rollback preserve their stable paths;
+runtime shell registration also checks the IPC protocol version. The payload
+also retains `tauri_leptos_bar` so existing saved bar selections still work after
+an upgrade.
 
 The default shared panels auto-hide; Super+Shift+B toggles enabled panels to
 pinned mode and back. The packaged `jwm-toggle-sidebar-mode` compatibility helper

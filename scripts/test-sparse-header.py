@@ -19,7 +19,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--bin-dir', type=Path, default=ROOT / 'target/release')
     parser.add_argument('--backend', choices=['xcb', 'x11rb'], default='x11rb')
-    parser.add_argument('--bar', default='tauri_leptos_bar')
+    parser.add_argument('--bar', default='xilem_bar')
     parser.add_argument('--theme', choices=['light', 'dark'], default='light')
     parser.add_argument('--first-tag-center', type=float, default=68, help='physical x of first numeric tag, relative to the actual top window')
     parser.add_argument('--tag-step', type=float, default=40)

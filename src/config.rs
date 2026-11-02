@@ -494,7 +494,7 @@ pub fn get_backend_family() -> BackendFamily {
 
 /// Matches the bar installed by `scripts/install-jwm.sh` when the user
 /// does not select another implementation explicitly.
-pub const STATUS_BAR_NAME: &str = "tauri_leptos_bar";
+pub const STATUS_BAR_NAME: &str = "xilem_bar";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TomlConfig {

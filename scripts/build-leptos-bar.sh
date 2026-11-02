@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build the default bar without installing it or changing user configuration.
+# Build the optional Leptos bar without installing it or changing user configuration.
 set -euo pipefail
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 TARGET=${1:-"$ROOT/bars/tauri_leptos_bar/src-tauri/target"}

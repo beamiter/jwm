@@ -106,7 +106,14 @@ jobs:
               --backend "$backend" --bin-dir target/release --shell-bin crates/jwm_shell/target/debug/jwm-shell \
               --evidence-dir artifacts/shared-shell/sparse-header
           done
-      - name: Verify the default production WebView, not only debug assets
+      - name: Verify the default Xilem production frontend
+        if: matrix.bar == 'xilem_bar'
+        run: |
+          cargo build --locked --release --manifest-path bars/xilem_bar/Cargo.toml --target-dir "$PWD/target/default-release"
+          for backend in xcb x11rb; do
+            python3 scripts/test-shared-sidebar-shell-x11.py --bar xilem_bar --bar-bin "$PWD/target/default-release/release/xilem_bar" --backend "$backend" --bin-dir target/release --evidence-dir artifacts/shared-shell/production
+          done
+      - name: Verify the Leptos production WebView, not only debug assets
         if: matrix.bar == 'tauri_leptos_bar'
         run: |
           bash scripts/build-leptos-bar.sh "$PWD/target/default-release"
@@ -129,12 +136,12 @@ jobs:
             python3 scripts/test-shared-sidebar-mode.py --backend "$backend" --bin-dir target/release --shell-bin crates/jwm_shell/target/debug/jwm-shell --evidence-dir artifacts/shared-shell/sidebar-mode
           done
       - name: Verify native Wayland panels separately from physical output acceptance
-        if: matrix.bar == 'tauri_leptos_bar'
+        if: matrix.bar == 'tauri_leptos_bar' || matrix.bar == 'xilem_bar'
         run: |
           cargo build --locked --release --no-default-features --features backend-x11rb,backend-xcb,backend-wayland-nested --bin jwm --bin jwm-tool
           cargo build --locked --manifest-path crates/jwm_shell/Cargo.toml --example native_shell_client
           cargo build --locked --manifest-path bars/tao_pixels_bar/Cargo.toml
-          python3 scripts/test-shared-sidebar-shell-wayland.py --bar tauri_leptos_bar --bar-bin "$PWD/target/default-release/release/tauri_leptos_bar" --evidence-dir artifacts/shared-shell/wayland-nested
+          python3 scripts/test-shared-sidebar-shell-wayland.py --bar '${{ matrix.bar }}' --bar-bin "$PWD/target/default-release/release/${{ matrix.bar }}" --evidence-dir artifacts/shared-shell/wayland-nested
       - name: Archive actual process results, compositor captures and logs
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9

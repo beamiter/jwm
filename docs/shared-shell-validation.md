@@ -2,7 +2,7 @@
 
 The current P4 inventory contains **28 successful frontend builds, 56 actual XCB/X11RB generic runs, and 56 actual sparse-tag interaction runs**. All 56 generic captures also pass the TaoGlow material, outer-boundary and transparent-corner checks. The inventory was validated at `2026-10-29T09:48:09.815893+00:00`; exact binaries, hashes, build logs, fixture hashes and captures are recorded in [shared-shell-coverage.json](shared-shell-coverage.json).
 
-Every accepted case uses JWM `cbde73f7de2ebe9afc3847fca20040cd8bdc425df0c5fffc1468f013198da079` and shared host `bc2effeb8e564e015e48180fab7dc43566f21779dd830d49b2eb60d61dd06799`. Each frontend hash is checked against the current executable before acceptance and again after evidence persistence. The default Leptos release is `43bd73daf2cd5f6f95adea91d1426acac4df589a46d1fbda8e6970de773270b9` at `target/tauri-release/release/tauri_leptos_bar`. `binary` remains the matrix's canonical build destination; `validated_binary` identifies the executable actually tested.
+Every accepted case uses JWM `cbde73f7de2ebe9afc3847fca20040cd8bdc425df0c5fffc1468f013198da079` and shared host `bc2effeb8e564e015e48180fab7dc43566f21779dd830d49b2eb60d61dd06799`. Each frontend hash is checked against the current executable before acceptance and again after evidence persistence. The recorded Leptos release is `43bd73daf2cd5f6f95adea91d1426acac4df589a46d1fbda8e6970de773270b9` at `target/tauri-release/release/tauri_leptos_bar`. `binary` remains the matrix's canonical build destination; `validated_binary` identifies the executable actually tested.
 
 ## Acceptance gates
 

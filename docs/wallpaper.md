@@ -168,7 +168,7 @@ installed as the root pixmap (`_XROOTPMAP_ID`), laid out per output with the
 same `fill` / `fit` / `stretch` / `center` rules. Startup no longer paints the
 root black first, so an existing `feh` / `esetroot` pixmap stays until JWM's
 own wallpaper lands. Tiling gaps then match the composited desktop instead of
-a solid black root. The default status bar (`tao_glow_bar`) frosts that same
+a solid black root. The `tao_glow_bar` example frosts that same
 root pixmap when it cannot be translucent. A `glass.wallpaper` path that
 cannot be read still falls back to that pixmap. Monitor layout changes
 recompose the picture; turning the compositor off restores native borders

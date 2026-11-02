@@ -4,7 +4,7 @@
 
 本记录使用当前 WM `cbde73f7de2ebe9afc3847fca20040cd8bdc425df0c5fffc1468f013198da079`、共享宿主 `bc2effeb8e564e015e48180fab7dc43566f21779dd830d49b2eb60d61dd06799`。旧版本结果只作历史证据，不替代当前组合。
 
-源码和发布包默认顶栏为 `tauri_leptos_bar`（当前正式二进制 `43bd73da…`），共享宿主仍需显式启用。三侧栏省略模式时均为 `hover`（自动隐藏）；**Super+Shift+B** 在自动隐藏和常驻之间切换并保存，已禁用的边不被开启。源码原生快捷键和旧驻留实例的兼容辅助程序分别有[原生双后端记录](../artifacts/shared-shell/sidebar-mode-native/summary.json)和[兼容双后端记录](../artifacts/shared-shell/sidebar-mode-compat-e2f/summary.json)。本机已[热加载兼容配置](../artifacts/shared-shell/sidebar-autohide/local-shortcut.json)；2026-10-29 15:43 系统重启后的[只读核验](../artifacts/shared-shell/sidebar-autohide/post-reboot-config.json)确认三个 hover、快捷键和辅助程序保留，XCB 配置诊断无错误。这不意味着新程序已对当前桌面执行会话升级。
+下述历史验收采用当时默认的 `tauri_leptos_bar`（二进制 `43bd73da…`），当时共享宿主需显式启用。当前源码和发布包默认顶栏为 `xilem_bar`，共享宿主默认启用；见[当前配置](shared-desktop-shell.md)。三侧栏省略模式时均为 `hover`（自动隐藏）；**Super+Shift+B** 在自动隐藏和常驻之间切换并保存，已禁用的边不被开启。源码原生快捷键和旧驻留实例的兼容辅助程序分别有[原生双后端记录](../artifacts/shared-shell/sidebar-mode-native/summary.json)和[兼容双后端记录](../artifacts/shared-shell/sidebar-mode-compat-e2f/summary.json)。本机已[热加载兼容配置](../artifacts/shared-shell/sidebar-autohide/local-shortcut.json)；2026-10-29 15:43 系统重启后的[只读核验](../artifacts/shared-shell/sidebar-autohide/post-reboot-config.json)确认三个 hover、快捷键和辅助程序保留，XCB 配置诊断无错误。这不意味着新程序已对当前桌面执行会话升级。
 
 | 阶段 | 当前状态与证据 |
 |---|---|

@@ -67,13 +67,14 @@ native dependency plus the Rust toolchain (via rustup, since distro packages are
 older than the 1.89 floor) in one step:
 
 ```bash
-bash scripts/bootstrap_deps.sh --with-tauri # apt packages + Rust + default bar prerequisites
-JWM_CN_MIRROR=1 bash scripts/bootstrap_deps.sh --with-tauri # China: rustup + cargo via rsproxy.cn
+bash scripts/bootstrap_deps.sh              # apt packages + Rust + default bar prerequisites
+JWM_CN_MIRROR=1 bash scripts/bootstrap_deps.sh # China: rustup + cargo via rsproxy.cn
 bash scripts/bootstrap_deps.sh --help       # options include --with-portal, --with-tauri, --cn
-rustup target add wasm32-unknown-unknown
-cargo install trunk --version 0.22.1 --locked
-cargo install tauri-cli --version 2.12.4 --locked
 ```
+
+The default `xilem_bar` builds with Cargo. For optional Tauri bars, run
+`bash scripts/bootstrap_deps.sh --with-tauri` and follow the
+[WebKitGTK and frontend prerequisites](bars/README.md#optional-tauri-bars).
 
 `--with-portal` (or `JWM_WITH_PORTAL=1`) adds the PipeWire headers needed by the
 screencast portal. On non-Debian distros the script prints the required library
@@ -125,7 +126,7 @@ hot-tunable changes that must become valid together; non-hot-tunable values must
 be edited in the configuration file.
 
 The installation helper builds JWM, the Eva voice service, the independent
-`jwm-shell` host, and the selected status bar (`tauri_leptos_bar` by default;
+`jwm-shell` host, and the selected status bar (`xilem_bar` by default;
 use `--bar` to choose another crate under `bars/`), installs
 the session files (Wayland session recommended), and checks both configuration
 templates against their last installed versions. The records are stored beside

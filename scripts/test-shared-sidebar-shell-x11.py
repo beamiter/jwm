@@ -76,7 +76,7 @@ spec.loader.exec_module(legacy)
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--bar", default="tauri_leptos_bar")
+    parser.add_argument("--bar", default="xilem_bar")
     parser.add_argument("--bar-bin", type=Path)
     parser.add_argument("--backend", choices=("xcb", "x11rb"), default="x11rb")
     parser.add_argument("--bin-dir", type=Path, default=ROOT / "target/debug")

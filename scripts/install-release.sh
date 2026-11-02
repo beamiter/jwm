@@ -127,6 +127,7 @@ valid_stable_path() {
         usr/local/bin/jwm-toggle-sidebar-mode|\
         usr/lib/udev/rules.d/69-jwm-touchpad-gestures.rules|\
         usr/local/bin/tauri_leptos_bar|\
+        usr/local/bin/xilem_bar|\
         usr/local/bin/tao_glow_bar|\
         usr/local/bin/tao_pixels_bar|\
         usr/share/xsessions/jwm-x11rb.desktop|\
@@ -263,6 +264,7 @@ load_manifest() {
     case "$manifest_header" in
         '# JWM release manifest, format 1.') manifest_format=1 ;;
         '# JWM release manifest, format 2.') manifest_format=2 ;;
+        '# JWM release manifest, format 3.') manifest_format=3 ;;
         *) die "unsupported release manifest format" ;;
     esac
     while IFS=$'\t' read -r kind source version_path stable_path mode extra || [[ -n ${kind:-} ]]; do
@@ -316,6 +318,8 @@ load_manifest() {
     )
     if [[ $manifest_format == 2 ]]; then
         required+=(usr/local/bin/jwm-shell usr/local/bin/tauri_leptos_bar)
+    elif [[ $manifest_format == 3 ]]; then
+        required+=(usr/local/bin/jwm-shell usr/local/bin/xilem_bar)
     fi
     local required_path found
     for required_path in "${required[@]}"; do

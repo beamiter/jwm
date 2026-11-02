@@ -111,7 +111,7 @@ ALL_BARS=(
 # 默认值
 # ============================================================
 BUILD_MODE="release"
-JWM_BAR_NAME="${JWM_BAR_NAME:-tauri_leptos_bar}"
+JWM_BAR_NAME="${JWM_BAR_NAME:-xilem_bar}"
 JWM_BAR_SET_BY_ARGS=false
 UPDATED_CONFIG_PATHS=()
 SKIP_BAR=false
@@ -145,7 +145,7 @@ usage() {
 
 说明:
   - 推荐日用会话是 Wayland（jwm-wayland.desktop / wayland-udev）；X11 会话条目仍会安装，作为兼容面。
-  - 官方默认 status bar 是 tauri_leptos_bar；可通过 JWM_BAR_NAME 或 -b 选择其它 bar，-b 优先。
+  - 官方默认 status bar 是 xilem_bar；可通过 JWM_BAR_NAME 或 -b 选择其它 bar，-b 优先。
   - 所有 bar 的源码都在本仓库 bars/ 目录下，随 jwm 一起版本化，无需克隆外部仓库。
   - 真正会被安装的 bar 只有 JWM_BAR_NAME（即 -b 的第一个参数、环境变量或官方默认值）。
   - 原生 Rust bar 使用 cargo install --path ... 安装到 cargo bin 目录（通常是 ~/.cargo/bin）。
@@ -166,7 +166,7 @@ usage() {
     缺失的配置会自动生成；手动 jwm --gen-config 可主动强制重置。
 
 示例:
-  $(basename "$0")                           # 安装 jwm + 官方默认 bar（tauri_leptos_bar）
+  $(basename "$0")                           # 安装 jwm + 官方默认 bar（xilem_bar）
   $(basename "$0") --gen-config              # 同上，并按字段变化更新配置
   $(basename "$0") -m debug                  # debug 模式编译安装
   $(basename "$0") -b xcb_bar                # 安装示例 bar（非官方默认）
@@ -1107,5 +1107,5 @@ ok "全部完成！"
 echo ""
 info "日用推荐: 在显示管理器里选「JWM」Wayland 会话（jwm-wayland.desktop）。"
 info "启动前跑: jwm --backend wayland-udev --doctor"
-info "官方 bar: ${JWM_BAR_NAME:-tauri_leptos_bar}（见 bars/README.md）"
+info "官方 bar: ${JWM_BAR_NAME:-xilem_bar}（见 bars/README.md）"
 info "真机验收清单: docs/hardware-validation.md"

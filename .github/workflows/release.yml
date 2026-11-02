@@ -53,7 +53,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            build-essential pkg-config libglib2.0-dev libcairo2-dev \
+            build-essential pkg-config cmake clang libglib2.0-dev libcairo2-dev \
             libpango1.0-dev libasound2-dev libdbus-1-dev libudev-dev \
             libinput-dev libseat-dev libdrm-dev libgbm-dev \
             libegl1-mesa-dev libgl1-mesa-dev libwayland-dev \
@@ -63,6 +63,7 @@ jobs:
             libxcb-shape0-dev libxcb-xfixes0-dev libxcursor-dev \
             libxfixes-dev libxi-dev libxrandr-dev libxrender-dev \
             shellcheck libglib2.0-bin xdg-utils \
+            libfontconfig1-dev libfreetype-dev libvulkan-dev \
             libwebkit2gtk-4.1-dev libxdo-dev libayatana-appindicator3-dev librsvg2-dev libgtk-4-dev
 
       - name: Install stable Rust
@@ -74,7 +75,7 @@ jobs:
       - name: Cache Cargo build data
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0  # v2.9.3
 
-      - name: Install the default Leptos frontend builder
+      - name: Install the bundled Leptos compatibility frontend builder
         run: cargo install trunk --version '0.22.1' --locked
 
       - name: Check formatting

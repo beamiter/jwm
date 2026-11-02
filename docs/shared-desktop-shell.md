@@ -3,7 +3,7 @@
 JWM supervises one `jwm-shell` process per session. Each output has a left
 application/workspace panel, right sound/display panel, and bottom media/window
 Dock. The selected status bar keeps its own toolkit and renders the primary
-bar. The built-in and source-installer default is `tauri_leptos_bar`.
+bar. The built-in and source-installer default is `xilem_bar`.
 
 Implementation and acceptance are tracked separately. The authoritative frontend
 inventory is [shared-shell-coverage.json](shared-shell-coverage.json); `pending`
@@ -16,7 +16,7 @@ Merge into the existing JWM configuration for the active backend:
 
 ```toml
 [status_bar]
-name = "tauri_leptos_bar"
+name = "xilem_bar"
 
 [desktop_shell]
 enabled = true

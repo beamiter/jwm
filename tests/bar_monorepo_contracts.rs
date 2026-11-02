@@ -157,7 +157,7 @@ fn tauri_install_path_declares_and_checks_its_linux_prerequisites() {
         "the optional bootstrap must install Tauri 2's Linux webview dependency"
     );
     assert!(
-        installer.contains("pkg-config --exists webkit2gtk-4.1"),
+        installer.contains("check-webkitgtk-version.sh"),
         "the installer must fail early when WebKitGTK 4.1 is unavailable"
     );
     assert!(
@@ -385,7 +385,7 @@ fn rust_wasm_frontends_include_an_executable_trunk_entrypoint() {
 fn release_bundle_and_source_install_include_the_shared_host_and_default_frontend() {
     let root = repository_root();
     let manifest = fs::read_to_string(root.join("packaging/release-manifest.tsv")).unwrap();
-    for name in ["jwm-shell", "tauri_leptos_bar"] {
+    for name in ["jwm-shell", "xilem_bar"] {
         assert!(
             manifest
                 .lines()
@@ -394,6 +394,6 @@ fn release_bundle_and_source_install_include_the_shared_host_and_default_fronten
         );
     }
     let installer = fs::read_to_string(root.join("scripts/install-jwm.sh")).unwrap();
-    assert!(installer.contains("JWM_BAR_NAME=\"${JWM_BAR_NAME:-tauri_leptos_bar}\""));
+    assert!(installer.contains("JWM_BAR_NAME=\"${JWM_BAR_NAME:-xilem_bar}\""));
     assert!(installer.contains("build_and_install_shell"));
 }

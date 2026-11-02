@@ -119,6 +119,7 @@ valid_stable_path() {
         usr/local/bin/jwm-toggle-sidebar-mode|\
         usr/lib/udev/rules.d/69-jwm-touchpad-gestures.rules|\
         usr/local/bin/tauri_leptos_bar|\
+        usr/local/bin/xilem_bar|\
         usr/local/bin/tao_glow_bar|\
         usr/local/bin/tao_pixels_bar|\
         usr/share/xsessions/jwm-x11rb.desktop|\
@@ -172,6 +173,8 @@ if ((SKIP_BUILD == 0)); then
     cargo build --locked --release --bins --target-dir "$TARGET_DIR" --manifest-path "$PROJECT_ROOT/crates/jwm_apps/Cargo.toml"
     cargo build --locked --release --bin tao_glow_bar --target-dir "$TARGET_DIR" --manifest-path "$PROJECT_ROOT/bars/tao_glow_bar/Cargo.toml"
     cargo build --locked --release --manifest-path "$PROJECT_ROOT/crates/jwm_shell/Cargo.toml" --target-dir "$TARGET_DIR"
+    cargo build --locked --release --bin xilem_bar --target-dir "$TARGET_DIR" --manifest-path "$PROJECT_ROOT/bars/xilem_bar/Cargo.toml"
+    # Keep the former packaged default available for existing user configs.
     bash "$PROJECT_ROOT/scripts/build-leptos-bar.sh" "$TARGET_DIR"
     cargo build --locked --release --bin tao_pixels_bar --target-dir "$TARGET_DIR" --manifest-path "$PROJECT_ROOT/bars/tao_pixels_bar/Cargo.toml"
 fi
