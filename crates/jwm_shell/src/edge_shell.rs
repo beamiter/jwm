@@ -56,6 +56,8 @@ pub enum Action {
     Files,
     Terminal,
     Browser,
+    /// Open or raise JWM's player, including when no MPRIS player is running.
+    MediaOpen,
     MediaPrevious,
     MediaNext,
 }
@@ -314,6 +316,7 @@ impl Hit {
             }
             Action::CycleTasks => value["kind"] = "task_overflow".into(),
             Action::HidePanel => value["kind"] = "hide_panel".into(),
+            Action::MediaOpen => value["kind"] = "media_open".into(),
             Action::MediaPrevious => value["kind"] = "media_previous".into(),
             Action::MediaNext => value["kind"] = "media_next".into(),
             Action::Model(UserAction::MediaPlayPause) => value["kind"] = "media_play_pause".into(),

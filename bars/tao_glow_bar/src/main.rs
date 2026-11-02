@@ -513,6 +513,19 @@ impl App {
                 self.handle_edge_action(*action);
                 return;
             }
+            Action::Model(xbar_core::UserAction::MediaPlayPause)
+                if self
+                    .bar
+                    .runtime()
+                    .view()
+                    .media
+                    .player
+                    .as_deref()
+                    .is_none_or(|player| player.trim().is_empty()) =>
+            {
+                self.handle_edge_action(Action::MediaOpen);
+                return;
+            }
             Action::Model(action) => {
                 let update = self.bar.runtime_mut().dispatch(action);
                 self.handle_runtime_update(update);
@@ -560,7 +573,8 @@ impl App {
                 });
                 return;
             }
-            Action::CycleTasks => return,
+            Action::CycleTasks | Action::HidePanel => return,
+            Action::MediaOpen => Some(("jwm-player", Vec::new())),
             Action::Files => std::env::var_os("HOME").map(|home| ("xdg-open", vec![home])),
             Action::Terminal => Some(("x-terminal-emulator", Vec::new())),
             Action::Browser => Some(("x-www-browser", Vec::new())),

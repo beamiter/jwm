@@ -549,7 +549,16 @@ fn dispatch(
         }
         Action::MediaPrevious => return invoke("media_previous", Value::Null),
         Action::MediaNext => return invoke("media_next", Value::Null),
+        Action::MediaOpen => return launch("jwm-player", &[], invoke),
         Action::Model(UserAction::MediaPlayPause) => {
+            if view
+                .media
+                .player
+                .as_deref()
+                .is_none_or(|player| player.trim().is_empty())
+            {
+                return launch("jwm-player", &[], invoke);
+            }
             return invoke("media_play_pause", Value::Null);
         }
         Action::Model(action) => action,

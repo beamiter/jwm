@@ -5,6 +5,11 @@ application/workspace panel, right sound/display panel, and bottom media/window
 Dock. The selected status bar keeps its own toolkit and renders the primary
 bar. The built-in and source-installer default is `xilem_bar`.
 
+Click the bottom Dock's media artwork or title to open or raise **JWM Player**.
+With no running media player, its play button also opens JWM Player so you can
+choose files; previous/next stay disabled until a player is available. When a
+player is running, play/pause and previous/next control the active MPRIS player.
+
 Implementation and acceptance are tracked separately. The authoritative frontend
 inventory is [shared-shell-coverage.json](shared-shell-coverage.json); `pending`
 means no current-build runtime acceptance exists. Historical binaries, compile

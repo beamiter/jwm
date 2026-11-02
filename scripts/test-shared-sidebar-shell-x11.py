@@ -82,12 +82,14 @@ def main():
     parser.add_argument("--bin-dir", type=Path, default=ROOT / "target/debug")
     parser.add_argument("--shell-bin", type=Path, default=ROOT / "crates/jwm_shell/target/debug/jwm-shell")
     parser.add_argument("--bridge-bin", type=Path, help="current jwm-bridge executable for the private deep MPRIS test")
+    parser.add_argument("--player-bin", type=Path, help="current jwm-player executable for the private media test")
     parser.add_argument("--second-bar", default="tao_pixels_bar")
     parser.add_argument("--second-bar-bin", type=Path)
     parser.add_argument("--evidence-dir", type=Path, default=ROOT / "artifacts/shared-shell")
     parser.add_argument("--size", default="1280x800")
     parser.add_argument("--theme", choices=("light", "dark"), default="light")
     parser.add_argument("--deep", action="store_true")
+    parser.add_argument("--media-only", action="store_true", help="test empty-player launch and real MPRIS controls after the standard smoke")
     parser.add_argument("--ui-font", help="optional private system UI font override for visual fixtures")
     parser.add_argument("--submenu-themes", action="store_true", help="capture Hub child pages and verify live theme changes without replacing the shared host")
     parser.add_argument("--workarea-only", action="store_true", help="run real external-strut, fullscreen and one-switch rollback acceptance after the standard smoke")
@@ -101,6 +103,7 @@ def main():
     bar_bin = (args.bar_bin or bar_dir / ("src-tauri/target/debug" if (bar_dir / "src-tauri").is_dir() else "target/debug") / args.bar).resolve()
     second_bin = (args.second_bar_bin or ROOT / "bars" / args.second_bar / "target/debug" / args.second_bar).resolve()
     bridge_bin = (args.bridge_bin or args.bin_dir / "jwm-bridge").resolve()
+    player_bin = (args.player_bin or args.bin_dir / "jwm-player").resolve()
     width, height = map(int, args.size.split("x"))
     assert not (args.legacy_four_edge and args.legacy_edge_shell), "choose one legacy source"
     suffix = "-legacy-four-edge" if args.legacy_four_edge else ("-legacy-edge-shell" if args.legacy_edge_shell else "")
@@ -136,7 +139,7 @@ def main():
         env["XBAR_CONFIG"] = str(work / "xbar.toml")
         (work / "xbar.toml").write_text(f'theme="{args.theme}"\n[edge_shell]\nenabled=true\nleft="always"\nright="always"\nbottom="always"\n')
         (work / "bin").mkdir()
-        if args.deep:
+        if args.deep or args.media_only:
             env["JWM_TEST_LAUNCH_PID"] = str(work / "launched-application.pid")
             terminal = work / "bin/x-terminal-emulator"
             terminal.write_text("#!/bin/sh\nprintf '%s\\n' \"$$\" > \"$JWM_TEST_LAUNCH_PID\"\nexec xmessage -name SharedLaunchedTerminal -title SharedLaunchedTerminal 'shared shell application survival'\n")
@@ -145,6 +148,8 @@ def main():
             bridge_launcher = work / "bin/capture-bridge-pid"
             bridge_launcher.write_text("#!/bin/sh\nprintf '%s\\n' \"$$\" > \"$JWM_TEST_BRIDGE_PID\"\nexec \"$@\"\n")
             bridge_launcher.chmod(0o700)
+            assert player_bin.is_file() and os.access(player_bin, os.X_OK), f"build current jwm-player first: {player_bin}"
+            (work / "bin/jwm-player").symlink_to(player_bin)
         env["PATH"] = str(work / "bin") + os.pathsep + env.get("PATH", "")
         log = (evidence / "session.log").open("w+")
 
@@ -373,6 +378,34 @@ def main():
             identity = legacy.process_identity(bridge_pid)
             assert identity
             service_identities.append(identity)
+
+            def player_windows():
+                return [item for item in msg("get_windows") if item["class"] == "jwm-player" or
+                    item.get("instance") == "jwm-player"]
+
+            # The empty play button must launch a real window, rather than
+            # silently sending PlayPause to a nonexistent MPRIS destination.
+            for kind in ("media_play_pause", "media_open"):
+                wait_for(lambda: not msg("get_media_status").get("active", False), "no active player before cold launch")
+                bottom = next(p for p in state()["host"]["panels"] if p["role"] == "bottom")
+                controls = wait_for(lambda: (rows if (rows := edge_controls(bottom)) and
+                    all(not c["enabled"] for c in rows if c["kind"] in ("media_previous", "media_next")) else None), "empty skip controls disabled")
+                assert {c["kind"] for c in controls if c["enabled"]} >= {"media_open", "media_play_pause"}
+                target = wait_for(lambda: panel_control("bottom", kind), "empty " + kind + " target")
+                click(target[0], target[1])
+                wait_for(player_windows, kind + " opens an actual player window")
+                wait_for(lambda: msg("get_media_status").get("player") == "jwm", "launched player discovered over MPRIS")
+                # Reopening the card raises/reuses the existing player.
+                target = wait_for(lambda: panel_control("bottom", "media_open"), "player card target")
+                click(target[0], target[1])
+                time.sleep(0.5)
+                assert len(player_windows()) == 1, "card must reuse the existing player"
+                msg("spawn", {"cmd": ["gdbus", "call", "--session", "--dest", "org.mpris.MediaPlayer2.jwm",
+                    "--object-path", "/org/mpris/MediaPlayer2", "--method", "org.mpris.MediaPlayer2.Quit"]})
+                wait_for(lambda: not player_windows(), "private player closed")
+                wait_for(lambda: not msg("get_media_status").get("active", False), "closed player removed from MPRIS snapshot")
+            record("empty play and media card open real JWM Player windows; reopen reuses the window; unavailable skips are disabled")
+
             destination = work / "mpris.json"
             helper = ROOT / "scripts/fixtures/shared_shell_mpris.py"
             msg("spawn", {"cmd": ["/usr/bin/python3", str(helper), str(destination)]})
@@ -782,6 +815,8 @@ def main():
                 exercise_topology()
             if args.workarea_only:
                 exercise_workarea()
+            if args.media_only and not args.deep:
+                exercise_media_controls()
             if args.deep:
                 exercise_provider_controls()
                 exercise_media_controls()

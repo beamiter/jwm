@@ -156,13 +156,23 @@ impl Painter<'_> {
     }
 
     fn flat_button(&mut self, rect: [f64; 4], label: &str, action: Action) -> Result<()> {
+        self.flat_button_enabled(rect, label, action, true)
+    }
+
+    fn flat_button_enabled(
+        &mut self,
+        rect: [f64; 4],
+        label: &str,
+        action: Action,
+        enabled: bool,
+    ) -> Result<()> {
         let [x, y, w, h] = rect;
         let pressed = self
             .panel
             .pressed
             .as_ref()
             .is_some_and(|hit| hit.action == action && hit.rect == rect);
-        if pressed || self.panel.hovered == Some(self.panel.hits.len()) {
+        if enabled && (pressed || self.panel.hovered == Some(self.panel.hits.len())) {
             let palette = ShellPalette::for_dark(self.dark);
             rounded(self.ctx, x, y, w, h, 12.0);
             color(
@@ -175,7 +185,11 @@ impl Painter<'_> {
             );
             self.ctx.fill()?;
         }
-        self.ink();
+        if enabled {
+            self.ink();
+        } else {
+            color(self.ctx, ShellPalette::for_dark(self.dark).muted_ink);
+        }
         if !symbol(self.ctx, label, rect)? {
             text(self.ctx, label, x, y + (h - 20.0) / 2.0, w, 14.0, true)?;
         }
@@ -183,7 +197,7 @@ impl Painter<'_> {
             rect,
             action,
             slider: None,
-            enabled: true,
+            enabled,
             slider_value: None,
         });
         Ok(())
@@ -442,6 +456,12 @@ impl Painter<'_> {
             let art = 36.0_f64.min(size);
             let ax = x + 20.0;
             let ay = y + (h - art) / 2.0;
+            let controls_x = x + media_width - 104.0;
+            self.flat_button(
+                [ax - 6.0, cy, controls_x - ax + 2.0, size],
+                "",
+                Action::MediaOpen,
+            )?;
             // No fabricated album image: show an explicit music tile until
             // the shared now-playing model supplies artwork in a future API.
             rounded(self.ctx, ax, ay, art, art, 9.0);
@@ -453,8 +473,13 @@ impl Painter<'_> {
             self.ctx.set_source_rgba(0.92, 0.97, 1.0, 0.96);
             symbol(self.ctx, "♫", [ax + 4.0, ay + 4.0, art - 8.0, art - 8.0])?;
             let tx = ax + art + 12.0;
-            let controls_x = x + media_width - 104.0;
             let tw = (controls_x - tx - 10.0).max(1.0);
+            let has_player = self
+                .snapshot
+                .media
+                .player
+                .as_deref()
+                .is_some_and(|player| !player.trim().is_empty());
             self.ink();
             text(
                 self.ctx,
@@ -462,7 +487,7 @@ impl Painter<'_> {
                     .media
                     .title
                     .as_deref()
-                    .unwrap_or("Nothing playing"),
+                    .unwrap_or("Open player"),
                 tx,
                 cy + 2.0,
                 tw,
@@ -484,10 +509,11 @@ impl Painter<'_> {
                 10.0,
                 false,
             )?;
-            self.flat_button(
+            self.flat_button_enabled(
                 [controls_x, cy + 3.0, 30.0, size - 6.0],
                 "previous",
                 Action::MediaPrevious,
+                has_player,
             )?;
             self.flat_button(
                 [controls_x + 34.0, cy + 3.0, 30.0, size - 6.0],
@@ -498,10 +524,11 @@ impl Painter<'_> {
                 },
                 Action::Model(UserAction::MediaPlayPause),
             )?;
-            self.flat_button(
+            self.flat_button_enabled(
                 [controls_x + 68.0, cy + 3.0, 30.0, size - 6.0],
                 "next",
                 Action::MediaNext,
+                has_player,
             )?;
             color(self.ctx, ShellPalette::for_dark(self.dark).divider);
             self.ctx.move_to(x + media_width + 8.0, cy + 7.0);
@@ -1315,6 +1342,53 @@ mod tests {
         for hit in panel.hits {
             let [x, y, w, h] = hit.rect;
             assert!(x >= 0.0 && y >= 0.0 && x + w <= 1024.0 && y + h <= 64.0);
+        }
+    }
+
+    #[test]
+    fn media_card_opens_player_and_empty_transport_disables_only_skips() {
+        for width in [640, 800, 1024] {
+            for dark in [false, true] {
+                for player in [None, Some(""), Some("jwm")] {
+                    let mut snapshot = xbar_core::model::BarModel::default().snapshot();
+                    snapshot.media.player = player.map(str::to_owned);
+                    let surface =
+                        cairo::ImageSurface::create(cairo::Format::ARgb32, width, 64).unwrap();
+                    let ctx = Context::new(&surface).unwrap();
+                    let mut panel = panel(BarEdge::Bottom, 0);
+                    Painter {
+                        ctx: &ctx,
+                        panel: &mut panel,
+                        snapshot: &snapshot,
+                        tasks: &[],
+                        dark,
+                    }
+                    .bottom(0.0, 0.0, f64::from(width), 64.0)
+                    .unwrap();
+                    let open = panel
+                        .hits
+                        .iter()
+                        .find(|hit| hit.action == Action::MediaOpen)
+                        .unwrap();
+                    assert!(open.contains(38.0, 32.0), "artwork opens the player");
+                    assert!(open.contains(70.0, 32.0), "title opens the player");
+                    for hit in panel.hits.iter().filter(|hit| {
+                        matches!(
+                            hit.action,
+                            Action::MediaPrevious
+                                | Action::MediaNext
+                                | Action::Model(UserAction::MediaPlayPause)
+                        )
+                    }) {
+                        let [x, y, w, h] = hit.rect;
+                        assert!(!open.contains(x + w / 2.0, y + h / 2.0));
+                        let enabled = player == Some("jwm")
+                            || hit.action == Action::Model(UserAction::MediaPlayPause);
+                        assert_eq!(hit.enabled, enabled);
+                        assert_eq!(hit.contains(x + w / 2.0, y + h / 2.0), enabled);
+                    }
+                }
+            }
         }
     }
 
