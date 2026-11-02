@@ -42,8 +42,9 @@ jwm-tool msg waterlily_palette --args '"fluent"'
 jwm-tool msg get_waterlily_status --raw
 ```
 
-`get_waterlily` / `get_wly` aliases and compact `jwm-tool health` output remain
-unchanged. The older `toggle_excalibur` alias remains deprecated. The legacy
+`get_waterlily` / `get_wly` aliases remain unchanged. `jwm-tool health` still
+prints compact `waterlily` for WaterLily operators. The older
+`toggle_excalibur` alias remains deprecated. The legacy
 adapter's pointer behavior is unchanged; it is **not** a capability of the new
 protocol. The legacy layer remains unavailable on Wayland as before.
 
