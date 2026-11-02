@@ -12,8 +12,8 @@ case "${1:-}" in
         exit 0 ;;
 esac
 [[ $# == 0 ]] || { printf 'Unexpected argument: %s\n' "$1" >&2; exit 2; }
-pkg-config --atleast-version=4.10 gtk4 || {
-    printf '%s\n' 'GTK >= 4.10 development files are required (Ubuntu 24.04+: libgtk-4-dev).' >&2
+pkg-config --exists cairo pangocairo gio-2.0 || {
+    printf '%s\n' 'Cairo/Pango/GLib development files are required (libcairo2-dev libpango1.0-dev libglib2.0-dev).' >&2
     exit 1
 }
 target=${CARGO_TARGET_DIR:-$ROOT/target}

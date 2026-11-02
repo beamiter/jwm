@@ -39,8 +39,8 @@ leave the user's MIME configuration untouched.
 
 The same source installation also builds `jwm-notes` and `jwm-image-viewer`
 from the independent `crates/jwm_apps` package and sets text/image defaults in
-`jwm-mimeapps.list`. GTK >= 4.10 is required at build and runtime (Ubuntu 24.04+);
-the release runner uses Ubuntu 24.04. Release payloads include both binaries
+`jwm-mimeapps.list`. The apps use Cairo/Pango with native X11/Wayland software
+surfaces; the release runner uses Ubuntu 24.04. Release payloads include both binaries
 and their `org.jwm.Notes.desktop` / `org.jwm.ImageViewer.desktop` entries.
 See [native applications](../docs/native-apps.md) for storage and shortcuts.
 
@@ -62,7 +62,7 @@ pkgdesc="Tag-based WM/compositor with built-in shell (Wayland DRM primary)"
 arch=('x86_64')
 url="https://github.com/<org>/jwm"
 license=('MIT')
-depends=('libx11' 'libxkbcommon' 'wayland' 'mesa' 'libinput' 'seatd' 'alsa-lib' 'dbus' 'gtk4>=4.10')
+depends=('libx11' 'libxkbcommon' 'wayland' 'mesa' 'libinput' 'seatd' 'alsa-lib' 'dbus' 'cairo' 'pango' 'glib2')
 optdepends=('mpv: JWM music and video playback')
 makedepends=('cargo' 'git' 'clang' 'pkgconf')
 provides=('jwm')

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise actual GTK windows on private Xvfb and D-Bus sessions.
+"""Exercise native Cairo windows on private Xvfb and D-Bus sessions.
 
 Requires Xvfb, xdotool, ImageMagick and Pillow. Never uses the user's display,
 session bus, notes, or application defaults. Build the apps before running.
@@ -7,6 +7,7 @@ session bus, notes, or application defaults. Build the apps before running.
 import argparse
 import io
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -41,9 +42,13 @@ def main():
             processes.append(xvfb)
             display = ":" + xvfb.stdout.readline().decode().strip()
             xvfb.stdout.close()
-            env = dict(os.environ, DISPLAY=display, GDK_BACKEND="x11", GSK_RENDERER="cairo",
-                       GTK_A11Y="none", GTK_USE_PORTAL="0", HOME=str(work),
-                       XDG_DATA_HOME=str(work / "data"), XDG_CONFIG_HOME=str(work / "config"))
+            runtime = work / "runtime"
+            runtime.mkdir(mode=0o700)
+            env = dict(os.environ, DISPLAY=display, HOME=str(work), XDG_RUNTIME_DIR=str(runtime),
+                       XDG_DATA_HOME=str(work / "data"), XDG_CONFIG_HOME=str(work / "config"),
+                       XDG_CACHE_HOME=str(work / "cache"), GIO_USE_VFS="local")
+            for name in ("WAYLAND_DISPLAY", "WAYLAND_SOCKET"):
+                env.pop(name, None)
 
             def command(*argv):
                 return subprocess.check_output(list(map(str, argv)), env=env, stderr=subprocess.DEVNULL).decode().strip()
@@ -72,8 +77,13 @@ def main():
                 return process
 
             def window(name):
-                return wait(lambda: command("xdotool", "search", "--onlyvisible", "--name", name).splitlines()[0],
-                            f"Window did not appear: {name}")
+                def find():
+                    # Winit publishes the Unicode title in _NET_WM_NAME;
+                    # xdotool's legacy WM_NAME search interprets it as Latin-1.
+                    ids = command("xdotool", "search", "--onlyvisible", "--class", "org.jwm").splitlines()
+                    return next((identifier for identifier in ids
+                                 if re.search(name, command("xprop", "-id", identifier, "_NET_WM_NAME"))), None)
+                return wait(find, f"Window did not appear: {name}")
 
             def focus(identifier):
                 command("xdotool", "windowfocus", "--sync", identifier)
@@ -101,7 +111,7 @@ def main():
 
             def color_bounds(identifier):
                 image = screenshot(identifier)
-                # Red/green test images have high saturation; the GTK chrome
+                # Red/green test images have high saturation; the neutral chrome
                 # and antialiased text are neutral. Inspect actual rendered pixels.
                 points = [(x, y) for y in range(image.height) for x in range(image.width)
                           if max(image.getpixel((x, y))) - min(image.getpixel((x, y))) > 150]
@@ -117,6 +127,16 @@ def main():
                 notes_dir = work / "data/jwm/notes"
                 wait(lambda: any(path.read_text() == "Shopping\nmilk" for path in notes_dir.glob("*.txt")),
                      "Notebook did not automatically save")
+                key("ctrl+a", "ctrl+c", "ctrl+End", "Return", "ctrl+v")
+                wait(lambda: any(path.read_text() == "Shopping\nmilk\nShopping\nmilk" for path in notes_dir.glob("*.txt")),
+                     "Clipboard copy/paste failed")
+                key("ctrl+z", "ctrl+z")
+                wait(lambda: any(path.read_text() == "Shopping\nmilk" for path in notes_dir.glob("*.txt")),
+                     "Undo did not restore the note")
+                # Desktop activation must focus the existing notebook.
+                activated = launch("jwm-notes")
+                wait(lambda: activated.poll() == 0, "Repeated activation did not reuse the app")
+                assert len(command("xdotool", "search", "--onlyvisible", "--class", "org.jwm.Notes").splitlines()) == 1
                 key("ctrl+n")
                 type_text("Second note")
                 wait(lambda: len(list(notes_dir.glob("*.txt"))) == 2 and
@@ -162,8 +182,25 @@ def main():
                 key("Escape")  # Cancel the unsaved-changes prompt.
                 assert external.read_text() == "Changed by another editor", "Header close overwrote the conflict"
                 print("Explicit text save, encoding preservation and external conflict: PASS", flush=True)
-                editor.terminate()
-                editor.wait(3)
+                # Export through the actual self-drawn path picker. A target
+                # that exists must remain untouched until explicit confirmation.
+                existing = work / "existing copy.txt"
+                existing.write_text("Keep this file")
+                key("ctrl+shift+s")
+                type_text(str(existing))
+                key("Return")
+                assert existing.read_text() == "Keep this file", "Save-as overwrote without confirmation"
+                key("Escape")
+                exported = work / "export with spaces.txt"
+                key("ctrl+shift+s")
+                type_text(str(exported))
+                key("Return")
+                wait(lambda: exported.exists() and exported.read_bytes() == b"\xef\xbb\xbfOriginal\r\nAppendedConflict",
+                     "Self-drawn save-as did not preserve content and encoding")
+                assert external.read_text() == "Changed by another editor"
+                key("ctrl+w")
+                wait(lambda: editor.poll() is not None, "Saved editor did not close")
+                print("Clipboard, undo, desktop activation, file picker and overwrite confirmation: PASS", flush=True)
 
                 # Solid asymmetric images make fit, zoom and rotation measurable.
                 first, second = work / "01 red.png", work / "02 green.webp"

@@ -147,10 +147,10 @@ files and prints the commands to enable the service after login. Use `--skip-eva
 `--skip-jwm` for a bar-only installation. Eva can also be updated independently
 with `bash scripts/install-eva.sh`; see [Eva setup](eva/README.md).
 
-The source installer includes native Rust/GTK4 **JWM Notes** (`jwm-notes`) and
-**JWM Image Viewer** (`jwm-image-viewer`), requiring GTK 4.10+ (`libgtk-4-dev`
-on Ubuntu 24.04+). Notes provides searchable, automatically saved notes and a
-UTF-8 text editor. The viewer supports PNG, JPEG, WebP, GIF (first frame), BMP,
+The source installer includes native **JWM Notes** (`jwm-notes`) and
+**JWM Image Viewer** (`jwm-image-viewer`). Both share the sidebars' Cairo/Pango
+self-drawn GUI route, with native X11/Wayland windows and no GTK dependency.
+Notes provides searchable, automatically saved notes and a UTF-8 text editor. The viewer supports PNG, JPEG, WebP, GIF (first frame), BMP,
 TIFF, ICO and portable bitmaps, with zoom, rotation, fullscreen, drag and drop,
 and browsing adjacent images. See [native applications](docs/native-apps.md).
 

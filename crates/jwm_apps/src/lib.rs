@@ -1,82 +1,48 @@
-use gtk::{gio, glib, prelude::*};
-use std::path::{Path, PathBuf};
+//! Native JWM applications: Cairo/Pango scenes on X11 and Wayland software surfaces.
+use std::{
+    path::{Path, PathBuf},
+    process::ExitCode,
+};
 
+mod app;
+mod editor;
+mod host;
 pub mod notes;
 mod ui;
 pub mod viewer;
 
-pub fn run(id: &str, name: &str, notes: bool) -> glib::ExitCode {
-    if std::env::args_os().any(|arg| arg == "--version") {
-        println!("{name} {}", env!("CARGO_PKG_VERSION"));
-        return glib::ExitCode::SUCCESS;
-    }
-    if std::env::args_os().any(|arg| arg == "--help" || arg == "-h") {
-        println!(
-            "Usage: {name} [--] [FILE…]\nNative JWM {}",
-            if notes {
-                "notes and UTF-8 text editor"
-            } else {
-                "image viewer"
-            }
-        );
-        return glib::ExitCode::SUCCESS;
-    }
-    glib::set_prgname(Some(name));
-    glib::set_application_name(if notes {
-        "JWM 备忘录"
-    } else {
-        "JWM 图片查看器"
-    });
-    let app = gtk::Application::builder()
-        .application_id(id)
-        .flags(gio::ApplicationFlags::HANDLES_OPEN)
-        .build();
-    app.connect_startup(|_| ui::install());
-    app.connect_activate(move |app| {
-        if let Some(window) = app.active_window() {
-            window.present();
-        } else if notes {
-            notes::open(app, None);
-        } else {
-            viewer::open(app, vec![]);
+pub fn run(id: &str, name: &str, notes: bool) -> ExitCode {
+    let mut paths = Vec::new();
+    let mut literal = false;
+    for argument in std::env::args_os().skip(1) {
+        if !literal && argument == "--" {
+            literal = true;
+            continue;
         }
-    });
-    app.connect_open(move |app, files, _| {
-        if notes {
-            for file in files {
-                notes::open(app, Some(file.clone()));
-            }
-        } else {
-            viewer::open(app, files.to_vec());
+        if !literal && argument == "--version" {
+            println!("{name} {}", env!("CARGO_PKG_VERSION"));
+            return ExitCode::SUCCESS;
         }
-    });
-    app.run()
-}
-
-pub(crate) fn action(
-    window: &gtk::ApplicationWindow,
-    name: &str,
-    keys: &[&str],
-    callback: impl Fn() + 'static,
-) {
-    let action = gio::SimpleAction::new(name, None);
-    action.connect_activate(move |_, _| callback());
-    window.add_action(&action);
-    if let Some(app) = window.application() {
-        app.set_accels_for_action(&format!("win.{name}"), keys);
+        if !literal && (argument == "--help" || argument == "-h") {
+            println!(
+                "Usage: {name} [--] [FILE…]\nNative JWM {}",
+                if notes {
+                    "notes and UTF-8 text editor"
+                } else {
+                    "image viewer"
+                }
+            );
+            return ExitCode::SUCCESS;
+        }
+        paths.push(PathBuf::from(argument));
     }
-}
-
-pub(crate) fn error(window: &impl IsA<gtk::Window>, message: &str) {
-    gtk::AlertDialog::builder()
-        .message("操作未完成")
-        .detail(message)
-        .build()
-        .show(Some(window));
-}
-
-pub(crate) fn local_path(file: &gio::File) -> Result<PathBuf, String> {
-    file.path().ok_or_else(|| "请选择本地文件。".to_string())
+    match host::run(id, notes, paths) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("{name}: {error}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 pub fn note_title(text: &str) -> String {

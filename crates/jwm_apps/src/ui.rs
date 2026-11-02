@@ -1,21 +1,83 @@
-//! Shared GTK chrome using JWM Player's palette, spacing and line icons.
-use gtk::{cairo, gdk, prelude::*};
+//! Shared Cairo/Pango chrome. Like jwm-shell, rendering never needs GTK.
+use cairo::{Context, LineCap, LineJoin};
 
-pub(crate) fn install() {
-    if let Some(settings) = gtk::Settings::default() {
-        settings.set_gtk_application_prefer_dark_theme(true);
+pub type Color = (f64, f64, f64);
+pub const CANVAS: Color = (0.012, 0.016, 0.020);
+pub const PANEL: Color = (0.067, 0.078, 0.090);
+pub const HOVER: Color = (0.141, 0.161, 0.188);
+pub const LINE: Color = (0.184, 0.192, 0.208);
+pub const TEXT: Color = (0.945, 0.941, 0.949);
+pub const MUTED: Color = (0.588, 0.573, 0.588);
+pub const ACCENT: Color = (0.533, 0.682, 0.957);
+pub const SELECT: Color = (0.204, 0.306, 0.463);
+pub const HEADER: f64 = 64.;
+pub const TOOLS: f64 = 44.;
+pub const STATUS: f64 = 32.;
+#[derive(Clone, Copy, Default)]
+pub struct Rect {
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+}
+impl Rect {
+    pub const fn new(x: f64, y: f64, w: f64, h: f64) -> Self {
+        Self { x, y, w, h }
     }
-    let provider = gtk::CssProvider::new();
-    provider.load_from_data(include_str!("ui.css"));
-    if let Some(display) = gdk::Display::default() {
-        gtk::style_context_add_provider_for_display(
-            &display,
-            &provider,
-            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
-        );
+    pub fn contains(self, x: f64, y: f64) -> bool {
+        x >= self.x && x < self.x + self.w && y >= self.y && y < self.y + self.h
     }
 }
-
+pub fn color(cr: &Context, c: Color) {
+    cr.set_source_rgb(c.0, c.1, c.2);
+}
+pub fn fill(cr: &Context, r: Rect, c: Color) {
+    color(cr, c);
+    cr.rectangle(r.x, r.y, r.w, r.h);
+    let _ = cr.fill();
+}
+pub fn rounded(cr: &Context, r: Rect, c: Color) {
+    color(cr, c);
+    cr.new_sub_path();
+    for (x, y, a) in [
+        (r.x + r.w - 6., r.y + 6., -90.),
+        (r.x + r.w - 6., r.y + r.h - 6., 0.),
+        (r.x + 6., r.y + r.h - 6., 90.),
+        (r.x + 6., r.y + 6., 180.),
+    ] {
+        cr.arc(
+            x,
+            y,
+            6.,
+            a * std::f64::consts::PI / 180.,
+            (a + 90.) * std::f64::consts::PI / 180.,
+        );
+    }
+    cr.close_path();
+    let _ = cr.fill();
+}
+pub fn layout(cr: &Context, text: &str, size: f64, width: f64, wrap: bool) -> pango::Layout {
+    let layout = pangocairo::functions::create_layout(cr);
+    let mut font = pango::FontDescription::from_string("Sans");
+    font.set_absolute_size(size * pango::SCALE as f64);
+    layout.set_font_description(Some(&font));
+    layout.set_text(text);
+    layout.set_width((width.max(1.) * pango::SCALE as f64) as i32);
+    if wrap {
+        layout.set_wrap(pango::WrapMode::WordChar);
+        layout.set_spacing(4 * pango::SCALE);
+    } else {
+        layout.set_single_paragraph_mode(true);
+        layout.set_ellipsize(pango::EllipsizeMode::End);
+    }
+    layout
+}
+pub fn text(cr: &Context, text: &str, r: Rect, size: f64, c: Color) {
+    let layout = layout(cr, text, size, r.w, false);
+    color(cr, c);
+    cr.move_to(r.x, r.y + (r.h - layout.pixel_size().1 as f64) / 2.);
+    pangocairo::functions::show_layout(cr, &layout);
+}
 #[derive(Clone, Copy)]
 pub(crate) enum Icon {
     Notes,
@@ -39,234 +101,119 @@ pub(crate) enum Icon {
     Close,
 }
 
-fn icon(kind: Icon) -> gtk::DrawingArea {
-    let area = gtk::DrawingArea::builder()
-        .content_width(18)
-        .content_height(18)
-        .halign(gtk::Align::Center)
-        .valign(gtk::Align::Center)
-        .css_classes(["jwm-icon"])
-        .accessible_role(gtk::AccessibleRole::Presentation)
-        .build();
-    area.set_draw_func(move |area, cr, width, height| {
-        let color = area.color();
-        cr.set_source_rgba(
-            color.red().into(),
-            color.green().into(),
-            color.blue().into(),
-            color.alpha().into(),
-        );
-        cr.scale(f64::from(width) / 24.0, f64::from(height) / 24.0);
-        cr.set_line_width(1.5);
-        cr.set_line_cap(cairo::LineCap::Round);
-        cr.set_line_join(cairo::LineJoin::Round);
-        let path = |points: &[(f64, f64)]| {
-            cr.move_to(points[0].0, points[0].1);
-            for &(x, y) in &points[1..] {
-                cr.line_to(x, y);
-            }
-        };
-        let rect = |x, y, w, h| cr.rectangle(x, y, w, h);
-        match kind {
-            Icon::Notes | Icon::New => {
-                path(&[
-                    (6., 3.),
-                    (15., 3.),
-                    (19., 7.),
-                    (19., 21.),
-                    (6., 21.),
-                    (6., 3.),
-                ]);
-                path(&[(15., 3.), (15., 7.), (19., 7.)]);
-                path(&[(9., 12.), (16., 12.)]);
-                if matches!(kind, Icon::New) {
-                    path(&[(12.5, 8.5), (12.5, 15.5)]);
-                } else {
-                    path(&[(9., 16.), (16., 16.)]);
-                }
-            }
-            Icon::Image => {
-                rect(3., 4., 18., 16.);
-                path(&[(3., 17.), (9., 11.), (13., 15.), (16., 12.), (21., 17.)]);
-                cr.new_sub_path();
-                cr.arc(16., 8., 1., 0., std::f64::consts::TAU);
-            }
-            // These paths match the player's folder and window-control icons.
-            Icon::Folder => path(&[
-                (3., 6.),
-                (10., 6.),
-                (12., 9.),
-                (21., 9.),
-                (21., 20.),
-                (3., 20.),
-                (3., 6.),
-            ]),
-            Icon::Save => {
-                path(&[
-                    (4., 3.),
-                    (17., 3.),
-                    (21., 7.),
-                    (21., 21.),
-                    (4., 21.),
-                    (4., 3.),
-                ]);
-                rect(8., 3., 8., 6.);
-                rect(8., 14., 9., 7.);
-            }
-            Icon::Export => {
-                path(&[(4., 14.), (4., 21.), (20., 21.), (20., 14.)]);
-                path(&[(12., 16.), (12., 3.)]);
-                path(&[(7., 8.), (12., 3.), (17., 8.)]);
-            }
-            Icon::Trash => {
-                path(&[(3., 6.), (21., 6.)]);
-                path(&[(5., 6.), (6., 21.), (18., 21.), (19., 6.)]);
-                path(&[(9., 6.), (9., 3.), (15., 3.), (15., 6.)]);
-                path(&[(10., 10.), (10., 17.)]);
-                path(&[(14., 10.), (14., 17.)]);
-            }
-            Icon::Previous => path(&[(15., 5.), (8., 12.), (15., 19.)]),
-            Icon::Next => path(&[(9., 5.), (16., 12.), (9., 19.)]),
-            Icon::ZoomIn | Icon::ZoomOut => {
-                cr.arc(10., 10., 6.5, 0., std::f64::consts::TAU);
-                path(&[(15., 15.), (21., 21.)]);
-                path(&[(7., 10.), (13., 10.)]);
-                if matches!(kind, Icon::ZoomIn) {
-                    path(&[(10., 7.), (10., 13.)]);
-                }
-            }
-            Icon::Actual => {
-                path(&[(3., 9.), (6., 6.), (6., 18.)]);
-                path(&[(15., 9.), (18., 6.), (18., 18.)]);
-                path(&[(11., 9.), (12., 9.)]);
-                path(&[(11., 15.), (12., 15.)]);
-            }
-            Icon::Fit | Icon::Fullscreen => {
-                path(&[(3., 9.), (3., 3.), (9., 3.)]);
-                path(&[(15., 3.), (21., 3.), (21., 9.)]);
-                path(&[(21., 15.), (21., 21.), (15., 21.)]);
-                path(&[(9., 21.), (3., 21.), (3., 15.)]);
-                if matches!(kind, Icon::Fit) {
-                    rect(8., 8., 8., 8.);
-                }
-            }
-            Icon::Rotate => {
-                cr.arc(12., 12., 8., 0., std::f64::consts::PI * 1.5);
-                path(&[(8., 1.), (12., 4.), (8., 7.)]);
-            }
-            Icon::Minimize => path(&[(5., 12.), (19., 12.)]),
-            Icon::Maximize => rect(5., 5., 14., 14.),
-            Icon::Restore => {
-                rect(5., 7., 12., 12.);
-                path(&[(9., 3.), (21., 3.), (21., 15.)]);
-            }
-            Icon::Close => {
-                path(&[(6., 6.), (18., 18.)]);
-                path(&[(18., 6.), (6., 18.)]);
+pub fn icon(cr: &Context, kind: Icon, x: f64, y: f64) {
+    let _ = cr.save();
+    color(cr, TEXT);
+    cr.translate(x, y);
+    cr.scale(0.8, 0.8);
+    cr.set_line_width(1.5);
+    cr.set_line_cap(LineCap::Round);
+    cr.set_line_join(LineJoin::Round);
+    let path = |points: &[(f64, f64)]| {
+        cr.move_to(points[0].0, points[0].1);
+        for &(x, y) in &points[1..] {
+            cr.line_to(x, y);
+        }
+    };
+    let rect = |x, y, w, h| cr.rectangle(x, y, w, h);
+    match kind {
+        Icon::Notes | Icon::New => {
+            path(&[
+                (6., 3.),
+                (15., 3.),
+                (19., 7.),
+                (19., 21.),
+                (6., 21.),
+                (6., 3.),
+            ]);
+            path(&[(15., 3.), (15., 7.), (19., 7.)]);
+            path(&[(9., 12.), (16., 12.)]);
+            if matches!(kind, Icon::New) {
+                path(&[(12.5, 8.5), (12.5, 15.5)]);
+            } else {
+                path(&[(9., 16.), (16., 16.)]);
             }
         }
-        let _ = cr.stroke();
-    });
-    area
-}
-
-fn plain_button(kind: Icon, tooltip: &str) -> gtk::Button {
-    let button = gtk::Button::builder()
-        .child(&icon(kind))
-        .tooltip_text(tooltip)
-        .css_classes(["jwm-icon-button"])
-        .build();
-    button.update_property(&[gtk::accessible::Property::Label(tooltip)]);
-    button
-}
-
-pub(crate) fn button(kind: Icon, tooltip: &str, action: &str) -> gtk::Button {
-    let button = plain_button(kind, tooltip);
-    button.set_action_name(Some(action));
-    button
-}
-
-pub(crate) fn group(buttons: &[&gtk::Button]) -> gtk::Box {
-    let group = gtk::Box::new(gtk::Orientation::Horizontal, 2);
-    group.set_valign(gtk::Align::Center);
-    group.add_css_class("jwm-tools");
-    for button in buttons {
-        group.append(*button);
+        Icon::Image => {
+            rect(3., 4., 18., 16.);
+            path(&[(3., 17.), (9., 11.), (13., 15.), (16., 12.), (21., 17.)]);
+            cr.new_sub_path();
+            cr.arc(16., 8., 1., 0., std::f64::consts::TAU);
+        }
+        // These paths match the player's folder and window-control icons.
+        Icon::Folder => path(&[
+            (3., 6.),
+            (10., 6.),
+            (12., 9.),
+            (21., 9.),
+            (21., 20.),
+            (3., 20.),
+            (3., 6.),
+        ]),
+        Icon::Save => {
+            path(&[
+                (4., 3.),
+                (17., 3.),
+                (21., 7.),
+                (21., 21.),
+                (4., 21.),
+                (4., 3.),
+            ]);
+            rect(8., 3., 8., 6.);
+            rect(8., 14., 9., 7.);
+        }
+        Icon::Export => {
+            path(&[(4., 14.), (4., 21.), (20., 21.), (20., 14.)]);
+            path(&[(12., 16.), (12., 3.)]);
+            path(&[(7., 8.), (12., 3.), (17., 8.)]);
+        }
+        Icon::Trash => {
+            path(&[(3., 6.), (21., 6.)]);
+            path(&[(5., 6.), (6., 21.), (18., 21.), (19., 6.)]);
+            path(&[(9., 6.), (9., 3.), (15., 3.), (15., 6.)]);
+            path(&[(10., 10.), (10., 17.)]);
+            path(&[(14., 10.), (14., 17.)]);
+        }
+        Icon::Previous => path(&[(15., 5.), (8., 12.), (15., 19.)]),
+        Icon::Next => path(&[(9., 5.), (16., 12.), (9., 19.)]),
+        Icon::ZoomIn | Icon::ZoomOut => {
+            cr.arc(10., 10., 6.5, 0., std::f64::consts::TAU);
+            path(&[(15., 15.), (21., 21.)]);
+            path(&[(7., 10.), (13., 10.)]);
+            if matches!(kind, Icon::ZoomIn) {
+                path(&[(10., 7.), (10., 13.)]);
+            }
+        }
+        Icon::Actual => {
+            path(&[(3., 9.), (6., 6.), (6., 18.)]);
+            path(&[(15., 9.), (18., 6.), (18., 18.)]);
+            path(&[(11., 9.), (12., 9.)]);
+            path(&[(11., 15.), (12., 15.)]);
+        }
+        Icon::Fit | Icon::Fullscreen => {
+            path(&[(3., 9.), (3., 3.), (9., 3.)]);
+            path(&[(15., 3.), (21., 3.), (21., 9.)]);
+            path(&[(21., 15.), (21., 21.), (15., 21.)]);
+            path(&[(9., 21.), (3., 21.), (3., 15.)]);
+            if matches!(kind, Icon::Fit) {
+                rect(8., 8., 8., 8.);
+            }
+        }
+        Icon::Rotate => {
+            cr.arc(12., 12., 8., 0., std::f64::consts::PI * 1.5);
+            path(&[(8., 1.), (12., 4.), (8., 7.)]);
+        }
+        Icon::Minimize => path(&[(5., 12.), (19., 12.)]),
+        Icon::Maximize => rect(5., 5., 14., 14.),
+        Icon::Restore => {
+            rect(5., 7., 12., 12.);
+            path(&[(9., 3.), (21., 3.), (21., 15.)]);
+        }
+        Icon::Close => {
+            path(&[(6., 6.), (18., 18.)]);
+            path(&[(18., 6.), (6., 18.)]);
+        }
     }
-    group
-}
-
-pub(crate) fn header(
-    window: &gtk::ApplicationWindow,
-    kind: Icon,
-    name: &str,
-    title: &gtk::Label,
-) -> gtk::HeaderBar {
-    window.add_css_class("jwm-app");
-    let header = gtk::HeaderBar::builder()
-        .show_title_buttons(false)
-        .css_classes(["jwm-header"])
-        .build();
-    let brand = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    brand.add_css_class("jwm-brand");
-    brand.append(&icon(kind));
-    brand.append(&gtk::Label::new(Some(name)));
-    header.pack_start(&brand);
-    title.add_css_class("jwm-document-title");
-    title.set_width_chars(1);
-    title.set_max_width_chars(32);
-    header.set_title_widget(Some(title));
-
-    let minimize = plain_button(Icon::Minimize, "最小化");
-    let weak = window.downgrade();
-    minimize.connect_clicked(move |_| {
-        if let Some(window) = weak.upgrade() {
-            window.minimize();
-        }
-    });
-    let maximize = plain_button(Icon::Maximize, "最大化 / 还原");
-    let weak = window.downgrade();
-    maximize.connect_clicked(move |_| {
-        if let Some(window) = weak.upgrade() {
-            if window.is_maximized() {
-                window.unmaximize();
-            } else {
-                window.maximize();
-            }
-        }
-    });
-    let weak = maximize.downgrade();
-    window.connect_maximized_notify(move |window| {
-        if let Some(button) = weak.upgrade() {
-            button.set_child(Some(&icon(if window.is_maximized() {
-                Icon::Restore
-            } else {
-                Icon::Maximize
-            })));
-        }
-    });
-    let close = plain_button(Icon::Close, "关闭 (Ctrl+W)");
-    close.add_css_class("jwm-close");
-    let weak = window.downgrade();
-    close.connect_clicked(move |_| {
-        if let Some(window) = weak.upgrade() {
-            // Go through close-request so notes still save or prompt.
-            window.close();
-        }
-    });
-    let controls = group(&[&minimize, &maximize, &close]);
-    controls.add_css_class("jwm-window-controls");
-    header.pack_end(&controls);
-    // HeaderBar's native WindowHandle owns dragging, double-click and the
-    // window menu. Buttons retain GTK focus, keyboard and accessibility support.
-    window.set_titlebar(Some(&header));
-    header
-}
-
-pub(crate) fn status() -> gtk::Label {
-    gtk::Label::builder()
-        .xalign(0.0)
-        .ellipsize(gtk::pango::EllipsizeMode::Middle)
-        .css_classes(["jwm-status"])
-        .build()
+    let _ = cr.stroke();
+    let _ = cr.restore();
 }

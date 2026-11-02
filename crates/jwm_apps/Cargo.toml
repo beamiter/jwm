@@ -15,7 +15,14 @@ name = "jwm-image-viewer"
 path = "src/bin/image_viewer.rs"
 
 [dependencies]
-gtk = { package = "gtk4", version = "=0.11.4", features = ["v4_10"] }
+cairo-rs = "0.22.9"
+pango = "0.22.9"
+pangocairo = "0.22.9"
+gio = "0.22.8"
+winit = { version = "0.30.13", default-features = false, features = ["rwh_06", "x11", "wayland", "wayland-dlopen"] }
+softbuffer = { version = "0.4.8", default-features = false, features = ["x11", "x11-dlopen", "wayland", "wayland-dlopen"] }
+arboard = { version = "3.6.1", default-features = false, features = ["wayland-data-control"] }
+unicode-segmentation = "1.12"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "ico", "tiff", "pnm"] }
 
 [profile.dev]

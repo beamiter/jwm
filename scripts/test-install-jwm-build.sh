@@ -112,7 +112,7 @@ STUB
 cat > "$TEST_ROOT/bin/pkg-config" <<'STUB'
 #!/usr/bin/env bash
 if [[ ( $SCENARIO == eva-deps-failure || $SCENARIO == eva-skip ) && $* == *libpulse* ]]; then exit 1; fi
-if [[ $SCENARIO == apps-deps-failure && $* == *gtk4* ]]; then exit 1; fi
+if [[ $SCENARIO == apps-deps-failure && $* == *pangocairo* ]]; then exit 1; fi
 if [[ $SCENARIO == tauri-webkit-old ]]; then
     case "$*" in
         '--atleast-version=2.52.6 webkit2gtk-4.1') exit 1 ;;
@@ -308,7 +308,7 @@ run_case player-install-failure release 'player install failed target' 73
 run_case apps-failure release 'apps failed target' 101
 run_case apps-missing debug 'apps missing target' 1
 run_case apps-install-failure release 'apps install failed target' 73
-run_case apps-deps-failure release 'apps missing GTK target' 1
+run_case apps-deps-failure release 'apps missing Cairo target' 1
 run_case eva-no-bus release 'Eva no session target' 0
 run_case eva-no-graphical debug 'Eva no graphical session target' 0
 run_case eva-skip debug 'Eva skipped target' 0 --skip-eva

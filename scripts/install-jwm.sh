@@ -154,7 +154,7 @@ usage() {
   - 完整安装默认同时构建 Eva，沿用 --mode、--jobs 和 CARGO_TARGET_DIR，安装到登录用户的 ~/.local/bin。
     保留已有 eva.toml；图形用户会话可用时启用并重启，否则仅安装文件并提示后续启用命令。
   - 音乐和视频播放运行时需要 mpv；缺少它不影响 JWM 的构建与安装。
-  - 同时安装原生 jwm-notes 备忘录和 jwm-image-viewer 图片查看器（需要 GTK4 >= 4.10 开发库）。
+  - 同时安装原生 jwm-notes 备忘录和 jwm-image-viewer 图片查看器（Cairo/Pango 自绘，支持 X11/Wayland）。
   - 通过用户配置目录中的 jwm-mimeapps.list 设置 JWM 会话的默认音视频、文本、图片应用；Ubuntu/GNOME 的默认设置不变。
   - jwm 通过 ~/.config/jwm/config_x11.toml 和 config_wayland.toml 的 status_bar.name
     在运行时选择 bar，切换 bar 不需要重编 jwm。
@@ -620,8 +620,8 @@ build_and_install_shell() {
 # GUI dependencies have an independent lock, like the shared shell and bars.
 build_and_install_apps() {
     info "构建原生备忘录和图片查看器（$BUILD_MODE 模式）..."
-    if ! pkg-config --atleast-version=4.10 gtk4; then
-        err "原生应用需要 GTK4 >= 4.10 开发库（Ubuntu 24.04+: libgtk-4-dev）"
+    if ! pkg-config --exists cairo pangocairo gio-2.0; then
+        err "原生应用需要 Cairo/Pango/GLib 开发库（libcairo2-dev libpango1.0-dev libglib2.0-dev）"
         return 1
     fi
     cargo build --locked --manifest-path "$PROJECT_ROOT/crates/jwm_apps/Cargo.toml" \
