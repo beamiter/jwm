@@ -212,6 +212,9 @@ LifeAI.jl 的 Julia 预编译缓存没有稳定的仓库内路径，因此只在
                      (即明确要求动态 glibc 版本；install-jsh.sh 也认这个变量)
   CARGO_TARGET_DIR   若设置，产物检测也跟着走这个目录
 
+Git 更新在后台运行，不交互询问 HTTPS 用户名或密码；请先配置 Git 凭据助手。
+GitHub 可先运行 gh auth login，再运行 gh auth setup-git。
+
 退出码: 0 全部成功；1 有仓库更新失败、编译失败或安装失败。
 EOF
 }
@@ -414,12 +417,28 @@ update_one() {
     run_git_logged() {
         local raw="$WORKDIR/$idx.git-output" rc line
         : >"$raw"
-        git -c color.ui=false -C "$repo" "$@" >"$raw" 2>&1
+        # Git opens /dev/tty for HTTP credentials even with stderr redirected.
+        # Concurrent workers must use existing helpers, never compete for input.
+        # An empty GIT_ASKPASS also bypasses core.askPass/SSH_ASKPASS fallback;
+        # GCM has its own interactive UI and needs an explicit opt-out too.
+        GIT_TERMINAL_PROMPT=0 GIT_ASKPASS='' GCM_INTERACTIVE=never \
+            git -c color.ui=false -C "$repo" "$@" </dev/null >"$raw" 2>&1
         rc=$?
         while IFS= read -r line || [ -n "$line" ]; do
             printf '%s\n' "$(sanitize_text "$line")" >&3
         done <"$raw"
         return "$rc"
+    }
+    git_failure_detail() {
+        local operation="$1"
+        if LC_ALL=C grep -Eiq \
+            'terminal prompts disabled|authentication failed|invalid username or (password|token)|could not read (username|password)|interactivity.*disabled|HTTP Basic: Access denied' \
+            "$WORKDIR/$idx.git-output"; then
+            say "后台 Git 不询问用户名或密码；请先在前台配置 Git 凭据助手后重试。"
+            printf '%s' "$operation 认证失败（请先配置 Git 凭据助手）"
+        else
+            printf '%s' "$operation 失败"
+        fi
     }
     append_commit_log() {
         local range="$1" commit_line
@@ -491,11 +510,12 @@ update_one() {
     # Fetch one source and branch. FETCH_HEAD is immutable for this worker
     # after the fetch; integrating its commit avoids a second pull fetching
     # from an unrelated configured upstream.
-    local fetch_args=(--tags --quiet)
+    local failure fetch_args=(--tags --quiet)
     [ "$PRUNE" -eq 1 ] && fetch_args+=(--prune)
     if ! run_git_logged fetch "${fetch_args[@]}" -- "$fetch_source" "refs/heads/$source_branch"; then
-        say "${C_RED}fetch 失败${C_RST}"
-        report FAIL "fetch 失败"; return
+        failure="$(git_failure_detail fetch)"
+        say "${C_RED}$failure${C_RST}"
+        report FAIL "$failure"; return
     fi
 
     local local_sha remote_sha
@@ -605,11 +625,12 @@ update_one() {
                 fi
                 return
             else
-                say "${C_RED}push 失败（可能远端有新提交，或无推送权限），本地改动仍保留${C_RST}"
+                failure="$(git_failure_detail push)"
+                say "${C_RED}$failure，本地改动仍保留${C_RST}"
                 if [ -n "$pull_msg" ]; then
-                    report WARN "${pull_msg}；push 失败"
+                    report WARN "${pull_msg}；$failure"
                 else
-                    report FAIL "push 失败"
+                    report FAIL "$failure"
                 fi
                 return
             fi

@@ -48,6 +48,30 @@ skipped. `-f` requires fast-forward history and `-m` permits a merge commit.
 `-n` still fetches objects/tags, but does not change the working tree or push.
 Run `--help` for build targets, installer arguments and all options.
 
+Git updates run in background workers, so HTTPS authentication is noninteractive
+even with `-j 1`. Existing credential helpers still work, but terminal prompts,
+Git askpass programs and Git Credential Manager login dialogs are disabled for
+these Git commands. Missing or rejected credentials fail that repository's
+fetch/push with an authentication hint in the summary, including under `-q`;
+other repositories continue. Configure credentials in the foreground first,
+then rerun the updater. SSH authentication continues to use the normal SSH config
+and agent.
+
+For GitHub HTTPS, [GitHub CLI](https://cli.github.com/manual/gh_auth_login)
+can sign in through a browser, and
+[`gh auth setup-git`](https://cli.github.com/manual/gh_auth_setup-git)
+configures it as Git's credential helper:
+
+```sh
+gh auth login --hostname github.com --git-protocol https --web
+gh auth setup-git --hostname github.com
+./git-update-all.sh -B -X LifeAI.jl
+```
+
+If entering a personal access token manually in a foreground Git prompt, enter
+your GitHub login as the username and the token as the password. Revoke and
+replace any token accidentally pasted into a username prompt or shared in logs.
+
 The offline contract gate is `bash scripts/test-git-update-all.sh`. It uses local
 bare repositories and Git URL rewrites to exercise SSH source selection without
 network access, including unavailable unrelated remotes, dry runs, source-specific

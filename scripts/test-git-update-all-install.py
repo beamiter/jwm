@@ -1,9 +1,15 @@
 #!/usr/bin/env python3
 """Exercise update/build/install routing with local Git remotes and stub tools."""
 import os
+import fcntl
 from pathlib import Path
+import pty
+import select
+import signal
 import subprocess
 import tempfile
+import termios
+import time
 import unittest
 import re
 
@@ -75,6 +81,153 @@ class UpdateInstallTests(unittest.TestCase):
 
     def lines(self):
         return self.calls.read_text().splitlines() if self.calls.exists() else []
+
+    def auth_fixture(self, operation, names, ready=False):
+        """Use real Git credential prompting without contacting an HTTP server."""
+        helper = self.root / 'credential-helper'
+        self.executable(helper, '''#!/bin/sh
+cat >/dev/null
+[ "$1" = get ] || exit 0
+if [ "${TEST_AUTH_READY:-0}" = 1 ]; then
+    printf 'username=fixture-user\npassword=fixture-password\n'
+elif [ "${GCM_INTERACTIVE:-}" != never ]; then
+    printf 'helper-ui\n' >> "$TEST_AUTH_EVENTS"
+fi
+''')
+        askpass = self.root / 'askpass'
+        self.executable(askpass, '''#!/bin/sh
+printf 'askpass\n' >> "$TEST_AUTH_EVENTS"
+printf 'fixture-answer\n'
+''')
+        self.env.update(TEST_AUTH_OPERATION=operation, TEST_AUTH_NAMES=','.join(names),
+                        TEST_AUTH_READY=str(int(ready)), TEST_AUTH_HELPER=str(helper),
+                        TEST_AUTH_ASKPASS=str(askpass),
+                        TEST_AUTH_EVENTS=str(self.root / 'auth-events'),
+                        GIT_TERMINAL_PROMPT='1', GCM_INTERACTIVE='always',
+                        TEST_REAL_GIT='/usr/bin/git')
+        self.executable(self.tools / 'git', '''#!/usr/bin/python3
+import os
+from pathlib import Path
+import subprocess
+import sys
+args = sys.argv[1:]
+operation = next((arg for arg in args if arg in ('fetch', 'push')), None)
+repo = args[args.index('-C') + 1] if '-C' in args else ''
+if (operation == os.environ['TEST_AUTH_OPERATION']
+        and Path(repo).name in os.environ['TEST_AUTH_NAMES'].split(',')):
+    result = subprocess.run(
+        [os.environ['TEST_REAL_GIT'], '-C', repo, '-c', 'credential.helper=',
+         '-c', 'credential.helper=' + os.environ['TEST_AUTH_HELPER'],
+         '-c', 'core.askPass=' + os.environ['TEST_AUTH_ASKPASS'], 'credential', 'fill'],
+        input='protocol=https\\nhost=auth.example.invalid\\n\\n',
+        text=True, stdout=subprocess.DEVNULL)
+    if result.returncode:
+        sys.exit(result.returncode)
+os.execv(os.environ['TEST_REAL_GIT'], [os.environ['TEST_REAL_GIT'], *args])
+''')
+
+    def run_script_in_terminal(self, *args):
+        # A controlling terminal is essential: redirecting stdio alone does not
+        # stop Git from opening /dev/tty. Bound the test and clean up all workers
+        # if the regression makes a credential prompt block again.
+        master, slave = pty.openpty()
+
+        def attach_terminal():
+            os.setsid()
+            fcntl.ioctl(0, termios.TIOCSCTTY, 0)
+
+        process = subprocess.Popen(['bash', str(SCRIPT), *args, str(self.projects)],
+                                   env=self.env, stdin=slave, stdout=slave, stderr=slave,
+                                   preexec_fn=attach_terminal)
+        os.close(slave)
+        output = bytearray()
+        deadline = time.monotonic() + 10
+        try:
+            while True:
+                if time.monotonic() >= deadline:
+                    self.fail('updater blocked on a credential prompt: ' + output.decode(errors='replace'))
+                if select.select([master], [], [], 0.1)[0]:
+                    try:
+                        chunk = os.read(master, 65536)
+                    except OSError:
+                        break  # PTY reports EIO after its last writer exits.
+                    if not chunk:
+                        break
+                    output.extend(chunk)
+                elif process.poll() is not None:
+                    break
+            return subprocess.CompletedProcess(process.args, process.wait(timeout=2),
+                                               output.decode(errors='replace'), '')
+        finally:
+            # The updater may have exited while a background Git process is
+            # still alive, so clean the process group, not only the parent PID.
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.wait()
+            os.close(master)
+
+    def assert_no_auth_ui(self):
+        events = self.root / 'auth-events'
+        self.assertFalse(events.exists() and events.read_text(),
+                         'background Git opened an authentication UI')
+
+    def test_parallel_missing_credentials_fail_without_terminal_or_askpass_prompts(self):
+        for name in ('ember', 'frost', 'forge', 'anvil'):
+            self.project(name, updated=True)
+        self.auth_fixture('fetch', ('ember', 'frost', 'forge'))
+        self.env.update(GIT_ASKPASS=self.env['TEST_AUTH_ASKPASS'],
+                        SSH_ASKPASS=self.env['TEST_AUTH_ASKPASS'])
+        result = self.run_script_in_terminal('-B', '-j', '4', '-X', 'frost')
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn('失败 3', result.stdout)
+        self.assertIn('Git 凭据助手', result.stdout)
+        self.assertNotRegex(result.stdout, r'(?m)^(?:Username|Password) for ')
+        self.assertIn('terminal prompts disabled', result.stdout)
+        self.assertEqual(self.lines(), ['installer:anvil'])
+        self.assert_no_auth_ui()
+
+    def test_quiet_single_worker_reports_auth_failure_and_skips_build(self):
+        self.project('ember')
+        self.auth_fixture('fetch', ('ember',))
+        self.env.pop('GIT_ASKPASS', None)
+        self.env['SSH_ASKPASS'] = self.env['TEST_AUTH_ASKPASS']
+        result = self.run_script('-B', '-q', '-j', '1')
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn('fetch 认证失败（请先配置 Git 凭据助手）', result.stdout)
+        self.assertEqual(self.lines(), [])
+        self.assert_no_auth_ui()
+
+    def test_existing_credential_helpers_still_authenticate(self):
+        self.project('ember', updated=True)
+        self.auth_fixture('fetch', ('ember',), ready=True)
+        result = self.run_script('-B', '-q')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue((self.projects / 'ember' / 'changed').exists())
+        self.assertEqual(self.lines(), ['installer:ember'])
+        self.assert_no_auth_ui()
+
+    def test_push_auth_failure_keeps_local_commits_and_reports_partial_pull(self):
+        for updated in (False, True):
+            with self.subTest(updated=updated):
+                name = 'frost' if updated else 'ember'
+                checkout = self.project(name, updated=updated)
+                self.git('-C', checkout, 'config', 'user.email', 'test@example.invalid')
+                self.git('-C', checkout, 'config', 'user.name', 'Fixture')
+                (checkout / 'local').write_text('local commit\n')
+                self.git('-C', checkout, 'add', 'local')
+                self.git('-C', checkout, 'commit', '-qm', 'local commit')
+                self.auth_fixture('push', (name,))
+                result = self.run_script('-B', '-q', '-T', name)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn('push 认证失败（请先配置 Git 凭据助手）', result.stdout)
+                self.assertIn('注意' if updated else '失败', result.stdout)
+                self.assertEqual(self.git('-C', checkout, 'log', '-1', '--format=%s').stdout.strip(),
+                                 'local commit')
+                self.assertEqual((checkout / 'changed').exists(), updated)
+                self.assertEqual(self.lines(), [])
+                self.assert_no_auth_ui()
 
     def test_default_installs_each_known_project_through_its_own_script(self):
         names = ('jsh', 'anvil', 'ember', 'frost', 'forge', 'jwm')
