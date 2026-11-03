@@ -193,7 +193,7 @@ impl Viewer {
 }
 fn surface(decoded: DecodedImage) -> Result<ImageSurface, String> {
     let mut pixels = decoded.pixels;
-    for p in pixels.chunks_exact_mut(4) {
+    for p in pixels.as_chunks_mut::<4>().0 {
         let a = u32::from(p[3]);
         let value = (a << 24)
             | ((u32::from(p[0]) * a / 255) << 16)

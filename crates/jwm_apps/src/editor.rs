@@ -342,7 +342,7 @@ impl Editor {
                     continue;
                 }
                 let rect = layout.index_to_pos(line.start_index());
-                for pair in line.x_ranges(start as i32, end as i32).chunks_exact(2) {
+                for pair in line.x_ranges(start as i32, end as i32).as_chunks::<2>().0 {
                     cr.rectangle(
                         pair[0] as f64 / pango::SCALE as f64,
                         rect.y() as f64 / pango::SCALE as f64,

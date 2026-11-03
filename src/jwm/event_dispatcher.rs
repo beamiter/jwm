@@ -9083,6 +9083,10 @@ mod tests {
         jwm.last_idle_poll = Some(settled_at);
         jwm.last_ping_time = Some(settled_at);
         jwm.features.resource_sampler.defer_for_test(settled_at);
+        // The default shared shell also owns startup maintenance. Keep that
+        // independent deadline in the future without spawning a host, so the
+        // needs_tick assertions below measure only the repark retry policy.
+        jwm.desktop_shell.defer_for_test(settled_at);
         backend
             .window_ops
             .fail_position

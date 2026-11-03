@@ -6124,18 +6124,28 @@ impl<C: CompositorConnection> Compositor<C> {
         let mut tfp_order = std::mem::take(&mut self.scratch_tfp_order);
         tfp_order.clear();
         tfp_order.reserve(scene.len());
-        if let Some(fw) = focused.filter(|focused| scene.iter().any(|entry| entry.0 == *focused)) {
+        if let Some(fw) = focused {
             tfp_order.push(fw);
         }
+        let mut focused_in_scene = false;
         for &(win, _, _, _, _) in scene {
-            if Some(win) != focused
-                && self
-                    .windows
-                    .get(&win)
-                    .is_some_and(|wt| is_status_bar_class(&wt.class_name, frame_status_bar_name))
+            if Some(win) == focused {
+                focused_in_scene = true;
+                continue;
+            }
+            if self
+                .windows
+                .get(&win)
+                .is_some_and(|wt| is_status_bar_class(&wt.class_name, frame_status_bar_name))
             {
                 tfp_order.push(win);
             }
+        }
+        // Validate the speculative first slot during the existing bar scan,
+        // not with an extra full-scene search. An off-scene focus must never
+        // receive a texture refresh or disturb the ordinary-client cursor.
+        if focused.is_some() && !focused_in_scene {
+            tfp_order.remove(0);
         }
         let ordinary_start = tfp_order.len();
         for &(win, _, _, _, _) in scene {

@@ -256,9 +256,23 @@ edited text is checked before it is written: if the file uses a shape the
 line edit cannot handle safely — an inline `appearance = { ... }` table or
 dotted `appearance.*` keys — the theme still applies for the session, the
 file is left untouched, and a `Theme: failed to persist` error is logged.
-IPC `set_config` for the same key stays session-only — only the Hub Theme
-page writes the file. There are no live previews and no motion/blur rows on
-that page.
+IPC `set_config` for the same key stays session-only. The Theme page labels
+its global appearance scope and offers three explicit ways to try a choice:
+
+- **Space** previews the selected theme across live consumers without editing
+  the file. The page stays open and shows a Preview badge. Browse and press
+  Space again to compare another theme.
+- **Enter / click** applies and saves the selected theme using the existing
+  surgical edit. A failed save still reports that the choice is session-only.
+- **Ctrl+Enter** keeps the selected theme for this session without writing the
+  file. The next configuration reload or login follows the saved setting.
+
+Escape, clicking outside, replacing the page or locking abandons a preview and
+restores its opening theme. A later configuration publication (file reload or
+IPC edit) retires the preview's ownership instead: cancellation never overwrites
+that newer choice, even if it happens to contain the same theme. Unrelated
+configuration values are never restored from an old full snapshot. There are
+no motion/blur rows on this page yet.
 
 Both compositors rebuild the blur chain if the switch needs one, and
 re-rasterize the panel text so the new theme's inks take effect immediately —
@@ -278,3 +292,4 @@ and the springs are unit-tested without a context and neither backend can drift
 from the other on where a row goes.
 
 `jwm-tool health` prints compact `blur` for ui theme operators.
+

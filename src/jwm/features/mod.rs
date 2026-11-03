@@ -47,6 +47,7 @@ mod sysfs;
 pub mod system_controls;
 pub mod system_ui;
 pub mod tags_overview;
+pub(crate) mod theme_preview;
 pub mod toggles;
 pub(crate) mod touchpad;
 pub mod wallpaper;
@@ -223,6 +224,9 @@ pub struct FeatureStates {
     pub notifications: NotificationCenter,
     /// Built-in lock screen, application launcher, and display layout UI.
     pub system_ui: SystemUiState,
+    /// Temporary Theme-page publication. Closing or replacing the page rolls
+    /// it back only while it still owns the live configuration revision.
+    pub(crate) theme_preview: Option<theme_preview::ThemePreview>,
     /// Which monitors are behind a lock shade. Not a mode and not a panel:
     /// it outlives every panel, including the unlock prompt that lifts it.
     /// See [`monitor_lock`].
@@ -376,3 +380,4 @@ mod tests {
         assert_eq!(state.attempts, u64::MAX);
     }
 }
+
