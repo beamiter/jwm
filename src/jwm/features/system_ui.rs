@@ -550,7 +550,7 @@ impl ListKind {
             Self::Wallpaper => {
                 "type  filter    Click/Enter  apply    F5  refresh    PgUp/PgDn  page    Esc  close"
             }
-            Self::Theme => "Click/Enter  apply    \u{f062}/\u{f063}  select    Esc  close",
+            Self::Theme => "Space  preview    Enter/click  save    Ctrl+Enter  session only    Esc  cancel",
             Self::Music | Self::Video => {
                 "type  filter    Enter  play    Shift+Enter  enqueue    Ctrl+Enter  play list    F5  refresh    Esc"
             }
@@ -3264,7 +3264,7 @@ impl SystemUiState {
             row_icons: Vec::new(),
             source_rows: None,
             selected,
-            message: String::new(),
+            message: "Global appearance · Enter saves; Ctrl+Enter changes this session only".into(),
             prompt: None,
             query: String::new(),
             empty: "No themes".to_string(),
@@ -3278,6 +3278,22 @@ impl SystemUiState {
     /// The theme id the selection rests on — what Enter would apply.
     pub fn selected_theme(&self) -> Option<&str> {
         Some(self.selected_row(ListKind::Theme)?.key.as_str())
+    }
+
+    /// Refresh the current-theme badge without moving keyboard selection.
+    pub(crate) fn set_theme_status(&mut self, current: &str, status: &str) {
+        if let Self::ListPanel {
+            kind: ListKind::Theme,
+            rows,
+            message,
+            ..
+        } = self
+        {
+            for row in rows {
+                row.text = crate::jwm::features::shell_hub::theme_picker_row(&row.key, current);
+            }
+            *message = status.to_owned();
+        }
     }
 
     // --- Audio device pickers ---
@@ -8446,6 +8462,25 @@ mod tests {
         assert_eq!(panel.selected_theme(), Some("tokyo-night"));
     }
 
+    #[test]
+    fn theme_scope_and_preview_badges_do_not_move_the_selected_action() {
+        let mut panel = SystemUiState::theme_picker("nord");
+        assert!(panel.overlay_parts().hint.contains("Ctrl+Enter  session only"));
+        panel.move_selection(1);
+        panel.set_theme_status("paper", "Preview · configuration file unchanged");
+        assert_eq!(panel.selected_theme(), Some("tokyo-night"));
+        let SystemUiState::ListPanel { rows, message, .. } = &panel else {
+            panic!("theme picker is a list panel");
+        };
+        assert_eq!(message, "Preview · configuration file unchanged");
+        let marked: Vec<_> = rows
+            .iter()
+            .filter(|row| row.text.contains('\u{f00c}'))
+            .map(|row| row.key.as_str())
+            .collect();
+        assert_eq!(marked, ["paper"]);
+    }
+
     /// Neither monitor-lock row is a permanent fixture: one appears only
     /// while there is a monitor that could go behind a shade, the other only
     /// while one is behind one. A session with a single output sees neither.
@@ -11429,3 +11464,4 @@ mod tests {
         assert_eq!(panel.selected_media_player(), Some("mpv"));
     }
 }
+

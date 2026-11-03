@@ -11521,6 +11521,12 @@ border_px = 3
     fn bar_positions_are_backwards_compatible_and_monitor_overrides_are_explicit() {
         use xbar_core::placement::BarEdge;
         let mut config = validated_value_fixture(42);
+        // Exercise the explicit single-bar compatibility mode. With no
+        // ownership table the shared desktop shell is enabled by default and
+        // intentionally places its primary bar at the top.
+        config
+            .set_values(&[("desktop_shell.enabled".into(), serde_json::json!(false))])
+            .unwrap();
         assert_eq!(config.status_bar_position(), BarEdge::Top);
         assert!(config.status_bar_config().monitors.is_empty());
         for (name, edge) in [
@@ -11555,6 +11561,13 @@ border_px = 3
         use super::StatusBarLayout;
         use xbar_core::placement::BarEdge;
         let mut config = validated_value_fixture(42);
+        // Legacy four-edge owns the shell while selected, then returns to
+        // the actual legacy single-bar preference. An absent legacy table
+        // instead returns to the new default shared hover shell.
+        config.legacy_edge_shell = Some(xbar_core::edge_shell::EdgeShellConfig {
+            enabled: false,
+            ..Default::default()
+        });
         config.inner.status_bar.name = STATUS_BAR_NAME.into();
         assert_eq!(config.status_bar_layout(), StatusBarLayout::Single);
         config
@@ -11580,6 +11593,42 @@ border_px = 3
                 .is_err()
         );
         assert_eq!(serde_json::to_value(&config.inner).unwrap(), before);
+    }
+
+    #[test]
+    fn default_shared_shell_preserves_single_bar_and_monitor_preferences_for_disable() {
+        use xbar_core::placement::BarEdge;
+        let mut config = validated_value_fixture(42);
+        config
+            .set_values(&[
+                ("status_bar.position".into(), serde_json::json!("right")),
+                (
+                    "status_bar.monitors".into(),
+                    serde_json::json!([{"monitor": 2, "position": "bottom"}]),
+                ),
+            ])
+            .unwrap();
+        assert!(config.desktop_shell_enabled());
+        assert_eq!(config.desktop_shell_source().as_str(), "default");
+        assert_eq!(config.status_bar_position(), BarEdge::Right);
+        assert_eq!(config.status_bar_position_for_monitor(0), BarEdge::Top);
+        assert_eq!(config.status_bar_position_for_monitor(2), BarEdge::Top);
+        let saved = config.status_bar_config().clone();
+
+        config
+            .set_values(&[("desktop_shell.enabled".into(), serde_json::json!(false))])
+            .unwrap();
+        assert_eq!(config.status_bar_position_for_monitor(0), BarEdge::Right);
+        assert_eq!(config.status_bar_position_for_monitor(2), BarEdge::Bottom);
+        assert_eq!(config.status_bar_config().position, saved.position);
+        assert_eq!(config.status_bar_config().monitors, saved.monitors);
+
+        config
+            .set_values(&[("desktop_shell.enabled".into(), serde_json::json!(true))])
+            .unwrap();
+        assert_eq!(config.status_bar_position_for_monitor(2), BarEdge::Top);
+        assert_eq!(config.status_bar_config().position, saved.position);
+        assert_eq!(config.status_bar_config().monitors, saved.monitors);
     }
 
     #[test]

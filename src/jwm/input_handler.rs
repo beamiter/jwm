@@ -416,6 +416,11 @@ impl Jwm {
     /// Push a panel that was rebuilt since the last frame. Costs a boolean
     /// test when nothing changed.
     pub(crate) fn flush_system_ui(&mut self, backend: &mut dyn Backend) {
+        // Emergency feature cancellation can retire the panel without going
+        // through its ordinary close path. Do not leave its temporary theme.
+        if self.features.theme_preview.is_some() && !self.features.system_ui.is_theme_picker() {
+            self.cancel_theme_preview(backend);
+        }
         // A control read-back that contradicts the OSD card on screen — or
         // the first card for a press that had nothing to estimate from — is
         // queued by the frame tick's control-feedback poll, which has no
@@ -3249,8 +3254,14 @@ impl Jwm {
                 return Ok(());
             }
             if self.features.system_ui.is_theme_picker() {
-                if keysym == keys::KEY_Return || keysym == keys::KEY_space {
-                    self.apply_selected_theme(backend);
+                if keysym == keys::KEY_Return && !repeat {
+                    if clean_state.contains(Mods::CONTROL) {
+                        self.keep_selected_theme_for_session(backend);
+                    } else {
+                        self.apply_selected_theme(backend);
+                    }
+                } else if keysym == keys::KEY_space && !repeat {
+                    self.preview_selected_theme(backend);
                 } else {
                     if keysym == keys::KEY_Up {
                         self.features.system_ui.move_selection(-1);
@@ -9427,3 +9438,4 @@ mod tests {
         );
     }
 }
+

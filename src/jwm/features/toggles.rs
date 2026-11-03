@@ -1451,7 +1451,7 @@ impl Jwm {
     ) -> Result<(), Box<dyn std::error::Error>> {
         use crate::jwm::features::ShellHubRoute;
 
-        let next = match route {
+        let mut next = match route {
             ShellHubRoute::Applications => self.cached_launcher_state(),
             ShellHubRoute::Notifications => SystemUiState::notification_center(
                 &self.features.notifications,
@@ -1472,6 +1472,10 @@ impl Jwm {
                 .media_library_state(crate::jwm::features::media_library::MediaKind::Video, false),
         };
 
+        self.cancel_theme_preview(backend);
+        if route == ShellHubRoute::Theme {
+            next = Self::theme_picker_state();
+        }
         self.features.system_ui_return_to_hub = true;
         self.features.system_ui = next;
         self.sync_system_ui(backend);
@@ -1566,6 +1570,7 @@ impl Jwm {
     /// Rebuild the shell home page after leaving a child page. This path does
     /// not reacquire grabs or toggle the compositor.
     pub(crate) fn return_to_shell_hub(&mut self, backend: &mut dyn Backend) {
+        self.cancel_theme_preview(backend);
         // Leaving the Bluetooth picker for the hub abandons any live pairing,
         // the same as closing the panel would.
         self.cancel_bluetooth_pairing();
@@ -2085,6 +2090,90 @@ impl Jwm {
         self.mark_system_ui_dirty();
     }
 
+    /// Apply the highlighted theme temporarily. This publishes through the
+    /// ordinary configuration path, so every existing consumer sees it, but
+    /// never edits the configuration file.
+    pub(crate) fn preview_selected_theme(&mut self, backend: &mut dyn Backend) -> bool {
+        let Some(theme) = self.features.system_ui.selected_theme().map(str::to_string) else {
+            return false;
+        };
+        let current = CONFIG.load_full();
+        let original = self
+            .features
+            .theme_preview
+            .as_ref()
+            .and_then(|preview| preview.rollback_theme(&current))
+            .unwrap_or_else(|| current.ui_theme())
+            .to_owned();
+        let mut updated = (*current).clone();
+        if let Err(error) = updated.set_value(
+            "appearance.ui_theme",
+            &serde_json::Value::String(theme.clone()),
+        ) {
+            self.report_theme_failure(backend, "Theme not previewed", error.to_string());
+            return false;
+        }
+        let applied = std::sync::Arc::new(updated);
+        CONFIG.store(std::sync::Arc::clone(&applied));
+        self.features.theme_preview = Some(
+            crate::jwm::features::theme_preview::ThemePreview::new(original, applied),
+        );
+        self.apply_config_changes(backend);
+        self.features.system_ui.set_theme_status(
+            &theme,
+            "Preview · configuration file unchanged · Esc restores the previous theme",
+        );
+        self.broadcast_ipc_event(
+            "config/changed",
+            serde_json::json!({ "key": "appearance.ui_theme", "value": theme, "scope": "preview" }),
+        );
+        self.sync_system_ui(backend);
+        true
+    }
+
+    /// Escape, panel replacement and locking all abandon a preview. A newer
+    /// reload or IPC edit wins; it is never overwritten with a stale snapshot.
+    pub(crate) fn cancel_theme_preview(&mut self, backend: &mut dyn Backend) {
+        let Some(preview) = self.features.theme_preview.take() else {
+            return;
+        };
+        let current = CONFIG.load_full();
+        let Some(original) = preview.rollback_theme(&current) else {
+            return;
+        };
+        let mut updated = (*current).clone();
+        if let Err(error) = updated.set_value(
+            "appearance.ui_theme",
+            &serde_json::Value::String(original.to_owned()),
+        ) {
+            error!("Theme preview could not restore {original}: {error}");
+            return;
+        }
+        CONFIG.store(std::sync::Arc::new(updated));
+        self.apply_config_changes(backend);
+        self.broadcast_ipc_event(
+            "config/changed",
+            serde_json::json!({ "key": "appearance.ui_theme", "value": original, "scope": "preview_cancelled" }),
+        );
+    }
+
+    /// Commit only the live theme. The next file reload/login follows the
+    /// user's saved configuration, exactly like the existing IPC setter.
+    pub(crate) fn keep_selected_theme_for_session(&mut self, backend: &mut dyn Backend) {
+        if self.preview_selected_theme(backend) {
+            self.features.theme_preview = None;
+            self.broadcast_ipc_event(
+                "config/changed",
+                serde_json::json!({
+                    "key": "appearance.ui_theme",
+                    "value": CONFIG.load().ui_theme(),
+                    "scope": "session"
+                }),
+            );
+            self.close_system_ui(backend);
+        }
+    }
+
     /// Apply the selected UI theme through the same configuration path a
     /// `set_config` takes, so both compositors rebuild their palettes on the
     /// next `apply_config` exactly as they would from a reload, then surgically
@@ -2102,6 +2191,7 @@ impl Jwm {
             self.report_theme_failure(backend, "Theme not applied", error.to_string());
             return;
         }
+        self.features.theme_preview = None;
         CONFIG.store(std::sync::Arc::new(updated));
         self.apply_config_changes(backend);
         // Stat the file before writing it: an edit the user saved within the
@@ -3159,6 +3249,7 @@ impl Jwm {
     /// Drop the panel, release its grabs, and restore a temporarily enabled
     /// compositor to the user's previous off state.
     pub(crate) fn close_system_ui(&mut self, backend: &mut dyn Backend) {
+        self.cancel_theme_preview(backend);
         self.features.touchpad.detach_switcher();
         self.cancel_pointer_scroll(backend);
         self.cancel_touchpad_gesture(backend, false);
@@ -3233,6 +3324,7 @@ impl Jwm {
     /// parking every hidden window twice for a swap the user sees as one
     /// motion. What it does still do is run the teardown each panel owns.
     fn hand_over_system_ui(&mut self, backend: &mut dyn Backend) {
+        self.cancel_theme_preview(backend);
         self.cancel_pointer_scroll(backend);
         self.cancel_touchpad_gesture(backend, false);
         // The film strip applies each layout as it is browsed. Leaving through
@@ -11001,3 +11093,4 @@ mod session_action_command_tests {
         assert_eq!(probe.child_session(), unsafe { libc::getsid(0) });
     }
 }
+

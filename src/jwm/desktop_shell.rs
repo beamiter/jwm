@@ -111,6 +111,15 @@ impl Drop for DesktopShellSupervisor {
 }
 
 impl DesktopShellSupervisor {
+    /// Isolate unrelated scheduler tests from starting a real shell process.
+    #[cfg(test)]
+    pub(crate) fn defer_for_test(&mut self, now: Instant) {
+        assert!(self.child.is_none(), "cannot defer a running shell fixture");
+        let deadline = now + Duration::from_secs(5);
+        self.retry_at = Some(deadline);
+        self.next_legacy_scan = Some(deadline);
+    }
+
     pub(crate) fn reserves_space(&self) -> bool {
         // The health tick owns timeout transitions. Computing expiry here
         // would release the flag before that tick records its old value,
