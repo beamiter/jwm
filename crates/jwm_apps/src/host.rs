@@ -397,8 +397,8 @@ impl NativeWindow {
             .chunks_exact(stride)
             .zip(buffer.chunks_exact_mut(size.width as usize))
         {
-            for (pixel, out) in row.chunks_exact(4).zip(destination) {
-                *out = u32::from_ne_bytes(pixel.try_into().unwrap()) & 0x00ff_ffff;
+            for (pixel, out) in row.as_chunks::<4>().0.iter().zip(destination) {
+                *out = u32::from_ne_bytes(*pixel) & 0x00ff_ffff;
             }
         }
         self.window.pre_present_notify();
