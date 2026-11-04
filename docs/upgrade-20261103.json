@@ -344,7 +344,7 @@
     }
   ],
   "not_claimed": [
-    "Hosted GitHub Actions success for the final unpushed candidate",
+    "Hosted GitHub Actions success for the published candidate",
     "Measured input-to-photon or GPU durations from CPU instrumentation",
     "Actual kernel wakeups from voluntary-context-switch counters",
     "Completed two-vendor physical acceptance or seven-day soak",
@@ -360,7 +360,7 @@
   },
   "final_evidence_summary": "artifacts/gap-completion-20261103/candidate-v2/manifest.json",
   "local_integration_manifest": "artifacts/gap-completion-20261103/deployment/live-core-v2-activation.json",
-  "remote_push_performed": false,
+  "remote_push_performed": true,
   "previous_candidate": {
     "compiled_source_commit": "d1318e51a16ff75f04e0b23a13a3d851e5555cbc",
     "final_binary_sha256": {
@@ -631,6 +631,17 @@
     "Restore upstream service quota or configure available credentials; user input remains pending.",
     "Run new frozen-source genuine full241 and independent semantic review; require at least229/241 accepted and zero critical violations. Ordinary failures do not stop coverage; critical violations do.",
     "After genuine acceptance, build ordinary Release, atomically replace only EVA binary and restart only an idle EVA service, verify live executable/config/runtime/credential readiness while preserving genuine ledgers.",
-    "After verified deployment, finalize evidence and fast-forward local master; no remote push. Unwaived physical/hosted acceptance stays separately unverified."
-  ]
+    "After verified deployment, finalize evidence and fast-forward local master; publication requires the user-authorized GitHub API flow. Unwaived physical/hosted acceptance stays separately unverified."
+  ],
+  "github_publication": {
+    "repository": "beamiter/jwm",
+    "branch": "master",
+    "method": "GitHub Git Data API; non-force update with expected previous SHA",
+    "previous_remote_sha": "46fadfb529730cd8d87cabcfe95d7d9039673c95",
+    "initial_published_commit": "b61f247fb186c3755b436854ae8525fecea7d063",
+    "local_source_commit": "6b0f0e2c11d7e01de5a62cc13167262ef2f26202",
+    "published_source_tree": "0da5d149cf50bb2e8ebb1332cd952be4c4e55a8b",
+    "changed_files": 199,
+    "qualification": "Current committed source was published as an API snapshot commit. Publishing does not mark pending real-model, deployment or physical acceptance gates passed. Original local history remains in the working branch; auxiliary repositories are outside this publication."
+  }
 }
