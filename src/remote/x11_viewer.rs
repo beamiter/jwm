@@ -21,9 +21,10 @@ use x11rb::protocol::render::{
     self, CreatePictureAux, PictOp, Pictformat, Picture, Repeat, Transform,
 };
 use x11rb::protocol::xproto::{
-    Atom, AtomEnum, ConnectionExt as _, CreateGCAux, CreateWindowAux, Cursor, EventMask, Format,
-    Gcontext, GrabMode, GrabStatus, ImageFormat, ImageOrder as X11ImageOrder, Mapping, NotifyMode,
-    Pixmap, PropMode, Rectangle, Screen, Setup, VisualClass, Visualtype, Window, WindowClass,
+    Atom, AtomEnum, ClientMessageEvent, ConnectionExt as _, CreateGCAux, CreateWindowAux, Cursor,
+    EventMask, Format, Gcontext, GrabMode, GrabStatus, ImageFormat, ImageOrder as X11ImageOrder,
+    Mapping, NotifyMode, Pixmap, PropMode, Rectangle, Screen, Setup, VisualClass, Visualtype,
+    Window, WindowClass,
 };
 use x11rb::protocol::{ErrorKind, Event, shm};
 use x11rb::rust_connection::RustConnection;
@@ -2674,6 +2675,70 @@ fn is_closed_window_error(error: &X11Error, window: Window) -> bool {
     matches!(error.error_kind, ErrorKind::Drawable | ErrorKind::Window) && error.bad_value == window
 }
 
+/// Bring an open viewer of `peer_label` on `display` to the front.
+///
+/// Returns whether one was found. A keyboard shortcut that opens a remote
+/// desktop is pressed again to get back to it, and a second session to the
+/// same machine would only fight the first over its input.
+pub fn focus_existing_viewer(display: Option<&str>, peer_label: &str) -> RemoteResult<bool> {
+    let (conn, screen_num) = xbar_core::x11_connection::connect(display)?;
+    let root = conn
+        .setup()
+        .roots
+        .get(screen_num)
+        .ok_or_else(|| invalid_data("X11 selected an unavailable screen"))?
+        .root;
+    let client_list = intern_atom(&conn, b"_NET_CLIENT_LIST")?;
+    let active_window = intern_atom(&conn, b"_NET_ACTIVE_WINDOW")?;
+    let net_wm_name = intern_atom(&conn, b"_NET_WM_NAME")?;
+    let utf8_string = intern_atom(&conn, b"UTF8_STRING")?;
+
+    // Managed clients, plus top-level windows for a session with no window
+    // manager to keep that list.
+    let mut candidates: Vec<Window> = conn
+        .get_property(false, root, client_list, AtomEnum::WINDOW, 0, 4096)?
+        .reply()?
+        .value32()
+        .map(Iterator::collect)
+        .unwrap_or_default();
+    candidates.extend(conn.query_tree(root)?.reply()?.children);
+    for window in candidates {
+        let class = conn
+            .get_property(false, window, AtomEnum::WM_CLASS, AtomEnum::STRING, 0, 64)?
+            .reply()
+            .map(|reply| reply.value)
+            .unwrap_or_default();
+        if class != WM_CLASS {
+            continue;
+        }
+        let title = conn
+            .get_property(false, window, net_wm_name, utf8_string, 0, 1024)?
+            .reply()
+            .map(|reply| reply.value)
+            .unwrap_or_default();
+        if !is_viewer_of(&title, peer_label) {
+            continue;
+        }
+        // Source 2: a pager-like request on the user's behalf, which window
+        // managers honour without focus-stealing prevention.
+        let event = ClientMessageEvent::new(32, window, active_window, [2, CURRENT_TIME, 0, 0, 0]);
+        conn.send_event(
+            false,
+            root,
+            EventMask::SUBSTRUCTURE_REDIRECT | EventMask::SUBSTRUCTURE_NOTIFY,
+            event,
+        )?;
+        conn.flush()?;
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+/// Whether a viewer window title belongs to `peer_label`.
+fn is_viewer_of(title: &[u8], peer_label: &str) -> bool {
+    title.starts_with(format!("{peer_label} - JWM Remote").as_bytes())
+}
+
 fn intern_atom(conn: &RustConnection, name: &[u8]) -> RemoteResult<Atom> {
     Ok(conn.intern_atom(false, name)?.reply()?.atom)
 }
@@ -2835,6 +2900,19 @@ mod tests {
             bits_per_pixel: 32,
             scanline_pad: 32,
         }
+    }
+
+    #[test]
+    fn a_viewer_is_recognised_by_its_peer_label_only() {
+        let title = b"ubuntu@desk (DP-0) - JWM Remote - keyboard + pointer; clipboard off";
+        assert!(is_viewer_of(title, "ubuntu@desk (DP-0)"));
+        // Another monitor, or another machine whose name shares a prefix.
+        assert!(!is_viewer_of(title, "ubuntu@desk (DP-2)"));
+        assert!(!is_viewer_of(title, "ubuntu@desk"));
+        assert!(!is_viewer_of(
+            b"ubuntu@desk2 - JWM Remote - view-only",
+            "ubuntu@desk"
+        ));
     }
 
     #[test]

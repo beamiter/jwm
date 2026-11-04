@@ -96,6 +96,27 @@ user, including a host with `--allow-input`. The session's traffic is
 encrypted twice, and SSH adds the forward secrecy the pre-shared-key
 transport lacks.
 
+### One key for a machine you use often
+
+Bind the command in `config_x11.toml`:
+
+```toml
+[[keybindings.keys]]
+modifier = ["Mod4"]
+key = "r"
+function = "spawn"
+argument = ["jwm-remote", "ssh", "user@desktop", "--grab-input", "--monitor", "DP-0", "--notify"]
+```
+
+Pressing it again brings the open window back to the front instead of
+starting a second session: one session per machine and monitor runs at a
+time, guarded by a lock in `$XDG_RUNTIME_DIR`, so a second press while the
+first is still connecting does nothing either. `--notify` reports a failure
+(`ssh could not connect or log in`, a busy desktop, ...) as a desktop
+notification, since a shortcut has no terminal. A shortcut cannot answer a
+password prompt, so use a key without a passphrase or one loaded in an agent
+that JWM's environment can reach.
+
 The helper is looked up in the remote `PATH`, then in the managed bundle at
 `/usr/local/lib/jwm/current/bin`. Use `--remote-command PATH` for another
 location (a leading `~/` is the remote home), and `--ssh-option OPTION` for

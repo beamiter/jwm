@@ -20,8 +20,12 @@
 use super::RemoteResult;
 use super::client::{ClientOptions, run_client};
 use super::key::{KeySource, generate_session_key};
+use super::x11_viewer::focus_existing_viewer;
+use std::fs::{File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Write};
 use std::net::TcpListener;
+use std::os::fd::AsRawFd;
+use std::path::PathBuf;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::mpsc;
 use std::thread;
@@ -58,6 +62,17 @@ pub struct SshOptions {
 
 pub fn run_ssh(options: SshOptions) -> RemoteResult<()> {
     validate_destination(&options.destination)?;
+    let label = peer_label(&options);
+    // One session per machine and monitor. Pressing a shortcut again means
+    // "take me back there", not "start a second host fighting over input".
+    let Some(_session_lock) = SessionLock::acquire(&label)? else {
+        if focus_existing_viewer(options.display.as_deref(), &label)? {
+            eprintln!("jwm-remote: {label} is already open; brought it to the front");
+        } else {
+            eprintln!("jwm-remote: a connection to {label} is already starting");
+        }
+        return Ok(());
+    };
     let (key, printable_key) = generate_session_key();
     let local_port = free_local_port()?;
     let remote_port = REMOTE_PORT_BASE + rand::random::<u16>() % REMOTE_PORT_SPAN;
@@ -108,7 +123,7 @@ pub fn run_ssh(options: SshOptions) -> RemoteResult<()> {
         .and_then(|()| {
             run_client(ClientOptions {
                 address: format!("127.0.0.1:{local_port}"),
-                peer_label: peer_label(&options),
+                peer_label: label.clone(),
                 key: KeySource::Bytes(key),
                 display: options.display.clone(),
                 view_only: options.view_only,
@@ -237,6 +252,56 @@ fn classify_host_line(line: &str) -> HostLine<'_> {
     } else {
         HostLine::Host(message)
     }
+}
+
+/// An exclusive lock held for as long as one session to a peer runs.
+struct SessionLock {
+    _file: File,
+}
+
+impl SessionLock {
+    /// `None` when another `jwm-remote ssh` already holds it.
+    fn acquire(label: &str) -> io::Result<Option<Self>> {
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(session_lock_path(label))?;
+        // SAFETY: flock only reads the descriptor, which `file` keeps open.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+            return Ok(Some(Self { _file: file }));
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() == io::ErrorKind::WouldBlock {
+            Ok(None)
+        } else {
+            Err(error)
+        }
+    }
+}
+
+/// A per-user lock file named after the peer. The kernel drops the lock with
+/// the process, so a crashed session never blocks the next one.
+fn session_lock_path(label: &str) -> PathBuf {
+    let directory = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .unwrap_or_else(|| {
+            // SAFETY: getuid has no preconditions and cannot fail.
+            std::env::temp_dir().join(format!("jwm-remote-{}", unsafe { libc::getuid() }))
+        });
+    let _ = std::fs::create_dir_all(&directory);
+    let name: String = label
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || "@.-_".contains(c) {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    directory.join(format!("jwm-remote-ssh-{name}.lock"))
 }
 
 fn peer_label(options: &SshOptions) -> String {
@@ -487,6 +552,23 @@ mod tests {
         let input = "jwm-remote: sharing it\njwm-remote: listening on 127.0.0.1:1\n";
         relay_host_messages(io::Cursor::new(input), &ready_tx);
         assert!(ready_rx.try_recv().is_ok());
+    }
+
+    #[test]
+    fn only_one_session_per_peer_runs_at_a_time() {
+        let label = format!("test@lock-{:016x} (DP-0)", rand::random::<u64>());
+        let other_monitor = label.replace("DP-0", "DP-2");
+        let first = SessionLock::acquire(&label).unwrap();
+        assert!(first.is_some());
+        assert!(SessionLock::acquire(&label).unwrap().is_none());
+        // Another monitor of the same machine is a different session.
+        assert!(SessionLock::acquire(&other_monitor).unwrap().is_some());
+        drop(first);
+        assert!(SessionLock::acquire(&label).unwrap().is_some());
+        let path = session_lock_path(&label);
+        assert!(path.to_str().unwrap().ends_with("_DP-0_.lock"), "{path:?}");
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(session_lock_path(&other_monitor));
     }
 
     #[test]

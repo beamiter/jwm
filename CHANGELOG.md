@@ -17,6 +17,10 @@ monorepo use independent Semantic Versions.
   when stdin closes) and `--display auto` (use the running JWM session's
   display, also chosen when DISPLAY is unset).
 - Viewer windows are titled with the machine they show.
+- Running `jwm-remote ssh` again for the same machine and monitor brings the
+  open viewer to the front instead of starting a second session, also while
+  the first is still connecting, so it can sit on one key. `--notify` reports
+  failures as a desktop notification for shortcut launches.
 
 ### Remote control between two real desktops
 

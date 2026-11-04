@@ -26,6 +26,12 @@ const DEFAULT_JPEG_QUALITY_FLOOR: u8 = 40;
 struct Cli {
     #[command(subcommand)]
     command: Command,
+
+    /// Also report a failure as a desktop notification.
+    ///
+    /// For launching from a keyboard shortcut, where nobody sees the terminal.
+    #[arg(long, global = true)]
+    notify: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -226,13 +232,41 @@ enum Command {
 }
 
 fn main() -> std::process::ExitCode {
-    match run(Cli::parse().command) {
+    let cli = Cli::parse();
+    match run(cli.command) {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("jwm-remote: {error}");
+            if cli.notify {
+                notify_failure(&error.to_string());
+            }
             std::process::ExitCode::FAILURE
         }
     }
+}
+
+/// Show a failure through the desktop's notification service, best effort.
+fn notify_failure(message: &str) {
+    // The first line is the cause; the rest is advice for a terminal reader.
+    let body: String = message
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .trim_end_matches("; the lines above say more")
+        .chars()
+        .take(300)
+        .collect();
+    let _ = std::process::Command::new("notify-send")
+        .args([
+            "--app-name=JWM Remote",
+            "--icon=network-error",
+            "Remote desktop failed",
+            &body,
+        ])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
 }
 
 fn resolve_key_path(explicit: Option<PathBuf>) -> std::io::Result<PathBuf> {
@@ -666,6 +700,11 @@ mod tests {
             panic!("ssh variant expected")
         };
         assert_eq!(destination, "ubuntu@desk");
+        assert!(
+            Cli::try_parse_from(["jwm-remote", "ssh", "desk", "--notify"])
+                .unwrap()
+                .notify
+        );
         assert_eq!(monitor.as_deref(), Some("DP-0"));
         assert_eq!(ssh_options, ["Port=2222", "User=me"]);
         for conflicting in [
