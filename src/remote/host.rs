@@ -1,11 +1,15 @@
 //! Trusted-LAN remote desktop host.
 
 use super::RemoteResult;
+use super::clipboard_sync::{
+    ClipboardInbox, ClipboardOutbox, ClipboardSync, MAX_TRANSFER_RECORD_BYTES, Outgoing,
+    SyncOptions,
+};
 use super::deadline::TcpStreamDeadline;
 use super::key::KeySource;
 use super::messages::{
     ClientHello, MAX_CLIPBOARD_BYTES, MIN_VIEWPORT_HEIGHT, MIN_VIEWPORT_WIDTH, ServerHello,
-    decode_clipboard, decode_frame_ack, decode_input_batch, decode_viewport, encode_clipboard,
+    decode_frame_ack, decode_input_batch, decode_viewport,
 };
 use super::pacing::capture_rate_limit_wait;
 use super::protocol::{
@@ -20,7 +24,6 @@ use super::x11_capture::{
 };
 use super::x11_input::{InputArea, InputInjector};
 use super::x11_keymap::{KeymapMatch, KeymapTable};
-use crate::backend::clipboard_x11::{Clipboard, ClipboardCaptures, ClipboardSetter};
 use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 use signal_hook::consts::{SIGINT, SIGTERM};
 use signal_hook::flag;
@@ -60,6 +63,7 @@ const MAX_INBOUND_PAYLOAD_LEN: usize = 1024;
 /// Kept separate so a session without `--allow-clipboard` still refuses
 /// anything larger than an input batch before allocating for it.
 const MAX_INBOUND_CLIPBOARD_PAYLOAD_LEN: usize = MAX_CLIPBOARD_BYTES + 1024;
+const _: () = assert!(MAX_TRANSFER_RECORD_BYTES <= MAX_INBOUND_CLIPBOARD_PAYLOAD_LEN);
 /// How long the clipboard forwarder waits before re-checking for shutdown.
 const CLIPBOARD_POLL_INTERVAL: Duration = Duration::from_millis(250);
 /// Reason sent to a second viewer while one is already connected.
@@ -1397,6 +1401,8 @@ pub struct HostOptions {
     pub allow_lan: bool,
     pub allow_input: bool,
     pub allow_clipboard: bool,
+    /// Largest file copy shared through the clipboard; 0 shares no files.
+    pub clipboard_file_limit: u64,
     pub once: bool,
 }
 
@@ -1750,6 +1756,8 @@ fn serve_authenticated(
     // request is consent. Sending clipboard records to a peer that asked for
     // none would be a protocol violation on arrival.
     let clipboard_enabled = options.allow_clipboard && hello.request_clipboard;
+    let files_enabled =
+        clipboard_enabled && hello.request_clipboard_files && options.clipboard_file_limit > 0;
     let mut capture = match X11Capture::connect(
         options.display.as_deref(),
         options.capture_source,
@@ -1807,27 +1815,44 @@ fn serve_authenticated(
         None
     };
     let pointer_enabled = injector.is_some();
-    // Clipboard sharing needs its own X connection and thread; the watcher
+    // Clipboard sharing needs its own X connection and threads; the watcher
     // must not be able to delay a frame, and a conversion blocks until the
-    // current selection owner answers.
-    let (clipboard_captures, clipboard_setter) = if clipboard_enabled {
-        match Clipboard::start(options.display.as_deref()) {
-            Ok(clipboard) => {
-                let (captures, setter) = clipboard.split();
-                eprintln!("jwm-remote: clipboard sharing enabled");
-                (Some(captures), Some(setter))
+    // current selection owner answers. The host does not push what was
+    // already copied here: the viewer's clipboard is the one shared on
+    // connect, so the two machines do not swap clipboards.
+    let (clipboard_sync, clipboard_inbox, clipboard_outbox) = if clipboard_enabled {
+        match ClipboardSync::start(
+            options.display.as_deref(),
+            SyncOptions {
+                files: files_enabled,
+                file_limit: options.clipboard_file_limit,
+                share_existing: false,
+            },
+            None,
+        ) {
+            Ok((sync, inbox, outbox)) => {
+                eprintln!(
+                    "jwm-remote: clipboard sharing enabled ({})",
+                    if files_enabled {
+                        "text, images and files"
+                    } else {
+                        "text and images"
+                    }
+                );
+                (Some(sync), Some(inbox), Some(outbox))
             }
             Err(error) => {
                 eprintln!(
                     "jwm-remote: clipboard sharing unavailable ({error}); continuing without it"
                 );
-                (None, None)
+                (None, None, None)
             }
         }
     } else {
-        (None, None)
+        (None, None, None)
     };
-    let clipboard_enabled = clipboard_setter.is_some();
+    let clipboard_enabled = clipboard_sync.is_some();
+    let files_enabled = files_enabled && clipboard_enabled;
     if clipboard_enabled {
         reader.set_max_payload_len(MAX_INBOUND_CLIPBOARD_PAYLOAD_LEN);
     }
@@ -1837,6 +1862,7 @@ fn serve_authenticated(
             pointer_enabled,
             keyboard_enabled,
             clipboard_enabled,
+            clipboard_files_enabled: files_enabled,
         }
         .encode(),
     )?;
@@ -1898,13 +1924,13 @@ fn serve_authenticated(
                 &input_telemetry,
                 &input_jpeg_quality,
                 &input_viewport,
-                clipboard_setter.as_ref(),
+                clipboard_inbox.as_ref(),
             )
         })?;
 
     let stream_result = stream_frames(
         &viewport,
-        clipboard_captures,
+        clipboard_outbox,
         &mut capture,
         writer,
         &control,
@@ -1919,6 +1945,8 @@ fn serve_authenticated(
     running.store(false, Ordering::Release);
     let _ = control.shutdown(Shutdown::Both);
     let input_result = input_thread.join();
+    // Both network halves are done with the clipboard; stop its threads.
+    drop(clipboard_sync);
     report_host_final(&telemetry, &credits, Instant::now());
     let input_result = match input_result {
         Ok(result) => result,
@@ -1996,7 +2024,7 @@ type SharedWriter = Arc<Mutex<SessionWriter<DeadlineWriter<TcpStream>>>>;
 
 fn stream_frames(
     viewport: &ViewportRequest,
-    clipboard_captures: Option<ClipboardCaptures>,
+    clipboard_outbox: Option<ClipboardOutbox>,
     capture: &mut X11Capture,
     writer: SessionWriter<DeadlineWriter<TcpStream>>,
     control: &TcpStream,
@@ -2050,7 +2078,7 @@ fn stream_frames(
         }
     };
 
-    let clipboard_thread = clipboard_captures.map(|captures| {
+    let clipboard_thread = clipboard_outbox.map(|outbox| {
         let clipboard_control = control.try_clone()?;
         let writer = Arc::clone(&writer);
         let running = Arc::clone(running);
@@ -2061,7 +2089,7 @@ fn stream_frames(
             .name("jwm-remote-clipboard".into())
             .spawn(move || {
                 run_clipboard_worker(
-                    || forward_clipboard(&captures, &writer, &running),
+                    || forward_clipboard(&outbox, &writer, &running),
                     &running,
                     &first_stop,
                     || {
@@ -2445,21 +2473,23 @@ fn finish_clipboard_worker(
 }
 
 fn forward_clipboard<W: std::io::Write + SetWriteTimeout>(
-    captures: &ClipboardCaptures,
+    outbox: &ClipboardOutbox,
     writer: &Mutex<SessionWriter<DeadlineWriter<W>>>,
     running: &AtomicBool,
 ) -> RemoteResult<()> {
-    forward_clipboard_from(|timeout| captures.recv_timeout(timeout), writer, running)
+    forward_clipboard_from(|timeout| outbox.next_timeout(timeout), writer, running)
 }
 
+/// Write each clipboard record the worker queues, one record per lock, so a
+/// frame can always slip in between two chunks of a large copy.
 fn forward_clipboard_from<W: std::io::Write + SetWriteTimeout>(
-    mut receive: impl FnMut(Duration) -> Result<Option<String>, std::sync::mpsc::RecvError>,
+    mut receive: impl FnMut(Duration) -> Result<Option<Outgoing>, std::sync::mpsc::RecvError>,
     writer: &Mutex<SessionWriter<DeadlineWriter<W>>>,
     running: &AtomicBool,
 ) -> RemoteResult<()> {
     while running.load(Ordering::Acquire) {
-        let text = match receive(CLIPBOARD_POLL_INTERVAL) {
-            Ok(Some(text)) => text,
+        let record = match receive(CLIPBOARD_POLL_INTERVAL) {
+            Ok(Some(record)) => record,
             Ok(None) => continue,
             Err(_) if !running.load(Ordering::Acquire) => return Ok(()),
             Err(_) => {
@@ -2470,16 +2500,12 @@ fn forward_clipboard_from<W: std::io::Write + SetWriteTimeout>(
                 .into());
             }
         };
-        let Ok(payload) = encode_clipboard(&text) else {
-            eprintln!("jwm-remote: local clipboard text is too large to share; skipping it");
-            continue;
-        };
         let result = {
             let mut writer = lock_writer(writer);
             write_session_record(
                 &mut writer,
-                MessageKind::Clipboard,
-                payload,
+                record.kind,
+                &record.payload,
                 FRAME_WRITE_DEADLINE,
             )
         };
@@ -2621,7 +2647,7 @@ fn receive_input(
     telemetry: &HostTelemetry,
     jpeg_quality: &JpegQualityController,
     viewport: &ViewportRequest,
-    clipboard: Option<&ClipboardSetter>,
+    clipboard: Option<&ClipboardInbox>,
 ) -> RemoteResult<()> {
     let mut payload = Vec::new();
     let session_result = (|| -> RemoteResult<()> {
@@ -2700,12 +2726,9 @@ fn receive_input(
                 MessageKind::Heartbeat => {
                     return Err(invalid_data("client heartbeat payload must be empty").into());
                 }
-                MessageKind::Clipboard => {
-                    let text = decode_clipboard(&payload)?;
-                    match clipboard.as_ref() {
-                        Some(clipboard) => {
-                            clipboard.set_text(&text);
-                        }
+                MessageKind::Clipboard | MessageKind::ClipboardTransfer => {
+                    match clipboard {
+                        Some(clipboard) => clipboard.deliver(kind, &payload)?,
                         // Negotiation already told the peer clipboard sharing
                         // is off; a record arriving anyway is a protocol
                         // violation, not something to silently absorb.
@@ -2982,6 +3005,13 @@ mod tests {
         }
     }
 
+    fn text_record(text: &str) -> Outgoing {
+        Outgoing {
+            kind: MessageKind::Clipboard,
+            payload: text.as_bytes().to_vec(),
+        }
+    }
+
     fn assert_clipboard_failure_stops_session<W: Write + SetWriteTimeout>(inner: W) {
         let running = Arc::new(AtomicBool::new(true));
         let first_stop = FirstStop::new();
@@ -3001,7 +3031,7 @@ mod tests {
             ),
             [0x93; 32],
         ));
-        let mut text = Some("clipboard text".to_owned());
+        let mut text = Some(text_record("clipboard text"));
         let result = run_clipboard_worker(
             || forward_clipboard_from(|_| Ok(text.take()), &writer, &running),
             &running,
@@ -3190,7 +3220,7 @@ mod tests {
                         calls.set(calls.get() + 1);
                         match calls.get() {
                             1 => Ok(None),
-                            2 => Ok(Some("last text".into())),
+                            2 => Ok(Some(text_record("last text"))),
                             3 => Err(std::sync::mpsc::RecvError),
                             _ => panic!("closed capture must not spin"),
                         }
@@ -3221,7 +3251,7 @@ mod tests {
         let mut reader = SessionReader::new(std::io::Cursor::new(bytes), [0x95; 32]);
         let (kind, payload) = reader.read_message().unwrap();
         assert_eq!(kind, MessageKind::Clipboard);
-        assert_eq!(decode_clipboard(&payload).unwrap(), "last text");
+        assert_eq!(payload, b"last text");
     }
 
     #[test]
@@ -3268,7 +3298,7 @@ mod tests {
         ));
         let running = Arc::new(AtomicBool::new(true));
         let first_stop = FirstStop::new();
-        let mut text = Some("normal clipboard".to_owned());
+        let mut text = Some(text_record("normal clipboard"));
         run_clipboard_worker(
             || {
                 forward_clipboard_from(
@@ -3293,7 +3323,7 @@ mod tests {
         let mut reader = SessionReader::new(Cursor::new(wire), [0x94; 32]);
         let (kind, payload) = reader.read_message().unwrap();
         assert_eq!(kind, MessageKind::Clipboard);
-        assert_eq!(decode_clipboard(&payload).unwrap(), "normal clipboard");
+        assert_eq!(payload, b"normal clipboard");
         let stopped = AtomicBool::new(false);
         forward_clipboard_from(|_| panic!("no receive after stop"), &writer, &stopped).unwrap();
     }
@@ -3740,6 +3770,7 @@ mod tests {
                 pointer_enabled: false,
                 keyboard_enabled: false,
                 clipboard_enabled: false,
+                clipboard_files_enabled: false,
             };
             peer.writer
                 .write_message(MessageKind::HelloAck, &hello.encode())?;
@@ -3761,6 +3792,7 @@ mod tests {
             let hello = ClientHello {
                 request_input: false,
                 request_clipboard: false,
+                request_clipboard_files: false,
                 keymap: KeymapTable::empty(),
             };
             writer
@@ -3789,6 +3821,7 @@ mod tests {
             let mut hello = ClientHello {
                 request_input: false,
                 request_clipboard: false,
+                request_clipboard_files: false,
                 keymap: KeymapTable::empty(),
             }
             .encode();
@@ -3800,7 +3833,7 @@ mod tests {
             let (kind, reason) = reader.read_message().unwrap();
             assert_eq!(kind, MessageKind::Close);
             let reason = String::from_utf8(reason).unwrap();
-            assert!(reason.contains("version 4; expected 5"), "{reason}");
+            assert!(reason.contains("version 4; expected 6"), "{reason}");
             assert!(
                 reason.contains("update jwm-remote on both machines"),
                 "{reason}"
@@ -3878,6 +3911,7 @@ mod tests {
             let hello = ClientHello {
                 request_input: false,
                 request_clipboard: false,
+                request_clipboard_files: false,
                 keymap: KeymapTable::empty(),
             };
             writer
@@ -3908,6 +3942,7 @@ mod tests {
             allow_lan: false,
             allow_input: false,
             allow_clipboard: false,
+            clipboard_file_limit: 0,
             once: false,
         };
         assert!(!options.allow_lan);

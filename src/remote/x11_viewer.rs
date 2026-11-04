@@ -259,6 +259,8 @@ pub struct Viewer {
     net_wm_name: Atom,
     utf8_string: Atom,
     clipboard_enabled: bool,
+    /// Transfer progress or outcome shown after the clipboard state.
+    clipboard_activity: Option<String>,
     depth: u8,
     pixel_layout: PixelLayout,
     native_pixel_writer: NativePixelWriter,
@@ -515,6 +517,7 @@ impl Viewer {
             grab_input,
             false,
             false,
+            None,
             escape_key,
         );
         conn.change_property8(
@@ -572,6 +575,7 @@ impl Viewer {
             net_wm_name,
             utf8_string,
             clipboard_enabled: false,
+            clipboard_activity: None,
             depth: root_depth,
             pixel_layout,
             native_pixel_writer,
@@ -923,6 +927,14 @@ impl Viewer {
         self.update_title();
     }
 
+    /// Show a copy travelling or just arrived, such as `receiving 3 files 40%`.
+    pub fn set_clipboard_activity(&mut self, activity: Option<String>) {
+        if self.clipboard_activity != activity {
+            self.clipboard_activity = activity;
+            self.update_title();
+        }
+    }
+
     // Decoration must never interrupt input release or turn a successful grab
     // into a half-failed operation. Transport/input errors keep their own path.
     fn update_title(&self) {
@@ -939,6 +951,7 @@ impl Viewer {
             self.grab_input,
             self.grabbed,
             self.clipboard_enabled,
+            self.clipboard_activity.as_deref(),
             &self.escape_name,
         );
         self.conn

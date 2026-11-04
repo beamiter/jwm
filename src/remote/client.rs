@@ -1,11 +1,14 @@
 //! Remote desktop viewer/client orchestration.
 
+use super::clipboard_sync::{
+    ClipboardInbox, ClipboardOutbox, ClipboardSync, Outgoing, SyncOptions, SyncStatus,
+};
 use super::deadline::TcpStreamDeadline;
 use super::frame::{RecyclableDecodedFrame, SharedDecodeBufferPool, new_decode_buffer_pool};
 use super::key::KeySource;
 use super::messages::{
-    ClientHello, MAX_INPUT_BATCH_EVENTS, ServerHello, decode_clipboard, encode_clipboard,
-    encode_frame_ack, encode_input_batch_into, encode_viewport,
+    ClientHello, MAX_INPUT_BATCH_EVENTS, ServerHello, encode_frame_ack, encode_input_batch_into,
+    encode_viewport,
 };
 use super::protocol::{
     MAX_PAYLOAD_LEN, MessageKind, PayloadBufferRetention, ProtocolError, SessionReader,
@@ -17,7 +20,6 @@ use super::x11_input::InputEvent;
 use super::x11_keymap::{KeymapTable, read_display};
 use super::x11_viewer::{Viewer, ViewerEvent, validate_escape_key};
 use super::{RemoteError, RemoteResult, VIDEO_FRAME_IDLE_TIMEOUT};
-use crate::backend::clipboard_x11::{Clipboard, ClipboardCaptures, ClipboardSetter};
 use nix::errno::Errno;
 use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 use std::io::Write as _;
@@ -37,14 +39,10 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 // Stay comfortably inside the host's 600 ms held-input safety lease even
 // while a modifier is held over a static desktop and no frame ACKs arrive.
 const HEARTBEAT_INTERVAL: Duration = Duration::from_millis(200);
-/// How often the viewer loop looks for newly copied local text.
-///
-/// The loop otherwise parks until its next heartbeat, and a quarter second of
-/// copy-paste latency is imperceptible next to that.
-const CLIPBOARD_POLL_INTERVAL: Duration = Duration::from_millis(250);
-// Bound clipboard work before the next input pass, frame ACK and heartbeat.
-// Oversized/rejected captures count too; this is not a socket latency bound.
-const MAX_VIEWER_CLIPBOARD_RECORDS_PER_PASS: usize = 4;
+// Bound clipboard work before the next input pass, frame ACK and heartbeat:
+// sixteen records cover a whole transfer window of chunks plus small control
+// records, and leftovers stay queued for the next pass.
+const MAX_VIEWER_CLIPBOARD_RECORDS_PER_PASS: usize = 16;
 const TELEMETRY_INTERVAL: Duration = Duration::from_secs(5);
 const RECEIVER_JOIN_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -59,6 +57,8 @@ pub struct ClientOptions {
     pub view_only: bool,
     pub grab_input: bool,
     pub clipboard: bool,
+    /// Largest file copy shared through the clipboard; 0 shares no files.
+    pub clipboard_file_limit: u64,
     /// X keysym name that releases the local grab on a double tap.
     pub escape_key: String,
 }
@@ -141,6 +141,7 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
         &key,
         request_input,
         options.clipboard,
+        options.clipboard && options.clipboard_file_limit > 0,
         &keymap,
         HANDSHAKE_TIMEOUT,
     )?;
@@ -162,13 +163,40 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
             "jwm-remote: host did not enable clipboard sharing; start it with --allow-clipboard"
         );
     }
-    let (clipboard_captures, receiver_clipboard) = if hello.clipboard_enabled {
+    if options.clipboard
+        && options.clipboard_file_limit > 0
+        && hello.clipboard_enabled
+        && !hello.clipboard_files_enabled
+    {
+        eprintln!("jwm-remote: the host shares clipboard text and images, not files");
+    }
+    let (mut wake_receiver, wake_sender) = wake_pair()?;
+    let (clipboard_sync, clipboard_inbox, clipboard_outbox) = if hello.clipboard_enabled {
         *stage = ClientStage::LocalClipboard;
-        match Clipboard::start(options.display.as_deref()) {
-            Ok(clipboard) => {
-                let (captures, setter) = clipboard.split();
-                eprintln!("jwm-remote: clipboard sharing enabled");
-                (Some(captures), Some(setter))
+        let clipboard_wake = wake_sender.try_clone()?;
+        match ClipboardSync::start(
+            options.display.as_deref(),
+            SyncOptions {
+                files: hello.clipboard_files_enabled,
+                file_limit: options.clipboard_file_limit,
+                // What you copied just before connecting is what you most
+                // likely mean to paste over there.
+                share_existing: true,
+            },
+            Some(Box::new(move || {
+                let _ = clipboard_wake.signal();
+            })),
+        ) {
+            Ok((sync, inbox, outbox)) => {
+                eprintln!(
+                    "jwm-remote: clipboard sharing enabled ({})",
+                    if hello.clipboard_files_enabled {
+                        "text, images and files"
+                    } else {
+                        "text and images"
+                    }
+                );
+                (Some(sync), Some(inbox), Some(outbox))
             }
             Err(error) => {
                 return Err(io::Error::other(format!(
@@ -178,8 +206,9 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
             }
         }
     } else {
-        (None, None)
+        (None, None, None)
     };
+    let clipboard_status = clipboard_sync.as_ref().map(ClipboardSync::status);
 
     *stage = ClientStage::FirstFrame;
     let state = Arc::new(ReceiveState::new());
@@ -188,12 +217,11 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
         &mut reader,
         hello.clipboard_enabled,
         FIRST_FRAME_TIMEOUT,
-        |text| {
-            let setter = receiver_clipboard
+        |kind, payload| {
+            clipboard_inbox
                 .as_ref()
-                .ok_or_else(|| invalid_data("clipboard sharing was not negotiated"))?;
-            setter.set_text(text);
-            Ok(())
+                .ok_or_else(|| invalid_data("clipboard sharing was not negotiated"))?
+                .deliver(kind, payload)
         },
     )?;
     state.telemetry.record_received();
@@ -257,7 +285,6 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
 
     let control = writer.get_ref().try_clone()?;
     let mut cancel = SessionCancel::new(control, Arc::clone(&state));
-    let (mut wake_receiver, wake_sender) = wake_pair()?;
     let receive_state = Arc::clone(&state);
     let receiver = ReceiverThread::spawn(move || {
         // Move the authenticated first-frame allocation into the receiver
@@ -270,7 +297,7 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
             payload,
             wake_sender,
             tile_decoder,
-            receiver_clipboard,
+            clipboard_inbox,
         );
     })?;
 
@@ -284,7 +311,8 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
         keyboard_enabled,
         &mut telemetry_reporter,
         &mut wake_receiver,
-        clipboard_captures.as_ref(),
+        clipboard_outbox.as_ref(),
+        clipboard_status.as_deref(),
     );
     let graceful_close = matches!(
         &loop_result,
@@ -294,6 +322,7 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
     );
     let cancel_result = cancel.cancel(&mut writer, graceful_close);
     let receiver_exit = receiver.join_timeout(RECEIVER_JOIN_TIMEOUT);
+    drop(clipboard_sync);
     telemetry_reporter.force_report();
     // Preserve the foreground/X11 first cause. Receiver cleanup failures only
     // replace a successful viewer-close result, matching the old precedence.
@@ -316,6 +345,7 @@ fn negotiate_session(
     key: &[u8],
     request_input: bool,
     request_clipboard: bool,
+    request_clipboard_files: bool,
     keymap: &KeymapTable,
     negotiation_timeout: Duration,
 ) -> RemoteResult<(
@@ -343,6 +373,7 @@ fn negotiate_session(
         &ClientHello {
             request_input,
             request_clipboard,
+            request_clipboard_files,
             keymap: keymap.clone(),
         }
         .encode(),
@@ -367,7 +398,12 @@ fn negotiate_session(
         return Err(invalid_data("host did not acknowledge remote session negotiation").into());
     }
     let hello = ServerHello::decode(&payload)?;
-    validate_server_capabilities(&hello, request_input, request_clipboard)?;
+    validate_server_capabilities(
+        &hello,
+        request_input,
+        request_clipboard,
+        request_clipboard_files,
+    )?;
     negotiation_deadline.cancel();
     reader.set_max_payload_len(MAX_PAYLOAD_LEN);
     reader
@@ -434,9 +470,13 @@ fn validate_server_capabilities(
     hello: &ServerHello,
     request_input: bool,
     request_clipboard: bool,
+    request_clipboard_files: bool,
 ) -> RemoteResult<()> {
     if hello.clipboard_enabled && !request_clipboard {
         return Err(invalid_data("host enabled clipboard sharing without client consent").into());
+    }
+    if hello.clipboard_files_enabled && !request_clipboard_files {
+        return Err(invalid_data("host enabled file sharing without client consent").into());
     }
     if (hello.pointer_enabled || hello.keyboard_enabled) && !request_input {
         return Err(invalid_data("host enabled input without client consent").into());
@@ -450,10 +490,10 @@ fn read_initial_frame(
     reader: &mut SessionReader<TcpStream>,
     clipboard_enabled: bool,
     timeout: Duration,
-    set_clipboard: impl FnMut(&str) -> RemoteResult<()>,
+    deliver_clipboard: impl FnMut(MessageKind, &[u8]) -> RemoteResult<()>,
 ) -> RemoteResult<Vec<u8>> {
     let mut deadline = TcpStreamDeadline::arm(reader.get_ref(), timeout)?;
-    let payload = read_initial_frame_records(reader, clipboard_enabled, set_clipboard)?;
+    let payload = read_initial_frame_records(reader, clipboard_enabled, deliver_clipboard)?;
     deadline.cancel();
     Ok(payload)
 }
@@ -461,14 +501,16 @@ fn read_initial_frame(
 fn read_initial_frame_records<R: io::Read>(
     reader: &mut SessionReader<R>,
     clipboard_enabled: bool,
-    mut set_clipboard: impl FnMut(&str) -> RemoteResult<()>,
+    mut deliver_clipboard: impl FnMut(MessageKind, &[u8]) -> RemoteResult<()>,
 ) -> RemoteResult<Vec<u8>> {
     let mut payload = Vec::new();
     loop {
         match reader.read_message_into(&mut payload)? {
             MessageKind::Frame => return Ok(payload),
-            MessageKind::Clipboard if clipboard_enabled => {
-                set_clipboard(&decode_clipboard(&payload)?)?;
+            kind @ (MessageKind::Clipboard | MessageKind::ClipboardTransfer)
+                if clipboard_enabled =>
+            {
+                deliver_clipboard(kind, &payload)?;
             }
             MessageKind::Close => {
                 return Err(io::Error::new(
@@ -490,8 +532,10 @@ fn viewer_loop(
     keyboard_enabled: bool,
     telemetry_reporter: &mut ClientTelemetryReporter<'_>,
     wake: &mut WakeReceiver,
-    clipboard: Option<&ClipboardCaptures>,
+    clipboard: Option<&ClipboardOutbox>,
+    clipboard_status: Option<&SyncStatus>,
 ) -> RemoteResult<ViewerLoopExit> {
+    let mut clipboard_status_seen = 0;
     let mut next_heartbeat = Instant::now() + HEARTBEAT_INTERVAL;
     let mut input_batch = Vec::with_capacity(MAX_INPUT_BATCH_EVENTS);
     let mut input_payload = Vec::new();
@@ -522,11 +566,13 @@ fn viewer_loop(
         }
         if let Some(clipboard) = clipboard {
             // Closing the viewer wins over a simultaneous local worker exit.
-            wrote |= forward_viewer_clipboard_from(
-                || clipboard.recv_timeout(Duration::ZERO),
-                writer,
-                outcome.close,
-            )?;
+            wrote |= forward_viewer_clipboard_from(|| clipboard.try_next(), writer, outcome.close)?;
+        }
+        if let Some((version, line)) =
+            clipboard_status.and_then(|status| status.changed_since(clipboard_status_seen))
+        {
+            clipboard_status_seen = version;
+            viewer.set_clipboard_activity(line);
         }
         if Instant::now() >= next_heartbeat {
             writer.write_message(MessageKind::Heartbeat, &[])?;
@@ -572,9 +618,6 @@ fn viewer_loop(
             continue;
         }
         let mut deadline = next_heartbeat.min(telemetry_reporter.next_deadline());
-        if clipboard.is_some() {
-            deadline = deadline.min(Instant::now() + CLIPBOARD_POLL_INTERVAL);
-        }
         if let Some(viewer_deadline) = viewer.next_event_deadline() {
             deadline = deadline.min(viewer_deadline);
         }
@@ -591,7 +634,7 @@ fn viewer_loop(
 }
 
 fn forward_viewer_clipboard_from<W: std::io::Write>(
-    mut receive: impl FnMut() -> Result<Option<String>, std::sync::mpsc::RecvError>,
+    mut receive: impl FnMut() -> Result<Option<Outgoing>, std::sync::mpsc::RecvError>,
     writer: &mut SessionWriter<W>,
     closing: bool,
 ) -> RemoteResult<bool> {
@@ -600,8 +643,8 @@ fn forward_viewer_clipboard_from<W: std::io::Write>(
     }
     let mut wrote = false;
     for _ in 0..MAX_VIEWER_CLIPBOARD_RECORDS_PER_PASS {
-        let text = match receive() {
-            Ok(Some(text)) => text,
+        let record = match receive() {
+            Ok(Some(record)) => record,
             Ok(None) => return Ok(wrote),
             Err(_) => {
                 return Err(Box::new(ClientFailure {
@@ -614,17 +657,12 @@ fn forward_viewer_clipboard_from<W: std::io::Write>(
                 }));
             }
         };
-        match encode_clipboard(&text) {
-            Ok(payload) => {
-                writer.write_message(MessageKind::Clipboard, payload)?;
-                wrote = true;
-            }
-            Err(_) => {
-                eprintln!("jwm-remote: local clipboard text is too large to share; skipping it")
-            }
-        }
+        writer.write_message(record.kind, &record.payload)?;
+        wrote = true;
     }
-    // Queued captures remain in FIFO order for the next viewer pass.
+    // Queued records remain in FIFO order for the next viewer pass. The
+    // worker woke this loop for each of them, so the pass after this one
+    // starts without waiting.
     Ok(wrote)
 }
 
@@ -910,6 +948,12 @@ struct WakeSender {
 }
 
 impl WakeSender {
+    fn try_clone(&self) -> io::Result<Self> {
+        Ok(Self {
+            stream: self.stream.try_clone()?,
+        })
+    }
+
     fn signal(&self) -> io::Result<()> {
         loop {
             match (&self.stream).write(&[1]) {
@@ -1269,7 +1313,7 @@ fn receive_frames(
     mut payload: Vec<u8>,
     wake: WakeSender,
     mut tile_decoder: TileDecoder,
-    clipboard_setter: Option<ClipboardSetter>,
+    clipboard: Option<ClipboardInbox>,
 ) {
     let mut completion = ReceiveCompletion::new(Arc::clone(&state), wake);
     let mut payload_retention = PayloadBufferRetention::default();
@@ -1333,17 +1377,12 @@ fn receive_frames(
             | MessageKind::Viewport => {
                 return Err(invalid_data(format!("unexpected host message: {kind:?}")).into());
             }
-            MessageKind::Clipboard => {
-                let text = decode_clipboard(&payload)?;
-                match clipboard_setter.as_ref() {
-                    Some(setter) => {
-                        setter.set_text(&text);
-                    }
-                    None => {
-                        return Err(invalid_data("clipboard sharing was not negotiated").into());
-                    }
+            MessageKind::Clipboard | MessageKind::ClipboardTransfer => match clipboard.as_ref() {
+                Some(clipboard) => clipboard.deliver(kind, &payload)?,
+                None => {
+                    return Err(invalid_data("clipboard sharing was not negotiated").into());
                 }
-            }
+            },
             MessageKind::Heartbeat => {
                 return Err(invalid_data("host sent an unexpected heartbeat").into());
             }
@@ -1434,48 +1473,48 @@ mod tests {
         }
     }
 
+    fn text_record(text: &str) -> Outgoing {
+        Outgoing {
+            kind: MessageKind::Clipboard,
+            payload: text.as_bytes().to_vec(),
+        }
+    }
+
     #[test]
-    fn viewer_clipboard_budget_yields_and_preserves_queued_text_order() {
+    fn viewer_clipboard_budget_yields_and_preserves_queued_record_order() {
         let mut writer = SessionWriter::new(Vec::new(), TEST_PSK);
         let mut next = 0;
-        for expected_end in [4, 8] {
+        let per_pass = MAX_VIEWER_CLIPBOARD_RECORDS_PER_PASS;
+        for expected_end in [per_pass, 2 * per_pass] {
             let mut receive = || {
                 next += 1;
                 assert!(next <= expected_end + 1, "clipboard pass did not yield");
-                Ok(Some(format!("text-{next}")))
+                Ok(Some(text_record(&format!("text-{next}"))))
             };
             assert!(forward_viewer_clipboard_from(&mut receive, &mut writer, false).unwrap());
             assert_eq!(next, expected_end);
         }
         let mut reader = SessionReader::new(std::io::Cursor::new(writer.into_inner()), TEST_PSK);
-        for index in 1..=8 {
+        for index in 1..=2 * per_pass {
             let (kind, payload) = reader.read_message().unwrap();
             assert_eq!(kind, MessageKind::Clipboard);
-            assert_eq!(decode_clipboard(&payload).unwrap(), format!("text-{index}"));
+            assert_eq!(payload, format!("text-{index}").as_bytes());
         }
     }
 
     #[test]
-    fn viewer_clipboard_budget_counts_rejected_text_and_later_worker_exit() {
+    fn viewer_clipboard_budget_covers_a_whole_transfer_window() {
+        // A pass must be able to flush every chunk the worker may have in
+        // flight, or a transfer would crawl at one pass per heartbeat.
+        let chunks = (super::super::clipboard_sync::TRANSFER_WINDOW_BYTES
+            / super::super::clipboard_sync::TRANSFER_CHUNK_BYTES as u64)
+            as usize;
+        assert!(MAX_VIEWER_CLIPBOARD_RECORDS_PER_PASS >= chunks + 2);
+    }
+
+    #[test]
+    fn viewer_clipboard_reports_a_worker_exit_after_a_full_pass() {
         let mut writer = SessionWriter::new(Vec::new(), TEST_PSK);
-        let mut calls = 0;
-        let oversized = "x".repeat(super::super::messages::MAX_CLIPBOARD_BYTES + 1);
-        assert!(
-            !forward_viewer_clipboard_from(
-                || {
-                    calls += 1;
-                    assert!(
-                        calls <= 4,
-                        "rejected text must count against the pass budget"
-                    );
-                    Ok(Some(oversized.clone()))
-                },
-                &mut writer,
-                false,
-            )
-            .unwrap()
-        );
-        assert_eq!(calls, 4);
         let error =
             forward_viewer_clipboard_from(|| Err(std::sync::mpsc::RecvError), &mut writer, false)
                 .unwrap_err();
@@ -1491,7 +1530,7 @@ mod tests {
             || {
                 calls += 1;
                 match calls {
-                    1 => Ok(Some("queued".into())),
+                    1 => Ok(Some(text_record("queued"))),
                     2 => Err(std::sync::mpsc::RecvError),
                     _ => panic!("closed receiver must not spin"),
                 }
@@ -1507,7 +1546,7 @@ mod tests {
         let mut reader = SessionReader::new(std::io::Cursor::new(writer.into_inner()), TEST_PSK);
         let (kind, payload) = reader.read_message().unwrap();
         assert_eq!(kind, MessageKind::Clipboard);
-        assert_eq!(decode_clipboard(&payload).unwrap(), "queued");
+        assert_eq!(payload, b"queued");
     }
 
     #[test]
@@ -1542,8 +1581,9 @@ mod tests {
             }
         }
         let mut writer = SessionWriter::new(RejectWrite, TEST_PSK);
-        let error = forward_viewer_clipboard_from(|| Ok(Some("text".into())), &mut writer, false)
-            .unwrap_err();
+        let error =
+            forward_viewer_clipboard_from(|| Ok(Some(text_record("text"))), &mut writer, false)
+                .unwrap_err();
         assert!(!error.is::<ClientFailure>());
         assert!(error.to_string().contains("transport write failed"));
     }
@@ -1613,23 +1653,28 @@ mod tests {
             pointer_enabled: false,
             keyboard_enabled: false,
             clipboard_enabled: true,
+            clipboard_files_enabled: false,
         };
-        assert!(validate_server_capabilities(&hello, false, false).is_err());
-        assert!(validate_server_capabilities(&hello, false, true).is_ok());
+        assert!(validate_server_capabilities(&hello, false, false, false).is_err());
+        assert!(validate_server_capabilities(&hello, false, true, false).is_ok());
+        hello.clipboard_files_enabled = true;
+        assert!(validate_server_capabilities(&hello, false, true, false).is_err());
+        assert!(validate_server_capabilities(&hello, false, true, true).is_ok());
         hello.clipboard_enabled = false;
+        hello.clipboard_files_enabled = false;
         hello.pointer_enabled = true;
-        assert!(validate_server_capabilities(&hello, false, false).is_err());
-        assert!(validate_server_capabilities(&hello, true, false).is_ok());
+        assert!(validate_server_capabilities(&hello, false, false, false).is_err());
+        assert!(validate_server_capabilities(&hello, true, false, false).is_ok());
     }
 
     #[test]
     fn negotiated_clipboard_may_precede_the_first_video_record() {
         let mut writer = SessionWriter::new(Vec::new(), TEST_PSK);
         writer
-            .write_message(
-                MessageKind::Clipboard,
-                encode_clipboard("synthetic fixture").unwrap(),
-            )
+            .write_message(MessageKind::Clipboard, b"synthetic fixture")
+            .unwrap();
+        writer
+            .write_message(MessageKind::ClipboardTransfer, b"\x03\0\0\0\x01")
             .unwrap();
         writer
             .write_message(MessageKind::Frame, b"synthetic frame header")
@@ -1637,16 +1682,22 @@ mod tests {
         let bytes = writer.into_inner();
         let mut reader = SessionReader::new(Cursor::new(bytes.clone()), TEST_PSK);
         let mut copied = Vec::new();
-        let frame = read_initial_frame_records(&mut reader, true, |text| {
-            copied.push(text.to_string());
+        let frame = read_initial_frame_records(&mut reader, true, |kind, payload| {
+            copied.push((kind, payload.to_vec()));
             Ok(())
         })
         .unwrap();
-        assert_eq!(copied, ["synthetic fixture"]);
+        assert_eq!(
+            copied,
+            [
+                (MessageKind::Clipboard, b"synthetic fixture".to_vec()),
+                (MessageKind::ClipboardTransfer, b"\x03\0\0\0\x01".to_vec()),
+            ]
+        );
         assert_eq!(frame, b"synthetic frame header");
         let mut reader = SessionReader::new(Cursor::new(bytes), TEST_PSK);
         assert!(
-            read_initial_frame_records(&mut reader, false, |_| {
+            read_initial_frame_records(&mut reader, false, |_, _| {
                 panic!("unnegotiated clipboard must never reach the setter")
             })
             .is_err()
@@ -1676,7 +1727,8 @@ mod tests {
         let mut reader = SessionReader::new(receiver, TEST_PSK);
         let started = Instant::now();
         assert!(
-            read_initial_frame(&mut reader, true, Duration::from_millis(40), |_| Ok(())).is_err()
+            read_initial_frame(&mut reader, true, Duration::from_millis(40), |_, _| Ok(()))
+                .is_err()
         );
         assert!(started.elapsed() < Duration::from_millis(500));
         sender.join().unwrap();
@@ -2544,6 +2596,7 @@ mod tests {
             &TEST_PSK,
             false,
             false,
+            false,
             &KeymapTable::empty(),
             Duration::from_millis(80),
         );
@@ -2574,6 +2627,7 @@ mod tests {
                         pointer_enabled: false,
                         keyboard_enabled: false,
                         clipboard_enabled: false,
+                        clipboard_files_enabled: false,
                     }
                     .encode(),
                 )
@@ -2591,6 +2645,7 @@ mod tests {
         let result = negotiate_session(
             stream,
             &TEST_PSK,
+            false,
             false,
             false,
             &KeymapTable::empty(),
@@ -2639,6 +2694,7 @@ mod tests {
             &TEST_PSK,
             false,
             false,
+            false,
             &KeymapTable::empty(),
             Duration::from_secs(5),
         );
@@ -2676,6 +2732,7 @@ mod tests {
                             pointer_enabled: false,
                             keyboard_enabled: false,
                             clipboard_enabled: true,
+                            clipboard_files_enabled: false,
                         }
                         .encode(),
                     )
@@ -2688,6 +2745,7 @@ mod tests {
                 &TEST_PSK,
                 false,
                 request_clipboard,
+                false,
                 &KeymapTable::empty(),
                 Duration::from_secs(5),
             );
@@ -2729,6 +2787,7 @@ mod tests {
                         pointer_enabled: false,
                         keyboard_enabled: false,
                         clipboard_enabled: false,
+                        clipboard_files_enabled: false,
                     }
                     .encode(),
                 )
@@ -2743,6 +2802,7 @@ mod tests {
         let (mut reader, _writer, hello) = negotiate_session(
             stream,
             &TEST_PSK,
+            false,
             false,
             false,
             &KeymapTable::empty(),

@@ -302,6 +302,7 @@ pub fn viewer_title(
     grab_input: bool,
     grabbed: bool,
     clipboard: bool,
+    clipboard_activity: Option<&str>,
     escape: &str,
 ) -> String {
     let mode = session_mode(pointer, keyboard);
@@ -316,8 +317,12 @@ pub fn viewer_title(
     };
     // The peer comes first: with several viewers open, which machine a
     // window shows matters more than its input mode.
+    let activity = clipboard_activity
+        .filter(|_| clipboard)
+        .map(|activity| format!(" - {activity}"))
+        .unwrap_or_default();
     format!(
-        "{peer} - JWM Remote - {mode}{input}; clipboard {}",
+        "{peer} - JWM Remote - {mode}{input}; clipboard {}{activity}",
         if clipboard { "ON" } else { "off" }
     )
 }
@@ -561,20 +566,59 @@ mod tests {
     #[test]
     fn titles_show_actual_capabilities_and_grab_state() {
         assert!(
-            viewer_title("desk", false, false, true, false, false, "F12").contains("view-only")
+            viewer_title("desk", false, false, true, false, false, None, "F12")
+                .contains("view-only")
         );
-        assert!(!viewer_title("desk", false, false, true, false, false, "F12").contains("click"));
         assert!(
-            viewer_title("desk", true, false, true, false, false, "F12")
+            !viewer_title("desk", false, false, true, false, false, None, "F12").contains("click")
+        );
+        assert!(
+            viewer_title("desk", true, false, true, false, false, None, "F12")
                 .contains("pointer only; keyboard disabled; input released")
         );
         assert!(
-            viewer_title("desk", true, true, true, true, true, "Pause")
+            viewer_title("desk", true, true, true, true, true, None, "Pause")
                 .contains("double-tap Pause to release; clipboard ON")
         );
         assert!(
-            viewer_title("ubuntu@desk", false, false, false, false, false, "F12")
-                .starts_with("ubuntu@desk - JWM Remote - view-only")
+            viewer_title(
+                "ubuntu@desk",
+                false,
+                false,
+                false,
+                false,
+                false,
+                None,
+                "F12"
+            )
+            .starts_with("ubuntu@desk - JWM Remote - view-only")
+        );
+        assert!(
+            viewer_title(
+                "desk",
+                true,
+                true,
+                false,
+                false,
+                true,
+                Some("receiving 2 files 40%"),
+                "F12"
+            )
+            .ends_with("; clipboard ON - receiving 2 files 40%")
+        );
+        // Activity never shows next to a clipboard that is off.
+        assert!(
+            viewer_title(
+                "desk",
+                true,
+                true,
+                false,
+                false,
+                false,
+                Some("stale"),
+                "F12"
+            )
+            .ends_with("; clipboard off")
         );
     }
 }

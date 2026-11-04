@@ -5,6 +5,29 @@ monorepo use independent Semantic Versions.
 
 ## [Unreleased]
 
+### Copy and paste files and images through jwm-remote
+
+- With `--clipboard`, a remote session now shares images and files as well
+  as text, in both directions: copy a folder in Nautilus on one machine and
+  paste it in the other's file manager; copy a screenshot and paste it in an
+  image editor there. Files travel in chunks with session-wide flow control
+  (at most 1 MiB in flight), so the screen and keyboard stay responsive during
+  a large copy. A paste made before the copy has arrived waits for it, and the
+  viewer's title shows `receiving 3 files 40%`, then `ready to paste`.
+  Received files are kept under `~/.cache/jwm/remote-clipboard/`.
+- `--clipboard-file-limit SIZE` (default `2G`; `0` shares no files) bounds
+  one file copy on each end. Symlinks inside copied folders, devices and
+  set-id bits are not carried; a cut is shared as a copy.
+- The host no longer pushes its existing clipboard on connect, so the two
+  machines stop swapping clipboards; the viewer's current clipboard is shared.
+- Application protocol version 6: update `jwm-remote` on both machines.
+- Images over about 1 MiB copied through `xclip` (as in `maim | xclip`) were
+  silently dropped, by JWM's clipboard history as well: xclip announces a
+  chunked transfer without its size, which was treated as malformed, and it
+  ignores a second reader while it serves the first. Such a transfer is now
+  accepted (the size caps still apply chunk by chunk), and a request the owner
+  never answers is repeated after 1.5 s, up to three times.
+
 ### Status bars no longer outlive their window manager
 
 - Restarting JWM through `jwm-tool daemon` (SIGTERM, then SIGKILL) or a

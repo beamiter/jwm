@@ -31,8 +31,8 @@ const MAX_IMAGE_DECODE_BYTES: u64 = MAX_IMAGE_HISTORY_PIXELS * 4;
 
 /// One clipboard payload a backend captured for the history to adopt.
 ///
-/// Remote clipboard sharing remains text-only; PNG variants are filtered
-/// before they leave the local session.
+/// The remote helper captures through its own profile
+/// (`clipboard_x11::CopiedClipboard`), which also carries copied files.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CapturedClipboard {
     Text(String),
@@ -827,7 +827,17 @@ pub fn preferred_image_mime(mime_types: &[String]) -> Option<String> {
 /// and re-offers PNG only.
 #[must_use]
 pub fn image_offer_to_history_png(bytes: &[u8], mime: &str) -> Option<Vec<u8>> {
-    if bytes.is_empty() || bytes.len() > MAX_IMAGE_HISTORY_BYTES {
+    image_offer_to_png_within(bytes, mime, MAX_IMAGE_HISTORY_BYTES)
+}
+
+/// [`image_offer_to_history_png`] with a caller-chosen encoded-byte ceiling.
+///
+/// The decoded-pixel budget is the same for every caller; only how many
+/// encoded bytes are worth keeping differs. The remote helper shares one image
+/// at a time and may carry a larger screenshot than the fifty-entry history.
+#[must_use]
+pub fn image_offer_to_png_within(bytes: &[u8], mime: &str, max_bytes: usize) -> Option<Vec<u8>> {
+    if bytes.is_empty() || bytes.len() > max_bytes {
         return None;
     }
     let mime = mime.to_ascii_lowercase();
@@ -869,7 +879,7 @@ pub fn image_offer_to_history_png(bytes: &[u8], mime: &str) -> Option<Vec<u8>> {
         let mut cursor = std::io::Cursor::new(&mut png);
         image.write_to(&mut cursor, image::ImageFormat::Png).ok()?;
     }
-    if png.is_empty() || png.len() > MAX_IMAGE_HISTORY_BYTES {
+    if png.is_empty() || png.len() > max_bytes {
         return None;
     }
     Some(png)
@@ -896,6 +906,168 @@ fn image_dimensions_fit_history(width: u32, height: u32) -> bool {
 #[must_use]
 pub fn preferred_history_mime(mime_types: &[String]) -> Option<String> {
     preferred_text_mime(mime_types).or_else(|| preferred_image_mime(mime_types))
+}
+
+/// File managers copy files as a list of `file://` URIs. GNOME, Thunar,
+/// PCManFM, Nemo and Caja put `copy` or `cut` on a first line of
+/// `x-special/gnome-copied-files`; everything (Qt included) also offers the
+/// plain RFC 2483 `text/uri-list`.
+#[cfg(feature = "remote-x11")]
+pub(crate) const GNOME_COPIED_FILES_MIME: &str = "x-special/gnome-copied-files";
+
+/// RFC 2483 URI list; see [`GNOME_COPIED_FILES_MIME`].
+#[cfg(feature = "remote-x11")]
+pub(crate) const URI_LIST_MIME: &str = "text/uri-list";
+
+/// Most entries one copied file list may name. A selection of thousands of
+/// top-level items is far past what a person picks by hand.
+#[cfg(feature = "remote-x11")]
+pub(crate) const MAX_FILE_LIST_ITEMS: usize = 4096;
+
+/// Parse a copied file list into local absolute paths.
+///
+/// `None` means "this is not a local file copy": an empty list, a non-`file`
+/// URI (a browser's link list), a remote host, malformed escapes, or a path
+/// containing NUL. The caller then falls back to the plain-text form the same
+/// owner usually offers, so a copied web link still arrives as text.
+#[cfg(feature = "remote-x11")]
+pub(crate) fn parse_file_list(mime: &str, bytes: &[u8]) -> Option<Vec<std::path::PathBuf>> {
+    use std::os::unix::ffi::OsStringExt as _;
+    let text = std::str::from_utf8(bytes).ok()?.trim_end_matches('\0');
+    let mut lines = text.split('\n').map(|line| line.trim_end_matches('\r'));
+    if mime == GNOME_COPIED_FILES_MIME {
+        // The first line is the operation. A cut is shared as a copy: the
+        // other machine never deletes the originals here.
+        match lines.next()? {
+            "copy" | "cut" => {}
+            _ => return None,
+        }
+    } else if mime != URI_LIST_MIME {
+        return None;
+    }
+    let mut paths = Vec::new();
+    for line in lines {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if paths.len() == MAX_FILE_LIST_ITEMS {
+            return None;
+        }
+        let path = local_path_from_file_uri(line)?;
+        paths.push(std::path::PathBuf::from(std::ffi::OsString::from_vec(path)));
+    }
+    (!paths.is_empty()).then_some(paths)
+}
+
+/// Decode `file:///abs/path` or `file://localhost/abs/path` into path bytes.
+#[cfg(feature = "remote-x11")]
+fn local_path_from_file_uri(uri: &str) -> Option<Vec<u8>> {
+    let scheme_len = "file:".len();
+    if uri.len() < scheme_len || !uri[..scheme_len].eq_ignore_ascii_case("file:") {
+        return None;
+    }
+    let rest = &uri[scheme_len..];
+    let path = if let Some(authority_and_path) = rest.strip_prefix("//") {
+        let slash = authority_and_path.find('/')?;
+        let host = &authority_and_path[..slash];
+        if !host.is_empty() && !host.eq_ignore_ascii_case("localhost") {
+            return None;
+        }
+        &authority_and_path[slash..]
+    } else if rest.starts_with('/') {
+        // `file:/path`, as some KDE versions write it.
+        rest
+    } else {
+        return None;
+    };
+    // A query or fragment has no meaning for a local file.
+    if path.contains(['?', '#']) {
+        return None;
+    }
+    let decoded = percent_decode(path.as_bytes())?;
+    (decoded.first() == Some(&b'/') && !decoded.contains(&0)).then_some(decoded)
+}
+
+#[cfg(feature = "remote-x11")]
+fn percent_decode(bytes: &[u8]) -> Option<Vec<u8>> {
+    fn hex(digit: u8) -> Option<u8> {
+        match digit {
+            b'0'..=b'9' => Some(digit - b'0'),
+            b'a'..=b'f' => Some(digit - b'a' + 10),
+            b'A'..=b'F' => Some(digit - b'A' + 10),
+            _ => None,
+        }
+    }
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            let high = hex(*bytes.get(index + 1)?)?;
+            let low = hex(*bytes.get(index + 2)?)?;
+            decoded.push(high << 4 | low);
+            index += 3;
+        } else {
+            decoded.push(bytes[index]);
+            index += 1;
+        }
+    }
+    Some(decoded)
+}
+
+/// `file://` URI for an absolute local path.
+///
+/// Every byte outside RFC 3986's unreserved set (and `/`) is escaped, so a
+/// name with spaces, `#`, `%` or non-UTF-8 bytes survives the round trip.
+#[cfg(feature = "remote-x11")]
+pub(crate) fn file_uri(path: &std::path::Path) -> String {
+    use std::fmt::Write as _;
+    use std::os::unix::ffi::OsStrExt as _;
+    let mut uri = String::from("file://");
+    for &byte in path.as_os_str().as_bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'-' | b'.' | b'_' | b'~') {
+            uri.push(char::from(byte));
+        } else {
+            let _ = write!(uri, "%{byte:02X}");
+        }
+    }
+    uri
+}
+
+/// The three encodings a file list is offered in on X11.
+#[cfg(feature = "remote-x11")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FileListPayloads {
+    /// `x-special/gnome-copied-files`: `copy` then one URI per line.
+    pub(crate) gnome: Vec<u8>,
+    /// `text/uri-list`: CRLF-terminated URIs.
+    pub(crate) uri_list: Vec<u8>,
+    /// Plain text: one path per line, for pasting into a terminal or editor.
+    pub(crate) text: Vec<u8>,
+}
+
+#[cfg(feature = "remote-x11")]
+pub(crate) fn file_list_payloads(paths: &[std::path::PathBuf]) -> FileListPayloads {
+    let uris: Vec<String> = paths.iter().map(|path| file_uri(path)).collect();
+    let mut gnome = b"copy".to_vec();
+    let mut uri_list = Vec::new();
+    for uri in &uris {
+        gnome.push(b'\n');
+        gnome.extend_from_slice(uri.as_bytes());
+        uri_list.extend_from_slice(uri.as_bytes());
+        uri_list.extend_from_slice(b"\r\n");
+    }
+    let text = paths
+        .iter()
+        .map(|path| path.to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("\n")
+        .into_bytes();
+    FileListPayloads {
+        gnome,
+        uri_list,
+        text,
+    }
 }
 
 #[cfg(test)]
@@ -1271,5 +1443,110 @@ mod tests {
     fn image_history_cap_dwarfs_the_text_cap() {
         assert!(MAX_IMAGE_HISTORY_BYTES > MAX_TEXT_BYTES);
         assert_eq!(MAX_IMAGE_HISTORY_BYTES, 4 * 1024 * 1024);
+    }
+
+    #[cfg(feature = "remote-x11")]
+    #[test]
+    fn nautilus_file_copies_parse_to_local_paths() {
+        let gnome = b"copy\nfile:///home/u/My%20Doc.pdf\nfile:///home/u/%E4%B8%AD%E6%96%87";
+        assert_eq!(
+            parse_file_list(GNOME_COPIED_FILES_MIME, gnome).unwrap(),
+            vec![
+                std::path::PathBuf::from("/home/u/My Doc.pdf"),
+                std::path::PathBuf::from("/home/u/\u{4e2d}\u{6587}"),
+            ]
+        );
+        // A cut is shared as a copy, with the trailing newline and NUL some
+        // toolkits append.
+        assert_eq!(
+            parse_file_list(GNOME_COPIED_FILES_MIME, b"cut\nfile:///tmp/a\n\0").unwrap(),
+            vec![std::path::PathBuf::from("/tmp/a")]
+        );
+        let uri_list = b"# comment\r\nfile://localhost/etc/hosts\r\nfile:/tmp/b\r\n";
+        assert_eq!(
+            parse_file_list(URI_LIST_MIME, uri_list).unwrap(),
+            vec![
+                std::path::PathBuf::from("/etc/hosts"),
+                std::path::PathBuf::from("/tmp/b"),
+            ]
+        );
+    }
+
+    #[cfg(feature = "remote-x11")]
+    #[test]
+    fn non_local_or_malformed_file_lists_fall_back_to_text() {
+        for (mime, bytes) in [
+            (URI_LIST_MIME, &b"https://example.com/page"[..]),
+            (URI_LIST_MIME, b"file:///tmp/a\r\nhttps://example.com/"),
+            (URI_LIST_MIME, b"file://otherhost/tmp/a"),
+            (URI_LIST_MIME, b"file:///tmp/%zz"),
+            (URI_LIST_MIME, b"file:///tmp/%00nul"),
+            (URI_LIST_MIME, b"file:///tmp/a?query"),
+            (URI_LIST_MIME, b"file:relative"),
+            (URI_LIST_MIME, b"\r\n# only comments\r\n"),
+            (GNOME_COPIED_FILES_MIME, b"file:///tmp/a"),
+            (GNOME_COPIED_FILES_MIME, b"link\nfile:///tmp/a"),
+            ("text/plain", b"file:///tmp/a"),
+            (URI_LIST_MIME, &[0xff, 0xfe]),
+        ] {
+            assert_eq!(parse_file_list(mime, bytes), None, "{mime}: {bytes:?}");
+        }
+        let too_many = (0..=MAX_FILE_LIST_ITEMS)
+            .map(|index| format!("file:///tmp/{index}\r\n"))
+            .collect::<String>();
+        assert_eq!(parse_file_list(URI_LIST_MIME, too_many.as_bytes()), None);
+    }
+
+    #[cfg(feature = "remote-x11")]
+    #[test]
+    fn served_file_lists_round_trip_through_the_parser() {
+        use std::os::unix::ffi::OsStrExt as _;
+        let paths = vec![
+            std::path::PathBuf::from("/home/u/.cache/jwm/a b#c%d.txt"),
+            std::path::PathBuf::from(std::ffi::OsStr::from_bytes(b"/tmp/raw\xff\xfename")),
+            std::path::PathBuf::from("/tmp/\u{4e2d}\u{6587}/dir"),
+        ];
+        let payloads = file_list_payloads(&paths);
+        assert!(
+            payloads
+                .gnome
+                .starts_with(b"copy\nfile:///home/u/.cache/jwm/a%20b%23c%25d.txt")
+        );
+        assert_eq!(
+            parse_file_list(GNOME_COPIED_FILES_MIME, &payloads.gnome).unwrap(),
+            paths
+        );
+        assert_eq!(
+            parse_file_list(URI_LIST_MIME, &payloads.uri_list).unwrap(),
+            paths
+        );
+        assert!(payloads.uri_list.ends_with(b"/dir\r\n"));
+        assert_eq!(
+            String::from_utf8(payloads.text).unwrap().lines().count(),
+            paths.len()
+        );
+    }
+
+    #[test]
+    fn image_ceiling_is_chosen_by_the_caller() {
+        let png = {
+            let img = image::RgbImage::from_pixel(2, 2, image::Rgb([0, 128, 255]));
+            let mut bytes = Vec::new();
+            image::DynamicImage::ImageRgb8(img)
+                .write_to(
+                    &mut std::io::Cursor::new(&mut bytes),
+                    image::ImageFormat::Png,
+                )
+                .unwrap();
+            bytes
+        };
+        assert_eq!(
+            image_offer_to_png_within(&png, "image/png", png.len()).as_deref(),
+            Some(&png[..])
+        );
+        assert_eq!(
+            image_offer_to_png_within(&png, "image/png", png.len() - 1),
+            None
+        );
     }
 }

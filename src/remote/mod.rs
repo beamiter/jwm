@@ -17,6 +17,8 @@ pub type RemoteError = Box<dyn Error + Send + Sync>;
 pub type RemoteResult<T> = Result<T, RemoteError>;
 
 pub mod client;
+pub mod clipboard_files;
+pub mod clipboard_sync;
 mod deadline;
 mod downscale;
 pub mod frame;

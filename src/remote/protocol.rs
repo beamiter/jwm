@@ -155,6 +155,9 @@ pub enum MessageKind {
     Viewport = 12,
     /// UTF-8 clipboard text. Travels in both directions.
     Clipboard = 13,
+    /// One step of a chunked clipboard image or file transfer, or its flow
+    /// control. Travels in both directions; see `clipboard_sync`.
+    ClipboardTransfer = 14,
 }
 
 impl TryFrom<u8> for MessageKind {
@@ -175,6 +178,7 @@ impl TryFrom<u8> for MessageKind {
             11 => Ok(Self::InputBatch),
             12 => Ok(Self::Viewport),
             13 => Ok(Self::Clipboard),
+            14 => Ok(Self::ClipboardTransfer),
             other => Err(ProtocolError::UnknownMessageKind(other)),
         }
     }

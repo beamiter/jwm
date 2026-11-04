@@ -37,9 +37,9 @@ use x11rb::wrapper::ConnectionExt as _;
 #[cfg(feature = "backend-x11rb")]
 use crate::backend::clipboard_offer::ClipboardImageSender;
 use crate::backend::clipboard_offer::{
-    CapturedClipboard, ClipboardOffer, MAX_IMAGE_HISTORY_BYTES, X11_DIRECT_PROPERTY_BYTES,
-    X11_INCR_CHUNK_BYTES, X11_MAX_ACTIVE_INCR_BYTES, X11_MAX_MULTIPLE_CONVERSIONS,
-    next_x11_incr_chunk_with_limit, x11_selection_time_is_valid,
+    CapturedClipboard, ClipboardOffer, ClipboardReceiptGuard, MAX_IMAGE_HISTORY_BYTES,
+    X11_DIRECT_PROPERTY_BYTES, X11_INCR_CHUNK_BYTES, X11_MAX_ACTIVE_INCR_BYTES,
+    X11_MAX_MULTIPLE_CONVERSIONS, next_x11_incr_chunk_with_limit, x11_selection_time_is_valid,
 };
 
 /// A requester that never deletes the INCR property must not retain transfer
@@ -48,10 +48,29 @@ const MAX_OUTGOING_INCR_TRANSFERS: usize = 32;
 const MAX_OUTGOING_INCR_PER_REQUESTOR: usize = 8;
 const OUTGOING_INCR_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const INCOMING_CONVERSION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+/// Ask again when an owner has not answered a conversion at all.
+///
+/// xclip serves one INCR transfer at a time and silently drops any request
+/// that arrives meanwhile. On a desktop where JWM's history and the remote
+/// helper both read every copy, one of them lost every image over ~1 MiB.
+/// Asking again once the other transfer has had time to finish gets it.
+const UNANSWERED_CONVERSION_RETRY: std::time::Duration = std::time::Duration::from_millis(1500);
+const MAX_CONVERSION_ATTEMPTS: u8 = 3;
 const MAX_INCOMING_CHUNK_BYTES: u32 = 1024 * 1024;
 const MAX_TARGET_ATOMS: usize = 256;
 const MAX_TARGET_LIST_BYTES: usize = MAX_TARGET_ATOMS * 4;
 const CLIPBOARD_HANDOFF_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+/// How long a paste may wait for data the remote helper is still receiving.
+///
+/// Comfortably inside GTK 3's 30-second selection timeout; Qt gives up after
+/// five seconds on its own. A paste that outlives this is refused and works
+/// again once the transfer has finished.
+#[cfg(feature = "remote-x11")]
+const DEFERRED_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(25);
+/// Requests parked behind one pending offer. Real pastes are one or two; the
+/// bound keeps a misbehaving requestor from growing the list.
+#[cfg(feature = "remote-x11")]
+const MAX_DEFERRED_REQUESTS: usize = 16;
 
 /// Atoms this module needs. Interned once; comparing atoms is exact and free
 /// compared with resolving names on every event.
@@ -74,9 +93,122 @@ struct Atoms {
     image_png: Atom,
     image_jpeg: Atom,
     image_bmp: Atom,
+    #[cfg(feature = "remote-x11")]
+    gnome_copied_files: Atom,
+    #[cfg(feature = "remote-x11")]
+    uri_list: Atom,
     incr: Atom,
     /// Property on our own window that conversions are delivered into.
     transfer: Atom,
+}
+
+/// What a watcher captures and how much it keeps.
+///
+/// JWM's clipboard history and the remote helper share the X11 mechanics but
+/// not the policy: only the remote helper treats a file manager's copy as
+/// files (the history keeps its text form), and it shares one image at a time
+/// rather than keeping fifty.
+#[derive(Debug, Clone, Copy)]
+struct CaptureProfile {
+    /// Prefer a copied file list over its plain-text form.
+    #[cfg(feature = "remote-x11")]
+    files: bool,
+    /// Encoded-byte ceiling for a captured image.
+    image_bytes: usize,
+    /// Capture whatever is already on the clipboard when the watcher starts.
+    capture_existing: bool,
+}
+
+impl CaptureProfile {
+    #[cfg_attr(not(feature = "backend-x11rb"), allow(dead_code))]
+    const HISTORY: Self = Self {
+        #[cfg(feature = "remote-x11")]
+        files: false,
+        image_bytes: MAX_IMAGE_HISTORY_BYTES,
+        capture_existing: true,
+    };
+}
+
+/// One copy as a watcher captured it, before any consumer's filtering.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CopiedClipboard {
+    Text(String),
+    Png(Vec<u8>),
+    /// Absolute local paths from a file manager's copy.
+    #[cfg(feature = "remote-x11")]
+    Files(Vec<std::path::PathBuf>),
+}
+
+/// Where captured copies go.
+enum CaptureSink {
+    /// JWM's clipboard history: text and PNG only.
+    #[cfg_attr(not(feature = "backend-x11rb"), allow(dead_code))]
+    History(std::sync::mpsc::Sender<CapturedClipboard>),
+    /// The remote helper: everything its profile captured.
+    #[cfg(feature = "remote-x11")]
+    Remote(std::sync::mpsc::Sender<CopiedClipboard>),
+}
+
+impl CaptureSink {
+    /// `false` once the consumer is gone.
+    fn send(&self, copied: CopiedClipboard) -> bool {
+        match self {
+            Self::History(sender) => {
+                let captured = match copied {
+                    CopiedClipboard::Text(text) => CapturedClipboard::Text(text),
+                    CopiedClipboard::Png(png) => CapturedClipboard::Png(png),
+                    #[cfg(feature = "remote-x11")]
+                    CopiedClipboard::Files(_) => return true,
+                };
+                sender.send(captured).is_ok()
+            }
+            #[cfg(feature = "remote-x11")]
+            Self::Remote(sender) => sender.send(copied).is_ok(),
+        }
+    }
+}
+
+/// Where offers to serve come from.
+enum ServeSource {
+    #[cfg_attr(not(feature = "backend-x11rb"), allow(dead_code))]
+    History(std::sync::mpsc::Receiver<ClipboardOffer>),
+    #[cfg(feature = "remote-x11")]
+    Remote(std::sync::mpsc::Receiver<RemoteServe>),
+}
+
+/// What the remote helper asks its watcher to serve.
+///
+/// A copy received from the other machine is announced as soon as it starts
+/// arriving, so CLIPBOARD changes the moment the copy was made rather than
+/// when the last byte lands; a paste in between waits for the data.
+#[cfg(feature = "remote-x11")]
+#[derive(Debug)]
+pub(crate) enum RemoteServe {
+    Text(String),
+    /// Own CLIPBOARD now with the targets of `kind`; data follows.
+    Announce {
+        token: u64,
+        kind: PendingKind,
+    },
+    FulfilPng {
+        token: u64,
+        png: Vec<u8>,
+    },
+    FulfilFiles {
+        token: u64,
+        paths: Vec<std::path::PathBuf>,
+    },
+    /// The announced data will never arrive; refuse waiting pastes.
+    Abandon {
+        token: u64,
+    },
+}
+
+#[cfg(feature = "remote-x11")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PendingKind {
+    Png,
+    Files,
 }
 
 /// What a finished conversion carries.
@@ -90,6 +222,8 @@ enum Conversion {
     TargetList,
     Text,
     Png,
+    #[cfg(feature = "remote-x11")]
+    Files,
 }
 
 /// The watcher, living on its own thread.
@@ -99,10 +233,14 @@ struct Watcher {
     /// selection when JWM serves an entry back.
     window: Window,
     atoms: Atoms,
+    profile: CaptureProfile,
     /// Data JWM currently offers as owner; `None` when another application
     /// owns the clipboard.
     offered: Option<OfferedData>,
-    pending_offer: Option<ClipboardOffer>,
+    pending_offer: Option<PendingOwnership>,
+    /// Pastes waiting for a pending offer's data.
+    #[cfg(feature = "remote-x11")]
+    deferred: Vec<DeferredRequest>,
     pending_probe_events: usize,
     /// Server timestamp used for the most recent successful ownership change.
     ownership_time: Option<u32>,
@@ -120,8 +258,32 @@ struct CaptureRequest {
     request_time: u32,
     conversion: Conversion,
     target: Atom,
+    /// Further targets to try, in order, if this one yields nothing usable
+    /// (a `text/uri-list` of web links falls back to the owner's text).
+    fallbacks: Vec<(Conversion, Atom)>,
     incoming_incr: Option<IncomingIncr>,
     last_activity: std::time::Instant,
+    /// When the current conversion was (last) requested, and how often.
+    requested_at: std::time::Instant,
+    attempts: u8,
+}
+
+/// An offer waiting for the server timestamp that makes it the owner.
+struct PendingOwnership {
+    data: OfferedData,
+    receipt: Option<ClipboardReceiptGuard>,
+}
+
+/// A paste parked until a pending offer's data arrives.
+#[cfg(feature = "remote-x11")]
+#[derive(Debug, Clone, Copy)]
+struct DeferredRequest {
+    requestor: Window,
+    selection: Atom,
+    target: Atom,
+    property: Atom,
+    time: u32,
+    deadline: std::time::Instant,
 }
 
 #[derive(Debug)]
@@ -134,6 +296,19 @@ struct IncomingIncr {
 enum OfferedData {
     Text(std::sync::Arc<[u8]>),
     Png(std::sync::Arc<[u8]>),
+    /// A file list in each encoding it is served as.
+    #[cfg(feature = "remote-x11")]
+    Files {
+        gnome: std::sync::Arc<[u8]>,
+        uri_list: std::sync::Arc<[u8]>,
+        text: std::sync::Arc<[u8]>,
+    },
+    /// Targets announced, data still arriving from the other machine.
+    #[cfg(feature = "remote-x11")]
+    Pending {
+        token: u64,
+        kind: PendingKind,
+    },
 }
 
 impl From<ClipboardOffer> for OfferedData {
@@ -147,37 +322,50 @@ impl From<ClipboardOffer> for OfferedData {
 }
 
 impl OfferedData {
-    fn targets(&self, atoms: &Atoms) -> Vec<Atom> {
-        match self {
-            Self::Text(_) => vec![
-                atoms.targets,
-                atoms.multiple,
-                atoms.timestamp,
-                atoms.save_targets,
-                atoms.utf8_string,
-                atoms.text_plain_utf8,
-                atoms.text_plain,
-            ],
-            Self::Png(_) => vec![
-                atoms.targets,
-                atoms.multiple,
-                atoms.timestamp,
-                atoms.save_targets,
-                atoms.image_png,
-            ],
+    #[cfg(feature = "remote-x11")]
+    fn files(paths: &[std::path::PathBuf]) -> Self {
+        let payloads = crate::backend::clipboard_offer::file_list_payloads(paths);
+        Self::Files {
+            gnome: payloads.gnome.into(),
+            uri_list: payloads.uri_list.into(),
+            text: payloads.text.into(),
         }
     }
 
+    fn targets(&self, atoms: &Atoms) -> Vec<Atom> {
+        let mut targets = vec![
+            atoms.targets,
+            atoms.multiple,
+            atoms.timestamp,
+            atoms.save_targets,
+        ];
+        targets.extend(self.payload_targets(atoms));
+        targets
+    }
+
     fn payload_for(&self, atoms: &Atoms, target: Atom) -> Option<std::sync::Arc<[u8]>> {
+        let is_text = target == atoms.utf8_string
+            || target == atoms.text_plain_utf8
+            || target == atoms.text_plain;
         match self {
-            Self::Text(bytes)
-                if target == atoms.utf8_string
-                    || target == atoms.text_plain_utf8
-                    || target == atoms.text_plain =>
-            {
-                Some(std::sync::Arc::clone(bytes))
-            }
+            Self::Text(bytes) if is_text => Some(std::sync::Arc::clone(bytes)),
             Self::Png(bytes) if target == atoms.image_png => Some(std::sync::Arc::clone(bytes)),
+            #[cfg(feature = "remote-x11")]
+            Self::Files {
+                gnome,
+                uri_list,
+                text,
+            } => {
+                if target == atoms.gnome_copied_files {
+                    Some(std::sync::Arc::clone(gnome))
+                } else if target == atoms.uri_list {
+                    Some(std::sync::Arc::clone(uri_list))
+                } else if is_text {
+                    Some(std::sync::Arc::clone(text))
+                } else {
+                    None
+                }
+            }
             _ => None,
         }
     }
@@ -186,6 +374,37 @@ impl OfferedData {
         match self {
             Self::Text(_) => vec![atoms.utf8_string, atoms.text_plain_utf8, atoms.text_plain],
             Self::Png(_) => vec![atoms.image_png],
+            #[cfg(feature = "remote-x11")]
+            Self::Files { .. }
+            | Self::Pending {
+                kind: PendingKind::Files,
+                ..
+            } => vec![
+                atoms.gnome_copied_files,
+                atoms.uri_list,
+                atoms.utf8_string,
+                atoms.text_plain_utf8,
+                atoms.text_plain,
+            ],
+            #[cfg(feature = "remote-x11")]
+            Self::Pending {
+                kind: PendingKind::Png,
+                ..
+            } => vec![atoms.image_png],
+        }
+    }
+
+    /// Whether a request for `target` must wait for data still arriving.
+    #[cfg(feature = "remote-x11")]
+    fn defers(&self, atoms: &Atoms, target: Atom) -> bool {
+        matches!(self, Self::Pending { .. }) && self.payload_targets(atoms).contains(&target)
+    }
+
+    #[cfg(feature = "remote-x11")]
+    fn pending_token(&self) -> Option<u64> {
+        match self {
+            Self::Pending { token, .. } => Some(*token),
+            _ => None,
         }
     }
 }
@@ -200,11 +419,11 @@ struct OutgoingIncr {
 
 /// Handle held by the backend: captured payloads arrive on `captured`,
 /// entries to serve are sent on `serve`.
+#[cfg(feature = "backend-x11rb")]
 pub(crate) struct Clipboard {
     captured: std::sync::mpsc::Receiver<CapturedClipboard>,
     serve: std::sync::mpsc::Sender<ClipboardOffer>,
     worker_wake: crate::backend::update_notifier::AsyncUpdateNotifier,
-    #[cfg(feature = "backend-x11rb")]
     notifier: std::sync::Arc<
         std::sync::Mutex<Option<crate::backend::update_notifier::AsyncUpdateNotifier>>,
     >,
@@ -244,76 +463,91 @@ impl Drop for ClipboardWorkerLifetime {
     }
 }
 
+type SharedNotifier =
+    std::sync::Arc<std::sync::Mutex<Option<crate::backend::update_notifier::AsyncUpdateNotifier>>>;
+
+/// Start a watcher on its own connection and thread.
+///
+/// The watcher is built on the thread that will own it: RustConnection is not
+/// Sync, and nothing outside the thread may touch it.
+fn spawn_watcher(
+    display: Option<&str>,
+    profile: CaptureProfile,
+    sink: CaptureSink,
+    source: ServeSource,
+    notifier: SharedNotifier,
+) -> Result<
+    (
+        crate::backend::update_notifier::AsyncUpdateNotifier,
+        std::sync::Arc<ClipboardWorkerLifetime>,
+    ),
+    String,
+> {
+    let display = display.map(str::to_string);
+    let (shutdown, shutdown_rx) = std::sync::mpsc::channel();
+    let (done_tx, done) = std::sync::mpsc::channel();
+    let worker_wake = crate::backend::update_notifier::AsyncUpdateNotifier::new()
+        .map_err(|error| format!("create clipboard worker wake fd: {error}"))?;
+    let thread_wake = worker_wake.clone();
+    let (ready_tx, ready) = std::sync::mpsc::channel();
+    let join = std::thread::Builder::new()
+        .name("jwm-clipboard".to_string())
+        .spawn(move || {
+            match Watcher::new(display.as_deref(), profile) {
+                Ok(mut watcher) => {
+                    let _ = ready_tx.send(Ok(()));
+                    watcher.run(&sink, &source, &notifier, &thread_wake, &shutdown_rx);
+                }
+                Err(error) => {
+                    let _ = ready_tx.send(Err(error));
+                }
+            }
+            thread_wake.mark_unhealthy();
+            let _ = done_tx.send(());
+        })
+        .map_err(|error| format!("spawn clipboard thread: {error}"))?;
+
+    ready
+        .recv()
+        .map_err(|_| "clipboard thread died during startup".to_string())??;
+    let worker = std::sync::Arc::new(ClipboardWorkerLifetime {
+        shutdown,
+        wake: worker_wake.clone(),
+        done: std::sync::Mutex::new(done),
+        join: std::sync::Mutex::new(Some(join)),
+    });
+    Ok((worker_wake, worker))
+}
+
+#[cfg(feature = "backend-x11rb")]
 impl Clipboard {
     /// Start watching CLIPBOARD on a dedicated connection and thread.
-    ///
-    /// `display` selects the X server, so the remote helper can watch the
-    /// display it is actually sharing or presenting rather than whatever
-    /// `$DISPLAY` happens to say.
     pub(crate) fn start(display: Option<&str>) -> Result<Self, String> {
-        let display = display.map(str::to_string);
         let (captured_tx, captured) = std::sync::mpsc::channel();
         let (serve, serve_rx) = std::sync::mpsc::channel();
-        let (shutdown, shutdown_rx) = std::sync::mpsc::channel();
-        let (done_tx, done) = std::sync::mpsc::channel();
-        let worker_wake = crate::backend::update_notifier::AsyncUpdateNotifier::new()
-            .map_err(|error| format!("create clipboard worker wake fd: {error}"))?;
-        let thread_wake = worker_wake.clone();
         let notifier = std::sync::Arc::new(std::sync::Mutex::new(None));
-        let worker_notifier = std::sync::Arc::clone(&notifier);
-        // Build the watcher on the thread that will own it: RustConnection is
-        // not Sync, and nothing outside the thread may touch it.
-        let (ready_tx, ready) = std::sync::mpsc::channel();
-        let join = std::thread::Builder::new()
-            .name("jwm-clipboard".to_string())
-            .spawn(move || {
-                match Watcher::new(display.as_deref()) {
-                    Ok(mut watcher) => {
-                        let _ = ready_tx.send(Ok(()));
-                        watcher.run(
-                            &captured_tx,
-                            &serve_rx,
-                            &worker_notifier,
-                            &thread_wake,
-                            &shutdown_rx,
-                        );
-                    }
-                    Err(error) => {
-                        let _ = ready_tx.send(Err(error));
-                    }
-                }
-                thread_wake.mark_unhealthy();
-                let _ = done_tx.send(());
-            })
-            .map_err(|error| format!("spawn clipboard thread: {error}"))?;
-
-        ready
-            .recv()
-            .map_err(|_| "clipboard thread died during startup".to_string())??;
-        let worker = std::sync::Arc::new(ClipboardWorkerLifetime {
-            shutdown,
-            wake: worker_wake.clone(),
-            done: std::sync::Mutex::new(done),
-            join: std::sync::Mutex::new(Some(join)),
-        });
+        let (worker_wake, worker) = spawn_watcher(
+            display,
+            CaptureProfile::HISTORY,
+            CaptureSink::History(captured_tx),
+            ServeSource::History(serve_rx),
+            std::sync::Arc::clone(&notifier),
+        )?;
         Ok(Self {
             captured,
             serve,
             worker_wake,
-            #[cfg(feature = "backend-x11rb")]
             notifier,
             worker,
         })
     }
 
     /// Payloads copied since the last call, oldest first.
-    #[cfg(feature = "backend-x11rb")]
     pub(crate) fn drain_captured(&self) -> Vec<CapturedClipboard> {
         self.captured.try_iter().collect()
     }
 
     /// Offer `text` to other applications.
-    #[cfg(feature = "backend-x11rb")]
     pub(crate) fn offer_with_receipt(
         &self,
         offer: crate::backend::clipboard_offer::CapturedClipboard,
@@ -339,7 +573,6 @@ impl Clipboard {
         }
         Some(receipt)
     }
-    #[cfg(feature = "backend-x11rb")]
     pub(crate) fn set_text(&self, text: &str) -> bool {
         if text.len() > crate::backend::clipboard_offer::MAX_TEXT_BYTES {
             return false;
@@ -356,7 +589,6 @@ impl Clipboard {
     }
 
     /// Route an encoded PNG to this backend's native selection owner.
-    #[cfg(feature = "backend-x11rb")]
     pub(crate) fn image_sender(&self) -> ClipboardImageSender {
         let _keep_worker_alive = &self.worker;
         ClipboardImageSender::new_with_wake(self.serve.clone(), self.worker_wake.clone())
@@ -366,7 +598,6 @@ impl Clipboard {
     /// its aggregate readiness fd. The watcher connection starts earlier than
     /// JWM, so attaching itself emits one conservative wake to cover a capture
     /// that may already be queued.
-    #[cfg(feature = "backend-x11rb")]
     pub(crate) fn set_update_notifier(
         &self,
         notifier: Option<crate::backend::update_notifier::AsyncUpdateNotifier>,
@@ -383,128 +614,109 @@ impl Clipboard {
             notifier.notify();
         }
     }
+}
 
-    /// Split into halves that can live on different threads.
-    ///
-    /// The remote helper watches captures on one thread and serves incoming
-    /// text from another, and neither may block the other.
-    #[cfg(feature = "remote-x11")]
-    pub(crate) fn split(self) -> (ClipboardCaptures, ClipboardSetter) {
-        let Clipboard {
-            captured,
-            serve,
-            worker_wake,
-            worker,
-            ..
-        } = self;
-        (
-            ClipboardCaptures {
+/// What the remote helper's watcher captures.
+#[cfg(feature = "remote-x11")]
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct RemoteClipboardOptions {
+    /// Share a file manager's copy as files rather than as its path text.
+    pub(crate) files: bool,
+    /// Encoded-byte ceiling for a shared image.
+    pub(crate) image_bytes: usize,
+    /// Share what is already on the clipboard when the session starts.
+    pub(crate) capture_existing: bool,
+}
+
+/// The remote helper's watcher, split into a capture half and a serve half
+/// that live on different threads.
+#[cfg(feature = "remote-x11")]
+pub(crate) struct RemoteClipboard;
+
+#[cfg(feature = "remote-x11")]
+impl RemoteClipboard {
+    /// `display` selects the X server, so the helper watches the display it
+    /// is actually sharing or presenting rather than whatever `$DISPLAY` says.
+    pub(crate) fn start(
+        display: Option<&str>,
+        options: RemoteClipboardOptions,
+    ) -> Result<(RemoteCaptures, RemoteSetter), String> {
+        let (captured_tx, captured) = std::sync::mpsc::channel();
+        let (serve, serve_rx) = std::sync::mpsc::channel();
+        let (wake, worker) = spawn_watcher(
+            display,
+            CaptureProfile {
+                files: options.files,
+                image_bytes: options.image_bytes,
+                capture_existing: options.capture_existing,
+            },
+            CaptureSink::Remote(captured_tx),
+            ServeSource::Remote(serve_rx),
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
+        )?;
+        Ok((
+            RemoteCaptures {
                 captured,
                 worker: std::sync::Arc::clone(&worker),
             },
-            ClipboardSetter {
+            RemoteSetter {
                 serve,
-                wake: worker_wake,
+                wake,
                 worker,
             },
-        )
+        ))
     }
 }
 
-/// Receiving half: text copied on this display.
-///
-/// Remote clipboard sharing stays text-only (`docs/clipboard.md`); PNG
-/// captures are drained and discarded here so they never leave the session.
+/// Receiving half: copies made on this display.
 #[cfg(feature = "remote-x11")]
-pub(crate) struct ClipboardCaptures {
-    captured: std::sync::mpsc::Receiver<CapturedClipboard>,
+pub(crate) struct RemoteCaptures {
+    captured: std::sync::mpsc::Receiver<CopiedClipboard>,
     worker: std::sync::Arc<ClipboardWorkerLifetime>,
 }
 
 #[cfg(feature = "remote-x11")]
-impl ClipboardCaptures {
-    /// Block for the next captured text, giving up after `timeout`.
+impl RemoteCaptures {
+    /// Block for the next copy, giving up after `timeout`.
     ///
-    /// Returning on a timeout rather than parking forever lets the caller
-    /// notice session shutdown without a second wake channel. PNG captures
-    /// are skipped so a local image copy cannot stall text forwarding.
-    /// `Ok(None)` is a live timeout or a nonblocking fairness yield;
-    /// `Err` means the worker permanently closed its channel after all queued
-    /// captures were drained.
+    /// `Ok(None)` is a live timeout; `Err` means the watcher stopped for good
+    /// after every queued copy was taken.
     pub(crate) fn recv_timeout(
         &self,
         timeout: std::time::Duration,
-    ) -> Result<Option<String>, std::sync::mpsc::RecvError> {
+    ) -> Result<Option<CopiedClipboard>, std::sync::mpsc::RecvError> {
         let _keep_worker_alive = &self.worker;
-        recv_captured_text(&self.captured, timeout)
-    }
-}
-
-/// Maximum captures inspected by one nonblocking remote-viewer poll.
-/// Blocking callers already have the absolute deadline below.
-#[cfg(feature = "remote-x11")]
-const MAX_NONBLOCKING_CAPTURE_ITEMS: usize = 32;
-
-/// Empty/budget-limited is a live yield; a drained closed channel cannot recover.
-#[cfg(feature = "remote-x11")]
-fn recv_captured_text(
-    captured: &std::sync::mpsc::Receiver<CapturedClipboard>,
-    timeout: std::time::Duration,
-) -> Result<Option<String>, std::sync::mpsc::RecvError> {
-    let deadline = std::time::Instant::now() + timeout;
-    let mut inspected = 0;
-    loop {
-        if timeout.is_zero() && inspected >= MAX_NONBLOCKING_CAPTURE_ITEMS {
-            return Ok(None);
-        }
-        let remaining = if timeout.is_zero() {
-            std::time::Duration::ZERO
-        } else {
-            deadline.saturating_duration_since(std::time::Instant::now())
-        };
-        if !timeout.is_zero() && remaining.is_zero() {
-            return Ok(None);
-        }
-        match captured.recv_timeout(remaining) {
-            Ok(CapturedClipboard::Text(text)) => return Ok(Some(text)),
-            Ok(CapturedClipboard::Png(_)) => {
-                // Only the nonblocking path needs a count limit. The host's
-                // blocking path rechecks its absolute deadline on every item.
-                if timeout.is_zero() {
-                    inspected += 1;
-                }
-            }
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => return Ok(None),
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                return Err(std::sync::mpsc::RecvError);
-            }
+        match self.captured.recv_timeout(timeout) {
+            Ok(copied) => Ok(Some(copied)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Ok(None),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(std::sync::mpsc::RecvError),
         }
     }
 }
 
-/// Sending half: text to offer to other applications on this display.
+/// Sending half: what to offer to other applications on this display.
 #[cfg(feature = "remote-x11")]
 #[derive(Clone)]
-pub(crate) struct ClipboardSetter {
-    serve: std::sync::mpsc::Sender<ClipboardOffer>,
+pub(crate) struct RemoteSetter {
+    serve: std::sync::mpsc::Sender<RemoteServe>,
     wake: crate::backend::update_notifier::AsyncUpdateNotifier,
     worker: std::sync::Arc<ClipboardWorkerLifetime>,
 }
 
 #[cfg(feature = "remote-x11")]
-impl ClipboardSetter {
-    pub(crate) fn set_text(&self, text: &str) -> bool {
-        if text.len() > crate::backend::clipboard_offer::MAX_TEXT_BYTES {
+impl RemoteSetter {
+    /// `false` when the watcher has stopped.
+    pub(crate) fn send(&self, request: RemoteServe) -> bool {
+        if let RemoteServe::Text(text) = &request
+            && text.len() > crate::backend::clipboard_offer::MAX_TEXT_BYTES
+        {
             return false;
         }
         let _keep_worker_alive = &self.worker;
         if !self.wake.is_healthy() {
             return false;
         }
-        self.serve
-            .send(ClipboardOffer::Text(text.to_string()))
-            .is_ok()
-            && self.wake.notify()
+        self.serve.send(request).is_ok() && self.wake.notify()
     }
 }
 
@@ -519,7 +731,7 @@ fn intern(conn: &RustConnection, name: &str) -> Result<Atom, String> {
 impl Watcher {
     /// Open a private connection, create the owner window, and start
     /// watching CLIPBOARD.
-    fn new(display: Option<&str>) -> Result<Self, String> {
+    fn new(display: Option<&str>, profile: CaptureProfile) -> Result<Self, String> {
         let (conn, screen_num) = xbar_core::x11_connection::connect(display)
             .map_err(|error| format!("clipboard connect: {error}"))?;
         let root = conn
@@ -546,6 +758,13 @@ impl Watcher {
             image_png: intern(&conn, "image/png")?,
             image_jpeg: intern(&conn, "image/jpeg")?,
             image_bmp: intern(&conn, "image/bmp")?,
+            #[cfg(feature = "remote-x11")]
+            gnome_copied_files: intern(
+                &conn,
+                crate::backend::clipboard_offer::GNOME_COPIED_FILES_MIME,
+            )?,
+            #[cfg(feature = "remote-x11")]
+            uri_list: intern(&conn, crate::backend::clipboard_offer::URI_LIST_MIME)?,
             incr: intern(&conn, "INCR")?,
             transfer: intern(&conn, "JWM_CLIPBOARD")?,
         };
@@ -598,8 +817,11 @@ impl Watcher {
             conn,
             window,
             atoms,
+            profile,
             offered: None,
             pending_offer: None,
+            #[cfg(feature = "remote-x11")]
+            deferred: Vec::new(),
             pending_probe_events: 0,
             ownership_time: None,
             property_payload_bytes,
@@ -614,7 +836,7 @@ impl Watcher {
             .and_then(|cookie| cookie.reply().ok())
             .map(|reply| reply.owner)
             .unwrap_or(x11rb::NONE);
-        if existing_owner != x11rb::NONE {
+        if profile.capture_existing && existing_owner != x11rb::NONE {
             watcher.begin_capture(existing_owner, x11rb::CURRENT_TIME);
         }
         Ok(watcher)
@@ -624,8 +846,8 @@ impl Watcher {
     /// one blocking poll, so an idle session performs no timer wakeups.
     fn run(
         &mut self,
-        captured: &std::sync::mpsc::Sender<CapturedClipboard>,
-        serve: &std::sync::mpsc::Receiver<ClipboardOffer>,
+        captured: &CaptureSink,
+        serve: &ServeSource,
         notifier: &std::sync::Mutex<Option<crate::backend::update_notifier::AsyncUpdateNotifier>>,
         wake: &crate::backend::update_notifier::AsyncUpdateNotifier,
         shutdown: &std::sync::mpsc::Receiver<()>,
@@ -640,21 +862,7 @@ impl Watcher {
             );
 
             if serve_connected {
-                match serve.try_recv() {
-                    Ok(mut offer) => {
-                        // Only the newest clipboard value can be current. Drop
-                        // superseded queued PNG allocations before taking X11
-                        // ownership instead of replaying every intermediate copy.
-                        while let Ok(newer) = serve.try_recv() {
-                            offer = newer;
-                        }
-                        self.take_ownership(offer);
-                    }
-                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                        serve_connected = false;
-                    }
-                    Err(std::sync::mpsc::TryRecvError::Empty) => {}
-                }
+                serve_connected = self.take_queued_offers(serve);
             }
             if shutdown_requested {
                 self.handoff_to_clipboard_manager(wake);
@@ -662,6 +870,8 @@ impl Watcher {
             }
 
             self.expire_outgoing_incr();
+            #[cfg(feature = "remote-x11")]
+            self.expire_deferred();
 
             let mut handled_event = false;
             for _ in 0..256 {
@@ -690,6 +900,169 @@ impl Watcher {
                 return;
             }
         }
+    }
+
+    /// Apply offers queued since the last pass. `false` once the sender
+    /// side has gone away for good.
+    fn take_queued_offers(&mut self, serve: &ServeSource) -> bool {
+        match serve {
+            ServeSource::History(serve) => match serve.try_recv() {
+                Ok(mut offer) => {
+                    // Only the newest clipboard value can be current. Drop
+                    // superseded queued PNG allocations before taking X11
+                    // ownership instead of replaying every intermediate copy.
+                    while let Ok(newer) = serve.try_recv() {
+                        offer = newer;
+                    }
+                    let (offer, receipt) = offer.split_receipt();
+                    self.take_ownership(PendingOwnership {
+                        data: offer.into(),
+                        receipt,
+                    });
+                    true
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => false,
+                Err(std::sync::mpsc::TryRecvError::Empty) => true,
+            },
+            // Remote requests are applied in order: an announcement and the
+            // data that fulfils it must not be coalesced into one.
+            #[cfg(feature = "remote-x11")]
+            ServeSource::Remote(serve) => loop {
+                match serve.try_recv() {
+                    Ok(request) => self.apply_remote(request),
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => return false,
+                    Err(std::sync::mpsc::TryRecvError::Empty) => return true,
+                }
+            },
+        }
+    }
+
+    #[cfg(feature = "remote-x11")]
+    fn apply_remote(&mut self, request: RemoteServe) {
+        match request {
+            RemoteServe::Text(text) => self.take_ownership(PendingOwnership {
+                data: OfferedData::Text(text.into_bytes().into()),
+                receipt: None,
+            }),
+            RemoteServe::Announce { token, kind } => self.take_ownership(PendingOwnership {
+                data: OfferedData::Pending { token, kind },
+                receipt: None,
+            }),
+            RemoteServe::FulfilPng { token, png } => {
+                self.fulfil(token, OfferedData::Png(png.into()));
+            }
+            RemoteServe::FulfilFiles { token, paths } => {
+                self.fulfil(token, OfferedData::files(&paths));
+            }
+            RemoteServe::Abandon { token } => self.abandon(token),
+        }
+    }
+
+    /// Replace pending offer `token` with its data and answer the pastes
+    /// that were waiting for it. A token that is no longer current — the
+    /// user copied something else meanwhile — is ignored: the late data must
+    /// not take the clipboard back.
+    #[cfg(feature = "remote-x11")]
+    fn fulfil(&mut self, token: u64, data: OfferedData) {
+        if let Some(pending) = self.pending_offer.as_mut()
+            && pending.data.pending_token() == Some(token)
+        {
+            pending.data = data;
+            return;
+        }
+        if self.offered.as_ref().and_then(OfferedData::pending_token) != Some(token) {
+            return;
+        }
+        self.offered = Some(data);
+        self.answer_deferred(true);
+    }
+
+    #[cfg(feature = "remote-x11")]
+    fn abandon(&mut self, token: u64) {
+        if let Some(pending) = self.pending_offer.as_ref()
+            && pending.data.pending_token() == Some(token)
+        {
+            self.pending_offer = None;
+            return;
+        }
+        if self.offered.as_ref().and_then(OfferedData::pending_token) != Some(token) {
+            return;
+        }
+        self.answer_deferred(false);
+        // Nothing will ever be served; give CLIPBOARD up rather than keep
+        // advertising targets that can only be refused.
+        if let Some(time) = self.ownership_time {
+            let _ = self
+                .conn
+                .set_selection_owner(x11rb::NONE, self.atoms.clipboard, time);
+            let _ = self.conn.flush();
+        }
+        self.offered = None;
+        self.ownership_time = None;
+    }
+
+    /// Serve (or refuse) every parked paste.
+    #[cfg(feature = "remote-x11")]
+    fn answer_deferred(&mut self, serve: bool) {
+        for request in std::mem::take(&mut self.deferred) {
+            let served =
+                serve && self.serve_target(request.requestor, request.property, request.target);
+            self.notify_requestor(
+                request.time,
+                request.requestor,
+                request.selection,
+                request.target,
+                served.then_some(request.property),
+            );
+        }
+        let _ = self.conn.flush();
+    }
+
+    #[cfg(feature = "remote-x11")]
+    fn expire_deferred(&mut self) {
+        let now = std::time::Instant::now();
+        if self.deferred.iter().all(|request| request.deadline > now) {
+            return;
+        }
+        let (expired, waiting): (Vec<_>, Vec<_>) = std::mem::take(&mut self.deferred)
+            .into_iter()
+            .partition(|request| request.deadline <= now);
+        self.deferred = waiting;
+        if !expired.is_empty() {
+            log::debug!("clipboard: refusing a paste whose data did not arrive in time");
+        }
+        for request in expired {
+            self.notify_requestor(
+                request.time,
+                request.requestor,
+                request.selection,
+                request.target,
+                None,
+            );
+        }
+        let _ = self.conn.flush();
+    }
+
+    fn notify_requestor(
+        &self,
+        time: u32,
+        requestor: Window,
+        selection: Atom,
+        target: Atom,
+        property: Option<Atom>,
+    ) {
+        let notify = SelectionNotifyEvent {
+            response_type: x11rb::protocol::xproto::SELECTION_NOTIFY_EVENT,
+            sequence: 0,
+            time,
+            requestor,
+            selection,
+            target,
+            property: property.unwrap_or(x11rb::NONE),
+        };
+        let _ = self
+            .conn
+            .send_event(false, requestor, EventMask::NO_EVENT, notify);
     }
 
     fn wait_for_work(
@@ -745,13 +1118,29 @@ impl Watcher {
                 .saturating_sub(now.saturating_duration_since(transfer.last_activity))
         });
         let incoming = self.capture.as_ref().map(|capture| {
-            INCOMING_CONVERSION_TIMEOUT
-                .saturating_sub(now.saturating_duration_since(capture.last_activity))
+            let timeout = INCOMING_CONVERSION_TIMEOUT
+                .saturating_sub(now.saturating_duration_since(capture.last_activity));
+            if Self::awaits_retry(capture) {
+                timeout.min(
+                    UNANSWERED_CONVERSION_RETRY
+                        .saturating_sub(now.saturating_duration_since(capture.requested_at)),
+                )
+            } else {
+                timeout
+            }
         });
         let handoff = deadline.map(|deadline| deadline.saturating_duration_since(now));
+        #[cfg(feature = "remote-x11")]
+        let deferred = self
+            .deferred
+            .iter()
+            .map(|request| request.deadline.saturating_duration_since(now));
+        #[cfg(not(feature = "remote-x11"))]
+        let deferred = std::iter::empty();
         outgoing
             .chain(incoming)
             .chain(handoff)
+            .chain(deferred)
             .min()
             .map_or(-1, |remaining| {
                 if remaining.is_zero() {
@@ -848,6 +1237,11 @@ impl Watcher {
         let Some(offered) = self.offered.as_ref() else {
             return;
         };
+        // Data still in flight cannot be handed to a manager to keep.
+        #[cfg(feature = "remote-x11")]
+        if offered.pending_token().is_some() {
+            return;
+        }
         if !self.is_current_owner(self.window) {
             return;
         }
@@ -946,7 +1340,7 @@ impl Watcher {
     }
 
     /// Route one X event. Returns a captured payload when a conversion completed.
-    fn handle(&mut self, event: &x11rb::protocol::Event) -> Option<CapturedClipboard> {
+    fn handle(&mut self, event: &x11rb::protocol::Event) -> Option<CopiedClipboard> {
         use x11rb::protocol::Event;
         match event {
             Event::XfixesSelectionNotify(e) => {
@@ -967,6 +1361,8 @@ impl Watcher {
                     && self.pending_offer.is_none()
                     && !self.is_current_owner(self.window)
                 {
+                    #[cfg(feature = "remote-x11")]
+                    self.answer_deferred(false);
                     self.offered = None;
                     self.pending_offer = None;
                     self.pending_probe_events = 0;
@@ -1012,6 +1408,8 @@ impl Watcher {
         if owner == x11rb::NONE {
             self.cancel_capture();
             if !self.is_current_owner(self.window) {
+                #[cfg(feature = "remote-x11")]
+                self.answer_deferred(false);
                 self.offered = None;
                 self.pending_offer = None;
                 self.pending_probe_events = 0;
@@ -1024,6 +1422,8 @@ impl Watcher {
         if self.is_current_owner(self.window) {
             return;
         }
+        #[cfg(feature = "remote-x11")]
+        self.answer_deferred(false);
         self.offered = None;
         self.pending_offer = None;
         self.pending_probe_events = 0;
@@ -1076,8 +1476,11 @@ impl Watcher {
             request_time,
             conversion: Conversion::TargetList,
             target: self.atoms.targets,
+            fallbacks: Vec::new(),
             incoming_incr: None,
             last_activity: std::time::Instant::now(),
+            requested_at: std::time::Instant::now(),
+            attempts: 1,
         });
         if self
             .conn
@@ -1106,7 +1509,7 @@ impl Watcher {
 
     /// A conversion finished. Returns the copied payload once it has been asked
     /// for and delivered.
-    fn on_selection_notify(&mut self, event: &SelectionNotifyEvent) -> Option<CapturedClipboard> {
+    fn on_selection_notify(&mut self, event: &SelectionNotifyEvent) -> Option<CopiedClipboard> {
         let Some(capture) = self.capture.as_ref() else {
             return None;
         };
@@ -1117,6 +1520,12 @@ impl Watcher {
             return None;
         }
         if event.property == x11rb::NONE {
+            // An owner may advertise a file list it then refuses to convert;
+            // its text form can still be shared.
+            #[cfg(feature = "remote-x11")]
+            if capture.conversion == Conversion::Files {
+                return self.try_next_candidate();
+            }
             self.cancel_capture();
             return None;
         }
@@ -1129,11 +1538,7 @@ impl Watcher {
         }
 
         let conversion = capture.conversion;
-        let cap = match conversion {
-            Conversion::TargetList => MAX_TARGET_LIST_BYTES,
-            Conversion::Text => crate::backend::clipboard_offer::MAX_TEXT_BYTES,
-            Conversion::Png => MAX_IMAGE_HISTORY_BYTES,
-        };
+        let cap = self.conversion_cap(conversion);
         let reply = self
             .conn
             .get_property(
@@ -1150,7 +1555,12 @@ impl Watcher {
 
         if reply.type_ == self.atoms.incr {
             let announced = reply.value32().and_then(|mut values| values.next());
-            let valid_announcement = reply.format == 32 && reply.value_len == 1;
+            // ICCCM asks for one 32-bit lower bound, but xclip 0.13 — what
+            // `maim | xclip` and most screenshot scripts use — announces
+            // none, which dropped every image it served over ~1 MiB. The
+            // bound is advisory either way: the cap is enforced chunk by
+            // chunk below.
+            let valid_announcement = reply.format == 32 && reply.value_len <= 1;
             if let Some(capture) = self.capture.as_mut() {
                 capture.incoming_incr = Some(IncomingIncr {
                     bytes: Vec::with_capacity(
@@ -1195,7 +1605,7 @@ impl Watcher {
                 self.cancel_capture();
                 String::from_utf8(reply.value)
                     .ok()
-                    .map(CapturedClipboard::Text)
+                    .map(CopiedClipboard::Text)
             }
             Conversion::Png => {
                 if reply.type_ != event.target || reply.format != 8 {
@@ -1204,10 +1614,66 @@ impl Watcher {
                 }
                 let mime = self.image_mime_for_atom(event.target);
                 self.cancel_capture();
-                crate::backend::clipboard_offer::image_offer_to_history_png(&reply.value, mime)
-                    .map(CapturedClipboard::Png)
+                crate::backend::clipboard_offer::image_offer_to_png_within(
+                    &reply.value,
+                    mime,
+                    self.profile.image_bytes,
+                )
+                .map(CopiedClipboard::Png)
+            }
+            #[cfg(feature = "remote-x11")]
+            Conversion::Files => {
+                if reply.type_ != event.target || reply.format != 8 {
+                    return self.try_next_candidate();
+                }
+                self.files_or_next_candidate(event.target, &reply.value)
             }
         }
+    }
+
+    fn conversion_cap(&self, conversion: Conversion) -> usize {
+        match conversion {
+            Conversion::TargetList => MAX_TARGET_LIST_BYTES,
+            Conversion::Text => crate::backend::clipboard_offer::MAX_TEXT_BYTES,
+            Conversion::Png => self.profile.image_bytes,
+            #[cfg(feature = "remote-x11")]
+            Conversion::Files => crate::backend::clipboard_offer::MAX_TEXT_BYTES,
+        }
+    }
+
+    /// A delivered file list, or — when it names no local files — the next
+    /// advertised form of the same copy.
+    #[cfg(feature = "remote-x11")]
+    fn files_or_next_candidate(&mut self, target: Atom, bytes: &[u8]) -> Option<CopiedClipboard> {
+        let mime = if target == self.atoms.gnome_copied_files {
+            crate::backend::clipboard_offer::GNOME_COPIED_FILES_MIME
+        } else {
+            crate::backend::clipboard_offer::URI_LIST_MIME
+        };
+        match crate::backend::clipboard_offer::parse_file_list(mime, bytes) {
+            Some(paths) => {
+                self.cancel_capture();
+                Some(CopiedClipboard::Files(paths))
+            }
+            None => self.try_next_candidate(),
+        }
+    }
+
+    /// Ask the owner for its next advertised form, or give up on this copy.
+    #[cfg(feature = "remote-x11")]
+    fn try_next_candidate(&mut self) -> Option<CopiedClipboard> {
+        let next = self.capture.as_mut().and_then(|capture| {
+            if capture.fallbacks.is_empty() {
+                None
+            } else {
+                Some(capture.fallbacks.remove(0))
+            }
+        });
+        match next {
+            Some(candidate) => self.request_candidate(candidate),
+            None => self.cancel_capture(),
+        }
+        None
     }
 
     /// Decide from the target list whether to ask for the payload at all.
@@ -1254,8 +1720,31 @@ impl Watcher {
             self.cancel_capture();
             return;
         }
-        // Ask for the richest text form the owner actually advertises; else PNG.
-        let (conversion, target) = if let Some(target) = [
+        let mut candidates = self.capture_candidates(&targets).into_iter();
+        let Some(first) = candidates.next() else {
+            self.cancel_capture();
+            return;
+        };
+        if let Some(capture) = self.capture.as_mut() {
+            capture.fallbacks = candidates.collect();
+        }
+        self.request_candidate(first);
+    }
+
+    /// Forms worth asking for, best first.
+    ///
+    /// Text wins over images, matching the history. With the remote file
+    /// profile a file manager's list wins over both, since its text form is
+    /// only the paths; a list that names no local file falls through.
+    fn capture_candidates(&self, targets: &[Atom]) -> Vec<(Conversion, Atom)> {
+        let mut wanted = Vec::with_capacity(8);
+        #[cfg(feature = "remote-x11")]
+        if self.profile.files {
+            wanted.push((Conversion::Files, self.atoms.gnome_copied_files));
+            wanted.push((Conversion::Files, self.atoms.uri_list));
+        }
+        // Only the richest advertised text form is asked for, and one image.
+        if let Some(text) = [
             self.atoms.text_plain_utf8,
             self.atoms.utf8_string,
             self.atoms.text_plain,
@@ -1263,18 +1752,31 @@ impl Watcher {
         .into_iter()
         .find(|wanted| targets.contains(wanted))
         {
-            (Conversion::Text, target)
-        } else if targets.contains(&self.atoms.image_png) {
-            (Conversion::Png, self.atoms.image_png)
-        } else if targets.contains(&self.atoms.image_jpeg) {
-            (Conversion::Png, self.atoms.image_jpeg)
-        } else if targets.contains(&self.atoms.image_bmp) {
-            (Conversion::Png, self.atoms.image_bmp)
-        } else {
-            self.cancel_capture();
-            return;
-        };
+            wanted.push((Conversion::Text, text));
+        }
+        if let Some(image) = [
+            self.atoms.image_png,
+            self.atoms.image_jpeg,
+            self.atoms.image_bmp,
+        ]
+        .into_iter()
+        .find(|wanted| targets.contains(wanted))
+        {
+            wanted.push((Conversion::Png, image));
+        }
+        wanted.retain(|(_, target)| targets.contains(target));
+        // Text first, then an image: once text exists the image is never
+        // reached, exactly as before. Files are only ever ahead of both.
+        let first_text = wanted
+            .iter()
+            .position(|(conversion, _)| *conversion == Conversion::Text);
+        if let Some(index) = first_text {
+            wanted.truncate(index + 1);
+        }
+        wanted
+    }
 
+    fn request_candidate(&mut self, (conversion, target): (Conversion, Atom)) {
         let Some(capture) = self.capture.as_ref() else {
             return;
         };
@@ -1290,6 +1792,8 @@ impl Watcher {
             capture.target = target;
             capture.incoming_incr = None;
             capture.last_activity = std::time::Instant::now();
+            capture.requested_at = capture.last_activity;
+            capture.attempts = 1;
         }
 
         let request = self
@@ -1311,8 +1815,12 @@ impl Watcher {
     }
 
     /// Offer one payload to other applications by taking CLIPBOARD ownership.
-    fn take_ownership(&mut self, offer: ClipboardOffer) {
+    fn take_ownership(&mut self, offer: PendingOwnership) {
         self.cancel_capture();
+        // Pastes parked behind a previous pending offer asked for data that
+        // will now never be served.
+        #[cfg(feature = "remote-x11")]
+        self.answer_deferred(false);
         self.offered = None;
         self.ownership_time = None;
         self.pending_offer = Some(offer);
@@ -1346,11 +1854,14 @@ impl Watcher {
     }
 
     fn acquire_pending_ownership(&mut self, timestamp: u32) -> bool {
-        let Some(offer) = self.pending_offer.take() else {
+        let Some(PendingOwnership {
+            data: offer,
+            receipt,
+        }) = self.pending_offer.take()
+        else {
             return self.offered.is_some() && self.is_current_owner(self.window);
         };
-        let (offer, receipt) = offer.split_receipt();
-        self.offered = Some(offer.into());
+        self.offered = Some(offer);
         let set = self
             .conn
             .set_selection_owner(self.window, self.atoms.clipboard, timestamp)
@@ -1389,6 +1900,26 @@ impl Watcher {
                 .is_none_or(|capture| event.requestor != capture.window)
             && self.offered.is_some()
             && x11_selection_time_is_valid(event.time, self.ownership_time);
+        // Data still arriving from the other machine: park the paste and
+        // answer it when the data lands (or refuse it at the deadline).
+        #[cfg(feature = "remote-x11")]
+        if request_valid
+            && self
+                .offered
+                .as_ref()
+                .is_some_and(|offered| offered.defers(&self.atoms, event.target))
+            && self.deferred.len() < MAX_DEFERRED_REQUESTS
+        {
+            self.deferred.push(DeferredRequest {
+                requestor: event.requestor,
+                selection: event.selection,
+                target: event.target,
+                property,
+                time: event.time,
+                deadline: std::time::Instant::now() + DEFERRED_REQUEST_TIMEOUT,
+            });
+            return;
+        }
         let served = if !request_valid {
             false
         } else if event.target == self.atoms.multiple {
@@ -1397,18 +1928,13 @@ impl Watcher {
             self.serve_target(event.requestor, property, event.target)
         };
 
-        let notify = SelectionNotifyEvent {
-            response_type: x11rb::protocol::xproto::SELECTION_NOTIFY_EVENT,
-            sequence: 0,
-            time: event.time,
-            requestor: event.requestor,
-            selection: event.selection,
-            target: event.target,
-            property: if served { property } else { x11rb::NONE },
-        };
-        let _ = self
-            .conn
-            .send_event(false, event.requestor, EventMask::NO_EVENT, notify);
+        self.notify_requestor(
+            event.time,
+            event.requestor,
+            event.selection,
+            event.target,
+            served.then_some(property),
+        );
         let _ = self.conn.flush();
     }
 
@@ -1611,7 +2137,7 @@ impl Watcher {
     /// The requestor deletes the property once for every chunk it is ready to
     /// consume. After the last data chunk, one more delete is answered with a
     /// zero-length property, which terminates the transfer.
-    fn on_property_notify(&mut self, event: &PropertyNotifyEvent) -> Option<CapturedClipboard> {
+    fn on_property_notify(&mut self, event: &PropertyNotifyEvent) -> Option<CopiedClipboard> {
         if event.state == Property::NEW_VALUE
             && event.window == self.window
             && event.atom == self.atoms.timestamp_probe
@@ -1666,7 +2192,7 @@ impl Watcher {
         &mut self,
         window: Window,
         property: Atom,
-    ) -> Option<CapturedClipboard> {
+    ) -> Option<CopiedClipboard> {
         let Some(capture) = self.capture.as_ref() else {
             return None;
         };
@@ -1692,7 +2218,7 @@ impl Watcher {
             .ok()?;
         let expected_format = match conversion {
             Conversion::TargetList => 32,
-            Conversion::Text | Conversion::Png => 8,
+            _ => 8,
         };
         let valid_type = peek.type_ == target && peek.format == expected_format;
 
@@ -1744,11 +2270,7 @@ impl Watcher {
             .ok()?
             .reply()
             .ok()?;
-        let cap = match conversion {
-            Conversion::TargetList => MAX_TARGET_LIST_BYTES,
-            Conversion::Text => crate::backend::clipboard_offer::MAX_TEXT_BYTES,
-            Conversion::Png => MAX_IMAGE_HISTORY_BYTES,
-        };
+        let cap = self.conversion_cap(conversion);
         if let Some(capture) = self.capture.as_mut() {
             if let Some(incoming) = capture.incoming_incr.as_mut() {
                 if reply.type_ != target
@@ -1769,7 +2291,7 @@ impl Watcher {
         &mut self,
         conversion: Conversion,
         bytes: Vec<u8>,
-    ) -> Option<CapturedClipboard> {
+    ) -> Option<CopiedClipboard> {
         match conversion {
             Conversion::TargetList => {
                 let _ = bytes;
@@ -1778,7 +2300,7 @@ impl Watcher {
             }
             Conversion::Text => {
                 self.cancel_capture();
-                String::from_utf8(bytes).ok().map(CapturedClipboard::Text)
+                String::from_utf8(bytes).ok().map(CopiedClipboard::Text)
             }
             Conversion::Png => {
                 let mime = self
@@ -1787,8 +2309,17 @@ impl Watcher {
                     .map(|capture| self.image_mime_for_atom(capture.target))
                     .unwrap_or("image/png");
                 self.cancel_capture();
-                crate::backend::clipboard_offer::image_offer_to_history_png(&bytes, mime)
-                    .map(CapturedClipboard::Png)
+                crate::backend::clipboard_offer::image_offer_to_png_within(
+                    &bytes,
+                    mime,
+                    self.profile.image_bytes,
+                )
+                .map(CopiedClipboard::Png)
+            }
+            #[cfg(feature = "remote-x11")]
+            Conversion::Files => {
+                let target = self.capture.as_ref().map(|capture| capture.target)?;
+                self.files_or_next_candidate(target, &bytes)
             }
         }
     }
@@ -1819,11 +2350,57 @@ impl Watcher {
         for window in expired {
             self.stop_watching_requestor_if_idle(window);
         }
+        self.retry_unanswered_conversion(now);
         if self.capture.as_ref().is_some_and(|capture| {
             now.saturating_duration_since(capture.last_activity) >= INCOMING_CONVERSION_TIMEOUT
         }) {
             self.cancel_capture();
         }
+    }
+
+    /// A conversion nobody has answered yet that may be asked for again.
+    fn awaits_retry(capture: &CaptureRequest) -> bool {
+        capture.incoming_incr.is_none() && capture.attempts < MAX_CONVERSION_ATTEMPTS
+    }
+
+    fn retry_unanswered_conversion(&mut self, now: std::time::Instant) {
+        let Some(capture) = self.capture.as_mut() else {
+            return;
+        };
+        if !Self::awaits_retry(capture)
+            || now.saturating_duration_since(capture.requested_at) < UNANSWERED_CONVERSION_RETRY
+        {
+            return;
+        }
+        capture.attempts += 1;
+        capture.requested_at = now;
+        capture.last_activity = now;
+        let (owner, window, target, time) = (
+            capture.owner,
+            capture.window,
+            capture.target,
+            capture.request_time,
+        );
+        if !self.is_current_owner(owner) {
+            self.cancel_capture();
+            return;
+        }
+        log::debug!("clipboard: owner did not answer; asking again");
+        if self
+            .conn
+            .convert_selection(
+                window,
+                self.atoms.clipboard,
+                target,
+                self.atoms.transfer,
+                time,
+            )
+            .is_err()
+        {
+            self.cancel_capture();
+            return;
+        }
+        let _ = self.conn.flush();
     }
 
     fn stop_watching_requestor_if_idle(&self, requestor: Window) {
@@ -1843,13 +2420,13 @@ impl Watcher {
 }
 
 fn publish_capture(
-    captured: &std::sync::mpsc::Sender<CapturedClipboard>,
+    captured: &CaptureSink,
     notifier: &std::sync::Mutex<Option<crate::backend::update_notifier::AsyncUpdateNotifier>>,
-    payload: CapturedClipboard,
+    payload: CopiedClipboard,
 ) -> bool {
     // Channel publication happens first. Once the eventfd is readable the
     // handler must be able to drain this payload without another timer tick.
-    if captured.send(payload).is_err() {
+    if !captured.send(payload) {
         return false;
     }
     let notifier = notifier
@@ -1865,122 +2442,6 @@ fn publish_capture(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[cfg(feature = "remote-x11")]
-    #[test]
-    fn capture_receive_zero_timeout_yields_after_png_budget_without_losing_text() {
-        let (tx, rx) = std::sync::mpsc::channel();
-        for _ in 0..32 {
-            tx.send(CapturedClipboard::Png(vec![0])).unwrap();
-        }
-        tx.send(CapturedClipboard::Text("after images".into()))
-            .unwrap();
-        drop(tx);
-        assert_eq!(recv_captured_text(&rx, std::time::Duration::ZERO), Ok(None));
-        assert_eq!(
-            recv_captured_text(&rx, std::time::Duration::ZERO),
-            Ok(Some("after images".into()))
-        );
-        assert!(recv_captured_text(&rx, std::time::Duration::ZERO).is_err());
-    }
-
-    #[cfg(feature = "remote-x11")]
-    #[test]
-    fn capture_receive_png_budget_boundary_defers_but_preserves_close() {
-        for png_count in [32, 33, 64] {
-            let (tx, rx) = std::sync::mpsc::channel();
-            for _ in 0..png_count {
-                tx.send(CapturedClipboard::Png(vec![0])).unwrap();
-            }
-            drop(tx);
-            for _ in 0..png_count / 32 {
-                assert_eq!(recv_captured_text(&rx, std::time::Duration::ZERO), Ok(None));
-            }
-            assert!(recv_captured_text(&rx, std::time::Duration::ZERO).is_err());
-        }
-    }
-
-    #[cfg(feature = "remote-x11")]
-    #[test]
-    fn capture_receive_zero_timeout_png_budget_is_not_a_disconnect() {
-        let (tx, rx) = std::sync::mpsc::channel();
-        for _ in 0..64 {
-            tx.send(CapturedClipboard::Png(vec![0])).unwrap();
-        }
-        for _ in 0..2 {
-            assert_eq!(recv_captured_text(&rx, std::time::Duration::ZERO), Ok(None));
-        }
-        assert_eq!(recv_captured_text(&rx, std::time::Duration::ZERO), Ok(None));
-        tx.send(CapturedClipboard::Text("still live".into()))
-            .unwrap();
-        assert_eq!(
-            recv_captured_text(&rx, std::time::Duration::ZERO),
-            Ok(Some("still live".into()))
-        );
-    }
-
-    #[cfg(feature = "remote-x11")]
-    #[test]
-    fn capture_receive_nonzero_timeout_keeps_absolute_deadline_path() {
-        let (tx, rx) = std::sync::mpsc::channel();
-        for _ in 0..64 {
-            tx.send(CapturedClipboard::Png(vec![0])).unwrap();
-        }
-        tx.send(CapturedClipboard::Text("waiting caller".into()))
-            .unwrap();
-        drop(tx);
-        assert_eq!(
-            recv_captured_text(&rx, std::time::Duration::from_secs(60)),
-            Ok(Some("waiting caller".into()))
-        );
-        assert!(recv_captured_text(&rx, std::time::Duration::from_secs(60)).is_err());
-    }
-
-    #[cfg(feature = "remote-x11")]
-    #[test]
-    fn capture_receive_distinguishes_idle_from_closed_and_drains_text_first() {
-        let (tx, rx) = std::sync::mpsc::channel();
-        assert_eq!(recv_captured_text(&rx, std::time::Duration::ZERO), Ok(None));
-        tx.send(CapturedClipboard::Text("queued".into())).unwrap();
-        drop(tx);
-        assert_eq!(
-            recv_captured_text(&rx, std::time::Duration::ZERO),
-            Ok(Some("queued".into()))
-        );
-        assert!(recv_captured_text(&rx, std::time::Duration::ZERO).is_err());
-        assert!(recv_captured_text(&rx, std::time::Duration::from_secs(60)).is_err());
-    }
-
-    #[cfg(feature = "remote-x11")]
-    #[test]
-    fn capture_receive_skips_png_before_text_and_terminal_close() {
-        let (tx, rx) = std::sync::mpsc::channel();
-        tx.send(CapturedClipboard::Png(vec![1, 2])).unwrap();
-        tx.send(CapturedClipboard::Text("last text".into()))
-            .unwrap();
-        tx.send(CapturedClipboard::Png(vec![3])).unwrap();
-        drop(tx);
-        assert_eq!(
-            recv_captured_text(&rx, std::time::Duration::ZERO),
-            Ok(Some("last text".into()))
-        );
-        assert!(recv_captured_text(&rx, std::time::Duration::ZERO).is_err());
-    }
-
-    #[cfg(feature = "remote-x11")]
-    #[test]
-    fn capture_receive_live_timeout_does_not_poison_later_text() {
-        let (tx, rx) = std::sync::mpsc::channel();
-        assert_eq!(
-            recv_captured_text(&rx, std::time::Duration::from_millis(1)),
-            Ok(None)
-        );
-        tx.send(CapturedClipboard::Text("later".into())).unwrap();
-        assert_eq!(
-            recv_captured_text(&rx, std::time::Duration::from_millis(10)),
-            Ok(Some("later".into()))
-        );
-    }
 
     #[cfg(feature = "backend-x11rb")]
     fn wait_for_selection_owner(conn: &RustConnection, selection: Atom) {
@@ -2122,9 +2583,9 @@ mod tests {
         let (send, receive) = std::sync::mpsc::channel();
 
         assert!(publish_capture(
-            &send,
+            &CaptureSink::History(send),
             &slot,
-            CapturedClipboard::Text("ready".to_string())
+            CopiedClipboard::Text("ready".to_string())
         ));
         assert_eq!(notifier.drain().unwrap(), 1);
         assert_eq!(
@@ -2676,10 +3137,10 @@ mod tests {
     fn native_split_setter_keeps_serving_after_capture_half_drops() {
         let x11 = crate::backend::clipboard_offer::IsolatedXvfb::acquire();
         let display = x11.name();
-        let clipboard = Clipboard::start(Some(display)).unwrap();
-        let (captures, setter) = clipboard.split();
+        let (captures, setter) =
+            RemoteClipboard::start(Some(display), remote_test_options()).unwrap();
         drop(captures);
-        assert!(setter.set_text("setter survives"));
+        assert!(setter.send(RemoteServe::Text("setter survives".into())));
 
         let (conn, screen_num) = x11rb::connect(Some(display)).unwrap();
         let root = conn.setup().roots[screen_num].root;
@@ -2720,5 +3181,603 @@ mod tests {
             .unwrap();
         assert_eq!(reply.value, b"setter survives");
         drop(setter);
+    }
+
+    #[cfg(all(feature = "backend-x11rb", feature = "remote-x11"))]
+    fn remote_test_options() -> RemoteClipboardOptions {
+        RemoteClipboardOptions {
+            files: true,
+            image_bytes: 32 * 1024 * 1024,
+            capture_existing: false,
+        }
+    }
+
+    #[cfg(all(feature = "backend-x11rb", feature = "remote-x11"))]
+    fn input_only_window(conn: &RustConnection, root: Window) -> Window {
+        let window = conn.generate_id().unwrap();
+        conn.create_window(
+            0,
+            window,
+            root,
+            0,
+            0,
+            1,
+            1,
+            0,
+            WindowClass::INPUT_ONLY,
+            0,
+            &xproto::CreateWindowAux::new().event_mask(EventMask::PROPERTY_CHANGE),
+        )
+        .unwrap()
+        .check()
+        .unwrap();
+        window
+    }
+
+    /// Own CLIPBOARD and answer requests from `offers` until `done` holds.
+    #[cfg(all(feature = "backend-x11rb", feature = "remote-x11"))]
+    fn serve_fake_owner(
+        conn: &RustConnection,
+        owner: Window,
+        offers: &[(Atom, Vec<u8>)],
+        mut done: impl FnMut() -> bool,
+    ) {
+        let clipboard = intern(conn, "CLIPBOARD").unwrap();
+        let targets = intern(conn, "TARGETS").unwrap();
+        conn.set_selection_owner(owner, clipboard, x11rb::CURRENT_TIME)
+            .unwrap()
+            .check()
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !done() {
+            assert!(std::time::Instant::now() < deadline, "fake owner timed out");
+            let Some(event) = conn.poll_for_event().unwrap() else {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+                continue;
+            };
+            let x11rb::protocol::Event::SelectionRequest(event) = event else {
+                continue;
+            };
+            let property = if event.property == x11rb::NONE {
+                event.target
+            } else {
+                event.property
+            };
+            let served = if event.target == targets {
+                let mut list = vec![targets];
+                list.extend(offers.iter().map(|(atom, _)| *atom));
+                conn.change_property32(
+                    PropMode::REPLACE,
+                    event.requestor,
+                    property,
+                    AtomEnum::ATOM,
+                    &list,
+                )
+                .unwrap()
+                .check()
+                .is_ok()
+            } else if let Some((atom, bytes)) =
+                offers.iter().find(|(atom, _)| *atom == event.target)
+            {
+                conn.change_property8(PropMode::REPLACE, event.requestor, property, *atom, bytes)
+                    .unwrap()
+                    .check()
+                    .is_ok()
+            } else {
+                false
+            };
+            conn.send_event(
+                false,
+                event.requestor,
+                EventMask::NO_EVENT,
+                SelectionNotifyEvent {
+                    response_type: xproto::SELECTION_NOTIFY_EVENT,
+                    sequence: 0,
+                    time: event.time,
+                    requestor: event.requestor,
+                    selection: event.selection,
+                    target: event.target,
+                    property: if served { property } else { x11rb::NONE },
+                },
+            )
+            .unwrap();
+            conn.flush().unwrap();
+        }
+    }
+
+    /// The SelectionNotify for `target`, if one arrives within `wait`.
+    #[cfg(all(feature = "backend-x11rb", feature = "remote-x11"))]
+    fn selection_notify_within(
+        conn: &RustConnection,
+        requestor: Window,
+        target: Atom,
+        wait: std::time::Duration,
+    ) -> Option<SelectionNotifyEvent> {
+        let deadline = std::time::Instant::now() + wait;
+        while std::time::Instant::now() < deadline {
+            match conn.poll_for_event().unwrap() {
+                Some(x11rb::protocol::Event::SelectionNotify(event))
+                    if event.requestor == requestor && event.target == target =>
+                {
+                    return Some(event);
+                }
+                Some(_) => {}
+                None => std::thread::sleep(std::time::Duration::from_millis(1)),
+            }
+        }
+        None
+    }
+
+    #[cfg(all(feature = "backend-x11rb", feature = "remote-x11"))]
+    #[test]
+    fn remote_profile_shares_a_file_managers_copy_as_files_and_links_as_text() {
+        let x11 = crate::backend::clipboard_offer::IsolatedXvfb::acquire();
+        let display = x11.name();
+        let (captures, _setter) =
+            RemoteClipboard::start(Some(display), remote_test_options()).unwrap();
+        let (conn, screen_num) = x11rb::connect(Some(display)).unwrap();
+        let root = conn.setup().roots[screen_num].root;
+        let gnome = intern(&conn, "x-special/gnome-copied-files").unwrap();
+        let uri_list = intern(&conn, "text/uri-list").unwrap();
+        let utf8 = intern(&conn, "UTF8_STRING").unwrap();
+        let owner = input_only_window(&conn, root);
+
+        let receive = |captures: &RemoteCaptures| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                if let Some(copied) = captures
+                    .recv_timeout(std::time::Duration::from_millis(1))
+                    .unwrap()
+                {
+                    return Some(copied);
+                }
+                if std::time::Instant::now() >= deadline {
+                    return None;
+                }
+            }
+        };
+
+        // Nautilus: the file list wins over the path text it also offers.
+        let mut copied = None;
+        serve_fake_owner(
+            &conn,
+            owner,
+            &[
+                (
+                    gnome,
+                    b"copy\nfile:///tmp/My%20Report.pdf\nfile:///tmp/dir".to_vec(),
+                ),
+                (utf8, b"/tmp/My Report.pdf\n/tmp/dir".to_vec()),
+            ],
+            || {
+                copied = captures.recv_timeout(std::time::Duration::ZERO).unwrap();
+                copied.is_some()
+            },
+        );
+        assert_eq!(
+            copied,
+            Some(CopiedClipboard::Files(vec![
+                std::path::PathBuf::from("/tmp/My Report.pdf"),
+                std::path::PathBuf::from("/tmp/dir"),
+            ]))
+        );
+
+        // A browser's link list names no local file: its text is shared.
+        let mut copied = None;
+        serve_fake_owner(
+            &conn,
+            owner,
+            &[
+                (uri_list, b"https://example.com/page\r\n".to_vec()),
+                (utf8, b"https://example.com/page".to_vec()),
+            ],
+            || {
+                copied = captures.recv_timeout(std::time::Duration::ZERO).unwrap();
+                copied.is_some()
+            },
+        );
+        assert_eq!(
+            copied,
+            Some(CopiedClipboard::Text("https://example.com/page".into()))
+        );
+        assert_eq!(receive(&captures), None, "each copy is captured once");
+    }
+
+    /// Serve `bytes` as `target` through INCR the way xclip 0.13 does: an
+    /// announcement with no size, then ~1 MiB chunks.
+    #[cfg(feature = "backend-x11rb")]
+    fn serve_like_xclip(conn: &RustConnection, owner: Window, target: Atom, bytes: &[u8]) {
+        let clipboard = intern(conn, "CLIPBOARD").unwrap();
+        let targets = intern(conn, "TARGETS").unwrap();
+        let incr = intern(conn, "INCR").unwrap();
+        conn.set_selection_owner(owner, clipboard, x11rb::CURRENT_TIME)
+            .unwrap()
+            .check()
+            .unwrap();
+        let chunk = 1024 * 1024 - 1;
+        let mut transfer: Option<(Window, Atom, usize)> = None;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "xclip stand-in timed out"
+            );
+            let Some(event) = conn.poll_for_event().unwrap() else {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+                continue;
+            };
+            match event {
+                x11rb::protocol::Event::SelectionRequest(event) => {
+                    let property = event.property;
+                    let served = if event.target == targets {
+                        conn.change_property32(
+                            PropMode::REPLACE,
+                            event.requestor,
+                            property,
+                            AtomEnum::ATOM,
+                            &[targets, target],
+                        )
+                        .unwrap()
+                        .check()
+                        .is_ok()
+                    } else if event.target == target {
+                        conn.change_window_attributes(
+                            event.requestor,
+                            &xproto::ChangeWindowAttributesAux::new()
+                                .event_mask(EventMask::PROPERTY_CHANGE),
+                        )
+                        .unwrap()
+                        .check()
+                        .unwrap();
+                        conn.change_property32(
+                            PropMode::REPLACE,
+                            event.requestor,
+                            property,
+                            incr,
+                            &[],
+                        )
+                        .unwrap()
+                        .check()
+                        .unwrap();
+                        transfer = Some((event.requestor, property, 0));
+                        true
+                    } else {
+                        false
+                    };
+                    conn.send_event(
+                        false,
+                        event.requestor,
+                        EventMask::NO_EVENT,
+                        SelectionNotifyEvent {
+                            response_type: xproto::SELECTION_NOTIFY_EVENT,
+                            sequence: 0,
+                            time: event.time,
+                            requestor: event.requestor,
+                            selection: event.selection,
+                            target: event.target,
+                            property: if served { property } else { x11rb::NONE },
+                        },
+                    )
+                    .unwrap();
+                    conn.flush().unwrap();
+                }
+                x11rb::protocol::Event::PropertyNotify(event)
+                    if event.state == Property::DELETE =>
+                {
+                    let Some((requestor, property, offset)) = transfer.as_mut() else {
+                        continue;
+                    };
+                    if event.window != *requestor || event.atom != *property {
+                        continue;
+                    }
+                    let end = offset.saturating_add(chunk).min(bytes.len());
+                    conn.change_property8(
+                        PropMode::REPLACE,
+                        *requestor,
+                        *property,
+                        target,
+                        &bytes[*offset..end],
+                    )
+                    .unwrap()
+                    .check()
+                    .unwrap();
+                    conn.flush().unwrap();
+                    if *offset == bytes.len() {
+                        return;
+                    }
+                    *offset = end;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    #[cfg(feature = "backend-x11rb")]
+    #[test]
+    fn a_request_the_owner_drops_is_asked_again() {
+        // xclip ignores a request that arrives while it serves another
+        // reader's INCR transfer; the watcher must not give up on the copy.
+        let x11 = crate::backend::clipboard_offer::IsolatedXvfb::acquire();
+        let display = x11.name();
+        let watcher = Clipboard::start(Some(display)).unwrap();
+        let (conn, screen_num) = x11rb::connect(Some(display)).unwrap();
+        let root = conn.setup().roots[screen_num].root;
+        let clipboard = intern(&conn, "CLIPBOARD").unwrap();
+        let targets = intern(&conn, "TARGETS").unwrap();
+        let utf8 = intern(&conn, "UTF8_STRING").unwrap();
+        let owner = conn.generate_id().unwrap();
+        conn.create_window(
+            0,
+            owner,
+            root,
+            0,
+            0,
+            1,
+            1,
+            0,
+            WindowClass::INPUT_ONLY,
+            0,
+            &xproto::CreateWindowAux::new(),
+        )
+        .unwrap()
+        .check()
+        .unwrap();
+        conn.set_selection_owner(owner, clipboard, x11rb::CURRENT_TIME)
+            .unwrap()
+            .check()
+            .unwrap();
+        let mut payload_requests = 0;
+        let started = std::time::Instant::now();
+        let deadline = started + std::time::Duration::from_secs(8);
+        loop {
+            let captured = watcher.drain_captured();
+            if !captured.is_empty() {
+                assert_eq!(
+                    captured,
+                    vec![CapturedClipboard::Text("second time".into())]
+                );
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "a dropped request was never repeated"
+            );
+            let Some(x11rb::protocol::Event::SelectionRequest(event)) =
+                conn.poll_for_event().unwrap()
+            else {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+                continue;
+            };
+            let served = if event.target == targets {
+                conn.change_property32(
+                    PropMode::REPLACE,
+                    event.requestor,
+                    event.property,
+                    AtomEnum::ATOM,
+                    &[targets, utf8],
+                )
+                .unwrap()
+                .check()
+                .is_ok()
+            } else if event.target == utf8 {
+                payload_requests += 1;
+                if payload_requests == 1 {
+                    // Dropped without any answer, as a busy xclip does.
+                    continue;
+                }
+                conn.change_property8(
+                    PropMode::REPLACE,
+                    event.requestor,
+                    event.property,
+                    utf8,
+                    b"second time",
+                )
+                .unwrap()
+                .check()
+                .is_ok()
+            } else {
+                false
+            };
+            conn.send_event(
+                false,
+                event.requestor,
+                EventMask::NO_EVENT,
+                SelectionNotifyEvent {
+                    response_type: xproto::SELECTION_NOTIFY_EVENT,
+                    sequence: 0,
+                    time: event.time,
+                    requestor: event.requestor,
+                    selection: event.selection,
+                    target: event.target,
+                    property: if served { event.property } else { x11rb::NONE },
+                },
+            )
+            .unwrap();
+            conn.flush().unwrap();
+        }
+        assert_eq!(payload_requests, 2);
+        assert!(started.elapsed() >= UNANSWERED_CONVERSION_RETRY);
+    }
+
+    #[cfg(feature = "backend-x11rb")]
+    #[test]
+    fn an_image_from_xclip_over_one_mib_is_captured() {
+        let x11 = crate::backend::clipboard_offer::IsolatedXvfb::acquire();
+        let display = x11.name();
+        let watcher = Clipboard::start(Some(display)).unwrap();
+        let (conn, screen_num) = x11rb::connect(Some(display)).unwrap();
+        let root = conn.setup().roots[screen_num].root;
+        let png_atom = intern(&conn, "image/png").unwrap();
+        let owner = conn.generate_id().unwrap();
+        conn.create_window(
+            0,
+            owner,
+            root,
+            0,
+            0,
+            1,
+            1,
+            0,
+            WindowClass::INPUT_ONLY,
+            0,
+            &xproto::CreateWindowAux::new(),
+        )
+        .unwrap()
+        .check()
+        .unwrap();
+        // Noise does not compress: about 2.3 MiB of PNG, three INCR chunks.
+        let mut state = 0x2545_f491_u32;
+        let noise = image::RgbImage::from_fn(900, 900, |_, _| {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            image::Rgb(state.to_le_bytes()[..3].try_into().unwrap())
+        });
+        let mut png = Vec::new();
+        image::DynamicImage::ImageRgb8(noise)
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        assert!(png.len() > 2 * 1024 * 1024 && png.len() < MAX_IMAGE_HISTORY_BYTES);
+        serve_like_xclip(&conn, owner, png_atom, &png);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let captured = watcher.drain_captured();
+            if !captured.is_empty() {
+                assert_eq!(captured, vec![CapturedClipboard::Png(png)]);
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "an INCR image without a size announcement was dropped"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    }
+
+    #[cfg(all(feature = "backend-x11rb", feature = "remote-x11"))]
+    #[test]
+    fn a_paste_during_a_transfer_waits_for_the_data() {
+        let x11 = crate::backend::clipboard_offer::IsolatedXvfb::acquire();
+        let display = x11.name();
+        let (_captures, setter) =
+            RemoteClipboard::start(Some(display), remote_test_options()).unwrap();
+        let (conn, screen_num) = x11rb::connect(Some(display)).unwrap();
+        let root = conn.setup().roots[screen_num].root;
+        let selection = intern(&conn, "CLIPBOARD").unwrap();
+        let targets = intern(&conn, "TARGETS").unwrap();
+        let gnome = intern(&conn, "x-special/gnome-copied-files").unwrap();
+        let uri_list = intern(&conn, "text/uri-list").unwrap();
+        let property = intern(&conn, "JWM_TEST_PENDING").unwrap();
+        let requestor = input_only_window(&conn, root);
+
+        assert!(setter.send(RemoteServe::Announce {
+            token: 7,
+            kind: PendingKind::Files,
+        }));
+        wait_for_selection_owner(&conn, selection);
+        // A file manager can enable Paste at once.
+        let notify = convert_and_wait(
+            &conn,
+            requestor,
+            selection,
+            targets,
+            property,
+            x11rb::CURRENT_TIME,
+        );
+        assert_eq!(notify.property, property);
+        let offered: Vec<Atom> = conn
+            .get_property(true, requestor, property, AtomEnum::ATOM, 0, 64)
+            .unwrap()
+            .reply()
+            .unwrap()
+            .value32()
+            .unwrap()
+            .collect();
+        assert!(offered.contains(&gnome) && offered.contains(&uri_list));
+
+        conn.convert_selection(requestor, selection, gnome, property, x11rb::CURRENT_TIME)
+            .unwrap();
+        conn.flush().unwrap();
+        let wait = std::time::Duration::from_millis(200);
+        assert!(
+            selection_notify_within(&conn, requestor, gnome, wait).is_none(),
+            "the paste waits while the data is still arriving"
+        );
+        // Data for an older announcement never answers it.
+        assert!(setter.send(RemoteServe::FulfilFiles {
+            token: 6,
+            paths: vec!["/stale".into()],
+        }));
+        assert!(selection_notify_within(&conn, requestor, gnome, wait).is_none());
+        let paths = vec![std::path::PathBuf::from("/home/u/.cache/jwm/x/report.pdf")];
+        assert!(setter.send(RemoteServe::FulfilFiles { token: 7, paths }));
+        let notify =
+            selection_notify_within(&conn, requestor, gnome, std::time::Duration::from_secs(3))
+                .expect("the waiting paste is answered");
+        assert_eq!(notify.property, property);
+        let reply = conn
+            .get_property(true, requestor, property, AtomEnum::ANY, 0, 1024)
+            .unwrap()
+            .reply()
+            .unwrap();
+        assert_eq!(reply.type_, gnome);
+        assert_eq!(reply.value, b"copy\nfile:///home/u/.cache/jwm/x/report.pdf");
+
+        // Once fulfilled, later pastes are served at once.
+        let notify = convert_and_wait(
+            &conn,
+            requestor,
+            selection,
+            uri_list,
+            property,
+            x11rb::CURRENT_TIME,
+        );
+        assert_eq!(notify.property, property);
+    }
+
+    #[cfg(all(feature = "backend-x11rb", feature = "remote-x11"))]
+    #[test]
+    fn an_abandoned_transfer_refuses_waiting_pastes_and_frees_the_clipboard() {
+        let x11 = crate::backend::clipboard_offer::IsolatedXvfb::acquire();
+        let display = x11.name();
+        let (_captures, setter) =
+            RemoteClipboard::start(Some(display), remote_test_options()).unwrap();
+        let (conn, screen_num) = x11rb::connect(Some(display)).unwrap();
+        let root = conn.setup().roots[screen_num].root;
+        let selection = intern(&conn, "CLIPBOARD").unwrap();
+        let png = intern(&conn, "image/png").unwrap();
+        let property = intern(&conn, "JWM_TEST_ABANDON").unwrap();
+        let requestor = input_only_window(&conn, root);
+
+        assert!(setter.send(RemoteServe::Announce {
+            token: 1,
+            kind: PendingKind::Png,
+        }));
+        wait_for_selection_owner(&conn, selection);
+        conn.convert_selection(requestor, selection, png, property, x11rb::CURRENT_TIME)
+            .unwrap();
+        conn.flush().unwrap();
+        let wait = std::time::Duration::from_millis(150);
+        assert!(selection_notify_within(&conn, requestor, png, wait).is_none());
+        assert!(setter.send(RemoteServe::Abandon { token: 1 }));
+        let notify =
+            selection_notify_within(&conn, requestor, png, std::time::Duration::from_secs(3))
+                .expect("the waiting paste is refused");
+        assert_eq!(notify.property, x11rb::NONE);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while conn
+            .get_selection_owner(selection)
+            .unwrap()
+            .reply()
+            .unwrap()
+            .owner
+            != x11rb::NONE
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "clipboard still owned after abandon"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
     }
 }

@@ -73,7 +73,8 @@ remember matters as much as what it keeps:
 - **Payloads over the caps are ignored.** Text over 256 KiB and PNG (or the
   PNG produced by decoding a JPEG/WebP/GIF/BMP/TIFF/AVIF offer) over 4 MiB are
   dropped. Other non-PNG image types beyond those six are never captured.
-  Remote clipboard sharing stays text-only.
+  Remote clipboard sharing (`jwm-remote --clipboard`) is separate: it shares
+  text, images up to 32 MiB and copied files; see `docs/remote-control.md`.
 - **Incoming image dimensions are bounded before decoding.** Each edge may be
   at most 16,384 pixels and the total may be at most 16,777,216 pixels. The
   decoder also receives a 64 MiB allocation budget; decoder-internal memory

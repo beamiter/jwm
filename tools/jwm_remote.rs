@@ -2,6 +2,7 @@
 
 use clap::{Parser, Subcommand};
 use jwm::remote::client::{ClientOptions, run_client};
+use jwm::remote::clipboard_files::parse_size;
 use jwm::remote::host::{HostOptions, run_host};
 use jwm::remote::key::{KeySource, generate_key_file};
 use jwm::remote::session_env;
@@ -15,6 +16,8 @@ use jwm::remote::{RemoteResult, messages::APPLICATION_VERSION, protocol::TRANSPO
 use std::path::PathBuf;
 
 const DEFAULT_JPEG_QUALITY_FLOOR: u8 = 40;
+/// Default `--clipboard-file-limit`; matches `clipboard_sync::DEFAULT_FILE_LIMIT`.
+const DEFAULT_CLIPBOARD_FILE_LIMIT: &str = "2G";
 
 #[derive(Debug, Parser)]
 #[command(
@@ -151,11 +154,17 @@ enum Command {
         #[arg(long)]
         allow_input: bool,
 
-        /// Share the clipboard with the authenticated peer, both directions.
+        /// Share the clipboard with the authenticated peer, both directions:
+        /// text, images, and files copied in a file manager.
         ///
         /// Text marked secret by a password manager is never shared.
         #[arg(long)]
         allow_clipboard: bool,
+
+        /// Largest file copy shared through the clipboard, such as 512M or
+        /// 10G; 0 shares text and images only.
+        #[arg(long, default_value = DEFAULT_CLIPBOARD_FILE_LIMIT, value_name = "SIZE", value_parser = parse_size)]
+        clipboard_file_limit: u64,
 
         /// Exit after the first connection ends (useful for tests/scripts).
         #[arg(long)]
@@ -188,9 +197,15 @@ enum Command {
         #[arg(long, default_value = DEFAULT_ESCAPE_KEY, value_name = "KEYSYM")]
         escape_key: String,
 
-        /// Share the clipboard with the other machine, both directions.
+        /// Share the clipboard with the other machine, both directions:
+        /// text, images, and files copied in a file manager.
         #[arg(long)]
         clipboard: bool,
+
+        /// Largest file copy shared through the clipboard, such as 512M or
+        /// 10G; 0 shares text and images only.
+        #[arg(long, default_value = DEFAULT_CLIPBOARD_FILE_LIMIT, value_name = "SIZE", value_parser = parse_size)]
+        clipboard_file_limit: u64,
 
         /// Local X11 display for the viewer window (defaults to DISPLAY).
         #[arg(long, value_name = "DISPLAY")]
@@ -233,11 +248,17 @@ enum Command {
         #[arg(long, default_value = DEFAULT_ESCAPE_KEY, value_name = "KEYSYM")]
         escape_key: String,
 
-        /// Share the clipboard with the host, both directions.
+        /// Share the clipboard with the host, both directions: text,
+        /// images, and files copied in a file manager.
         ///
         /// The host must also be started with --allow-clipboard.
         #[arg(long)]
         clipboard: bool,
+
+        /// Largest file copy shared through the clipboard, such as 512M or
+        /// 10G; 0 shares text and images only.
+        #[arg(long, default_value = DEFAULT_CLIPBOARD_FILE_LIMIT, value_name = "SIZE", value_parser = parse_size)]
+        clipboard_file_limit: u64,
     },
 }
 
@@ -323,6 +344,7 @@ fn run(command: Command) -> RemoteResult<()> {
             allow_lan,
             allow_input,
             allow_clipboard,
+            clipboard_file_limit,
             once,
         } => {
             let key = if key_stdin {
@@ -352,6 +374,7 @@ fn run(command: Command) -> RemoteResult<()> {
                 allow_lan,
                 allow_input,
                 allow_clipboard,
+                clipboard_file_limit,
                 once,
             })
         }
@@ -362,6 +385,7 @@ fn run(command: Command) -> RemoteResult<()> {
             grab_input,
             escape_key,
             clipboard,
+            clipboard_file_limit,
             display,
             remote_command,
             ssh_options,
@@ -374,6 +398,7 @@ fn run(command: Command) -> RemoteResult<()> {
             view_only,
             grab_input,
             clipboard,
+            clipboard_file_limit,
             escape_key,
         }),
         Command::Connect {
@@ -383,6 +408,7 @@ fn run(command: Command) -> RemoteResult<()> {
             view_only,
             grab_input,
             clipboard,
+            clipboard_file_limit,
             escape_key,
         } => run_client(ClientOptions {
             peer_label: address.clone(),
@@ -392,6 +418,7 @@ fn run(command: Command) -> RemoteResult<()> {
             view_only,
             grab_input,
             clipboard,
+            clipboard_file_limit,
             escape_key,
         }),
     }

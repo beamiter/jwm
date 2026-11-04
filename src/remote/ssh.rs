@@ -57,6 +57,8 @@ pub struct SshOptions {
     pub view_only: bool,
     pub grab_input: bool,
     pub clipboard: bool,
+    /// Largest file copy shared through the clipboard; 0 shares no files.
+    pub clipboard_file_limit: u64,
     pub escape_key: String,
 }
 
@@ -122,6 +124,7 @@ pub fn run_ssh(options: SshOptions) -> RemoteResult<()> {
                 view_only: options.view_only,
                 grab_input: options.grab_input,
                 clipboard: options.clipboard,
+                clipboard_file_limit: options.clipboard_file_limit,
                 escape_key: options.escape_key.clone(),
             })
         }),
@@ -468,6 +471,11 @@ fn remote_host_script_with(options: &SshOptions, remote_port: u16, managed: &str
     }
     if options.clipboard {
         host.push_str(" --allow-clipboard");
+        // Both ends enforce their own limit; give the host the same one.
+        host.push_str(&format!(
+            " --clipboard-file-limit {}",
+            options.clipboard_file_limit
+        ));
     }
     if let Some(monitor) = &options.monitor {
         host.push_str(" --monitor ");
@@ -502,6 +510,7 @@ mod tests {
             view_only: false,
             grab_input: true,
             clipboard: false,
+            clipboard_file_limit: 2 << 30,
             escape_key: "F12".into(),
         }
     }
@@ -556,6 +565,11 @@ mod tests {
         let printed = String::from_utf8(output.stdout).unwrap();
         assert!(!printed.contains("--allow-input"), "{printed}");
         assert!(printed.contains("[--allow-clipboard]"), "{printed}");
+        // The host enforces the viewer's file limit too.
+        assert!(
+            printed.contains("[--clipboard-file-limit]\n[2147483648]\n"),
+            "{printed}"
+        );
         std::fs::remove_dir_all(directory).unwrap();
     }
 

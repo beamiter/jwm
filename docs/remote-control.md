@@ -66,7 +66,7 @@ session, nothing needs to be set up there beyond installing the same
 ```bash
 jwm-remote ssh user@desktop --grab-input
 jwm-remote ssh user@desktop --grab-input --monitor DP-0   # one monitor
-jwm-remote ssh user@desktop --view-only --clipboard       # watch, share text
+jwm-remote ssh user@desktop --grab-input --clipboard      # copy and paste both ways
 ```
 
 What it does:
@@ -76,7 +76,8 @@ What it does:
    No key file is written, copied or kept.
 2. Starts `jwm-remote host` there on a random loopback port, for one session
    (`--once`), with input unless `--view-only`, clipboard only with
-   `--clipboard`. Nothing listens on the LAN.
+   `--clipboard` (text, images and files; see
+   [Clipboard sharing](#clipboard-sharing)). Nothing listens on the LAN.
 3. Finds the display of your running JWM session there (`--display auto`):
    the `DISPLAY` and `XAUTHORITY` of the oldest `jwm` process you own. An SSH
    login has neither, and a gdm session on `:1` with its cookie under
@@ -228,8 +229,10 @@ The viewer terminal reports connecting, authentication/negotiation, waiting for
 the first frame, and finally connected **after a frame is drawn and ACKed**. This is the existing viewer draw/ACK
 contract, not a guarantee that a physical display has completed scanout.
 The title shows actual negotiated permissions: view-only, pointer-only when
-keymaps differ, or keyboard + pointer. It also shows clipboard ON/off and,
-with `--grab-input`, whether input is released or grabbed and how to release it.
+keymaps differ, or keyboard + pointer. It also shows clipboard ON/off — with a
+copy in flight, its progress (`clipboard ON - receiving 3 files 40%`) and then
+`3 files ready to paste` — and, with `--grab-input`, whether input is released
+or grabbed and how to release it.
 An authenticated connection waiting on capture is not reported as a connected
 desktop. View-only and host input denial remain view-only; there is no fallback
 that enables input automatically.
@@ -311,8 +314,9 @@ contents into a shell command or a reconnect script.
 5. Select a monitor/region, change its position/size, and verify fail-closed
    disconnect. Recheck the area before rerunning the connection command.
 6. Verify a wrong key, older peer and occupied host fail safely. Enable clipboard
-   on one end only, then both ends using harmless text; confirm its title and
-   actual behavior agree. Restore clipboard-off for normal use if not needed.
+   on one end only, then both ends using harmless text, a screenshot and a
+   copied folder in the file manager, each way; confirm its title and actual
+   behavior agree. Restore clipboard-off for normal use if not needed.
 
 ## Security boundary
 
@@ -333,14 +337,17 @@ gives each complete authenticated video record, including its final flush, one
 budget; a partial or timed-out record closes the whole session so its wire
 sequence can never be retried out of sync.
 
-The current application protocol is version 5. Versions 2, 3 and 4 are
+The current application protocol is version 6. Versions 2 to 5 are
 deliberately incompatible, so update `jwm-remote` on both machines together;
 negotiation rejects an older peer before screen or input data is exchanged.
-A version-5 host tells an older viewer which version it speaks instead of
-hanging up on it, and a version-5 viewer reports an older host's hang-up as
-"accepted the key but closed before acknowledging". Version 5 replaces the
-single whole-keymap digest in the viewer's hello with a per-keycode table
-(see [Keyboard layouts](#keyboard-layouts)). Version 4 replaced whole-frame JPEG video with dirty-tile delta coding on the
+A version-5 or later host tells an older viewer which version it speaks instead
+of hanging up on it, and a version-5 or later viewer reports an older host's
+hang-up as "accepted the key but closed before acknowledging". Version 6 adds
+chunked clipboard image and file transfers and a separately negotiated
+file-sharing capability (see [Clipboard sharing](#clipboard-sharing)); a
+version-5 peer would end the session on the first such record. Version 5
+replaced the single whole-keymap digest in the viewer's hello with a
+per-keycode table (see [Keyboard layouts](#keyboard-layouts)). Version 4 replaced whole-frame JPEG video with dirty-tile delta coding on the
 same frame message; a version-3 peer would misread the first frame body, so the
 handshake fails closed instead. Version 4
 retains acknowledgements only for frames successfully drawn by the viewer,
@@ -907,33 +914,87 @@ against.
 ### Clipboard sharing
 
 Off unless **both** sides ask for it: the host needs `--allow-clipboard` and
-the viewer needs `--clipboard`. The host's flag is policy and the client's is
-consent; if either is missing the capability is simply absent from the
-negotiated session and no clipboard record is ever sent.
+the viewer needs `--clipboard` (`jwm-remote ssh ... --clipboard` sets both).
+The host's flag is policy and the client's is consent; if either is missing
+the capability is simply absent from the negotiated session and no clipboard
+record is ever sent.
 
 ```bash
 jwm-remote host ... --allow-clipboard
 jwm-remote connect ... --clipboard
 ```
 
-Text copied on either desktop appears on the other, as UTF-8 text only. Each
-side watches CLIPBOARD on **its own X connection and thread**: a selection
-conversion blocks until the current owner answers, and a slow or hostile
-clipboard owner must never be able to delay a frame or an input event.
+Whatever you copy on either desktop is what you paste on the other:
 
-Two limits are deliberate. Text marked secret by a password manager — the
-`x-kde-passwordManagerHint` convention and its variants — is never shared, the
-same rule JWM's local clipboard history already applies. And payloads are
-capped at 256 KiB, matching that history's own ceiling, so a copied image or a
-multi-megabyte log is refused rather than streamed; the cap is enforced before
-the text is examined on receipt, and a payload that is not valid UTF-8 is
-rejected before it is handed to the local X server to hold as a selection.
+- **Text** in any application, as UTF-8, up to 256 KiB.
+- **Images** — a screenshot, an image copied in a browser or an image
+  editor — as PNG, up to 32 MiB. JPEG and BMP offers are converted to PNG.
+- **Files and folders** copied in a file manager (Nautilus, Thunar, PCManFM,
+  Nemo, Caja, Dolphin: anything offering `x-special/gnome-copied-files` or a
+  `text/uri-list` of local files). Paste them in the other machine's file
+  manager. A terminal or editor pastes their paths there instead.
+
+Each side watches CLIPBOARD on **its own X connection and thread**, and the
+copy itself is moved by a separate worker: a selection conversion blocks until
+the current owner answers, reading files can be slow, and neither may delay a
+frame or an input event.
+
+**How files arrive.** A copy is sent as soon as it is made, not when it is
+pasted. The receiving machine takes CLIPBOARD at once, so it changes the moment
+the copy was made; if you paste before the last byte has arrived, the paste
+waits for it (up to 25 seconds, then it is refused and works once the copy has
+landed). The viewer's title shows `receiving 3 files 40%`, then `3 files ready
+to paste`; both terminals print a line when a copy starts and lands. Received
+files are written under
+`$XDG_CACHE_HOME/jwm/remote-clipboard/` (by default `~/.cache/...`), on disk
+rather than in the RAM-backed runtime directory, in a private directory per
+session. Pasting copies them out of there. The three most recent copies are
+kept during a session and the newest one after it, so a paste after
+disconnecting still works; the next session removes what a finished session
+left behind.
+
+**The newest copy wins**, on both machines. Copying anything while a copy is
+still travelling, in either direction, cancels that transfer. A cut is shared
+as a copy: the originals are never deleted on the other machine's behalf.
+
+**What is carried.** File contents, names (raw bytes, so any name survives),
+folders, modification times and executable bits. Not carried: symlinks inside a
+copied folder (a copied symlink itself is followed), devices, sockets and
+FIFOs, owners, and set-id bits. Unreadable files are left out and counted in
+the terminal. The receiver rebuilds the tree inside a fresh private directory:
+every name component is checked, nothing is created through a symlink, and
+every file and folder must be new, so a peer cannot write outside it.
+
+**Size.** `--clipboard-file-limit SIZE` (default `2G`, on `host`, `connect`
+and `ssh`) bounds one file copy; each end enforces its own limit, as sender
+and as receiver, and checks it before reading a byte. `0` shares text and
+images only. A receiver also refuses a copy that would leave less than
+256 MiB free on its disk. A copy over the limit is not shared and the title
+says `copy not shared: too large`.
+
+**Flow control.** Images and files travel in 128 KiB chunks. The receiver
+acknowledges a chunk only once it is written, and the sender keeps at most
+1 MiB unacknowledged across the whole session, so a slow disk throttles the
+sender, and a frame or an input batch never waits behind more than a megabyte
+of copied data. A peer that overruns that window ends the session.
+
+**On connect,** the viewer shares what is already on its clipboard — what you
+copied just before connecting is usually what you mean to paste — and the host
+does not, so the two machines never swap clipboards.
+
+Two limits from JWM's local clipboard history apply here too. Text marked
+secret by a password manager — the `x-kde-passwordManagerHint` convention and
+its variants — is never shared. And payloads are validated before they are
+handed to the local X server: text must be valid UTF-8 within its cap, and an
+image must decode as a PNG within 16 megapixels.
 
 **Understand what this shares.** With clipboard sharing on, everything you copy
 on either machine crosses the network to the other, for as long as the session
-lasts. That is the point of the feature, but it is a much broader grant than
-screen sharing alone, so it stays opt-in on both ends rather than following
-from `--allow-input`.
+lasts — including files you copy in a file manager, which are sent whether or
+not you paste them there. That is the point of the feature, but it is a much
+broader grant than screen sharing alone, so it stays opt-in on both ends rather
+than following from `--allow-input`. Use `--clipboard-file-limit 0` to share
+text and images but not files.
 
 ### Viewport negotiation
 
@@ -1056,8 +1117,8 @@ XRender for anyone who prefers that speed and does not see the artifacts;
   included in video; the viewer cursor is transparent during ordinary input
   forwarding and an active grab, while view-only and released-grab windows keep
   a visible local cursor; the rest of the client desktop is never affected;
-- JPEG tile video plus UTF-8 clipboard text: no audio, file transfer, non-text
-  clipboard targets, or inter-frame codec yet;
+- JPEG tile video plus clipboard text, images and files: no audio, drag and
+  drop, lazy (paste-time) file transfer, or inter-frame codec yet;
 - video uses cumulative display acknowledgements, at most two unacknowledged
   frames, and one latest queued frame; persistently slow viewers therefore
   reduce capture/encode/network work instead of accumulating stale video;
@@ -1084,21 +1145,20 @@ Rendering still runs on the viewer's main thread, so a slow native draw can
 still delay the next input pass; no claim of measured end-to-end mouse latency
 is made by the offline tests.
 
-Clipboard forwarding also yields to the viewer loop: at most four captured
-texts are considered per pass, including oversized texts that are skipped.
-Each nonblocking capture read inspects at most 32 queued items so a backlog of
-unsupported images cannot monopolize the pass. Remaining captures stay in FIFO
-order; a budget yield is not a disconnect. Worker closure is still reported
-once preceding captures have been consumed, potentially on a later pass.
-The host's blocking clipboard receiver retains its existing absolute deadline.
+Clipboard forwarding also yields to the viewer loop: at most sixteen queued
+clipboard records are written per pass — enough for a whole 1 MiB transfer
+window of chunks plus their control records. Remaining records stay in FIFO
+order; a budget yield is not a disconnect, and the clipboard worker wakes the
+loop for each record it queues, so the next pass follows at once. Worker
+closure is still reported once preceding records have been written,
+potentially on a later pass. On the host, each clipboard record takes the
+shared writer for exactly one record, so a frame can always go out between two
+chunks of a large copy.
 
-These are work-count bounds, not hard response-time bounds. Four maximum-sized
-texts can still total 1 MiB before protocol overhead, and an individual socket
-write or native draw can block. On an otherwise idle viewer, the existing
-200 ms heartbeat wake schedules another pass; this may delay a large clipboard
-backlog while preserving opportunities to process input, draw/ACK and heartbeat.
-No new polling thread, immediate retry loop, queue or clipboard permission is
-introduced, and the existing clipboard producer queue is unchanged.
+These are work-count bounds, not hard response-time bounds: sixteen records
+can still total 2 MiB, and an individual socket write or native draw can
+block. Copied files are read and written only by the clipboard worker, never
+by the viewer loop or the host's input thread.
 
 Letterbox bars preserve aspect ratio and are not remote desktop content.
 Clicks there neither grab nor send a remote button press. A button pressed

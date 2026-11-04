@@ -8,15 +8,17 @@ use super::x11_keymap::{KeymapTable, MAX_ENCODED_KEYMAP_LEN};
 use std::io;
 
 const APPLICATION_MAGIC: &[u8; 8] = b"JWMREM01";
-pub const APPLICATION_VERSION: u16 = 5;
+pub const APPLICATION_VERSION: u16 = 6;
 const SERVER_HELLO_LEN: usize = 11;
 /// Largest client hello: the shared prefix plus a full keymap table.
 pub const MAX_CLIENT_HELLO_LEN: usize = SERVER_HELLO_LEN + MAX_ENCODED_KEYMAP_LEN;
 const FLAG_POINTER: u8 = 1 << 0;
 const FLAG_KEYBOARD: u8 = 1 << 1;
 const FLAG_CLIPBOARD: u8 = 1 << 2;
+/// Copied files travel too. Only meaningful together with [`FLAG_CLIPBOARD`].
+const FLAG_CLIPBOARD_FILES: u8 = 1 << 3;
 const INPUT_FLAGS: u8 = FLAG_POINTER | FLAG_KEYBOARD;
-const KNOWN_FLAGS: u8 = INPUT_FLAGS | FLAG_CLIPBOARD;
+const KNOWN_FLAGS: u8 = INPUT_FLAGS | FLAG_CLIPBOARD | FLAG_CLIPBOARD_FILES;
 const INPUT_TAG_POINTER: u8 = 1;
 const INPUT_TAG_KEY: u8 = 2;
 const INPUT_TAG_BUTTON: u8 = 3;
@@ -37,6 +39,8 @@ pub const MAX_INPUT_BATCH_PAYLOAD_LEN: usize = 1 + MAX_INPUT_BATCH_EVENTS * POIN
 pub struct ClientHello {
     pub request_input: bool,
     pub request_clipboard: bool,
+    /// Also share copied files. Requires `request_clipboard`.
+    pub request_clipboard_files: bool,
     /// The viewer's keymap, empty for a view-only viewer. Version 5 replaced
     /// a single whole-map digest with this per-keycode table.
     pub keymap: KeymapTable,
@@ -47,6 +51,8 @@ pub struct ServerHello {
     pub pointer_enabled: bool,
     pub keyboard_enabled: bool,
     pub clipboard_enabled: bool,
+    /// Copied files are shared too. Implies `clipboard_enabled`.
+    pub clipboard_files_enabled: bool,
 }
 
 impl ClientHello {
@@ -55,6 +61,9 @@ impl ClientHello {
         let mut flags = if self.request_input { INPUT_FLAGS } else { 0 };
         if self.request_clipboard {
             flags |= FLAG_CLIPBOARD;
+            if self.request_clipboard_files {
+                flags |= FLAG_CLIPBOARD_FILES;
+            }
         }
         let mut payload = Vec::with_capacity(MAX_CLIENT_HELLO_LEN);
         payload.extend_from_slice(&encode_hello(flags));
@@ -73,6 +82,7 @@ impl ClientHello {
         Ok(Self {
             request_input: flags & INPUT_FLAGS != 0,
             request_clipboard: flags & FLAG_CLIPBOARD != 0,
+            request_clipboard_files: flags & FLAG_CLIPBOARD_FILES != 0,
             keymap,
         })
     }
@@ -90,6 +100,9 @@ impl ServerHello {
         }
         if self.clipboard_enabled {
             flags |= FLAG_CLIPBOARD;
+            if self.clipboard_files_enabled {
+                flags |= FLAG_CLIPBOARD_FILES;
+            }
         }
         encode_hello(flags)
     }
@@ -100,6 +113,7 @@ impl ServerHello {
             pointer_enabled: flags & FLAG_POINTER != 0,
             keyboard_enabled: flags & FLAG_KEYBOARD != 0,
             clipboard_enabled: flags & FLAG_CLIPBOARD != 0,
+            clipboard_files_enabled: flags & FLAG_CLIPBOARD_FILES != 0,
         })
     }
 }
@@ -125,6 +139,9 @@ fn decode_hello(payload: &[u8]) -> RemoteResult<u8> {
     }
     if payload[10] & !KNOWN_FLAGS != 0 {
         return Err(invalid_data("peer advertised unknown remote capabilities").into());
+    }
+    if payload[10] & FLAG_CLIPBOARD_FILES != 0 && payload[10] & FLAG_CLIPBOARD == 0 {
+        return Err(invalid_data("peer advertised file sharing without clipboard sharing").into());
     }
     Ok(payload[10])
 }
@@ -437,6 +454,7 @@ mod tests {
         let payload = ClientHello {
             request_input: true,
             request_clipboard: false,
+            request_clipboard_files: false,
             keymap: KeymapTable::empty(),
         }
         .encode();
@@ -461,6 +479,7 @@ mod tests {
                 &ClientHello {
                     request_input,
                     request_clipboard,
+                    request_clipboard_files: request_clipboard,
                     keymap: KeymapTable::empty(),
                 }
                 .encode(),
@@ -468,6 +487,7 @@ mod tests {
             .unwrap();
             assert_eq!(decoded.request_input, request_input);
             assert_eq!(decoded.request_clipboard, request_clipboard);
+            assert_eq!(decoded.request_clipboard_files, request_clipboard);
         }
 
         for (pointer, keyboard, clipboard) in [
@@ -481,6 +501,7 @@ mod tests {
                     pointer_enabled: pointer,
                     keyboard_enabled: keyboard,
                     clipboard_enabled: clipboard,
+                    clipboard_files_enabled: false,
                 }
                 .encode(),
             )
@@ -503,6 +524,7 @@ mod tests {
         let hello = ClientHello {
             request_input: true,
             request_clipboard: true,
+            request_clipboard_files: false,
             keymap,
         };
         let payload = hello.encode();
@@ -516,28 +538,32 @@ mod tests {
     }
 
     #[test]
-    fn hello_uses_version_five_and_rejects_neighbouring_versions() {
+    fn hello_uses_version_six_and_rejects_neighbouring_versions() {
         let payload = ServerHello {
             pointer_enabled: false,
             keyboard_enabled: false,
             clipboard_enabled: false,
+            clipboard_files_enabled: false,
         }
         .encode();
-        assert_eq!(&payload[8..10], &5_u16.to_be_bytes());
+        assert_eq!(&payload[8..10], &6_u16.to_be_bytes());
 
-        // Version 4 sent one digest of the whole keymap where version 5
-        // sends a per-keycode table, so a version-4 hello would be misread
-        // as a malformed table. It must fail on its version instead.
-        let mut version_four = payload;
-        version_four[8..10].copy_from_slice(&4_u16.to_be_bytes());
-        let error = ServerHello::decode(&version_four).unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("application version 4; expected 5")
-        );
+        // Version 5 had no clipboard transfer records: a version-5 peer
+        // would end the session on the first copied image or file. It must
+        // fail on its version instead. Version 4 sent one digest of the whole
+        // keymap where later versions send a per-keycode table.
+        for older in [4_u16, 5] {
+            let mut previous = payload;
+            previous[8..10].copy_from_slice(&older.to_be_bytes());
+            let error = ServerHello::decode(&previous).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains(&format!("application version {older}; expected 6"))
+            );
+        }
 
-        for rejected in [0_u16, 2, 3, 6, u16::MAX] {
+        for rejected in [0_u16, 2, 3, 7, u16::MAX] {
             let mut other = payload;
             other[8..10].copy_from_slice(&rejected.to_be_bytes());
             assert!(
@@ -545,6 +571,42 @@ mod tests {
                 "version {rejected} must be rejected"
             );
         }
+    }
+
+    #[test]
+    fn file_sharing_is_negotiated_only_alongside_clipboard_sharing() {
+        let both = ServerHello {
+            pointer_enabled: false,
+            keyboard_enabled: false,
+            clipboard_enabled: true,
+            clipboard_files_enabled: true,
+        };
+        assert_eq!(ServerHello::decode(&both.encode()).unwrap(), both);
+        // Files without the clipboard are never encoded...
+        let files_only = ServerHello {
+            clipboard_enabled: false,
+            ..both
+        };
+        assert!(
+            !ServerHello::decode(&files_only.encode())
+                .unwrap()
+                .clipboard_files_enabled
+        );
+        let hello = ClientHello {
+            request_input: false,
+            request_clipboard: false,
+            request_clipboard_files: true,
+            keymap: KeymapTable::empty(),
+        };
+        assert!(
+            !ClientHello::decode(&hello.encode())
+                .unwrap()
+                .request_clipboard_files
+        );
+        // ...and a peer that sends them anyway is refused.
+        let mut forged = both.encode();
+        forged[10] = FLAG_CLIPBOARD_FILES;
+        assert!(ServerHello::decode(&forged).is_err());
     }
 
     #[test]
@@ -839,6 +901,7 @@ mod tests {
             pointer_enabled: true,
             keyboard_enabled: false,
             clipboard_enabled: false,
+            clipboard_files_enabled: false,
         }
         .encode();
         let decoded = ServerHello::decode(&payload).unwrap();
