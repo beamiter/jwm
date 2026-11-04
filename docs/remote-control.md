@@ -149,6 +149,16 @@ that enables input automatically.
 
 ### Listener and connection errors
 
+- The host opens its X display before it listens and prints what it shares,
+  for example `sharing the whole 5120x1440 root`. A display it cannot open
+  fails there, as `cannot open X11 display ":1": ...`, instead of after the
+  first viewer has authenticated. When that still happens mid-run, the viewer
+  is told `host cannot capture its display` rather than seeing a hang-up.
+- A stale-socket cleanup can delete `/tmp/.X11-unix/X1` while the X server
+  keeps running on its Linux abstract socket. libxcb tools such as `xdpyinfo`
+  carry on, but x11rb does not try the abstract socket, so every helper
+  connection was refused. `jwm-remote` now falls back to the abstract socket
+  with the same authorization, as JWM's bars already did.
 - An invalid `--listen` value fails during argument parsing, with an example
   of a local IP/name and optional port. Empty hosts, broken IPv6 brackets,
   invalid ports, whitespace and control characters are rejected before startup.
@@ -176,6 +186,18 @@ Errors identify the stage (local setup, TCP connect, negotiation, first-frame
 receive/decode, local clipboard setup, local display/draw, first-frame ACK, or active session) and give the corresponding next check. A refused negotiation
 may mean a busy host, wrong key or incompatible helper; it is not blindly
 reported as a firewall problem. Read the specific cause printed with the hint.
+
+A host that hangs up says nothing, so the viewer explains a hang-up by where it
+happened, instead of quoting Rust's `failed to fill whole buffer`:
+
+| Viewer says | Meaning |
+|---|---|
+| `host closed the connection during authentication; the two key files most likely differ` | The host never proved it holds the same key. Compare `sha256sum` of the key on both machines. |
+| `host accepted the key but closed before acknowledging the session` | The key is right; an older host, or a host-side error in its terminal. |
+| `host cannot capture its display: ...` | Authenticated, but the host could not open its X display; the reason follows. |
+| `another viewer is already connected to this host` | Close the other viewer first. |
+| `host closed the session: the host stopped sharing its desktop` | The host was stopped (Ctrl+C or SIGTERM) and said goodbye. |
+| `the connection closed without a goodbye from the host` | The host process was killed or the network dropped. |
 
 There is no automatic reconnect. After a disconnect, inspect both terminals,
 verify the intended host/key and the selected monitor or region, then rerun the
@@ -224,10 +246,14 @@ gives each complete authenticated video record, including its final flush, one
 budget; a partial or timed-out record closes the whole session so its wire
 sequence can never be retried out of sync.
 
-The current application protocol is version 4. Versions 2 and 3 are
+The current application protocol is version 5. Versions 2, 3 and 4 are
 deliberately incompatible, so update `jwm-remote` on both machines together;
 negotiation rejects an older peer before screen or input data is exchanged.
-Version 4 replaces whole-frame JPEG video with dirty-tile delta coding on the
+A version-5 host tells an older viewer which version it speaks instead of
+hanging up on it, and a version-5 viewer reports an older host's hang-up as
+"accepted the key but closed before acknowledging". Version 5 replaces the
+single whole-keymap digest in the viewer's hello with a per-keycode table
+(see [Keyboard layouts](#keyboard-layouts)). Version 4 replaced whole-frame JPEG video with dirty-tile delta coding on the
 same frame message; a version-3 peer would misread the first frame body, so the
 handshake fails closed instead. Version 4
 retains acknowledgements only for frames successfully drawn by the viewer,
@@ -337,8 +363,36 @@ cargo build --locked --release --no-default-features \
 Both machines need an X11 JWM session. The host X server needs Composite;
 interactive control additionally needs XTEST. The two machines should use the
 same XKB layout for keyboard control because the MVP forwards X11 keycodes
-(physical keys), not text. The handshake fingerprints both keymaps; a mismatch
+(physical keys), not text. The handshake compares both keymaps; a mismatch
 fails closed by disabling keyboard injection while leaving pointer control on.
+
+### Keyboard layouts
+
+The viewer sends a 3-byte digest of every keycode's base symbols — the first
+two levels of the first two groups — and the host compares it key by key with
+its own map. A keycode bound on both machines must produce the same symbols.
+A keycode bound on only one side is ignored: the viewer's keyboard cannot
+produce it, or the host has nothing on it, so it cannot type a wrong
+character. Modifier maps must match exactly, and at least 32 keycodes must be
+bound on both sides.
+
+The earlier whole-map digest failed on real desktops with identical layouts.
+Tools that type text through XTEST bind spare keycodes to the characters they
+need — one desktop had 17 unused keycodes bound to CJK characters left over
+from an automation — and the core table can widen as a side effect, so the
+digests never matched and keyboard control silently fell back to pointer-only.
+The per-key comparison tolerates both. Columns past the first four are not
+compared, because their meaning depends on the table width; a layout that
+differs only in AltGr (third-level) symbols is therefore not detected.
+
+When keys do differ, the host terminal names them:
+
+```text
+jwm-remote: peer X11 keymap differs (2 keys differ (keycodes 29, 52)); keyboard disabled, pointer remains enabled
+```
+
+A keymap change during a session is checked the same way: binding a spare
+keycode keeps the session, remapping a real key ends it.
 
 ## First LAN connection
 
@@ -412,7 +466,12 @@ that viewer only magnified the lost detail. Explicit width limits still win,
 source dimensions are never upscaled for encoding, and all existing dimension,
 pixel-count and payload safety limits remain. The first frame may use native
 source dimensions before the viewer reports its size, so very large roots can
-cost more at startup; set an explicit ceiling when needed.
+cost more at startup; set an explicit ceiling when needed. The viewer window
+itself opens at that frame's size shrunk to 90% of the local monitor under the
+pointer (aspect kept, never enlarged) and centred on it. A 5120x1440 desk viewed
+from a 2560x1600 laptop used to open a 5120-pixel window, mostly off-screen
+wherever the window manager did not tile it; it now opens at 2304x648, and the
+host narrows the stream to that size from the second frame on.
 
 The quality floor stays 40 so congested sessions can still shed detail. A
 higher frame/quality ceiling is not a promise to sustain that rate: two-frame

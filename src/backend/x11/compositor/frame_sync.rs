@@ -457,7 +457,7 @@ fn worker(
 ) -> Result<()> {
     use nix::poll::{PollFd, PollFlags, poll};
     use std::os::fd::AsFd;
-    let (conn, _) = x11rb::connect(None)?;
+    let (conn, _) = xbar_core::x11_connection::connect(None)?;
     let (root, owner) = authority;
     if !conn.setup().roots.iter().any(|screen| screen.root == root) {
         return Err("wrong X11 root".into());

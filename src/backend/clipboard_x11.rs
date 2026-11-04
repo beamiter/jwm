@@ -520,8 +520,8 @@ impl Watcher {
     /// Open a private connection, create the owner window, and start
     /// watching CLIPBOARD.
     fn new(display: Option<&str>) -> Result<Self, String> {
-        let (conn, screen_num) =
-            x11rb::connect(display).map_err(|error| format!("clipboard connect: {error}"))?;
+        let (conn, screen_num) = xbar_core::x11_connection::connect(display)
+            .map_err(|error| format!("clipboard connect: {error}"))?;
         let root = conn
             .setup()
             .roots

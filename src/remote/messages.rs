@@ -4,12 +4,14 @@
 use super::RemoteResult;
 use super::protocol::MessageKind;
 use super::x11_input::InputEvent;
+use super::x11_keymap::{KeymapTable, MAX_ENCODED_KEYMAP_LEN};
 use std::io;
 
 const APPLICATION_MAGIC: &[u8; 8] = b"JWMREM01";
-pub const APPLICATION_VERSION: u16 = 4;
+pub const APPLICATION_VERSION: u16 = 5;
 const SERVER_HELLO_LEN: usize = 11;
-const CLIENT_HELLO_LEN: usize = SERVER_HELLO_LEN + 32;
+/// Largest client hello: the shared prefix plus a full keymap table.
+pub const MAX_CLIENT_HELLO_LEN: usize = SERVER_HELLO_LEN + MAX_ENCODED_KEYMAP_LEN;
 const FLAG_POINTER: u8 = 1 << 0;
 const FLAG_KEYBOARD: u8 = 1 << 1;
 const FLAG_CLIPBOARD: u8 = 1 << 2;
@@ -31,11 +33,13 @@ pub const MAX_INPUT_BATCH_EVENTS: usize = 128;
 /// one count byte followed by 128 five-byte operations.
 pub const MAX_INPUT_BATCH_PAYLOAD_LEN: usize = 1 + MAX_INPUT_BATCH_EVENTS * POINTER_INPUT_LEN;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ClientHello {
     pub request_input: bool,
     pub request_clipboard: bool,
-    pub keymap_fingerprint: [u8; 32],
+    /// The viewer's keymap, empty for a view-only viewer. Version 5 replaced
+    /// a single whole-map digest with this per-keycode table.
+    pub keymap: KeymapTable,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -47,27 +51,29 @@ pub struct ServerHello {
 
 impl ClientHello {
     #[must_use]
-    pub fn encode(self) -> [u8; CLIENT_HELLO_LEN] {
-        let mut payload = [0_u8; CLIENT_HELLO_LEN];
+    pub fn encode(&self) -> Vec<u8> {
         let mut flags = if self.request_input { INPUT_FLAGS } else { 0 };
         if self.request_clipboard {
             flags |= FLAG_CLIPBOARD;
         }
-        payload[..SERVER_HELLO_LEN].copy_from_slice(&encode_hello(flags));
-        payload[SERVER_HELLO_LEN..].copy_from_slice(&self.keymap_fingerprint);
+        let mut payload = Vec::with_capacity(MAX_CLIENT_HELLO_LEN);
+        payload.extend_from_slice(&encode_hello(flags));
+        self.keymap.encode_into(&mut payload);
         payload
     }
 
     pub fn decode(payload: &[u8]) -> RemoteResult<Self> {
-        if payload.len() != CLIENT_HELLO_LEN {
+        if payload.len() < SERVER_HELLO_LEN || payload.len() > MAX_CLIENT_HELLO_LEN {
             return Err(invalid_data("client hello has an invalid length").into());
         }
+        // The version is checked before the keymap, so an older viewer is
+        // told its version is unsupported rather than that its table is bad.
         let flags = decode_hello(&payload[..SERVER_HELLO_LEN])?;
-        let keymap_fingerprint = payload[SERVER_HELLO_LEN..].try_into().unwrap();
+        let keymap = KeymapTable::decode(&payload[SERVER_HELLO_LEN..])?;
         Ok(Self {
             request_input: flags & INPUT_FLAGS != 0,
             request_clipboard: flags & FLAG_CLIPBOARD != 0,
-            keymap_fingerprint,
+            keymap,
         })
     }
 }
@@ -431,13 +437,13 @@ mod tests {
         let payload = ClientHello {
             request_input: true,
             request_clipboard: false,
-            keymap_fingerprint: [7; 32],
+            keymap: KeymapTable::empty(),
         }
         .encode();
         let decoded = ClientHello::decode(&payload).unwrap();
         assert!(decoded.request_input);
         assert!(!decoded.request_clipboard);
-        assert_eq!(decoded.keymap_fingerprint, [7; 32]);
+        assert!(decoded.keymap.is_empty());
 
         let mut future = payload;
         future[10] |= 0x80;
@@ -455,7 +461,7 @@ mod tests {
                 &ClientHello {
                     request_input,
                     request_clipboard,
-                    keymap_fingerprint: [0; 32],
+                    keymap: KeymapTable::empty(),
                 }
                 .encode(),
             )
@@ -486,28 +492,52 @@ mod tests {
     }
 
     #[test]
-    fn hello_uses_version_four_and_rejects_neighbouring_versions() {
+    fn a_viewer_keymap_fits_the_host_inbound_ceiling_and_round_trips() {
+        // A full table: every keycode from 8 to 255 bound.
+        let mut wire = vec![8, 248];
+        wire.extend([0; 32]);
+        for keycode in 0..248_u8 {
+            wire.extend([keycode, 1, 2]);
+        }
+        let keymap = KeymapTable::decode(&wire).unwrap();
+        let hello = ClientHello {
+            request_input: true,
+            request_clipboard: true,
+            keymap,
+        };
+        let payload = hello.encode();
+        assert_eq!(payload.len(), MAX_CLIENT_HELLO_LEN);
+        assert!(
+            payload.len() <= 1024,
+            "host reads at most 1 KiB before negotiation"
+        );
+        assert_eq!(ClientHello::decode(&payload).unwrap(), hello);
+        assert!(ClientHello::decode(&payload[..payload.len() - 1]).is_err());
+    }
+
+    #[test]
+    fn hello_uses_version_five_and_rejects_neighbouring_versions() {
         let payload = ServerHello {
             pointer_enabled: false,
             keyboard_enabled: false,
             clipboard_enabled: false,
         }
         .encode();
-        assert_eq!(&payload[8..10], &4_u16.to_be_bytes());
+        assert_eq!(&payload[8..10], &5_u16.to_be_bytes());
 
-        // Version 3 carried whole-frame JPEGs; version 4 carries dirty-tile
-        // deltas on the same message kind, so an older peer must fail the
-        // handshake rather than misread the first frame body.
-        let mut version_three = payload;
-        version_three[8..10].copy_from_slice(&3_u16.to_be_bytes());
-        let error = ServerHello::decode(&version_three).unwrap_err();
+        // Version 4 sent one digest of the whole keymap where version 5
+        // sends a per-keycode table, so a version-4 hello would be misread
+        // as a malformed table. It must fail on its version instead.
+        let mut version_four = payload;
+        version_four[8..10].copy_from_slice(&4_u16.to_be_bytes());
+        let error = ServerHello::decode(&version_four).unwrap_err();
         assert!(
             error
                 .to_string()
-                .contains("application version 3; expected 4")
+                .contains("application version 4; expected 5")
         );
 
-        for rejected in [0_u16, 2, 5, u16::MAX] {
+        for rejected in [0_u16, 2, 3, 6, u16::MAX] {
             let mut other = payload;
             other[8..10].copy_from_slice(&rejected.to_be_bytes());
             assert!(

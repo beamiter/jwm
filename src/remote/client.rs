@@ -8,13 +8,13 @@ use super::messages::{
     encode_frame_ack, encode_input_batch_into, encode_viewport,
 };
 use super::protocol::{
-    MAX_PAYLOAD_LEN, MessageKind, PayloadBufferRetention, SessionReader, SessionWriter,
-    client_handshake,
+    MAX_PAYLOAD_LEN, MessageKind, PayloadBufferRetention, ProtocolError, SessionReader,
+    SessionWriter, client_handshake,
 };
 use super::tile::TileDecoder;
 use super::usability::{ClientStage, failure_hint, session_mode};
 use super::x11_input::InputEvent;
-use super::x11_keymap::fingerprint_display;
+use super::x11_keymap::{KeymapTable, read_display};
 use super::x11_viewer::{Viewer, ViewerEvent, validate_escape_key};
 use super::{RemoteError, RemoteResult, VIDEO_FRAME_IDLE_TIMEOUT};
 use crate::backend::clipboard_x11::{Clipboard, ClipboardCaptures, ClipboardSetter};
@@ -74,9 +74,30 @@ impl std::fmt::Display for ClientFailure {
             f,
             "{:?}: {}\n{}",
             self.stage,
-            self.cause,
+            describe_cause(&self.cause),
             failure_hint(self.stage, kind)
         )
+    }
+}
+
+/// The cause as a person should read it.
+///
+/// A peer that vanished mid-record surfaces as Rust's `failed to fill whole
+/// buffer`, which reads like a bug in the viewer. A host that stops on purpose
+/// now says goodbye first, so a bare end of stream means it did not get to.
+fn describe_cause(cause: &RemoteError) -> String {
+    let vanished = match cause.downcast_ref::<ProtocolError>() {
+        Some(ProtocolError::Io(error)) => error.kind() == io::ErrorKind::UnexpectedEof,
+        _ => cause
+            .downcast_ref::<io::Error>()
+            .is_some_and(|error| error.kind() == io::ErrorKind::UnexpectedEof),
+    };
+    if vanished {
+        "the connection closed without a goodbye from the host: its process ended or the \
+         network dropped"
+            .to_owned()
+    } else {
+        cause.to_string()
     }
 }
 
@@ -103,10 +124,10 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
     validate_escape_key(&options.escape_key)?;
     let key = load_key_file(&options.key_file)?;
     let request_input = !options.view_only;
-    let keymap_fingerprint = if request_input {
-        fingerprint_display(options.display.as_deref())?
+    let keymap = if request_input {
+        read_display(options.display.as_deref())?
     } else {
-        [0; 32]
+        KeymapTable::empty()
     };
     *stage = ClientStage::Connect;
     eprintln!("jwm-remote: connecting to {}", options.address);
@@ -118,7 +139,7 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
         &key,
         request_input,
         options.clipboard,
-        keymap_fingerprint,
+        &keymap,
         HANDSHAKE_TIMEOUT,
     )?;
     *stage = ClientStage::FirstFrame;
@@ -126,7 +147,10 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
     if request_input && !(hello.pointer_enabled || hello.keyboard_enabled) {
         eprintln!("jwm-remote: host accepted a view-only session; input will not be forwarded");
     } else if request_input && !hello.keyboard_enabled {
-        eprintln!("jwm-remote: X11 keymaps differ; pointer works but keyboard is disabled");
+        eprintln!(
+            "jwm-remote: X11 keymaps differ; pointer works but keyboard is disabled \
+             (the host terminal names the keys that differ)"
+        );
     }
 
     // Its own X connection and thread, so a slow selection owner on either
@@ -195,7 +219,7 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
         initial_height,
         hello.pointer_enabled,
         hello.keyboard_enabled,
-        hello.keyboard_enabled.then_some(keymap_fingerprint),
+        hello.keyboard_enabled.then_some(keymap),
         options.grab_input && (hello.pointer_enabled || hello.keyboard_enabled),
         &options.escape_key,
     )?;
@@ -289,7 +313,7 @@ fn negotiate_session(
     key: &[u8],
     request_input: bool,
     request_clipboard: bool,
-    keymap_fingerprint: [u8; 32],
+    keymap: &KeymapTable,
     negotiation_timeout: Duration,
 ) -> RemoteResult<(
     SessionReader<TcpStream>,
@@ -302,7 +326,8 @@ fn negotiate_session(
     // Per-call socket timeouts can be extended indefinitely by a peer that
     // drips bytes.  Bound authentication and the versioned HelloAck together.
     let mut negotiation_deadline = TcpStreamDeadline::arm(&stream, negotiation_timeout)?;
-    let session_keys = client_handshake(&mut stream, key, rand::random())?;
+    let session_keys = client_handshake(&mut stream, key, rand::random())
+        .map_err(|error| explain_negotiation_eof(error, false))?;
 
     let reader_stream = stream.try_clone()?;
     let (receive_key, send_key) = session_keys.into_client();
@@ -315,12 +340,14 @@ fn negotiate_session(
         &ClientHello {
             request_input,
             request_clipboard,
-            keymap_fingerprint,
+            keymap: keymap.clone(),
         }
         .encode(),
     )?;
     writer.flush()?;
-    let (kind, payload) = reader.read_message()?;
+    let (kind, payload) = reader
+        .read_message()
+        .map_err(|error| explain_negotiation_eof(error, true))?;
     if kind == MessageKind::Close {
         // The host declined the session and said why. Surfacing its reason is
         // the difference between "another viewer is already connected" and a
@@ -345,6 +372,29 @@ fn negotiate_session(
         .set_read_timeout(Some(FIRST_FRAME_TIMEOUT))?;
     writer.get_ref().set_write_timeout(Some(WRITE_TIMEOUT))?;
     Ok((reader, writer, hello))
+}
+
+/// Say what a hang-up during negotiation most likely means.
+///
+/// The host closes without a word on a wrong key, and Rust words that as
+/// `failed to fill whole buffer`, which reads like a local bug. Where the
+/// connection was cut says more than the error does: before the host proved
+/// it holds the key, the two key files most likely differ; after, the key is
+/// right and something on the host's side ended the session.
+fn explain_negotiation_eof(error: ProtocolError, host_proved_key: bool) -> RemoteError {
+    match &error {
+        ProtocolError::Io(io_error) if io_error.kind() == io::ErrorKind::UnexpectedEof => {
+            let message = if host_proved_key {
+                "host accepted the key but closed before acknowledging the session; \
+                 its terminal says why (an older jwm-remote host also does this)"
+            } else {
+                "host closed the connection during authentication; the two key files \
+                 most likely differ (compare `sha256sum` of the key on both machines)"
+            };
+            io::Error::new(io::ErrorKind::ConnectionAborted, message).into()
+        }
+        _ => error.into(),
+    }
 }
 
 /// Largest record accepted before the host acknowledges the session.
@@ -1176,7 +1226,7 @@ impl ReceiveCompletion {
     }
 
     fn finish(&mut self, result: RemoteResult<()>) {
-        let error = result.err().map(|error| error.to_string());
+        let error = result.err().map(|error| describe_cause(&error));
         self.publish_terminal(error);
     }
 
@@ -1254,7 +1304,19 @@ fn receive_frames(
                 // slot is unlocked before the stale frame reaches Drop.
                 drop(replaced);
             }
-            MessageKind::Close => break Ok(()),
+            MessageKind::Close => {
+                // A host that stops deliberately says so. Its reason becomes
+                // the session's closing message, instead of a generic one.
+                let reason = refusal_reason_for_display(&payload);
+                if reason.trim().is_empty() {
+                    break Ok(());
+                }
+                break Err(io::Error::new(
+                    io::ErrorKind::ConnectionAborted,
+                    format!("host closed the session: {reason}"),
+                )
+                .into());
+            }
             MessageKind::FrameAck => {
                 return Err(invalid_data("host sent an unexpected frame acknowledgement").into());
             }
@@ -1508,6 +1570,33 @@ mod tests {
                 .unwrap()
                 < body.find("loop_result?;").unwrap()
         );
+    }
+
+    #[test]
+    fn a_vanished_host_is_described_rather_than_quoted_from_std() {
+        let eof: RemoteError = Box::new(ProtocolError::Io(io::Error::from(
+            io::ErrorKind::UnexpectedEof,
+        )));
+        let shown = describe_cause(&eof);
+        assert!(shown.contains("without a goodbye"), "{shown}");
+        let other: RemoteError = Box::new(ProtocolError::AuthenticationFailed);
+        assert_eq!(describe_cause(&other), "remote peer authentication failed");
+    }
+
+    #[test]
+    fn a_negotiation_hang_up_names_its_likely_cause() {
+        let eof = || ProtocolError::Io(io::Error::from(io::ErrorKind::UnexpectedEof));
+        let during_auth = explain_negotiation_eof(eof(), false).to_string();
+        assert!(
+            during_auth.contains("key files most likely differ"),
+            "{during_auth}"
+        );
+        let after_auth = explain_negotiation_eof(eof(), true).to_string();
+        assert!(after_auth.contains("accepted the key"), "{after_auth}");
+        assert!(!after_auth.contains("fill whole buffer"));
+        // Anything other than a hang-up keeps its own, more specific message.
+        let other = explain_negotiation_eof(ProtocolError::AuthenticationFailed, false);
+        assert_eq!(other.to_string(), "remote peer authentication failed");
     }
 
     #[test]
@@ -2452,7 +2541,7 @@ mod tests {
             &TEST_PSK,
             false,
             false,
-            [0; 32],
+            &KeymapTable::empty(),
             Duration::from_millis(80),
         );
         assert!(result.is_err());
@@ -2501,7 +2590,7 @@ mod tests {
             &TEST_PSK,
             false,
             false,
-            [0; 32],
+            &KeymapTable::empty(),
             Duration::from_millis(100),
         );
         assert!(result.is_err());
@@ -2547,7 +2636,7 @@ mod tests {
             &TEST_PSK,
             false,
             false,
-            [0; 32],
+            &KeymapTable::empty(),
             Duration::from_secs(5),
         );
         server.join().unwrap();
@@ -2596,7 +2685,7 @@ mod tests {
                 &TEST_PSK,
                 false,
                 request_clipboard,
-                [0; 32],
+                &KeymapTable::empty(),
                 Duration::from_secs(5),
             );
             server.join().unwrap();
@@ -2653,7 +2742,7 @@ mod tests {
             &TEST_PSK,
             false,
             false,
-            [0; 32],
+            &KeymapTable::empty(),
             Duration::from_millis(80),
         )
         .unwrap();

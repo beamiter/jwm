@@ -132,7 +132,7 @@ pub struct InputInjector {
 impl InputInjector {
     /// Connect to `display` (or `$DISPLAY` when it is `None`) and verify XTEST.
     pub fn connect(display: Option<&str>) -> Result<Self, InputError> {
-        let (conn, screen_num) = x11rb::connect(display)?;
+        let (conn, screen_num) = xbar_core::x11_connection::connect(display)?;
         let setup = conn.setup();
         let screen = setup
             .roots
@@ -162,8 +162,8 @@ impl InputInjector {
         })
     }
 
-    pub fn keymap_fingerprint(&self) -> super::RemoteResult<[u8; 32]> {
-        super::x11_keymap::fingerprint(&self.conn)
+    pub fn keymap(&self) -> super::RemoteResult<super::x11_keymap::KeymapTable> {
+        super::x11_keymap::KeymapTable::read(&self.conn)
     }
 
     /// Inject one operation and flush it to the X server.

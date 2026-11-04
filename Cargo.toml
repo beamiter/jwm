@@ -106,7 +106,7 @@ backend-x11rb = ["x11-backends", "dep:x11rb"]
 # JWM-to-JWM remote viewing/control for X11 sessions.  The helper opens an
 # independent x11rb connection, so it works while JWM itself uses either the
 # x11rb or xcb backend.
-remote-x11 = ["dep:x11rb", "x11rb/image", "dep:sha2", "dep:chacha20poly1305"]
+remote-x11 = ["dep:x11rb", "x11rb/image", "dep:sha2", "dep:chacha20poly1305", "xbar_core/x11-connection"]
 # XCB transport + shared X11 compositor.
 backend-xcb = ["x11-backends", "dep:xcb"]
 # Direct Wayland DRM/KMS session backend.

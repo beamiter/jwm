@@ -5,6 +5,29 @@ monorepo use independent Semantic Versions.
 
 ## [Unreleased]
 
+### Remote control between two real desktops
+
+Found by driving `jwm-remote` from a laptop to a dual-monitor desktop over
+the LAN. **Application protocol 5: update `jwm-remote` on both machines.**
+
+- Keyboard control no longer drops to pointer-only between desktops with the
+  same layout. Keymaps are compared key by key: keys bound on both sides must
+  agree, keys bound on only one side (such as spare keycodes a text-typing
+  tool rebound and never restored) are ignored. The host names any keycodes
+  that differ.
+- The helper falls back to the X server's abstract socket when
+  `/tmp/.X11-unix/X<n>` has been deleted, as libxcb clients do. Previously
+  every viewer was refused with a bare "Connection refused". JWM's clipboard
+  watcher and compositor frame-sync connection use the same fallback.
+- The host opens its display before listening and reports what it shares;
+  a viewer whose session cannot start is told why.
+- The viewer window opens fitted to the local monitor instead of at the
+  remote root's native size (5120 pixels wide for a dual-monitor host).
+- Clearer endings: a wrong key, an older host, a busy host, a stopped host
+  and a killed host each get their own message instead of
+  `failed to fill whole buffer`. A stopping host says goodbye to its viewer,
+  and a host tells an older viewer which protocol version it speaks.
+
 ### Shared desktop sidebars and the Xilem default
 
 - JWM supervises an independent `jwm-shell` process for common left, right and

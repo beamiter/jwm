@@ -281,7 +281,7 @@ pub struct Viewer {
     forward_input: bool,
     pointer_enabled: bool,
     forward_keyboard: bool,
-    verified_keymap: Option<[u8; 32]>,
+    verified_keymap: Option<super::x11_keymap::KeymapTable>,
     grabbed: bool,
     escape_keycodes: Vec<u8>,
     escape_keysym: u32,
@@ -294,6 +294,87 @@ pub struct Viewer {
     close_reported: bool,
 }
 
+/// Share of the local monitor a new viewer window may ask for, per axis.
+const INITIAL_WINDOW_PERCENT: u32 = 90;
+
+/// Size a new viewer window: the first frame, shrunk to fit inside
+/// `INITIAL_WINDOW_PERCENT` of `monitor` with its aspect kept, never enlarged.
+fn fit_initial_window(frame: (u16, u16), monitor: (u16, u16)) -> (u16, u16) {
+    let (frame_width, frame_height) = (u64::from(frame.0), u64::from(frame.1));
+    let bound_width = u64::from(monitor.0) * u64::from(INITIAL_WINDOW_PERCENT) / 100;
+    let bound_height = u64::from(monitor.1) * u64::from(INITIAL_WINDOW_PERCENT) / 100;
+    if bound_width == 0
+        || bound_height == 0
+        || frame_width == 0
+        || frame_height == 0
+        || (frame_width <= bound_width && frame_height <= bound_height)
+    {
+        return frame;
+    }
+    // Whichever axis binds harder sets the scale.
+    let (width, height) = if bound_width * frame_height <= bound_height * frame_width {
+        (bound_width, frame_height * bound_width / frame_width)
+    } else {
+        (frame_width * bound_height / frame_height, bound_height)
+    };
+    (
+        u16::try_from(width.max(1)).unwrap_or(frame.0),
+        u16::try_from(height.max(1)).unwrap_or(frame.1),
+    )
+}
+
+/// Origin that centres a `size` window on `monitor` (`x, y, width, height`).
+fn centered_origin(monitor: (i16, i16, u16, u16), size: (u16, u16)) -> (i16, i16) {
+    let offset = |origin: i16, extent: u16, length: u16| {
+        let centred = i32::from(origin) + (i32::from(extent) - i32::from(length)).max(0) / 2;
+        i16::try_from(centred).unwrap_or(origin)
+    };
+    (
+        offset(monitor.0, monitor.2, size.0),
+        offset(monitor.1, monitor.3, size.1),
+    )
+}
+
+/// The local monitor a new viewer should fit: the one under the pointer,
+/// else the primary, else the whole screen. Best effort -- any failure here
+/// only costs the old full-size window.
+fn placement_monitor(
+    conn: &RustConnection,
+    root: Window,
+    screen_size: (u16, u16),
+) -> (i16, i16, u16, u16) {
+    use x11rb::protocol::randr::ConnectionExt as _;
+    let whole_screen = (0, 0, screen_size.0, screen_size.1);
+    let Some(monitors) = conn
+        .randr_get_monitors(root, true)
+        .ok()
+        .and_then(|cookie| cookie.reply().ok())
+    else {
+        return whole_screen;
+    };
+    let pointer = conn
+        .query_pointer(root)
+        .ok()
+        .and_then(|cookie| cookie.reply().ok())
+        .map(|reply| (i32::from(reply.root_x), i32::from(reply.root_y)));
+    let contains = |monitor: &&x11rb::protocol::randr::MonitorInfo, (x, y): (i32, i32)| {
+        let left = i32::from(monitor.x);
+        let top = i32::from(monitor.y);
+        x >= left
+            && y >= top
+            && x < left + i32::from(monitor.width)
+            && y < top + i32::from(monitor.height)
+    };
+    monitors
+        .monitors
+        .iter()
+        .filter(|monitor| monitor.width > 0 && monitor.height > 0)
+        .find(|monitor| pointer.is_some_and(|point| contains(monitor, point)))
+        .or_else(|| monitors.monitors.iter().find(|monitor| monitor.primary))
+        .map(|monitor| (monitor.x, monitor.y, monitor.width, monitor.height))
+        .unwrap_or(whole_screen)
+}
+
 impl Viewer {
     /// Open an X11 window on `display`, or on `$DISPLAY` when it is `None`.
     pub fn connect(
@@ -302,7 +383,7 @@ impl Viewer {
         initial_height: u16,
         pointer_enabled: bool,
         forward_keyboard: bool,
-        verified_keymap: Option<[u8; 32]>,
+        verified_keymap: Option<super::x11_keymap::KeymapTable>,
         grab_input: bool,
         escape_key: &str,
     ) -> RemoteResult<Self> {
@@ -311,18 +392,27 @@ impl Viewer {
             return Err(invalid_input("remote viewer dimensions must be nonzero").into());
         }
 
-        let (conn, screen_num) = x11rb::connect(display)?;
+        let (conn, screen_num) = xbar_core::x11_connection::connect(display)?;
         if forward_keyboard {
             let expected = verified_keymap
+                .as_ref()
                 .ok_or_else(|| invalid_data("keyboard input has no verified X11 keymap"))?;
-            if super::x11_keymap::fingerprint(&conn)? != expected {
+            if !super::x11_keymap::KeymapTable::read(&conn)?.still_covers(expected) {
                 return Err(invalid_data(
                     "local X11 keymap changed during connection; reconnect to negotiate input",
                 )
                 .into());
             }
         }
-        let (root, root_depth, root_visual, black_pixel, pixel_layout, native_pixel_writer) = {
+        let (
+            root,
+            root_depth,
+            root_visual,
+            black_pixel,
+            pixel_layout,
+            native_pixel_writer,
+            screen_size,
+        ) = {
             let screen = conn
                 .setup()
                 .roots
@@ -340,8 +430,18 @@ impl Viewer {
                 screen.black_pixel,
                 PixelLayout::from_visual_type(visual)?,
                 select_native_pixel_writer(conn.setup(), depth, visual),
+                (screen.width_in_pixels, screen.height_in_pixels),
             )
         };
+        // The first frame arrives at the host's native size, before this
+        // window has reported one. A 5120x1440 desk opened 5120 pixels wide on
+        // a 2560 laptop, mostly off-screen wherever the window manager did
+        // not tile it. Ask for a window that fits the local monitor instead;
+        // the viewport report that follows narrows the stream to match.
+        let monitor = placement_monitor(&conn, root, screen_size);
+        let (initial_width, initial_height) =
+            fit_initial_window((initial_width, initial_height), (monitor.2, monitor.3));
+        let (window_x, window_y) = centered_origin(monitor, (initial_width, initial_height));
         // MIT-SHM requires QueryVersion to complete before any other request
         // from the extension. Segment allocation remains lazy until a frame is
         // actually uploaded.
@@ -380,8 +480,8 @@ impl Viewer {
             root_depth,
             window,
             root,
-            0,
-            0,
+            window_x,
+            window_y,
             initial_width,
             initial_height,
             0,
@@ -643,11 +743,13 @@ impl Viewer {
                 }
                 Event::MappingNotify(event) if event.request != Mapping::POINTER => {
                     if self.forward_keyboard {
-                        let expected = self.verified_keymap.ok_or_else(|| {
+                        let expected = self.verified_keymap.as_ref().ok_or_else(|| {
                             invalid_data("keyboard input has no verified X11 keymap")
                         })?;
-                        let current = super::x11_keymap::fingerprint(&self.conn)?;
-                        if current != expected {
+                        // A spare keycode rebound by a typing tool is not
+                        // one the host verified, so it does not end input.
+                        let current = super::x11_keymap::KeymapTable::read(&self.conn)?;
+                        if !current.still_covers(expected) {
                             return Err(invalid_data(
                                 "local X11 keymap changed; reconnect to re-verify keyboard input",
                             )
@@ -2727,6 +2829,31 @@ mod tests {
             bits_per_pixel: 32,
             scanline_pad: 32,
         }
+    }
+
+    #[test]
+    fn a_wide_host_opens_a_window_that_fits_the_local_monitor() {
+        // Dual 2560x1440 desktop viewed from a 2560x1600 laptop.
+        assert_eq!(fit_initial_window((5120, 1440), (2560, 1600)), (2304, 648));
+        // A tall stacked host binds on height instead.
+        assert_eq!(fit_initial_window((2560, 2880), (1920, 1080)), (864, 972));
+        // A frame that already fits is never enlarged.
+        assert_eq!(fit_initial_window((1280, 720), (2560, 1600)), (1280, 720));
+        // No usable monitor keeps the old behaviour.
+        assert_eq!(fit_initial_window((5120, 1440), (0, 0)), (5120, 1440));
+    }
+
+    #[test]
+    fn a_new_viewer_is_centred_on_its_monitor() {
+        assert_eq!(
+            centered_origin((2560, 0, 2560, 1600), (2304, 648)),
+            (2688, 476)
+        );
+        // A window larger than the monitor starts at its corner.
+        assert_eq!(
+            centered_origin((-1920, 0, 1920, 1080), (4000, 2000)),
+            (-1920, 0)
+        );
     }
 
     #[test]

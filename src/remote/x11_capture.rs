@@ -968,7 +968,7 @@ impl X11Capture {
         max_width: u16,
         area: CaptureArea,
     ) -> RemoteResult<Self> {
-        let (conn, screen_num) = x11rb::connect(display)?;
+        let (conn, screen_num) = open_display(display)?;
         let screen = conn
             .setup()
             .roots
@@ -4097,15 +4097,27 @@ fn translate_cursor(position: Option<(i32, i32)>, origin: (i16, i16)) -> Option<
     position.map(|(x, y)| (x - i32::from(origin.0), y - i32::from(origin.1)))
 }
 
-/// Check that the requested area exists, before the host starts listening.
+/// Open `display` (or `$DISPLAY`), naming the display in any error.
 ///
-/// Capture is per-session, so without this a typo in `--monitor` would print
-/// a healthy "listening on ..." and only fail when somebody finally connected.
+/// x11rb reports a missing server as a bare `Connection refused`, which in a
+/// host log reads like a network failure rather than a display problem.
+pub(crate) fn open_display(display: Option<&str>) -> RemoteResult<(RustConnection, usize)> {
+    xbar_core::x11_connection::connect(display).map_err(|error| {
+        let name = display
+            .map(str::to_owned)
+            .or_else(|| std::env::var("DISPLAY").ok())
+            .unwrap_or_default();
+        io::Error::other(format!("cannot open X11 display {name:?}: {error}")).into()
+    })
+}
+
+/// Check the display and the requested area, before the host starts listening.
+///
+/// Capture is per-session, so without this a typo in `--monitor` -- or a
+/// display the helper cannot open at all -- would print a healthy
+/// "listening on ..." and only fail when somebody finally connected.
 pub fn validate_capture_area(display: Option<&str>, area: &CaptureArea) -> RemoteResult<()> {
-    if *area == CaptureArea::Root {
-        return Ok(());
-    }
-    let (conn, screen_num) = x11rb::connect(display)?;
+    let (conn, screen_num) = open_display(display)?;
     let root = conn
         .setup()
         .roots
@@ -4113,12 +4125,15 @@ pub fn validate_capture_area(display: Option<&str>, area: &CaptureArea) -> Remot
         .ok_or_else(|| invalid_data("X11 selected an unavailable screen"))?
         .root;
     let geometry = conn.get_geometry(root)?.reply()?;
-    let region = resolve_capture_area(&conn, root, area, geometry.width, geometry.height)?;
-    if let Some(region) = region {
-        eprintln!(
+    match resolve_capture_area(&conn, root, area, geometry.width, geometry.height)? {
+        Some(region) => eprintln!(
             "jwm-remote: sharing {}x{} at +{}+{} of the {}x{} root",
             region.width, region.height, region.x, region.y, geometry.width, geometry.height
-        );
+        ),
+        None => eprintln!(
+            "jwm-remote: sharing the whole {}x{} root",
+            geometry.width, geometry.height
+        ),
     }
     Ok(())
 }
@@ -4201,6 +4216,41 @@ fn invalid_data(message: impl Into<String>) -> io::Error {
 mod tests {
     use super::*;
     use std::cell::Cell;
+
+    #[test]
+    fn an_unreachable_display_is_named_rather_than_reported_as_a_network_error() {
+        // No server listens on display 987 by any transport.
+        let Err(error) = open_display(Some(":987")) else {
+            panic!("display :987 unexpectedly opened");
+        };
+        let shown = error.to_string();
+        assert!(
+            shown.starts_with("cannot open X11 display \":987\": "),
+            "{shown}"
+        );
+    }
+
+    /// A stale-socket cleanup can delete `/tmp/.X11-unix/X<n>` while the X
+    /// server keeps its abstract listener. libxcb clients carry on; a host
+    /// built on bare `x11rb::connect` refused every viewer.
+    #[cfg(any(
+        feature = "backend-x11rb",
+        feature = "backend-xcb",
+        feature = "wayland-backends"
+    ))]
+    #[test]
+    fn the_host_still_opens_a_display_whose_socket_file_was_deleted() {
+        let x11 = crate::backend::clipboard_offer::IsolatedXvfb::acquire();
+        let number = x11.name().trim_start_matches(':');
+        std::fs::remove_file(format!("/tmp/.X11-unix/X{number}")).unwrap();
+        assert!(
+            x11rb::connect(Some(x11.name())).is_err(),
+            "x11rb alone needs the socket file"
+        );
+        let (conn, screen) = open_display(Some(x11.name())).unwrap();
+        assert!(conn.setup().roots.len() > screen);
+        validate_capture_area(Some(x11.name()), &CaptureArea::Root).unwrap();
+    }
 
     #[test]
     fn scoped_recovery_keeps_selected_dimensions_separate_from_root() {

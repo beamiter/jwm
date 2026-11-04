@@ -255,9 +255,19 @@ pub fn failure_hint(stage: ClientStage, kind: Option<io::ErrorKind>) -> &'static
             }
             _ => "Check HOST[:PORT] and local name resolution, then the host listener and route.",
         },
-        ClientStage::Negotiate => {
-            "Check the host's refusal reason, that both helpers are the same version, and that the intended private key was copied securely. Do not bypass authentication; another viewer may already be connected."
-        }
+        ClientStage::Negotiate => match kind {
+            // The host authenticated this viewer and said why it declined.
+            Some(io::ErrorKind::ConnectionRefused) => {
+                "The host declined with the reason above; nothing was retried or downgraded. If another viewer is connected, close it first."
+            }
+            // A hang-up the viewer has already explained by where it happened.
+            Some(io::ErrorKind::ConnectionAborted) => {
+                "The likely cause is named above; the host terminal has the details. Do not bypass authentication."
+            }
+            _ => {
+                "Check the host's refusal reason, that both helpers are the same version, and that the intended private key was copied securely. Do not bypass authentication; another viewer may already be connected."
+            }
+        },
         ClientStage::FirstFrame => {
             "Authentication completed, but the first frame was not ready. Check host capture errors and the reported receive/decode failure."
         }
@@ -472,6 +482,11 @@ mod tests {
         let refused = Some(io::ErrorKind::ConnectionRefused);
         assert!(failure_hint(ClientStage::Connect, refused).contains("listener"));
         assert!(failure_hint(ClientStage::Negotiate, refused).contains("another viewer"));
+        // Once the host has given a reason, version/key advice is noise.
+        assert!(!failure_hint(ClientStage::Negotiate, refused).contains("version"));
+        let aborted = Some(io::ErrorKind::ConnectionAborted);
+        assert!(failure_hint(ClientStage::Negotiate, aborted).contains("host terminal"));
+        assert!(failure_hint(ClientStage::Negotiate, None).contains("same version"));
         assert!(!failure_hint(ClientStage::FirstFrame, None).contains("connected"));
         assert!(failure_hint(ClientStage::Session, None).contains("verify the host identity"));
     }

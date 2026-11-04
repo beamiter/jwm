@@ -19,6 +19,7 @@ use super::x11_capture::{
     validate_capture_area,
 };
 use super::x11_input::{InputArea, InputInjector};
+use super::x11_keymap::{KeymapMatch, KeymapTable};
 use crate::backend::clipboard_x11::{Clipboard, ClipboardCaptures, ClipboardSetter};
 use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 use signal_hook::consts::{SIGINT, SIGTERM};
@@ -64,6 +65,16 @@ const MAX_INBOUND_CLIPBOARD_PAYLOAD_LEN: usize = MAX_CLIPBOARD_BYTES + 1024;
 const CLIPBOARD_POLL_INTERVAL: Duration = Duration::from_millis(250);
 /// Reason sent to a second viewer while one is already connected.
 const BUSY_REASON: &str = "another viewer is already connected to this host";
+/// Reason sent to the viewer when the host is asked to stop.
+const HOST_STOPPING_REASON: &str = "the host stopped sharing its desktop";
+/// Budget for that one goodbye record. A peer too slow to take a few dozen
+/// bytes must not hold up Ctrl+C; it then sees the connection drop instead.
+const GOODBYE_WRITE_DEADLINE: Duration = Duration::from_millis(250);
+/// Longest setup-failure reason sent to an authenticated viewer, in bytes.
+///
+/// The viewer accepts at most 1 KiB before its session is acknowledged and
+/// shows at most 256 bytes of a refusal, so the host trims first.
+const MAX_SETUP_REASON_BYTES: usize = 240;
 const ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(25);
 /// Unauthenticated handshakes allowed to run at once.
 ///
@@ -1580,7 +1591,7 @@ where
                 let mut peer_session = match authenticated {
                     Ok(peer_session) => peer_session,
                     Err(error) => {
-                        eprintln!("jwm-remote: {peer} did not authenticate: {error}");
+                        eprintln!("jwm-remote: {peer} was not admitted: {error}");
                         return;
                     }
                 };
@@ -1665,7 +1676,7 @@ fn authenticate_peer(mut stream: TcpStream, key: &[u8]) -> RemoteResult<Authenti
     let (receive_key, send_key) = session_keys.into_server();
     let mut reader = SessionReader::new(reader_stream, receive_key);
     reader.set_max_payload_len(MAX_INBOUND_PAYLOAD_LEN);
-    let writer = SessionWriter::new(DeadlineWriter::new(stream, WRITE_TIMEOUT), send_key);
+    let mut writer = SessionWriter::new(DeadlineWriter::new(stream, WRITE_TIMEOUT), send_key);
 
     let (kind, hello_payload) = reader.read_message()?;
     if kind != MessageKind::Hello {
@@ -1673,7 +1684,19 @@ fn authenticate_peer(mut stream: TcpStream, key: &[u8]) -> RemoteResult<Authenti
             invalid_data("first authenticated client message must negotiate the session").into(),
         );
     }
-    let hello = ClientHello::decode(&hello_payload)?;
+    let hello = match ClientHello::decode(&hello_payload) {
+        Ok(hello) => hello,
+        Err(error) => {
+            // Usually a viewer from another release. It holds the key, and
+            // every release prints a refusal reason, so say which version
+            // this host speaks rather than hanging up on it.
+            decline_session(
+                &mut writer,
+                &format!("{error}; update jwm-remote on both machines together"),
+            );
+            return Err(error);
+        }
+    };
     handshake_deadline.cancel();
     Ok(AuthenticatedPeer {
         reader,
@@ -1696,12 +1719,24 @@ fn serve_authenticated(
     // request is consent. Sending clipboard records to a peer that asked for
     // none would be a protocol violation on arrival.
     let clipboard_enabled = options.allow_clipboard && hello.request_clipboard;
-    let mut capture = X11Capture::connect(
+    let mut capture = match X11Capture::connect(
         options.display.as_deref(),
         options.capture_source,
         options.max_width,
         options.capture_area.clone(),
-    )?;
+    ) {
+        Ok(capture) => capture,
+        Err(error) => {
+            // Dropping the socket here left the viewer with a bare
+            // end-of-file and a hint about keys and versions. It has proved
+            // it holds the key, so it may learn why the host cannot serve it.
+            decline_session(
+                &mut writer,
+                &format!("host cannot capture its display: {error}"),
+            );
+            return Err(error);
+        }
+    };
     // Injected pointer coordinates arrive in shared-area space; XTEST wants
     // root coordinates. Resolved once here rather than per event.
     let input_area = capture.input_area();
@@ -1710,16 +1745,19 @@ fn serve_authenticated(
     let injector = if options.allow_input && hello.request_input {
         match InputInjector::connect(options.display.as_deref()) {
             Ok(injector) => {
-                match injector.keymap_fingerprint() {
-                    Ok(fingerprint) if fingerprint == hello.keymap_fingerprint => {
-                        keyboard_enabled = true;
-                        verified_keymap = Some(fingerprint);
-                    }
-                    Ok(_) => {
-                        eprintln!(
-                            "jwm-remote: peer X11 keymap differs; keyboard disabled, pointer remains enabled"
-                        );
-                    }
+                match injector.keymap() {
+                    Ok(host_keymap) => match hello.keymap.compare(&host_keymap) {
+                        KeymapMatch::Compatible => {
+                            keyboard_enabled = true;
+                            // Mid-session checks compare the host's map
+                            // against the viewer's, as negotiated.
+                            verified_keymap = Some(hello.keymap.clone());
+                        }
+                        mismatch => eprintln!(
+                            "jwm-remote: peer X11 keymap differs ({mismatch}); keyboard disabled, \
+                             pointer remains enabled"
+                        ),
+                    },
                     Err(error) => {
                         eprintln!(
                             "jwm-remote: could not verify the host X11 keymap; keyboard disabled: {error}"
@@ -1857,7 +1895,11 @@ fn serve_authenticated(
     match first_stop.cause() {
         StopCause::Input => input_result,
         StopCause::Graceful => {
-            if let Err(error) = input_result {
+            // Shutting the socket down is what ends the input reader, so the
+            // end of stream it reports is the expected outcome, not news.
+            if let Err(error) = input_result
+                && !is_end_of_stream(&error)
+            {
                 eprintln!("jwm-remote: input receiver stopped during shutdown: {error}");
             }
             stream_result
@@ -1873,6 +1915,43 @@ fn serve_authenticated(
             stream_result
         }
     }
+}
+
+fn is_end_of_stream(error: &super::RemoteError) -> bool {
+    match error.downcast_ref::<ProtocolError>() {
+        Some(ProtocolError::Io(error)) => error.kind() == io::ErrorKind::UnexpectedEof,
+        _ => error
+            .downcast_ref::<io::Error>()
+            .is_some_and(|error| error.kind() == io::ErrorKind::UnexpectedEof),
+    }
+}
+
+/// Tell the viewer the host is stopping on purpose, best effort.
+///
+/// Skipped while the video sender holds the writer mid-record, rather than
+/// waiting behind a write that may itself be stuck on a slow peer.
+fn say_goodbye<W: std::io::Write + SetWriteTimeout>(
+    writer: &Mutex<SessionWriter<DeadlineWriter<W>>>,
+) {
+    if let Ok(mut writer) = writer.try_lock() {
+        let _ = write_session_record(
+            &mut writer,
+            MessageKind::Close,
+            HOST_STOPPING_REASON.as_bytes(),
+            GOODBYE_WRITE_DEADLINE,
+        );
+    }
+}
+
+/// Tell an authenticated viewer why its session cannot start, best effort.
+fn decline_session<W: std::io::Write>(writer: &mut SessionWriter<W>, reason: &str) {
+    let mut end = reason.len().min(MAX_SETUP_REASON_BYTES);
+    while !reason.is_char_boundary(end) {
+        end -= 1;
+    }
+    let _ = writer
+        .write_message(MessageKind::Close, &reason.as_bytes()[..end])
+        .and_then(|()| writer.flush());
 }
 
 /// The session's single wire writer.
@@ -2053,6 +2132,9 @@ fn stream_frames(
         first_stop.record(StopCause::Capture);
     } else if shutdown.load(Ordering::Acquire) {
         first_stop.record(StopCause::Graceful);
+    }
+    if first_stop.cause() == StopCause::Graceful {
+        say_goodbye(&writer);
     }
     running.store(false, Ordering::Release);
     mailbox.close();
@@ -2498,7 +2580,7 @@ fn receive_input(
     mut injector: Option<InputInjector>,
     input_area: InputArea,
     keyboard_enabled: bool,
-    verified_keymap: Option<[u8; 32]>,
+    verified_keymap: Option<KeymapTable>,
     initial_activity_timeout: Duration,
     session_idle_timeout: Duration,
     running: &AtomicBool,
@@ -2562,7 +2644,7 @@ fn receive_input(
                     // too. Drain their notices before the next button edge,
                     // without ever granting a disabled keyboard capability.
                     if keyboard_enabled {
-                        verify_injector_keymap(injector, verified_keymap)?;
+                        verify_injector_keymap(injector, verified_keymap.as_ref())?;
                     } else {
                         let _ = injector.take_keymap_change()?;
                     }
@@ -2573,14 +2655,14 @@ fn receive_input(
                 | MessageKind::Button
                 | MessageKind::ReleaseAll => {
                     return Err(invalid_data(
-                        "legacy single-event input is invalid in application protocol v4",
+                        "legacy single-event input is invalid since application protocol v4",
                     )
                     .into());
                 }
                 MessageKind::Close => break,
                 MessageKind::Heartbeat if payload.is_empty() => {
                     if keyboard_enabled && let Some(injector) = injector.as_mut() {
-                        verify_injector_keymap(injector, verified_keymap)?;
+                        verify_injector_keymap(injector, verified_keymap.as_ref())?;
                     }
                 }
                 MessageKind::Heartbeat => {
@@ -2675,18 +2757,22 @@ fn read_input_record(
 
 fn verify_injector_keymap(
     injector: &mut InputInjector,
-    expected: Option<[u8; 32]>,
+    viewer_keymap: Option<&KeymapTable>,
 ) -> RemoteResult<()> {
     if !injector.take_keymap_change()? {
         return Ok(());
     }
-    let expected = expected.ok_or_else(|| invalid_data("keyboard input has no verified keymap"))?;
-    if injector.keymap_fingerprint()? != expected {
-        return Err(
-            invalid_data("host X11 keymap changed; reconnect to re-verify keyboard input").into(),
-        );
+    let viewer_keymap =
+        viewer_keymap.ok_or_else(|| invalid_data("keyboard input has no verified keymap"))?;
+    // Re-run the negotiation comparison: a spare keycode bound since then by
+    // a typing tool on this desktop keeps the session, a remapped key ends it.
+    match viewer_keymap.compare(&injector.keymap()?) {
+        KeymapMatch::Compatible => Ok(()),
+        mismatch => Err(invalid_data(format!(
+            "host X11 keymap changed ({mismatch}); reconnect to re-verify keyboard input"
+        ))
+        .into()),
     }
-    Ok(())
 }
 
 /// Wait for `stream` to become readable, returning false on timeout.
@@ -3181,6 +3267,49 @@ mod tests {
     }
 
     #[test]
+    fn a_stopping_host_says_goodbye_unless_the_writer_is_busy() {
+        let state = Arc::new((
+            Mutex::new(GateState {
+                open: true,
+                ..GateState::default()
+            }),
+            Condvar::new(),
+        ));
+        let writer = Mutex::new(SessionWriter::new(
+            DeadlineWriter::new(GateWriter(Arc::clone(&state)), WRITE_TIMEOUT),
+            [0x92; 32],
+        ));
+        say_goodbye(&writer);
+        let wire = state.0.lock().unwrap().bytes.clone();
+        let mut reader = SessionReader::new(Cursor::new(wire), [0x92; 32]);
+        let (kind, payload) = reader.read_message().unwrap();
+        assert_eq!(kind, MessageKind::Close);
+        assert_eq!(payload, HOST_STOPPING_REASON.as_bytes());
+
+        // A sender mid-record keeps the writer; the goodbye is skipped
+        // rather than queued behind a possibly stuck write.
+        let written = state.0.lock().unwrap().bytes.len();
+        let held = writer.lock().unwrap();
+        say_goodbye(&writer);
+        drop(held);
+        assert_eq!(state.0.lock().unwrap().bytes.len(), written);
+    }
+
+    #[test]
+    fn a_setup_failure_reaches_the_viewer_as_a_bounded_close_reason() {
+        let mut writer = SessionWriter::new(Vec::new(), [0x93; 32]);
+        // Multi-byte text straddling the cap must not be cut mid-character.
+        let reason = format!("host cannot capture its display: {}", "显示".repeat(200));
+        decline_session(&mut writer, &reason);
+        let mut reader = SessionReader::new(Cursor::new(writer.into_inner()), [0x93; 32]);
+        let (kind, payload) = reader.read_message().unwrap();
+        assert_eq!(kind, MessageKind::Close);
+        assert!(payload.len() <= MAX_SETUP_REASON_BYTES);
+        let shown = std::str::from_utf8(&payload).unwrap();
+        assert!(shown.starts_with("host cannot capture its display: 显示"));
+    }
+
+    #[test]
     fn clipboard_panic_publishes_its_cause_and_wakes_before_unwind_escapes() {
         let running = Arc::new(AtomicBool::new(true));
         let first_stop = FirstStop::new();
@@ -3600,7 +3729,7 @@ mod tests {
             let hello = ClientHello {
                 request_input: false,
                 request_clipboard: false,
-                keymap_fingerprint: [0; 32],
+                keymap: KeymapTable::empty(),
             };
             writer
                 .write_message(MessageKind::Hello, &hello.encode())
@@ -3608,6 +3737,45 @@ mod tests {
             writer.flush().unwrap();
             let (kind, payload) = reader.read_message().unwrap();
             (kind, payload, stream)
+        }
+
+        #[test]
+        fn a_viewer_from_another_release_is_told_which_version_this_host_speaks() {
+            let (address, shutdown, handle) = spawn_loop(false, |_| {
+                panic!("an unsupported viewer must not be served")
+            });
+            let mut stream = TcpStream::connect(address).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
+            let keys = client_handshake(&mut stream, &KEY, [0x12; NONCE_LEN]).unwrap();
+            let (receive, send) = keys.into_client();
+            let mut reader = SessionReader::new(stream.try_clone().unwrap(), receive);
+            let mut writer = SessionWriter::new(stream.try_clone().unwrap(), send);
+            // A version-4 viewer: same prefix, the older version number and
+            // its single 32-byte keymap digest.
+            let mut hello = ClientHello {
+                request_input: false,
+                request_clipboard: false,
+                keymap: KeymapTable::empty(),
+            }
+            .encode();
+            hello.truncate(11);
+            hello[8..10].copy_from_slice(&4_u16.to_be_bytes());
+            hello.extend([0; 32]);
+            writer.write_message(MessageKind::Hello, &hello).unwrap();
+            writer.flush().unwrap();
+            let (kind, reason) = reader.read_message().unwrap();
+            assert_eq!(kind, MessageKind::Close);
+            let reason = String::from_utf8(reason).unwrap();
+            assert!(reason.contains("version 4; expected 5"), "{reason}");
+            assert!(
+                reason.contains("update jwm-remote on both machines"),
+                "{reason}"
+            );
+
+            shutdown.store(true, Ordering::Release);
+            handle.join().unwrap().unwrap();
         }
 
         #[test]
@@ -3678,7 +3846,7 @@ mod tests {
             let hello = ClientHello {
                 request_input: false,
                 request_clipboard: false,
-                keymap_fingerprint: [0; 32],
+                keymap: KeymapTable::empty(),
             };
             writer
                 .write_message(MessageKind::Hello, &hello.encode())
