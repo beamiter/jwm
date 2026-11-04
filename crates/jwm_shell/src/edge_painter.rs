@@ -1036,6 +1036,9 @@ fn symbol(ctx: &Context, label: &str, rect: [f64; 4]) -> Result<bool> {
         return Ok(false);
     }
     let [x, y, w, h] = rect;
+    // Cairo save/restore does not isolate paths. Text leaves a current point,
+    // which an initial arc would otherwise connect to the icon with a line.
+    ctx.new_path();
     ctx.save()?;
     ctx.translate(x + w / 2.0, y + h / 2.0);
     let scale = (w.min(h) / 44.0).min(1.0);
@@ -1724,6 +1727,78 @@ mod tests {
                             || hit.action == Action::Model(UserAction::MediaPlayPause);
                         assert_eq!(hit.enabled, enabled);
                         assert_eq!(hit.contains(x + w / 2.0, y + h / 2.0), enabled);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn bottom_task_overflow_leaves_the_gap_before_search_unpainted() {
+        let snapshot = xbar_core::model::BarModel::default().snapshot();
+        let tasks: Vec<_> = (0..12)
+            .map(|id| crate::ipc::Task {
+                id,
+                incarnation: 0,
+                name: format!("Task {id}"),
+                class: String::new(),
+                monitor: 0,
+                is_focused: false,
+                is_minimized: false,
+                is_dock: false,
+                is_desktop: false,
+                is_swallowed: false,
+            })
+            .collect();
+        for width in [640, 800, 1024, 1344] {
+            for dark in [false, true] {
+                let mut surface =
+                    cairo::ImageSurface::create(cairo::Format::ARgb32, width, 64).unwrap();
+                let ctx = Context::new(&surface).unwrap();
+                let mut panel = panel(BarEdge::Bottom, 0);
+                Painter {
+                    ctx: &ctx,
+                    panel: &mut panel,
+                    snapshot: &snapshot,
+                    tasks: &tasks,
+                    dark,
+                    tokens: None,
+                    agents: None,
+                }
+                .bottom(0.0, 0.0, f64::from(width), 64.0)
+                .unwrap();
+                let overflow = panel
+                    .hits
+                    .iter()
+                    .find(|hit| hit.action == Action::CycleTasks)
+                    .unwrap();
+                let search = panel
+                    .hits
+                    .iter()
+                    .find(|hit| {
+                        hit.action
+                            == Action::Model(UserAction::OpenShellHub(ShellRoute::Applications))
+                    })
+                    .unwrap();
+                // Leave room for the overflow button's soft shadow. Neither
+                // control owns pixels in the remaining gap between them.
+                let left = (overflow.rect[0] + overflow.rect[2] + 4.0).ceil() as usize;
+                let right = search.rect[0].floor() as usize;
+                assert!(right > left);
+                drop(ctx);
+                surface.flush();
+                let stride = surface.stride() as usize;
+                let data = surface.data().unwrap();
+                for y in 0..64 {
+                    for x in left..right {
+                        let offset = y * stride + x * 4;
+                        let pixel =
+                            u32::from_ne_bytes(data[offset..offset + 4].try_into().unwrap());
+                        assert_eq!(
+                            pixel >> 24,
+                            0,
+                            "stray paint at ({x}, {y}), {width}px, dark={dark}"
+                        );
                     }
                 }
             }
