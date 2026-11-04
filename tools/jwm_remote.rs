@@ -393,7 +393,21 @@ fn run_doctor(key_file: PathBuf, display: Option<String>) -> RemoteResult<()> {
         "Session type: {session:?}; DISPLAY: {:?} (not opened)",
         display.as_deref().unwrap_or("missing")
     );
-    let mut blocked = display.is_none() || session.eq_ignore_ascii_case("wayland");
+    // Over SSH there is no DISPLAY, yet `host --display auto` (and so
+    // `jwm-remote ssh` from the other machine) works from the running session.
+    let session_display = if display.is_none() {
+        session_env::discover().ok()
+    } else {
+        None
+    };
+    if let Some(found) = &session_display {
+        println!(
+            "JWM session: DISPLAY {:?} (pid {}); `host --display auto` and `jwm-remote ssh` use it",
+            found.display, found.pid
+        );
+    }
+    let mut blocked =
+        (display.is_none() && session_display.is_none()) || session.eq_ignore_ascii_case("wayland");
     if blocked {
         println!(
             "FAIL: use a JWM X11 session on both machines; Wayland/Xwayland is outside this MVP"

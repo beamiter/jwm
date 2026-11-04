@@ -104,7 +104,12 @@ apply as usual, and password or host-key prompts appear in the terminal.
 
 Failures say where they happened: `ssh could not connect or log in`, `jwm-remote
 is not installed on this machine`, or `did not accept the host options` when
-the other machine's helper is older than this one.
+the other machine's helper is older than this one. Run `jwm-remote doctor` over
+SSH on the other machine to see which session display it would share:
+
+```text
+JWM session: DISPLAY ":1" (pid 3035859); `host --display auto` and `jwm-remote ssh` use it
+```
 
 ## Quick start: two X11 JWM machines
 
