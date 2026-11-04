@@ -2,7 +2,7 @@
 
 use super::deadline::TcpStreamDeadline;
 use super::frame::{RecyclableDecodedFrame, SharedDecodeBufferPool, new_decode_buffer_pool};
-use super::key::load_key_file;
+use super::key::KeySource;
 use super::messages::{
     ClientHello, MAX_INPUT_BATCH_EVENTS, ServerHello, decode_clipboard, encode_clipboard,
     encode_frame_ack, encode_input_batch_into, encode_viewport,
@@ -25,7 +25,6 @@ use std::io::{self, Read as _};
 use std::net::{Shutdown, TcpStream, ToSocketAddrs};
 use std::os::fd::{AsFd, BorrowedFd};
 use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
@@ -52,7 +51,10 @@ const RECEIVER_JOIN_TIMEOUT: Duration = Duration::from_secs(2);
 #[derive(Clone, Debug)]
 pub struct ClientOptions {
     pub address: String,
-    pub key_file: PathBuf,
+    /// What to call the host in messages and the window title: the address
+    /// as typed, or the SSH destination when the address is a local tunnel.
+    pub peer_label: String,
+    pub key: KeySource,
     pub display: Option<String>,
     pub view_only: bool,
     pub grab_input: bool,
@@ -122,7 +124,7 @@ pub fn run_client(options: ClientOptions) -> RemoteResult<()> {
 
 fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> RemoteResult<()> {
     validate_escape_key(&options.escape_key)?;
-    let key = load_key_file(&options.key_file)?;
+    let key = options.key.load()?;
     let request_input = !options.view_only;
     let keymap = if request_input {
         read_display(options.display.as_deref())?
@@ -130,7 +132,7 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
         KeymapTable::empty()
     };
     *stage = ClientStage::Connect;
-    eprintln!("jwm-remote: connecting to {}", options.address);
+    eprintln!("jwm-remote: connecting to {}", options.peer_label);
     let stream = connect_with_timeout(&options.address, CONNECT_TIMEOUT)?;
     *stage = ClientStage::Negotiate;
     eprintln!("jwm-remote: connection opened; authenticating and negotiating permissions");
@@ -222,6 +224,7 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
         hello.keyboard_enabled.then_some(keymap),
         options.grab_input && (hello.pointer_enabled || hello.keyboard_enabled),
         &options.escape_key,
+        &options.peer_label,
     )?;
     viewer.set_clipboard_status(hello.clipboard_enabled);
     let mut first_frame_presented = false;

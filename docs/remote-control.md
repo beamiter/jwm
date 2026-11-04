@@ -57,6 +57,55 @@ place the helper in `/usr/local/bin`):
 export PATH="/usr/local/lib/jwm/current/bin:$PATH"
 ```
 
+## Quickest: over SSH
+
+If you can already SSH to the other machine as the user logged in to its JWM
+session, nothing needs to be set up there beyond installing the same
+`jwm-remote` version:
+
+```bash
+jwm-remote ssh user@desktop --grab-input
+jwm-remote ssh user@desktop --grab-input --monitor DP-0   # one monitor
+jwm-remote ssh user@desktop --view-only --clipboard       # watch, share text
+```
+
+What it does:
+
+1. Generates a fresh 256-bit key for this one session and hands it to the
+   other machine on the SSH channel's standard input (`host --key-stdin`).
+   No key file is written, copied or kept.
+2. Starts `jwm-remote host` there on a random loopback port, for one session
+   (`--once`), with input unless `--view-only`, clipboard only with
+   `--clipboard`. Nothing listens on the LAN.
+3. Finds the display of your running JWM session there (`--display auto`):
+   the `DISPLAY` and `XAUTHORITY` of the oldest `jwm` process you own. An SSH
+   login has neither, and a gdm session on `:1` with its cookie under
+   `/run/user/<uid>/gdm` is not guessable.
+4. Forwards a local loopback port to that host with `ssh -L` and opens the
+   viewer on it. The window title names the machine:
+   `user@desktop (DP-0) - JWM Remote - keyboard + pointer; ...`.
+
+Closing the viewer, Ctrl+C or killing it closes the SSH channel, and a host
+started with `--key-stdin` stops when its standard input closes. On a dropped
+network the remote sshd may hold the channel open for much longer, but the
+session's own idle timeout ends it within seconds and the one-session host
+exits with it. Either way nothing stays running on the other machine.
+
+This grants nothing new: the SSH login can already run any program as that
+user, including a host with `--allow-input`. The session's traffic is
+encrypted twice, and SSH adds the forward secrecy the pre-shared-key
+transport lacks.
+
+The helper is looked up in the remote `PATH`, then in the managed bundle at
+`/usr/local/lib/jwm/current/bin`. Use `--remote-command PATH` for another
+location (a leading `~/` is the remote home), and `--ssh-option OPTION` for
+extra `ssh -o` options such as `Port=2222`; your SSH configuration and agent
+apply as usual, and password or host-key prompts appear in the terminal.
+
+Failures say where they happened: `ssh could not connect or log in`, `jwm-remote
+is not installed on this machine`, or `did not accept the host options` when
+the other machine's helper is older than this one.
+
 ## Quick start: two X11 JWM machines
 
 Start on **both** machines with:

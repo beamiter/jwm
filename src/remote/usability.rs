@@ -296,6 +296,7 @@ pub fn session_mode(pointer: bool, keyboard: bool) -> &'static str {
 }
 
 pub fn viewer_title(
+    peer: &str,
     pointer: bool,
     keyboard: bool,
     grab_input: bool,
@@ -313,8 +314,10 @@ pub fn viewer_title(
     } else {
         "; input while focused".to_owned()
     };
+    // The peer comes first: with several viewers open, which machine a
+    // window shows matters more than its input mode.
     format!(
-        "JWM Remote - {mode}{input}; clipboard {}",
+        "{peer} - JWM Remote - {mode}{input}; clipboard {}",
         if clipboard { "ON" } else { "off" }
     )
 }
@@ -557,15 +560,21 @@ mod tests {
 
     #[test]
     fn titles_show_actual_capabilities_and_grab_state() {
-        assert!(viewer_title(false, false, true, false, false, "F12").contains("view-only"));
-        assert!(!viewer_title(false, false, true, false, false, "F12").contains("click"));
         assert!(
-            viewer_title(true, false, true, false, false, "F12")
+            viewer_title("desk", false, false, true, false, false, "F12").contains("view-only")
+        );
+        assert!(!viewer_title("desk", false, false, true, false, false, "F12").contains("click"));
+        assert!(
+            viewer_title("desk", true, false, true, false, false, "F12")
                 .contains("pointer only; keyboard disabled; input released")
         );
         assert!(
-            viewer_title(true, true, true, true, true, "Pause")
+            viewer_title("desk", true, true, true, true, true, "Pause")
                 .contains("double-tap Pause to release; clipboard ON")
+        );
+        assert!(
+            viewer_title("ubuntu@desk", false, false, false, false, false, "F12")
+                .starts_with("ubuntu@desk - JWM Remote - view-only")
         );
     }
 }

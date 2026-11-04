@@ -2,7 +2,7 @@
 
 use super::RemoteResult;
 use super::deadline::TcpStreamDeadline;
-use super::key::load_key_file;
+use super::key::KeySource;
 use super::messages::{
     ClientHello, MAX_CLIPBOARD_BYTES, MIN_VIEWPORT_HEIGHT, MIN_VIEWPORT_WIDTH, ServerHello,
     decode_clipboard, decode_frame_ack, decode_input_batch, decode_viewport, encode_clipboard,
@@ -28,7 +28,6 @@ use std::collections::VecDeque;
 use std::io;
 use std::net::{IpAddr, Shutdown, TcpListener, TcpStream};
 use std::os::fd::AsFd;
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
@@ -1383,7 +1382,7 @@ impl FirstStop {
 #[derive(Clone, Debug)]
 pub struct HostOptions {
     pub listen: String,
-    pub key_file: PathBuf,
+    pub key: KeySource,
     pub display: Option<String>,
     pub fps: u16,
     pub jpeg_quality: u8,
@@ -1422,7 +1421,7 @@ pub fn run_host(options: HostOptions) -> RemoteResult<()> {
         target_frame_interval(options.fps),
         Instant::now(),
     )?;
-    let key = load_key_file(&options.key_file)?;
+    let key = options.key.load()?;
     validate_capture_area(options.display.as_deref(), &options.capture_area)?;
     let listener = TcpListener::bind(&options.listen)
         .map_err(|error| listener_bind_error(&options.listen, error))?;
@@ -1430,6 +1429,9 @@ pub fn run_host(options: HostOptions) -> RemoteResult<()> {
     let shutdown = Arc::new(AtomicBool::new(false));
     flag::register(SIGINT, Arc::clone(&shutdown))?;
     flag::register(SIGTERM, Arc::clone(&shutdown))?;
+    if matches!(options.key, KeySource::Stdin) {
+        stop_when_stdin_closes(Arc::clone(&shutdown))?;
+    }
     let local_address = listener.local_addr()?;
     if !local_address.ip().is_loopback() && !options.allow_lan {
         return Err(permission_denied(format!(
@@ -1453,6 +1455,33 @@ pub fn run_host(options: HostOptions) -> RemoteResult<()> {
     accept_connections(&listener, key, &shutdown, once, move |peer| {
         serve_authenticated(peer, &options, &session_shutdown)
     })
+}
+
+/// Stop the host once standard input reaches end of file.
+///
+/// A host that read its key from stdin was started by `jwm-remote ssh`, and
+/// stdin is the SSH channel. When the viewer side goes away -- closed, killed,
+/// or its network gone -- sshd closes that channel, and a host listening on
+/// would be left behind holding a key nobody can use again.
+fn stop_when_stdin_closes(shutdown: Arc<AtomicBool>) -> io::Result<()> {
+    thread::Builder::new()
+        .name("jwm-remote-stdin".into())
+        .spawn(move || {
+            let mut discard = [0_u8; 64];
+            let mut stdin = io::stdin();
+            loop {
+                match std::io::Read::read(&mut stdin, &mut discard) {
+                    Ok(0) => break,
+                    Ok(_) => {}
+                    Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                    Err(_) => break,
+                }
+            }
+            if !shutdown.swap(true, Ordering::AcqRel) {
+                eprintln!("jwm-remote: the controlling SSH session closed; stopping");
+            }
+        })
+        .map(drop)
 }
 
 /// Releases the single viewer slot when the session that claimed it ends,
@@ -3863,7 +3892,7 @@ mod tests {
     fn defaults_must_explicitly_opt_into_lan_and_input() {
         let options = HostOptions {
             listen: "127.0.0.1:48221".into(),
-            key_file: PathBuf::from("key"),
+            key: KeySource::File(std::path::PathBuf::from("key")),
             display: None,
             fps: 30,
             jpeg_quality: 85,

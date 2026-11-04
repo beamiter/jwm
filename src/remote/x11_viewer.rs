@@ -286,6 +286,8 @@ pub struct Viewer {
     escape_keycodes: Vec<u8>,
     escape_keysym: u32,
     escape_name: String,
+    /// The machine this window shows, first in its title.
+    peer_label: String,
     keyboard: ViewerKeyboardState,
     held_buttons: ForwardedButtons,
     deferred_events: VecDeque<Event>,
@@ -386,6 +388,7 @@ impl Viewer {
         verified_keymap: Option<super::x11_keymap::KeymapTable>,
         grab_input: bool,
         escape_key: &str,
+        peer_label: &str,
     ) -> RemoteResult<Self> {
         let forward_input = pointer_enabled || forward_keyboard;
         if initial_width == 0 || initial_height == 0 {
@@ -505,6 +508,7 @@ impl Viewer {
         render_upscale.attach_backing(&conn, backing)?;
 
         let title = viewer_title(
+            peer_label,
             pointer_enabled,
             forward_keyboard,
             grab_input,
@@ -588,6 +592,7 @@ impl Viewer {
             escape_keycodes,
             escape_keysym,
             escape_name: escape_key.to_string(),
+            peer_label: peer_label.to_string(),
             keyboard: ViewerKeyboardState::default(),
             held_buttons: ForwardedButtons::default(),
             deferred_events: VecDeque::new(),
@@ -927,6 +932,7 @@ impl Viewer {
 
     fn try_update_title(&self) -> RemoteResult<()> {
         let title = viewer_title(
+            &self.peer_label,
             self.pointer_enabled,
             self.forward_keyboard,
             self.grab_input,

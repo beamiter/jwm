@@ -24,6 +24,8 @@ pub mod key;
 pub mod messages;
 mod pacing;
 pub mod protocol;
+pub mod session_env;
+pub mod ssh;
 mod tile;
 pub mod usability;
 pub mod x11_capture;

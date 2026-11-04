@@ -446,8 +446,19 @@ report to a public issue.
 
 ## Remote control between JWM X11 sessions
 
-Generate and securely copy one private key, explicitly expose the host on the
-trusted LAN, then connect from the other JWM machine:
+If you can SSH to the other machine, one command is enough. It starts a
+loopback-only host there for this session, with a fresh key handed over the
+SSH channel, and opens it here through an SSH tunnel:
+
+```bash
+jwm-remote ssh user@desktop --grab-input            # whole desktop
+jwm-remote ssh user@desktop --grab-input --monitor DP-0
+```
+
+Nothing is copied, kept or opened on the LAN, and closing the viewer stops the
+host. Both machines need the same `jwm-remote` version. For a standing host
+without SSH, generate and securely copy one private key, explicitly expose the
+host on the trusted LAN, then connect from the other JWM machine:
 
 ```bash
 # Managed release bundle only; source installs already use /usr/local/bin.

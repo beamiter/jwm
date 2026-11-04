@@ -5,6 +5,19 @@ monorepo use independent Semantic Versions.
 
 ## [Unreleased]
 
+### One-command remote control over SSH
+
+- `jwm-remote ssh [USER@]HOST` controls another JWM desktop with nothing set
+  up there: it starts a loopback-only, one-session host over SSH with a fresh
+  key handed over the SSH channel, finds the display of the running JWM
+  session, tunnels to it and opens the viewer. Closing the viewer stops the
+  host. `--monitor`, `--view-only`, `--clipboard` and `--grab-input` work as
+  for `connect`.
+- New host options behind it: `--key-stdin` (read the key from stdin, stop
+  when stdin closes) and `--display auto` (use the running JWM session's
+  display, also chosen when DISPLAY is unset).
+- Viewer windows are titled with the machine they show.
+
 ### Remote control between two real desktops
 
 Found by driving `jwm-remote` from a laptop to a dual-monitor desktop over

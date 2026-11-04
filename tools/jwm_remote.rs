@@ -3,7 +3,9 @@
 use clap::{Parser, Subcommand};
 use jwm::remote::client::{ClientOptions, run_client};
 use jwm::remote::host::{HostOptions, run_host};
-use jwm::remote::key::generate_key_file;
+use jwm::remote::key::{KeySource, generate_key_file};
+use jwm::remote::session_env;
+use jwm::remote::ssh::{SshOptions, run_ssh};
 use jwm::remote::usability::{
     default_key_path, key_metadata, normalize_address, normalize_listen_address,
 };
@@ -19,7 +21,7 @@ const DEFAULT_JPEG_QUALITY_FLOOR: u8 = 40;
     name = "jwm-remote",
     version,
     about = "JWM-to-JWM remote viewing and control for trusted X11 LANs",
-    after_help = "Start here: jwm-remote doctor\nCreate a key explicitly: jwm-remote keygen (never overwrites; see keygen --help).\nShare the same private key securely with your other machine.\nHost: jwm-remote host --listen 0.0.0.0 --allow-lan\nViewer: jwm-remote connect HOST --view-only\nInput needs host --allow-input; clipboard requires explicit consent on both ends.\nDefault key: $XDG_CONFIG_HOME/jwm/remote.key, otherwise $HOME/.config/jwm/remote.key.\nNo command silently creates a key, opens LAN access, or enables clipboard sharing."
+    after_help = "Quickest, if you can SSH to the other machine:\n  jwm-remote ssh [USER@]HOST --grab-input\nIt starts a loopback-only host there for one session, with a fresh key, through SSH.\n\nOr set up a LAN host yourself. Start here: jwm-remote doctor\nCreate a key explicitly: jwm-remote keygen (never overwrites; see keygen --help).\nShare the same private key securely with your other machine.\nHost: jwm-remote host --listen 0.0.0.0 --allow-lan\nViewer: jwm-remote connect HOST --view-only\nInput needs host --allow-input; clipboard requires explicit consent on both ends.\nDefault key: $XDG_CONFIG_HOME/jwm/remote.key, otherwise $HOME/.config/jwm/remote.key.\nNo command silently creates a key, opens LAN access, or enables clipboard sharing."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -62,11 +64,21 @@ enum Command {
         listen: String,
 
         /// Private key; defaults to the JWM key path shown in top-level help.
-        #[arg(long, value_name = "PATH")]
+        #[arg(long, value_name = "PATH", conflicts_with = "key_stdin")]
         key_file: Option<PathBuf>,
 
+        /// Read one key line from standard input, and stop when it closes.
+        ///
+        /// This is how `jwm-remote ssh` starts a host: the key never touches
+        /// a file, and the host ends with the SSH session that started it.
+        #[arg(long)]
+        key_stdin: bool,
+
         /// X11 display to share (defaults to DISPLAY).
-        #[arg(long, value_name = "DISPLAY")]
+        ///
+        /// `auto` uses the display of your running JWM session, which is what
+        /// a host started over SSH needs; it is also used when DISPLAY is unset.
+        #[arg(long, value_name = "DISPLAY|auto")]
         display: Option<String>,
 
         /// Interactive upper frame-rate limit; unchanged areas are still suppressed.
@@ -132,6 +144,50 @@ enum Command {
         /// Exit after the first connection ends (useful for tests/scripts).
         #[arg(long)]
         once: bool,
+    },
+    /// Control another JWM desktop through SSH, with nothing set up there.
+    ///
+    /// Starts a host on the other machine over SSH -- loopback only, for one
+    /// session, with a fresh key handed over the SSH channel -- and opens it
+    /// here through an SSH tunnel. Needs `jwm-remote` installed on both.
+    Ssh {
+        /// `[USER@]HOST` or a Host alias from your SSH configuration.
+        #[arg(value_name = "[USER@]HOST")]
+        destination: String,
+
+        /// Share one monitor of the other machine by RandR name (see
+        /// `xrandr --listmonitors` there), instead of all of them.
+        #[arg(long, value_name = "NAME")]
+        monitor: Option<String>,
+
+        /// Watch only: the host is started without input control.
+        #[arg(long)]
+        view_only: bool,
+
+        /// Click the viewer to grab local input; double-tap the escape key to release.
+        #[arg(long, conflicts_with = "view_only")]
+        grab_input: bool,
+
+        /// X keysym name that releases the grab when tapped twice quickly.
+        #[arg(long, default_value = DEFAULT_ESCAPE_KEY, value_name = "KEYSYM")]
+        escape_key: String,
+
+        /// Share the clipboard with the other machine, both directions.
+        #[arg(long)]
+        clipboard: bool,
+
+        /// Local X11 display for the viewer window (defaults to DISPLAY).
+        #[arg(long, value_name = "DISPLAY")]
+        display: Option<String>,
+
+        /// Path of jwm-remote on the other machine (default: PATH, then the
+        /// managed bundle). A leading ~/ is that machine's home.
+        #[arg(long, value_name = "PATH")]
+        remote_command: Option<String>,
+
+        /// Extra ssh -o option, such as Port=2222; may be repeated.
+        #[arg(long = "ssh-option", value_name = "OPTION")]
+        ssh_options: Vec<String>,
     },
     /// Open a remote JWM desktop in a window on this JWM X11 session.
     Connect {
@@ -209,6 +265,7 @@ fn run(command: Command) -> RemoteResult<()> {
         Command::Host {
             listen,
             key_file,
+            key_stdin,
             display,
             fps,
             jpeg_quality,
@@ -223,7 +280,12 @@ fn run(command: Command) -> RemoteResult<()> {
             allow_clipboard,
             once,
         } => {
-            let key_file = resolve_key_path(key_file)?;
+            let key = if key_stdin {
+                KeySource::Stdin
+            } else {
+                KeySource::File(resolve_key_path(key_file)?)
+            };
+            let display = resolve_host_display(display)?;
             let jpeg_quality_floor = resolve_quality_floor(jpeg_quality, jpeg_quality_floor)?;
             let capture_area = match (monitor, region) {
                 (Some(name), _) => CaptureArea::Monitor(name),
@@ -232,7 +294,7 @@ fn run(command: Command) -> RemoteResult<()> {
             };
             run_host(HostOptions {
                 listen,
-                key_file,
+                key,
                 display,
                 fps,
                 jpeg_quality,
@@ -247,6 +309,27 @@ fn run(command: Command) -> RemoteResult<()> {
                 once,
             })
         }
+        Command::Ssh {
+            destination,
+            monitor,
+            view_only,
+            grab_input,
+            escape_key,
+            clipboard,
+            display,
+            remote_command,
+            ssh_options,
+        } => run_ssh(SshOptions {
+            destination,
+            ssh_options,
+            remote_command,
+            monitor,
+            display,
+            view_only,
+            grab_input,
+            clipboard,
+            escape_key,
+        }),
         Command::Connect {
             address,
             key_file,
@@ -256,8 +339,9 @@ fn run(command: Command) -> RemoteResult<()> {
             clipboard,
             escape_key,
         } => run_client(ClientOptions {
+            peer_label: address.clone(),
             address,
-            key_file: resolve_key_path(key_file)?,
+            key: KeySource::File(resolve_key_path(key_file)?),
             display,
             view_only,
             grab_input,
@@ -265,6 +349,33 @@ fn run(command: Command) -> RemoteResult<()> {
             escape_key,
         }),
     }
+}
+
+/// The display a host shares: as given, else DISPLAY, else -- and always for
+/// `auto` -- the display of the user's running JWM session.
+fn resolve_host_display(display: Option<String>) -> RemoteResult<Option<String>> {
+    let from_environment = || {
+        std::env::var("DISPLAY")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+    };
+    match display {
+        Some(display) if display != "auto" => return Ok(Some(display)),
+        None if from_environment().is_some() => return Ok(None),
+        _ => {}
+    }
+    let session = session_env::discover()?;
+    eprintln!(
+        "jwm-remote: using DISPLAY {} of your JWM session (pid {})",
+        session.display, session.pid
+    );
+    if let Some(xauthority) = &session.xauthority {
+        // x11rb reads the cookie path from the environment only.
+        // SAFETY: still single-threaded here; no thread has been started
+        // that could read the environment concurrently.
+        unsafe { std::env::set_var("XAUTHORITY", xauthority) };
+    }
+    Ok(Some(session.display))
 }
 
 fn run_doctor(key_file: PathBuf, display: Option<String>) -> RemoteResult<()> {
@@ -491,6 +602,7 @@ mod tests {
             vec!["jwm-remote", "doctor", "--help"],
             vec!["jwm-remote", "host", "--help"],
             vec!["jwm-remote", "connect", "--help"],
+            vec!["jwm-remote", "ssh", "--help"],
         ] {
             let error = Cli::try_parse_from(command).unwrap_err();
             assert_eq!(error.kind(), clap::error::ErrorKind::DisplayHelp);
@@ -517,6 +629,41 @@ mod tests {
         ] {
             assert!(Cli::try_parse_from(command).is_ok());
         }
+        let Command::Ssh {
+            destination,
+            monitor,
+            ssh_options,
+            ..
+        } = Cli::try_parse_from([
+            "jwm-remote",
+            "ssh",
+            "ubuntu@desk",
+            "--grab-input",
+            "--monitor",
+            "DP-0",
+            "--ssh-option",
+            "Port=2222",
+            "--ssh-option",
+            "User=me",
+        ])
+        .unwrap()
+        .command
+        else {
+            panic!("ssh variant expected")
+        };
+        assert_eq!(destination, "ubuntu@desk");
+        assert_eq!(monitor.as_deref(), Some("DP-0"));
+        assert_eq!(ssh_options, ["Port=2222", "User=me"]);
+        for conflicting in [
+            vec!["jwm-remote", "ssh", "desk", "--view-only", "--grab-input"],
+            vec!["jwm-remote", "host", "--key-stdin", "--key-file", "k"],
+        ] {
+            assert!(Cli::try_parse_from(conflicting).is_err());
+        }
+        assert!(
+            Cli::try_parse_from(["jwm-remote", "host", "--key-stdin", "--display", "auto"]).is_ok()
+        );
+
         let Command::Connect {
             address, key_file, ..
         } = Cli::try_parse_from(["jwm-remote", "connect", "host"])
