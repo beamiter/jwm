@@ -21,6 +21,13 @@ const TAPS: usize = 63;
 /// Retain the library for the process lifetime: ORT sessions and its global
 /// environment contain function pointers into it. A failed load is cached;
 /// installing/changing the runtime requires an Eva restart.
+static RUNTIME_VERSION: OnceLock<String> = OnceLock::new();
+
+/// Version read from the loaded native library, never the Rust binding version.
+pub fn runtime_version() -> Option<&'static str> {
+    RUNTIME_VERSION.get().map(String::as_str)
+}
+
 fn initialize_runtime() -> Result<(), &'static str> {
     static RUNTIME: OnceLock<Result<Library, &'static str>> = OnceLock::new();
     RUNTIME
@@ -54,6 +61,13 @@ fn initialize_runtime() -> Result<(), &'static str> {
                 let api = ((*base).GetApi)(ort::sys::ORT_API_VERSION);
                 if api.is_null() {
                     return Err("silero_runtime_incompatible");
+                }
+                let version = ((*base).GetVersionString)();
+                if !version.is_null() {
+                    let version = std::ffi::CStr::from_ptr(version).to_string_lossy();
+                    if version.len() <= 80 && !version.chars().any(char::is_control) {
+                        let _ = RUNTIME_VERSION.set(version.into_owned());
+                    }
                 }
                 ort::set_api(api.read());
             }

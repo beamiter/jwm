@@ -351,6 +351,16 @@ impl Jwm {
             && self.running.load(std::sync::atomic::Ordering::SeqCst)
     }
     pub(crate) fn eva_cancel(&mut self, reason: &str) {
+        for operation in self
+            .eva
+            .operations
+            .values()
+            .filter(|operation| !operation.terminal)
+        {
+            if let Some(id) = operation.result["verified"]["agent_operation_id"].as_str() {
+                self.features.agent_sessions.cancel_activation(id);
+            }
+        }
         let had_permit = self.eva.permit.take();
         self.eva.lease_until = None;
         self.eva.activated_monotonic_ns = None;
@@ -1455,7 +1465,7 @@ impl Jwm {
             })
             .collect()
     }
-    fn eva_window_token(&self, key: ClientKey) -> String {
+    pub(crate) fn eva_window_token(&self, key: ClientKey) -> String {
         format!("{}:w:{:x}", self.eva.instance, key.data().as_ffi())
     }
     fn eva_monitor_token(&self, key: MonitorKey) -> String {
@@ -1509,6 +1519,24 @@ impl Jwm {
                 }
             })
             .collect();
+        let trusted = focus.and_then(|key| {
+            let token = self.eva_window_token(key);
+            self.features
+                .agent_sessions
+                .window_anchor(&token, Instant::now())
+                .map(|association| {
+                    let geometry = &self.state.clients[key].geometry;
+                    (
+                        association,
+                        companion_protocol::Rect {
+                            x: geometry.x as f64,
+                            y: geometry.y as f64,
+                            width: geometry.w as f64,
+                            height: geometry.h as f64,
+                        },
+                    )
+                })
+        });
         let suppressed = self.features.system_ui.is_active()
             || self.eva.confirmation.as_ref().is_some_and(|c| !c.approved)
             || !self.features.monitor_lock.is_empty()
@@ -1529,9 +1557,20 @@ impl Jwm {
                 .map(|key| self.eva_window_token(key))
                 .unwrap_or_default()
         );
+        let target = format!(
+            "{target}:{}:{:?}",
+            trusted
+                .as_ref()
+                .map(|(association, _)| association.as_str())
+                .unwrap_or("exposed-desktop"),
+            trusted
+                .as_ref()
+                .map(|(_, rect)| (rect.x, rect.y, rect.width, rect.height))
+        );
         companion_scene::publish(Desktop {
             target: target.clone(),
             viewport,
+            anchor: trusted.map(|(_, rect)| rect),
             occupied: occupied.clone(),
             suppressed,
             reduced_motion: !CONFIG.load().motion_enabled(),
@@ -1555,10 +1594,11 @@ impl Jwm {
     }
 
     /// Content-free desktop observations. No titles, cwd, commands, permits or
-    /// screenshots are returned. Native-retirement capabilities stay false:
-    /// existing Eva cards do not prove terminal bodies left scanout.
+    /// screenshots are returned. Native completion support describes the active
+    /// backend route; individual scene tickets still require completion proof.
     pub(crate) fn eva_companion_context(&self) -> Value {
-        let companion_scene_enabled = crate::backend::compositor_common::companion_scene::enabled;
+        use crate::backend::compositor_common::companion_scene;
+        let native_completion = companion_scene::native_presentation_supported();
         let selected = self.state.sel_mon;
         let focus = self.get_selected_client_key();
         let monitors: Vec<Value> = self
@@ -1582,21 +1622,77 @@ impl Jwm {
             "monitor_token": selected.map(|key| self.eva_monitor_token(key)),
             "fullscreen": focus.and_then(|key| self.state.clients.get(key)).is_some_and(|c| c.state.is_fullscreen),
             "monitors": monitors,
-            "capabilities": { "metadata_only": true, "x11_native_retirement": false,
-                "wayland_native_retirement": false, "single_scene_node_implemented": cfg!(any(feature="x11-backends",feature="wayland-backends")), "scene_requested": companion_scene_enabled(), "snapshot_authorized": crate::backend::compositor_common::companion_scene::snapshot().is_some() },
-            "native_retirement_status": "unverified; no physical retirement claim",
-            "scene_scope": "opt-in compositor-only; exposed desktop pixels; no native-window anchor mapping",
+            "capabilities": { "metadata_only": true,
+                "x11_native_retirement": native_completion && matches!(self.runtime_backend.as_str(), "x11rb" | "xcb"),
+                "wayland_native_retirement": native_completion && self.runtime_backend == "wayland-udev",
+                "single_scene_node_implemented": cfg!(any(feature="x11-backends",feature="wayland-backends")),
+                "scene_requested": companion_scene::enabled(), "snapshot_authorized": companion_scene::snapshot().is_some() },
+            "native_retirement_status": companion_scene::native_presentation_reason(),
+            "scene_scope": "opt-in compositor-only; live registered terminal window edges or exposed desktop pixels; pane-local geometry unavailable",
+            "trusted_window_anchor": true, "pane_local_anchor": false,
             "desktop_observer_connected": crate::backend::compositor_common::companion_desktop::connected()
         })
     }
+    pub(crate) fn eva_add_output_descriptions(&self, backend: &dyn Backend, context: &mut Value) {
+        let Some(monitors) = context["monitors"].as_array_mut() else {
+            return;
+        };
+        for &key in &self.state.monitor_order {
+            let token = self.eva_monitor_token(key);
+            let Some(monitor) = monitors.iter_mut().find(|m| m["monitor_token"] == token) else {
+                continue;
+            };
+            let bounded = |value: Option<String>| {
+                value.map(|value| {
+                    value
+                        .chars()
+                        .filter(|c| !c.is_control())
+                        .take(80)
+                        .collect::<String>()
+                })
+            };
+            monitor["connector"] = json!(bounded(self.output_connector_for_monitor(backend, key)));
+            monitor["name"] = json!(bounded(self.output_name_for_monitor(backend, key)));
+            // JWM's public monitor numbering defines monitor zero as primary.
+            // This is independent of whichever output currently owns focus.
+            monitor["primary"] = json!(self.state.monitors.get(key).is_some_and(|m| m.num == 0));
+        }
+    }
+
     pub(crate) fn eva_execution_context(&mut self) -> Value {
         self.eva_record_focus();
         let monitors: Vec<Value> = self.state.monitor_order.iter().filter_map(|&key|self.state.monitors.get(key).map(|m|json!({
             "monitor_token":self.eva_monitor_token(key),"monitor_ref":format!("m{:x}",key.data().as_ffi()),"num":m.num,"geometry":[m.geometry.m_x,m.geometry.m_y,m.geometry.m_w,m.geometry.m_h],"tab_tokens":self.tab_group_clients(key).iter().map(|w|self.eva_window_token(*w)).collect::<Vec<_>>(),"visible_tag_mask":m.get_active_tags(),"layout":canonical_layout(&m.lt),"locked":self.monitor_key_is_locked(key)
         }))).collect();
         let windows: Vec<Value> = self.state.clients.iter().filter(|(_,c)|!c.state.is_dock && !c.state.is_desktop).map(|(key,c)|json!({
-            "target_token":self.eva_window_token(key),"window_ref":format!("w{:x}",key.data().as_ffi()),"id":c.win.raw().to_string(),"title":c.name.chars().take(160).collect::<String>(),"class":c.class.chars().take(80).collect::<String>(),"monitor_token":c.mon.map(|m|self.eva_monitor_token(m)),"tag_mask":c.state.tags,"focused":self.get_selected_client_key()==Some(key),"minimized":c.state.is_hidden,"floating":c.state.is_floating,"maximized":c.state.is_maximized_vert&&c.state.is_maximized_horz,"maximized_horz":c.state.is_maximized_horz,"maximized_vert":c.state.is_maximized_vert,"sticky":c.state.is_sticky,"pip":c.state.is_pip
+            "target_token":self.eva_window_token(key),"window_ref":format!("w{:x}",key.data().as_ffi()),"id":c.win.raw().to_string(),"pid":c.pid,"title":c.name.chars().take(160).collect::<String>(),"class":c.class.chars().take(80).collect::<String>(),"monitor_token":c.mon.map(|m|self.eva_monitor_token(m)),"tag_mask":c.state.tags,"focused":self.get_selected_client_key()==Some(key),"minimized":c.state.is_hidden,"floating":c.state.is_floating,"maximized":c.state.is_maximized_vert&&c.state.is_maximized_horz,"maximized_horz":c.state.is_maximized_horz,"maximized_vert":c.state.is_maximized_vert,"sticky":c.state.is_sticky,"pip":c.state.is_pip
         })).collect();
+        let mut windows = windows;
+        for row in &mut windows {
+            let visible = row["target_token"]
+                .as_str()
+                .and_then(|token| self.eva_resolve_window(token))
+                .is_some_and(|key| {
+                    let client = &self.state.clients[key];
+                    !client.state.is_hidden
+                        && !client.state.is_swallowed
+                        && client
+                            .mon
+                            .and_then(|m| self.state.monitors.get(m).map(|monitor| (m, monitor)))
+                            .is_some_and(|(m, monitor)| {
+                                !self.monitor_key_is_locked(m)
+                                    && (client.state.is_sticky
+                                        || client.state.tags & monitor.get_active_tags() != 0)
+                            })
+                });
+            row["visible"] = json!(visible);
+            row["swallowed"] = json!(
+                row["target_token"]
+                    .as_str()
+                    .and_then(|token| self.eva_resolve_window(token))
+                    .is_some_and(|key| self.state.clients[key].state.is_swallowed)
+            );
+        }
         let mut workspaces = Vec::new();
         for &key in &self.state.monitor_order {
             if let Some(m) = self.state.monitors.get(key) {
@@ -1610,7 +1706,13 @@ impl Jwm {
                 }
             }
         }
-        json!({"assistant_protocol":jwm_eva_core::protocol::assistant_protocol(),"wm_pid":std::process::id(),"wm_start_ticks":process_start_ticks(),"observed_monotonic_ns":monotonic_ns(),"focus_history":self.eva.focus_history.iter().map(|(at,token)|json!({"at_monotonic_ns":at,"focus_token":token})).collect::<Vec<_>>(),"selected_monitor_history":self.eva.selected_monitor_history.iter().map(|(at,token)|json!({"at_monotonic_ns":at,"monitor_token":token})).collect::<Vec<_>>(),"protocol_version":1,"wm_instance_id":self.eva.instance,"wake_generation":self.eva.wake_generation,"assistant_permit":self.eva.permit,"session_unlocked":!self.features.system_ui.is_locked()&&self.features.monitor_lock.is_empty(),"activation_monitor_token":self.eva.activation_monitor.filter(|_|self.eva_active()).map(|m|self.eva_monitor_token(m)),"selected_monitor_token":self.state.sel_mon.map(|m|self.eva_monitor_token(m)),"focus_token":self.get_selected_client_key().map(|k|self.eva_window_token(k)),"tag_count":CONFIG.load().tags_length().min(32),"monitors":monitors,"windows":windows,"workspaces":workspaces})
+        let mut context = json!({"assistant_protocol":jwm_eva_core::protocol::assistant_protocol(),"wm_pid":std::process::id(),"wm_start_ticks":process_start_ticks(),"observed_monotonic_ns":monotonic_ns(),"focus_history":self.eva.focus_history.iter().map(|(at,token)|json!({"at_monotonic_ns":at,"focus_token":token})).collect::<Vec<_>>(),"selected_monitor_history":self.eva.selected_monitor_history.iter().map(|(at,token)|json!({"at_monotonic_ns":at,"monitor_token":token})).collect::<Vec<_>>(),"protocol_version":1,"wm_instance_id":self.eva.instance,"wake_generation":self.eva.wake_generation,"assistant_permit":self.eva.permit,"session_unlocked":!self.features.system_ui.is_locked()&&self.features.monitor_lock.is_empty(),"activation_monitor_token":self.eva.activation_monitor.filter(|_|self.eva_active()).map(|m|self.eva_monitor_token(m)),"selected_monitor_token":self.state.sel_mon.map(|m|self.eva_monitor_token(m)),"focus_token":self.get_selected_client_key().map(|k|self.eva_window_token(k)),"tag_count":CONFIG.load().tags_length().min(32),"monitors":monitors,"windows":windows,"workspaces":workspaces});
+        // Exact untruncated managed-app table (dock/desktop surfaces excluded).
+        context["windows_complete"] = json!(true);
+        context["windows_scope"] = json!("managed_application_windows_v1");
+        context["agent_sessions"] =
+            self.features.agent_sessions.snapshot(&context)["sessions"].clone();
+        context
     }
     pub(crate) fn eva_command_schema(&self) -> Value {
         let mut actions = serde_json::to_value(jwm_eva_core::actions::full_registry())
@@ -1679,6 +1781,41 @@ impl Jwm {
                 name,
                 "toggle_audio_recording" | "start_audio_recording" | "stop_audio_recording"
             );
+            if name == "focus_agent_session" {
+                let receipt = verified["agent_operation_id"]
+                    .as_str()
+                    .and_then(|operation| {
+                        self.features.agent_sessions.activation_status(operation)
+                    });
+                if let Some(receipt) = receipt
+                    && receipt["status"] != "queued"
+                {
+                    let focused = self
+                        .get_selected_client_key()
+                        .map(|key| self.eva_window_token(key));
+                    if let Some(op) = self.eva.operations.get_mut(&id) {
+                        let status = receipt["status"].as_str().unwrap_or("unknown");
+                        op.result["status"] = json!(match status {
+                            "revealed"
+                                if focused.as_deref() == verified["window_token"].as_str() =>
+                                "succeeded",
+                            "revealed" => "failed",
+                            "failed" => "failed",
+                            "cancelled" => "cancelled",
+                            _ => "unknown",
+                        });
+                        op.result["verified"]["terminal_receipt"] = receipt;
+                        op.result["verified"]["completion"] =
+                            json!(if op.result["status"] == "succeeded" {
+                                "terminal_pane_revealed_and_focus_verified"
+                            } else {
+                                "terminal_navigation_not_verified"
+                            });
+                        op.terminal = op.result["status"] != "unknown";
+                        op.expires = Instant::now() + RETENTION;
+                    }
+                }
+            }
             if name == "benchmark" {
                 if let Some(report) = self
                     .handle_ipc_query("benchmark_report", &json!({}), backend)
@@ -1869,6 +2006,20 @@ impl Jwm {
         }
         if let Err(error) = self.eva_check_undo_state(&req.action) {
             return failure(&error);
+        }
+        // Legacy guarded callers have no whole-plan snapshot preflight. A
+        // confirmation containing a legacy close must be a single-action plan,
+        // including before an ordinary prefix could otherwise be dispatched.
+        if self.eva.confirmation.as_ref().is_some_and(|confirmation| {
+            confirmation.targets.as_array().is_some_and(|actions| {
+                actions.len() != 1
+                    && actions.iter().any(|action| {
+                        action["name"] == "killclient"
+                            && action["arguments"]["expected_state"].as_object().is_none()
+                    })
+            })
+        }) {
+            return failure("unsupported_action: legacy close requires single-action confirmation");
         }
         let sensitive = jwm_eva_core::actions::semantic_actions()
             .iter()
@@ -2255,7 +2406,7 @@ impl Jwm {
         &mut self,
         backend: &mut dyn Backend,
         action: &Action,
-        _expected: &ExpectedContext,
+        expected_context: &ExpectedContext,
         operation_id: &str,
     ) -> Result<(&'static str, Value), String> {
         let args = &action.arguments;
@@ -2554,6 +2705,32 @@ impl Jwm {
                     ))
                 }
             }
+            "focus_agent_session" => {
+                let id = args["session_id"]
+                    .as_str()
+                    .ok_or("plan_invalid: session id")?;
+                let revision = args["session_revision"]
+                    .as_u64()
+                    .ok_or("plan_invalid: session revision")?;
+                let context = self.eva_execution_context();
+                let session = context["agent_sessions"]
+                    .as_array()
+                    .and_then(|sessions| {
+                        sessions.iter().find(|session| session["session_id"] == id)
+                    })
+                    .ok_or("target_gone: agent session")?;
+                if session["window_token"] != args["window_token"]
+                    || session["host_incarnation"] != args["host_incarnation"]
+                    || session["revision"] != revision
+                {
+                    return Err("stale_context: agent session association changed".into());
+                }
+                let receipt = self.activate_agent_session(backend, id, revision)?;
+                Ok((
+                    "accepted",
+                    json!({"agent_operation_id":receipt["operation_id"],"window_token":args["window_token"],"completion":"awaiting_terminal_reveal_receipt"}),
+                ))
+            }
             "focus_window" => {
                 let w = window()?;
                 self.eva_mutable_window(w)?;
@@ -2710,6 +2887,64 @@ impl Jwm {
                 Ok((
                     "succeeded",
                     json!({"window_token":self.eva_window_token(w),"sticky":self.state.clients[w].state.is_sticky}),
+                ))
+            }
+            "killclient" => {
+                let w = window()?;
+                self.eva_mutable_window(w)?;
+                let client = &self.state.clients[w];
+                let actual_monitor = client.mon.ok_or("target_gone: close monitor")?;
+                let actual_monitor_token = self.eva_monitor_token(actual_monitor);
+                if let Some(expected) = args.get("expected_state") {
+                    let expected = expected
+                        .as_object()
+                        .ok_or("plan_invalid: close source snapshot")?;
+                    if expected.get("window_token") != args.get("window_token")
+                        || expected.get("monitor_token").and_then(Value::as_str)
+                            != Some(actual_monitor_token.as_str())
+                        || expected.get("tag_mask").and_then(Value::as_u64)
+                            != Some(u64::from(client.state.tags))
+                        || args.get("monitor_token").is_some_and(|token| {
+                            token.as_str() != Some(actual_monitor_token.as_str())
+                        })
+                        || args.get("tag_mask").is_some_and(|mask| {
+                            mask.as_u64().is_none_or(|mask| {
+                                mask == 0 || mask & !u64::from(client.state.tags) != 0
+                            })
+                        })
+                    {
+                        return Err("stale_context: close source changed".into());
+                    }
+                } else {
+                    // Guarded-v1 compatibility is deliberately limited to the
+                    // original selected window, selected monitor and active tag.
+                    let token = self.eva_window_token(w);
+                    let active_tags = self.state.monitors[actual_monitor].get_active_tags();
+                    if self.get_selected_client_key() != Some(w)
+                        || self.state.sel_mon != Some(actual_monitor)
+                        || expected_context.focus_token.as_deref() != Some(token.as_str())
+                        || expected_context.monitor_token.as_deref()
+                            != Some(actual_monitor_token.as_str())
+                        || args["monitor_token"].as_str() != Some(actual_monitor_token.as_str())
+                        || args["tag_mask"].as_u64() != Some(u64::from(active_tags))
+                        || client.state.tags & active_tags == 0
+                    {
+                        return Err(
+                            "stale_context: legacy close requires selected active target".into(),
+                        );
+                    }
+                }
+                // Guarded EVA is target-directed. Ordinary keyboard/legacy IPC
+                // killclient continues to use the selected-client adapter.
+                let native = client.win;
+                let token = self.eva_window_token(w);
+                backend
+                    .window_ops()
+                    .close_window(native)
+                    .map_err(|error| error.to_string())?;
+                Ok((
+                    "accepted",
+                    json!({"window_token":token,"completion":"window disappearance","directed":true}),
                 ))
             }
             "close_window" => {
@@ -3734,6 +3969,218 @@ impl Jwm {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::api::*;
+    use crate::backend::common_define::*;
+    use crate::backend::error::BackendError;
+    struct CloseSpy(std::sync::Arc<std::sync::Mutex<Vec<(&'static str, WindowId)>>>);
+    impl crate::backend::api::WindowOps for CloseSpy {
+        // ... 代码内容保持不变，只是为了去除 warning ...
+        fn set_position(&self, _win: WindowId, _x: i32, _y: i32) -> Result<(), BackendError> {
+            Ok(())
+        }
+        fn configure(
+            &self,
+            _win: WindowId,
+            _x: i32,
+            _y: i32,
+            _w: u32,
+            _h: u32,
+            _border: u32,
+        ) -> Result<(), BackendError> {
+            Ok(())
+        }
+        fn set_decoration_style(
+            &self,
+            _win: WindowId,
+            _border_width: u32,
+            _border_color: Pixel,
+        ) -> Result<(), BackendError> {
+            Ok(())
+        }
+        fn raise_window(&self, _win: WindowId) -> Result<(), BackendError> {
+            Ok(())
+        }
+        fn map_window(&self, _win: WindowId) -> Result<(), BackendError> {
+            Ok(())
+        }
+        fn unmap_window(&self, _win: WindowId) -> Result<(), BackendError> {
+            Ok(())
+        }
+        fn close_window(&self, _win: WindowId) -> Result<CloseResult, BackendError> {
+            self.0.lock().unwrap().push(("close", _win));
+            Ok(CloseResult::Graceful)
+        }
+        fn set_input_focus(&self, _win: WindowId) -> Result<(), BackendError> {
+            self.0.lock().unwrap().push(("focus", _win));
+            Ok(())
+        }
+        fn set_input_focus_root(&self) -> Result<(), BackendError> {
+            Ok(())
+        }
+        fn get_window_attributes(&self, _win: WindowId) -> Result<WindowAttributes, BackendError> {
+            Ok(WindowAttributes {
+                override_redirect: false,
+                map_state_viewable: true,
+            })
+        }
+        fn get_geometry(&self, _win: WindowId) -> Result<Geometry, BackendError> {
+            Ok(Geometry::default())
+        }
+        fn scan_windows(&self) -> Result<Vec<WindowId>, BackendError> {
+            Ok(vec![])
+        }
+        fn flush(&self) -> Result<(), BackendError> {
+            Ok(())
+        }
+        fn kill_client(&self, _win: WindowId) -> Result<(), BackendError> {
+            Ok(())
+        }
+        fn apply_window_changes(
+            &self,
+            _win: WindowId,
+            _changes: WindowChanges,
+        ) -> Result<(), BackendError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn legacy_guarded_close_is_single_focused_active_target_only() {
+        let (mut jwm, mut backend) = setup();
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        backend.window_ops = Box::new(CloseSpy(calls.clone()));
+        let m = jwm.state.sel_mon.unwrap();
+        let mt = jwm.eva_monitor_token(m);
+        let mut a = WMClient::new(WindowId::from_raw(992));
+        a.mon = Some(m);
+        a.state.tags = 1;
+        let mut b = a.clone();
+        b.win = WindowId::from_raw(993);
+        let ka = jwm.insert_client(a);
+        let kb = jwm.insert_client(b);
+        jwm.attach_to_monitor(ka, m);
+        jwm.attach_to_monitor(kb, m);
+        jwm.state.monitors[m].sel = Some(ka);
+        let token = jwm.eva_window_token(ka);
+        let action = json!({"name":"killclient","arguments":{"window_token":token,"monitor_token":mt,"tag_mask":1}});
+        let status = json!({"assistant_permit":jwm.eva.permit,"state":"confirming","confirmation":{"plan_hash":"legacy-single","targets":[action]}});
+        assert!(jwm.eva_set_status(&mut backend, &status).success);
+        assert!(jwm.eva_confirm());
+        let mut req = request(&jwm, "legacy-single", action.clone());
+        req["confirmation_token"] = json!(jwm.eva.confirmation.as_ref().unwrap().token);
+        req["expected_context"] =
+            json!({"session_unlocked":true,"focus_token":token,"monitor_token":mt});
+        let seal = |req: &mut Value| {
+            let mut p = req.clone();
+            p.as_object_mut().unwrap().remove("request_digest");
+            req["request_digest"] = json!(jwm_eva_core::protocol::digest(&p));
+        };
+        seal(&mut req);
+        // Correct token alone never authorizes a background or inactive target.
+        jwm.state.monitors[m].sel = Some(kb);
+        assert!(!jwm.eva_guarded_execute(&mut backend, &req).success);
+        assert!(calls.lock().unwrap().is_empty());
+        jwm.state.monitors[m].sel = Some(ka);
+        jwm.state.clients[ka].state.tags = 4;
+        let parsed: Action = serde_json::from_value(action.clone()).unwrap();
+        let expected: ExpectedContext =
+            serde_json::from_value(req["expected_context"].clone()).unwrap();
+        assert!(
+            jwm.eva_dispatch(&mut backend, &parsed, &expected, "legacy-inactive")
+                .is_err()
+        );
+        assert!(calls.lock().unwrap().is_empty());
+        jwm.state.clients[ka].state.tags = 1;
+        let missing_focus: ExpectedContext =
+            serde_json::from_value(json!({"session_unlocked":true,"monitor_token":mt})).unwrap();
+        assert!(
+            jwm.eva_dispatch(
+                &mut backend,
+                &parsed,
+                &missing_focus,
+                "legacy-missing-focus"
+            )
+            .is_err()
+        );
+        let mut conflicting = parsed.clone();
+        conflicting.arguments["tag_mask"] = json!(2);
+        assert!(
+            jwm.eva_dispatch(&mut backend, &conflicting, &expected, "legacy-wrong-tag")
+                .is_err()
+        );
+        req["operation_id"] = json!("legacy-correct");
+        seal(&mut req);
+        let result = jwm.eva_guarded_execute(&mut backend, &req);
+        assert!(result.success, "{result:?}");
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec![("close", WindowId::from_raw(992))]
+        );
+        assert!(jwm.eva_guarded_execute(&mut backend, &req).success);
+        assert_eq!(calls.lock().unwrap().len(), 1);
+        // The whole trusted confirmation list is known locally. Refuse even an
+        // ordinary prefix when its legacy-close plan contains multiple steps.
+        let prefix = json!({"name":"switch_tag","arguments":{"monitor_token":mt,"tag_mask":2}});
+        let status = json!({"assistant_permit":jwm.eva.permit,"state":"confirming","confirmation":{"plan_hash":"legacy-mixed","targets":[prefix,action]}});
+        assert!(jwm.eva_set_status(&mut backend, &status).success);
+        assert!(jwm.eva_confirm());
+        let prefix = request(&jwm, "legacy-prefix", prefix);
+        assert!(!jwm.eva_guarded_execute(&mut backend, &prefix).success);
+        assert_eq!(jwm.state.monitors[m].get_active_tags(), 1);
+        assert_eq!(calls.lock().unwrap().len(), 1);
+    }
+    #[test]
+    fn guarded_directed_close_targets_background_window_without_focus_and_rejects_drift() {
+        let (mut jwm, mut backend) = setup();
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        backend.window_ops = Box::new(CloseSpy(calls.clone()));
+        let m = jwm.state.sel_mon.unwrap();
+        let mut a = WMClient::new(WindowId::from_raw(990));
+        a.mon = Some(m);
+        a.state.tags = 4;
+        let mut b = a.clone();
+        b.win = WindowId::from_raw(991);
+        b.state.tags = 1;
+        let ka = jwm.insert_client(a);
+        let kb = jwm.insert_client(b);
+        jwm.attach_to_monitor(ka, m);
+        jwm.attach_to_monitor(kb, m);
+        jwm.state.monitors[m].sel = Some(kb);
+        let token = jwm.eva_window_token(ka);
+        let action = json!({"name":"killclient","arguments":{"window_token":token,"expected_state":{"window_token":token,"monitor_token":jwm.eva_monitor_token(m),"tag_mask":4}}});
+        let status = json!({"assistant_permit":jwm.eva.permit,"state":"confirming","confirmation":{"plan_hash":"close-hash","targets":[action]}});
+        assert!(jwm.eva_set_status(&mut backend, &status).success);
+        let mut req = request(&jwm, "close-background", action);
+        assert!(!jwm.eva_guarded_execute(&mut backend, &req).success);
+        assert!(calls.lock().unwrap().is_empty());
+        assert!(jwm.eva_confirm());
+        req["confirmation_token"] = json!(jwm.eva.confirmation.as_ref().unwrap().token);
+        let mut payload = req.clone();
+        payload.as_object_mut().unwrap().remove("request_digest");
+        req["request_digest"] = json!(jwm_eva_core::protocol::digest(&payload));
+        let result = jwm.eva_guarded_execute(&mut backend, &req);
+        assert!(result.success, "{result:?}");
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec![("close", WindowId::from_raw(990))]
+        );
+        assert_eq!(jwm.state.monitors[m].sel, Some(kb));
+        assert!(jwm.eva_guarded_execute(&mut backend, &req).success);
+        assert_eq!(calls.lock().unwrap().len(), 1);
+        jwm.state.clients[ka].state.tags = 8;
+        let parsed: Action = serde_json::from_value(req["action"].clone()).unwrap();
+        assert!(
+            jwm.eva_dispatch(
+                &mut backend,
+                &parsed,
+                &serde_json::from_value(json!({"session_unlocked":true})).unwrap(),
+                "drift"
+            )
+            .is_err()
+        );
+        assert_eq!(calls.lock().unwrap().len(), 1);
+    }
+
     use crate::backend::api::CompositorWorkspaceEffects;
     use crate::backend::common_define::WindowId;
     use crate::core::models::WMClient;
@@ -3822,12 +4269,135 @@ mod tests {
         ));
         (jwm, backend)
     }
+    #[test]
+    fn execution_query_keeps_live_connector_labels_and_primary_independent_of_focus() {
+        let mut first = output(1, 0, 0, 1920, 1080);
+        first.identity.connector = "DP-1".into();
+        let mut second = output(2, 1920, 0, 1920, 1080);
+        second.identity.connector = "HDMI-1".into();
+        let mut backend = DisplaySpyBackend::new(vec![first, second]);
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let primary = jwm.state.monitor_order[0];
+        let other = jwm.state.monitor_order[1];
+        jwm.state.sel_mon = Some(other);
+        jwm.state.monitor_order.reverse();
+        let query = jwm.handle_ipc_query("get_execution_context", &Value::Null, &mut backend);
+        assert!(query.success);
+        let context = query.data.unwrap();
+        let monitors = context["monitors"].as_array().unwrap();
+        let first = monitors
+            .iter()
+            .find(|m| m["monitor_token"] == jwm.eva_monitor_token(primary))
+            .unwrap();
+        assert_eq!(first["connector"], "DP-1");
+        assert_eq!(first["primary"], true);
+        let second = monitors
+            .iter()
+            .find(|m| m["monitor_token"] == jwm.eva_monitor_token(other))
+            .unwrap();
+        assert_eq!(second["connector"], "HDMI-1");
+        assert_eq!(second["primary"], false);
+
+        backend.output_ops.outputs.retain(|o| o.id.0 != 1);
+        let context = jwm
+            .handle_ipc_query("get_execution_context", &Value::Null, &mut backend)
+            .data
+            .unwrap();
+        let first = context["monitors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["monitor_token"] == jwm.eva_monitor_token(primary))
+            .unwrap();
+        assert!(
+            first["connector"].is_null(),
+            "lost output must not keep a cached connector label"
+        );
+    }
+
     fn request(jwm: &Jwm, id: &str, action: Value) -> Value {
         let mut value = json!({"protocol_version":1,"wm_instance_id":jwm.eva.instance,"assistant_permit":jwm.eva.permit,"operation_id":id,"request_digest":"","expected_context":{"session_unlocked":true},"action":action});
         let mut payload = value.clone();
         payload.as_object_mut().unwrap().remove("request_digest");
         value["request_digest"] = json!(jwm_eva_core::protocol::digest(&payload));
         value
+    }
+    #[test]
+    fn agent_voice_navigation_requires_terminal_receipt_and_cancel_retires_queued_reveal() {
+        for cancelled in [false, true] {
+            let (mut jwm, mut backend) = setup();
+            let monitor = jwm.state.sel_mon.unwrap();
+            let mut client = WMClient::new(WindowId::from_raw(921));
+            client.mon = Some(monitor);
+            client.state.tags = 1;
+            let key = jwm.insert_client(client);
+            jwm.attach_to_monitor(key, monitor);
+            let window = jwm.eva_window_token(key);
+            let registration = json!({"wm_instance_id":jwm.eva.instance,"session":{"session_id":"codex:one","project_id":"jwm","provider":"forge","host_id":"host","host_incarnation":"boot:one","pane_id":"pane:one","window_token":window,"title":"Compile","status":"waiting","can_reveal":true,"revision":1}});
+            jwm.agent_session_command(&mut backend, "register_agent_session", &registration)
+                .unwrap();
+            let req = request(
+                &jwm,
+                "voice-session",
+                json!({"name":"focus_agent_session","arguments":{"session_id":"codex:one","session_revision":1,"host_incarnation":"boot:one","window_token":window}}),
+            );
+            let response = jwm.eva_guarded_execute(&mut backend, &req);
+            assert!(response.success, "{response:?}");
+            assert_eq!(response.data.unwrap()["status"], "accepted");
+            let status = json!({"wm_instance_id":jwm.eva.instance,"operation_id":"voice-session"});
+            assert_eq!(
+                jwm.eva_execution_status(&mut backend, &status)
+                    .data
+                    .unwrap()["status"],
+                "accepted"
+            );
+            let requests = jwm
+                .agent_session_requests(&json!({"host_id":"host","host_incarnation":"boot:one"}));
+            assert_eq!(requests["requests"].as_array().unwrap().len(), 1);
+            let mut receipt = requests["requests"][0].clone();
+            receipt["wm_instance_id"] = json!(jwm.eva.instance);
+            receipt["status"] = json!("revealed");
+            if cancelled {
+                jwm.eva_cancel("cancelled");
+                assert!(
+                    jwm.agent_session_command(&mut backend, "agent_session_revealed", &receipt)
+                        .is_err()
+                );
+                assert_eq!(
+                    jwm.eva_execution_status(&mut backend, &status)
+                        .data
+                        .unwrap()["status"],
+                    "cancelled"
+                );
+            } else {
+                jwm.agent_session_command(&mut backend, "claim_agent_session_reveal", &receipt)
+                    .unwrap();
+                jwm.agent_session_command(&mut backend, "agent_session_revealed", &receipt)
+                    .unwrap();
+                let result = jwm
+                    .eva_execution_status(&mut backend, &status)
+                    .data
+                    .unwrap();
+                assert_eq!(result["status"], "succeeded");
+                assert_eq!(
+                    result["verified"]["completion"],
+                    "terminal_pane_revealed_and_focus_verified"
+                );
+                assert_eq!(
+                    jwm.eva_guarded_execute(&mut backend, &req).data.unwrap()["status"],
+                    "succeeded"
+                );
+                assert_eq!(
+                    jwm.agent_session_requests(
+                        &json!({"host_id":"host","host_incarnation":"boot:one"})
+                    )["requests"]
+                        .as_array()
+                        .unwrap()
+                        .len(),
+                    1
+                );
+            }
+        }
     }
     #[test]
     fn assistant_contract_is_coherent_across_native_schema_context_and_status() {

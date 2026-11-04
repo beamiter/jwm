@@ -988,7 +988,14 @@ impl WMController for Jwm {
             return;
         }
         if self.features.system_ui.is_active() {
+            let pointer_moved = self.last_mouse_root != (root_x, root_y);
             self.last_mouse_root = (root_x, root_y);
+            // A font or geometry preview can produce an unchanged-position
+            // MotionNotify. It must not replace the keyboard's selection cue.
+            if self.features.system_ui.is_theme_picker() && !pointer_moved {
+                backend.compositor_set_system_ui_hover(None);
+                return;
+            }
             // The film strip follows the pointer, so the cell under it is the
             // one a click would take.
             if self.features.system_ui.is_layout_picker() {
@@ -4026,6 +4033,51 @@ mod tests {
         assert!(jwm.features.system_ui.is_launcher());
         jwm.app_launcher(&mut backend, &WMArgEnum::Int(0)).unwrap();
         assert!(!jwm.features.system_ui.is_active());
+    }
+
+    #[test]
+    fn theme_geometry_updates_do_not_recreate_hover_without_pointer_motion() {
+        let mut jwm = empty_jwm();
+        let mut backend = RenderSpyBackend::new();
+        jwm.features.system_ui = crate::jwm::features::SystemUiState::appearance_picker(
+            &crate::config::Config::default(),
+        );
+        jwm.features.system_ui.jump_selection(false);
+        jwm.features.system_ui.move_selection(12);
+        let selected = jwm
+            .features
+            .system_ui
+            .selected_appearance_choice()
+            .unwrap()
+            .to_owned();
+        jwm.last_mouse_root = (300.0, 250.0);
+        backend.system_ui_hit = SystemUiHitTarget::Item(1, 0.0);
+        <Jwm as WMController>::on_motion_notify(
+            &mut jwm,
+            &mut backend,
+            HitTarget::Background { output: None },
+            300.0,
+            250.0,
+            0,
+        );
+        assert_eq!(backend.system_ui_hover_updates.last(), Some(&None));
+        assert_eq!(
+            jwm.features.system_ui.selected_appearance_choice(),
+            Some(selected.as_str())
+        );
+        <Jwm as WMController>::on_motion_notify(
+            &mut jwm,
+            &mut backend,
+            HitTarget::Background { output: None },
+            301.0,
+            250.0,
+            1,
+        );
+        assert_eq!(backend.system_ui_hover_updates.last(), Some(&Some(1)));
+        assert_eq!(
+            jwm.features.system_ui.selected_appearance_choice(),
+            Some(selected.as_str())
+        );
     }
 
     #[test]
@@ -7588,6 +7640,25 @@ mod tests {
 
     #[test]
     fn four_finger_window_preview_commits_only_at_release_and_never_minimizes_live_content() {
+        // This ownership test needs one stable CONFIG snapshot. Unrelated parallel
+        // config-publication tests intentionally invalidate gesture generations;
+        // isolate this fixture instead of weakening production invalidation.
+        const CHILD: &str = "JWM_TEST_TOUCHPAD_OWNERSHIP_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().expect("unit-test executable"))
+                .args(["--exact", "jwm::event_dispatcher::tests::four_finger_window_preview_commits_only_at_release_and_never_minimizes_live_content", "--test-threads=1", "--nocapture"])
+                .env(CHILD, "1")
+                .output()
+                .expect("run isolated regression fixture");
+            assert!(
+                output.status.success()
+                    && String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"),
+                "isolated regression failed: stdout={} stderr={}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
         let (mut jwm, monitor, first, _) = jwm_with_tab_group();
         let mut backend = RenderSpyBackend::new();
         jwm.focus(&mut backend, Some(first)).unwrap();
@@ -12620,7 +12691,7 @@ mod tests {
     }
 
     #[test]
-    fn the_open_grid_follows_the_selection_to_another_monitor() {
+    fn desktop_grid_keeps_all_output_targets_when_viewport_follows_monitor_focus() {
         use crate::core::models::WMClient;
 
         let mut jwm = empty_jwm();
@@ -12674,8 +12745,11 @@ mod tests {
 
         let overview = jwm.features.system_ui.tags_overview().unwrap();
         assert_eq!(overview.monitor, Some(second));
-        assert_eq!(overview.window_ids[3], vec![placed[1]]);
-        assert!(overview.window_ids[0].is_empty());
+        let tags = CONFIG.load().tags_length();
+        assert_eq!(overview.window_ids[tags + 3], vec![placed[1]]);
+        assert_eq!(overview.window_ids[0], vec![placed[0]]);
+        assert_eq!(overview.targets[0], (first, 0));
+        assert_eq!(overview.targets[tags + 3], (second, 3));
         assert!(!jwm.tags_overview_follows_another_monitor());
     }
 

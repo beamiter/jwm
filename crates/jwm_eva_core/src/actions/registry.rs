@@ -149,6 +149,16 @@ pub fn semantic_actions() -> Vec<ActionSpec> {
             "restore_monitor_if_poststate_unchanged",
         ),
         spec(
+            "focus_agent_session",
+            &["activate_agent_session"],
+            "回到已登记的 Agent 会话：聚焦正确终端并等待原 pane 的回执，不启动新进程",
+            &[("session_ref", reference())],
+            "registered_agent_session",
+            "same_host_pane_session_receipt_and_focus_token",
+            "reversible",
+            "none",
+        ),
+        spec(
             "focus_monitor",
             &["focusmon", "focus_mon"],
             "聚焦指定显示器",
@@ -242,8 +252,16 @@ fn extended_actions() -> Vec<ActionSpec> {
         add(
             name,
             description,
-            window_scope(),
-            "selected_window",
+            if name == "killclient" {
+                vec![("window_ref", reference())]
+            } else {
+                window_scope()
+            },
+            if name == "killclient" {
+                "window"
+            } else {
+                "selected_window"
+            },
             "query:get_windows",
             if name == "killclient" {
                 "confirmation"
@@ -932,6 +950,16 @@ fn extended_actions() -> Vec<ActionSpec> {
     // Several semantic forms share a legacy handler, but remain distinct
     // capabilities: replacing a tag set and toggling membership are not aliases.
     for item in &mut result {
+        if item.canonical_name == "killclient" {
+            // Retain optional old source annotations without requiring a
+            // selected window/profile for directed close.
+            let spec = &mut *item;
+            spec.parameters_schema["properties"]["monitor_ref"] = reference();
+            spec.parameters_schema["properties"]["tag_number"] = tag();
+            spec.context_requirements
+                .push(crate::protocol::DIRECTED_CLOSE_WINDOW_FEATURE.into());
+            spec.capability_version = 2;
+        }
         let ensure_panel = matches!(
             item.canonical_name.as_str(),
             "app_launcher"
@@ -1113,6 +1141,17 @@ pub fn ipc_catalog() -> Vec<CatalogEntry> {
         ("get_command_schema", "query"),
         ("get_assistant_status", "query"),
         ("get_companion_desktop_state", "query"),
+        ("register_agent_session", "command"),
+        ("unregister_agent_session", "command"),
+        ("activate_agent_session", "command"),
+        ("agent_session_revealed", "command"),
+        ("claim_agent_session_reveal", "command"),
+        ("get_agent_sessions", "query"),
+        ("get_agent_summary", "query"),
+        ("get_agent_session_requests", "query"),
+        ("get_ui_theme", "query"),
+        ("agent/sessions", "subscription"),
+        ("agent/activation", "subscription"),
         ("assistant", "subscription"),
     ] {
         if !catalog.iter().any(|e| e.name == name && e.kind == kind) {

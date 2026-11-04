@@ -14,7 +14,7 @@
 | P3 JWM 监督 | 当前 release 组合双后端各 23 项通过：切顶栏保持 host、顶栏/宿主崩溃恢复、12 秒暂停、真实全屏、任务预览/恢复、逻辑多屏、重启与禁用回滚。 |
 | P4 全部前端 | [当前覆盖清单](shared-shell-coverage.json)与[逐项验收](shared-shell-validation.md)记录 28 项实际构建、56 次 XCB/X11RB 通用运行、56 次 sparse tag 交互。每次通用运行另验 TaoGlow 正文材质、外沿及透明圆角；各前端保留自己的渲染框架。 |
 | P5 发布与回滚 | [新版真实 ELF 候选包](../artifacts/header-alignment/release-candidate/lifecycle.json)通过新装、升级、回滚、卸载及配置保留；完整 payload、文档、稳定链接和 10 个 ELF 均有校验。[最终归档复验](../artifacts/header-alignment/release-final/lifecycle.json)与[本机安装/激活状态](../artifacts/header-alignment/release-final/local-install.json)独立记录。原驻留会话迁移失败仍保留。 |
-| P6 原生 Wayland | [当前 cbde/bc2 与正式 Leptos 43bd 的嵌套原生 10 项](../artifacts/header-alignment/native-wayland-header-final/summary.json)通过，内层 scale=1；[物理矩阵](shared-shell-hardware-acceptance.md)仍未验收。 |
+| P6 原生 Wayland | [历史 cbde/bc2 与当时 Leptos 43bd 的嵌套原生 10 项](../artifacts/header-alignment/native-wayland-header-final/summary.json)通过，内层 scale=1；[物理矩阵](shared-shell-hardware-acceptance.md)仍未验收。 |
 
 顶栏只显示本 monitor 有 client 或正在选中的 tag，保留原数字；例如 1/3/8 有窗口且空 tag 5 正在选中时显示 1/3/5/8。右键和滚轮仍按原 tag ID 操作，多活跃 tag 分别高亮。
 

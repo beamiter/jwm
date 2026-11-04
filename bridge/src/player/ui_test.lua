@@ -50,7 +50,7 @@ local mock = {
     register_event=function() end,
 }
 package.loaded.mp=mock
-package.loaded['mp.utils']={split_path=utils.split_path,file_info=function(path)
+package.loaded['mp.utils']={parse_json=utils.parse_json,shared_script_property_set=function(key,value) props['shared-script-properties/'..key]=value end,split_path=utils.split_path,file_info=function(path)
     return {is_file=path:sub(1,7)=='/media/'}
 end}
 local function key(group,name,event)
@@ -216,6 +216,16 @@ local ok,err=pcall(function()
     set('loop-playlist','inf'); props['playlist-pos']=2
     bindings['>'](); assert(props['playlist-pos']==0)
     bindings['<'](); assert(props['playlist-pos']==2)
+    local colors={}
+    for i=1,8 do colors[i]={.2,.3,.4,1} end
+    messages['jwm-theme'](utils.format_json({protocol_version=1,native_colors=colors,font='Sans 18',surface_opacity=.85,config_revision='style-1'}))
+    assert(props['shared-script-properties/jwm-theme-revision']=='style-1','theme completion requires applied Lua readback')
+    assert(overlay.data:find('664D33',1,true),'RGB semantic colors must adapt to ASS BGR')
+    assert(overlay.data:find('\\fnSans',1,true),'player inherits global font family')
+    local previous_theme=overlay.data
+    messages['jwm-theme'](utils.format_json({protocol_version=1,native_colors={},font='Sans 11',config_revision='invalid'}))
+    assert(overlay.data==previous_theme and props['shared-script-properties/jwm-theme-revision']=='style-1','malformed theme must retain last complete style')
+
 end)
 package.loaded.mp=real
 package.loaded['mp.utils']=utils

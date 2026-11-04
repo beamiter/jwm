@@ -24,12 +24,13 @@ use crate::backend::common_define::WindowId;
 use crate::backend::compositor_common::expose::{expose_grid_cols, move_expose_selection};
 use crate::backend::compositor_common::tags_grid;
 use crate::config::CONFIG;
-use crate::core::models::MonitorKey;
+use crate::core::models::{ClientKey, MonitorKey};
 use crate::core::types::Rect;
 use crate::jwm::Jwm;
 use crate::jwm::features::SystemUiState;
 use crate::jwm::features::toggles::{SystemUiPointerGrab, configured_feature_toggle_allowed};
 use crate::jwm::types::WMArgEnum;
+use std::collections::HashMap;
 
 /// One client's slice of the snapshot, narrow enough for the cell builder to
 /// be tested without a window manager.
@@ -101,6 +102,12 @@ pub struct TagsOverviewState {
     /// `None` for a snapshot built without one (tests); the flush treats
     /// that like any other mismatch with the selected monitor.
     pub monitor: Option<MonitorKey>,
+    /// Cell targets retain generational monitor identities across unplug/replug.
+    pub targets: Vec<(MonitorKey, usize)>,
+    /// A held gesture belongs to this exact output and work-area geometry.
+    pub output_geometry: Vec<(MonitorKey, [i32; 8])>,
+    /// Snapshot identities prevent a recycled native window from accepting a drag.
+    pub client_keys: HashMap<u64, ClientKey>,
 }
 
 impl TagsOverviewState {
@@ -132,6 +139,9 @@ impl TagsOverviewState {
             selected,
             pending: None,
             monitor: None,
+            targets: Vec::new(),
+            output_geometry: Vec::new(),
+            client_keys: HashMap::new(),
         }
     }
 
@@ -313,6 +323,7 @@ fn build_cells_with_ids(
     let mut cells: Vec<TagsGridCell> = (0..tags_length)
         .map(|tag_index| TagsGridCell {
             tag_index,
+            output_number: None,
             windows: Vec::new(),
             occupied: false,
             urgent: false,
@@ -367,6 +378,27 @@ pub fn live_cell(overview: &TagsOverviewState) -> Option<LiveTagsCell> {
         .map(|(id, rect)| (WindowId::from_raw(id), rect))
         .collect();
     Some(LiveTagsCell { cell, windows })
+}
+
+pub fn live_cells(overview: &TagsOverviewState) -> Vec<LiveTagsCell> {
+    overview
+        .cells
+        .iter()
+        .enumerate()
+        .filter(|(_, cell)| cell.active)
+        .filter_map(|(index, cell)| {
+            let ids = overview.window_ids.get(index)?;
+            Some(LiveTagsCell {
+                cell: index,
+                windows: ids
+                    .iter()
+                    .copied()
+                    .zip(cell.windows.iter().copied())
+                    .map(|(id, rect)| (WindowId::from_raw(id), rect))
+                    .collect(),
+            })
+        })
+        .collect()
 }
 
 /// Map a global window rectangle into a cell's `0.0..=1.0` frame, clipping
@@ -447,13 +479,29 @@ impl Jwm {
         let Some(overview) = self.features.system_ui.tags_overview() else {
             return Ok(());
         };
-        let Some(mask) = commit_mask(overview.selected, CONFIG.load().tags_length()) else {
+        let target = overview
+            .targets
+            .get(overview.selected)
+            .copied()
+            .or_else(|| overview.monitor.map(|monitor| (monitor, overview.selected)));
+        let Some((monitor, tag)) =
+            target.filter(|(monitor, _)| self.state.monitors.contains_key(*monitor))
+        else {
+            self.close_system_ui(backend);
+            return Ok(());
+        };
+        let Some(mask) = commit_mask(tag, CONFIG.load().tags_length()) else {
             // A config reload shrank the tag list under the open panel: there
             // is no tag left to jump to, so the commit degrades to a cancel.
             self.close_system_ui(backend);
             return Ok(());
         };
-        log::info!("[tags_overview] jumping to tag {}", overview.selected + 1);
+        log::info!(
+            "[tags_overview] jumping to tag {} on {:?}",
+            tag + 1,
+            monitor
+        );
+        self.switch_to_monitor(backend, monitor)?;
         self.view(backend, &WMArgEnum::UInt(mask))?;
         self.close_system_ui(backend);
         Ok(())
@@ -503,6 +551,33 @@ impl Jwm {
         }
         overview.selected = index;
         self.confirm_tags_overview(backend)
+    }
+
+    pub(crate) fn digit_tags_overview(
+        &mut self,
+        backend: &mut dyn Backend,
+        tag: usize,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let Some(overview) = self.features.system_ui.tags_overview() else {
+            return Ok(());
+        };
+        let monitor = overview
+            .targets
+            .get(overview.selected)
+            .map(|(monitor, _)| *monitor)
+            .or(overview.monitor);
+        let target = monitor
+            .and_then(|monitor| {
+                overview
+                    .targets
+                    .iter()
+                    .position(|entry| *entry == (monitor, tag))
+            })
+            .or_else(|| overview.targets.is_empty().then_some(tag));
+        if let Some(index) = target {
+            self.jump_tags_overview(backend, index)?;
+        }
+        Ok(())
     }
 
     /// Highlight the cell under the pointer. Mouse and keyboard share the one
@@ -589,15 +664,42 @@ impl Jwm {
                 if let Some(overview) = self.features.system_ui.tags_overview_mut() {
                     overview.pending = None;
                 }
-                let mask = commit_mask(target, CONFIG.load().tags_length());
-                let client_key = self.wintoclient(WindowId::from_raw(window));
-                if let (Some(mask), Some(client_key)) = (mask, client_key) {
+                let target_identity =
+                    self.features
+                        .system_ui
+                        .tags_overview()
+                        .and_then(|overview| {
+                            overview
+                                .targets
+                                .get(target)
+                                .copied()
+                                .or_else(|| overview.monitor.map(|monitor| (monitor, target)))
+                        });
+                let client_key = self
+                    .features
+                    .system_ui
+                    .tags_overview()
+                    .and_then(|overview| overview.client_keys.get(&window).copied())
+                    .filter(|key| {
+                        self.state
+                            .clients
+                            .get(*key)
+                            .is_some_and(|client| client.win.raw() == window)
+                    });
+                let valid_target = target_identity.filter(|(monitor, tag)| {
+                    self.state.monitors.contains_key(*monitor)
+                        && commit_mask(*tag, CONFIG.load().tags_length()).is_some()
+                });
+                if let (Some((monitor, tag)), Some(client_key)) = (valid_target, client_key) {
+                    let mask =
+                        commit_mask(tag, CONFIG.load().tags_length()).expect("validated target");
                     log::info!(
                         "[tags_overview] dragging window {window} to tag {}",
-                        target + 1
+                        tag + 1
                     );
                     // The arrange inside rebuilds the open panel's cells, so
                     // the drop is visible without the panel closing.
+                    self.sendmon(backend, Some(client_key), Some(monitor));
                     self.move_client_to_tag(backend, client_key, mask)?;
                 }
             }
@@ -688,11 +790,26 @@ impl Jwm {
         let rebuilt = self.tags_overview_state(sel_mon_key);
         if let Some(overview) = self.features.system_ui.tags_overview_mut() {
             let selected = overview.selected;
+            let identity = overview.targets.get(selected).copied();
             let pending = overview.pending.filter(|pending| {
-                overview.monitor == rebuilt.monitor && pending.cell < rebuilt.cells.len()
+                overview.monitor == rebuilt.monitor
+                    && overview.targets == rebuilt.targets
+                    && overview.output_geometry == rebuilt.output_geometry
+                    && pending.cell < rebuilt.cells.len()
+                    && pending.window.is_none_or(|window| {
+                        overview.client_keys.get(&window) == rebuilt.client_keys.get(&window)
+                    })
             });
             *overview = rebuilt;
-            overview.selected = selected.min(overview.cells.len().saturating_sub(1));
+            overview.selected = identity
+                .and_then(|target| overview.targets.iter().position(|entry| *entry == target))
+                .unwrap_or_else(|| {
+                    if identity.is_some() {
+                        overview.cells.len()
+                    } else {
+                        selected.min(overview.cells.len().saturating_sub(1))
+                    }
+                });
             overview.pending = pending;
         }
         self.mark_system_ui_dirty();
@@ -701,6 +818,52 @@ impl Jwm {
     /// The panel's contents for one monitor: the current tags snapshot in
     /// grid form.
     fn tags_overview_state(&self, mon_key: MonitorKey) -> TagsOverviewState {
+        let mut desktop = self.tags_overview_monitor_state(mon_key);
+        desktop.cells.clear();
+        desktop.window_ids.clear();
+        desktop.sticky_windows.clear();
+        for &monitor in &self.state.monitor_order {
+            let local = self.tags_overview_monitor_state(monitor);
+            let offset = desktop.cells.len();
+            let number = self.state.monitors.get(monitor).map(|monitor| monitor.num);
+            if let Some(output) = self.state.monitors.get(monitor) {
+                let g = &output.geometry;
+                desktop.output_geometry.push((
+                    monitor,
+                    [g.m_x, g.m_y, g.m_w, g.m_h, g.w_x, g.w_y, g.w_w, g.w_h],
+                ));
+            }
+            desktop
+                .cells
+                .extend(local.cells.into_iter().map(|mut cell| {
+                    if self.state.monitor_order.len() > 1 {
+                        cell.output_number = number;
+                    }
+                    cell
+                }));
+            desktop.window_ids.extend(local.window_ids);
+            desktop.sticky_windows.extend(local.sticky_windows);
+            desktop
+                .targets
+                .extend((0..CONFIG.load().tags_length()).map(|tag| (monitor, tag)));
+            if monitor == mon_key {
+                desktop.selected = offset + local.selected;
+            }
+        }
+        if self.state.monitor_order.len() > 1 {
+            // One output per row makes the grouping and screen/tag labels explicit.
+            desktop.cols = CONFIG.load().tags_length().max(1) as u32;
+        }
+        desktop.client_keys = self
+            .state
+            .clients
+            .iter()
+            .map(|(key, client)| (client.win.raw(), key))
+            .collect();
+        desktop
+    }
+
+    fn tags_overview_monitor_state(&self, mon_key: MonitorKey) -> TagsOverviewState {
         let tags_length = CONFIG.load().tags_length();
         let (active_tags, work) = self
             .state
@@ -797,6 +960,58 @@ mod tests {
         assert!(
             overview.pending.is_none(),
             "a drag cannot migrate to another monitor's grid"
+        );
+    }
+
+    #[test]
+    fn desktop_overview_addresses_the_same_tag_on_distinct_outputs() {
+        use crate::jwm::monitor::test_support::{DisplaySpyBackend, output};
+        let mut backend = DisplaySpyBackend::new(vec![
+            output(1, -1920, 0, 1920, 1080),
+            output(2, 0, 0, 1920, 1080),
+        ]);
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let left = jwm.state.monitor_order[0];
+        let right = jwm.state.monitor_order[1];
+        let mut overview = jwm.tags_overview_state(left);
+        let tags = CONFIG.load().tags_length();
+        assert_eq!(overview.cells.len(), tags * 2);
+        assert_eq!(overview.targets[0], (left, 0));
+        assert_eq!(overview.targets[tags], (right, 0));
+        assert_ne!(
+            overview.cells[0].display_label(),
+            overview.cells[tags].display_label()
+        );
+        assert_eq!(live_cells(&overview).len(), 2);
+        overview.selected = tags + 1;
+        jwm.features.system_ui = SystemUiState::TagsOverview(overview);
+        jwm.confirm_tags_overview(&mut backend).unwrap();
+        assert_eq!(jwm.state.sel_mon, Some(right));
+        assert_eq!(jwm.state.monitors[right].get_active_tags(), 2);
+    }
+
+    #[test]
+    fn an_output_geometry_change_cancels_a_held_overview_gesture() {
+        use crate::jwm::monitor::test_support::{DisplaySpyBackend, output};
+        let mut backend = DisplaySpyBackend::new(vec![output(1, 0, 0, 1920, 1080)]);
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let monitor = jwm.state.sel_mon.unwrap();
+        let mut overview = jwm.tags_overview_state(monitor);
+        overview.pending = Some(PendingCellPress {
+            cell: 0,
+            window: None,
+            dragging: false,
+        });
+        jwm.features.system_ui = SystemUiState::TagsOverview(overview);
+        jwm.state.monitors[monitor].geometry.w_w -= 16;
+        jwm.refresh_tags_overview();
+        assert!(
+            jwm.features
+                .system_ui
+                .tags_overview()
+                .unwrap()
+                .pending
+                .is_none()
         );
     }
 

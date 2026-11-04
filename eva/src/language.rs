@@ -107,7 +107,7 @@ fn adjacent_tags(desktop: &Value) -> Value {
     }
 }
 
-fn application_family(class: &str) -> Option<&'static str> {
+pub(crate) fn application_family(class: &str) -> Option<&'static str> {
     // Application classes, never titles, supply these optional broad labels.
     // Exact aliases avoid treating arbitrary title text or a substring such as
     // "firefox-password-helper" as a trustworthy application identity.
@@ -430,7 +430,19 @@ pub fn conversation_grounding(result: &Value) -> Value {
     } else {
         None
     };
-    json!({"can_repeat":effect.is_some(),"last_effect":effect,"window_ref":window})
+    let previous_monitor = steps.filter(|steps| steps.len() == 1).and_then(|steps| {
+        (steps[0]["name"] == "move_window_to_monitor" && steps[0]["status"] == "succeeded")
+            .then(|| reference(&steps[0]["previous_monitor_ref"], 'm'))
+            .flatten()
+    });
+    let last_domain = steps
+        .filter(|steps| steps.len() == 1 && steps[0]["status"] == "succeeded")
+        .and_then(|steps| match steps[0]["name"].as_str() {
+            Some("set_volume" | "adjust_volume") => Some("volume"),
+            Some("set_brightness" | "adjust_brightness") => Some("brightness"),
+            _ => None,
+        });
+    json!({"can_repeat":effect.is_some(),"last_effect":effect,"window_ref":window,"previous_monitor_ref":previous_monitor,"last_domain":last_domain})
 }
 
 #[cfg(test)]

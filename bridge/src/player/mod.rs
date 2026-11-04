@@ -3,6 +3,7 @@ mod cli;
 mod eva;
 mod model;
 mod service;
+mod theme;
 mod ui;
 
 pub async fn run(eva_request: Option<String>) -> Result<(), String> {

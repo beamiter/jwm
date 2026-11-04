@@ -211,6 +211,7 @@ fn shell_route_to_shared(route: ShellRoute) -> shared_structures::ShellHubRoute 
         ShellRoute::Calendar => Wire::Calendar,
         ShellRoute::Wallpaper => Wire::Wallpaper,
         ShellRoute::Theme => Wire::Theme,
+        ShellRoute::AgentSessions => Wire::AgentSessions,
     }
 }
 

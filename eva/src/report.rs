@@ -15,6 +15,7 @@ struct Turn {
     playback_end: Option<u64>,
     feedback_done: Option<u64>,
     responses: u64,
+    semantic_reviews: u64,
     rejections: u64,
     normalized: u64,
     response_ids: Vec<String>,
@@ -111,8 +112,11 @@ pub fn analyze<I: IntoIterator<Item = String>>(lines: I) -> Value {
             let turn = turns.entry(key).or_default();
             match stage {
                 "input_committed" => turn.committed = turn.committed.or(at),
-                "plan_completed" => {
+                "plan_completed" | "semantic_review_completed" => {
                     turn.responses += 1;
+                    if stage == "semantic_review_completed" {
+                        turn.semantic_reviews += 1;
+                    }
                     if let Some(id) = event["response_id"].as_str() {
                         turn.response_ids.push(id.to_owned());
                     }
@@ -224,6 +228,7 @@ pub fn analyze<I: IntoIterator<Item = String>>(lines: I) -> Value {
             "mean_responses": if committed_turns.is_empty() {0.0} else {total_responses as f64 / committed_turns.len() as f64},
             "discovery_rounds": discovery,
             "repair_rounds": repair,
+            "semantic_review_rounds": committed_turns.iter().map(|t| t.semantic_reviews).sum::<u64>(),
             "rejections": committed_turns.iter().map(|t| t.rejections).sum::<u64>(),
             "normalized": committed_turns.iter().map(|t| t.normalized).sum::<u64>(),
             "results": results,
@@ -292,12 +297,13 @@ pub fn render(report: &Value, since: &str) -> String {
         map_text(&sessions["failed"])
     ));
     out.push_str(&format!(
-        "Turns {} · responses/turn {} (mean {:.2}) · discovery {} · repair {} · rejections {} · normalized {}\n",
+        "Turns {} · responses/turn {} (mean {:.2}) · discovery {} · repair {} · semantic review {} · rejections {} · normalized {}\n",
         turns["count"],
         map_text(&turns["responses_per_turn"]),
         turns["mean_responses"].as_f64().unwrap_or(0.0),
         turns["discovery_rounds"],
         turns["repair_rounds"],
+        turns["semantic_review_rounds"].as_u64().unwrap_or(0),
         turns["rejections"],
         turns["normalized"]
     ));
@@ -429,6 +435,83 @@ mod tests {
         assert!(text.contains("warm 120/120/120"));
         assert!(text.contains("Cost USD 0.0170"));
     }
+    #[test]
+    fn settled_semantic_review_counts_the_second_response_cost_and_final_validation_latency() {
+        let report = analyze(vec![
+            record("activation_received", json!({"generation":9,"utc_ms":100})),
+            record(
+                "input_committed",
+                json!({"generation":9,"session_epoch":2,"turn_id":7,"utc_ms":1000}),
+            ),
+            record(
+                "plan_completed",
+                json!({"generation":9,"session_epoch":2,"turn_id":7,"response_id":"plan-1","utc_ms":1200}),
+            ),
+            record(
+                "usage_settled",
+                json!({"phase":"plan","response_id":"plan-1","cost_microusd":1000,"usage":{"tokens":{"input_text":100,"output_text":10}}}),
+            ),
+            record(
+                "usage_settled",
+                json!({"phase":"semantic_review","response_id":"review-1","cost_microusd":2500,"usage":{"tokens":{"input_text":200,"output_text":20}}}),
+            ),
+            record(
+                "semantic_review_completed",
+                json!({"generation":9,"session_epoch":2,"turn_id":7,"phase":"semantic_review","response_id":"review-1","result":"completed","utc_ms":1800}),
+            ),
+            record(
+                "validation_completed",
+                json!({"generation":9,"session_epoch":2,"turn_id":7,"utc_ms":1900}),
+            ),
+        ]);
+        assert_eq!(report["turns"]["count"], 1);
+        assert_eq!(report["turns"]["responses_per_turn"]["1"], 0);
+        assert_eq!(report["turns"]["responses_per_turn"]["2"], 1);
+        assert_eq!(report["turns"]["mean_responses"], 2.0);
+        assert_eq!(report["turns"]["semantic_review_rounds"], 1);
+        assert_eq!(report["cost_usd"]["by_phase"]["plan"], 0.001);
+        assert_eq!(report["cost_usd"]["by_phase"]["semantic_review"], 0.0025);
+        assert_eq!(report["cost_usd"]["total"], 0.0035);
+        assert_eq!(
+            report["cost_usd"]["tokens_by_phase"]["semantic_review"]["input_text"],
+            200
+        );
+        // Final validation follows the review: do not report the initial
+        // 200ms plan response as the complete 900ms decision latency.
+        assert_eq!(
+            report["latency_ms"]["speech_end_to_plan"],
+            json!({"count":1,"p50":900,"p95":900,"max":900})
+        );
+        assert!(render(&report, "today").contains("semantic review 1"));
+    }
+
+    #[test]
+    fn legacy_journal_and_legacy_report_render_zero_semantic_reviews() {
+        let mut report = analyze(vec![
+            record("activation_received", json!({"generation":1,"utc_ms":0})),
+            record(
+                "input_committed",
+                json!({"generation":1,"session_epoch":1,"turn_id":1,"utc_ms":100}),
+            ),
+            record(
+                "plan_completed",
+                json!({"generation":1,"session_epoch":1,"turn_id":1,"response_id":"old-plan","utc_ms":200}),
+            ),
+            record(
+                "validation_completed",
+                json!({"generation":1,"session_epoch":1,"turn_id":1,"utc_ms":250}),
+            ),
+        ]);
+        assert_eq!(report["turns"]["semantic_review_rounds"], 0);
+        assert_eq!(report["turns"]["responses_per_turn"]["1"], 1);
+        assert_eq!(report["latency_ms"]["speech_end_to_plan"]["p50"], 150);
+        report["turns"]
+            .as_object_mut()
+            .unwrap()
+            .remove("semantic_review_rounds");
+        assert!(render(&report, "old").contains("semantic review 0"));
+    }
+
     #[test]
     fn percentiles_use_nearest_rank_and_tolerate_empty_input() {
         assert_eq!(percentile(&[], 50), 0);

@@ -25,6 +25,7 @@ pub type SharedState = Arc<Mutex<State>>;
 
 #[derive(Debug)]
 pub enum Action {
+    Theme(Value),
     Open(Open),
     OpenEva { open: Open, request: Value },
     Play,
@@ -626,6 +627,15 @@ impl Mpv {
 
     fn action(&mut self, action: Action, deadline: Instant) -> Result<(), String> {
         match action {
+            Action::Theme(theme) => {
+                self.command(json!(["script-message", "jwm-theme", theme.to_string()]))?;
+                if self.get("shared-script-properties")?["jwm-theme-revision"]
+                    != theme["config_revision"]
+                {
+                    return Err("player theme is awaiting its Lua readback".into());
+                }
+                Ok(())
+            }
             Action::Open(open) => self.open(open, deadline),
             Action::OpenEva { open, request } => {
                 self.open_eva(open, request, deadline);
@@ -1216,6 +1226,38 @@ mod tests {
         std::fs::remove_dir_all(directory).unwrap();
     }
 
+    #[test]
+    fn real_mpv_theme_message_is_applied_before_receipt_and_invalid_updates_are_retained() {
+        if std::env::var_os("RUN_JWM_MPV_TESTS").is_none() {
+            return;
+        }
+        let mut mpv =
+            Mpv::spawn(Arc::new(Mutex::new(State::default())), Mode::Video, true).unwrap();
+        let theme = json!({"protocol_version":1,"native_colors":vec![[0.2,0.3,0.4,1.0];8],"font":"Sans 18","surface_opacity":0.85,"config_revision":"style-1"});
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            if mpv.action(Action::Theme(theme.clone()), deadline).is_ok() {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "real mpv never applied a valid theme"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let invalid = json!({"protocol_version":1,"native_colors":[],"font":"Sans 11","config_revision":"invalid"});
+        assert!(
+            mpv.action(
+                Action::Theme(invalid),
+                Instant::now() + Duration::from_secs(2)
+            )
+            .is_err()
+        );
+        assert_eq!(
+            mpv.get("shared-script-properties").unwrap()["jwm-theme-revision"],
+            "style-1"
+        );
+    }
     #[test]
     fn real_mpv_crash_reaps_child_and_removes_ui() {
         if std::env::var_os("RUN_JWM_MPV_TESTS").is_none() {

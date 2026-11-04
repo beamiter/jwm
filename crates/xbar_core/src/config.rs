@@ -34,6 +34,8 @@ pub struct BarConfig {
     /// Pango font description string.
     pub font: String,
     pub theme: ThemeMode,
+    /// Named global semantic theme, `inherit`, or `standalone` to retain local colors.
+    pub ui_theme: Option<String>,
     /// Optional background alpha multiplier for renderers that support it.
     pub background_opacity: Option<f64>,
     pub presentation: PresentationConfig,
@@ -46,6 +48,7 @@ impl Default for BarConfig {
             edge_shell: crate::edge_shell::EdgeShellConfig::default(),
             font: DEFAULT_FONT.to_owned(),
             theme: ThemeMode::Light,
+            ui_theme: None,
             background_opacity: None,
             presentation: PresentationConfig::default(),
             glass: GlassConfig::default(),
@@ -221,6 +224,7 @@ struct FileConfig {
     edge_shell: crate::edge_shell::EdgeShellConfig,
     font: Option<String>,
     theme: Option<FileTheme>,
+    ui_theme: Option<String>,
     background_opacity: Option<f64>,
     #[serde(default)]
     presentation: FilePresentation,
@@ -428,7 +432,35 @@ impl BarConfig {
             validate_text_bytes("font", &font, MAX_FONT_BYTES)?;
             config.font = font;
         }
+        if let Some(theme) = file.ui_theme {
+            let normalized = theme.trim().to_ascii_lowercase();
+            if ![
+                "inherit",
+                "standalone",
+                "glass",
+                "glass-dark",
+                "aurora",
+                "material",
+                "nord",
+                "tokyo-night",
+                "paper",
+                "light",
+                "dark",
+            ]
+            .contains(&normalized.as_str())
+            {
+                return Err(ConfigError::InvalidValue {
+                    field: "ui_theme",
+                    reason: "must be inherit, standalone, or a supported desktop theme",
+                });
+            }
+            config.ui_theme = Some(normalized);
+        }
         if let Some(theme) = file.theme {
+            // An existing explicit local light/dark preference remains an override.
+            if config.ui_theme.is_none() {
+                config.ui_theme = Some("standalone".into());
+            }
             config.theme = match theme {
                 FileTheme::Dark => ThemeMode::Dark,
                 FileTheme::Light => ThemeMode::Light,
@@ -1323,5 +1355,30 @@ blur_radius = 10
 
         drop(listener);
         std::fs::remove_file(path).unwrap();
+    }
+    #[test]
+    fn semantic_theme_inheritance_preserves_explicit_legacy_overrides() {
+        assert_eq!(
+            BarConfig::from_toml("theme='dark'")
+                .unwrap()
+                .ui_theme
+                .as_deref(),
+            Some("standalone")
+        );
+        assert_eq!(
+            BarConfig::from_toml("theme='dark'\nui_theme='inherit'")
+                .unwrap()
+                .ui_theme
+                .as_deref(),
+            Some("inherit")
+        );
+        assert_eq!(
+            BarConfig::from_toml("ui_theme='nord'")
+                .unwrap()
+                .ui_theme
+                .as_deref(),
+            Some("nord")
+        );
+        assert!(BarConfig::from_toml("ui_theme='unknown-palette'").is_err());
     }
 }

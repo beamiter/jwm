@@ -360,3 +360,10 @@ desktop environment. The experimental Iced adapter has no explicit bar keyboard
 traversal, and Xilem's in-window tooltips can clip within a narrow sidebar.
 JWM's native minimized-window previews follow the inward-facing edge placement.
 The supported daily-drive target remains `tao_glow_bar`.
+
+Fresh source installs create `~/.config/xbar/config.toml` with
+`ui_theme = "inherit"` only when no conventional config, explicit `XBAR_CONFIG`,
+or legacy Xilem saved theme exists. Existing configs, symlinks, comments and
+explicit light/dark/named overrides remain untouched. To opt an existing config
+into desktop theme inheritance, add the top-level `ui_theme = "inherit"` yourself;
+`ui_theme = "standalone"` keeps its local palette.

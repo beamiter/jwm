@@ -180,7 +180,7 @@ impl TileEncoder {
         self.plan_with_refinement(frame, request, None)
     }
 
-    /// Add a bounded quality-only delta only when there are no pixel changes.
+    /// Add bounded quality debt to a delta, including during local pixel changes.
     /// This uses the existing wire format and leaves the committed debt intact
     /// until encode, authenticated write and flush all succeed.
     pub(crate) fn plan_with_refinement(
@@ -233,19 +233,22 @@ impl TileEncoder {
         }
 
         let mut refinement_cursor = keyframe.then_some(0);
-        if !keyframe
-            && self.dirty.is_empty()
-            && let Some((quality, limit)) = refinement
-        {
+        if !keyframe && let Some((quality, limit)) = refinement {
             let (indices, next) =
                 refinement_tiles(&self.qualities, quality, limit, self.refinement_cursor);
             if !indices.is_empty() {
                 refinement_cursor = Some(next);
             }
             for index in indices {
-                self.bitmap[index / 8] |= 1 << (index % 8);
-                self.dirty.push(index as u32);
+                let mask = 1 << (index % 8);
+                if self.bitmap[index / 8] & mask == 0 {
+                    self.bitmap[index / 8] |= mask;
+                    self.dirty.push(index as u32);
+                }
             }
+            // The bitmap decoder consumes atlas tiles in raster order. The
+            // round-robin repair selection may precede ordinary damage.
+            self.dirty.sort_unstable();
         }
 
         let dirty_tiles = u32::try_from(self.dirty.len())
@@ -1676,6 +1679,47 @@ mod tests {
     }
 
     #[test]
+    fn blinking_tile_does_not_starve_unchanged_text_or_reorder_the_atlas() {
+        let mut source = flat(128, 32, 20);
+        let mut encoder = TileEncoder::new();
+        let mut decoder = TileDecoder::new();
+        roundtrip(
+            &mut encoder,
+            &mut decoder,
+            &source,
+            40,
+            TileEncodeRequest::Keyframe,
+        );
+        // Start in the middle: the changed high-index tile is collected first,
+        // while refinement wraps around to low indices on later rounds.
+        encoder.refinement_cursor = 8;
+        let mut payload = Vec::new();
+        for sequence in 1..=16 {
+            let blink = if sequence % 2 == 0 { 20 } else { 240 };
+            for y in 16..32 {
+                for x in 112..128 {
+                    source.image.put_pixel(x, y, Rgb([blink; 3]));
+                }
+            }
+            let plan = encoder
+                .plan_with_refinement(&source, TileEncodeRequest::Delta, Some((85, 2)))
+                .unwrap();
+            assert!(plan.dirty_tiles <= 3, "damage plus bounded repair");
+            encoder
+                .encode_into(&mut payload, sequence, &source, 85)
+                .unwrap();
+            decoder
+                .decode_into(&payload, new_decode_buffer_pool())
+                .unwrap();
+            encoder.commit(&source);
+            let decoded = decoder.canvas().unwrap();
+            assert!(decoded.get_pixel(120, 24)[0].abs_diff(blink) < 12);
+            assert!(decoded.get_pixel(8, 8)[0].abs_diff(20) < 12);
+        }
+        assert!(!encoder.has_quality_debt(85));
+    }
+
+    #[test]
     fn refinement_damage_and_geometry_changes_replace_quality_state() {
         let source = flat(64, 64, 20);
         let mut encoder = TileEncoder::new();
@@ -1690,11 +1734,11 @@ mod tests {
         let mut changed = flat(64, 64, 20);
         changed.image.put_pixel(0, 0, Rgb([250; 3]));
         let plan = encoder
-            .plan_with_refinement(&changed, TileEncodeRequest::Delta, Some((85, 256)))
+            .plan_with_refinement(&changed, TileEncodeRequest::Delta, Some((85, 1)))
             .unwrap();
         assert_eq!(
             plan.dirty_tiles, 1,
-            "pixel changes take precedence over quality-only debt"
+            "a changed tile also pays its own quality debt"
         );
         let mut payload = Vec::new();
         encoder.encode_into(&mut payload, 1, &changed, 70).unwrap();

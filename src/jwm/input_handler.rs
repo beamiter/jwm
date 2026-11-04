@@ -598,6 +598,7 @@ impl Jwm {
                         // the compositor falls back to the wireframe for any
                         // window whose texture it cannot find.
                         live: live_cell(overview),
+                        live_outputs: crate::jwm::features::tags_overview::live_cells(overview),
                     }),
                 // The wallpaper picker's side preview tracks the highlight:
                 // the row key is the path the picker would apply, so the
@@ -1754,7 +1755,7 @@ impl Jwm {
             // digit past what the row offers names nothing and does nothing.
             let index = (keysym - keys::KEY_1) as usize;
             if let Some((id, action)) = self.features.system_ui.notification_action_at(index) {
-                self.invoke_notification_action(id, &action);
+                self.invoke_agent_or_notification_action(backend, id, &action);
             }
         } else if let Some((id, action)) = self.features.system_ui.selected_notification() {
             if keysym == keys::KEY_Return || keysym == keys::KEY_space {
@@ -1762,7 +1763,7 @@ impl Jwm {
                     // Without an action there is nothing to hand back to the
                     // sender, so Return just dismisses like `d`.
                     Some(action) => {
-                        self.invoke_notification_action(id, &action);
+                        self.invoke_agent_or_notification_action(backend, id, &action);
                     }
                     None => {
                         self.close_notification(id, CloseReason::Dismissed);
@@ -2046,6 +2047,36 @@ impl Jwm {
             self.close_system_ui(backend);
             return Ok(true);
         }
+        if let Some(scene) = self.features.system_ui.selected_scene().cloned() {
+            if let Err(reason) = self.open_workscene_preview(backend, scene) {
+                backend.compositor_push_toast(crate::backend::api::ToastNotification {
+                    title: "Scene unavailable".into(),
+                    body: reason,
+                    app: "JWM".into(),
+                    ..Default::default()
+                });
+            }
+            return Ok(true);
+        }
+        if let Some(session) = self.features.system_ui.selected_agent_session().cloned() {
+            match self.activate_agent_session(backend, &session.session_id, session.revision) {
+                Ok(_) => self.close_system_ui(backend),
+                Err(reason) => {
+                    log::warn!("Launcher: session unavailable: {reason}");
+                    backend.compositor_push_toast(crate::backend::api::ToastNotification {
+                        title: "Agent session unavailable".into(),
+                        body: reason,
+                        app: "JWM".into(),
+                        ..Default::default()
+                    });
+                }
+            }
+            return Ok(true);
+        }
+        if let Some(route) = self.features.system_ui.selected_setting() {
+            self.open_shell_hub_route(backend, route)?;
+            return Ok(true);
+        }
         if let Some(window) = self.features.system_ui.selected_window() {
             // A recycled native window ID must never restore another client.
             // Also reject a client restored elsewhere while this snapshot was open.
@@ -2110,7 +2141,7 @@ impl Jwm {
     ) -> Result<(), Box<dyn std::error::Error>> {
         if self.features.system_ui.notification_strip_visible_row() == Some(row) {
             if let Some((id, action, _)) = self.notification_strip_chip_at(row, text_x) {
-                self.invoke_notification_action(id, &action);
+                self.invoke_agent_or_notification_action(backend, id, &action);
                 self.sync_system_ui(backend);
             }
             return Ok(());
@@ -2259,6 +2290,8 @@ impl Jwm {
             self.copy_selected_clipboard(backend);
         } else if self.features.system_ui.is_wallpaper_picker() {
             self.apply_selected_wallpaper(backend);
+        } else if self.features.system_ui.is_workscene_preview() {
+            self.perform_workscene_selection(backend);
         } else if self.features.system_ui.is_theme_picker() {
             self.apply_selected_theme(backend);
         } else if self.features.system_ui.media_library_kind().is_some() {
@@ -2937,7 +2970,7 @@ impl Jwm {
                     // without modifiers: the panel holds the keyboard grab,
                     // so the global Mod1+N bindings never see the key.
                     k if (keys::KEY_1..=keys::KEY_9).contains(&k) => {
-                        self.jump_tags_overview(backend, (k - keys::KEY_1) as usize)?;
+                        self.digit_tags_overview(backend, (k - keys::KEY_1) as usize)?;
                         true
                     }
                     _ => false,
@@ -3253,6 +3286,16 @@ impl Jwm {
                 }
                 return Ok(());
             }
+            if self.features.system_ui.is_workscene_preview() {
+                match keysym {
+                    keys::KEY_Return if !repeat => self.perform_workscene_selection(backend),
+                    keys::KEY_Up => self.features.system_ui.move_selection(-1),
+                    keys::KEY_Down | keys::KEY_Tab => self.features.system_ui.move_selection(1),
+                    _ => {}
+                }
+                self.sync_system_ui(backend);
+                return Ok(());
+            }
             if self.features.system_ui.is_theme_picker() {
                 if keysym == keys::KEY_Return && !repeat {
                     if clean_state.contains(Mods::CONTROL) {
@@ -3263,7 +3306,15 @@ impl Jwm {
                 } else if keysym == keys::KEY_space && !repeat {
                     self.preview_selected_theme(backend);
                 } else {
-                    if keysym == keys::KEY_Up {
+                    if keysym == keys::KEY_Home {
+                        self.features.system_ui.jump_selection(false);
+                    } else if keysym == keys::KEY_End {
+                        self.features.system_ui.jump_selection(true);
+                    } else if keysym == keys::KEY_Page_Up {
+                        self.features.system_ui.page_selection(-1);
+                    } else if keysym == keys::KEY_Page_Down {
+                        self.features.system_ui.page_selection(1);
+                    } else if keysym == keys::KEY_Up {
                         self.features.system_ui.move_selection(-1);
                     } else if keysym == keys::KEY_Down || keysym == keys::KEY_Tab {
                         self.features.system_ui.move_selection(1);
@@ -4135,7 +4186,11 @@ impl Jwm {
                     // ActionInvoked, then NotificationClosed); the compositor
                     // already dismissed the card itself.
                     if press == ToastPress::Activate {
-                        self.invoke_notification_action(notification_id, &action_key);
+                        self.invoke_agent_or_notification_action(
+                            backend,
+                            notification_id,
+                            &action_key,
+                        );
                     }
                     self.features.capture.swallow_next_button_release();
                     return Ok(PointerPressDisposition::Consumed);
@@ -6784,6 +6839,8 @@ mod tests {
             query: String::new(),
             entries: std::sync::Arc::from([]),
             windows: Vec::new(),
+            sessions: Vec::new(),
+            scenes: Vec::new(),
             matches: Vec::new(),
             selected: 0,
             usage: Default::default(),
@@ -9438,4 +9495,3 @@ mod tests {
         );
     }
 }
-

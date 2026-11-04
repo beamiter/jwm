@@ -27,6 +27,10 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--agent-summary", action="store_true", help="Verify registered-state summary, collapsed Agent entry, picker routes and quiet waiting deduplication")
+    parser.add_argument("--density-transitions", action="store_true", help="Verify live density hit regions remain aligned with visible native controls")
+    parser.add_argument("--theme-transitions", action="store_true", help="Verify live global theme inheritance in the running header and native sidebars")
+    parser.add_argument("--keyboard-mode", action="store_true", help="Verify explicit native sidebar focus and real app key delivery")
     parser.add_argument("--backend", choices=("wayland-x11", "wayland-winit"), default="wayland-winit")
     parser.add_argument("--bin-dir", type=Path, default=ROOT / "target/release")
     parser.add_argument("--shell-bin", type=Path, default=ROOT / "crates/jwm_shell/target/debug/jwm-shell")
@@ -64,7 +68,7 @@ def main():
             path.mkdir(mode=0o700)
             env[f"XDG_{name}_HOME" if name in ("CONFIG", "CACHE", "DATA", "STATE") else f"XDG_{name}_DIR"] = str(path)
         env["XBAR_CONFIG"] = str(work / "xbar.toml")
-        (work / "xbar.toml").write_text(f'theme="{args.theme}"\n[edge_shell]\nenabled=true\n')
+        (work / "xbar.toml").write_text(f'theme="{args.theme}"\nui_theme="inherit"\n[edge_shell]\nenabled=true\n')
         (work / "bin").mkdir()
         env["PATH"] = str(work / "bin") + os.pathsep + env.get("PATH", "")
         env["JWM_TEST_LAUNCH_PID"] = str(work / "launched-application.pid")
@@ -138,8 +142,22 @@ def main():
                         raise
                     time.sleep(0.1)
 
+        def inspected_controls():
+            raw = run(args.shell_bin, "--inspect-controls")
+            # A missing private ALSA device can emit diagnostics on stderr,
+            # which this fixture captures with stdout. Keep the actual JSON
+            # array machine-readable without discarding the diagnostics log.
+            for line in reversed(raw.splitlines()):
+                try:
+                    value = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(value, list):
+                    return value
+            raise AssertionError("missing control inventory JSON: " + raw[-2000:])
+
         def controls(edge, kind, identity):
-            rows = json.loads(run(args.shell_bin, "--inspect-controls"))
+            rows = inspected_controls()
             row = next(item for item in rows if item["output"] == 0 and item["edge"] == edge)
             key = "index" if kind == "workspace" else "id"
             return next(item["rect"] for item in row["controls"] if item["kind"] == kind and item.get(key) == identity)
@@ -305,9 +323,157 @@ Path(sys.argv[1]).write_text(json.dumps({'window':int(window),'geometry':[int(fi
             record("physical pointer enters the real native panel and changes workspace")
             sockets = wait_for(lambda: list((work / "runtime").glob("wayland-*")), "native Wayland socket")
             wayland = next(path.name for path in sockets if path.is_socket())
-            native = spawn(args.client_bin, extra_env={"WAYLAND_DISPLAY": wayland, "GDK_BACKEND": "wayland"})
+            native = spawn(args.client_bin, extra_env={"WAYLAND_DISPLAY": wayland, "GDK_BACKEND": "wayland", "JWM_TEST_KEYBOARD_LOG": str(work / "keyboard.log")})
             native_row = wait_for(lambda: next((row for row in msg("get_windows") if row["name"] == "SharedShellNativeTask"), None), "real native xdg task")
             native_id = native_row["id"]
+            if args.agent_summary:
+                context = msg("get_execution_context")
+                target = next(row for row in context["windows"] if str(row["id"]) == str(native_id))
+                registered = {"session_id":"shared-shell-ui-fixture", "project_id":"jwm-ui-fixture", "provider":"forge", "host_id":"ui-fixture", "host_incarnation":"ui-fixture-v1", "pane_id":"fixture-pane", "window_token":target["target_token"], "title":"Registered UI fixture", "status":"running", "can_reveal":True, "revision":1}
+                def publish_session(status, revision):
+                    registered["status"], registered["revision"] = status, revision
+                    return msg("register_agent_session", {"wm_instance_id":context["wm_instance_id"], "session":registered})
+                publish_session("running", 1)
+                wait_for(lambda: msg("get_agent_summary")["running"] == 1, "actual registry running summary")
+                wait_for(lambda: "agent summary: Agents 1 run" in (evidence / "session.log").read_text(), "default header consumes running summary")
+                publish_session("waiting", 2)
+                wait_for(lambda: msg("get_agent_summary")["waiting"] == 1, "actual registry waiting transition")
+                wait_for(lambda: "shared agents: Agents 0 run · 1 wait" in (evidence / "session.log").read_text(), "shared sidebar consumes waiting summary")
+                def agent_notices():
+                    return [row for row in msg("get_notifications")["notifications"] if row["app"] == "JWM Agents"]
+                notices = wait_for(lambda: agent_notices(), "waiting transition creates one quiet notification")
+                assert len(notices) == 1, notices
+                publish_session("waiting", 3)
+                assert [row["id"] for row in agent_notices()] == [row["id"] for row in notices], "waiting heartbeat duplicated its notification"
+                capture("agent-summary-waiting")
+                left = next(row for row in inspected_controls() if row["output"] == 0 and row["edge"] == "left")
+                toggle = next(row["rect"] for row in left["controls"] if row["kind"] == "agent_toggle")
+                assert not any(row["kind"] == "agent_sessions" for row in left["controls"]), "Agent section must start collapsed"
+                pointer(toggle[0] + toggle[2] / 2, toggle[1] + toggle[3] / 2, True)
+                time.sleep(0.2)
+                assert not msg("get_system_ui")["active"], "expansion must not launch or focus a terminal"
+                capability = msg("get_agent_summary")
+                if capability.get("picker_available", False):
+                    pointer(toggle[0] + toggle[2] / 2, toggle[1] + toggle[3] + 8 + 14, True)
+                    wait_for(lambda: msg("get_system_ui")["kind"] == "launcher", "expanded Agent entry opens canonical session picker")
+                    capture("agent-sidebar-session-picker")
+                    run("xdotool", "key", "Escape")
+                    time.sleep(0.2)
+                    pointer(toggle[0] + toggle[2] / 2, toggle[1] + toggle[3] / 2, True)
+                    pointer(width * 0.38, 25, True)
+                    wait_for(lambda: msg("get_system_ui")["kind"] == "launcher", "header activity summary opens the same session picker")
+                    capture("agent-header-session-picker")
+                    run("xdotool", "key", "Escape")
+                else:
+                    result["agent_picker_unavailable"] = capability.get("picker_unavailable_reason", "this backend does not render compositor-owned modal UI")
+                    capture("agent-picker-unavailable")
+                    pointer(toggle[0] + toggle[2] / 2, toggle[1] + toggle[3] / 2, True)
+                    pointer(width * 0.38, 25, True)
+                    assert not msg("get_system_ui")["active"], "unavailable picker must not acquire invisible modal grabs"
+                publish_session("running", 4)
+                msg("unregister_agent_session", {"wm_instance_id":context["wm_instance_id"], "session_id":registered["session_id"], "host_id":registered["host_id"], "host_incarnation":registered["host_incarnation"]})
+                result["agent_summary_fixture"] = {"kind":"synthetic registered metadata bound to a real native window; no provider reveal claim", "waiting_notice_id":notices[0]["id"]}
+                record("registered Agent summary/collapse and quiet waiting deduplication respect backend picker capability")
+            if args.keyboard_mode:
+                keyboard_log = work / "keyboard.log"
+                def app_keys():
+                    return [int(key) for key in keyboard_log.read_text().splitlines()] if keyboard_log.exists() else []
+                msg("focus_window", {"id": native_id})
+                pointer(40, height / 2)
+                run("xdotool", "key", "b")
+                wait_for(lambda: 48 in app_keys(), "hover keeps keyboard delivery on native application")
+                record("hover panel does not take application keyboard focus")
+                def keyboard_control():
+                    left = next(row for row in inspected_controls() if row["output"] == 0 and row["edge"] == "left")
+                    return next(row["rect"] for row in left["controls"] if row["kind"] == "keyboard_mode")
+                rect = wait_for(keyboard_control, "explicit native keyboard control")
+                pointer(rect[0] + rect[2] / 2, rect[1] + rect[3] / 2, True)
+                run("xdotool", "key", "Tab")
+                time.sleep(0.2)
+                assert 15 not in app_keys(), "Tab escaped the explicit sidebar keyboard owner"
+                capture("native-keyboard-focus")
+                run("xdotool", "key", "Escape")
+                time.sleep(0.2) # allow the client policy commit to round-trip before the next key
+                run("xdotool", "key", "c")
+                wait_for(lambda: 46 in app_keys(), "Escape returns real keyboard delivery to native application")
+                assert 1 not in app_keys(), "sidebar Escape leaked into the application"
+                record("explicit keyboard mode owns Tab and Escape restores native app delivery")
+                pointer(width / 2, height / 2)
+                pointer(0, height / 2)
+                time.sleep(0.3)
+                pointer(rect[0] + rect[2] / 2, rect[1] + rect[3] / 2, True)
+                # First control -> previous is Keyboard mode, previous is Hide.
+                run("xdotool", "key", "Up", "Up", "Return")
+                time.sleep(0.2)
+                run("xdotool", "key", "d")
+                wait_for(lambda: 32 in app_keys(), "Enter dismissal restores application keyboard focus")
+                assert 28 not in app_keys(), "sidebar Enter leaked into the application"
+                result["native_application_keys"] = app_keys()
+                record("arrows and Enter activate sidebar dismissal without leaking keys")
+            if args.theme_transitions:
+                from PIL import Image
+                pointer(width / 2, height / 2)
+                pointer(0, height / 2)
+                time.sleep(0.3)
+                samples = {}
+                sidebar_samples = {}
+                for theme in ("glass-dark", "aurora", "material", "nord", "tokyo-night", "paper", "glass"):
+                    marker = "inherited appearance: " + theme
+                    count = (evidence / "session.log").read_text().count(marker)
+                    shell_marker = "shared appearance: " + theme
+                    shell_count = (evidence / "session.log").read_text().count(shell_marker)
+                    set_config("appearance.ui_theme", theme)
+                    wait_for(lambda: (evidence / "session.log").read_text().count(marker) > count, "current-source Xilem consumes semantic tokens for " + theme)
+                    wait_for(lambda: (evidence / "session.log").read_text().count(shell_marker) > shell_count, "current-source Shell consumes semantic tokens for " + theme)
+                    time.sleep(0.25)
+                    current = capture("theme-" + theme + "-shared-header")
+                    rendered = Image.open(current).convert("RGB")
+                    samples[theme] = list(rendered.getpixel((width // 2, 8)))
+                    sidebar_samples[theme] = list(rendered.getpixel((16, height // 2 + 80)))
+                assert len(set(map(tuple, samples.values()))) == 7, ("named themes did not produce seven distinct header surface hues", samples)
+                assert len(set(map(tuple, sidebar_samples.values()))) == 7, ("named themes did not produce seven distinct sidebar surface hues", sidebar_samples)
+                result["theme_header_samples"] = samples
+                result["theme_sidebar_samples"] = sidebar_samples
+                record("current-source default header and native sidebar repaint seven distinct live semantic theme hues")
+                old_font = msg("get_ui_theme")["font"]
+                before_font = capture("font-before-inheritance")
+                marker = "inherited appearance: glass"
+                count = (evidence / "session.log").read_text().count(marker)
+                set_config("appearance.system_ui_font", "Noto Sans CJK SC Regular 14")
+                wait_for(lambda: (evidence / "session.log").read_text().count(marker) > count, "running header consumes global font preview")
+                time.sleep(0.3)
+                after_font = capture("font-after-inheritance")
+                changed = changed_pixels(before_font, after_font, (200, 0, int(width*0.6), 50))
+                assert changed > 100, ("header font did not repaint after global family/size change", changed)
+                result["font_header_changed_pixels"] = changed
+                set_config("appearance.system_ui_font", old_font)
+                record("default header consumes global font family and size with real text pixel change")
+            if args.density_transitions:
+                def app_control():
+                    left = next(row for row in inspected_controls() if row["output"] == 0 and row["edge"] == "left")
+                    return next(hit["rect"] for hit in left["controls"] if hit["kind"] == "control"), left["panel"]
+                baseline_control, baseline_panel = app_control()
+                marker = "shared appearance: glass"
+                count = (evidence / "session.log").read_text().count(marker)
+                set_config("appearance.ui_density", 0.8)
+                wait_for(lambda: (evidence / "session.log").read_text().count(marker) > count, "native sidebar applies compact density")
+                time.sleep(0.2)
+                compact_control, compact_panel = app_control()
+                assert compact_panel == baseline_panel, "density must not silently resize output reservations"
+                assert compact_control[2] < baseline_control[2], (baseline_control, compact_control)
+                capture("density-compact")
+                original_tag = state()["outputs"][0]["snapshot"]["active_tag"]
+                left = next(row for row in inspected_controls() if row["output"] == 0 and row["edge"] == "left")
+                workspace = next(hit for hit in left["controls"] if hit["kind"] == "workspace" and hit["index"] != original_tag)
+                wx, wy, ww, wh = workspace["rect"]
+                pointer(wx + ww / 2, wy + wh / 2, True)
+                wait_for(lambda: state()["outputs"][0]["snapshot"]["active_tag"] == workspace["index"], "compact visual and pointer regions activate the same workspace control")
+                restored = controls("left", "workspace", original_tag)
+                pointer(restored[0] + restored[2] / 2, restored[1] + restored[3] / 2, True)
+                wait_for(lambda: state()["outputs"][0]["snapshot"]["active_tag"] == original_tag, "compact workspace control restores the original context")
+                set_config("appearance.ui_density", 1.0)
+                result["density_controls"] = {"normal":baseline_control,"compact":compact_control}
+                record("compact density keeps native control pixels, input regions and output reservations aligned")
             # Spawn through JWM's active child environment: it owns the
             # XWayland DISPLAY, which may differ from this fixture's outer Xvfb.
             msg("spawn", {"cmd": ["xmessage", "-timeout", "120", "-title", "SharedShellXWaylandTask", "native and XWayland inventory"]})
@@ -360,7 +526,7 @@ Path(sys.argv[1]).write_text(json.dumps({'window':int(window),'geometry':[int(fi
             wait_for(lambda: state()["outputs"][0]["visible"], "fullscreen exit restores shell")
             assert state()["host"]["pid"] == host_pid
             record("real xdg fullscreen hides and restores the same host")
-            left = next(row for row in json.loads(run(args.shell_bin, "--inspect-controls"))
+            left = next(row for row in inspected_controls()
                         if row["output"] == 0 and row["edge"] == "left")
             # Apps, Files, Terminal are the first three generic controls in
             # the shared production Painter. The private PATH wrapper opens a

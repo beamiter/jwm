@@ -156,3 +156,79 @@ The fixture uses a private Xvfb, Unix socket and configuration. Evidence include
 actual process IDs, registered output/roles, compositor screenshots, test steps
 and failure reasons. The full matrix must retain individual rows rather than
 folding experimental toolkits into a blanket pass.
+
+## Unified search, named scenes and explicit keyboard interaction
+
+Alt+R preserves `/` window search, `>` commands and arithmetic answers. It now
+also searches typed Settings, Agent and Scene rows. `settings:` (or `设置:`),
+`sessions:` / `agent:` (or `会话:`), and `scenes:` (or `场景:`) filter those
+providers. Application and session updates preserve the highlighted object's
+identity; removing that object disables Enter until another selection is made.
+Agent status comes from registered terminal adapters. Unknown/disconnected
+providers are shown as such, and focusing a terminal is separate from the
+provider's acknowledged pane reveal.
+
+Alt+O shows every output in its own row. A cell label is `display · tag` on
+multi-output desktops; its caption names the target. Enter and digit shortcuts
+act on the highlighted output, and dragging uses captured generational monitor
+and window identities. Disconnecting/replacing a target cancels its pending drag.
+
+Named scenes are editable in the main configuration. Omission supplies four
+starter names; `workscenes = []` disables them. A scene is previewed before any
+workspace or application action. For example:
+
+```toml
+[[workscenes]]
+name = "JWM 开发"
+sessions = ["provider-registered-session-id"]
+applications = ["Firefox"] # exact application catalog name
+
+[[workscenes.outputs]]
+output = "DP-1" # stable EDID key or connector; empty means selected at preview
+tag = 1
+layout = "tile"
+```
+
+`tag` is a one-based workspace number. Layout is optional;
+omitting it preserves the workspace's layout. Each preview offers workspace
+layout, session reveal and missing-application startup as separate actions.
+Only a specifically selected missing application is started, once per preview;
+existing matching applications and registered terminal sessions are reused.
+A configuration publication or disconnected output invalidates the preview.
+Scenes restore desktop placement and registered provider references, without
+claiming to recover arbitrary application content or unsupported cloud sessions.
+
+On native Wayland sidebars, the explicit `⌨` end-cap enters keyboard mode;
+ordinary hover retains application keyboard focus. Tab/Up/Down navigate the
+same controls as the pointer, Left/Right adjust a focused slider, Enter activates,
+and Esc dismisses the panel and returns keyboard focus. Focus is released on
+hide, seat removal, lock takeover, and layer destruction. X11 currently retains
+pointer interaction and does not advertise this native keyboard capability.
+
+### Semantic appearance and Agent activity
+
+The default Xilem header and shared sidebars inherit all seven named desktop
+palettes through bounded `get_ui_theme` snapshots. Socket work runs on a worker;
+render/input threads take the latest validated snapshot without waiting. Missing
+or incompatible replies retain the last valid appearance. Font family/size and
+surface alpha are separate from text alpha; density changes spacing and control
+geometry while retaining the selected point size and matching pointer regions.
+
+For shared appearance, use top-level `ui_theme = "inherit"` in the bar's TOML.
+`ui_theme = "nord"` (or another named desktop theme) is a frontend override;
+`ui_theme = "standalone"` preserves the local light/dark palette. Existing
+explicit `theme = "dark"`/`"light"` settings without `ui_theme` retain their local
+override. `JWM_BAR_THEME` and `JWM_SHELL_THEME` provide explicit process overrides.
+Nondefault frontend font settings remain overrides. New installer-created bar
+configuration opts into inheritance; existing configuration is preserved.
+
+Agent counts come from the terminal-owned registry, including leases and live
+window generations. The header shows a quiet running/waiting summary; the left
+Agent section starts collapsed and opens the same registered-session picker.
+A waiting transition updates one per-session notification rather than emitting a
+notification for each heartbeat. Unknown/disconnected states remain explicit.
+`get_agent_summary` exposes `picker_available` and its unavailable reason. Nested
+Wayland development backends currently expose status and a disabled picker entry;
+they do not render compositor-owned modal UI. Full X11 and DRM sessions use their
+native modal UI. A displayed summary never claims that a provider revealed a pane
+until the terminal's correlated receipt confirms it.

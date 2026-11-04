@@ -143,6 +143,36 @@ pub fn validate_plan(plan: &Plan, context: &Value) -> Result<FrozenPlan, String>
                 .ok_or("missing_window_token")?;
             args.insert("window_token".into(), json!(token));
         }
+        if let Some(reference) = args.remove("session_ref") {
+            let reference = reference.as_str().ok_or("invalid_session_ref")?;
+            let session = context["agent_sessions"]
+                .as_array()
+                .and_then(|sessions| {
+                    sessions
+                        .iter()
+                        .find(|session| session["session_ref"].as_str() == Some(reference))
+                })
+                .ok_or("target_agent_session_gone")?;
+            if session["can_reveal"] != true || session["status"] == "disconnected" {
+                return Err("target_agent_session_unavailable".into());
+            }
+            let token = session["window_token"]
+                .as_str()
+                .ok_or("missing_window_token")?;
+            if !context["windows"]
+                .as_array()
+                .is_some_and(|windows| windows.iter().any(|window| window["target_token"] == token))
+            {
+                return Err("target_agent_window_gone".into());
+            }
+            args.insert("session_id".into(), session["session_id"].clone());
+            args.insert("session_revision".into(), session["revision"].clone());
+            args.insert(
+                "host_incarnation".into(),
+                session["host_incarnation"].clone(),
+            );
+            args.insert("window_token".into(), json!(token));
+        }
         if let Some(number) = args.remove("tag_number") {
             args.insert(
                 "tag_mask".into(),
@@ -200,6 +230,50 @@ pub fn validate_plan(plan: &Plan, context: &Value) -> Result<FrozenPlan, String>
             {
                 return Err("path_must_be_absolute_without_parent_traversal".into());
             }
+        }
+        if action.name == "killclient" {
+            let token = args["window_token"]
+                .as_str()
+                .ok_or("missing_window_token")?;
+            let mut windows = context["windows"]
+                .as_array()
+                .ok_or("window_snapshot_missing")?
+                .iter()
+                .filter(|w| w["target_token"].as_str() == Some(token));
+            let window = windows.next().ok_or("target_window_gone")?;
+            if windows.next().is_some() || window["closed"] == true || window["live"] == false {
+                return Err("target_window_gone".into());
+            }
+            let monitor = window["monitor_token"]
+                .as_str()
+                .ok_or("target_monitor_gone")?;
+            let mut monitors = context["monitors"]
+                .as_array()
+                .ok_or("monitor_snapshot_missing")?
+                .iter()
+                .filter(|m| m["monitor_token"].as_str() == Some(monitor));
+            let m = monitors.next().ok_or("target_monitor_gone")?;
+            if monitors.next().is_some() || m["locked"] != false {
+                return Err("target_monitor_locked".into());
+            }
+            let tags = window["tag_mask"]
+                .as_u64()
+                .filter(|n| *n > 0 && *n <= u32::MAX as u64)
+                .ok_or("window_tags_missing")?;
+            if args
+                .get("monitor_token")
+                .is_some_and(|value| value.as_str() != Some(monitor))
+                || args.get("tag_mask").is_some_and(|mask| {
+                    mask.as_u64()
+                        .is_none_or(|mask| mask == 0 || mask & !tags != 0)
+                })
+            {
+                return Err("close_source_scope_mismatch".into());
+            }
+            args.insert(
+                "expected_state".into(),
+                json!({"window_token":token,"monitor_token":monitor,"tag_mask":tags}),
+            );
         }
         actions.push(Action {
             name: action.name.clone(),
@@ -343,6 +417,19 @@ pub fn execution_schema(name: &str) -> Option<Value> {
     if name == "launch_application" {
         properties.insert("argv".into(),json!({"type":"array","minItems":1,"maxItems":32,"items":{"type":"string","minLength":1,"maxLength":4096}}));
     }
+    if name == "focus_agent_session" {
+        properties.remove("session_ref");
+        for key in ["session_id", "host_incarnation", "window_token"] {
+            properties.insert(
+                key.into(),
+                json!({"type":"string","minLength":1,"maxLength":256}),
+            );
+        }
+        properties.insert(
+            "session_revision".into(),
+            json!({"type":"integer","minimum":1,"maximum":i64::MAX}),
+        );
+    }
     if name == "focus_tab" {
         properties.insert(
             "expected_window_token".into(),
@@ -371,7 +458,11 @@ pub fn execution_schema(name: &str) -> Option<Value> {
     }
     object.insert(
         "required".into(),
-        json!(properties.keys().collect::<Vec<_>>()),
+        if name == "killclient" {
+            json!(["window_token"])
+        } else {
+            json!(properties.keys().collect::<Vec<_>>())
+        },
     );
     if name == "move_window_to_monitor" {
         properties.insert(
@@ -409,6 +500,34 @@ mod tests {
     use super::*;
     fn context() -> Value {
         json!({"session_unlocked":true,"wm_instance_id":"wm1","tag_count":9,"monitors":[{"monitor_ref":"m1","monitor_token":"mon1","locked":false}],"windows":[{"window_ref":"w1","target_token":"win1"}]})
+    }
+    #[test]
+    fn agent_navigation_freezes_provider_identity_and_rejects_stale_or_model_supplied_authority() {
+        let mut context = context();
+        context["agent_sessions"] = json!([{"session_ref":"s1","session_id":"codex:one","revision":7,"host_incarnation":"boot:one","window_token":"win1","can_reveal":true,"status":"waiting"}]);
+        let mut plan: Plan = serde_json::from_value(json!({"disposition":"execute","actions":[{"name":"focus_agent_session","arguments":{"session_ref":"s1"}}],"question":null,"reason":null})).unwrap();
+        let frozen = validate_plan(&plan, &context).unwrap();
+        assert_eq!(frozen.actions[0].arguments["session_revision"], 7);
+        assert_eq!(frozen.actions[0].arguments["window_token"], "win1");
+        validate_execution_action(&frozen.actions[0]).unwrap();
+        plan.actions[0].arguments["session_id"] = json!("attacker");
+        assert!(validate_plan(&plan, &context).is_err());
+        plan.actions[0]
+            .arguments
+            .as_object_mut()
+            .unwrap()
+            .remove("session_id");
+        context["agent_sessions"][0]["can_reveal"] = json!(false);
+        assert_eq!(
+            validate_plan(&plan, &context).unwrap_err(),
+            "target_agent_session_unavailable"
+        );
+        context["agent_sessions"][0]["can_reveal"] = json!(true);
+        context["windows"] = json!([]);
+        assert_eq!(
+            validate_plan(&plan, &context).unwrap_err(),
+            "target_agent_window_gone"
+        );
     }
     #[test]
     fn long_ordered_plans_have_one_shared_bounded_capacity() {
@@ -537,5 +656,37 @@ mod tests {
             reason: None,
         };
         assert!(validate_plan(&plan, &context()).is_err());
+    }
+    #[test]
+    fn directed_close_freezes_actual_source_without_focus_and_rejects_conflicts() {
+        let context = json!({"wm_instance_id":"wm","session_unlocked":true,"tag_count":9,"focus_token":"other","monitors":[{"monitor_ref":"m1","monitor_token":"mt1","locked":false},{"monitor_ref":"m2","monitor_token":"mt2","locked":false}],"windows":[{"window_ref":"w1","target_token":"wt1","monitor_token":"mt1","tag_mask":4}]});
+        let mut plan = Plan {
+            disposition: Disposition::Execute,
+            actions: vec![Action {
+                name: "killclient".into(),
+                arguments: json!({"window_ref":"w1"}),
+            }],
+            question: None,
+            reason: None,
+        };
+        let frozen = validate_plan(&plan, &context).unwrap();
+        assert!(frozen.requires_confirmation);
+        assert_eq!(
+            frozen.actions[0].arguments["expected_state"],
+            json!({"window_token":"wt1","monitor_token":"mt1","tag_mask":4})
+        );
+        assert!(validate_execution_action(&frozen.actions[0]).is_ok());
+        plan.actions[0].arguments = json!({"window_ref":"w1","monitor_ref":"m2","tag_number":3});
+        assert!(validate_plan(&plan, &context).is_err());
+        plan.actions[0].arguments = json!({"window_ref":"w1","monitor_ref":"m1","tag_number":2});
+        assert!(validate_plan(&plan, &context).is_err());
+        plan.actions[0].arguments = json!({"window_ref":"w1","monitor_ref":"m1","tag_number":3});
+        assert!(validate_plan(&plan, &context).is_ok());
+        let mut duplicate = context.clone();
+        duplicate["windows"]
+            .as_array_mut()
+            .unwrap()
+            .push(context["windows"][0].clone());
+        assert!(validate_plan(&plan, &duplicate).is_err());
     }
 }

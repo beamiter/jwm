@@ -61,6 +61,8 @@ fn binding_context(scenario: &Value) -> Value {
             json!({
                 "window_ref": reference,
                 "target_token": format!("fixture-window:{reference}"),
+                "monitor_token": format!("fixture-monitor:{}",window["monitor_ref"].as_str().expect("fixture window monitor")),
+                "tag_mask": window["tags"].as_array().expect("fixture window tags").iter().fold(0u64, |mask,tag| mask | (1u64 << (tag.as_u64().expect("fixture tag")-1))),
             })
         })
         .collect::<Vec<_>>();

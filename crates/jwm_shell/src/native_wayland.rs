@@ -36,9 +36,9 @@ use std::{
     time::{Duration, Instant},
 };
 use wayland_client::{
-    Connection, QueueHandle, delegate_noop,
+    Connection, Dispatch, QueueHandle, delegate_noop,
     globals::registry_queue_init,
-    protocol::{wl_output, wl_pointer, wl_region, wl_seat, wl_shm, wl_surface},
+    protocol::{wl_keyboard, wl_output, wl_pointer, wl_region, wl_seat, wl_shm, wl_surface},
 };
 use wayland_protocols::wp::viewporter::client::{wp_viewport, wp_viewporter};
 use xbar_core::{
@@ -122,6 +122,9 @@ impl NativeShell {
                         pool: None,
                         panels: Vec::new(),
                         pointer: None,
+                        keyboard: None,
+                        keyboard_panel: None,
+                        keyboard_action: None,
                         bound_output: None,
                         scale: scale.clamp(0.25, 8.0),
                         state: initial,
@@ -185,6 +188,7 @@ impl NativeShell {
                         );
                         let scene = Panel {
                             task_offset: 0,
+                            agents_expanded: false,
                             edge,
                             window: 0,
                             sensor: 0,
@@ -394,6 +398,9 @@ struct Host {
     pool: Option<SlotPool>,
     panels: Vec<NativePanel>,
     pointer: Option<wl_pointer::WlPointer>,
+    keyboard: Option<wl_keyboard::WlKeyboard>,
+    keyboard_panel: Option<usize>,
+    keyboard_action: Option<Action>,
     bound_output: Option<wl_output::WlOutput>,
     scale: f64,
     state: ShellState,
@@ -426,6 +433,9 @@ impl Host {
     fn configure_surfaces(&mut self, qh: &QueueHandle<Self>) -> Result<()> {
         let config = self.config();
         let shown = self.shown();
+        if !shown {
+            self.leave_keyboard(false);
+        }
         for index in 0..self.panels.len() {
             let edge = self.panels[index].scene.edge;
             let p = panel_geometry(self.state.output, edge, true, config.trigger_pixels);
@@ -581,16 +591,30 @@ impl Host {
         if state.visible == Some(false) {
             self.set_preview(None);
         }
+        if self.state.tokens != state.tokens
+            || self.state.font != state.font
+            || self.state.agents != state.agents
+        {
+            for panel in &mut self.panels {
+                panel.dirty = true;
+            }
+        }
         self.state = state;
         self.configure_surfaces(qh)?;
         self.draw(qh)
     }
     fn draw(&mut self, _qh: &QueueHandle<Self>) -> Result<()> {
         let shown = self.shown();
+        crate::edge_shell::painter::set_font(self.state.font.as_deref());
         let output = self.state.output;
         let snapshot = &self.state.snapshot;
         let tasks = self.state.tasks.as_deref().unwrap_or_default();
         let mut next_hover = None;
+        let keyboard_available = self.keyboard.is_some();
+        let keyboard_edge = self
+            .keyboard_panel
+            .and_then(|index| self.panels.get(index))
+            .map(|panel| panel.scene.edge);
         for panel in &mut self.panels {
             if !panel.configured || !panel.dirty {
                 continue;
@@ -650,11 +674,13 @@ impl Host {
                     y + 0.5,
                     (w - 1.0).max(1.0),
                     (h - 1.0).max(1.0),
-                    32.0,
+                    self.state
+                        .tokens
+                        .map_or(32.0, |tokens| f64::from(tokens.radius)),
                 );
                 ctx.save()?;
                 ctx.clip();
-                material(&ctx, [x, y, w, h], dark)?;
+                material(&ctx, [x, y, w, h], dark, self.state.tokens)?;
                 ctx.restore()?;
                 rounded(
                     &ctx,
@@ -662,7 +688,9 @@ impl Host {
                     y + 0.5,
                     (w - 1.0).max(1.0),
                     (h - 1.0).max(1.0),
-                    32.0,
+                    self.state
+                        .tokens
+                        .map_or(32.0, |tokens| f64::from(tokens.radius)),
                 );
                 ctx.set_source_rgba(1.0, 1.0, 1.0, if dark { 0.22 } else { 0.72 });
                 ctx.set_line_width(1.0);
@@ -674,11 +702,49 @@ impl Host {
                     snapshot,
                     tasks,
                     dark,
+                    tokens: self.state.tokens,
+                    agents: self.state.agents,
                 };
                 ctx.save()?;
                 ctx.rectangle(x, y, w, h);
                 ctx.clip();
-                painter.draw(x, y, w, h)?;
+                if keyboard_available {
+                    painter.draw_with_keyboard(
+                        x,
+                        y,
+                        w,
+                        h,
+                        keyboard_edge == Some(painter.panel.edge),
+                    )?;
+                } else {
+                    painter.draw(x, y, w, h)?;
+                }
+                if keyboard_edge == Some(painter.panel.edge)
+                    && let Some(action) = self.keyboard_action.as_ref()
+                    && let Some(hit) = painter.panel.hits.iter().find(|hit| &hit.action == action)
+                {
+                    let [fx, fy, fw, fh] = hit.rect;
+                    rounded(
+                        &ctx,
+                        fx + 1.5,
+                        fy + 1.5,
+                        (fw - 3.0).max(1.0),
+                        (fh - 3.0).max(1.0),
+                        8.0,
+                    );
+                    let focus = self
+                        .state
+                        .tokens
+                        .map_or([0.12, 0.55, 1.0, 1.0], |tokens| tokens.focus);
+                    ctx.set_source_rgba(
+                        f64::from(focus[0]),
+                        f64::from(focus[1]),
+                        f64::from(focus[2]),
+                        f64::from(focus[3]),
+                    );
+                    ctx.set_line_width(3.0);
+                    ctx.stroke()?;
+                }
                 ctx.restore()?;
             } else {
                 panel.scene.hits.clear();
@@ -830,7 +896,11 @@ impl Host {
         let reveal = self
             .panels
             .iter()
-            .filter(|panel| panel.scene.pressed.is_none())
+            .enumerate()
+            .filter(|(index, panel)| {
+                self.keyboard_panel != Some(*index) && panel.scene.pressed.is_none()
+            })
+            .map(|(_, panel)| panel)
             .filter_map(|panel| panel.scene.reveal.deadline())
             .min();
         let preview = if self.preview != self.acknowledged {
@@ -855,8 +925,11 @@ impl Host {
     fn timers(&mut self, qh: &QueueHandle<Self>) -> Result<()> {
         let now = Instant::now();
         let mut changed = false;
-        for panel in &mut self.panels {
-            if panel.scene.pressed.is_none() && panel.scene.reveal.tick(now) {
+        for (index, panel) in self.panels.iter_mut().enumerate() {
+            if self.keyboard_panel != Some(index)
+                && panel.scene.pressed.is_none()
+                && panel.scene.reveal.tick(now)
+            {
                 panel.dirty = true;
                 changed = true;
             }
@@ -900,6 +973,120 @@ impl Host {
                 self.acknowledged = None;
             }
             self.send_preview(false);
+        }
+    }
+
+    fn enter_keyboard(&mut self, index: usize) {
+        if self.keyboard.is_none() {
+            return;
+        }
+        if self.keyboard_panel == Some(index) {
+            self.leave_keyboard(false);
+            return;
+        }
+        self.leave_keyboard(false);
+        self.keyboard_panel = Some(index);
+        let panel = &mut self.panels[index];
+        self.keyboard_action = panel
+            .scene
+            .hits
+            .iter()
+            .find(|hit| hit.enabled && hit.action != Action::KeyboardMode)
+            .map(|hit| hit.action.clone());
+        // Exclusive is requested only after the explicit keyboard control.
+        panel
+            .layer
+            .set_keyboard_interactivity(KeyboardInteractivity::Exclusive);
+        panel.layer.commit();
+        panel.dirty = true;
+        self.set_preview(None);
+    }
+
+    fn leave_keyboard(&mut self, dismiss: bool) {
+        if let Some(index) = self.keyboard_panel.take()
+            && let Some(panel) = self.panels.get_mut(index)
+        {
+            panel
+                .layer
+                .set_keyboard_interactivity(KeyboardInteractivity::None);
+            panel.layer.commit();
+            if dismiss {
+                panel.scene.reveal.dismiss();
+            }
+            panel.scene.hovered = None;
+            panel.scene.pressed = None;
+            panel.dirty = true;
+        }
+        self.keyboard_action = None;
+    }
+
+    fn keyboard_key(&mut self, key: u32) {
+        let Some(index) = self.keyboard_panel else {
+            return;
+        };
+        if key == 1 {
+            self.leave_keyboard(true);
+            return;
+        } // Esc
+        let hits: Vec<_> = self.panels[index]
+            .scene
+            .hits
+            .iter()
+            .filter(|hit| hit.enabled)
+            .cloned()
+            .collect();
+        if hits.is_empty() {
+            self.leave_keyboard(false);
+            return;
+        }
+        let current = self
+            .keyboard_action
+            .as_ref()
+            .and_then(|action| hits.iter().position(|hit| &hit.action == action));
+        // A disappearing/replaced control must never activate its successor.
+        if current.is_none() {
+            self.leave_keyboard(false);
+            return;
+        }
+        let current = current.unwrap();
+        if matches!(key, 15 | 103 | 108) {
+            // Tab / Up / Down
+            let next = if key == 103 {
+                (current + hits.len() - 1) % hits.len()
+            } else {
+                (current + 1) % hits.len()
+            };
+            self.keyboard_action = Some(hits[next].action.clone());
+            self.panels[index].scene.hovered = Some(next);
+            self.panels[index].dirty = true;
+        } else if matches!(key, 105 | 106) {
+            // Left / Right adjusts the focused slider only.
+            if let Some((audio, ..)) = hits[current].slider {
+                self.send(Action::Model(if audio {
+                    UserAction::AdjustVolume(if key == 105 { -5 } else { 5 })
+                } else {
+                    UserAction::AdjustBrightness(if key == 105 { -5 } else { 5 })
+                }));
+            }
+        } else if key == 28 {
+            // Enter
+            match hits[current].action.clone() {
+                Action::HidePanel => self.leave_keyboard(true),
+                Action::KeyboardMode => self.leave_keyboard(false),
+                Action::ToggleAgents => {
+                    self.panels[index].scene.agents_expanded =
+                        !self.panels[index].scene.agents_expanded;
+                    self.panels[index].dirty = true;
+                }
+                Action::CycleTasks => {
+                    self.panels[index].scene.task_offset += 1;
+                    self.panels[index].dirty = true;
+                }
+                action => {
+                    self.leave_keyboard(false);
+                    self.send(action);
+                }
+            }
         }
     }
 
@@ -1010,7 +1197,10 @@ impl Host {
                     if hit.slider.is_some() {
                         self.slider(&hit, y);
                     } else if hit.contains(x, y) {
-                        if hit.action == Action::HidePanel {
+                        if hit.action == Action::KeyboardMode {
+                            self.enter_keyboard(index);
+                        } else if hit.action == Action::HidePanel {
+                            self.leave_keyboard(false);
                             let panel = &mut self.panels[index];
                             panel.scene.reveal.dismiss();
                             panel.scene.hovered = None;
@@ -1018,6 +1208,9 @@ impl Host {
                                 self.set_preview(None);
                                 self.withdraw_geometry();
                             }
+                        } else if hit.action == Action::ToggleAgents {
+                            self.panels[index].scene.agents_expanded =
+                                !self.panels[index].scene.agents_expanded;
                         } else if hit.action == Action::CycleTasks {
                             self.panels[index].scene.task_offset += 1;
                         } else {
@@ -1204,6 +1397,9 @@ impl SeatHandler for Host {
         seat: wl_seat::WlSeat,
         capability: Capability,
     ) {
+        if capability == Capability::Keyboard && self.keyboard.is_none() {
+            self.keyboard = Some(seat.get_keyboard(qh, ()));
+        }
         if capability == Capability::Pointer && self.pointer.is_none() {
             match self.seats.get_pointer(qh, &seat) {
                 Ok(pointer) => self.pointer = Some(pointer),
@@ -1218,6 +1414,12 @@ impl SeatHandler for Host {
         _: wl_seat::WlSeat,
         capability: Capability,
     ) {
+        if capability == Capability::Keyboard {
+            self.leave_keyboard(false);
+            if let Some(keyboard) = self.keyboard.take() {
+                keyboard.release();
+            }
+        }
         if capability == Capability::Pointer
             && let Some(pointer) = self.pointer.take()
         {
@@ -1226,6 +1428,30 @@ impl SeatHandler for Host {
     }
     fn remove_seat(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_seat::WlSeat) {}
 }
+impl Dispatch<wl_keyboard::WlKeyboard, ()> for Host {
+    fn event(
+        state: &mut Self,
+        _: &wl_keyboard::WlKeyboard,
+        event: wl_keyboard::Event,
+        _: &(),
+        _: &Connection,
+        qh: &QueueHandle<Self>,
+    ) {
+        match event {
+            wl_keyboard::Event::Key {
+                key,
+                state: wayland_client::WEnum::Value(wl_keyboard::KeyState::Pressed),
+                ..
+            } => state.keyboard_key(key),
+            wl_keyboard::Event::Leave { .. } => state.leave_keyboard(false),
+            _ => {} // Key releases/keymap/modifiers are consumed, never forwarded/injected.
+        }
+        if let Err(error) = state.update_input(qh).and_then(|_| state.draw(qh)) {
+            state.error = Some(error.to_string());
+        }
+    }
+}
+
 impl PointerHandler for Host {
     fn pointer_frame(
         &mut self,

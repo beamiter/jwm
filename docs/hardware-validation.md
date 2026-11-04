@@ -88,3 +88,37 @@ labeled baseline is incomplete.
 
 Until these boxes are checked, JWM remains a development build even if the
 packaging automation succeeds.
+
+## Version-bound candidate evidence
+
+Use the actual runner log, executable and dependencies for each case. Passing
+results need all three; `fail` and `skip` need an explicit reason.
+
+```sh
+python3 scripts/acceptance_evidence.py record \
+  --case login-upgrade --status pass --level physical --backend x11rb \
+  --binary /path/to/tested/jwm --config /path/to/test/config.toml \
+  --dependency src --dependency crates/shared_structures/src \
+  --evidence /path/to/isolated-login-run.json \
+  --hardware /path/to/actual-hardware.json --output /path/to/candidate/login.json
+python3 scripts/acceptance_evidence.py audit /path/to/candidate/*.json
+python3 scripts/acceptance_evidence.py release /path/to/candidate/*.json
+```
+
+Hardware JSON records `gpu_vendor` (`intel`, `amd`, or `nvidia`), `driver`,
+`outputs` with actual modes/scale/refresh/topology and `software_renderer`.
+A `daily-soak` record also needs timezone-qualified `soak_started_at` and
+`soak_ended_at`; a future end date or a duration below seven days fails the gate.
+The release gate additionally requires current physical `login-upgrade`,
+`bad-binary`, `rollback`, `crash-recovery` and `active-exit` evidence and two GPU
+vendors. Isolated Xvfb/Sway/offscreen GLES passes remain useful evidence, but do
+not satisfy these physical gates. Source dependency additions/deletions, changed
+executable/config/log hashes or missing files invalidate a current claim while
+preserving its historical status. Review the runner's scope and result as well:
+a log or a user-supplied hardware description is not independent attestation.
+
+Explicit user waivers can be recorded with
+`release --waive second_gpu_vendor --waive seven_day_soak --waiver-reason '…'`.
+The report then distinguishes `candidate_ready` from `hardware_certified` and
+keeps all unmet gates and the authorization reason. A waiver never converts a
+missing hardware result into a pass and does not waive unrelated failures.

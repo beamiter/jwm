@@ -2185,11 +2185,11 @@ mod tests {
         server.accept_connections();
         assert_eq!(server.clients.len(), 1);
 
-        // Drop the client (disconnect)
+        // Explicitly disconnect the endpoint, including any short-lived
+        // descriptor inherited by a concurrently forked test child before
+        // CLOEXEC. Dropping just this copy would not establish kernel EOF.
+        client.shutdown(std::net::Shutdown::Both).unwrap();
         drop(client);
-        std::thread::sleep(std::time::Duration::from_millis(20));
-
-        // Polling should detect the disconnect
         let _ = server.poll_clients();
         assert_eq!(server.clients.len(), 0);
     }

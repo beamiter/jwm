@@ -20,6 +20,8 @@ use std::{
 };
 use tokio::sync::{mpsc, watch};
 
+// One bounded handoff moves through this state; avoid a wake-path heap allocation.
+#[allow(clippy::large_enum_variant)]
 pub enum Outcome {
     Detected(Handoff),
     Rotate,

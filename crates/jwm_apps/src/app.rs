@@ -161,7 +161,7 @@ impl App {
     }
     fn sidebar(&self) -> f64 {
         if matches!(&self.document,Document::Notes(n) if n.managed) {
-            236.
+            236. * ui::density()
         } else {
             0.
         }
@@ -169,9 +169,9 @@ impl App {
     fn body(&self) -> Rect {
         Rect::new(
             0.,
-            ui::HEADER + ui::TOOLS,
+            ui::header() + ui::tools(),
             self.size.0,
-            (self.size.1 - ui::HEADER - ui::TOOLS - ui::STATUS).max(1.),
+            (self.size.1 - ui::header() - ui::tools() - ui::status()).max(1.),
         )
     }
     fn button(
@@ -184,7 +184,7 @@ impl App {
         enabled: bool,
     ) {
         if rect.contains(self.pointer.0, self.pointer.1) && enabled {
-            ui::rounded(cr, rect, ui::HOVER);
+            ui::rounded(cr, rect, ui::hover());
         }
         let _ = cr.save();
         if !enabled {
@@ -217,13 +217,13 @@ impl App {
         action: Action,
         accent: bool,
     ) {
-        ui::rounded(cr, rect, if accent { ui::SELECT } else { ui::HOVER });
+        ui::rounded(cr, rect, if accent { ui::select() } else { ui::hover() });
         ui::text(
             cr,
             label,
             Rect::new(rect.x + 12., rect.y, rect.w - 20., rect.h),
             13.,
-            ui::TEXT,
+            ui::text_color(),
         );
         self.hits.push(Hit {
             rect,
@@ -234,10 +234,15 @@ impl App {
     pub fn draw(&mut self, cr: &cairo::Context, width: f64, height: f64, maximized: bool) {
         self.size = (width, height);
         self.hits.clear();
-        ui::fill(cr, Rect::new(0., 0., width, height), ui::CANVAS);
-        ui::fill(cr, Rect::new(0., 0., width, ui::HEADER), ui::PANEL);
+        ui::fill(cr, Rect::new(0., 0., width, height), ui::canvas());
+        ui::fill(cr, Rect::new(0., 0., width, ui::header()), ui::panel());
         let notes = matches!(self.document, Document::Notes(_));
-        ui::icon(cr, if notes { Icon::Notes } else { Icon::Image }, 20., 22.);
+        ui::icon(
+            cr,
+            if notes { Icon::Notes } else { Icon::Image },
+            20.,
+            (ui::header() - 20.) / 2.,
+        );
         ui::text(
             cr,
             if notes {
@@ -245,9 +250,9 @@ impl App {
             } else {
                 "JWM 图片查看器"
             },
-            Rect::new(50., 0., 170., ui::HEADER),
+            Rect::new(50., 0., 170., ui::header()),
             14.,
-            ui::TEXT,
+            ui::text_color(),
         );
         let title = match &self.document {
             Document::Notes(n) => n.title(),
@@ -256,9 +261,9 @@ impl App {
         ui::text(
             cr,
             &title,
-            Rect::new(230., 0., (width - 370.).max(1.), ui::HEADER),
+            Rect::new(230., 0., (width - 370.).max(1.), ui::header()),
             13.,
-            ui::MUTED,
+            ui::muted(),
         );
         for (offset, icon, action, label) in [
             (118., Icon::Minimize, Action::Minimize, "最小化"),
@@ -276,14 +281,14 @@ impl App {
         ] {
             self.button(
                 cr,
-                Rect::new(width - offset, 16., 32., 32.),
+                Rect::new(width - offset, (ui::header() - 32.) / 2., 32., 32.),
                 icon,
                 action,
                 label,
                 true,
             );
         }
-        ui::fill(cr, Rect::new(0., ui::HEADER, width, 1.), ui::LINE);
+        ui::fill(cr, Rect::new(0., ui::header(), width, 1.), ui::line());
         let mut tools = vec![(Icon::Folder, Action::Open, "打开 (Ctrl+O)", true)];
         match &self.document {
             Document::Notes(n) => {
@@ -329,7 +334,12 @@ impl App {
         for (i, (icon, action, label, enabled)) in tools.into_iter().enumerate() {
             self.button(
                 cr,
-                Rect::new(12. + i as f64 * 38., ui::HEADER + 6., 32., 32.),
+                Rect::new(
+                    12. + i as f64 * 38.,
+                    ui::header() + (ui::tools() - 32.) / 2.,
+                    32.,
+                    32.,
+                ),
                 icon,
                 action,
                 label,
@@ -340,13 +350,13 @@ impl App {
         let sidebar = self.sidebar();
         match &mut self.document {
             Document::Notes(n) => {
-                ui::fill(cr, body, ui::PANEL);
+                ui::fill(cr, body, ui::panel());
                 if n.managed {
-                    ui::fill(cr, Rect::new(sidebar - 1., body.y, 1., body.h), ui::LINE);
+                    ui::fill(cr, Rect::new(sidebar - 1., body.y, 1., body.h), ui::line());
                     ui::rounded(
                         cr,
                         Rect::new(12., body.y + 12., sidebar - 24., 36.),
-                        ui::CANVAS,
+                        ui::canvas(),
                     );
                     let search = Rect::new(20., body.y + 20., sidebar - 40., 22.);
                     n.search.draw(
@@ -357,7 +367,7 @@ impl App {
                         false,
                     );
                     if n.search.text.is_empty() && self.focus != Focus::Search {
-                        ui::text(cr, "搜索备忘录 (Ctrl+F)", search, 13., ui::MUTED);
+                        ui::text(cr, "搜索备忘录 (Ctrl+F)", search, 13., ui::muted());
                     }
                     self.hits.push(Hit {
                         rect: Rect::new(12., body.y + 12., sidebar - 24., 36.),
@@ -378,16 +388,16 @@ impl App {
                             continue;
                         }
                         if n.document.as_ref().and_then(|d| d.file.path()).as_ref() == Some(path) {
-                            ui::rounded(cr, rect, ui::SELECT);
+                            ui::rounded(cr, rect, ui::select());
                         } else if rect.contains(self.pointer.0, self.pointer.1) {
-                            ui::rounded(cr, rect, ui::HOVER);
+                            ui::rounded(cr, rect, ui::hover());
                         }
                         ui::text(
                             cr,
                             title,
                             Rect::new(rect.x + 12., rect.y, rect.w - 24., rect.h),
                             14.,
-                            ui::TEXT,
+                            ui::text_color(),
                         );
                         self.hits.push(Hit {
                             rect: Rect::new(
@@ -456,7 +466,7 @@ impl App {
                 } else {
                     let layout = ui::layout(cr, &v.message, 14., (width - 100.).max(1.), true);
                     layout.set_alignment(pango::Alignment::Center);
-                    ui::color(cr, ui::MUTED);
+                    ui::color(cr, ui::muted());
                     cr.move_to(50., body.y + (body.h - layout.pixel_size().1 as f64) / 2.);
                     pangocairo::functions::show_layout(cr, &layout);
                 }
@@ -464,10 +474,14 @@ impl App {
         }
         ui::fill(
             cr,
-            Rect::new(0., height - ui::STATUS, width, ui::STATUS),
-            ui::PANEL,
+            Rect::new(0., height - ui::status(), width, ui::status()),
+            ui::panel(),
         );
-        ui::fill(cr, Rect::new(0., height - ui::STATUS, width, 1.), ui::LINE);
+        ui::fill(
+            cr,
+            Rect::new(0., height - ui::status(), width, 1.),
+            ui::line(),
+        );
         let status = match &self.document {
             Document::Notes(n) => n.status.as_str(),
             Document::Image(v) => v.status.as_str(),
@@ -481,9 +495,9 @@ impl App {
         ui::text(
             cr,
             tooltip,
-            Rect::new(16., height - ui::STATUS, width - 32., ui::STATUS),
+            Rect::new(16., height - ui::status(), width - 32., ui::status()),
             12.,
-            ui::MUTED,
+            ui::muted(),
         );
         if self.dialog.is_some() {
             self.draw_dialog(cr);
@@ -492,7 +506,7 @@ impl App {
                 .and_then(|i| self.dialog_actions().get(i).cloned())
                 && let Some(hit) = self.hits.iter().find(|h| h.action == action)
             {
-                ui::color(cr, ui::ACCENT);
+                ui::color(cr, ui::accent());
                 cr.set_line_width(2.);
                 cr.rectangle(hit.rect.x, hit.rect.y, hit.rect.w, hit.rect.h);
                 let _ = cr.stroke();
@@ -510,7 +524,7 @@ impl App {
             300_f64.min(self.size.1 - 32.)
         };
         let r = Rect::new((self.size.0 - w) / 2., (self.size.1 - h) / 2., w, h);
-        ui::rounded(cr, r, ui::PANEL);
+        ui::rounded(cr, r, ui::panel());
         let dialog = self.dialog.take().unwrap();
         match dialog {
             Dialog::Picker(mut picker) => {
@@ -524,12 +538,12 @@ impl App {
                     title,
                     Rect::new(r.x + 24., r.y + 12., r.w - 48., 32.),
                     16.,
-                    ui::TEXT,
+                    ui::text_color(),
                 );
                 ui::rounded(
                     cr,
                     Rect::new(r.x + 20., r.y + 56., r.w - 40., 38.),
-                    ui::CANVAS,
+                    ui::canvas(),
                 );
                 picker.path.draw(
                     cr,
@@ -548,14 +562,14 @@ impl App {
                 {
                     let rect = Rect::new(r.x + 24., r.y + 102. + i as f64 * 32., r.w - 48., 30.);
                     if rect.contains(self.pointer.0, self.pointer.1) {
-                        ui::rounded(cr, rect, ui::HOVER);
+                        ui::rounded(cr, rect, ui::hover());
                     }
                     let label = format!(
                         "{}{}",
                         if path.is_dir() { "▸  " } else { "    " },
                         path.file_name().unwrap_or_default().to_string_lossy()
                     );
-                    ui::text(cr, &label, rect, 13., ui::TEXT);
+                    ui::text(cr, &label, rect, 13., ui::text_color());
                     self.hits.push(Hit {
                         rect,
                         action: Action::Entry(path.clone()),
@@ -607,12 +621,12 @@ impl App {
                     title,
                     Rect::new(r.x + 24., r.y + 16., r.w - 48., 36.),
                     17.,
-                    ui::TEXT,
+                    ui::text_color(),
                 );
                 let layout = ui::layout(cr, message, 14., r.w - 48., true);
                 layout.set_height(((r.h - 124.) * pango::SCALE as f64) as i32);
                 layout.set_ellipsize(pango::EllipsizeMode::End);
-                ui::color(cr, ui::MUTED);
+                ui::color(cr, ui::muted());
                 cr.move_to(r.x + 24., r.y + 72.);
                 pangocairo::functions::show_layout(cr, &layout);
                 let buttons = match &dialog {
@@ -909,7 +923,7 @@ impl App {
             self.dragging = true;
             return false;
         }
-        y < ui::HEADER
+        y < ui::header()
     }
     fn editor_click(&mut self, x: f64, y: f64, extend: bool) {
         if let Document::Notes(n) = &mut self.document {

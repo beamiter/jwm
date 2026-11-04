@@ -91,6 +91,9 @@ Only coordinates and allocation axes change: text and images are never rotated.
 The shared TOML file, normally `~/.config/xbar/config.toml`, uses:
 
 ```toml
+# New frontend configs follow JWM; existing explicit light/dark stays standalone.
+ui_theme = "inherit"
+
 [presentation]
 position = "left"
 thickness = 42.0

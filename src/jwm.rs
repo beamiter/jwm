@@ -3020,6 +3020,7 @@ fn shell_page_for(
         Wire::Calendar => Some(ShellHubRoute::Calendar),
         Wire::Wallpaper => Some(ShellHubRoute::Wallpaper),
         Wire::Theme => Some(ShellHubRoute::Theme),
+        Wire::AgentSessions => Some(ShellHubRoute::AgentSessions),
     }
 }
 
@@ -3518,6 +3519,7 @@ mod shell_hub_command_tests {
             (Wire::Calendar, Some(ShellHubRoute::Calendar)),
             (Wire::Wallpaper, Some(ShellHubRoute::Wallpaper)),
             (Wire::Theme, Some(ShellHubRoute::Theme)),
+            (Wire::AgentSessions, Some(ShellHubRoute::AgentSessions)),
         ];
         assert_eq!(
             cases.len(),

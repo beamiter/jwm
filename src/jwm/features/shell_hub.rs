@@ -18,18 +18,20 @@ pub enum ShellHubRoute {
     Wallpaper,
     /// After Wallpaper: Theme lists the known `appearance.ui_theme` values.
     Theme,
+    AgentSessions,
     Music,
     Video,
 }
 
 impl ShellHubRoute {
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::Applications,
         Self::Notifications,
         Self::Clipboard,
         Self::Calendar,
         Self::Wallpaper,
         Self::Theme,
+        Self::AgentSessions,
         Self::Music,
         Self::Video,
     ];
@@ -43,6 +45,7 @@ impl ShellHubRoute {
             Self::Calendar => "Calendar",
             Self::Wallpaper => "Wallpaper",
             Self::Theme => "Theme",
+            Self::AgentSessions => "Agent sessions",
             Self::Music => "Music",
             Self::Video => "Video",
         }
@@ -56,7 +59,8 @@ impl ShellHubRoute {
             Self::Clipboard => "\u{f0ea}",     // clipboard
             Self::Calendar => "\u{f073}",      // calendar
             Self::Wallpaper => "\u{f03e}",     // image
-            Self::Theme => "\u{f1fc}",         // paint-brush (FA-4, <0xf600)
+            Self::AgentSessions => "\u{f121}",
+            Self::Theme => "\u{f1fc}", // paint-brush (FA-4, <0xf600)
             Self::Music => "\u{f001}",
             Self::Video => "\u{f008}",
         }
@@ -71,6 +75,7 @@ impl ShellHubRoute {
             Self::Calendar => 'd',
             Self::Wallpaper => 'w',
             Self::Theme => 't',
+            Self::AgentSessions => 'g',
             // M already mutes the Volume/Input rows in the control center.
             Self::Music => 'u',
             Self::Video => 'v',
@@ -86,6 +91,7 @@ impl ShellHubRoute {
             'd' => Some(Self::Calendar),
             'w' => Some(Self::Wallpaper),
             't' => Some(Self::Theme),
+            'g' => Some(Self::AgentSessions),
             'u' => Some(Self::Music),
             'v' => Some(Self::Video),
             _ => None,
@@ -97,6 +103,7 @@ impl ShellHubRoute {
     pub fn row(self, count: Option<usize>, detail: Option<&str>) -> String {
         let status = match self {
             Self::Applications => "search & run".to_string(),
+            Self::AgentSessions => "registered terminal sessions".to_string(),
             Self::Notifications => match count.unwrap_or_default() {
                 0 => "all clear".to_string(),
                 n => format!("{n} waiting"),

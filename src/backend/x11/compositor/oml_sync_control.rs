@@ -86,6 +86,15 @@ impl OmlSyncControl {
         self.available
     }
 
+    /// A returned swap target is only submission. Require a successful later
+    /// completed-SBC observation; a missing/failed extension never proves it.
+    pub fn swap_completed(&self, target: i64) -> bool {
+        target > 0
+            && self
+                .get_sync_values()
+                .is_some_and(|(_, _, completed)| completed >= target)
+    }
+
     /// Register a window for OML sync tracking
     pub fn register_window(&mut self, x11_win: u32, fps: f32) {
         self.windows
@@ -307,6 +316,16 @@ mod tests {
         assert_eq!(manager.get_sync_values(), Some(((-5i64) as u64, 42, 7)));
         manager.funcs.get_sync_values = Some(mock_get_failure);
         assert_eq!(manager.get_sync_values(), None);
+    }
+
+    #[test]
+    fn swap_evidence_waits_for_observed_sbc_and_rejects_probe_failure() {
+        let mut manager = mock_manager();
+        assert!(manager.swap_completed(7));
+        assert!(!manager.swap_completed(8));
+        assert!(!manager.swap_completed(0));
+        manager.funcs.get_sync_values = Some(mock_get_failure);
+        assert!(!manager.swap_completed(7));
     }
 
     #[test]

@@ -1432,6 +1432,8 @@ pub struct TagsGrid {
     /// The currently visible tag's cell upgraded to live content. `None`
     /// keeps every cell a wireframe.
     pub live: Option<LiveTagsCell>,
+    /// Additional current-tag previews, one per output. Legacy single-cell callers remain valid.
+    pub live_outputs: Vec<LiveTagsCell>,
 }
 
 impl TagsGrid {
@@ -1442,7 +1444,10 @@ impl TagsGrid {
     /// before it was moved off-screen.
     #[must_use]
     pub fn live_for_cell(&self, index: usize) -> Option<&LiveTagsCell> {
-        self.live.as_ref().filter(|live| live.cell == index)
+        self.live
+            .as_ref()
+            .filter(|live| live.cell == index)
+            .or_else(|| self.live_outputs.iter().find(|live| live.cell == index))
     }
 }
 
@@ -1487,6 +1492,8 @@ pub struct TagsGridCell {
     /// Zero-based tag index. The drawn label is `tag_index + 1`, matching the
     /// status bar.
     pub tag_index: usize,
+    /// Output number for desktop-wide overview labels; absent for a local grid.
+    pub output_number: Option<i32>,
     /// Window outlines in `0.0..=1.0` of the cell's exposed frame, back to
     /// front.
     pub windows: Vec<[f32; 4]>,
@@ -1499,6 +1506,15 @@ pub struct TagsGridCell {
     pub urgent: bool,
     /// The tag is currently visible on the monitor.
     pub active: bool,
+}
+
+impl TagsGridCell {
+    pub fn display_label(&self) -> String {
+        match self.output_number {
+            Some(output) => format!("{} · {}", output + 1, self.tag_index + 1),
+            None => (self.tag_index + 1).to_string(),
+        }
+    }
 }
 
 /// What the OSD card depicts. Unlike toasts the OSD is a single

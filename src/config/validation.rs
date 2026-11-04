@@ -649,6 +649,54 @@ impl Config {
     #[allow(clippy::too_many_lines)]
     pub fn diagnostics(&self) -> ConfigDiagnostics {
         let mut diagnostics = ConfigDiagnostics::default();
+        let mut scene_names = std::collections::HashSet::new();
+        if self.inner.workscenes.len() > 128 {
+            diagnostics.error("workscenes", "at most 128 named scenes are supported", None);
+        }
+        for (index, scene) in self.inner.workscenes.iter().enumerate() {
+            let path = format!("workscenes[{index}]");
+            if scene.name.trim().is_empty()
+                || scene.name.len() > 256
+                || scene.name.chars().any(char::is_control)
+                || !scene_names.insert(&scene.name)
+            {
+                diagnostics.error(format!("{path}.name"), "scene name must be unique, nonempty, and at most 256 bytes without control characters", None);
+            }
+            if scene.outputs.len() > 64
+                || scene.sessions.len() > 128
+                || scene.applications.len() > 128
+            {
+                diagnostics.error(
+                    &path,
+                    "scene exceeds bounded output/session/application limits",
+                    None,
+                );
+            }
+            let mut outputs = std::collections::HashSet::new();
+            for (slot, output) in scene.outputs.iter().enumerate() {
+                if !(1..=32).contains(&output.tag) {
+                    diagnostics.error(
+                        format!("{path}.outputs[{slot}].tag"),
+                        "scene tag must be in 1..=32",
+                        None,
+                    );
+                }
+                if !outputs.insert(&output.output) {
+                    diagnostics.error(
+                        format!("{path}.outputs[{slot}].output"),
+                        "an output may be assigned only once per scene",
+                        None,
+                    );
+                }
+                if !output.layout.is_empty() && LayoutEnum::from_name(&output.layout).is_none() {
+                    diagnostics.error(
+                        format!("{path}.outputs[{slot}].layout"),
+                        "unknown layout",
+                        None,
+                    );
+                }
+            }
+        }
         let behavior = &self.inner.behavior;
         let layout = &self.inner.layout;
 
@@ -1235,6 +1283,39 @@ impl Config {
             );
         }
 
+        if !self.inner.appearance.ui_density.is_finite()
+            || !(0.8..=1.25).contains(&self.inner.appearance.ui_density)
+        {
+            diagnostics.error(
+                "appearance.ui_density",
+                "density must be in 0.8..=1.25",
+                None,
+            );
+        }
+        if !self.inner.appearance.ui_surface_opacity.is_finite()
+            || !(0.85..=1.0).contains(&self.inner.appearance.ui_surface_opacity)
+        {
+            diagnostics.error(
+                "appearance.ui_surface_opacity",
+                "surface alpha multiplier must be in 0.85..=1.0",
+                None,
+            );
+        }
+        if self.inner.appearance.system_ui_font.trim().is_empty()
+            || self.inner.appearance.system_ui_font.len() > 1024
+            || self
+                .inner
+                .appearance
+                .system_ui_font
+                .chars()
+                .any(char::is_control)
+        {
+            diagnostics.error(
+                "appearance.system_ui_font",
+                "font must contain 1..=1024 bytes without control characters",
+                None,
+            );
+        }
         validate_choice_ignore_ascii_case(
             &mut diagnostics,
             "appearance.ui_theme",
@@ -2286,5 +2367,20 @@ mod tests {
                 .iter()
                 .any(|issue| issue.path == "behavior.shutdown_command")
         );
+    }
+    #[test]
+    fn workscenes_reject_duplicate_names_invalid_tags_and_unknown_layouts() {
+        let mut config = Config::default();
+        config.inner.workscenes[0].outputs[0].tag = 0;
+        config.inner.workscenes[0].outputs[0].layout = "unknown-layout".into();
+        config.inner.workscenes[1].name = config.inner.workscenes[0].name.clone();
+        let diagnostics = config.diagnostics();
+        for path in [
+            "workscenes[0].outputs[0].tag",
+            "workscenes[0].outputs[0].layout",
+            "workscenes[1].name",
+        ] {
+            assert!(diagnostics.issues().iter().any(|issue| issue.path == path));
+        }
     }
 }

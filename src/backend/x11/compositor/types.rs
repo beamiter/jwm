@@ -184,6 +184,8 @@ pub(super) struct WindowTexture {
     pub(super) x11_win: u32,
     pub(super) fade_opacity: f32,
     pub(super) fading_out: bool,
+    /// DestroyNotify ended this drawable lifetime; a reused XID needs a fresh import/Damage.
+    pub(super) native_lifetime_ended: bool,
     pub(super) class_name: String,
     pub(super) opacity_override: Option<f32>,
     pub(super) is_fullscreen: bool,

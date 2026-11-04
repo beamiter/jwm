@@ -26,19 +26,22 @@ class ShaderTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.egl = C.CDLL("libEGL.so.1")
-        cls.gl = C.CDLL("libGL.so.1")
+        cls.wayland = os.environ.get("JWM_DVR_GL_BACKEND", "x11") == "wayland"
+        cls.gl = C.CDLL("libGLESv2.so.2" if cls.wayland else "libGL.so.1")
         ptr, integer, uint = C.c_void_p, C.c_int, C.c_uint
         cls.display = function(cls.egl, "eglGetPlatformDisplay", ptr, uint, ptr, ptr)(0x31DD, None, None)
         initialize = function(cls.egl, "eglInitialize", uint, ptr, C.POINTER(integer), C.POINTER(integer))
         major, minor = integer(), integer()
         if not cls.display or not initialize(cls.display, C.byref(major), C.byref(minor)):
             raise RuntimeError("surfaceless EGL initialization unavailable")
-        assert function(cls.egl, "eglBindAPI", uint, uint)(0x30A2)
-        attrs = (integer * 15)(0x3033, 1, 0x3040, 8, 0x3024, 8, 0x3023, 8, 0x3022, 8, 0x3021, 8, 0x3038, 0, 0)
+        assert function(cls.egl, "eglBindAPI", uint, uint)(0x30A0 if cls.wayland else 0x30A2)
+        attrs = (integer * 15)(0x3033, 1, 0x3040, 64 if cls.wayland else 8, 0x3024, 8, 0x3023, 8, 0x3022, 8, 0x3021, 8, 0x3038, 0, 0)
         config, count = ptr(), integer()
         choose = function(cls.egl, "eglChooseConfig", uint, ptr, C.POINTER(integer), C.POINTER(ptr), integer, C.POINTER(integer))
         assert choose(cls.display, attrs, C.byref(config), 1, C.byref(count)) and count.value
         ctxattrs = (integer * 7)(0x3098, 3, 0x30FB, 3, 0x30FD, 1, 0x3038)
+        if cls.wayland:
+            ctxattrs = (integer * 3)(0x3098, 3, 0x3038)
         cls.context = function(cls.egl, "eglCreateContext", ptr, ptr, ptr, ptr, C.POINTER(integer))(cls.display, config, None, ctxattrs)
         pbattrs = (integer * 5)(0x3057, 4, 0x3056, 4, 0x3038)
         cls.surface = function(cls.egl, "eglCreatePbufferSurface", ptr, ptr, ptr, C.POINTER(integer))(cls.display, config, pbattrs)
@@ -46,6 +49,11 @@ class ShaderTests(unittest.TestCase):
         cls.make_current = function(cls.egl, "eglMakeCurrent", uint, ptr, ptr, ptr, ptr)
         assert cls.make_current(cls.display, cls.surface, cls.surface, cls.context)
         signatures = {
+            "glGenBuffers": (None, integer, C.POINTER(uint)), "glBindBuffer": (None, uint, uint),
+            "glBufferData": (None, uint, C.c_ssize_t, ptr, uint),
+            "glEnableVertexAttribArray": (None, uint),
+            "glVertexAttribPointer": (None, uint, integer, uint, C.c_ubyte, integer, ptr),
+            "glDeleteBuffers": (None, integer, C.POINTER(uint)),
             "glCreateShader": (uint, uint), "glShaderSource": (None, uint, integer, C.POINTER(C.c_char_p), C.POINTER(integer)),
             "glCompileShader": (None, uint), "glGetShaderiv": (None, uint, uint, C.POINTER(integer)),
             "glGetShaderInfoLog": (None, uint, integer, C.POINTER(integer), C.c_char_p),
@@ -69,12 +77,13 @@ class ShaderTests(unittest.TestCase):
         }
         for name, sig in signatures.items():
             setattr(cls, name, staticmethod(function(cls.gl, name, *sig)))
-        print("Software EGL renderer:", cls.glGetString(0x1F01).decode(), flush=True)
+        print("Surfaceless EGL renderer:", cls.glGetString(0x1F01).decode(), flush=True)
         def source(path, name):
             text = (ROOT / path).read_text()
             return re.search(rf'const {name}: &str = r#"(.*?)"#;', text, re.S).group(1).encode()
-        vs = source("src/backend/x11/compositor/common/shaders.rs", "VERTEX_SHADER")
-        fs = source("src/backend/x11/compositor/desktop_visual.rs", "FRAGMENT_SHADER")
+        shader_root = "src/backend/wayland_udev/compositor" if cls.wayland else "src/backend/x11/compositor"
+        vs = source(shader_root + ("/shaders.rs" if cls.wayland else "/common/shaders.rs"), "VERTEX_SHADER")
+        fs = source(shader_root + "/desktop_visual.rs", "FRAGMENT_SHADER")
         shaders = []
         for kind, code in [(0x8B31, vs), (0x8B30, fs)]:
             shader = cls.glCreateShader(kind)
@@ -95,6 +104,18 @@ class ShaderTests(unittest.TestCase):
         for shader in shaders: cls.glDeleteShader(shader)
         cls.vao, cls.texture = uint(), uint()
         cls.glGenVertexArrays(1, C.byref(cls.vao)); cls.glGenTextures(1, C.byref(cls.texture))
+        cls.vbo = uint()
+        if cls.wayland:
+            # Production GLES vertex shader uses the shared unit quad VBO;
+            # the desktop GL shader generates its quad from gl_VertexID.
+            cls.glGenBuffers(1, C.byref(cls.vbo))
+            cls.glBindVertexArray(cls.vao.value)
+            cls.glBindBuffer(0x8892, cls.vbo.value)
+            vertices = (C.c_float * 8)(0,0, 1,0, 0,1, 1,1)
+            cls.glBufferData(0x8892, C.sizeof(vertices), vertices, 0x88E4)
+            cls.glEnableVertexAttribArray(0)
+            cls.glVertexAttribPointer(0,2,0x1406,0,0,None)
+            cls.glBindVertexArray(0)
 
     @classmethod
     def tearDownClass(cls):
@@ -106,7 +127,7 @@ class ShaderTests(unittest.TestCase):
         function(cls.egl, "eglDestroyContext", C.c_uint, C.c_void_p, C.c_void_p)(cls.display, cls.context)
         function(cls.egl, "eglTerminate", C.c_uint, C.c_void_p)(cls.display)
 
-    def render(self, pixels, width, height, alpha, canvas=None, background=(0, 0, 0, 1)):
+    def render(self, pixels, width, height, alpha, canvas=None, background=(0, 0, 0, 1), scene_linear=False):
         w, h = canvas or (width, height)
         self.glViewport(0, 0, w, h)
         self.glClearColor(*background); self.glClear(0x4000)
@@ -119,6 +140,7 @@ class ShaderTests(unittest.TestCase):
         self.glUseProgram(self.program)
         loc = lambda s: self.glGetUniformLocation(self.program, s.encode())
         self.glUniform1i(loc("u_texture"), 0); self.glUniform1i(loc("u_alpha"), alpha)
+        self.glUniform1i(loc("u_scene_linear"), int(scene_linear))
         self.glUniform4f(loc("u_rect"), 0, 0, w, h)
         matrix = (C.c_float * 16)(2/w,0,0,0, 0,-2/h,0,0, 0,0,1,0, -1,1,0,1)
         self.glUniformMatrix4fv(loc("u_projection"), 1, 0, matrix)
@@ -142,7 +164,19 @@ class ShaderTests(unittest.TestCase):
         self.assertEqual(straight,[128,0,127,255])
 
     def test_transparent_rgb_does_not_bleed_when_scaled(self):
-        self.assertEqual(self.render([255,0,0,0, 0,0,255,255],2,1,2,(1,1)), [0,0,128,255])
+        pixel = self.render([255,0,0,0, 0,0,255,255],2,1,2,(1,1))
+        self.assertEqual(pixel[:2], [0,0])
+        self.assertAlmostEqual(pixel[2], 128, delta=1)  # normalized GPU rounding
+        self.assertEqual(pixel[3], 255)
+
+    def test_wayland_srgb_ingress_decodes_once_before_linear_blending(self):
+        if not self.wayland:
+            self.skipTest("common linear ingress is a native Wayland route")
+        encoded = self.render([128,128,128,255],1,1,1)
+        linear = self.render([128,128,128,255],1,1,1,scene_linear=True)
+        self.assertEqual(encoded, [128,128,128,255])
+        for channel in linear[:3]:
+            self.assertAlmostEqual(channel, 55, delta=1)
 
     def test_invalid_premultiplication_is_clamped(self):
         self.assertEqual(self.render([255,255,255,0],1,1,3), [0,0,0,255])

@@ -2049,7 +2049,7 @@ pub(crate) mod test_support {
         pub(crate) eva_overlay_supported: bool,
         pub(crate) eva_visible_outputs: Option<Vec<u64>>,
         pub(crate) clipboard_receipts: Vec<crate::backend::clipboard_offer::ClipboardReceipt>,
-        window_ops: DummyWindowOps,
+        pub(crate) window_ops: Box<dyn WindowOps>,
         input_ops: DummyInputOps,
         property_ops: DummyPropertyOps,
         pub(crate) output_ops: SpyOutputOps,
@@ -2066,7 +2066,7 @@ pub(crate) mod test_support {
                 eva_overlay_supported: false,
                 eva_visible_outputs: None,
                 clipboard_receipts: Vec::new(),
-                window_ops: DummyWindowOps,
+                window_ops: Box::new(DummyWindowOps),
                 input_ops: DummyInputOps,
                 property_ops: DummyPropertyOps,
                 output_ops: SpyOutputOps { outputs },
@@ -2142,7 +2142,7 @@ pub(crate) mod test_support {
         }
 
         fn window_ops(&self) -> &dyn WindowOps {
-            &self.window_ops
+            self.window_ops.as_ref()
         }
 
         fn input_ops(&self) -> &dyn InputOps {

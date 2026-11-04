@@ -205,6 +205,29 @@ impl<C: CompositorConnection> Compositor<C> {
         if w == 0 || h == 0 {
             return;
         }
+        // A retained close fade may outlive its native drawable. A new client
+        // can receive the same XID, but the old Damage object still names the
+        // old drawable object even when subtract succeeds. Drop only resources
+        // owned by that retired texture; never redirect or mutate the new XID.
+        if self
+            .windows
+            .get(&x11_win)
+            .is_some_and(|window| window.native_lifetime_ended)
+        {
+            let old = self
+                .windows
+                .remove(&x11_win)
+                .expect("retired texture exists");
+            self.free_texture_resources(old.gl_texture, old.binding, old.pixmap, old.damage);
+            if let Some(cache) = self.window_blur_caches.remove(&x11_win) {
+                unsafe {
+                    self.gl.delete_framebuffer(cache.fbo);
+                    self.gl.delete_texture(cache.texture);
+                }
+            }
+            self.is_game_window.remove(&x11_win);
+            self.force_full_redraw();
+        }
         let confirm_pixmap_on_damage = self.graphics.is_gles();
         let disposition =
             add_window_minimize_disposition(self.minimized_window_intents.get(&x11_win).copied());
@@ -365,6 +388,7 @@ impl<C: CompositorConnection> Compositor<C> {
                 x11_win,
                 fade_opacity: initial_fade,
                 fading_out: false,
+                native_lifetime_ended: false,
                 class_name: String::new(),
                 opacity_override: None,
                 is_fullscreen: false,
@@ -571,6 +595,39 @@ impl<C: CompositorConnection> Compositor<C> {
         self.minimized_window_metadata.remove(&x11_win);
         self.discard_minimized_visual(x11_win);
         self.retire_window(x11_win, WindowRetirement::Closed);
+    }
+
+    /// Native destruction ends the drawable lifetime even if its cosmetic
+    /// close fade retains an imported texture. Unmap/remap is a different case:
+    /// the same drawable and its Damage subscription remain valid there.
+    pub(crate) fn destroy_window(&mut self, x11_win: u32) {
+        if let Some(window) = self.windows.get_mut(&x11_win) {
+            window.native_lifetime_ended = true;
+        }
+        // A destroyed direct-presentation owner cannot be re-redirected. Clear
+        // bookkeeping before any generic cleanup can address a recycled XID.
+        if self.unredirected_window == Some(x11_win) {
+            self.unredirected_window = None;
+            self.force_full_redraw();
+        }
+        self.ripple_active
+            .retain(|ripple| ripple.x11_win != x11_win);
+        if let Some(cache) = self.window_blur_caches.remove(&x11_win) {
+            unsafe {
+                self.gl.delete_framebuffer(cache.fbo);
+                self.gl.delete_texture(cache.texture);
+            }
+        }
+        if let Some(oml) = self.oml.as_mut() {
+            oml.unregister_window(x11_win);
+        }
+        if let Some(present) = self.present_mgr.as_mut() {
+            present.unregister_window(x11_win);
+        }
+        self.audio_sync.unregister_stream(x11_win);
+        // This also drops detached Genie/thumbnail/preview resources and CPU
+        // capture generations, so a later native lifetime cannot inherit them.
+        self.remove_window(x11_win);
     }
 
     /// Release a live texture for a client that remains under WM ownership.

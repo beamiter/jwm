@@ -151,9 +151,21 @@ pub enum ScenarioStatus {
     Skipped,
 }
 
+/// Timing meaning belongs to the sample, not the metric's legacy name.
+/// In particular a CPU heuristic cannot be compared with presentation feedback.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MeasurementSemantics {
+    pub measurement_kind: String,
+    pub source: String,
+    pub clock_domain: String,
+    pub workload: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ScenarioResult {
     pub status: ScenarioStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub measurement: Option<MeasurementSemantics>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -165,6 +177,7 @@ impl ScenarioResult {
     pub fn recorded(metrics: BTreeMap<String, f64>) -> Self {
         Self {
             status: ScenarioStatus::Recorded,
+            measurement: None,
             reason: None,
             metrics,
         }
@@ -174,6 +187,7 @@ impl ScenarioResult {
     pub fn skipped(reason: impl Into<String>) -> Self {
         Self {
             status: ScenarioStatus::Skipped,
+            measurement: None,
             reason: Some(reason.into()),
             metrics: BTreeMap::new(),
         }
@@ -435,6 +449,17 @@ pub fn compare(
         ));
     }
 
+    for (name, base) in &baseline.scenarios {
+        if let Some(candidate) = candidate.scenarios.get(name)
+            && base.status == ScenarioStatus::Recorded
+            && candidate.status == ScenarioStatus::Recorded
+            && base.measurement != candidate.measurement
+        {
+            return Err(format!(
+                "{name} measurement semantics differ; re-record the baseline with matching clocks, source and workload"
+            ));
+        }
+    }
     let mut verdicts = Vec::new();
     for rule in budgets {
         verdicts.push(evaluate(baseline, candidate, rule));
@@ -633,6 +658,39 @@ mod tests {
                 .map(|(name, value)| ((*name).to_string(), *value))
                 .collect(),
         )
+    }
+
+    #[test]
+    fn cpu_heuristics_cannot_be_compared_to_presentation_feedback() {
+        let mut base = snapshot(&[("input_latency", recorded(&[("input_latency_p95_ms", 2.0)]))]);
+        base.scenarios.get_mut("input_latency").unwrap().measurement = Some(MeasurementSemantics {
+            measurement_kind: "heuristic".into(),
+            source: "cpu".into(),
+            clock_domain: "monotonic".into(),
+            workload: "ambient".into(),
+        });
+        let mut candidate = base.clone();
+        candidate
+            .scenarios
+            .get_mut("input_latency")
+            .unwrap()
+            .measurement
+            .as_mut()
+            .unwrap()
+            .measurement_kind = "presentation_feedback".into();
+        assert!(
+            compare(&base, &candidate, &default_budgets())
+                .unwrap_err()
+                .contains("semantics differ")
+        );
+        // Old snapshots remain readable, but cannot silently compete against
+        // a newly labelled timing implementation.
+        candidate
+            .scenarios
+            .get_mut("input_latency")
+            .unwrap()
+            .measurement = None;
+        assert!(compare(&base, &candidate, &default_budgets()).is_err());
     }
 
     #[test]

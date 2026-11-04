@@ -3357,6 +3357,14 @@ fn print_wayland_smoke(json_output: bool, save: Option<Option<PathBuf>>) -> io::
 
 #[derive(Subcommand)]
 enum PerfAction {
+    /// 只读采集空闲 CPU/RSS/主线程切换计数；不启动渲染基准
+    Idle {
+        #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u32).range(1..=3600))]
+        seconds: u32,
+        /// 显式追加已知组件 PID；仅合计实际采样的进程
+        #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
+        component_pid: Vec<u32>,
+    },
     /// 从活跃 JWM 会话采集一份带系统标签的性能基线
     Record {
         /// 输出文件（默认 perf/baselines/<label>.json）
@@ -3438,6 +3446,10 @@ fn main() -> io::Result<()> {
         Commands::Debug => debug_info(),
 
         Commands::Perf { action } => match action {
+            PerfAction::Idle {
+                seconds,
+                component_pid,
+            } => perf::run_idle(seconds, &component_pid)?,
             PerfAction::Record {
                 out,
                 frames,
@@ -3956,6 +3968,21 @@ mod tests {
         let path = dir.0.join("nested").join("jwm_daemon.log");
         append_log_with_rotation(&path, "hello", 1024).unwrap();
         assert!(fs::read_to_string(&path).unwrap().contains("hello"));
+    }
+
+    #[test]
+    fn idle_profile_cli_is_bounded_and_does_not_need_a_frame_benchmark() {
+        assert!(
+            matches!(Cli::try_parse_from(["jwm-tool","perf","idle","--seconds","30","--component-pid","123"])
+            .unwrap().cmd, Commands::Perf { action: crate::PerfAction::Idle {seconds:30,component_pid} } if component_pid==[123])
+        );
+        for args in [
+            vec!["jwm-tool", "perf", "idle", "--seconds", "0"],
+            vec!["jwm-tool", "perf", "idle", "--seconds", "3601"],
+            vec!["jwm-tool", "perf", "idle", "--component-pid", "0"],
+        ] {
+            assert!(Cli::try_parse_from(args).is_err());
+        }
     }
 
     #[test]

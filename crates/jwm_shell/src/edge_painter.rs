@@ -3,18 +3,86 @@ use anyhow::Result;
 use cairo::{Context, LinearGradient};
 use xbar_core::model::{BarSnapshot, ShellRoute, TagId, UserAction};
 use xbar_core::shell_palette::{Color, ShellPalette};
+thread_local! {
+    static DRAW_DENSITY: std::cell::Cell<f64> = const { std::cell::Cell::new(1.0) };
+    static INHERITED_FONT: std::cell::RefCell<(String,f64,String)> = std::cell::RefCell::new(("Sans".into(),1.0,"Sans 11".into()));
+}
+pub(crate) fn set_font(description: Option<&str>) {
+    let description = description.unwrap_or("Sans 11");
+    INHERITED_FONT.with(|font| {
+        let mut font = font.borrow_mut();
+        if font.2 != description {
+            let (family, size) = xbar_core::theme_inheritance::font_spec(description);
+            *font = (family, f64::from(size) / 11.0, description.to_owned());
+        }
+    });
+}
+
 pub(crate) struct Painter<'a> {
     pub(crate) ctx: &'a Context,
     pub(crate) panel: &'a mut Panel,
     pub(crate) snapshot: &'a BarSnapshot,
     pub(crate) tasks: &'a [crate::ipc::Task],
     pub(crate) dark: bool,
+    pub(crate) tokens: Option<xbar_core::shell_palette::SemanticTokens>,
+    pub(crate) agents: Option<xbar_core::agent_summary::AgentSummary>,
 }
 
 impl Painter<'_> {
+    fn palette(&self) -> ShellPalette {
+        let base = ShellPalette::for_dark(self.dark);
+        self.tokens.map_or(base, |tokens| base.with_tokens(tokens))
+    }
+
     /// Reserve a separate end cap for dismissal instead of overlaying an
     /// existing task, slider, or launcher hit target.
     pub(crate) fn draw(&mut self, x: f64, y: f64, w: f64, h: f64) -> Result<()> {
+        self.draw_scaled(x, y, w, h, None)
+    }
+
+    fn draw_scaled(
+        &mut self,
+        x: f64,
+        y: f64,
+        w: f64,
+        h: f64,
+        keyboard: Option<bool>,
+    ) -> Result<()> {
+        let density = self
+            .tokens
+            .map_or(1.0, |tokens| f64::from(tokens.density))
+            .clamp(0.8, 1.25);
+        let start = self.panel.hits.len();
+        self.ctx.save()?;
+        let previous_density = DRAW_DENSITY.with(|current| current.replace(density));
+        self.ctx.scale(density, density);
+        let result = match keyboard {
+            Some(active) => self.draw_keyboard_unscaled(
+                x / density,
+                y / density,
+                w / density,
+                h / density,
+                active,
+            ),
+            None => self.draw_unscaled(x / density, y / density, w / density, h / density),
+        };
+        let restored = self.ctx.restore();
+        DRAW_DENSITY.with(|current| current.set(previous_density));
+        result?;
+        restored?;
+        for hit in &mut self.panel.hits[start..] {
+            for coordinate in &mut hit.rect {
+                *coordinate *= density;
+            }
+            if let Some((_, top, height)) = &mut hit.slider {
+                *top *= density;
+                *height *= density;
+            }
+        }
+        Ok(())
+    }
+
+    fn draw_unscaled(&mut self, x: f64, y: f64, w: f64, h: f64) -> Result<()> {
         let size = (w.min(h) - 12.0).clamp(1.0, 28.0);
         let reserve = size + 12.0;
         let (rect, arrow) = if self.panel.edge.is_vertical() {
@@ -54,8 +122,52 @@ impl Painter<'_> {
         self.button(rect, arrow, Action::HidePanel, false)
     }
 
+    /// Native keyboard support is advertised only by adapters that implement it.
+    /// Reserve a second end cap so it cannot overlap dismissal or content.
+    pub(crate) fn draw_with_keyboard(
+        &mut self,
+        x: f64,
+        y: f64,
+        w: f64,
+        h: f64,
+        active: bool,
+    ) -> Result<()> {
+        self.draw_scaled(x, y, w, h, Some(active))
+    }
+
+    fn draw_keyboard_unscaled(
+        &mut self,
+        x: f64,
+        y: f64,
+        w: f64,
+        h: f64,
+        active: bool,
+    ) -> Result<()> {
+        let size = (w.min(h) - 12.0).clamp(1.0, 28.0);
+        let reserve = size + 12.0;
+        if self.panel.edge.is_vertical() && h > reserve + 100.0 {
+            self.draw_unscaled(x, y, w, h - reserve)?;
+            self.button(
+                [x + (w - size) / 2.0, y + h - reserve + 6.0, size, size],
+                "⌨",
+                Action::KeyboardMode,
+                active,
+            )
+        } else if !self.panel.edge.is_vertical() && w > reserve + 100.0 {
+            self.draw_unscaled(x, y, w - reserve, h)?;
+            self.button(
+                [x + w - reserve + 6.0, y + (h - size) / 2.0, size, size],
+                "⌨",
+                Action::KeyboardMode,
+                active,
+            )
+        } else {
+            self.draw_unscaled(x, y, w, h)
+        }
+    }
+
     fn ink(&self) {
-        color(self.ctx, ShellPalette::for_dark(self.dark).ink);
+        color(self.ctx, self.palette().tokens().text);
     }
 
     fn control_surface(
@@ -66,8 +178,8 @@ impl Painter<'_> {
         pressed: bool,
     ) -> Result<()> {
         let [x, y, w, h] = rect;
-        let palette = ShellPalette::for_dark(self.dark);
-        rounded(self.ctx, x, y, w, h, 14.0);
+        let palette = self.palette();
+        rounded(self.ctx, x, y, w, h, f64::from(palette.tokens().radius));
         let gradient = LinearGradient::new(x, y, x, y + h);
         let (top, bottom) = if selected {
             (palette.accent, palette.selection)
@@ -173,7 +285,7 @@ impl Painter<'_> {
             .as_ref()
             .is_some_and(|hit| hit.action == action && hit.rect == rect);
         if enabled && (pressed || self.panel.hovered == Some(self.panel.hits.len())) {
-            let palette = ShellPalette::for_dark(self.dark);
+            let palette = self.palette();
             rounded(self.ctx, x, y, w, h, 12.0);
             color(
                 self.ctx,
@@ -188,7 +300,7 @@ impl Painter<'_> {
         if enabled {
             self.ink();
         } else {
-            color(self.ctx, ShellPalette::for_dark(self.dark).muted_ink);
+            color(self.ctx, self.palette().muted_ink);
         }
         if !symbol(self.ctx, label, rect)? {
             text(self.ctx, label, x, y + (h - 20.0) / 2.0, w, 14.0, true)?;
@@ -204,7 +316,7 @@ impl Painter<'_> {
     }
 
     fn rule(&self, x: f64, y: f64, w: f64) -> Result<()> {
-        color(self.ctx, ShellPalette::for_dark(self.dark).divider);
+        color(self.ctx, self.palette().divider);
         self.ctx.move_to(x, y);
         self.ctx.line_to(x + w, y);
         self.ctx.set_line_width(1.0);
@@ -242,6 +354,45 @@ impl Painter<'_> {
         }
         self.rule(x + 18.0, cy + 4.0, (w - 36.0).max(1.0))?;
         cy += 20.0;
+        if let Some(summary) = self.agents
+            && cy + size + 80.0 < y + h
+        {
+            self.button(
+                [bx, cy, size, size],
+                "agents",
+                Action::ToggleAgents,
+                self.panel.agents_expanded,
+            )?;
+            self.ink();
+            let label = if summary.available {
+                format!("{}/{}", summary.running, summary.waiting)
+            } else {
+                "?".into()
+            };
+            text(self.ctx, &label, bx, cy + size - 12.0, size, 9.0, true)?;
+            cy += size + gap;
+            if self.panel.agents_expanded && cy + 28.0 + 70.0 < y + h {
+                if summary.picker_available {
+                    self.button(
+                        [bx, cy, size, 28.0],
+                        "↗",
+                        Action::Model(UserAction::OpenShellHub(ShellRoute::AgentSessions)),
+                        false,
+                    )?;
+                } else {
+                    self.flat_button_enabled(
+                        [bx, cy, size, 28.0],
+                        "",
+                        Action::Model(UserAction::OpenShellHub(ShellRoute::AgentSessions)),
+                        false,
+                    )?;
+                    color(self.ctx, self.palette().muted_ink);
+                    text(self.ctx, "Picker", x, cy, w, 9.0, true)?;
+                    text(self.ctx, "unavailable", x, cy + 13.0, w, 8.0, true)?;
+                }
+                cy += 28.0 + gap;
+            }
+        }
         let count = self.snapshot.tags.len();
         let capacity = (((y + h - 70.0 - cy) / (size + gap)).max(0.0) as usize).min(4);
         let active = self.snapshot.active_tag.map(TagId::index).unwrap_or(0);
@@ -264,7 +415,7 @@ impl Painter<'_> {
                 if self.snapshot.active_tag == Some(tag) {
                     self.ctx.set_source_rgba(1.0, 1.0, 1.0, 0.95);
                 } else {
-                    color(self.ctx, ShellPalette::for_dark(self.dark).ink);
+                    color(self.ctx, self.palette().ink);
                 }
                 self.ctx.arc(
                     bx + size - 10.0,
@@ -327,7 +478,7 @@ impl Painter<'_> {
             if cy + sh + 70.0 > y + h {
                 break;
             }
-            let palette = ShellPalette::for_dark(self.dark);
+            let palette = self.palette();
             let hovered = self.panel.hovered.is_some_and(|index| {
                 index == self.panel.hits.len() || index == self.panel.hits.len() + 1
             });
@@ -494,7 +645,7 @@ impl Painter<'_> {
                 11.5,
                 false,
             )?;
-            color(self.ctx, ShellPalette::for_dark(self.dark).muted_ink);
+            color(self.ctx, self.palette().muted_ink);
             text(
                 self.ctx,
                 self.snapshot
@@ -530,7 +681,7 @@ impl Painter<'_> {
                 Action::MediaNext,
                 has_player,
             )?;
-            color(self.ctx, ShellPalette::for_dark(self.dark).divider);
+            color(self.ctx, self.palette().divider);
             self.ctx.move_to(x + media_width + 8.0, cy + 7.0);
             self.ctx.line_to(x + media_width + 8.0, cy + size - 7.0);
             self.ctx.stroke()?;
@@ -612,7 +763,7 @@ impl Painter<'_> {
                 "⌕",
                 Action::Model(UserAction::OpenShellHub(ShellRoute::Applications)),
             )?;
-            color(self.ctx, ShellPalette::for_dark(self.dark).divider);
+            color(self.ctx, self.palette().divider);
             self.ctx.move_to(x + w - 88.0, cy + 7.0);
             self.ctx.line_to(x + w - 88.0, cy + size - 7.0);
             self.ctx.stroke()?;
@@ -700,7 +851,7 @@ impl Painter<'_> {
             )?;
         }
         if task.is_minimized {
-            color(self.ctx, ShellPalette::for_dark(self.dark).muted_ink);
+            color(self.ctx, self.palette().muted_ink);
             self.ctx
                 .arc(x + w - 9.0, y + h - 8.0, 1.8, 0.0, std::f64::consts::TAU);
             self.ctx.fill()?;
@@ -754,8 +905,13 @@ fn text(
     // Pango keeps translated labels and non-Latin window titles shaped and
     // ellipsized. Text is never allowed to grow the native surface.
     let layout = pangocairo::functions::create_layout(ctx);
-    let mut font = pango::FontDescription::from_string("Sans");
-    font.set_absolute_size(size * f64::from(pango::SCALE));
+    let (family, scale) = INHERITED_FONT.with(|font| {
+        let font = font.borrow();
+        (font.0.clone(), font.1)
+    });
+    let mut font = pango::FontDescription::from_string(&family);
+    let density = DRAW_DENSITY.with(std::cell::Cell::get);
+    font.set_absolute_size(size * scale / density * f64::from(pango::SCALE));
     layout.set_font_description(Some(&font));
     layout.set_text(value);
     layout.set_width((width * f64::from(pango::SCALE)).min(f64::from(i32::MAX)) as i32);
@@ -775,14 +931,23 @@ fn text(
 
 /// Shared capsule material: a cool translucent tint with a restrained upper
 /// highlight. The host supplies the rounded clip and the real desktop backdrop.
-pub(crate) fn material(ctx: &Context, rect: [f64; 4], dark: bool) -> Result<()> {
+pub(crate) fn material(
+    ctx: &Context,
+    rect: [f64; 4],
+    dark: bool,
+    tokens: Option<xbar_core::shell_palette::SemanticTokens>,
+) -> Result<()> {
     let [x, y, _, h] = rect;
-    let palette = ShellPalette::for_dark(dark);
+    let base = ShellPalette::for_dark(dark);
+    let palette = tokens.map_or(base, |tokens| base.with_tokens(tokens));
     let tint = LinearGradient::new(x, y, x, y + h);
     gradient_stop(&tint, 0.0, palette.sheet_top);
     gradient_stop(&tint, 1.0, palette.sheet_bottom);
     ctx.set_source(&tint)?;
     ctx.paint()?;
+    if tokens.is_some_and(|tokens| tokens.glass_quality == 0) {
+        return Ok(());
+    }
     let sheen = LinearGradient::new(x, y, x, y + h.min(120.0));
     sheen.add_color_stop_rgba(0.0, 1.0, 1.0, 1.0, if dark { 0.06 } else { 0.22 });
     sheen.add_color_stop_rgba(1.0, 1.0, 1.0, 1.0, 0.0);
@@ -865,6 +1030,8 @@ fn symbol(ctx: &Context, label: &str, rect: [f64; 4]) -> Result<bool> {
             | "clipboard"
             | "previous"
             | "next"
+            | "⌨"
+            | "agents"
     ) {
         return Ok(false);
     }
@@ -877,6 +1044,30 @@ fn symbol(ctx: &Context, label: &str, rect: [f64; 4]) -> Result<bool> {
     ctx.set_line_cap(cairo::LineCap::Round);
     ctx.set_line_join(cairo::LineJoin::Round);
     match label {
+        "agents" => {
+            rounded(ctx, -10.0, -10.0, 20.0, 14.0, 3.0);
+            ctx.stroke()?;
+            ctx.move_to(0.0, -10.0);
+            ctx.line_to(0.0, -14.0);
+            ctx.stroke()?;
+            for x in [-4.0, 4.0] {
+                ctx.arc(x, -4.0, 1.3, 0.0, std::f64::consts::TAU);
+                ctx.fill()?;
+            }
+        }
+        "⌨" => {
+            rounded(ctx, -12.0, -8.0, 24.0, 16.0, 2.5);
+            ctx.stroke()?;
+            for y in [-3.5, 1.0] {
+                for x in [-7.5, -2.5, 2.5, 7.5] {
+                    ctx.rectangle(x - 0.8, y - 0.8, 1.6, 1.6);
+                    ctx.fill()?;
+                }
+            }
+            ctx.move_to(-5.0, 5.0);
+            ctx.line_to(5.0, 5.0);
+            ctx.stroke()?;
+        }
         "▦" => {
             for (x, y) in [(-8.0, -8.0), (2.0, -8.0), (-8.0, 2.0), (2.0, 2.0)] {
                 rounded(ctx, x, y, 6.0, 6.0, 1.6);
@@ -1133,6 +1324,8 @@ mod tests {
                         snapshot: &snapshot,
                         tasks: &[],
                         dark,
+                        tokens: None,
+                        agents: None,
                     }
                     .button(rect, "", action.clone(), selected)
                     .unwrap();
@@ -1158,6 +1351,7 @@ mod tests {
     fn panel(edge: BarEdge, offset: usize) -> Panel {
         Panel {
             task_offset: offset,
+            agents_expanded: false,
             edge,
             window: 0,
             sensor: 0,
@@ -1186,6 +1380,140 @@ mod tests {
     }
 
     #[test]
+    fn agent_section_is_collapsed_by_default_and_opens_only_the_canonical_picker() {
+        let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 100, 900).unwrap();
+        let ctx = Context::new(&surface).unwrap();
+        let snapshot = xbar_core::model::BarModel::default().snapshot();
+        let mut panel = panel(BarEdge::Left, 0);
+        let summary = xbar_core::agent_summary::AgentSummary {
+            available: true,
+            picker_available: true,
+            running: 2,
+            waiting: 1,
+            total: 3,
+            ..Default::default()
+        };
+        Painter {
+            ctx: &ctx,
+            panel: &mut panel,
+            snapshot: &snapshot,
+            tasks: &[],
+            dark: false,
+            tokens: None,
+            agents: Some(summary),
+        }
+        .draw(0.0, 0.0, 66.0, 800.0)
+        .unwrap();
+        assert!(
+            panel
+                .hits
+                .iter()
+                .any(|hit| hit.action == Action::ToggleAgents)
+        );
+        let open = Action::Model(UserAction::OpenShellHub(ShellRoute::AgentSessions));
+        assert!(!panel.hits.iter().any(|hit| hit.action == open));
+        panel.agents_expanded = true;
+        panel.hits.clear();
+        Painter {
+            ctx: &ctx,
+            panel: &mut panel,
+            snapshot: &snapshot,
+            tasks: &[],
+            dark: false,
+            tokens: None,
+            agents: Some(summary),
+        }
+        .draw(0.0, 0.0, 66.0, 800.0)
+        .unwrap();
+        assert_eq!(
+            panel.hits.iter().filter(|hit| hit.action == open).count(),
+            1
+        );
+    }
+
+    #[test]
+    fn density_scales_visual_controls_and_their_actual_pointer_regions_together() {
+        let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 100, 800).unwrap();
+        let ctx = Context::new(&surface).unwrap();
+        let snapshot = xbar_core::model::BarModel::default().snapshot();
+        let mut widths = Vec::new();
+        for density in [1.0, 0.8, 1.2] {
+            let mut panel = panel(BarEdge::Left, 0);
+            let mut tokens = ShellPalette::LIGHT.tokens();
+            tokens.density = density;
+            Painter {
+                ctx: &ctx,
+                panel: &mut panel,
+                snapshot: &snapshot,
+                tasks: &[],
+                dark: false,
+                tokens: Some(tokens),
+                agents: None,
+            }
+            .draw_with_keyboard(0.0, 0.0, 66.0, 680.0, false)
+            .unwrap();
+            let first = &panel.hits[0];
+            widths.push(first.rect[2]);
+            assert!(first.contains(
+                first.rect[0] + first.rect[2] / 2.0,
+                first.rect[1] + first.rect[3] / 2.0
+            ));
+            for hit in &panel.hits {
+                let [x, y, w, h] = hit.rect;
+                assert!(
+                    x >= 0.0 && y >= 0.0 && x + w <= 66.001 && y + h <= 680.001,
+                    "{density}: {:?}",
+                    hit.rect
+                );
+            }
+        }
+        assert!(
+            widths[1] < widths[0],
+            "compact density uses smaller pointer targets in the same surface"
+        );
+    }
+
+    #[test]
+    fn explicit_keyboard_control_has_a_distinct_hit_region() {
+        let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 1400, 800).unwrap();
+        let ctx = Context::new(&surface).unwrap();
+        let snapshot = xbar_core::model::BarModel::default().snapshot();
+        for (edge, w, h) in [
+            (BarEdge::Left, 66.0, 680.0),
+            (BarEdge::Right, 66.0, 720.0),
+            (BarEdge::Bottom, 1344.0, 64.0),
+        ] {
+            let mut panel = panel(edge, 0);
+            Painter {
+                ctx: &ctx,
+                panel: &mut panel,
+                snapshot: &snapshot,
+                tasks: &[],
+                dark: true,
+                tokens: None,
+                agents: None,
+            }
+            .draw_with_keyboard(0.0, 0.0, w, h, true)
+            .unwrap();
+            let keyboard = panel
+                .hits
+                .iter()
+                .find(|hit| hit.action == Action::KeyboardMode)
+                .unwrap();
+            assert!(keyboard.enabled);
+            let [x, y, width, height] = keyboard.rect;
+            assert!(x >= 0.0 && y >= 0.0 && x + width <= w && y + height <= h);
+            for hit in &panel.hits {
+                if hit.action == Action::KeyboardMode {
+                    continue;
+                }
+                let [hx, hy, hw, hh] = hit.rect;
+                assert!(x + width <= hx || hx + hw <= x || y + height <= hy || hy + hh <= y);
+            }
+        }
+    }
+
+    #[test]
     fn hide_control_has_its_own_space_on_every_edge() {
         let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 1400, 800).unwrap();
         let ctx = Context::new(&surface).unwrap();
@@ -1204,6 +1532,8 @@ mod tests {
                 snapshot: &snapshot,
                 tasks: &[],
                 dark: false,
+                tokens: None,
+                agents: None,
             }
             .draw(0.0, 0.0, w, h)
             .unwrap();
@@ -1246,6 +1576,8 @@ mod tests {
                 snapshot: &snapshot,
                 tasks: &[],
                 dark: false,
+                tokens: None,
+                agents: None,
             }
             .right(12.0, 0.0, 66.0, 656.0)
             .unwrap();
@@ -1285,6 +1617,8 @@ mod tests {
                     snapshot: &snapshot,
                     tasks: &[],
                     dark: false,
+                    tokens: None,
+                    agents: None,
                 }
                 .left(12.0, 0.0, 60.0, 680.0)
                 .unwrap();
@@ -1323,6 +1657,8 @@ mod tests {
             snapshot: &snapshot,
             tasks: &[],
             dark: false,
+            tokens: None,
+            agents: None,
         }
         .bottom(0.0, 0.0, 1024.0, 64.0)
         .unwrap();
@@ -1362,6 +1698,8 @@ mod tests {
                         snapshot: &snapshot,
                         tasks: &[],
                         dark,
+                        tokens: None,
+                        agents: None,
                     }
                     .bottom(0.0, 0.0, f64::from(width), 64.0)
                     .unwrap();
@@ -1424,6 +1762,8 @@ mod tests {
                     snapshot: &snapshot,
                     tasks: &tasks,
                     dark: false,
+                    tokens: None,
+                    agents: None,
                 }
                 .bottom(0.0, 0.0, width, 64.0)
                 .unwrap();

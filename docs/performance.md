@@ -27,6 +27,14 @@ Two principles carry the whole contract:
    `alloc-counter`). A candidate that lacks only those is reported as not
    comparable.
 
+Recorded scenarios include `measurement_kind`, `source`, `clock_domain` and
+`workload` under `measurement`. X11 latency is a CPU heuristic combined with an
+unvalidated display estimate, and benchmark frame timings are CPU render-pass
+durations (including CPU-side waits), not inter-frame cadence. Neither is
+GPU duration or input-to-photon. `ambient` and `waterlily_paced` workloads differ.
+Comparison refuses changed semantics, including an older unlabelled sample
+against a newly labelled one: re-record the baseline under matching conditions.
+
 ## Recording
 
 ```
@@ -108,12 +116,18 @@ recording switched it on, whether or not the benchmark then started.
 | scenario | roadmap bullet | metrics | source |
 | --- | --- | --- | --- |
 | `idle` | idle CPU and wakeups | `cpu_percent_avg`, `wakeups_per_s`, `rss_mb` | `/proc/<pid>/stat` + `status` deltas over the idle window |
-| `steady_frame` | frame-time median/p95/p99 | `frame_time_{avg,p50,p95,p99,stddev}_ms`, `fps_avg`, `frame_samples` | compositor benchmark harness (`benchmark` IPC command) |
+| `steady_frame` | CPU render-pass median/p95/p99 | `frame_time_{avg,p50,p95,p99,stddev}_ms`, `fps_avg`, `frame_samples` | compositor benchmark harness (`benchmark` IPC command) |
 | `damage_redraw` | damage-area and redraw ratios | `dirty_fraction_avg_percent`, `dirty_regions_avg`, `dirty_region_merges_avg` | `get_metrics` sampled once per second across the benchmark window |
 | `input_latency` | backend-reported input latency estimate | `input_latency_{p50,p95,p99}_ms` | benchmark harness when it observed input, else the compositor's rolling window |
 | `allocation_steady` | allocation counts in steady-state frame production | `allocs_per_frame`, `frames_observed` | `allocations` counter deltas (requires a jwm built with `--features alloc-counter`) |
 | `multi_monitor` | multi-monitor refresh-rate and mixed-scale behavior | `monitor_count`, `refresh_hz` | `get_monitors` + `get_metrics` |
 | `direct_scanout` | direct-scanout entry/exit stability | `scanout_toggles_per_minute`, `scanout_active_end` | `direct_scanout_count` deltas across the window |
+
+The legacy benchmark `fps_avg` is `1000 / average CPU render-pass duration`.
+It is an inverse CPU-cost indicator, not measured presentation FPS. The live
+`get_metrics.fps` counter and elapsed wall-clock frame-count deltas are separate
+observations. A high inverse CPU throughput cannot establish smooth output,
+missed presentation deadlines, or physical latency.
 
 ### Input-latency limits
 
@@ -166,8 +180,8 @@ damage the desktop produced during the window. Two recordings taken minutes
 apart can differ wildly (an idle desktop renders frames in bursts; a 60 Hz
 animation paces them at the refresh rate) while both being *correct*. The
 label cannot capture this, so the recording protocol must: record baselines
-and candidates under the same conditions, and sanity-check `fps_avg` against
-`refresh_hz` before trusting a frame-time comparison. For a deterministic
+and candidates under the same conditions, and compare actual frame-count/elapsed-time observations separately from the
+legacy inverse-CPU-cost `fps_avg`; the latter cannot validate refresh pacing. For a deterministic
 paced workload, `--waterlily-workload` enables the built-in continuous
 animation for the duration of the benchmark window, or uses the one already
 running (visible on screen either way; see Recording for when it is
@@ -249,3 +263,51 @@ disabled; per the roadmap it may only be enabled together with benchmark
 evidence recorded through this contract.
 
 `jwm-tool health` prints compact `bench` for performance operators.
+
+## Reproducible isolated scroll run
+
+```sh
+python3 scripts/test-private-perf.py --jwm target/debug/jwm \
+  --tool target/debug/jwm-tool --backend x11rb --samples 3 --seconds 30 \
+  --warmup-seconds 5 --refresh-hz 60 --output artifacts/private-perf-candidate
+```
+
+This owns a 1280×800 Xvfb server, private D-Bus, configuration and the managed `private-scroll-workload.py` producer (a changing
+500×500 region at60Hz, without x11perf calibration/visibility waits). The preflight validates productive rendering; it does not infer a frame-rate
+budget from a cold startup. `seconds × refresh-hz` pins the measured frame count
+for every repeat;
+actual elapsed time and the compositor's observed frame statistics remain in the
+report. The orchestrator annotates each recorded scenario with the fixed workload
+identity; its concurrent procfs sample is explicitly skipped for `idle` because
+scrolling is active. Managed-window registration, frame-count progress and screenshot pixel changes
+must pass before sampling. The fixture explicitly disables the optional shared
+Shell table, warps the private pointer to the interior and settles before the
+separate idle sample. Exact source/dependency, executable and config hashes, output
+topology and raw logs accompany all repeats. It does not use the person's display
+or infer physical input-to-photon, multiple physical outputs or LAN latency from this
+isolated workload.
+
+Read-only idle sampling is available independently of frame benchmarks:
+
+```sh
+jwm-tool perf idle --seconds 30 > idle-core.json
+# Include a known, observed Shell PID; omitted processes are not counted.
+jwm-tool perf idle --seconds 30 --component-pid 12345 > idle-core-and-shell.json
+```
+
+Each PID is sampled over the same window and checked for start-time reuse;
+CPU and RSS totals cover only those processes. The context-switch field names
+main-thread voluntary context switches explicitly: it is a proxy, not measured
+kernel wakeups. The command does not claim that the user left the desktop idle;
+keep the workload quiet and retain its exact configuration with the result.
+
+The1000-session typed-search diagnostic uses production matching and visible-row
+formatting, with ordinary and worst legal ASCII/Unicode metadata:
+
+```sh
+cargo run --locked --example launcher-search-perf -- --samples 200
+```
+
+It reports p50/p95/p99/max, index-build time, output bounds and debug/release
+profile. The candidate50ms p95 target is informational until reference workload
+budgets are frozen; no network/provider fetch or physical rendering is timed.

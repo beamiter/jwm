@@ -159,6 +159,13 @@ impl WaylandCompositor {
             return Some(reason);
         }
 
+        if self
+            .desktop_visual
+            .as_ref()
+            .is_some_and(|layer| layer.visible() || layer.pending())
+        {
+            return Some("desktop visual layer requires composition");
+        }
         // A scene-linear frame is not scanout-ready until either the shader
         // has applied its per-output gamut/OETF plan or KMS owns the matching
         // CTM+LUT pair. Directly presenting a client buffer would bypass the

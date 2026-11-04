@@ -334,7 +334,7 @@ impl Editor {
         cr.translate(area.x - self.horizontal, area.y - self.scroll);
         let range = self.selection();
         if focused && !range.is_empty() {
-            ui::color(cr, ui::SELECT);
+            ui::color(cr, ui::select());
             for line in layout.lines_readonly() {
                 let start = (line.start_index() as usize).max(range.start);
                 let end = ((line.start_index() + line.length()) as usize).min(range.end);
@@ -353,26 +353,26 @@ impl Editor {
             }
             let _ = cr.fill();
         }
-        ui::color(cr, ui::TEXT);
+        ui::color(cr, ui::text_color());
         cr.move_to(0., 0.);
         pangocairo::functions::show_layout(cr, &layout);
         if focused && caret {
-            ui::fill(cr, Rect::new(cx, cy, 1.5, ch.max(17.)), ui::ACCENT);
+            ui::fill(cr, Rect::new(cx, cy, 1.5, ch.max(17.)), ui::accent());
         }
         if focused && !self.preedit.is_empty() {
             let preedit = ui::layout(cr, &self.preedit, 15., area.w - cx, false);
             ui::fill(
                 cr,
                 Rect::new(cx, cy, (preedit.pixel_size().0 as f64).max(8.), ch),
-                ui::HOVER,
+                ui::hover(),
             );
             cr.move_to(cx, cy);
-            ui::color(cr, ui::ACCENT);
+            ui::color(cr, ui::accent());
             pangocairo::functions::show_layout(cr, &preedit);
             ui::fill(
                 cr,
                 Rect::new(cx, cy + ch - 1., preedit.pixel_size().0 as f64, 1.),
-                ui::ACCENT,
+                ui::accent(),
             );
         }
         let _ = cr.restore();

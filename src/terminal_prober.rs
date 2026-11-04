@@ -602,15 +602,40 @@ mod tests {
         let fallback = temporary.0.join("forge");
         std::fs::write(&fallback, "#!/bin/sh\nexit 0\n").unwrap();
         std::fs::set_permissions(&fallback, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let fallback_launched = std::process::Command::new(&fallback)
-            .status()
-            .is_ok_and(|status| status.success());
+        // Parallel fork/exec tests can briefly inherit another thread's
+        // freshly-written descriptor before CLOEXEC closes it. Linux then
+        // returns ETXTBSY despite correct execution permissions. Retry only
+        // that transient kernel state; permission and noexec errors remain
+        // definitive results for this fixture.
+        let launch = |path: &Path| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+            loop {
+                match std::process::Command::new(path).status() {
+                    Err(error)
+                        if error.raw_os_error() == Some(libc::ETXTBSY)
+                            && std::time::Instant::now() < deadline =>
+                    {
+                        std::thread::sleep(std::time::Duration::from_millis(2));
+                    }
+                    Ok(status) => break status.success(),
+                    Err(error)
+                        if [Some(libc::EACCES), Some(libc::EPERM)]
+                            .contains(&error.raw_os_error()) =>
+                    {
+                        break false;
+                    }
+                    Err(error) => panic!(
+                        "permission fixture could not execute {}: {error}",
+                        path.display()
+                    ),
+                }
+            }
+        };
+        let fallback_launched = launch(&fallback);
         std::fs::write(&program, "#!/bin/sh\nexit 0\n").unwrap();
         for mode in [0o600, 0o610, 0o700] {
             std::fs::set_permissions(&program, std::fs::Permissions::from_mode(mode)).unwrap();
-            let launched = std::process::Command::new(&program)
-                .status()
-                .is_ok_and(|status| status.success());
+            let launched = launch(&program);
             assert_eq!(is_executable(&program), launched, "mode {mode:o}");
             let selected = available_terminal_in_path(
                 Some(temporary.0.as_os_str()),

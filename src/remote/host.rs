@@ -131,6 +131,10 @@ const UNCHANGED_FRAME_KEEPALIVE: Duration = Duration::from_secs(4);
 // Reuse the existing idle capture ticks instead of starting another producer.
 const STATIC_REFINEMENT_INTERVAL: Duration = Duration::from_secs(2);
 const STATIC_REFINEMENT_TILES: usize = 256;
+// Static readback already exists; a larger bounded batch clears code/text
+// promptly without introducing a second capture producer. Active damage uses
+// the smaller budget to preserve interactive encoding latency.
+const IDLE_REFINEMENT_TILES: usize = 4096;
 const MIN_BACKPRESSURE_REFRESH: Duration = Duration::from_millis(250);
 const MAX_BACKPRESSURE_REFRESH: Duration = Duration::from_secs(1);
 const TELEMETRY_INTERVAL: Duration = Duration::from_secs(5);
@@ -379,7 +383,9 @@ impl FrameSender {
         self.pending_refinement_at = None;
         let plan = self.encoder.plan(frame, request)?;
         if plan.dirty_tiles > 0 {
-            self.last_content_change = Some(now);
+            // Anchor the first repair deadline once. Repeated local damage
+            // before the first repair must not postpone it indefinitely.
+            self.last_content_change.get_or_insert(now);
         }
         Ok(plan)
     }
@@ -401,11 +407,15 @@ impl FrameSender {
         } else {
             TileEncodeRequest::Delta
         };
-        let plan = self.encoder.plan_with_refinement(
-            frame,
-            request,
-            Some((quality, STATIC_REFINEMENT_TILES)),
-        )?;
+        let ordinary = self.encoder.plan(frame, request)?;
+        let limit = if ordinary.dirty_tiles == 0 {
+            IDLE_REFINEMENT_TILES
+        } else {
+            STATIC_REFINEMENT_TILES
+        };
+        let plan = self
+            .encoder
+            .plan_with_refinement(frame, request, Some((quality, limit)))?;
         self.pending_refinement = plan.dirty_tiles > 0;
         self.pending_refinement_at = self.pending_refinement.then_some(now);
         Ok(plan)
@@ -445,7 +455,7 @@ fn static_refinement_due(changed: Option<Instant>, refined: Option<Instant>, now
     let Some(changed) = changed else {
         return false;
     };
-    let last = refined.map_or(changed, |refined| refined.max(changed));
+    let last = refined.unwrap_or(changed);
     now.saturating_duration_since(last) >= STATIC_REFINEMENT_INTERVAL
 }
 
@@ -859,6 +869,7 @@ struct JpegQualityState {
     pressure: u64,
     healthy_ack_streak: u64,
     healthy_since: Option<Instant>,
+    last_healthy_ack: Option<Instant>,
     signals: JpegQualitySignals,
     pending_acks: VecDeque<TimedAckObservation>,
 }
@@ -901,6 +912,7 @@ impl JpegQualityController {
                 pressure: 0,
                 healthy_ack_streak: 0,
                 healthy_since: None,
+                last_healthy_ack: None,
                 signals: JpegQualitySignals::default(),
                 pending_acks: VecDeque::with_capacity(MAX_OUTSTANDING_FRAMES as usize),
             }),
@@ -961,6 +973,7 @@ impl JpegQualityController {
                     } else {
                         state.healthy_ack_streak = state.healthy_ack_streak.saturating_add(1);
                         state.healthy_since.get_or_insert(observation.observed_at);
+                        state.last_healthy_ack = Some(observation.observed_at);
                     }
                 } else {
                     state.healthy_ack_streak = 0;
@@ -989,7 +1002,13 @@ impl JpegQualityController {
             state.healthy_ack_streak = 0;
             state.healthy_since = None;
         } else if state.current < self.maximum
-            && state.healthy_ack_streak >= self.recovery_ack_target
+            && state.healthy_ack_streak
+                >= observed_recovery_ack_target(
+                    self.recovery_ack_target,
+                    state.healthy_ack_streak,
+                    state.healthy_since,
+                    state.last_healthy_ack,
+                )
             && state.healthy_since.is_some_and(|since| {
                 now.saturating_duration_since(since) >= JPEG_QUALITY_RECOVERY_DURATION
             })
@@ -1019,6 +1038,27 @@ impl JpegQualityController {
             accumulated_pressure,
         }
     }
+}
+
+/// Configured FPS is only an upper bound on ACK frequency. Static desktops
+/// send keepalives far less often; require the same minimum of four independent
+/// healthy samples and the existing three-second observation span, but use
+/// their real same-epoch cadence. Bursty fast ACKs retain the24-sample ceiling.
+fn observed_recovery_ack_target(
+    configured: u64,
+    samples: u64,
+    first: Option<Instant>,
+    last: Option<Instant>,
+) -> u64 {
+    let (Some(first), Some(last)) = (first, last) else {
+        return configured;
+    };
+    if samples < 2 {
+        return configured;
+    }
+    let interval = last.saturating_duration_since(first).as_nanos() / u128::from(samples - 1);
+    let interval = Duration::from_nanos(u64::try_from(interval).unwrap_or(u64::MAX));
+    configured.min(jpeg_quality_recovery_ack_target(interval))
 }
 
 fn jpeg_quality_recovery_ack_target(frame_interval: Duration) -> u64 {
@@ -2126,7 +2166,7 @@ fn send_frames_with_encoder<W: std::io::Write + SetWriteTimeout>(
         }
         let planned_at = Instant::now();
         let mut plan = sender.plan_at(&pending.frame, planned_at)?;
-        if plan.dirty_tiles == 0 && sender.refinement_due(planned_at) {
+        if !plan.keyframe && sender.refinement_due(planned_at) {
             let current = jpeg_quality.current_quality();
             if sender.encoder.has_quality_debt(current) {
                 plan = sender.refine_at(&pending.frame, current, planned_at)?;
@@ -4307,6 +4347,72 @@ mod tests {
     }
 
     #[test]
+    fn idle_healthy_acks_recover_without_waiting_for_configured_fps_sample_count() {
+        let base = Instant::now();
+        let controller =
+            JpegQualityController::new_at(70, 40, true, Duration::from_millis(33), base).unwrap();
+        for millis in [0, 1] {
+            controller.observe_ack_at(
+                quality_ack(Duration::from_millis(800), 200_000, 1, 1, 70, 0),
+                base + Duration::from_millis(millis),
+            );
+        }
+        assert_eq!(
+            controller
+                .quality_before_encode_at(base + Duration::from_secs(1))
+                .quality,
+            63
+        );
+        assert_eq!(controller.recovery_ack_target, 24);
+        for second in [4, 8, 12] {
+            let at = base + Duration::from_secs(second);
+            controller.observe_ack_at(quality_ack(Duration::from_millis(20), 100, 1, 1, 63, 1), at);
+            assert_eq!(
+                controller.quality_before_encode_at(at).quality,
+                63,
+                "three idle samples cannot recover"
+            );
+        }
+        let at = base + Duration::from_secs(16);
+        controller.observe_ack_at(quality_ack(Duration::from_millis(20), 100, 1, 1, 63, 1), at);
+        let decision = controller.quality_before_encode_at(at);
+        assert_eq!((decision.quality, decision.epoch), (64, 2));
+        // Previously collected healthy samples cannot recover the new epoch.
+        assert_eq!(
+            controller
+                .quality_before_encode_at(at + Duration::from_secs(4))
+                .quality,
+            64
+        );
+    }
+
+    #[test]
+    fn observed_recovery_cadence_does_not_turn_a_fast_ack_burst_into_idle_proof() {
+        let base = Instant::now();
+        assert_eq!(
+            observed_recovery_ack_target(
+                24,
+                4,
+                Some(base),
+                Some(base + Duration::from_millis(100))
+            ),
+            24
+        );
+        assert_eq!(
+            observed_recovery_ack_target(24, 4, Some(base), Some(base + Duration::from_secs(12))),
+            4
+        );
+        assert_eq!(
+            observed_recovery_ack_target(24, 1, Some(base), Some(base)),
+            24
+        );
+        assert_eq!(
+            observed_recovery_ack_target(4, 24, Some(base), Some(base)),
+            4
+        );
+    }
+
+    #[test]
     fn recovery_ack_target_scales_with_fps_and_is_bounded() {
         assert_eq!(jpeg_quality_recovery_ack_target(Duration::from_secs(1)), 4);
         assert_eq!(
@@ -5086,7 +5192,7 @@ mod tests {
         );
     }
     #[test]
-    fn static_refinement_waits_for_quiet_and_commits_its_rate_limit() {
+    fn static_refinement_commits_its_rate_limit_without_waiting_for_global_quiet() {
         let base = Instant::now();
         let source = test_captured_frame(10);
         let mut sender = FrameSender::new();
@@ -5125,7 +5231,7 @@ mod tests {
         sender
             .plan_at(&changed, at + Duration::from_secs(2))
             .unwrap();
-        assert!(!sender.refinement_due(at + Duration::from_secs(3)));
+        assert!(sender.refinement_due(at + Duration::from_secs(3)));
     }
 
     #[test]
@@ -5159,7 +5265,24 @@ mod tests {
         );
     }
     #[test]
-    fn static_refinement_clock_obeys_damage_cooldown_and_session_reset() {
+    fn continuous_damage_cannot_postpone_even_the_first_refinement() {
+        let base = Instant::now();
+        let mut sender = FrameSender::new();
+        let first = test_captured_frame(10);
+        accept_frame(&mut sender, &first, base);
+        for step in 1..=20 {
+            let now = base + STATIC_REFINEMENT_INTERVAL * step / 10;
+            sender
+                .plan_at(&test_captured_frame(step as u8 + 20), now)
+                .unwrap();
+            if step >= 10 {
+                assert!(sender.refinement_due(now));
+            }
+        }
+    }
+
+    #[test]
+    fn static_refinement_clock_cannot_be_starved_by_new_local_damage() {
         let base = Instant::now();
         let interval = STATIC_REFINEMENT_INTERVAL;
         assert!(!static_refinement_due(None, None, base + interval));
@@ -5170,7 +5293,7 @@ mod tests {
             base + interval - Duration::from_nanos(1)
         ));
         assert!(static_refinement_due(Some(base), None, base + interval));
-        assert!(!static_refinement_due(
+        assert!(static_refinement_due(
             Some(base + interval),
             Some(base),
             base + interval

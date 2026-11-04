@@ -9,6 +9,7 @@ mod blur;
 mod cache_warmup;
 mod config;
 mod damage;
+mod desktop_visual;
 #[allow(dead_code, unreachable_pub)]
 mod direct_scanout;
 #[allow(dead_code, unreachable_pub)]
@@ -1025,7 +1026,7 @@ pub(crate) struct TagsGridLabelKey {
     inks: [[u8; 4]; 2],
     /// `(tag_index, occupied)` per drawn cell, in draw order: the label text
     /// and which of the two inks it took.
-    cells: Vec<(usize, bool)>,
+    cells: Vec<(usize, Option<i32>, bool)>,
 }
 
 impl TagsGridLabelKey {
@@ -1033,7 +1034,7 @@ impl TagsGridLabelKey {
     /// about to be drawn with `font`/`size`/`inks` over `cells`.
     pub(crate) fn matches<I>(&self, font: &str, size: f32, inks: &[[u8; 4]; 2], cells: I) -> bool
     where
-        I: ExactSizeIterator<Item = (usize, bool)>,
+        I: ExactSizeIterator<Item = (usize, Option<i32>, bool)>,
     {
         self.font == font
             && self.size_bits == size.to_bits()
@@ -1051,7 +1052,7 @@ impl TagsGridLabelKey {
     /// allocations the previous key already owns.
     pub(crate) fn refresh<I>(&mut self, font: &str, size: f32, inks: [[u8; 4]; 2], cells: I)
     where
-        I: Iterator<Item = (usize, bool)>,
+        I: Iterator<Item = (usize, Option<i32>, bool)>,
     {
         self.font.clear();
         self.font.push_str(font);
@@ -1159,6 +1160,10 @@ pub(crate) struct WaylandCompositor {
     quad_vbo: u32,
     output_fbo: u32,
     output_texture: u32,
+    /// Replacement storage prepared before any KMS mutation. Retained on GL
+    /// context failure so teardown can still release every owned name.
+    prepared_resize: Option<PreparedCompositorResize>,
+    desktop_visual: Option<desktop_visual::DesktopVisualLayer>,
     /// Actual storage format chosen when the output FBO was allocated. This is
     /// a hardware property and must not be inferred from the runtime HDR
     /// post-processing toggle.
@@ -1701,6 +1706,9 @@ pub(crate) struct WaylandCompositor {
     toast_button_hover: Option<(u64, usize)>,
     osd_slot: crate::backend::compositor_common::osd::OsdSlot,
     eva_overlay: crate::backend::compositor_common::eva_overlay::EvaOverlayState,
+    companion_drawn_this_frame: bool,
+    pub(crate) companion_frame_evidence:
+        Option<crate::backend::compositor_common::companion_scene::FrameEvidence>,
     companion_node:
         Option<std::sync::Arc<crate::backend::compositor_common::companion_scene::RasterNode>>,
     companion_texture: Option<(u64, u32)>,
@@ -2815,6 +2823,8 @@ impl WaylandCompositor {
                 output_fbo,
                 output_texture,
                 output_internal_format,
+                prepared_resize: None,
+                desktop_visual: None,
                 output_texture_generation: next_output_texture_generation(),
                 // Treat a failed FP16 allocation as disabled. In particular,
                 // never advertise the scene-linear path to damage/KMS-offload
@@ -3187,6 +3197,8 @@ impl WaylandCompositor {
                 osd_slot: Default::default(),
                 eva_overlay: Default::default(),
                 companion_node: None,
+                companion_frame_evidence: None,
+                companion_drawn_this_frame: false,
                 companion_texture: None,
                 eva_texture: None,
                 osd_texture: None,
@@ -3343,10 +3355,13 @@ impl WaylandCompositor {
             return false;
         }
 
+        crate::backend::compositor_common::companion_scene::presentation_route(Vec::new(), false);
         unsafe {
             // Jobs and synchronization objects may still reference the main
             // render targets. Retire them before deleting any target storage.
             self.recording.stop(gl);
+            self.discard_prepared_resize(gl);
+            self.release_desktop_visual(gl);
             self.screenshot_requests.clear();
             self.screenshot_readback.clear(gl);
             self.gpu_fence_sync_mgr.clear(gl);
@@ -3670,7 +3685,7 @@ mod vrr_report_contract_tests {
     #[test]
     fn a_tags_grid_label_key_covers_every_input_its_pixels_have() {
         let inks = [[255, 255, 255, 255], [128, 128, 128, 255]];
-        let cells = [(0usize, true), (1, false), (2, true)];
+        let cells = [(0usize, None, true), (1, None, false), (2, None, true)];
         let mut key = TagsGridLabelKey::default();
         // A fresh key matches nothing: the labels have not been baked yet.
         assert!(!key.matches("Sans 12", 19.2, &inks, cells.iter().copied()));
@@ -3684,9 +3699,9 @@ mod vrr_report_contract_tests {
         assert!(!key.matches("Sans 12", 24.0, &inks, cells.iter().copied()));
         let dim_ink = [inks[0], [64, 64, 64, 255]];
         assert!(!key.matches("Sans 12", 19.2, &dim_ink, cells.iter().copied()));
-        let flipped = [(0usize, false), (1, false), (2, true)];
+        let flipped = [(0usize, None, false), (1, None, false), (2, None, true)];
         assert!(!key.matches("Sans 12", 19.2, &inks, flipped.iter().copied()));
-        let renumbered = [(3usize, true), (1, false), (2, true)];
+        let renumbered = [(3usize, None, true), (1, None, false), (2, None, true)];
         assert!(!key.matches("Sans 12", 19.2, &inks, renumbered.iter().copied()));
         assert!(!key.matches("Sans 12", 19.2, &inks, cells[..2].iter().copied()));
 
@@ -3824,6 +3839,8 @@ mod gpu_release_contract_tests {
     // contract locks in its alias-only treatment.
     const RAW_GPU_OWNER_FIELDS: &[&str] = &[
         "program",
+        "prepared_resize",
+        "desktop_visual",
         "shadow_program",
         "blur_down_program",
         "blur_up_program",
@@ -3937,6 +3954,8 @@ mod gpu_release_contract_tests {
             .collect::<String>();
         for field in RAW_GPU_OWNER_FIELDS {
             let release_reference = match *field {
+                "prepared_resize" => "self.discard_prepared_resize(gl)".to_string(),
+                "desktop_visual" => "self.release_desktop_visual(gl)".to_string(),
                 "overview_title_textures" => "self.clear_overview_textures(gl)".to_string(),
                 "glass_backdrop_caches" => "self.release_glass_backdrop_caches(gl)".to_string(),
                 _ => format!("self.{field}"),
@@ -4417,6 +4436,7 @@ impl WaylandCompositor {
     /// Returns true if the compositor has pending work that requires a new frame.
     pub(crate) fn needs_render(&self) -> bool {
         self.needs_render
+            || self.desktop_visual.as_ref().is_some_and(|layer| layer.pending())
             || crate::backend::compositor_common::bar_wallpaper::needs_frame()
             // A recording that is due for its next capture. The udev loop gates
             // `handler.update` — and therefore every render — on this, so a
@@ -5054,6 +5074,13 @@ impl WaylandCompositor {
 // Resize
 // ---------------------------------------------------------------------------
 
+struct PreparedCompositorResize {
+    width: u32,
+    height: u32,
+    source_generation: u64,
+    targets: CompositorFramebufferTargets,
+}
+
 struct CompositorFramebufferTargets {
     output_fbo: u32,
     output_texture: u32,
@@ -5066,6 +5093,8 @@ struct CompositorFramebufferTargets {
     postprocess_texture: u32,
     transition_fbo: u32,
     transition_texture: u32,
+    capture_fbo: u32,
+    capture_texture: u32,
 }
 
 impl CompositorFramebufferTargets {
@@ -5080,11 +5109,13 @@ impl CompositorFramebufferTargets {
             delete_framebuffer_name(gl, &mut self.scene_fbo);
             delete_framebuffer_name(gl, &mut self.postprocess_fbo);
             delete_framebuffer_name(gl, &mut self.transition_fbo);
+            delete_framebuffer_name(gl, &mut self.capture_fbo);
             delete_texture_name(gl, &mut self.output_texture);
             delete_texture_name(gl, &mut self.linear_texture);
             delete_texture_name(gl, &mut self.scene_texture);
             delete_texture_name(gl, &mut self.postprocess_texture);
             delete_texture_name(gl, &mut self.transition_texture);
+            delete_texture_name(gl, &mut self.capture_texture);
         }
     }
 }
@@ -5113,6 +5144,39 @@ impl WaylandCompositor {
         h: u32,
         construction_probe: Option<&mut CompositorConstructionProbe>,
     ) -> Result<(), String> {
+        unsafe {
+            self.prepare_resize_inner(gl, w, h, construction_probe)?;
+            self.commit_prepared_resize(gl)?;
+        }
+        Ok(())
+    }
+
+    /// Allocate and validate the entire replacement chain before DRM TEST_ONLY
+    /// or modeset. This does not publish dimensions, invalidate captures or
+    /// discard the working frame. Only one bounded candidate can be retained.
+    pub(crate) unsafe fn prepare_resize(
+        &mut self,
+        gl: &ffi::Gles2,
+        w: u32,
+        h: u32,
+    ) -> Result<(), String> {
+        unsafe { self.prepare_resize_inner(gl, w, h, None) }
+    }
+
+    pub(crate) unsafe fn discard_prepared_resize(&mut self, gl: &ffi::Gles2) {
+        if let Some(prepared) = self.prepared_resize.take() {
+            unsafe { prepared.targets.delete(gl) };
+        }
+    }
+
+    unsafe fn prepare_resize_inner(
+        &mut self,
+        gl: &ffi::Gles2,
+        w: u32,
+        h: u32,
+        construction_probe: Option<&mut CompositorConstructionProbe>,
+    ) -> Result<(), String> {
+        unsafe { self.discard_prepared_resize(gl) };
         if w == self.screen_w && h == self.screen_h {
             return Ok(());
         }
@@ -5183,6 +5247,14 @@ impl WaylandCompositor {
                 "transition resize",
             )?;
 
+            // An allocated capture view is part of the same size contract.
+            // Prepare its encoded storage before modeset too, rather than
+            // discovering an allocation failure on the first recorded frame.
+            let (capture_fbo, capture_texture) = if self.capture_view_fbo != 0 {
+                allocation.create_required_fbo_texture(w, h, ffi::RGBA8, "capture resize")?
+            } else {
+                (0, 0)
+            };
             let replacement = CompositorFramebufferTargets {
                 output_fbo,
                 output_texture,
@@ -5195,12 +5267,38 @@ impl WaylandCompositor {
                 postprocess_texture,
                 transition_fbo,
                 transition_texture,
+                capture_fbo,
+                capture_texture,
             };
 
-            // From this point onward every operation is infallible. Transfer
-            // the guard's names to the compositor before installing them so a
-            // panic cannot make the guard delete names now referenced by self.
             allocation.commit();
+            self.prepared_resize = Some(PreparedCompositorResize {
+                width: w,
+                height: h,
+                source_generation: self.output_texture_generation,
+                targets: replacement,
+            });
+            gl.BindFramebuffer(ffi::FRAMEBUFFER, 0);
+            gl.BindTexture(ffi::TEXTURE_2D, 0);
+        }
+        Ok(())
+    }
+
+    /// Publish a completely allocated chain only after the output transaction
+    /// succeeds. A stale candidate is rejected without replacing live targets.
+    pub(crate) unsafe fn commit_prepared_resize(&mut self, gl: &ffi::Gles2) -> Result<(), String> {
+        let Some(prepared) = self.prepared_resize.take() else {
+            return Ok(());
+        };
+        if prepared.source_generation != self.output_texture_generation {
+            unsafe { prepared.targets.delete(gl) };
+            return Err(
+                "prepared output resize belongs to an obsolete framebuffer generation".into(),
+            );
+        }
+        let (w, h) = (prepared.width, prepared.height);
+        let replacement = prepared.targets;
+        unsafe {
             let old = CompositorFramebufferTargets {
                 output_fbo: std::mem::replace(&mut self.output_fbo, replacement.output_fbo),
                 output_texture: std::mem::replace(
@@ -5234,6 +5332,23 @@ impl WaylandCompositor {
                     &mut self.transition_texture,
                     replacement.transition_texture,
                 ),
+                capture_fbo: std::mem::replace(&mut self.capture_view_fbo, replacement.capture_fbo),
+                capture_texture: std::mem::replace(
+                    &mut self.capture_view_texture,
+                    replacement.capture_texture,
+                ),
+            };
+
+            self.capture_view_fresh = false;
+            self.capture_view_size = if self.capture_view_fbo != 0 {
+                (w, h)
+            } else {
+                (0, 0)
+            };
+            self.capture_view_texture_generation = if self.capture_view_texture != 0 {
+                next_output_texture_generation()
+            } else {
+                0
             };
 
             if crate::backend::compositor_common::wallpaper::wallpaper_resize_needs_reload(

@@ -23,6 +23,7 @@ use std::time::Duration;
 use crate::backend::common_define::keys as k;
 use crate::backend::common_define::{KeySym, Mods, MouseButton};
 
+mod appearance;
 pub(crate) mod astronomy;
 mod bar;
 pub(crate) mod input;
@@ -508,6 +509,9 @@ pub struct TomlConfig {
     pub keybindings: KeyBindingsConfig,
     pub mouse_bindings: MouseBindingsConfig,
     pub rules: Vec<RuleConfig>,
+    /// Named scenes only refer to stable outputs/apps/provider sessions, never process IDs.
+    #[serde(default = "crate::jwm::features::workscenes::defaults")]
+    pub workscenes: Vec<crate::jwm::features::workscenes::Workscene>,
     pub layout: LayoutConfig,
     #[serde(default = "AnimationConfig::default_value")]
     pub animation: AnimationConfig,
@@ -570,6 +574,19 @@ pub struct AppearanceConfig {
     /// Only affects JWM's own overlays; client windows are unchanged.
     #[serde(default = "default_ui_theme")]
     pub ui_theme: String,
+    /// Multiplier for JWM-owned surface alpha; text opacity remains independent.
+    #[serde(default = "default_ui_surface_opacity")]
+    pub ui_surface_opacity: f32,
+    /// Logical density shared by semantic UI adapters; 1 preserves existing spacing.
+    #[serde(default = "default_ui_density")]
+    pub ui_density: f32,
+}
+
+fn default_ui_surface_opacity() -> f32 {
+    1.0
+}
+fn default_ui_density() -> f32 {
+    1.0
 }
 
 /// Where a freshly managed window is inserted into its monitor's client list.
@@ -2397,11 +2414,14 @@ impl Default for Config {
             legacy_edge_shell: None,
             inner: TomlConfig {
                 desktop_shell: None,
+                workscenes: crate::jwm::features::workscenes::defaults(),
                 input: InputConfig::default(),
                 appearance: AppearanceConfig {
                     border_px: 3,
                     gap_px: 5,
                     snap: 32,
+                    ui_surface_opacity: default_ui_surface_opacity(),
+                    ui_density: 1.0,
                     system_ui_font: "SauceCodePro Nerd Font Regular 11".to_string(),
                     status_bar_padding: 5,
                     status_bar_height: 42,
@@ -3581,6 +3601,14 @@ impl Config {
     }
 
     /// Design language for JWM's own overlays: `"material"` or `"glass"`.
+    pub fn ui_density(&self) -> f32 {
+        self.inner.appearance.ui_density
+    }
+
+    pub fn ui_surface_opacity(&self) -> f32 {
+        self.inner.appearance.ui_surface_opacity
+    }
+
     pub fn ui_theme(&self) -> &str {
         &self.inner.appearance.ui_theme
     }
@@ -3728,6 +3756,10 @@ impl Config {
 
     pub fn colors(&self) -> &ColorsConfig {
         &self.inner.colors
+    }
+
+    pub fn workscenes(&self) -> &[crate::jwm::features::workscenes::Workscene] {
+        &self.inner.workscenes
     }
 
     pub fn behavior(&self) -> &BehaviorConfig {
@@ -5731,6 +5763,30 @@ impl Config {
                 }
                 self.inner.appearance.cursor_size = v;
             }
+            "appearance.system_ui_font" => {
+                let font = as_string()?;
+                if font.trim().is_empty() || font.len() > 1024 || font.chars().any(char::is_control)
+                {
+                    return Err("appearance.system_ui_font must contain 1..=1024 bytes without control characters".into());
+                }
+                self.inner.appearance.system_ui_font = font;
+            }
+            "appearance.ui_density" => {
+                let density = as_f32()?;
+                if !density.is_finite() || !(0.8..=1.25).contains(&density) {
+                    return Err("appearance.ui_density must be in 0.8..=1.25".into());
+                }
+                self.inner.appearance.ui_density = density;
+            }
+            "appearance.ui_surface_opacity" => {
+                let opacity = as_f32()?;
+                if !opacity.is_finite() || !(0.85..=1.0).contains(&opacity) {
+                    return Err("appearance.ui_surface_opacity must be in 0.85..=1.0".into());
+                }
+                self.inner.appearance.ui_surface_opacity = opacity;
+            }
+            "animation.enabled" => self.inner.animation.enabled = as_bool()?,
+            "behavior.border_glow_enabled" => self.inner.behavior.border_glow_enabled = as_bool()?,
             "appearance.ui_theme" => {
                 let v = as_string()?;
                 let Some(normalized) = normalize_ui_theme(&v) else {

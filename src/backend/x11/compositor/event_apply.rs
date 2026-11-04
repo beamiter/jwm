@@ -28,6 +28,7 @@ impl<C: CompositorConnection> Compositor<C> {
                 self.set_window_override_redirect(window, true);
             }
             CompositorEventOp::RemoveWindow { window } => self.remove_window(window),
+            CompositorEventOp::DestroyWindow { window } => self.destroy_window(window),
             CompositorEventOp::DiscardWindowSilently { window } => {
                 self.discard_window_silently(window)
             }

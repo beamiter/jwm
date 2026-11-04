@@ -4,6 +4,28 @@
 
 pub type Color = [f32; 4];
 
+/// Toolkit-neutral semantic appearance. Straight-alpha sRGB colors keep
+/// surface opacity separate from text opacity. Consumers adapt units explicitly.
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize, PartialEq)]
+pub struct SemanticTokens {
+    pub surface: Color,
+    pub text: Color,
+    pub muted: Color,
+    pub accent: Color,
+    pub focus: Color,
+    pub warning: Color,
+    pub radius: f32,
+    pub spacing: f32,
+    #[serde(default = "default_density")]
+    pub density: f32,
+    pub motion_ms: u32,
+    pub glass_quality: u8,
+}
+
+const fn default_density() -> f32 {
+    1.0
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct ShellPalette {
     pub ink: Color,
@@ -60,6 +82,47 @@ impl ShellPalette {
         divider: [0.65, 0.80, 1.0, 0.22],
         track: [0.01, 0.04, 0.10, 0.46],
     };
+
+    pub fn with_tokens(mut self, tokens: SemanticTokens) -> Self {
+        self.ink = tokens.text;
+        self.muted_ink = tokens.muted;
+        self.accent = tokens.accent;
+        self.selection = tokens.focus;
+        self.panel = tokens.surface;
+        self.sheet_top = tokens.surface;
+        self.sheet_bottom = tokens.surface;
+        self.control_top = tokens.surface;
+        self.control_top[3] = self.control_top[3].max(0.75);
+        self.control_bottom = self.control_top;
+        self.field = self.control_top;
+        self.hover = tokens.accent;
+        self.hover[3] = 0.16;
+        self.pressed = tokens.accent;
+        self.pressed[3] = 0.28;
+        self.rim = tokens.text;
+        self.rim[3] = 0.22;
+        self.divider = tokens.muted;
+        self.divider[3] = 0.24;
+        self.track = tokens.muted;
+        self.track[3] = 0.18;
+        self
+    }
+
+    pub const fn tokens(self) -> SemanticTokens {
+        SemanticTokens {
+            surface: self.panel,
+            text: self.ink,
+            muted: self.muted_ink,
+            accent: self.accent,
+            focus: self.selection,
+            warning: [0.98, 0.75, 0.29, 1.0],
+            radius: 14.0,
+            spacing: 12.0,
+            density: 1.0,
+            motion_ms: 160,
+            glass_quality: 2,
+        }
+    }
 
     pub const fn for_dark(dark: bool) -> Self {
         if dark { Self::DARK } else { Self::LIGHT }

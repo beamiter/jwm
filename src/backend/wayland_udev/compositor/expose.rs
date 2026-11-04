@@ -845,14 +845,19 @@ impl WaylandCompositor {
     /// over the local screen. The target is the post-delivery encoded output,
     /// so the border program's domain is pinned to encoded too — a
     /// scene-linear frame leaves it set for the linear target.
-    pub(crate) fn render_recording_region_overlay(&self, gl: &ffi::Gles2, projection: &[f32; 16]) {
+    pub(crate) fn render_recording_region_overlay(
+        &self,
+        gl: &ffi::Gles2,
+        projection: &[f32; 16],
+        scene_linear: bool,
+    ) {
         let Some((x, y, width, height)) = self.recording_region_overlay else {
             return;
         };
         unsafe {
             self.enable_premultiplied_blend(gl);
             gl.UseProgram(self.border_program);
-            gl.Uniform1i(self.border_uniforms.scene_linear, 0);
+            gl.Uniform1i(self.border_uniforms.scene_linear, i32::from(scene_linear));
         }
         self.render_capture_veil(
             gl,
@@ -1801,10 +1806,10 @@ mod tests {
             .expect("the crop cue must re-enable premultiplied blending");
         let domain = body
             .find(&format!(
-                "gl.Uniform1i(self.border_uniforms.{},0);",
+                "gl.Uniform1i(self.border_uniforms.{},i32::from(scene_linear));",
                 "scene_linear"
             ))
-            .expect("the crop cue must pin the border program to the encoded domain");
+            .expect("the crop cue must select the bound target color domain");
         let program = body
             .find(&format!("gl.UseProgram(self.{});", "border_program"))
             .expect("the domain uniform needs the border program bound");

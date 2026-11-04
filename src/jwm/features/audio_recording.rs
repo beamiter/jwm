@@ -1293,6 +1293,25 @@ mod tests {
     #[cfg(feature = "media-audio")]
     #[test]
     fn ffmpeg_delayed_complete_progress_is_ready_and_stops_normally() {
+        // Parallel fork/exec tests can inherit the brief writable descriptor of
+        // this synthetic script and cause ETXTBSY. Only this success-path
+        // fixture is isolated; production spawning and readiness deadlines stay unchanged.
+        const CHILD: &str = "JWM_TEST_AUDIO_PROGRESS_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().expect("unit-test executable"))
+                .args(["--exact", "jwm::features::audio_recording::tests::ffmpeg_delayed_complete_progress_is_ready_and_stops_normally", "--test-threads=1", "--nocapture"])
+                .env(CHILD, "1")
+                .output()
+                .expect("run isolated regression fixture");
+            assert!(
+                output.status.success()
+                    && String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"),
+                "isolated regression failed: stdout={} stderr={}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
         let (directory, program) = synthetic_progress_child(
             "printf 'out_time_us=0\nprogress=continue\n'; sleep 0.25; printf 'out_time_us=250000\nprogress=continue\n'; while read line; do [ \"$line\" = q ] && exit 0; done",
         );

@@ -9,8 +9,9 @@
 use ab_glyph::{Font, FontArc, GlyphId, ScaleFont, point};
 use std::collections::{HashMap, HashSet};
 use std::io::Read as _;
+use std::os::unix::fs::MetadataExt as _;
 use std::os::unix::fs::OpenOptionsExt as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
@@ -68,6 +69,98 @@ static FALLBACK_MISSES: LazyLock<Mutex<HashSet<u32>>> =
     LazyLock::new(|| Mutex::new(HashSet::new()));
 
 const MAX_FONT_CANDIDATES: usize = 12;
+const MAX_UNSUPPORTED_FONT_FILES: usize = 64;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FontFileStamp {
+    dev: u64,
+    ino: u64,
+    len: u64,
+    modified: (i64, i64),
+    changed: (i64, i64),
+}
+fn font_file_stamp(path: &Path) -> Result<FontFileStamp, ()> {
+    let metadata = std::fs::metadata(path).map_err(|_| ())?;
+    if !metadata.is_file() {
+        return Err(());
+    }
+    Ok(FontFileStamp {
+        dev: metadata.dev(),
+        ino: metadata.ino(),
+        len: metadata.len(),
+        modified: (metadata.mtime(), metadata.mtime_nsec()),
+        changed: (metadata.ctime(), metadata.ctime_nsec()),
+    })
+}
+static UNSUPPORTED_FONT_FILES: LazyLock<Mutex<HashMap<PathBuf, FontFileStamp>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+fn remember_unsupported_font(
+    cache: &mut HashMap<PathBuf, FontFileStamp>,
+    path: &Path,
+    stamp: FontFileStamp,
+) {
+    if !cache.contains_key(path) && cache.len() >= MAX_UNSUPPORTED_FONT_FILES {
+        cache.clear();
+    }
+    cache.insert(path.to_owned(), stamp);
+}
+
+fn known_unsupported_font_format(bytes: &[u8]) -> bool {
+    bytes.starts_with(&[0x80,0x01]) // Type1 PFB; never an OpenType header.
+        || bytes.starts_with(b"%!PS-AdobeFont")
+        || bytes.starts_with(b"%!FontType1")
+        || bytes.starts_with(b"wOFF")
+        || bytes.starts_with(b"wOF2")
+}
+
+/// Only identified unsupported formats are deterministic negative facts.
+/// InvalidFont can also mean a supported font is only partially written, so
+/// unknown/supported headers remain retryable rather than poisoning glyph misses.
+/// InvalidFont describes these exact bytes, not a temporary I/O failure.
+/// Cache only a stable file revision; a later candidate lookup retries changed
+/// stamps. The existing per-codepoint miss cache still requires a component
+/// restart after font installation. No font bytes are retained here.
+fn load_font_candidate(
+    path: &Path,
+    required: Option<char>,
+    remaining: &mut usize,
+    deadline: Instant,
+    cache: &Mutex<HashMap<PathBuf, FontFileStamp>>,
+) -> Result<Option<FontArc>, ()> {
+    let stamp = font_file_stamp(path)?;
+    if cache
+        .lock()
+        .is_ok_and(|cache| cache.get(path) == Some(&stamp))
+    {
+        return Ok(None);
+    }
+    if Instant::now() >= deadline || *remaining == 0 {
+        return Err(());
+    }
+    let bytes = read_regular_file_bounded(path, (*remaining).min(MAX_FONT_FILE_BYTES)).ok_or(())?;
+    *remaining = remaining.saturating_sub(bytes.len());
+    if font_file_stamp(path)? != stamp {
+        return Err(());
+    }
+    let unsupported_format = known_unsupported_font_format(&bytes);
+    let font = match FontArc::try_from_vec(bytes) {
+        Ok(font) => font,
+        Err(_) => {
+            if !unsupported_format {
+                return Err(());
+            }
+            if font_file_stamp(path)? != stamp {
+                return Err(());
+            }
+            if let Ok(mut cache) = cache.lock() {
+                remember_unsupported_font(&mut cache, path, stamp);
+            }
+            return Ok(None);
+        }
+    };
+    Ok(required
+        .is_none_or(|ch| font.glyph_id(ch).0 != 0)
+        .then_some(font))
+}
 
 fn query_font_candidates(pattern: &str, timeout: Duration) -> Result<Vec<String>, ()> {
     let output = crate::external_command::output_with_limits(
@@ -113,7 +206,7 @@ fn first_usable_candidate<T>(
             Err(()) => unavailable = true,
         }
     }
-    // An unsupported/temporarily unreadable candidate is not evidence that
+    // A temporarily unreadable candidate is not evidence that
     // the system has no glyph; do not poison the persistent miss cache.
     if unavailable { Err(()) } else { Ok(None) }
 }
@@ -127,15 +220,13 @@ fn load_font_candidates(
     let paths = query_font_candidates(pattern, timeout)?;
     let mut remaining = MAX_FONT_FILE_BYTES;
     first_usable_candidate(&paths, |path| {
-        if Instant::now() >= deadline || remaining == 0 {
-            return Err(());
-        }
-        let bytes = read_regular_file_bounded(path, remaining.min(MAX_FONT_FILE_BYTES)).ok_or(())?;
-        remaining = remaining.saturating_sub(bytes.len());
-        let font = FontArc::try_from_vec(bytes).map_err(|_| ())?;
-        Ok(required
-            .is_none_or(|ch| font.glyph_id(ch).0 != 0)
-            .then_some(font))
+        load_font_candidate(
+            path,
+            required,
+            &mut remaining,
+            deadline,
+            &UNSUPPORTED_FONT_FILES,
+        )
     })
 }
 
@@ -1072,7 +1163,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn unsupported_first_font_does_not_hide_a_later_renderable_candidate() {
+    fn unavailable_first_font_does_not_hide_a_later_renderable_candidate() {
         let candidates=parse_font_candidates(b"/fonts/default.woff2\n/fonts/default.woff2\n/fonts/native.ttf\n/fonts/not-needed.ttf\n").unwrap();
         assert_eq!(candidates.len(), 3);
         let mut tried = Vec::new();
@@ -1087,12 +1178,96 @@ mod tests {
         .unwrap();
         assert_eq!(font, Some("renderable"));
         assert_eq!(tried.len(), 2);
-        // Unsupported font data does not become a permanent no-glyph fact.
+        // A transient file/query error does not become a permanent no-glyph fact.
         assert!(first_usable_candidate::<()>(&candidates, |_| Err(())).is_err());
         assert_eq!(
             first_usable_candidate::<()>(&candidates, |_| Ok(None)).unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn unsupported_font_revisions_are_skipped_but_io_budget_and_timeout_failures_retry() {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "jwm-font-format-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        let cache = Mutex::new(HashMap::new());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut budget = MAX_FONT_FILE_BYTES;
+        assert!(load_font_candidate(&path, Some('A'), &mut budget, deadline, &cache).is_err());
+        assert!(cache.lock().unwrap().is_empty());
+        std::fs::write(&path, b"\x80\x01Type1 PFB fixture bytes").unwrap();
+        // A partial supported-format header is uncertain, not a no-glyph fact.
+        std::fs::write(&path, [0u8, 1, 0, 0]).unwrap();
+        assert!(load_font_candidate(&path, Some('A'), &mut budget, deadline, &cache).is_err());
+        assert!(cache.lock().unwrap().is_empty());
+        std::fs::write(&path, b"\x80\x01Type1 PFB fixture bytes").unwrap();
+        let mut tiny = 1;
+        assert!(load_font_candidate(&path, Some('A'), &mut tiny, deadline, &cache).is_err());
+        assert!(cache.lock().unwrap().is_empty());
+        assert!(
+            load_font_candidate(
+                &path,
+                Some('A'),
+                &mut budget,
+                Instant::now() - Duration::from_secs(1),
+                &cache
+            )
+            .is_err()
+        );
+        assert!(cache.lock().unwrap().is_empty());
+        assert!(
+            load_font_candidate(&path, Some('A'), &mut budget, deadline, &cache)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(cache.lock().unwrap().len(), 1);
+        let mut zero = 0;
+        assert!(
+            load_font_candidate(&path, Some('A'), &mut zero, deadline, &cache)
+                .unwrap()
+                .is_none(),
+            "a known stable format must not be reread"
+        );
+        std::fs::write(
+            &path,
+            b"\x80\x01replacement Type1 PFB bytes are a different length",
+        )
+        .unwrap();
+        assert!(
+            load_font_candidate(&path, Some('A'), &mut zero, deadline, &cache).is_err(),
+            "changed bytes must retry instead of inheriting an old negative"
+        );
+        assert!(
+            load_font_candidate(&path, Some('A'), &mut budget, deadline, &cache)
+                .unwrap()
+                .is_none()
+        );
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn unsupported_font_file_cache_remains_bounded() {
+        let stamp = FontFileStamp {
+            dev: 1,
+            ino: 2,
+            len: 3,
+            modified: (4, 5),
+            changed: (6, 7),
+        };
+        let mut cache = HashMap::new();
+        for index in 0..MAX_UNSUPPORTED_FONT_FILES {
+            remember_unsupported_font(&mut cache, Path::new(&format!("/font/{index}")), stamp);
+        }
+        assert_eq!(cache.len(), MAX_UNSUPPORTED_FONT_FILES);
+        remember_unsupported_font(&mut cache, Path::new("/font/0"), stamp);
+        assert_eq!(cache.len(), MAX_UNSUPPORTED_FONT_FILES);
+        remember_unsupported_font(&mut cache, Path::new("/font/new"), stamp);
+        assert!(cache.len() <= MAX_UNSUPPORTED_FONT_FILES);
+        assert_eq!(cache.get(Path::new("/font/new")), Some(&stamp));
     }
 
     #[test]

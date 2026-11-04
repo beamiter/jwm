@@ -15,7 +15,8 @@ shared memory, input injection requests, or screen-capture requests.
 | Reusable Julia DVR producer SDK (no WaterLily dependency) | `beamiter/juliafun/desktop_visual` |
 | Language-neutral protocol, bounded receiver and validation | `crates/desktop_visual` |
 | Python SDK and unrelated plasma example | `extensions/desktop_visual` |
-| Generic GL image consumer | `src/backend/x11/compositor/desktop_visual.rs` |
+| X11 GL image consumer | `src/backend/x11/compositor/desktop_visual.rs` |
+| Native Wayland GLES SDR consumer | `src/backend/wayland_udev/compositor/desktop_visual.rs` |
 | Old shared-file decoder, optical/volume shaders and jelly pose renderer | JWM **legacy WaterLily consumer adapter**, retained for existing effects |
 | Old shell commands | Compatibility launchers; locate the external Julia project |
 
@@ -30,15 +31,30 @@ output; see its README for exclusions. The default remains legacy for compatibil
 
 ## First run
 
-DVR v1 is implemented for the shared **X11 compositor (`x11rb` and `xcb`)**. It is
-not exposed by Wayland/DRM or nested Wayland yet; a successful transport unit test
-is not evidence of Wayland or real-GPU support. The interface is backend-neutral,
-but each backend must explicitly implement image presentation before advertising it.
+DVR v1 has consumers for the shared **X11 compositor (`x11rb` and `xcb`)**
+and the native **Wayland DRM/KMS GLES compositor**. The Wayland candidate has
+surfaceless offscreen-GLES shader/alpha/origin and sRGB-to-linear ingress tests;
+the offscreen run reports its actual GL renderer (NVIDIA RTX 4090 D on this
+host). It has not passed physical-output presentation acceptance. The
+`LIBGL_ALWAYS_SOFTWARE` request alone is not proof of software rendering. Nested
+Wayland adapters do not advertise this consumer. Shader output and a submitted
+frame do not establish `Presented`/`Retired` lifecycle evidence.
+
+The Wayland consumer keeps the same bounded worker, latest-wins mailbox and
+nonblocking render-side access. A pending payload wakes the compositor; a static
+layer does not continuously request frames. SDR content is decoded to the
+common-linear target when active. Native Wayland also supports bounded
+[selected-output endpoints](../crates/desktop_visual/protocol.md#native-wayland-selected-output-endpoints)
+with the same SDR payload format. HDR and dma-buf payloads remain unsupported.
+Companion window anchoring and presentation/retirement evidence are separate
+from DVR ingress; see the [companion bridge](eva-companion-bridge.md).
 
 Start a composited X11 JWM session with:
 
 ```sh
 JWM_DESKTOP_VISUAL_ENABLED=1 jwm --backend x11rb
+# Native Wayland candidate; physical GPU/output acceptance remains required:
+JWM_DESKTOP_VISUAL_ENABLED=1 jwm --backend wayland-udev
 ```
 
 The endpoint is `$XDG_RUNTIME_DIR/jwm-desktop-visual/visual.sock`. No insecure `/tmp`
@@ -64,12 +80,20 @@ The normative [DVR v1 wire specification](../crates/desktop_visual/protocol.md)
 defines exact little-endian layouts, capability masks, size limits, framing and
 lifecycle. Frames are top-left, display-referred sRGB RGBA8 with explicit opaque,
 straight or premultiplied alpha. No implicit chroma key or fluid-specific meaning
-is applied. A frame covers the full physical-pixel X11 root canvas, including all
-monitors, and is stretched to that canvas. Per-output routing, HDR, dma-buf,
-geometry, input and capture are **not** v1 capabilities. Output extent changes
+is applied. The default endpoint stretches a frame over the full physical-pixel
+compositor canvas (the X11 root or native Wayland framebuffer), including all
+monitors. Native Wayland can additionally select an output through a dedicated
+endpoint, configured with `JWM_DESKTOP_VISUAL_OUTPUTS`; that endpoint advertises
+the selected output's extent. Up to four selected routes retain the 32 MiB
+per-frame limit. X11 and nested Wayland support the full-canvas route only.
+Output selection comes from the endpoint, without adding a per-output field to
+the v1 payload. HDR, dma-buf, geometry, input and capture remain unsupported
+payload capabilities. Output extent changes
 invalidate the old image and disconnect for a fresh hello; producers reconnect
 and rerender. A topology change that leaves the root extent unchanged does not
-require new image coordinates under this canvas contract.
+require new image coordinates under the default full-canvas contract. Selected
+routes disconnect and discard their image on output movement, unplug, resize or
+endpoint-path changes, including a same-size replug; the producer must reconnect.
 
 One same-UID producer is served at a time. Fixed headers are checked before any
 allocation (4096 maximum image axis, 32 MiB maximum padded payload). Strict sequence
@@ -96,9 +120,11 @@ cargo test --locked -p desktop_visual
 cargo clippy --locked -p desktop_visual --all-targets -- -D warnings
 python3 -m unittest discover -s extensions/desktop_visual -p 'test_*.py' -v
 python3 scripts/test-desktop-visual-gl.py
+JWM_DVR_GL_BACKEND=wayland python3 scripts/test-desktop-visual-gl.py
 python3 scripts/test-waterlily-helper.py
 python3 scripts/test-showcase-lifecycle.py
 cargo check --locked --all-targets --no-default-features --features backend-x11rb
+cargo check --locked --all-targets --no-default-features --features backend-wayland-udev
 ```
 
 Transport tests exercise malformed/truncated frames, limits, deadlines, reconnect,

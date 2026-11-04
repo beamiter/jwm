@@ -16,6 +16,28 @@ use crate::ipc::{
 use crate::ipc_server::IncomingIpc;
 use crate::jwm::features::recording::RecordingFileIdentity;
 
+fn add_native_window_identities(
+    context: &mut serde_json::Value,
+    mut resolve: impl FnMut(
+        crate::backend::common_define::WindowId,
+    ) -> Option<crate::backend::api::WindowHandoffIdentity>,
+) {
+    if let Some(windows) = context["windows"].as_array_mut() {
+        for window in windows {
+            let native = window["id"]
+                .as_str()
+                .and_then(|id| id.parse::<u64>().ok())
+                .and_then(|id| resolve(crate::backend::common_define::WindowId::from_raw(id)));
+            window["native_window_id"] = match native {
+                Some(crate::backend::api::WindowHandoffIdentity::X11(xid)) => {
+                    serde_json::json!(xid)
+                }
+                None => serde_json::Value::Null,
+            };
+        }
+    }
+}
+
 fn runtime_health(
     config_status: &serde_json::Value,
     monitor_count: usize,
@@ -2100,6 +2122,19 @@ impl Jwm {
         if !self.running.load(std::sync::atomic::Ordering::SeqCst) {
             return IpcResponse::err("session is shutting down");
         }
+        if matches!(
+            name,
+            "register_agent_session"
+                | "unregister_agent_session"
+                | "activate_agent_session"
+                | "agent_session_revealed"
+                | "claim_agent_session_reveal"
+        ) {
+            return match self.agent_session_command(backend, name, args) {
+                Ok(value) => IpcResponse::ok(Some(value)),
+                Err(error) => IpcResponse::err(error),
+            };
+        }
         if name == "assistant_control" {
             return self.eva_control(backend, args);
         }
@@ -2924,7 +2959,31 @@ impl Jwm {
         }
         let cfg = CONFIG.load();
         match name {
-            "get_execution_context" => IpcResponse::ok(Some(self.eva_execution_context())),
+            "get_agent_sessions" => IpcResponse::ok(Some(self.agent_sessions_snapshot())),
+            "get_agent_summary" => {
+                let mut summary = self.agent_summary();
+                let available = backend.has_compositor();
+                summary["picker_available"] = serde_json::json!(available);
+                summary["picker_unavailable_reason"] = if available {
+                    serde_json::Value::Null
+                } else {
+                    serde_json::json!(
+                        "Session navigation requires an active compositor with native modal UI; this backend currently provides status only"
+                    )
+                };
+                IpcResponse::ok(Some(summary))
+            }
+            "get_agent_session_requests" => {
+                IpcResponse::ok(Some(self.agent_session_requests(args)))
+            }
+            "get_execution_context" => {
+                let mut context = self.eva_execution_context();
+                self.eva_add_output_descriptions(backend, &mut context);
+                add_native_window_identities(&mut context, |window| {
+                    backend.window_handoff_identity(window)
+                });
+                IpcResponse::ok(Some(context))
+            }
             "get_companion_desktop_state" => IpcResponse::ok(Some(self.eva_companion_context())),
             "get_execution_status" => self.eva_execution_status(backend, args),
             "get_assistant_status" => {
@@ -2995,6 +3054,35 @@ impl Jwm {
             "get_inputs" | "get_input_status" => IpcResponse::ok(Some(self.query_inputs())),
             "get_wayland_status" | "get_wayland" | "get_wl" => {
                 IpcResponse::ok(Some(self.query_wayland_status(backend)))
+            }
+            "get_ui_theme" => {
+                let cfg = crate::config::CONFIG.load();
+                let selected = args["theme"].as_str().unwrap_or(cfg.ui_theme());
+                let palette =
+                    crate::backend::compositor_common::ui_theme::UiTheme::from_config(selected)
+                        .palette();
+                let ink = |color: [u8; 4]| color.map(|value| f32::from(value) / 255.0);
+                let accent = palette.panel_accent([0.08, 0.43, 0.94, 1.0]);
+                let blend = |foreground: [f32; 4], background: [f32; 4], alpha: f32| {
+                    std::array::from_fn::<_, 4, _>(|channel| {
+                        if channel == 3 {
+                            1.0
+                        } else {
+                            foreground[channel] * alpha + background[channel] * (1.0 - alpha)
+                        }
+                    })
+                };
+                IpcResponse::ok(Some(serde_json::json!({
+                    "protocol_version":1, "theme":selected,
+                    "source":if args["theme"].is_string() { "application_override" } else { "global_default" },
+                    "scope":if self.features.theme_preview.as_ref().is_some_and(|preview|preview.owns(&cfg)){"preview"}else{"session"},
+                    "config_revision":jwm_eva_core::protocol::digest(&serde_json::json!({"theme":cfg.ui_theme(),"font":cfg.system_ui_font(),"surface_opacity":cfg.ui_surface_opacity(),"density":cfg.ui_density(),"gap":cfg.gap_px(),"bar_height":cfg.status_bar_height(),"bar_padding":cfg.status_bar_padding(),"motion":cfg.animation_enabled(),"blur":cfg.behavior().blur_enabled,"blur_strength":cfg.behavior().blur_strength,"shadow":cfg.behavior().shadow_enabled,"glow":cfg.behavior().border_glow_enabled})),
+                    "appearance_selection":self.features.system_ui.selected_appearance_choice(),
+                    "surface_opacity":cfg.ui_surface_opacity(),"density":cfg.ui_density(), "font":cfg.system_ui_font(), "radius":palette.card_radius,
+                    "tokens":palette.semantic_tokens(),
+                    "native_colors":[palette.field,palette.panel,palette.chip,palette.track,ink(palette.item_ink),ink(palette.hint_ink),accent,blend(accent,palette.panel,0.28)],
+                    "alpha_policy":"opaque_native_surfaces"
+                })))
             }
             "get_config_status" | "get_cfg" => IpcResponse::ok(Some(self.query_config_status())),
             "get_config" | "get_conf" => IpcResponse::ok(Some(self.query_config_subset(args))),
@@ -6520,6 +6608,8 @@ impl Jwm {
             "cursor_theme": cfg.cursor_theme(),
             "cursor_size": cfg.cursor_size(),
             "system_ui_font": cfg.system_ui_font(),
+            "ui_surface_opacity": cfg.ui_surface_opacity(),
+            "ui_density": cfg.ui_density(),
             "recording_bitrate": cfg.behavior().recording_bitrate,
             "recording_max_height": cfg.behavior().recording_max_height,
             "recording_output_dir": cfg.behavior().recording_output_dir,
@@ -6740,6 +6830,8 @@ impl Jwm {
             "status_bar_height": cfg.status_bar_height(),
             "status_bar_padding": cfg.status_bar_padding(),
             "system_ui_font": cfg.system_ui_font(),
+            "ui_surface_opacity": cfg.ui_surface_opacity(),
+            "ui_density": cfg.ui_density(),
             "cursor_theme": cfg.cursor_theme(),
             "cursor_size": cfg.cursor_size(),
             "drag_threshold_px": cfg.drag_threshold_px(),
@@ -24193,5 +24285,25 @@ mod move_window_to_monitor_tests {
         let moved = jwm.handle_move_window_to_monitor(&mut backend, &request(right_num));
         assert!(moved.success, "{:?}", moved.error);
         assert_eq!(jwm.state.clients[key].mon, Some(right));
+    }
+}
+
+#[cfg(test)]
+mod agent_native_identity_tests {
+    use super::*;
+    #[test]
+    fn execution_context_keeps_internal_ids_distinct_from_native_xids() {
+        let mut context = serde_json::json!({"windows":[{"id":"11","target_token":"wm:w:lifetime"},{"id":"12","target_token":"wm:w:other"}]});
+        add_native_window_identities(&mut context, |window| {
+            (window.raw() == 11)
+                .then_some(crate::backend::api::WindowHandoffIdentity::X11(23068676))
+        });
+        assert_eq!(context["windows"][0]["id"], "11");
+        assert_eq!(context["windows"][0]["native_window_id"], 23068676);
+        assert_eq!(context["windows"][0]["target_token"], "wm:w:lifetime");
+        assert!(
+            context["windows"][1]["native_window_id"].is_null(),
+            "unavailable backend identity must not fall back to an internal handle"
+        );
     }
 }

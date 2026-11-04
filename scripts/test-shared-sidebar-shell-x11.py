@@ -76,6 +76,7 @@ spec.loader.exec_module(legacy)
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--agent-summary", action="store_true", help="verify registered Agent summary and real compositor session-picker routes")
     parser.add_argument("--bar", default="xilem_bar")
     parser.add_argument("--bar-bin", type=Path)
     parser.add_argument("--backend", choices=("xcb", "x11rb"), default="x11rb")
@@ -97,7 +98,7 @@ def main():
     parser.add_argument("--legacy-four-edge", action="store_true", help="exercise migration from status_bar.layout=four-edge without an explicit desktop_shell table")
     parser.add_argument("--legacy-edge-shell", action="store_true", help="exercise live legacy xbar edge_shell migration")
     args = parser.parse_args()
-    if args.submenu_themes and not shutil.which("import"):
+    if (args.submenu_themes or args.agent_summary) and not shutil.which("import"):
         parser.error("--submenu-themes requires ImageMagick import for final composited X11 display captures")
     bar_dir = ROOT / "bars" / args.bar
     bar_bin = (args.bar_bin or bar_dir / ("src-tauri/target/debug" if (bar_dir / "src-tauri").is_dir() else "target/debug") / args.bar).resolve()
@@ -137,7 +138,7 @@ def main():
             env["ALSA_CONFIG_PATH"] = str(alsa_config)
             env["PULSE_SERVER"] = pulse_server
         env["XBAR_CONFIG"] = str(work / "xbar.toml")
-        (work / "xbar.toml").write_text(f'theme="{args.theme}"\n[edge_shell]\nenabled=true\nleft="always"\nright="always"\nbottom="always"\n')
+        (work / "xbar.toml").write_text(f'theme="{args.theme}"\nui_theme="inherit"\n[edge_shell]\nenabled=true\nleft="always"\nright="always"\nbottom="always"\n')
         (work / "bin").mkdir()
         if args.deep or args.media_only:
             env["JWM_TEST_LAUNCH_PID"] = str(work / "launched-application.pid")
@@ -506,6 +507,49 @@ def main():
             result["steps"].append(step)
             print("PASS:", step, flush=True)
 
+        def exercise_agents():
+            client = spawn("xmessage", "-name", "AgentSessionShellFixture", "-title", "AgentSessionShellFixture", "registered desktop Agent UI fixture")
+            row = wait_for(lambda: next((row for row in msg("get_windows") if row["name"] == "AgentSessionShellFixture"), None), "actual X11 Agent UI fixture window")
+            context = msg("get_execution_context")
+            target = next(window for window in context["windows"] if str(window["id"]) == str(row["id"]))
+            entry = {"session_id":"x11-shell-ui-fixture", "project_id":"jwm-ui-fixture", "provider":"forge", "host_id":"ui-fixture", "host_incarnation":"x11-ui-fixture-v1", "pane_id":"fixture-pane", "window_token":target["target_token"], "title":"Registered X11 UI fixture", "status":"running", "can_reveal":True, "revision":1}
+            def publish(status, revision):
+                entry["status"], entry["revision"] = status, revision
+                return msg("register_agent_session", {"wm_instance_id":context["wm_instance_id"], "session":entry})
+            publish("running", 1)
+            wait_for(lambda: "agent summary: Agents 1 run" in (evidence / "session.log").read_text(), "actual running summary reaches default header")
+            publish("waiting", 2)
+            summary = wait_for(lambda: (summary if (summary := msg("get_agent_summary"))["waiting"] == 1 else None), "registered waiting transition")
+            assert summary.get("picker_available"), summary
+            wait_for(lambda: "shared agents: Agents 0 run · 1 wait" in (evidence / "session.log").read_text(), "waiting summary reaches sidebar")
+            notices = [notice for notice in msg("get_notifications")["notifications"] if notice["app"] == "JWM Agents"]
+            assert len(notices) == 1, notices
+            publish("waiting", 3)
+            assert [notice["id"] for notice in msg("get_notifications")["notifications"] if notice["app"] == "JWM Agents"] == [notices[0]["id"]]
+            capture("agent-summary-waiting", final_display=True)
+            toggle = wait_for(lambda: panel_control("left", "agent_toggle"), "collapsed Agent entry")
+            assert panel_control("left", "agent_sessions") is None, "Agent section must begin collapsed"
+            click(toggle[0], toggle[1])
+            assert not msg("get_system_ui")["active"], "expansion must not acquire modal focus"
+            opening = wait_for(lambda: panel_control("left", "agent_sessions"), "expanded canonical session-picker entry")
+            click(opening[0], opening[1])
+            wait_for(lambda: msg("get_system_ui")["kind"] == "launcher", "real X11 compositor draws session picker")
+            capture("agent-sidebar-picker", final_display=True)
+            run("xdotool", "key", "Escape")
+            wait_for(lambda: not msg("get_system_ui")["active"], "session picker releases modal focus")
+            click(toggle[0], toggle[1])
+            click(int(width*0.30), 25)
+            wait_for(lambda: msg("get_system_ui")["kind"] == "launcher", "header summary opens the same canonical picker")
+            capture("agent-header-picker", final_display=True)
+            run("xdotool", "key", "Escape")
+            wait_for(lambda: not msg("get_system_ui")["active"], "header picker releases modal focus")
+            publish("running", 4)
+            msg("unregister_agent_session", {"wm_instance_id":context["wm_instance_id"], "session_id":entry["session_id"], "host_id":entry["host_id"], "host_incarnation":entry["host_incarnation"]})
+            client.terminate()
+            client.wait(timeout=5)
+            result["agent_summary_fixture"] = {"kind":"synthetic registered metadata bound to a real X11 window; no provider reveal claim", "waiting_notice_id":notices[0]["id"]}
+            record("real compositor Agent summary/sidebar routes open the same picker; waiting heartbeat preserves one notification")
+
         def exercise_workarea():
             client = spawn("xmessage", "-name", "shared-shell-client", "native fullscreen client")
             native_window = int(wait_for(lambda: run("xdotool", "search", "--name", "shared-shell-client").strip().splitlines()[0], "test client"))
@@ -702,6 +746,8 @@ def main():
             result["top_render"] = {"changed_pixels": changed_pixels, "region": region,
                                     "tauri_frontend_ready": args.bar.startswith("tauri_"), "tauri_frontend_rendered": args.bar.startswith("tauri_")}
             record("primary toolkit surface paints visible content above the fixed wallpaper")
+            if args.agent_summary:
+                exercise_agents()
             if args.submenu_themes:
                 def key_and_wait(key, kind):
                     # XTest can publish MappingNotify on connect. Match the

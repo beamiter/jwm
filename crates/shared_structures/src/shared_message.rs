@@ -462,10 +462,11 @@ pub enum ShellHubRoute {
     Calendar = 4,
     Wallpaper = 5,
     Theme = 6,
+    AgentSessions = 7,
 }
 
 impl ShellHubRoute {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::Hub,
         Self::Applications,
         Self::Notifications,
@@ -473,6 +474,7 @@ impl ShellHubRoute {
         Self::Calendar,
         Self::Wallpaper,
         Self::Theme,
+        Self::AgentSessions,
     ];
 
     /// 严格解析路由编号。未知编号返回 `None`，调用方决定是丢弃还是退化。
@@ -486,6 +488,7 @@ impl ShellHubRoute {
             4 => Some(Self::Calendar),
             5 => Some(Self::Wallpaper),
             6 => Some(Self::Theme),
+            7 => Some(Self::AgentSessions),
             _ => None,
         }
     }
@@ -1161,11 +1164,11 @@ mod tests {
 
     #[test]
     fn test_shell_hub_route_unknown_is_strict_but_degrades_to_hub() {
-        assert_eq!(ShellHubRoute::from_raw(7), None);
+        assert_eq!(ShellHubRoute::from_raw(8), None);
         assert_eq!(ShellHubRoute::from_raw(u32::MAX), None);
         // A newer bar talking to an older window manager still lands somewhere
         // useful instead of having its command silently dropped.
-        assert_eq!(ShellHubRoute::from_raw_or_hub(7), ShellHubRoute::Hub);
+        assert_eq!(ShellHubRoute::from_raw_or_hub(8), ShellHubRoute::Hub);
         assert_eq!(ShellHubRoute::from(u32::MAX), ShellHubRoute::Hub);
         assert_eq!(ShellHubRoute::from_raw(6), Some(ShellHubRoute::Theme));
     }

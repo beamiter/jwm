@@ -609,10 +609,31 @@ fn params_for_output_policy(
     }
 }
 
+fn params_for_presented_output_policy(
+    advanced: bool,
+    active: bool,
+    edid: Option<&EdidHdrCapabilities>,
+) -> ParametricParams {
+    // A policy disable changes the next frame target. The current output
+    // description remains HDR until its matching SDR withdrawal presents.
+    params_for_output_policy(advanced || active, active, edid)
+}
+
 pub(crate) fn params_for_output(output: &Output) -> ParametricParams {
-    params_for_output_policy(
+    params_for_presented_output_policy(
         advanced_color_management_enabled(),
         output_hdr_metadata_active(output),
+        output_edid_hdr_capabilities(output).as_ref(),
+    )
+}
+
+/// Private render target for a queued color transition. Protocol descriptions
+/// continue to use `params_for_output` until its matching frame is presented.
+#[cfg_attr(not(feature = "backend-wayland-udev"), allow(dead_code))]
+pub(crate) fn params_for_output_target(output: &Output, hdr: bool) -> ParametricParams {
+    params_for_output_policy(
+        advanced_color_management_enabled(),
+        hdr,
         output_edid_hdr_capabilities(output).as_ref(),
     )
 }
@@ -1801,6 +1822,43 @@ mod tests {
                 .feedback
                 .lock_safe()
                 .is_empty()
+        );
+    }
+}
+
+#[cfg(test)]
+mod presented_output_policy_tests {
+    use super::*;
+    use crate::backend::color_policy;
+    #[test]
+    fn public_output_description_waits_for_confirmed_enable_and_disable() {
+        let hdr = EdidHdrCapabilities {
+            max_luminance_nits: 1000.0,
+            min_luminance_nits: 0.05,
+            max_frame_average_nits: 400.0,
+            supports_bt2020: true,
+            supports_pq: true,
+            supports_hlg: false,
+        };
+        // Enable requested but no accepted HDR framebuffer yet.
+        assert_eq!(
+            params_for_presented_output_policy(true, false, Some(&hdr)).tf_named,
+            Some(color_policy::TF_SRGB)
+        );
+        assert_eq!(
+            params_for_presented_output_policy(true, true, Some(&hdr)).tf_named,
+            Some(color_policy::TF_ST2084_PQ)
+        );
+        // Disabling policy does not reinterpret the currently scanned frame.
+        assert_eq!(
+            params_for_presented_output_policy(false, true, Some(&hdr)).tf_named,
+            Some(color_policy::TF_ST2084_PQ)
+        );
+        // Its matching withdrawal frame (or nested output with no KMS active
+        // observation) remains conservative SDR under the disabled gate.
+        assert_eq!(
+            params_for_presented_output_policy(false, false, Some(&hdr)).tf_named,
+            Some(color_policy::TF_SRGB)
         );
     }
 }

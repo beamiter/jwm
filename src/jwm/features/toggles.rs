@@ -163,7 +163,10 @@ fn status_bar_shell_is_mine(
 
     match route {
         None => return_to_hub || state.is_control_center(),
-        Some(ShellHubRoute::Applications) => state.is_launcher(),
+        Some(ShellHubRoute::Applications) => {
+            state.is_launcher() && !state.is_agent_session_picker()
+        }
+        Some(ShellHubRoute::AgentSessions) => state.is_agent_session_picker(),
         Some(ShellHubRoute::Notifications) => state.is_notification_center(),
         Some(ShellHubRoute::Clipboard) => state.is_clipboard_picker(),
         Some(ShellHubRoute::Calendar) => state.is_calendar(),
@@ -1370,8 +1373,19 @@ impl Jwm {
     }
 
     fn theme_picker_state() -> crate::jwm::features::SystemUiState {
-        let current = CONFIG.load().ui_theme().to_string();
-        crate::jwm::features::SystemUiState::theme_picker(&current)
+        let config = CONFIG.load();
+        let mut state = crate::jwm::features::SystemUiState::appearance_picker(&config);
+        state.set_theme_status(
+            config.ui_theme(),
+            &format!(
+                "{} · {} · density {:.0}% · surface {:.0}% · frontend overrides retained",
+                config.appearance_persistence_label(),
+                config.system_ui_font(),
+                config.ui_density() * 100.0,
+                config.ui_surface_opacity() * 100.0
+            ),
+        );
+        state
     }
 
     /// Adopt a completed application scan into the long-lived cache. If the
@@ -1435,11 +1449,13 @@ impl Jwm {
             && crate::jwm::features::connectivity::job_in_flight(
                 self.features.launcher_catalog_job.as_ref(),
             );
-        SystemUiState::open_launcher(
+        let mut launcher = SystemUiState::open_launcher(
             std::sync::Arc::clone(&self.features.launcher_catalog),
             self.launcher_window_snapshot(),
             indexing,
-        )
+        );
+        launcher.set_agent_sessions(&self.agent_sessions_snapshot());
+        launcher
     }
 
     /// Swap from the shell home page to one of its native child pages while
@@ -1451,7 +1467,13 @@ impl Jwm {
     ) -> Result<(), Box<dyn std::error::Error>> {
         use crate::jwm::features::ShellHubRoute;
 
+        if route == ShellHubRoute::AgentSessions {
+            return self
+                .open_agent_session_picker(backend)
+                .map_err(|error| error.into());
+        }
         let mut next = match route {
+            ShellHubRoute::AgentSessions => unreachable!("handled session picker"),
             ShellHubRoute::Applications => self.cached_launcher_state(),
             ShellHubRoute::Notifications => SystemUiState::notification_center(
                 &self.features.notifications,
@@ -2090,143 +2112,173 @@ impl Jwm {
         self.mark_system_ui_dirty();
     }
 
-    /// Apply the highlighted theme temporarily. This publishes through the
-    /// ordinary configuration path, so every existing consumer sees it, but
-    /// never edits the configuration file.
+    /// Theme and preset previews share one owned-key transaction.
     pub(crate) fn preview_selected_theme(&mut self, backend: &mut dyn Backend) -> bool {
-        let Some(theme) = self.features.system_ui.selected_theme().map(str::to_string) else {
+        let Some(choice) = self
+            .features
+            .system_ui
+            .selected_appearance_choice()
+            .map(str::to_owned)
+        else {
             return false;
         };
+        let changes = match crate::jwm::features::theme_preview::changes_for_choice(&choice) {
+            Ok(changes) => changes,
+            Err(error) => {
+                self.report_theme_failure(backend, "Appearance not previewed", error);
+                return false;
+            }
+        };
         let current = CONFIG.load_full();
-        let original = self
-            .features
-            .theme_preview
-            .as_ref()
-            .and_then(|preview| preview.rollback_theme(&current))
-            .unwrap_or_else(|| current.ui_theme())
-            .to_owned();
-        let mut updated = (*current).clone();
-        if let Err(error) = updated.set_value(
-            "appearance.ui_theme",
-            &serde_json::Value::String(theme.clone()),
+        let disk = if self.features.theme_preview.is_none() {
+            match crate::config::Config::appearance_disk_baseline() {
+                Ok(snapshot) => snapshot,
+                Err(error) => {
+                    self.report_theme_failure(
+                        backend,
+                        "Appearance not previewed",
+                        error.to_string(),
+                    );
+                    return false;
+                }
+            }
+        } else {
+            None
+        };
+        let previous = self.features.theme_preview.take();
+        let (applied, preview) = match crate::jwm::features::theme_preview::ThemePreview::stage(
+            previous, current, &changes, disk,
         ) {
-            self.report_theme_failure(backend, "Theme not previewed", error.to_string());
-            return false;
-        }
-        let applied = std::sync::Arc::new(updated);
-        CONFIG.store(std::sync::Arc::clone(&applied));
-        self.features.theme_preview = Some(
-            crate::jwm::features::theme_preview::ThemePreview::new(original, applied),
-        );
+            Ok(staged) => staged,
+            Err(error) => {
+                self.report_theme_failure(backend, "Appearance preview conflict", error);
+                return false;
+            }
+        };
+        let theme = applied.ui_theme().to_owned();
+        CONFIG.store(applied);
+        self.features.theme_preview = Some(preview);
         self.apply_config_changes(backend);
         self.features.system_ui.set_theme_status(
             &theme,
-            "Preview · configuration file unchanged · Esc restores the previous theme",
+            "Preview · Global defaults · Save all / Keep session / Cancel",
         );
-        self.broadcast_ipc_event(
-            "config/changed",
-            serde_json::json!({ "key": "appearance.ui_theme", "value": theme, "scope": "preview" }),
-        );
+        self.broadcast_ipc_event("config/changed",serde_json::json!({"keys":changes.iter().map(|(key,_)|key).collect::<Vec<_>>(),"scope":"preview","atomic":true}));
         self.sync_system_ui(backend);
         true
     }
 
-    /// Escape, panel replacement and locking all abandon a preview. A newer
-    /// reload or IPC edit wins; it is never overwritten with a stale snapshot.
+    /// A later publication wins, including one with the same values.
     pub(crate) fn cancel_theme_preview(&mut self, backend: &mut dyn Backend) {
         let Some(preview) = self.features.theme_preview.take() else {
             return;
         };
         let current = CONFIG.load_full();
-        let Some(original) = preview.rollback_theme(&current) else {
+        let Some(changes) = preview.rollback_changes(&current) else {
+            self.report_theme_failure(
+                backend,
+                "Appearance changed elsewhere",
+                "Newer settings were retained; this preview no longer owns their revision".into(),
+            );
             return;
         };
         let mut updated = (*current).clone();
-        if let Err(error) = updated.set_value(
-            "appearance.ui_theme",
-            &serde_json::Value::String(original.to_owned()),
-        ) {
-            error!("Theme preview could not restore {original}: {error}");
+        if let Err(error) = updated.set_values(&changes) {
+            self.report_theme_failure(backend, "Appearance rollback failed", error);
             return;
         }
         CONFIG.store(std::sync::Arc::new(updated));
         self.apply_config_changes(backend);
-        self.broadcast_ipc_event(
-            "config/changed",
-            serde_json::json!({ "key": "appearance.ui_theme", "value": original, "scope": "preview_cancelled" }),
-        );
+        self.broadcast_ipc_event("config/changed",serde_json::json!({"keys":changes.iter().map(|(key,_)|key).collect::<Vec<_>>(),"scope":"preview_cancelled","atomic":true}));
     }
 
-    /// Commit only the live theme. The next file reload/login follows the
-    /// user's saved configuration, exactly like the existing IPC setter.
     pub(crate) fn keep_selected_theme_for_session(&mut self, backend: &mut dyn Backend) {
-        if self.preview_selected_theme(backend) {
+        let choice = self
+            .features
+            .system_ui
+            .selected_appearance_choice()
+            .unwrap_or("")
+            .to_owned();
+        if choice == "@cancel" {
+            self.cancel_theme_preview(backend);
+            self.close_system_ui(backend);
+            return;
+        }
+        if choice == "@save" {
+            self.apply_selected_theme(backend);
+            return;
+        }
+        if choice == "@keep" || self.preview_selected_theme(backend) {
             self.features.theme_preview = None;
             self.broadcast_ipc_event(
                 "config/changed",
-                serde_json::json!({
-                    "key": "appearance.ui_theme",
-                    "value": CONFIG.load().ui_theme(),
-                    "scope": "session"
-                }),
+                serde_json::json!({"scope":"session","appearance":true}),
             );
             self.close_system_ui(backend);
         }
     }
 
-    /// Apply the selected UI theme through the same configuration path a
-    /// `set_config` takes, so both compositors rebuild their palettes on the
-    /// next `apply_config` exactly as they would from a reload, then surgically
-    /// persist `appearance.ui_theme` to the live TOML (comments preserved).
+    /// Presets are staged, while a named theme retains the legacy Enter-to-save
+    /// behavior. The explicit Save row commits all owned preview keys together.
     pub(crate) fn apply_selected_theme(&mut self, backend: &mut dyn Backend) {
-        let Some(theme) = self.features.system_ui.selected_theme().map(str::to_string) else {
+        let Some(choice) = self
+            .features
+            .system_ui
+            .selected_appearance_choice()
+            .map(str::to_owned)
+        else {
             return;
         };
-        let mut updated = (**CONFIG.load()).clone();
-        if let Err(error) = updated.set_value(
-            "appearance.ui_theme",
-            &serde_json::Value::String(theme.clone()),
-        ) {
-            error!("Theme: {error}");
-            self.report_theme_failure(backend, "Theme not applied", error.to_string());
-            return;
+        match choice.as_str() {
+            "@cancel" => {
+                self.cancel_theme_preview(backend);
+                self.close_system_ui(backend);
+                return;
+            }
+            "@keep" => {
+                self.features.theme_preview = None;
+                self.close_system_ui(backend);
+                return;
+            }
+            "@save" => {}
+            key if key.starts_with('@') => {
+                self.preview_selected_theme(backend);
+                return;
+            }
+            _ => {
+                if !self.preview_selected_theme(backend) {
+                    return;
+                }
+            }
         }
-        self.features.theme_preview = None;
-        CONFIG.store(std::sync::Arc::new(updated));
-        self.apply_config_changes(backend);
-        // Stat the file before writing it: an edit the user saved within the
-        // last poll interval is otherwise first seen *after* JWM's own write,
-        // and settling that write would swallow it. Observed first, it stays
-        // pending, and the reload of JWM's revision carries both the theme
-        // and the edit.
-        self.observe_config_reload(std::time::Instant::now(), "pre-save check");
-        let persisted = CONFIG.load().persist_ui_theme(&theme);
-        self.settle_theme_persist(backend, &theme, persisted);
-        info!("Theme: {theme}");
-        self.broadcast_ipc_event(
-            "config/changed",
-            serde_json::json!({ "key": "appearance.ui_theme", "value": theme }),
-        );
-        self.close_system_ui(backend);
-    }
-
-    /// Account for the theme write: settle JWM's own revision of the file,
-    /// or say on screen that the theme was not saved.
-    fn settle_theme_persist(
-        &mut self,
-        backend: &mut dyn Backend,
-        theme: &str,
-        persisted: Result<std::time::SystemTime, crate::config::ConfigError>,
-    ) {
-        match persisted {
-            Ok(revision) => self.note_config_written_by_us(revision),
+        let current = CONFIG.load_full();
+        let Some(preview) = self.features.theme_preview.as_ref() else {
+            self.features.system_ui.set_theme_status(
+                current.ui_theme(),
+                "No unsaved preview · global defaults unchanged",
+            );
+            self.mark_system_ui_dirty();
+            return;
+        };
+        let changes = match preview.staged_changes(&current) {
+            Ok(changes) => changes,
             Err(error) => {
-                error!("Theme: failed to persist {theme}: {error}");
-                // The theme is live, but only in memory: the next reload or
-                // login brings the old one back. A refusal to edit the file
-                // tells the user to set the key by hand, which does nothing
-                // from the journal alone.
-                self.report_theme_failure(backend, "Theme not saved", error.to_string());
+                self.report_theme_failure(backend, "Appearance save conflict", error);
+                return;
+            }
+        };
+        let baseline = preview.disk_baseline().map(str::to_owned);
+        self.observe_config_reload(std::time::Instant::now(), "pre-save check");
+        match current.persist_appearance_changes(&changes, baseline.as_deref()) {
+            Ok(revision) => {
+                self.note_config_written_by_us(revision);
+                self.features.theme_preview = None;
+                self.broadcast_ipc_event("config/changed",serde_json::json!({"keys":changes.iter().map(|(key,_)|key).collect::<Vec<_>>(),"scope":"saved","atomic":true,"frontend_overrides":"preserved"}));
+                self.close_system_ui(backend);
+                self.push_system_toast(backend,crate::backend::api::ToastNotification{title:"Appearance saved".into(),body:"Global defaults saved · explicit frontend overrides retained · applied without restart".into(),timeout_ms:3500,..Default::default()});
+            }
+            Err(error) => {
+                self.report_theme_failure(backend, "Appearance not saved", error.to_string())
             }
         }
     }
@@ -3250,6 +3302,7 @@ impl Jwm {
     /// compositor to the user's previous off state.
     pub(crate) fn close_system_ui(&mut self, backend: &mut dyn Backend) {
         self.cancel_theme_preview(backend);
+        self.features.workscene_preview = None;
         self.features.touchpad.detach_switcher();
         self.cancel_pointer_scroll(backend);
         self.cancel_touchpad_gesture(backend, false);
@@ -6022,6 +6075,30 @@ impl Jwm {
 }
 
 #[cfg(test)]
+impl Jwm {
+    /// Account for the theme write: settle JWM's own revision of the file,
+    /// or say on screen that the theme was not saved.
+    fn settle_theme_persist(
+        &mut self,
+        backend: &mut dyn Backend,
+        theme: &str,
+        persisted: Result<std::time::SystemTime, crate::config::ConfigError>,
+    ) {
+        match persisted {
+            Ok(revision) => self.note_config_written_by_us(revision),
+            Err(error) => {
+                error!("Theme: failed to persist {theme}: {error}");
+                // The theme is live, but only in memory: the next reload or
+                // login brings the old one back. A refusal to edit the file
+                // tells the user to set the key by hand, which does nothing
+                // from the journal alone.
+                self.report_theme_failure(backend, "Theme not saved", error.to_string());
+            }
+        }
+    }
+}
+
+#[cfg(test)]
 mod configured_feature_gate_tests {
     use super::configured_feature_toggle_allowed;
 
@@ -6411,10 +6488,8 @@ mod shell_entry_tests {
             .expect("clipboard_picker follows theme apply")
             .0;
         for needle in [
-            "appearance.ui_theme",
-            "CONFIG.store",
-            "apply_config_changes",
-            "persist_ui_theme",
+            "staged_changes",
+            "persist_appearance_changes",
             "note_config_written_by_us",
             "config/changed",
             "close_system_ui",
@@ -6430,7 +6505,9 @@ mod shell_entry_tests {
         let observe = apply
             .find(&format!("self.{}(", "observe_config_reload"))
             .expect("apply_selected_theme no longer stats the config before writing it");
-        let persist = apply.find("persist_ui_theme").expect("the theme write");
+        let persist = apply
+            .find("persist_appearance_changes")
+            .expect("the appearance write");
         assert!(
             observe < persist,
             "the pre-save check must run before the theme is written"
@@ -11093,4 +11170,3 @@ mod session_action_command_tests {
         assert_eq!(probe.child_session(), unsafe { libc::getsid(0) });
     }
 }
-

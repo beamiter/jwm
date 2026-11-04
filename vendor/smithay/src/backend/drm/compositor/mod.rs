@@ -965,6 +965,7 @@ where
 struct QueuedFrame<A: Allocator, F: ExportFramebuffer<<A as Allocator>::Buffer>, U> {
     prepared_frame: PreparedFrame<A, F>,
     user_data: U,
+    properties: Vec<super::FrameProperty>,
 }
 
 impl<A, F, U> std::fmt::Debug for QueuedFrame<A, F, U>
@@ -987,6 +988,10 @@ where
 enum PreparedFrameKind {
     Full,
     Partial,
+}
+
+fn frame_color_properties_fit(kind: PreparedFrameKind, empty: bool, has_properties: bool) -> bool {
+    !empty && (!has_properties || kind == PreparedFrameKind::Full)
 }
 
 struct PreparedFrame<A: Allocator, F: ExportFramebuffer<<A as Allocator>::Buffer>> {
@@ -2439,6 +2444,17 @@ where
     /// `user_data` can be used to attach some data to a specific buffer and later retrieved with [`DrmCompositor::frame_submitted`]
     #[profiling::function]
     pub fn queue_frame(&mut self, user_data: U) -> FrameResult<(), A, F> {
+        self.queue_frame_with_properties(user_data, Vec::new())
+    }
+
+    /// Queue color properties owned by this exact prepared framebuffer. They
+    /// travel with the queued frame even when another frame is pending, and
+    /// are discarded together on replacement or failure.
+    pub fn queue_frame_with_properties(
+        &mut self,
+        user_data: U,
+        properties: Vec<super::FrameProperty>,
+    ) -> FrameResult<(), A, F> {
         if !self.surface.is_active() {
             return Err(FrameErrorType::<A, F>::DrmError(DrmError::DeviceInactive));
         }
@@ -2446,6 +2462,15 @@ where
         let prepared_frame = self.next_frame.take().ok_or(FrameErrorType::<A, F>::EmptyFrame)?;
         if prepared_frame.is_empty() {
             return Err(FrameErrorType::<A, F>::EmptyFrame);
+        }
+
+        if !frame_color_properties_fit(prepared_frame.kind, false, !properties.is_empty()) {
+            // A partial frame may retain pixels rendered for the old transfer
+            // function. The caller must force a full repaint before changing
+            // output color state; including an old FB would be atomic but wrong.
+            return Err(FrameErrorType::<A, F>::DrmError(DrmError::TestFailed(
+                self.surface.crtc(),
+            )));
         }
 
         if let Some(plane_state) = prepared_frame.frame.plane_state(self.surface.plane()) {
@@ -2464,6 +2489,7 @@ where
         self.queued_frame = Some(QueuedFrame {
             prepared_frame,
             user_data,
+            properties,
         });
         if self.pending_frame.is_none() {
             self.submit()?;
@@ -2542,10 +2568,19 @@ where
         let QueuedFrame {
             mut prepared_frame,
             user_data,
+            properties,
         } = self.queued_frame.take().unwrap();
 
         let allow_partial_update = prepared_frame.kind == PreparedFrameKind::Partial;
-        let flip = if self.surface.commit_pending() {
+        let flip = if !properties.is_empty() {
+            self.surface.commit_with_properties(
+                prepared_frame
+                    .frame
+                    .build_planes(&self.surface, self.supports_fencing, false),
+                true,
+                &properties,
+            )
+        } else if self.surface.commit_pending() {
             prepared_frame
                 .frame
                 .commit(&self.surface, self.supports_fencing, allow_partial_update, true)
@@ -2629,6 +2664,12 @@ where
 
     /// Reset the underlying buffers
     pub fn reset_buffers(&mut self) {
+        self.swapchain.reset_buffers();
+    }
+
+    /// Force full composition and complete plane state for a color transition.
+    pub fn prepare_color_transition(&mut self) {
+        self.reset_pending = true;
         self.swapchain.reset_buffers();
     }
 
@@ -4442,4 +4483,24 @@ fn drm_compositor_is_send() {
 
     is_send::<DrmCompositor<GbmAllocator<DrmDeviceFd>, GbmFramebufferExporter<DrmDeviceFd>, (), DrmDeviceFd>>(
     );
+}
+
+#[cfg(test)]
+mod frame_color_prepared_tests {
+    use super::{PreparedFrameKind, frame_color_properties_fit};
+    #[test]
+    fn changed_color_rejects_empty_or_partially_retained_framebuffers() {
+        assert!(!frame_color_properties_fit(PreparedFrameKind::Full, true, true));
+        assert!(!frame_color_properties_fit(
+            PreparedFrameKind::Partial,
+            false,
+            true
+        ));
+        assert!(frame_color_properties_fit(PreparedFrameKind::Full, false, true));
+        assert!(frame_color_properties_fit(
+            PreparedFrameKind::Partial,
+            false,
+            false
+        ));
+    }
 }

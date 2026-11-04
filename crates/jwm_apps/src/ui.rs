@@ -2,17 +2,65 @@
 use cairo::{Context, LineCap, LineJoin};
 
 pub type Color = (f64, f64, f64);
-pub const CANVAS: Color = (0.012, 0.016, 0.020);
-pub const PANEL: Color = (0.067, 0.078, 0.090);
-pub const HOVER: Color = (0.141, 0.161, 0.188);
-pub const LINE: Color = (0.184, 0.192, 0.208);
-pub const TEXT: Color = (0.945, 0.941, 0.949);
-pub const MUTED: Color = (0.588, 0.573, 0.588);
-pub const ACCENT: Color = (0.533, 0.682, 0.957);
-pub const SELECT: Color = (0.204, 0.306, 0.463);
-pub const HEADER: f64 = 64.;
-pub const TOOLS: f64 = 44.;
-pub const STATUS: f64 = 32.;
+thread_local! {
+    static THEME: std::cell::RefCell<crate::theme::NativeTheme> = std::cell::RefCell::new(crate::theme::NativeTheme::default());
+}
+pub(crate) fn apply_theme(theme: crate::theme::NativeTheme) -> bool {
+    THEME.with(|current| {
+        if *current.borrow() == theme {
+            return false;
+        }
+        *current.borrow_mut() = theme;
+        true
+    })
+}
+pub fn canvas() -> Color {
+    THEME.with(|theme| theme.borrow().colors[0])
+}
+pub fn panel() -> Color {
+    THEME.with(|theme| theme.borrow().colors[1])
+}
+pub fn hover() -> Color {
+    THEME.with(|theme| theme.borrow().colors[2])
+}
+pub fn line() -> Color {
+    THEME.with(|theme| theme.borrow().colors[3])
+}
+pub fn text_color() -> Color {
+    THEME.with(|theme| theme.borrow().colors[4])
+}
+pub fn muted() -> Color {
+    THEME.with(|theme| theme.borrow().colors[5])
+}
+pub fn accent() -> Color {
+    THEME.with(|theme| theme.borrow().colors[6])
+}
+pub fn select() -> Color {
+    THEME.with(|theme| theme.borrow().colors[7])
+}
+pub fn density() -> f64 {
+    THEME.with(|theme| theme.borrow().density)
+}
+fn font_scale(font: &pango::FontDescription) -> f64 {
+    let points = f64::from(font.size()) / f64::from(pango::SCALE);
+    if points.is_finite() && (6.0..=48.0).contains(&points) {
+        points / 11.0
+    } else {
+        1.0
+    }
+}
+fn chrome_scale() -> f64 {
+    THEME.with(|theme| font_scale(&pango::FontDescription::from_string(&theme.borrow().font)))
+}
+pub fn header() -> f64 {
+    (64.0 * density()).max(32.0 * chrome_scale() + 16.0)
+}
+pub fn tools() -> f64 {
+    (44.0 * density()).max(28.0 * chrome_scale() + 8.0)
+}
+pub fn status() -> f64 {
+    (32.0 * density()).max(14.0 * chrome_scale() + 10.0)
+}
 #[derive(Clone, Copy, Default)]
 pub struct Rect {
     pub x: f64,
@@ -39,16 +87,20 @@ pub fn fill(cr: &Context, r: Rect, c: Color) {
 pub fn rounded(cr: &Context, r: Rect, c: Color) {
     color(cr, c);
     cr.new_sub_path();
+    let radius = THEME
+        .with(|theme| theme.borrow().radius * theme.borrow().density)
+        .min(r.w.max(0.0) / 2.)
+        .min(r.h.max(0.0) / 2.);
     for (x, y, a) in [
-        (r.x + r.w - 6., r.y + 6., -90.),
-        (r.x + r.w - 6., r.y + r.h - 6., 0.),
-        (r.x + 6., r.y + r.h - 6., 90.),
-        (r.x + 6., r.y + 6., 180.),
+        (r.x + r.w - radius, r.y + radius, -90.),
+        (r.x + r.w - radius, r.y + r.h - radius, 0.),
+        (r.x + radius, r.y + r.h - radius, 90.),
+        (r.x + radius, r.y + radius, 180.),
     ] {
         cr.arc(
             x,
             y,
-            6.,
+            radius,
             a * std::f64::consts::PI / 180.,
             (a + 90.) * std::f64::consts::PI / 180.,
         );
@@ -58,8 +110,11 @@ pub fn rounded(cr: &Context, r: Rect, c: Color) {
 }
 pub fn layout(cr: &Context, text: &str, size: f64, width: f64, wrap: bool) -> pango::Layout {
     let layout = pangocairo::functions::create_layout(cr);
-    let mut font = pango::FontDescription::from_string("Sans");
-    font.set_absolute_size(size * pango::SCALE as f64);
+    let mut font = THEME.with(|theme| pango::FontDescription::from_string(&theme.borrow().font));
+    // Component sizes are authored against the shared 11-point default.
+    // Retain their hierarchy while inheriting a user's large-text size.
+    let scale = font_scale(&font);
+    font.set_absolute_size(size * scale * pango::SCALE as f64);
     layout.set_font_description(Some(&font));
     layout.set_text(text);
     layout.set_width((width.max(1.) * pango::SCALE as f64) as i32);
@@ -103,7 +158,7 @@ pub(crate) enum Icon {
 
 pub fn icon(cr: &Context, kind: Icon, x: f64, y: f64) {
     let _ = cr.save();
-    color(cr, TEXT);
+    color(cr, text_color());
     cr.translate(x, y);
     cr.scale(0.8, 0.8);
     cr.set_line_width(1.5);

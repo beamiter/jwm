@@ -128,6 +128,8 @@ APT_BAR=(
 # Runtime helpers useful for nested testing / running a session.
 APT_RUNTIME=(
     xwayland xserver-xephyr
+    # jwm-display-preview requires the --json interface (wlr-randr>=0.5).
+    wlr-randr
     # Shared sidebars and brightness keys use brightnessctl. Ubuntu splits
     # its device permission rules into brightness-udev; install them explicitly
     # because this bootstrap disables apt recommendations.

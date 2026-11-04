@@ -100,10 +100,32 @@ fn main() -> Result<()> {
         return Ok(());
     }
     if std::env::args().any(|arg| arg == "--inspect-controls") {
-        let snapshot = full_snapshot()?;
+        let raw = ipc::request("get_desktop_shell", Value::Null)?;
+        let native_keyboard = raw
+            .pointer("/host/backend")
+            .and_then(Value::as_str)
+            .is_some_and(|backend| backend.starts_with("wayland"));
+        let snapshot: ShellSnapshot = serde_json::from_value(raw)?;
+        snapshot.validate().map_err(anyhow::Error::msg)?;
         let mut runtime = BarRuntime::new(BarConfig::load_default()?.model_config())?;
         runtime.tick();
         let sampled = runtime.snapshot();
+        let config = BarConfig::load_default()?;
+        let override_name = std::env::var("JWM_SHELL_THEME")
+            .ok()
+            .or_else(|| config.ui_theme.clone());
+        let theme = if override_name.as_deref() == Some("standalone") {
+            None
+        } else {
+            let args = override_name
+                .filter(|name| name != "inherit")
+                .map(|name| json!({"theme":name}))
+                .unwrap_or(Value::Null);
+            ipc::request("get_ui_theme", args)
+                .ok()
+                .as_ref()
+                .and_then(xbar_core::theme_inheritance::ThemeUpdate::parse)
+        };
         let mut rows = Vec::new();
         for output in &snapshot.outputs {
             let view = with_local_providers(output.snapshot.clone(), &sampled);
@@ -112,6 +134,12 @@ fn main() -> Result<()> {
                 snapshot: view,
                 config: Some(snapshot.config.as_edge_shell()),
                 visible: Some(output.visible),
+                tokens: theme.as_ref().map(|theme| theme.tokens),
+                font: theme.as_ref().and_then(|theme| theme.font.clone()),
+                agents: ipc::request("get_agent_summary", Value::Null)
+                    .ok()
+                    .as_ref()
+                    .and_then(xbar_core::agent_summary::AgentSummary::parse),
                 tasks: Some(
                     output
                         .tasks
@@ -138,7 +166,7 @@ fn main() -> Result<()> {
             ] {
                 rows.push(json!({"output":output.id,"output_identity":output.identity,"edge":edge,
                     "panel":xbar_core::edge_shell::panel_geometry(output.geometry,edge,true,snapshot.config.trigger_pixels),
-                    "controls":jwm_shell::edge_shell::inspect_controls(&state,edge)?}));
+                    "controls":jwm_shell::edge_shell::inspect_controls_with_keyboard(&state,edge,native_keyboard)?}));
             }
         }
         println!("{}", serde_json::to_string(&rows)?);
@@ -186,11 +214,38 @@ fn main() -> Result<()> {
     let mut last_tick = Instant::now() - Duration::from_secs(2);
     let mut last_heartbeat = Instant::now() - Duration::from_secs(2);
     let mut last_success = Instant::now();
+    let override_name = std::env::var("JWM_SHELL_THEME")
+        .ok()
+        .or_else(|| config.ui_theme.clone());
+    let standalone_theme = override_name.as_deref() == Some("standalone");
+    let theme_watcher = xbar_core::theme_inheritance::ThemeWatcher::start(override_name);
+    let agents_watcher = xbar_core::agent_summary::AgentWatcher::start();
+    let mut agents = None;
+    let mut semantic_tokens = None;
+    let mut semantic_font = None;
+    let font_override = (config.font != BarConfig::default().font).then(|| config.font.clone());
     while !STOP.load(Ordering::Acquire) {
         if supervisor_pid.is_some_and(|parent| unsafe { libc::getppid() } != parent) {
             break;
         }
         let invalid = invalidated.try_recv().is_ok();
+        if let Some(next) = agents_watcher.take() {
+            log::info!("shared agents: {}", next.label());
+            agents = Some(next);
+            last_tick = Instant::now() - Duration::from_secs(2);
+        }
+        if invalid {
+            agents_watcher.request_refresh();
+            theme_watcher.request_refresh();
+        }
+        if let Some(theme) = theme_watcher.take()
+            && (semantic_tokens != Some(theme.tokens) || semantic_font != theme.font)
+        {
+            log::info!("shared appearance: {}", theme.name);
+            semantic_tokens = Some(theme.tokens);
+            semantic_font = theme.font;
+            last_tick = Instant::now() - Duration::from_secs(2);
+        }
         if invalid || last_snapshot.elapsed() >= Duration::from_secs(1) {
             last_snapshot = Instant::now();
             match full_snapshot() {
@@ -223,6 +278,8 @@ fn main() -> Result<()> {
             break;
         }
         if last_tick.elapsed() >= Duration::from_secs(1) {
+            theme_watcher.request_refresh();
+            agents_watcher.request_refresh();
             let update = providers.tick();
             report_issues(&update);
             last_tick = Instant::now();
@@ -243,7 +300,10 @@ fn main() -> Result<()> {
                     outputs.remove(&output.id);
                 }
                 identities.insert(output.id, metadata);
-                let view = with_local_providers(output.snapshot.clone(), &sampled);
+                let mut view = with_local_providers(output.snapshot.clone(), &sampled);
+                if standalone_theme {
+                    view.theme = config.theme;
+                }
                 let tasks = output
                     .tasks
                     .iter()
@@ -266,6 +326,9 @@ fn main() -> Result<()> {
                     config: Some(snapshot.config.as_edge_shell()),
                     visible: Some(output.visible),
                     tasks: Some(tasks),
+                    tokens: semantic_tokens,
+                    font: font_override.clone().or_else(|| semantic_font.clone()),
+                    agents,
                 };
                 if let Some(host) = outputs.get_mut(&output.id) {
                     if !host.is_alive() {
@@ -592,7 +655,9 @@ fn dispatch(
             launch_or_picker("x-www-browser", &[])?;
             return Ok(());
         }
-        Action::CycleTasks | Action::HidePanel => return Ok(()),
+        Action::CycleTasks | Action::HidePanel | Action::KeyboardMode | Action::ToggleAgents => {
+            return Ok(());
+        }
         Action::Bound { .. } => bail!("nested action binding"),
     };
     if let Some(command) = wm_command(action, view) {

@@ -507,6 +507,7 @@ async fn run_on_with_eva(
     } else {
         worker.spawn_inner(open, headless)
     };
+    let _theme_subscription = super::theme::start(controller.clone());
     let mut previous = controller.snapshot();
     let mut previous_properties = player_properties(&previous);
     let mut ticker = tokio::time::interval(Duration::from_millis(150));

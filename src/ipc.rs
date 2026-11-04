@@ -367,6 +367,11 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "zoom_master",
     ],
     special_commands: &[
+        "register_agent_session",
+        "unregister_agent_session",
+        "activate_agent_session",
+        "agent_session_revealed",
+        "claim_agent_session_reveal",
         "assistant_control",
         "set_assistant_status",
         "set_assistant_wake_status",
@@ -404,6 +409,9 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "stop_recording",
     ],
     queries: &[
+        "get_agent_sessions",
+        "get_agent_summary",
+        "get_agent_session_requests",
         "get_execution_context",
         "get_companion_desktop_state",
         "get_execution_status",
@@ -443,6 +451,7 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "get_conf",
         "get_config",
         "get_config_status",
+        "get_ui_theme",
         "get_conn",
         "get_connectivity",
         "get_cp",
@@ -557,6 +566,8 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "get_xwayland_status",
     ],
     subscription_topics: &[
+        "agent/sessions",
+        "agent/activation",
         "assistant",
         "desktop_shell",
         "desktop_shell/state",

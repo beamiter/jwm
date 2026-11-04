@@ -105,8 +105,10 @@ producer images. This permits a low-resolution producer while bounding memory.
 DVR/1 exposes no window list, output identities, pointer coordinates or scale
 factor beyond the canvas's physical dimensions. Per-output positioning,
 independent per-monitor scale, damage rectangles and interaction are not v1
-capabilities. The JWM v1 adapter is X11-only; this protocol alone does not add a
-Wayland renderer.
+capabilities. JWM has X11 and native Wayland GLES full-canvas SDR consumers;
+the Wayland candidate is offscreen-shader-tested, with physical-output acceptance
+still pending. A transport or shader test alone does not establish actual
+presentation, per-output routing or HDR support.
 
 A changed canvas size invalidates old-generation frames immediately and closes
 the current connection within the worker's bounded I/O poll. Reconnection gets
@@ -146,3 +148,36 @@ lifecycle, malformed/truncated input, sequence rejection, latest-wins handoff,
 slow/idle producer deadlines, reconnect, canvas resize, cleanup ownership,
 start/stop and nonblocking render handoff. It requires permission to create
 local Unix sockets, but no display, GPU, credentials or external service.
+
+### Native Wayland selected-output endpoints
+
+`JWM_DESKTOP_VISUAL_OUTPUTS` optionally maps exact native output names to private
+socket paths, for example `{"DP-1":"/run/user/1000/jwm-desktop-visual/DP-1.sock"}`.
+The existing `JWM_DESKTOP_VISUAL_ENABLED=1` switch and full-canvas endpoint remain
+required. Each selected endpoint uses the unchanged v1 handshake and bounded
+RGBA8/sRGB payload contract; its advertised extent and destination rectangle are
+that output's portion of the compositor canvas. The endpoint path supplies the
+output identity, so a producer never supplies or guesses desktop coordinates.
+Up to four selected endpoints are active, with one latest frame per endpoint and
+the existing 32 MiB per-frame limit. Unplug, destination movement, resize, or
+configuration-path changes remove the old endpoint and its GPU texture. A fresh
+connection is required even for a same-size replug. X11 and nested Wayland retain
+the v1 full-canvas route; selected-output negotiation is native Wayland only.
+
+### Companion presentation evidence
+
+Companion retirement is separate from DVR ingress. Native Wayland attaches an
+immutable companion frame ticket to the exact queued DRM framebuffer. Only a
+matching timestamp-validated, non-ambiguous page-flip with returned queue data
+confirms it. GLX uses the SBC returned by the actual OML swap and a subsequent
+successful `glXGetSyncValuesOML` completed-SBC observation. A successful ordinary
+swap, GL upload, queued submission, watchdog cancellation, DPMS-off cleanup, or
+HDR property operation supplies no presentation evidence. EGL and nested routes
+without such a completion source advertise no retirement capability.
+
+Tickets retain their exact token, render-start time, and route generation.
+`Presented` requires a successful companion draw on an intersecting output.
+After a revoke, `Retired` waits for a body-free frame captured after that revoke
+on every active output in the same route generation. Topology/power changes and
+backend teardown invalidate old tickets. These are software/native-compositor
+observations; they do not claim physical-panel certification.

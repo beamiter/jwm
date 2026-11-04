@@ -328,6 +328,46 @@ pub(crate) struct UiPalette {
 }
 
 impl UiPalette {
+    pub(crate) fn effective_pad(&self) -> f32 {
+        self.pad * crate::config::CONFIG.load().ui_density()
+    }
+    pub(crate) fn effective_gap(&self) -> f32 {
+        self.gap * crate::config::CONFIG.load().ui_density()
+    }
+    /// One adapter shared by native applications, diagnostics, and future
+    /// frontends. Values come from the active authored palette, not its name.
+    pub(crate) fn semantic_tokens(&self) -> xbar_core::shell_palette::SemanticTokens {
+        self.semantic_tokens_with_opacity(crate::config::CONFIG.load().ui_surface_opacity())
+    }
+    fn semantic_tokens_with_opacity(
+        &self,
+        opacity: f32,
+    ) -> xbar_core::shell_palette::SemanticTokens {
+        let ink = |rgba: [u8; 4]| rgba.map(|channel| f32::from(channel) / 255.0);
+        let accent = self.panel_accent([0.08, 0.43, 0.94, 1.0]);
+        xbar_core::shell_palette::SemanticTokens {
+            surface: Self::faded(self.panel, opacity),
+            text: ink(self.item_ink),
+            muted: ink(self.hint_ink),
+            accent,
+            focus: accent,
+            warning: METER_WARN,
+            radius: self.panel_radius,
+            spacing: self.pad,
+            density: crate::config::CONFIG.load().ui_density(),
+            motion_ms: if crate::config::CONFIG.load().motion_enabled() {
+                crate::config::CONFIG
+                    .load()
+                    .animation_duration()
+                    .as_millis()
+                    .min(u128::from(u32::MAX)) as u32
+            } else {
+                0
+            },
+            glass_quality: if self.glass.is_some() { 2 } else { 0 },
+        }
+    }
+
     /// Menus opened from the default shell retain its accent. Alternate themes
     /// continue to use the configured window accent.
     pub(crate) fn panel_accent(&self, configured: [f32; 4]) -> [f32; 4] {
@@ -352,6 +392,7 @@ impl UiPalette {
         scene_linear: bool,
         glass_available: bool,
     ) -> [f32; 4] {
+        surface[3] *= crate::config::CONFIG.load().ui_surface_opacity();
         // Light surfaces get brighter in linear light, which already helps
         // their dark ink. Opaque surfaces need no additional coverage either.
         if !scene_linear || surface[3] >= 1.0 {
@@ -1568,5 +1609,21 @@ mod tests {
         let (_, red, green, blue) = pixel.components();
         assert_eq!((red, green, blue), (128, 128, 128));
         assert_eq!(pixel.alpha(), 255);
+    }
+}
+
+#[cfg(test)]
+mod surface_opacity_tests {
+    use super::*;
+    #[test]
+    fn surface_opacity_never_fades_text_or_focus_tokens() {
+        let palette = UiTheme::GlassDark.palette();
+        let full = palette.semantic_tokens_with_opacity(1.0);
+        let lighter = palette.semantic_tokens_with_opacity(0.85);
+        assert!(lighter.surface[3] < full.surface[3]);
+        assert_eq!(lighter.text, full.text);
+        assert_eq!(lighter.muted, full.muted);
+        assert_eq!(lighter.focus, full.focus);
+        assert_eq!(&lighter.surface[..3], &full.surface[..3]);
     }
 }

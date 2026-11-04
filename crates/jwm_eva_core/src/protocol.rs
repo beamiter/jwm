@@ -4,6 +4,9 @@ use sha2::{Digest, Sha256};
 
 pub const PROTOCOL_VERSION: u32 = 1;
 
+/// Additive per-operation capability; never infer it from guarded v1 alone.
+pub const DIRECTED_CLOSE_WINDOW_FEATURE: &str = "directed_close_window_v1";
+
 /// Additive assistant contract, independent from the guarded request envelope.
 /// Feature names version their semantics; later revisions may add features
 /// without changing the meaning of these existing names.
@@ -24,7 +27,12 @@ pub const ASSISTANT_WAKE_FEATURES: &[&str] =
     &["wake_source_identity_v1", "wake_onset_monitor_history_v1"];
 
 pub fn assistant_protocol() -> Value {
-    serde_json::json!({"revision":ASSISTANT_PROTOCOL_REVISION,"features":ASSISTANT_REQUIRED_FEATURES})
+    let features = ASSISTANT_REQUIRED_FEATURES
+        .iter()
+        .copied()
+        .chain(std::iter::once(DIRECTED_CLOSE_WINDOW_FEATURE))
+        .collect::<Vec<_>>();
+    serde_json::json!({"revision":ASSISTANT_PROTOCOL_REVISION,"features":features})
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -212,7 +220,7 @@ mod tests {
         current["assistant_protocol"]["features"]
             .as_array_mut()
             .unwrap()
-            .pop();
+            .retain(|feature| feature != "verified_task_progress_v1");
         assert_eq!(
             validate_assistant_protocol(&current),
             Err(AssistantProtocolError::MissingFeatures(vec![

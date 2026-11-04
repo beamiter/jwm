@@ -3769,6 +3769,184 @@ fn wayland_constructor_rolls_back_every_raw_gpu_name_on_failure() {
 }
 
 #[test]
+fn wayland_dvr_socket_upload_draw_disconnect_and_resize_are_one_bounded_lifecycle() {
+    use smithay::backend::renderer::gles::ffi;
+    use std::io::{Read, Write};
+    use std::os::unix::{fs::PermissionsExt, net::UnixStream};
+    use std::time::{Duration, Instant};
+    let Some(_headless) = HeadlessGl::new(GlApi::Gles3) else {
+        eprintln!("headless GLES unavailable - skipping DVR consumer lifecycle");
+        return;
+    };
+    let gl = smithay::backend::renderer::gles::ffi::Gles2::load_with(|symbol| {
+        egl::get_proc_address(symbol) as *const c_void
+    });
+    let directory = std::env::temp_dir().join(format!(
+        "jwm-wayland-dvr-{}-{}",
+        std::process::id(),
+        super::next_output_texture_generation()
+    ));
+    std::fs::create_dir(&directory).unwrap();
+    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let socket = directory.join("visual.sock");
+    let event_loop = calloop::EventLoop::<()>::try_new().unwrap();
+    unsafe {
+        let mut compositor = super::WaylandCompositor::new(&gl, 64, 48, false).unwrap();
+        compositor
+            .initialize_desktop_visual_at(&gl, socket.clone(), event_loop.get_signal())
+            .unwrap();
+        let mut producer = UnixStream::connect(&socket).unwrap();
+        producer
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut hello = [0u8; desktop_visual::HEADER_BYTES];
+        producer.read_exact(&mut hello).unwrap();
+        assert_eq!(
+            desktop_visual::Hello::parse(&hello).unwrap().output,
+            desktop_visual::OutputSize {
+                width: 64,
+                height: 48
+            }
+        );
+        let header = desktop_visual::Header {
+            width: 2,
+            height: 2,
+            stride: 8,
+            alpha: desktop_visual::AlphaMode::Opaque,
+            sequence: 1,
+            timestamp_ns: 0,
+        };
+        producer.write_all(&header.encode().unwrap()).unwrap();
+        producer.write_all(&[250u8, 30, 10, 0].repeat(4)).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            compositor.poll_desktop_visual(&gl);
+            if compositor.desktop_visual.as_ref().unwrap().visible() {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "complete DVR frame was never uploaded"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let rect = crate::backend::api::CompositorRect::new(0., 0., 64., 48.);
+        assert_eq!(
+            compositor.direct_scanout_block_reason(rect),
+            Some("desktop visual layer requires composition")
+        );
+        gl.BindFramebuffer(ffi::FRAMEBUFFER, compositor.output_fbo);
+        gl.Viewport(0, 0, 64, 48);
+        gl.ClearColor(0., 0., 1., 1.);
+        gl.Clear(ffi::COLOR_BUFFER_BIT);
+        compositor.render_desktop_visual(&gl, &ortho(64., 48.), false);
+        let pixels = read_fbo_frame(&gl, compositor.output_fbo, 64, 48);
+        assert!(
+            pixels
+                .chunks_exact(4)
+                .all(|pixel| pixel == [250, 30, 10, 255])
+        );
+        assert!(
+            !compositor.desktop_visual.as_ref().unwrap().pending(),
+            "static frame must not keep scheduling work"
+        );
+        let selected_socket = directory.join("DP-1.sock");
+        let configured =
+            std::collections::BTreeMap::from([("DP-1".to_string(), selected_socket.clone())]);
+        let layout = [("DP-1".to_string(), [32., 0., 32., 48.])];
+        compositor.configure_desktop_visual_outputs_at(&gl, &layout, &configured);
+        let mut selected = UnixStream::connect(&selected_socket).unwrap();
+        selected
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        selected.read_exact(&mut hello).unwrap();
+        assert_eq!(
+            desktop_visual::Hello::parse(&hello).unwrap().output,
+            desktop_visual::OutputSize {
+                width: 32,
+                height: 48
+            }
+        );
+        selected.write_all(&header.encode().unwrap()).unwrap();
+        selected.write_all(&[0u8, 255, 0, 255].repeat(4)).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            compositor.poll_desktop_visual(&gl);
+            gl.BindFramebuffer(ffi::FRAMEBUFFER, compositor.output_fbo);
+            compositor.render_desktop_visual(&gl, &ortho(64., 48.), false);
+            let pixels = read_fbo_frame(&gl, compositor.output_fbo, 64, 48);
+            if pixels[(24 * 64 + 48) * 4..][..4] == [0, 255, 0, 255] {
+                assert_eq!(&pixels[(24 * 64 + 16) * 4..][..4], &[250, 30, 10, 255]);
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "selected output frame did not draw in its own rectangle"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        compositor.configure_desktop_visual_outputs_at(&gl, &[], &configured);
+        assert!(
+            !selected_socket.exists(),
+            "unplug withdraws the exact selected endpoint"
+        );
+        // Same-size replug is a fresh socket/connection and cannot retain pixels.
+        compositor.configure_desktop_visual_outputs_at(&gl, &layout, &configured);
+        let mut replugged = UnixStream::connect(&selected_socket).unwrap();
+        replugged
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        replugged.read_exact(&mut hello).unwrap();
+        assert_eq!(
+            desktop_visual::Hello::parse(&hello).unwrap().output,
+            desktop_visual::OutputSize {
+                width: 32,
+                height: 48
+            }
+        );
+        drop(selected);
+        drop(replugged);
+        compositor.configure_desktop_visual_outputs_at(&gl, &[], &configured);
+        compositor.resize(&gl, 32, 24).unwrap();
+        compositor.poll_desktop_visual(&gl);
+        assert!(
+            !compositor.desktop_visual.as_ref().unwrap().visible(),
+            "old canvas cannot survive resize"
+        );
+        drop(producer);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            compositor.poll_desktop_visual(&gl);
+            if !compositor.desktop_visual.as_ref().unwrap().pending() {
+                break;
+            }
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let mut producer = UnixStream::connect(&socket).unwrap();
+        producer
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        producer.read_exact(&mut hello).unwrap();
+        assert_eq!(
+            desktop_visual::Hello::parse(&hello).unwrap().output,
+            desktop_visual::OutputSize {
+                width: 32,
+                height: 24
+            }
+        );
+        drop(producer);
+        compositor
+            .release_gpu_resources(&gl, super::CompositorOutputTextureOwnership::RawCompositor);
+        assert!(
+            !socket.exists(),
+            "DVR teardown must remove its owned endpoint"
+        );
+    }
+    std::fs::remove_dir(directory).unwrap();
+}
+
+#[test]
 fn wayland_resize_failure_keeps_the_complete_old_target_chain() {
     let Some(_headless) = HeadlessGl::new(GlApi::Gles3) else {
         eprintln!("headless GL unavailable - skipping transactional resize test");
@@ -3788,6 +3966,10 @@ fn wayland_resize_failure_keeps_the_complete_old_target_chain() {
             "headless GLES3 must provide the requested FP16 scene target"
         );
 
+        let (capture_fbo, capture_texture) = super::create_fbo_texture(&gl, 64, 48);
+        compositor.capture_view_fbo = capture_fbo;
+        compositor.capture_view_texture = capture_texture;
+        compositor.capture_view_size = (64, 48);
         let old_size = compositor.screen_size();
         let old_generation = compositor.output_texture_generation();
         let old_framebuffers = std::iter::once(compositor.output_fbo)
@@ -3796,6 +3978,7 @@ fn wayland_resize_failure_keeps_the_complete_old_target_chain() {
             .chain(compositor.blur_fbos.iter().map(|level| level.fbo))
             .chain(std::iter::once(compositor.postprocess_fbo))
             .chain(std::iter::once(compositor.transition_fbo))
+            .chain(std::iter::once(compositor.capture_view_fbo))
             .collect::<Vec<_>>();
         let old_textures = std::iter::once(compositor.output_texture)
             .chain(std::iter::once(compositor.linear_texture))
@@ -3803,6 +3986,7 @@ fn wayland_resize_failure_keeps_the_complete_old_target_chain() {
             .chain(compositor.blur_fbos.iter().map(|level| level.texture))
             .chain(std::iter::once(compositor.postprocess_texture))
             .chain(std::iter::once(compositor.transition_texture))
+            .chain(std::iter::once(compositor.capture_view_texture))
             .collect::<Vec<_>>();
 
         // Fail only after several replacement pairs exist. The allocation
@@ -3827,6 +4011,7 @@ fn wayland_resize_failure_keeps_the_complete_old_target_chain() {
                 .chain(compositor.blur_fbos.iter().map(|level| level.fbo))
                 .chain(std::iter::once(compositor.postprocess_fbo))
                 .chain(std::iter::once(compositor.transition_fbo))
+                .chain(std::iter::once(compositor.capture_view_fbo))
                 .collect::<Vec<_>>()
         );
         assert_eq!(
@@ -3837,6 +4022,7 @@ fn wayland_resize_failure_keeps_the_complete_old_target_chain() {
                 .chain(compositor.blur_fbos.iter().map(|level| level.texture))
                 .chain(std::iter::once(compositor.postprocess_texture))
                 .chain(std::iter::once(compositor.transition_texture))
+                .chain(std::iter::once(compositor.capture_view_texture))
                 .collect::<Vec<_>>()
         );
         for &framebuffer in &old_framebuffers {
@@ -3855,10 +4041,53 @@ fn wayland_resize_failure_keeps_the_complete_old_target_chain() {
         assert!(error.contains("GL_MAX_TEXTURE_SIZE"));
         assert_eq!(compositor.screen_size(), old_size);
 
+        // Preparation spans the KMS transaction without publishing dimensions
+        // or losing the currently usable chain. Failed modesets cancel only
+        // the candidate, including repeated prepare/cancel cycles.
+        for attempt in 0..100 {
+            compositor
+                .prepare_resize(&gl, 80 + attempt % 2, 60)
+                .unwrap();
+            assert_eq!(compositor.screen_size(), old_size);
+            assert_eq!(compositor.output_texture_generation(), old_generation);
+            let candidate = compositor.prepared_resize.as_ref().unwrap();
+            let candidate_texture = candidate.targets.output_texture;
+            let candidate_fbo = candidate.targets.output_fbo;
+            assert_eq!(gl.IsTexture(candidate_texture), 1);
+            assert_eq!(gl.IsFramebuffer(candidate_fbo), 1);
+            compositor.discard_prepared_resize(&gl);
+            assert!(compositor.prepared_resize.is_none());
+            assert_eq!(gl.IsTexture(candidate_texture), 0);
+            assert_eq!(gl.IsFramebuffer(candidate_fbo), 0);
+            for &texture in &old_textures {
+                assert_eq!(gl.IsTexture(texture), 1);
+            }
+        }
+        compositor.prepare_resize(&gl, 80, 60).unwrap();
+        // Simulate another publication while the candidate was staged. A stale
+        // generation cannot replace live targets even when numeric GL names
+        // might eventually be recycled.
+        compositor
+            .prepared_resize
+            .as_mut()
+            .unwrap()
+            .source_generation = old_generation.wrapping_add(1);
+        let stale = compositor
+            .prepared_resize
+            .as_ref()
+            .unwrap()
+            .targets
+            .output_texture;
+        assert!(compositor.commit_prepared_resize(&gl).is_err());
+        assert_eq!(compositor.screen_size(), old_size);
+        assert_eq!(gl.IsTexture(stale), 0);
+
         compositor
             .resize(&gl, 80, 60)
             .expect("complete replacement chain should resize transactionally");
         assert_eq!(compositor.screen_size(), (80, 60));
+        assert_eq!(compositor.capture_view_size, (80, 60));
+        assert_eq!(gl.IsTexture(compositor.capture_view_texture), 1);
         assert_ne!(compositor.output_texture_generation(), old_generation);
         assert_ne!(compositor.linear_fbo, 0);
         for &framebuffer in &old_framebuffers {
@@ -3876,7 +4105,7 @@ fn wayland_resize_failure_keeps_the_complete_old_target_chain() {
 }
 
 #[test]
-fn wayland_scene_linear_delivery_blocks_scanout_and_annotation_only_tail() {
+fn wayland_scene_linear_delivery_blocks_scanout_but_accepts_annotation_tail() {
     let Some(_headless) = HeadlessGl::new(GlApi::Gles3) else {
         eprintln!("headless GL unavailable - skipping scene-linear safety test");
         return;
@@ -3907,8 +4136,8 @@ fn wayland_scene_linear_delivery_blocks_scanout_and_annotation_only_tail() {
         compositor.annotation_quads.clear();
         compositor.annotation_labels.clear();
         assert!(
-            !compositor.linear_tail_status().linear_tail_safe(),
-            "an annotation-only late pass must select the encoded fallback"
+            compositor.linear_tail_status().linear_tail_safe(),
+            "annotation-only late passes use common-linear delivery"
         );
 
         compositor.scene_linear_requested = saved_requested;
@@ -9630,7 +9859,7 @@ fn wayland_recording_veil_blends_after_the_capture_disabled_blending() {
         // What the recording capture leaves behind.
         gl.Disable(ffi::BLEND);
         let projection = super::ortho(0.0, W as f32, H as f32, 0.0);
-        compositor.render_recording_region_overlay(&gl, &projection);
+        compositor.render_recording_region_overlay(&gl, &projection, false);
 
         let frame = read_fbo_frame(&gl, compositor.output_fbo, W, H);
         let outside = frame_pixel(&frame, W as usize, H as usize, 2, 2);
@@ -11607,5 +11836,162 @@ fn eva_confirmation_eight_targets_have_visible_rows_and_clear_on_cancel() {
             compositor
                 .release_gpu_resources(&gl, super::CompositorOutputTextureOwnership::RawCompositor)
         );
+    }
+}
+
+/// Editor chrome shares the same linear scene as clients. Privacy cues take a
+/// second delivery from scratch storage, after the canonical capture was made.
+#[test]
+fn wayland_hdr_editor_chrome_and_local_cues_preserve_capture_pixels() {
+    let Some(_headless) = HeadlessGl::new(GlApi::Gles3) else {
+        return;
+    };
+    use crate::backend::compositor_common::{
+        annotation_overlay::{AnnotationLabel, AnnotationQuad},
+        screenshot_toolbar::{ScreenshotToolbar, ToolbarButton},
+    };
+    use crate::backend::wayland_udev::color_pipeline::{
+        IDENTITY_CTM, OutputColorRegion, OutputToneMapPlan, TransferKind,
+    };
+    use smithay::backend::renderer::gles::ffi;
+    let gl = ffi::Gles2::load_with(|symbol| egl::get_proc_address(symbol) as *const c_void);
+    const W: i32 = 320;
+    const H: i32 = 200;
+    unsafe {
+        for hardware in [false, true] {
+            let mut c = super::WaylandCompositor::new(&gl, W as u32, H as u32, false).unwrap();
+            c.scene_linear_requested = true;
+            c.sync_scene_linear_target(&gl);
+            let tex =
+                create_element_texture(&gl, W, H, &[64u8, 64, 64, 255].repeat((W * H) as usize));
+            insert_opaque_test_window(&mut c, 1, tex, W as u32, H as u32);
+            let scene = [(1u64, 0, 0, W as u32, H as u32)];
+            let region = OutputColorRegion {
+                rect: [0, 0, W, H],
+                output_tf: TransferKind::Srgb,
+                working_to_output_row_major: IDENTITY_CTM,
+                tone_map: OutputToneMapPlan::IDENTITY,
+            };
+            let render = |c: &mut super::WaylandCompositor| {
+                c.force_full_redraw();
+                assert!(c.render_frame(
+                    &gl,
+                    &scene,
+                    Some(1),
+                    true,
+                    hardware,
+                    hardware,
+                    if hardware {
+                        None
+                    } else {
+                        Some(std::slice::from_ref(&region))
+                    },
+                    true
+                ));
+                let capture = c.capture_readback_fbo().expect("canonical capture exists");
+                (
+                    read_fbo_frame(&gl, c.output_fbo, W, H),
+                    read_fbo_frame(&gl, capture, W, H),
+                )
+            };
+            let (_, base_capture) = render(&mut c);
+            c.annotation_active = true;
+            c.annotation_add_quad(AnnotationQuad {
+                x: 16.0,
+                y: 16.0,
+                w: 32.0,
+                h: 32.0,
+                radius: 0.0,
+                color: [0.5, 0.5, 0.5, 1.0],
+            });
+            c.annotation_add_text(AnnotationLabel {
+                x: 70.0,
+                y: 20.0,
+                size: 22.0,
+                color: [1.0, 1.0, 1.0, 1.0],
+                text: "HDR text".into(),
+                anchor_center: false,
+            });
+            c.annotation_strokes.push(super::AnnotationStroke {
+                points: vec![(18.0, 70.0), (48.0, 70.0)],
+                color: [0.5, 0.5, 0.5, 1.0],
+                width: 3.0,
+            });
+            c.set_screenshot_toolbar(Some(ScreenshotToolbar {
+                bar: [10.0, 130.0, 220.0, 44.0],
+                button_size: 32.0,
+                buttons: vec![ToolbarButton::label("Save HDR").available(true)],
+                hover_ease: Default::default(),
+            }));
+            c.screenshot_toolbar_appear
+                .advance(std::time::Instant::now(), true, false);
+            assert!(c.linear_tail_status().linear_tail_safe());
+            let (scanout, editor_capture) = render(&mut c);
+            let shape = frame_pixel(&editor_capture, W as usize, H as usize, 30, 30);
+            assert!(
+                (shape[0] as i32 - 128).abs() <= 2,
+                "hardware={hardware}: annotation shape {shape:?}"
+            );
+            let output_shape = frame_pixel(&scanout, W as usize, H as usize, 30, 30);
+            let expected = if hardware { 55 } else { 128 };
+            assert!(
+                (output_shape[0] as i32 - expected).abs() <= 2,
+                "hardware={hardware}: output shape {output_shape:?}"
+            );
+            let changed = |x0: usize, y0: usize, x1: usize, y1: usize| {
+                (y0..y1)
+                    .flat_map(|y| (x0..x1).map(move |x| (x, y)))
+                    .filter(|&(x, y)| {
+                        frame_pixel(&editor_capture, W as usize, H as usize, x, y)
+                            != frame_pixel(&base_capture, W as usize, H as usize, x, y)
+                    })
+                    .count()
+            };
+            assert!(
+                changed(70, 20, 200, 55) > 40,
+                "annotation glyphs were absent"
+            );
+            assert!(changed(10, 130, 230, 174) > 300, "toolbar was absent");
+            assert!(changed(18, 68, 49, 72) > 10, "annotation stroke was absent");
+            c.recording_region_overlay = Some((80, 40, 160, 80));
+            let (with_cue, cue_capture) = render(&mut c);
+            assert!(
+                cue_capture == editor_capture,
+                "local-only veil leaked into canonical capture (hardware={hardware}); {} differing bytes",
+                cue_capture
+                    .iter()
+                    .zip(&editor_capture)
+                    .filter(|(a, b)| a != b)
+                    .count()
+            );
+            assert_ne!(with_cue, scanout, "local-only veil absent from scanout");
+            // The persistent linear scene stays clean for a subsequent partial
+            // redraw; scratch contents must never become the capture source.
+            gl.BindFramebuffer(ffi::FRAMEBUFFER, c.linear_fbo);
+            let mut pixel = [0.0f32; 4];
+            gl.ReadPixels(
+                30,
+                H - 31,
+                1,
+                1,
+                ffi::RGBA,
+                ffi::FLOAT,
+                pixel.as_mut_ptr().cast(),
+            );
+            assert!(
+                (pixel[0] - 0.214).abs() < 0.005,
+                "local cue contaminated persistent scene: {pixel:?}"
+            );
+            c.recording_region_overlay = None;
+            let (_, after_capture) = render(&mut c);
+            assert!(
+                after_capture == editor_capture,
+                "capture changed after cue withdrawal"
+            );
+            assert!(c.release_gpu_resources(
+                &gl,
+                super::CompositorOutputTextureOwnership::RawCompositor
+            ));
+        }
     }
 }

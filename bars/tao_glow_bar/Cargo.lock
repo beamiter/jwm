@@ -3382,15 +3382,18 @@ dependencies = [
  "chrono",
  "flexi_logger",
  "image",
+ "jwm_ipc_transport",
  "libc",
  "log",
  "pango 0.22.9",
  "pango-sys 0.22.9",
  "pangocairo",
  "serde",
+ "serde_json",
  "shared_structures",
  "sysinfo",
  "toml 1.1.8+spec-1.1.0",
+ "x11rb 0.14.0",
 ]
 
 [[package]]

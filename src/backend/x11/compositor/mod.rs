@@ -315,7 +315,7 @@ impl<T> CompositorConnection for T where
 #[derive(PartialEq)]
 pub(crate) struct TagsGridLabelKey {
     /// `(tag_index, occupied)` for every cell, in grid order.
-    cells: Vec<(usize, bool)>,
+    cells: Vec<(usize, Option<i32>, bool)>,
     font: String,
     /// Pixel size as bits, so a degenerate (NaN) size still compares equal to
     /// itself instead of missing the cache on every single frame.
@@ -535,6 +535,11 @@ where
     toast_button_hover: Option<(u64, usize)>,
     osd_slot: crate::backend::compositor_common::osd::OsdSlot,
     eva_overlay: crate::backend::compositor_common::eva_overlay::EvaOverlayState,
+    companion_pending_presentation: Option<(
+        i64,
+        crate::backend::compositor_common::companion_scene::FrameEvidence,
+    )>,
+    companion_drawn_this_frame: bool,
     companion_node:
         Option<std::sync::Arc<crate::backend::compositor_common::companion_scene::RasterNode>>,
     companion_texture: Option<(u64, glow::Texture)>,
@@ -1212,6 +1217,7 @@ unsafe impl<C: CompositorConnection> Send for Compositor<C> {}
 
 impl<C: CompositorConnection> Drop for Compositor<C> {
     fn drop(&mut self) {
+        crate::backend::compositor_common::companion_scene::presentation_route(Vec::new(), false);
         self.frame_sync.take();
         if let Some(layer) = self.desktop_visual.take() {
             layer.destroy(&self.gl);

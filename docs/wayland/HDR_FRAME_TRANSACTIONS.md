@@ -1,0 +1,19 @@
+# Frame-associated output color transitions
+
+JWM maintains a narrow Smithay extension for native DRM color transitions:
+
+* `FrameProperty` permits only the owning CRTC's DEGAMMA_LUT, CTM and GAMMA_LUT, and the owning connectors' Colorspace and HDR_OUTPUT_METADATA. Plane framebuffer/routing and modeset properties remain Smithay-owned.
+* `DrmOutput::prepare_color_transition` forces a full repaint before rendering pixels in a new output domain. `queue_frame_with_properties` rejects nonempty properties on partial or empty frames.
+* The property vector belongs to the specific queued framebuffer. Smithay builds one complete atomic request containing both FB_ID and these color properties, tests a clone, then submits the original. Test or real submission failure never publishes the new state or transfers old mode-blob ownership. Later frames cannot inherit the failed vector.
+* JWM stages target handles and a generation without changing current scanout or the public output image description. An immutable generation/HDR ticket accompanies the framebuffer. Each exact queued framebuffer's accepted, timestamped, unambiguous vblank publishes its observed HDR state and notifies color-management clients, even when a newer desired generation was staged while that framebuffer was pending. Desired state never rolls back to an older observation. Staging preserves the previous confirmed presentation and cannot make a queued ticket ambiguous; hardware mutation, cancellation and watchdog uncertainty keep their fail-closed rules. Policy/planned route fields remain plans; presentation fields remain observations.
+* Replaced blob IDs stay owned until the newest desired generation presents. An accepted older framebuffer updates observed state but leaves the newer target retry/full repaint armed and retains all replaced IDs. JWM allows only one pending framebuffer per output, so that receipt also retires older frame references. Cancellation, missing timestamp and queue failure retain the IDs. The total current plus retired plus newly allocated IDs is capped at 64 per output; reaching the budget rejects new allocations while an allocation-free neutral clear remains possible. Teardown releases retained IDs after resetting hardware state.
+* Stable output generations submit an empty property vector and retain Smithay's ordinary page-flip path. Color transitions may require a blocking modeset; this is separate from asynchronous/tearing flips, which remain unsupported.
+* Gamma-control takeover waits for the frame-associated CTM/LUT teardown to present before writing its client ramp. Subsequent frames leave that client-owned gamma stage alone.
+
+Annotations and the screenshot toolbar draw into the common-linear scene before final delivery and canonical sRGB capture. Recording region, REC/MIC and capture-status cues draw after capture into FP16 scratch storage, followed by local output delivery. The persistent linear scene is restored so a later partial capture cannot inherit a previous local-only cue. Lock/editor visibility rules are retained.
+
+## Software validation
+
+`cargo test --manifest-path vendor/smithay/Cargo.toml --lib --no-default-features --features backend_drm frame_color_request_tests` uses the production atomic request executor with a recorder and injected test/real failures.
+
+JWM's `frame_color_transaction_tests` cover publication ordering, stalled-presentation resource bounds, and staging/queue contracts. `wayland_hdr_editor_chrome_and_local_cues_preserve_capture_pixels` renders actual GLES pixels for software output-region conversion and hardware-OETF preparation; it checks annotation shapes/strokes/text, toolbar, canonical capture exclusion, and clean persistent FP16 storage. These checks do not certify physical HDR displays or kernel driver acceptance.

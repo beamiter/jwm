@@ -1032,10 +1032,11 @@ pub enum ShellRoute {
     Calendar,
     Wallpaper,
     Theme,
+    AgentSessions,
 }
 
 impl ShellRoute {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::Hub,
         Self::Applications,
         Self::Notifications,
@@ -1043,6 +1044,7 @@ impl ShellRoute {
         Self::Calendar,
         Self::Wallpaper,
         Self::Theme,
+        Self::AgentSessions,
     ];
 
     /// Wire code shared with the window manager. Kept explicit rather than
@@ -1058,6 +1060,7 @@ impl ShellRoute {
             Self::Calendar => 4,
             Self::Wallpaper => 5,
             Self::Theme => 6,
+            Self::AgentSessions => 7,
         }
     }
 
@@ -1071,6 +1074,7 @@ impl ShellRoute {
             4 => Some(Self::Calendar),
             5 => Some(Self::Wallpaper),
             6 => Some(Self::Theme),
+            7 => Some(Self::AgentSessions),
             _ => None,
         }
     }
@@ -1086,6 +1090,7 @@ impl ShellRoute {
             Self::Calendar => "calendar",
             Self::Wallpaper => "wallpaper",
             Self::Theme => "theme",
+            Self::AgentSessions => "agent_sessions",
         }
     }
 
@@ -1105,6 +1110,7 @@ impl ShellRoute {
             "date" | "agenda" => Some(Self::Calendar),
             "background" | "wallpapers" => Some(Self::Wallpaper),
             "ui-theme" | "ui_theme" | "appearance" => Some(Self::Theme),
+            "agents" | "sessions" | "agent-sessions" => Some(Self::AgentSessions),
             _ => None,
         }
     }
@@ -1120,6 +1126,7 @@ impl ShellRoute {
             Self::Calendar => "Calendar",
             Self::Wallpaper => "Wallpaper",
             Self::Theme => "Theme",
+            Self::AgentSessions => "Agent sessions",
         }
     }
 
@@ -1134,20 +1141,22 @@ impl ShellRoute {
             Self::Clipboard => Self::Calendar,
             Self::Calendar => Self::Wallpaper,
             Self::Wallpaper => Self::Theme,
-            Self::Theme => Self::Hub,
+            Self::Theme => Self::AgentSessions,
+            Self::AgentSessions => Self::Hub,
         }
     }
 
     #[must_use]
     pub const fn previous(self) -> Self {
         match self {
-            Self::Hub => Self::Theme,
+            Self::Hub => Self::AgentSessions,
             Self::Applications => Self::Hub,
             Self::Notifications => Self::Applications,
             Self::Clipboard => Self::Notifications,
             Self::Calendar => Self::Clipboard,
             Self::Wallpaper => Self::Calendar,
             Self::Theme => Self::Wallpaper,
+            Self::AgentSessions => Self::Theme,
         }
     }
 }
@@ -2300,10 +2309,11 @@ mod tests {
         // rather than a bar that opens the wrong page.
         assert_eq!(
             ShellRoute::ALL.map(ShellRoute::code),
-            [0, 1, 2, 3, 4, 5, 6],
+            [0, 1, 2, 3, 4, 5, 6, 7],
             "wire codes must not move"
         );
-        assert_eq!(ShellRoute::from_code(7), None);
+        assert_eq!(ShellRoute::from_code(8), None);
+        assert_eq!(ShellRoute::from_code(7), Some(ShellRoute::AgentSessions));
         assert_eq!(ShellRoute::from_code(6), Some(ShellRoute::Theme));
         assert_eq!(ShellRoute::default(), ShellRoute::Hub);
     }

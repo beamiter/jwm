@@ -459,7 +459,7 @@ fn tags_grid_label_key(
     TagsGridLabelKey {
         cells: cells
             .iter()
-            .map(|cell| (cell.tag_index, cell.occupied))
+            .map(|cell| (cell.tag_index, cell.output_number, cell.occupied))
             .collect(),
         font: font.to_string(),
         size_bits: size.to_bits(),
@@ -2572,7 +2572,7 @@ impl<C: CompositorConnection> Compositor<C> {
             } else {
                 ui.hint_ink
             };
-            let text = format!("{}", content.tag_index + 1);
+            let text = content.display_label();
             if let Some((tex, w, h)) = self.rasterize_toast_text(&text, description, size, color) {
                 labels.push((index, tex, w, h));
             }
@@ -2926,6 +2926,9 @@ impl<C: CompositorConnection> Compositor<C> {
         let Some(overlay) = self.system_ui.take() else {
             return;
         };
+        let trace_start = log::log_enabled!(target:"ui_frame_trace",log::Level::Debug)
+            .then(std::time::Instant::now);
+        log::debug!(target:"ui_frame_trace","draw_begin frame={} theme={} dirty={} pending={} size={:?}",self.frame_stats.frame_count,overlay.title.contains("THEME"),self.sysui_text_dirty,self.needs_render,self.system_ui_island.size());
         self.system_ui_hit_geometry = None;
         self.update_system_ui_textures(&overlay);
         let viewport = overlay.effective_viewport(self.screen_w as i32, self.screen_h as i32);
@@ -2936,6 +2939,7 @@ impl<C: CompositorConnection> Compositor<C> {
         } else {
             self.render_system_ui_panel(proj, &overlay, viewport);
         }
+        log::debug!(target:"ui_frame_trace","draw_end frame={} theme={} dirty={} pending={} size={:?} cpu_ms={}",self.frame_stats.frame_count,overlay.title.contains("THEME"),self.sysui_text_dirty,self.needs_render,self.system_ui_island.size(),trace_start.map_or(0,|start|start.elapsed().as_millis()));
         self.system_ui = Some(overlay);
     }
 
@@ -4043,6 +4047,7 @@ impl<C: CompositorConnection> Compositor<C> {
                 .uniform_4_f32(self.hud_text_uniforms.rect.as_ref(), x, y, w, h);
             self.gl.bind_texture(glow::TEXTURE_2D, Some(tex));
             self.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+            self.companion_drawn_this_frame = self.gl.get_error() == glow::NO_ERROR;
             self.gl.bind_vertex_array(None);
             self.gl.use_program(None);
         }
@@ -5352,6 +5357,28 @@ impl<C: CompositorConnection> Compositor<C> {
         scene: &[(u32, i32, i32, u32, u32)],
         focused: Option<u32>,
     ) -> bool {
+        let completed = self
+            .companion_pending_presentation
+            .as_ref()
+            .is_some_and(|(target, _)| {
+                self.oml
+                    .as_ref()
+                    .is_some_and(|oml| oml.swap_completed(*target))
+            });
+        if completed {
+            if let Some((serial, ticket)) = self.companion_pending_presentation.take() {
+                crate::backend::compositor_common::companion_scene::confirm_frame_evidence(
+                    "x11-root",
+                    ticket,
+                    serial as u64,
+                );
+            }
+        }
+        self.companion_drawn_this_frame = false;
+        let mut companion_frame_evidence =
+            crate::backend::compositor_common::companion_scene::FrameEvidence::capture(
+                self.companion_node.as_ref(),
+            );
         let bar_wallpaper_probe = crate::backend::compositor_common::bar_wallpaper::begin_frame();
         let bench_frame_start = std::time::Instant::now();
 
@@ -8998,22 +9025,22 @@ impl<C: CompositorConnection> Compositor<C> {
         // Swap the selected platform surface. EGL receives the original damage
         // rectangles converted to its bottom-left coordinate convention.
         let swap_damage = (!swap_damage_rects.is_empty()).then_some(swap_damage_rects.as_slice());
-        // OML remains a GLX-only pacing optimization; EGL/GLES uses
-        // eglSwapInterval(1) or X Present pacing.
-        let swap_result = match self.vsync_method {
-            VsyncMethod::OmlSyncControl => {
-                if self
-                    .oml
-                    .as_ref()
-                    .and_then(|oml| oml.swap_buffers_msc(0))
-                    .is_some()
-                {
-                    Ok(())
-                } else {
-                    self.graphics.swap_buffers(swap_damage)
-                }
-            }
-            VsyncMethod::Present | VsyncMethod::Global => self.graphics.swap_buffers(swap_damage),
+        // GLX OML also supplies exact swap identities for the companion
+        // scene when Present/global pacing was selected. EGL and a failed
+        // OML call retain the ordinary swap, which provides no native ticket.
+        let oml_submission = if matches!(self.vsync_method, VsyncMethod::OmlSyncControl)
+            || crate::backend::compositor_common::companion_scene::enabled()
+        {
+            self.oml.as_ref().and_then(|oml| oml.swap_buffers_msc(0))
+        } else {
+            None
+        };
+        let mut companion_swap_serial = None;
+        let swap_result = if let Some(serial) = oml_submission {
+            companion_swap_serial = Some(serial);
+            Ok(())
+        } else {
+            self.graphics.swap_buffers(swap_damage)
         };
         self.scratch_swap_damage = swap_damage_rects;
         if let Err(error) = swap_result {
@@ -9029,6 +9056,12 @@ impl<C: CompositorConnection> Compositor<C> {
             self.context_current = false;
             self.needs_render = true;
             return false;
+        }
+        if let Some(serial) = companion_swap_serial.filter(|serial| *serial > 0) {
+            companion_frame_evidence.body_drawn = self.companion_drawn_this_frame;
+            if self.companion_pending_presentation.is_none() {
+                self.companion_pending_presentation = Some((serial, companion_frame_evidence));
+            }
         }
         let sync_swapped = if sync_drawn == 0 {
             0
@@ -9265,6 +9298,7 @@ mod tests {
     fn tags_cell(tag_index: usize, occupied: bool) -> crate::backend::api::TagsGridCell {
         crate::backend::api::TagsGridCell {
             tag_index,
+            output_number: None,
             windows: Vec::new(),
             occupied,
             urgent: false,

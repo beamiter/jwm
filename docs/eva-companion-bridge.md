@@ -156,9 +156,15 @@ previous possible residency in the durable journal is not cleared by this flag,
 by heartbeat expiry, or by JWM registration.
 
 The one compositor host negotiates an initial grant only from the coordinator's
-clean residence state. Native retirement capability remains **None**: this code
-never calls a submitted GL draw, status heartbeat or window callback a presented
-retirement fence. After an uncertain revoke/disconnect, strict transfer remains
+clean residence state. Native retirement capability is negotiated from the
+active backend. Native Wayland requires a successfully probed
+`DRM_CAP_TIMESTAMP_MONOTONIC`, a live powered output and an installed compositor.
+Its exact queued-frame ticket is confirmed only by a matching, unambiguous
+monotonic page-flip event. GLX requires a successful OML counter probe and confirms
+the actual returned swap SBC with a later completed-SBC observation. EGL and
+nested backends without a native completion source retain **None**. A GL draw,
+ordinary swap, status heartbeat, DPMS cleanup or submitted framebuffer is never
+presentation proof. After an uncertain revoke/disconnect, strict transfer remains
 blocked. In compositor-only mode Hidden temporarily suppresses the same
 already-authorized node; Recall may reveal that exact token, never invent a new
 grant from a snapshot. Restart/disconnect still blocks uncertain ownership.
@@ -171,8 +177,11 @@ raster preparation and IPC run on the worker; the render path only uploads a
 changed texture and draws one node. Static/hidden frames do not schedule repeated
 body redraws. Rendering is click-through and cannot grab keyboard focus.
 
-Current safe placement is an **exposed desktop corner on the selected monitor**,
-using live work-area geometry and rejecting every overlapping client rectangle.
+Current safe placement uses a **registered terminal-window edge** when a unique
+live provider registration maps to the native window. Stale, conflicting or
+recycled associations supply no anchor. Without a verified association it uses
+an exposed desktop corner on the selected monitor, rejecting every overlapping
+client rectangle. Neither path guesses a window identity from its title or PID.
 It hides for full-screen clients, modal system UI/lock, unavailable outputs,
 insufficient space, coordinator loss and changed target/workspace. Old pixels
 are explicitly damaged on node replacement/removal. A visible node requires
@@ -185,20 +194,41 @@ capabilities. It intentionally omits window titles, commands and action permits.
 
 ### Deliberately not claimed complete
 
-- Authenticated terminal-native-window anchor mapping is not implemented. The
-  renderer does not guess mappings from titles or PID and will hide rather than
-  paint over tiled terminal input/selection. Desktop-safe placement is real;
-  “follows terminal safe anchors” is not yet a supported claim.
-- Compositor retirement fences / scanout confirmation and cross-native recovery
-  still need actual backend integration and evidence. X11 and Wayland capabilities
-  are independently unverified. No `Retired` or `Presented` message is fabricated.
+- Pane-local anchor mapping is not implemented; the supported registered anchor
+  follows the whole terminal window and avoids its input area.
+- Native `Presented` and `Retired` callbacks are implemented on the completion
+  sources above. Tickets retain the exact token, render-start time and route
+  generation. Retirement waits for a post-revoke body-free frame on every active
+  output; topology/power changes and backend teardown invalidate old tickets.
+  These are native-compositor observations. Physical-panel certification remains
+  unverified, and uncertain disconnected ownership is never cleared by a heartbeat.
 - The body is currently click-through; independent companion input/card handling
   belongs to the coordinator/native GUI integration, not shell command injection.
-- Microphone, speaker, barge-in latency, GPU rendering, multi-output/HiDPI,
-  direct-scanout, lock-screen and native screenshot acceptance require an
-  authorized physical/session test. Deterministic tests are not that evidence.
+- Physical microphone, speaker, barge-in latency, multi-output/HiDPI,
+  direct-scanout and panel presentation observations remain separate from the
+  software checks. Only the hardware gates named in the upgrade record are user-waived;
+  deterministic tests are not recorded as physical acceptance.
+
+## Selected-output DVR
+
+Native Wayland additionally supports `JWM_DESKTOP_VISUAL_OUTPUTS`, a map of exact
+output names to independent private v1 socket paths. Each handshake advertises
+the selected output's canvas extent; frames draw only in that output rectangle.
+At most four selected endpoints retain bounded latest-wins RGBA8/sRGB frames.
+Unplug, movement, resize or a path change withdraws the old endpoint and texture;
+a same-size replug still requires a new connection. X11 and nested Wayland retain
+the existing full-canvas v1 route. HDR and dma-buf DVR payloads remain unsupported.
+See [the wire contract](../crates/desktop_visual/protocol.md).
 
 ## Checks
+
+R16 software evidence is recorded in
+`artifacts/gap-completion-20261103/visual/validation.json`: six companion scene
+unit tests and one OML completed-SBC/failure test passed. The separate actual
+headless GLES/socket test verifies selected-output handshake extent, RGBA upload,
+output-local crop pixels, unplug withdrawal and same-size reconnect. These checks
+do not claim a physical-panel presentation or cross-native recovery certification.
+
 
 `cargo test -p jwm_eva_core companion` exercises fail-closed backend policy,
 retirement-vs-heartbeat, lock/fullscreen/output suppression, epoch and target

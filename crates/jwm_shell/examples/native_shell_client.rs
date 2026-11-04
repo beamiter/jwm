@@ -18,9 +18,9 @@ use smithay_client_toolkit::{
     shm::{Shm, ShmHandler, slot::SlotPool},
 };
 use wayland_client::{
-    Connection, QueueHandle,
+    Connection, Dispatch, QueueHandle, delegate_noop,
     globals::registry_queue_init,
-    protocol::{wl_output, wl_shm, wl_surface},
+    protocol::{wl_keyboard, wl_output, wl_seat, wl_shm, wl_surface},
 };
 
 fn main() -> Result<()> {
@@ -30,6 +30,8 @@ fn main() -> Result<()> {
     let compositor = CompositorState::bind(&globals, &qh)?;
     let shell = XdgShell::bind(&globals, &qh)?;
     let shm = Shm::bind(&globals, &qh)?;
+    let seat = globals.bind::<wl_seat::WlSeat, _, _>(&qh, 5..=5, ())?;
+    let _keyboard = seat.get_keyboard(&qh, ());
     let window = shell.create_window(
         compositor.create_surface(&qh),
         WindowDecorations::RequestServer,
@@ -178,6 +180,34 @@ impl ShmHandler for Client {
         &mut self.shm
     }
 }
+impl Dispatch<wl_keyboard::WlKeyboard, ()> for Client {
+    fn event(
+        _: &mut Self,
+        _: &wl_keyboard::WlKeyboard,
+        event: wl_keyboard::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let wl_keyboard::Event::Key {
+            key,
+            state: wayland_client::WEnum::Value(wl_keyboard::KeyState::Pressed),
+            ..
+        } = event
+            && let Some(path) = std::env::var_os("JWM_TEST_KEYBOARD_LOG")
+        {
+            use std::io::Write;
+            if let Ok(mut file) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+            {
+                let _ = writeln!(file, "{key}");
+            }
+        }
+    }
+}
+delegate_noop!(Client: ignore wl_seat::WlSeat);
 delegate_compositor!(Client);
 delegate_output!(Client);
 delegate_shm!(Client);

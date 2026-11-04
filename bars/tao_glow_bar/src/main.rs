@@ -573,7 +573,14 @@ impl App {
                 });
                 return;
             }
-            Action::CycleTasks | Action::HidePanel => return,
+            // Panel toggles belong to the controller; keyboard ownership is
+            // handled by the shared host rather than this legacy action path.
+            Action::CycleTasks
+            | Action::HidePanel
+            | Action::KeyboardMode
+            | Action::ToggleAgents => {
+                return;
+            }
             Action::MediaOpen => Some(("jwm-player", Vec::new())),
             Action::Files => std::env::var_os("HOME").map(|home| ("xdg-open", vec![home])),
             Action::Terminal => Some(("x-terminal-emulator", Vec::new())),

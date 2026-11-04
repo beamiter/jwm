@@ -465,6 +465,74 @@ impl Damage {
 }
 
 impl Scene {
+    /// Paint-only adapter for a coherent semantic snapshot. Stable node IDs,
+    /// geometry and input bindings are unchanged; renderers keep their own alpha policy.
+    pub fn adapt_semantic_tokens(
+        &mut self,
+        theme: ThemeMode,
+        tokens: crate::shell_palette::SemanticTokens,
+    ) {
+        let original = Palette::for_theme(theme);
+        let rgba = |value: [f32; 4]| Rgba::new(value[0], value[1], value[2], value[3]);
+        let remap = |color: Rgba| {
+            if color == original.background {
+                rgba(tokens.surface)
+            } else if color == original.text {
+                rgba(tokens.text)
+            } else if color == original.muted_text {
+                rgba(tokens.muted)
+            } else if color == original.accent || color == original.selected {
+                rgba(tokens.accent)
+            } else if color == original.occupied || color == original.hovered {
+                let mut tone = rgba(tokens.text);
+                tone.alpha = color.alpha;
+                tone
+            } else {
+                color
+            }
+        };
+        for node in &mut self.nodes {
+            match node {
+                SceneNode::Background { fill, .. } => *fill = rgba(tokens.surface),
+                SceneNode::RoundedRect {
+                    fill,
+                    stroke,
+                    state,
+                    radius,
+                    ..
+                } => {
+                    *radius = radius.min(tokens.radius);
+                    *fill = if state.selected {
+                        rgba(tokens.focus)
+                    } else {
+                        remap(*fill)
+                    };
+                    if let Some(stroke) = stroke {
+                        stroke.color = remap(stroke.color);
+                    }
+                }
+                SceneNode::Text {
+                    id, color, state, ..
+                } => {
+                    if matches!(id, NodeId::Tag(_) | NodeId::MinimizedWindow(_))
+                        && !state.selected
+                        && !state.urgent
+                    {
+                        *color = rgba(if state.occupied {
+                            tokens.text
+                        } else {
+                            tokens.muted
+                        });
+                    } else {
+                        *color = remap(*color);
+                    }
+                }
+                SceneNode::Polyline { color, .. } => *color = remap(*color),
+                SceneNode::Image { .. } => {}
+            }
+        }
+    }
+
     /// Adapt ordinary text in a freshly built scene after the backdrop's actual
     /// alpha has been resolved. Keep explicit tag, selection, alert and Dock
     /// card colors paired with their own surfaces. Only paint changes, so
@@ -817,6 +885,9 @@ impl PresentationLabels {
     /// supplies a blank override.
     #[must_use]
     pub fn shell_route(&self, route: ShellRoute) -> &str {
+        if route == ShellRoute::AgentSessions {
+            return "🤖";
+        }
         let index = route.code() as usize;
         self.shell_routes
             .get(index)
@@ -5289,6 +5360,48 @@ mod tests {
                 .nodes
                 .iter()
                 .any(|node| matches!(node, SceneNode::Text { text, .. } if text == "Browser"))
+        );
+    }
+}
+
+#[cfg(test)]
+mod semantic_theme_tests {
+    use super::*;
+    #[test]
+    fn semantic_theme_changes_paint_without_changing_geometry_or_text_alpha() {
+        let bounds = Rect::new(0.0, 0.0, 200.0, 42.0);
+        let original = Palette::for_theme(ThemeMode::Light);
+        let mut scene = Scene {
+            viewport: Size::new(200.0, 42.0),
+            clip: bounds,
+            hits: Vec::new(),
+            nodes: vec![
+                SceneNode::Background {
+                    id: NodeId::Background,
+                    bounds,
+                    fill: original.background,
+                },
+                SceneNode::Text {
+                    id: NodeId::Clock,
+                    bounds,
+                    text: "11:20".into(),
+                    size: 13.0,
+                    color: original.text,
+                    align: TextAlign::End,
+                    state: VisualState::default(),
+                },
+            ],
+        };
+        let mut tokens = crate::shell_palette::ShellPalette::DARK.tokens();
+        tokens.surface = [0.1, 0.2, 0.3, 0.25];
+        scene.adapt_semantic_tokens(ThemeMode::Light, tokens);
+        assert_eq!(scene.clip, bounds);
+        assert_eq!(scene.nodes[0].bounds(), bounds);
+        assert!(
+            matches!(scene.nodes[0], SceneNode::Background {fill,..} if fill.alpha==0.25 && fill.red==0.1)
+        );
+        assert!(
+            matches!(scene.nodes[1], SceneNode::Text {color,..} if color.alpha==1.0 && color.red==tokens.text[0])
         );
     }
 }

@@ -28,6 +28,8 @@ pub struct Report {
     pub protocol_ready: bool,
     pub wake_protocol_ready: bool,
     pub checks: Vec<Check>,
+    pub local_voice: Value,
+    pub echo_cancellation: Value,
 }
 pub struct Inputs<'a> {
     pub credential_available: bool,
@@ -47,8 +49,9 @@ pub fn evaluate(config: &Config, inputs: Inputs<'_>) -> Report {
             recommendation,
         })
     };
+    let status = crate::audio::local_voice::LocalVoiceDetector::new(config).status;
+    let local_voice = crate::audio::local_voice::diagnostic(&status);
     if config.audio.local_voice_detection {
-        let status = crate::audio::local_voice::LocalVoiceDetector::new(config).status;
         let (state, message, recommendation) = match (status.active, status.degraded_reason) {
             ("silero", None) => (State::Ready, "本地 Silero 模型与 CPU 推理后端可用。", None),
             ("rnnoise", None) => (State::Ready, "已配置本地 RNNoise 神经语音门控。", None),
@@ -298,6 +301,8 @@ pub fn evaluate(config: &Config, inputs: Inputs<'_>) -> Report {
         protocol_ready,
         wake_protocol_ready,
         checks,
+        local_voice,
+        echo_cancellation: crate::audio::aec_diagnostic(inputs.audio),
     }
 }
 

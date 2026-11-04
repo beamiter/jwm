@@ -380,6 +380,7 @@ impl<C: CompositorConnection> Compositor<C> {
         }
         self.system_ui = overlay.map(Arc::new);
         self.needs_render = true;
+        log::debug!(target:"ui_frame_trace","set frame={} theme={} dirty={} pending={}",self.frame_stats.frame_count,self.system_ui.as_ref().is_some_and(|ui|ui.title.contains("THEME")),self.sysui_text_dirty,self.needs_render);
     }
 
     pub(crate) fn set_system_ui_hover(&mut self, row: Option<usize>) -> bool {

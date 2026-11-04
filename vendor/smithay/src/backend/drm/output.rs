@@ -8,28 +8,28 @@ use std::{
     sync::{Arc, Mutex, RwLock, RwLockWriteGuard, TryLockError},
 };
 
-use drm::control::{self, Mode, connector, crtc};
+use drm::control::{self, connector, crtc, Mode};
 use drm_fourcc::{DrmFormat, DrmFourcc, DrmModifier};
 
 use crate::{
     backend::{
         allocator::{
-            Allocator,
             dmabuf::{AsDmabuf, Dmabuf},
             gbm::GbmDevice,
+            Allocator,
         },
-        renderer::{Bind, Color32F, DebugFlags, Renderer, RendererSuper, Texture, element::RenderElement},
+        renderer::{element::RenderElement, Bind, Color32F, DebugFlags, Renderer, RendererSuper, Texture},
     },
     output::OutputModeSource,
 };
 
 use super::{
-    DrmDevice, DrmError, Planes,
     compositor::{
         DrmCompositor, FrameError, FrameFlags, FrameResult, PrimaryPlaneElement, RenderFrameError,
         RenderFrameErrorType, RenderFrameResult,
     },
     exporter::ExportFramebuffer,
+    DrmDevice, DrmError, Planes,
 };
 
 type CompositorList<A, F, U, G> = Arc<RwLock<HashMap<crtc::Handle, Mutex<DrmCompositor<A, F, U, G>>>>>;
@@ -671,6 +671,11 @@ where
         self.with_compositor(|compositor| compositor.reset_buffers());
     }
 
+    /// Force a full repaint before rendering a framebuffer in a new color domain.
+    pub fn prepare_color_transition(&self) {
+        self.with_compositor(|compositor| compositor.prepare_color_transition());
+    }
+
     /// Marks the current frame as submitted.
     ///
     /// *Note*: Needs to be called, after the vblank event of the matching [`DrmDevice`]
@@ -725,6 +730,16 @@ where
     /// `user_data` can be used to attach some data to a specific buffer and later retrieved with [`DrmCompositor::frame_submitted`]    
     pub fn queue_frame(&mut self, user_data: U) -> FrameResult<(), A, F> {
         self.with_compositor(|compositor| compositor.queue_frame(user_data))
+    }
+
+    /// Queue this frame with CRTC/connector color properties in the same
+    /// TEST_ONLY and real atomic request as its framebuffer.
+    pub fn queue_frame_with_properties(
+        &mut self,
+        user_data: U,
+        properties: Vec<super::FrameProperty>,
+    ) -> FrameResult<(), A, F> {
+        self.with_compositor(|compositor| compositor.queue_frame_with_properties(user_data, properties))
     }
 
     /// Commits the current frame for scan-out.

@@ -39,6 +39,21 @@ pub struct AudioStatus {
     pub output_available: bool,
 }
 
+/// Device discovery opens no stream, so it cannot establish the selected capture
+/// route, playback reference, device clock alignment or an active echo filter.
+/// Both native adapters request echo-cancel when a stream is actually created.
+pub fn aec_diagnostic(audio: Option<&AudioStatus>) -> serde_json::Value {
+    serde_json::json!({
+        "state":if audio.is_some(){"unknown"}else{"unavailable"},
+        "request_on_stream_creation":"echo-cancel",
+        "requested":false,"observed_active":false,
+        "capture_route":null,"playback_reference":null,"clock_alignment":null,
+        "reason":if audio.is_some(){"no_active_stream_route_observation"}else{"audio_server_unavailable"},
+        "acoustic_validation":"not_tested",
+        "correlation_rejection_is_aec":false
+    })
+}
+
 fn check_cancelled(stop: &AtomicBool) -> io::Result<()> {
     if stop.load(Ordering::Acquire) {
         Err(io::Error::new(

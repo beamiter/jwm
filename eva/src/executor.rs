@@ -141,6 +141,225 @@ pub(crate) async fn execute_observed(
     )
     .await
 }
+/// Execute against the original planning snapshot. This is a non-authorizing
+/// consistency guard; it never modifies actions, consent or target membership.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn execute_observed_with_context(
+    plan: &FrozenPlan,
+    permit: &AssistantPermit,
+    confirmation: Option<String>,
+    store: Arc<Mutex<Store>>,
+    c: &Config,
+    progress: Option<&tokio::sync::watch::Sender<Option<crate::progress::ExecutionProgress>>>,
+    owner: Option<&crate::companion::OperationOwner>,
+    captured_context: &Value,
+) -> io::Result<Value> {
+    execute_with_step_budget_and_context(
+        plan,
+        permit,
+        confirmation,
+        store,
+        c,
+        std::time::Duration::from_secs(22),
+        progress,
+        owner,
+        Some(captured_context),
+    )
+    .await
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct CloseWindowSnapshot {
+    reference: String,
+    monitor: String,
+    tags: u64,
+    native: Value,
+    pid: Value,
+    visible: bool,
+    minimized: bool,
+    sticky: bool,
+    swallowed: bool,
+}
+#[derive(Clone, Debug, PartialEq)]
+struct CloseContextSnapshot {
+    instance: String,
+    permit: Value,
+    selected: Value,
+    monitors: std::collections::BTreeMap<String, (u64, bool)>,
+    windows: std::collections::BTreeMap<String, CloseWindowSnapshot>,
+}
+impl CloseContextSnapshot {
+    fn capture(context: &Value) -> Result<Self, &'static str> {
+        jwm_eva_core::protocol::validate_assistant_features(
+            context,
+            &[jwm_eva_core::protocol::DIRECTED_CLOSE_WINDOW_FEATURE],
+        )
+        .map_err(|_| "unsupported_action: directed_close_window_v1 unavailable")?;
+        if context["windows_complete"] != true {
+            return Err("unsupported_action: complete close snapshot unavailable");
+        }
+        if context["session_unlocked"] != true {
+            return Err("session_locked");
+        }
+        let instance = context["wm_instance_id"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .ok_or("close_snapshot_invalid")?
+            .to_owned();
+        let mut monitors = std::collections::BTreeMap::new();
+        for row in context["monitors"]
+            .as_array()
+            .filter(|rows| rows.len() <= 128)
+            .ok_or("close_snapshot_invalid")?
+        {
+            let token = row["monitor_token"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .ok_or("close_snapshot_invalid")?;
+            let tags = row["visible_tag_mask"]
+                .as_u64()
+                .filter(|n| *n > 0 && *n <= u32::MAX as u64)
+                .ok_or("close_snapshot_invalid")?;
+            let locked = row["locked"].as_bool().ok_or("close_snapshot_invalid")?;
+            if monitors.insert(token.to_owned(), (tags, locked)).is_some() {
+                return Err("close_snapshot_ambiguous");
+            }
+        }
+        let mut windows = std::collections::BTreeMap::new();
+        let mut refs = std::collections::BTreeSet::new();
+        for row in context["windows"]
+            .as_array()
+            .filter(|rows| rows.len() <= 128)
+            .ok_or("close_snapshot_invalid")?
+        {
+            let token = row["target_token"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .ok_or("close_snapshot_invalid")?;
+            let reference = row["window_ref"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .ok_or("close_snapshot_invalid")?;
+            let monitor = row["monitor_token"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .ok_or("close_snapshot_invalid")?;
+            let tags = row["tag_mask"]
+                .as_u64()
+                .filter(|n| *n > 0 && *n <= u32::MAX as u64)
+                .ok_or("close_snapshot_invalid")?;
+            if row["closed"] == true || row["live"] == false || !monitors.contains_key(monitor) {
+                return Err("target_window_gone");
+            }
+            let get = |key| row[key].as_bool().ok_or("close_snapshot_invalid");
+            let entry = CloseWindowSnapshot {
+                reference: reference.into(),
+                monitor: monitor.into(),
+                tags,
+                native: row["id"].clone(),
+                pid: row["pid"].clone(),
+                visible: get("visible")?,
+                minimized: get("minimized")?,
+                sticky: get("sticky")?,
+                swallowed: get("swallowed")?,
+            };
+            if windows.insert(token.to_owned(), entry).is_some()
+                || !refs.insert(reference.to_owned())
+            {
+                return Err("close_snapshot_ambiguous");
+            }
+        }
+        Ok(Self {
+            instance,
+            permit: context["assistant_permit"].clone(),
+            selected: context["selected_monitor_token"].clone(),
+            monitors,
+            windows,
+        })
+    }
+    fn validates_targets(
+        &self,
+        plan: &FrozenPlan,
+        permit: &AssistantPermit,
+    ) -> Result<(), &'static str> {
+        if self.instance != plan.wm_instance_id || self.permit != json!(permit) {
+            return Err("assistant_permit_mismatch");
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        for action in plan
+            .actions
+            .iter()
+            .filter(|action| action.name == "killclient")
+        {
+            let token = action.arguments["window_token"]
+                .as_str()
+                .ok_or("close_snapshot_invalid")?;
+            let window = self.windows.get(token).ok_or("target_window_gone")?;
+            if !seen.insert(token) {
+                return Err("duplicate_close_target");
+            }
+            if self
+                .monitors
+                .get(&window.monitor)
+                .is_none_or(|(_, locked)| *locked)
+            {
+                return Err("session_locked");
+            }
+            let expected = &action.arguments["expected_state"];
+            if expected["window_token"] != token
+                || expected["monitor_token"] != window.monitor
+                || expected["tag_mask"].as_u64() != Some(window.tags)
+                || action
+                    .arguments
+                    .get("monitor_token")
+                    .is_some_and(|v| v.as_str() != Some(window.monitor.as_str()))
+                || action.arguments.get("tag_mask").is_some_and(|v| {
+                    v.as_u64()
+                        .is_none_or(|mask| mask == 0 || mask & !window.tags != 0)
+                })
+            {
+                return Err("stale_context: close source changed");
+            }
+        }
+        if !seen.is_empty() && !plan.requires_confirmation {
+            return Err("confirmation_required");
+        }
+        Ok(())
+    }
+}
+
+fn close_preflight_check(
+    plan: &FrozenPlan,
+    permit: &AssistantPermit,
+    captured: Option<&Value>,
+    fresh: &Value,
+) -> Result<(), &'static str> {
+    let count = plan
+        .actions
+        .iter()
+        .filter(|a| a.name == "killclient")
+        .count();
+    if count == 0 {
+        return Ok(());
+    }
+    let current = CloseContextSnapshot::capture(fresh)?;
+    current.validates_targets(plan, permit)?;
+    if let Some(captured) = captured {
+        let original = CloseContextSnapshot::capture(captured)?;
+        original.validates_targets(plan, permit)?;
+        if original != current {
+            return Err("stale_context: batch close snapshot changed");
+        }
+    } else if count > 1 {
+        return Err("unsupported_action: original batch close snapshot required");
+    }
+    Ok(())
+}
+fn close_preflight_failure(error: &str, total: usize) -> Value {
+    let (code, detail) = error.split_once(':').unwrap_or((error, ""));
+    json!({"status":"failed","error":code.trim(),"detail":detail.trim(),"completed_steps":0,"unexecuted_steps":total,"steps":[],"dispatched":false})
+}
+
 fn emit_progress(
     sender: Option<&tokio::sync::watch::Sender<Option<crate::progress::ExecutionProgress>>>,
     value: Option<crate::progress::ExecutionProgress>,
@@ -160,6 +379,31 @@ async fn execute_with_step_budget(
     progress: Option<&tokio::sync::watch::Sender<Option<crate::progress::ExecutionProgress>>>,
     owner: Option<&crate::companion::OperationOwner>,
 ) -> io::Result<Value> {
+    execute_with_step_budget_and_context(
+        plan,
+        permit,
+        confirmation,
+        store,
+        c,
+        step_budget,
+        progress,
+        owner,
+        None,
+    )
+    .await
+}
+#[allow(clippy::too_many_arguments)]
+async fn execute_with_step_budget_and_context(
+    plan: &FrozenPlan,
+    permit: &AssistantPermit,
+    confirmation: Option<String>,
+    store: Arc<Mutex<Store>>,
+    c: &Config,
+    step_budget: std::time::Duration,
+    progress: Option<&tokio::sync::watch::Sender<Option<crate::progress::ExecutionProgress>>>,
+    owner: Option<&crate::companion::OperationOwner>,
+    captured_context: Option<&Value>,
+) -> io::Result<Value> {
     use crate::progress::{ExecutionProgress, Stage};
     let dispatch_cancelled = Arc::new(AtomicBool::new(false));
     let _lifetime = DispatchLifetime(dispatch_cancelled.clone());
@@ -168,6 +412,24 @@ async fn execute_with_step_budget(
     let mut ledger_error = None;
     // The first budget includes waiting for the shared persistent store too.
     let mut dispatch_deadline = std::time::Instant::now() + step_budget;
+    if plan
+        .actions
+        .iter()
+        .any(|action| action.name == "killclient")
+    {
+        // Entire close target set is checked before any plan side effect or
+        // operation intent, including when another action precedes the closes.
+        let fresh = query("get_execution_context", json!({})).await?;
+        if let Err(error) = close_preflight_check(plan, permit, captured_context, &fresh) {
+            return Ok(close_preflight_failure(error, plan.actions.len()));
+        }
+        if std::time::Instant::now() >= dispatch_deadline {
+            return Ok(close_preflight_failure(
+                "execution_deadline_expired",
+                plan.actions.len(),
+            ));
+        }
+    }
     let previous_mutating_plan_hash = crate::store::access(&store, |storage| {
         Ok(storage.ledger.last_mutating_plan_hash.clone())
     })
@@ -234,6 +496,7 @@ async fn execute_with_step_budget(
                 "move_window_to_tag"
                     | "move_window_to_tags"
                     | "focus_window"
+                    | "focus_agent_session"
                     | "move_window_to_monitor"
                     | "set_window_minimized"
                     | "set_window_maximized"
@@ -241,6 +504,7 @@ async fn execute_with_step_budget(
                     | "set_window_pip"
                     | "set_window_sticky"
                     | "query_window"
+                    | "killclient"
                     | "close_window"
             )
         {
@@ -662,7 +926,7 @@ async fn settle_level_control(
         }
     }
 }
-async fn persist_settlement(
+pub(crate) async fn persist_settlement(
     storage: Arc<Mutex<Store>>,
     id: String,
     action: Action,
@@ -670,6 +934,28 @@ async fn persist_settlement(
     mut result: Value,
     dispatched: bool,
 ) -> (Value, bool) {
+    // Carry only the verified same-instance source monitor from this actual
+    // dispatch's before snapshot. It is local evidence, never model input.
+    if action.name == "move_window_to_monitor"
+        && result["status"] == "succeeded"
+        && result["verified"]["window_token"] == action.arguments["window_token"]
+        && let Some(window) = before["windows"].as_array().and_then(|windows| {
+            let mut matching = windows
+                .iter()
+                .filter(|w| w["target_token"] == action.arguments["window_token"]);
+            let first = matching.next()?;
+            matching.next().is_none().then_some(first)
+        })
+        && before["monitors"].as_array().is_some_and(|monitors| {
+            monitors
+                .iter()
+                .filter(|m| m["monitor_token"] == window["monitor_token"])
+                .count()
+                == 1
+        })
+    {
+        result["verified"]["previous_monitor_token"] = window["monitor_token"].clone();
+    }
     crate::store::access(&storage, move |store| {
         let current = store.ledger.operations.get(&id);
         if current.is_some_and(|record| {
@@ -1567,6 +1853,115 @@ mod undo_tests {
                 &json!({"window_token":"new-instance:w1","tag_mask":4,"monitor_token":"m1"})
             )
             .is_err()
+        );
+    }
+}
+
+#[cfg(test)]
+mod close_preflight_tests {
+    use super::*;
+    fn fixture() -> (FrozenPlan, AssistantPermit, Value) {
+        let permit = AssistantPermit {
+            assistant_session_id: "session".into(),
+            generation: 7,
+        };
+        let windows = (1..=2).map(|n| json!({"window_ref":format!("w{n}"),"target_token":format!("t{n}"),"id":format!("native{n}"),"pid":n,"monitor_token":"m1","tag_mask":1,"visible":true,"minimized":false,"sticky":false,"swallowed":false})).collect::<Vec<_>>();
+        let context = json!({"assistant_protocol":jwm_eva_core::protocol::assistant_protocol(),"wm_instance_id":"wm","assistant_permit":permit,"session_unlocked":true,"windows_complete":true,"selected_monitor_token":"m1","monitors":[{"monitor_token":"m1","visible_tag_mask":1,"locked":false}],"windows":windows});
+        let actions = (1..=2).map(|n| { let token=format!("t{n}"); Action {name:"killclient".into(),arguments:json!({"window_token":token,"expected_state":{"window_token":token,"monitor_token":"m1","tag_mask":1}})} }).collect();
+        let plan = FrozenPlan {
+            plan_hash: "hash".into(),
+            wm_instance_id: "wm".into(),
+            disposition: jwm_eva_core::actions::Disposition::Execute,
+            actions,
+            question: None,
+            reason: None,
+            requires_confirmation: true,
+        };
+        (plan, permit, context)
+    }
+    #[test]
+    fn entire_batch_is_checked_before_first_effect_and_focus_is_irrelevant() {
+        let (plan, permit, context) = fixture();
+        assert_eq!(
+            close_preflight_check(&plan, &permit, Some(&context), &context),
+            Ok(())
+        );
+        let mut focus = context.clone();
+        focus["focus_token"] = json!("t2");
+        assert_eq!(
+            close_preflight_check(&plan, &permit, Some(&context), &focus),
+            Ok(())
+        );
+        for field in ["target_token", "monitor_token", "tag_mask", "id", "visible"] {
+            let mut fresh = context.clone();
+            fresh["windows"][1][field] = match field {
+                "tag_mask" => json!(2),
+                "visible" => json!(false),
+                _ => json!("changed"),
+            };
+            assert!(
+                close_preflight_check(&plan, &permit, Some(&context), &fresh).is_err(),
+                "{field}"
+            );
+        }
+        let mut fresh = context.clone();
+        fresh["windows"].as_array_mut().unwrap().pop();
+        assert_eq!(
+            close_preflight_check(&plan, &permit, Some(&context), &fresh),
+            Err("target_window_gone")
+        );
+        let result = close_preflight_failure("target_window_gone", plan.actions.len());
+        assert_eq!(result["completed_steps"], 0);
+        assert_eq!(result["dispatched"], false);
+    }
+    #[test]
+    fn missing_capability_original_snapshot_and_confirmation_fail_closed() {
+        let (mut plan, permit, context) = fixture();
+        assert!(
+            close_preflight_check(&plan, &permit, None, &context)
+                .unwrap_err()
+                .starts_with("unsupported_action")
+        );
+        for key in ["assistant_protocol", "windows_complete"] {
+            let mut old = context.clone();
+            old.as_object_mut().unwrap().remove(key);
+            assert!(close_preflight_check(&plan, &permit, Some(&context), &old).is_err());
+        }
+        plan.requires_confirmation = false;
+        assert_eq!(
+            close_preflight_check(&plan, &permit, Some(&context), &context),
+            Err("confirmation_required")
+        );
+        plan.requires_confirmation = true;
+        plan.actions[1] = plan.actions[0].clone();
+        assert_eq!(
+            close_preflight_check(&plan, &permit, Some(&context), &context),
+            Err("duplicate_close_target")
+        );
+    }
+    #[test]
+    fn complete_snapshot_and_lease_identity_cannot_drift() {
+        let (plan, permit, context) = fixture();
+        for key in [
+            "wm_instance_id",
+            "assistant_permit",
+            "selected_monitor_token",
+        ] {
+            let mut fresh = context.clone();
+            fresh[key] = json!("changed");
+            assert!(close_preflight_check(&plan, &permit, Some(&context), &fresh).is_err());
+        }
+        let mut fresh = context.clone();
+        let mut extra = fresh["windows"][0].clone();
+        extra["target_token"] = json!("t3");
+        extra["window_ref"] = json!("w3");
+        fresh["windows"].as_array_mut().unwrap().push(extra);
+        assert!(close_preflight_check(&plan, &permit, Some(&context), &fresh).is_err());
+        let mut fresh = context.clone();
+        fresh["monitors"][0]["locked"] = json!(true);
+        assert_eq!(
+            close_preflight_check(&plan, &permit, Some(&context), &fresh),
+            Err("session_locked")
         );
     }
 }

@@ -160,10 +160,9 @@ struct KmsOutputState {
     output_name: String,
 
     /// Per-CRTC color pipeline state. Caps are probed once at output init.
-    /// `installed_gamma_lut` carries `Some((blob_id, tf))` when a GAMMA_LUT
-    /// blob is currently bound on the CRTC, so the activation refresh can
-    /// no-op when the desired TF already matches and so teardown / DPMS-off
-    /// can `destroy_property_blob` cleanly.
+    /// `installed_gamma_lut` is the desired `Some((blob_id, tf))` for the
+    /// next framebuffer. It is planner state, not a public active claim.
+    /// `applied_color_generation` advances only on matching presentation.
     color_pipeline_caps: Option<crate::backend::api::KmsColorPipelineCaps>,
     installed_gamma_lut: Option<(
         u64,
@@ -212,21 +211,17 @@ struct KmsOutputState {
     client_gamma_pending: bool,
     /// `true` while DPMS is off; the LUT install path skips this output.
     dpms_off: bool,
-    /// The HDR_OUTPUT_METADATA blob currently committed on this connector.
-    ///
-    /// Tracked so it can be destroyed when it is replaced or cleared. Each
-    /// assert creates a new kernel blob; dropping the id on the floor leaks
-    /// one per assert for the life of the DRM fd, and the reconcile loop
-    /// asserts again every time a toast clears. `installed_gamma_lut` and
-    /// `installed_ctm` are tracked for exactly the same reason.
-    ///
-    /// This is also the truth of what the *connector* holds, as distinct
-    /// from `output_hdr_metadata_active`, which is the presentation claim.
-    /// The two part company on a dark output (the claim is dropped without
-    /// a commit), and the reconciliation reads both so the connector is
-    /// always brought back in line by a real commit on the first
-    /// participating frame — whichever way the request went meanwhile.
+    /// Desired HDR metadata blob for the next frame. Replaced handles remain
+    /// owned in retired_color_blobs until the current generation presents.
+    /// The public `output_hdr_metadata_active` and advertised image
+    /// description continue to describe only a confirmed framebuffer.
     installed_hdr_metadata_blob: Option<u64>,
+    // The installed_* handles above are desired state. Each framebuffer owns
+    // an immutable property snapshot; only a matching vblank publishes it.
+    desired_color_generation: u64,
+    applied_color_generation: u64,
+    retired_color_blobs: Vec<u64>,
+
     /// The driver rejected the last connector signalling assert. The
     /// hardware is unchanged and the frame is correct, so this blocks
     /// nothing; it is reported as a permanent refusal so the request is
@@ -240,6 +235,7 @@ struct KmsOutputState {
     /// request, and latching one dropped the user's HDR on the next frame
     /// with no way back but an explicit re-enable.
     hdr_connector_commit_rejected: bool,
+    scanout_color_commit_rejected: bool,
     /// `VrrSupport::Supported` on this connector, probed once at init.
     /// `vrr_supported` costs two ioctls and rebuilds the connector info for
     /// an answer that only changes on hotplug, so it must not be in the
@@ -715,15 +711,12 @@ fn connector_color_property_neutral_value(name: &str) -> Option<u64> {
 // sequence, whose intermediate states (e.g. LUT bound while the paired CTM
 // was not yet installed) could reach scanout for frames in between.
 //
-// The target framebuffer itself is committed by Smithay's DrmCompositor,
-// which exposes no hook to merge extra properties into its internal atomic
-// commit. The FB pairing guarantee therefore comes from ordering and
-// evidence: the color request is committed strictly before the frame's FB is
-// queued, and `invalidate_color_delivery_after_hardware_change` refuses to
-// report any hardware delivery route until a vblank confirms a frame queued
-// after the color change. The swapchain format the FB carries is still part
-// of the HDR chain validation below, so the bit depth of the scanned-out
-// framebuffer is verified before HDR signalling may be programmed.
+// The target framebuffer and all its CRTC/connector color properties are
+// committed together by the maintained Smithay `queue_frame_with_properties`
+// extension. Staging allocates blobs but never mutates current scanout. Every
+// transition forces a full repaint; one immutable per-frame snapshot reaches
+// the same TEST_ONLY and real atomic request as FB_ID. Public HDR descriptions
+// and delivery observations are promoted only by the matching accepted vblank.
 
 /// One raw property assignment inside a controlled atomic color request.
 /// `object`/`property` are raw DRM ids so assembly and tests never need a
@@ -852,23 +845,6 @@ fn build_atomic_color_request(
     Ok(assignments)
 }
 
-/// Which scanout colour state an atomic request touches, and therefore
-/// whether the driver may turn it into a modeset.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum AtomicColorCommitScope {
-    /// CRTC DEGAMMA_LUT/CTM/GAMMA_LUT stages: a per-frame property change
-    /// that never needs a modeset. A driver asking for one is a rejection.
-    CrtcStages,
-    /// Connector `Colorspace` + `HDR_OUTPUT_METADATA`. amdgpu forces a full
-    /// modeset when the metadata blob appears or disappears ("only force a
-    /// modeset if we're entering or exiting HDR") and when `Colorspace`
-    /// changes, so the plain TEST_ONLY is refused with EINVAL there and the
-    /// signal could never be asserted — or, worse, withdrawn. Entering and
-    /// leaving HDR is a mode switch on such drivers, and the request is
-    /// retried with ALLOW_MODESET when the plain test is refused.
-    ConnectorSignalling,
-}
-
 /// Whether a failed KMS colour commit is the driver's verdict on the request,
 /// or a symptom of not owning the device at that instant.
 ///
@@ -958,69 +934,26 @@ impl std::fmt::Display for ColorCommitError {
     }
 }
 
-/// Apply one assembled atomic color request: TEST_ONLY first, then the real
-/// commit. Legacy-only devices are refused instead of falling back to
-/// per-property ioctls — there is no all-or-nothing transaction there, and a
-/// partial color transition would leave scanout in a mixed domain (the same
-/// rule the init-time neutral reset already enforces).
-fn commit_atomic_color_request(
+const MAX_OWNED_COLOR_BLOBS: usize = 64;
+fn color_blob_budget_allows(retired: usize, current: usize, newly_allocated: usize) -> bool {
+    retired
+        .saturating_add(current)
+        .saturating_add(newly_allocated)
+        <= MAX_OWNED_COLOR_BLOBS
+}
+
+/// Validate staging without changing current scanout. The complete request is
+/// tested by Smithay only after its matching framebuffer has been prepared.
+fn stage_atomic_color_request(
     dev: &DrmDevice,
     assignments: &[AtomicColorAssignment],
-    scope: AtomicColorCommitScope,
 ) -> Result<(), ColorCommitError> {
-    use smithay::reexports::drm::control::atomic::AtomicModeReq;
-    use smithay::reexports::drm::control::{AtomicCommitFlags, RawResourceHandle, from_u32};
-
-    if assignments.is_empty() {
-        return Ok(());
+    if !assignments.is_empty() && !dev.is_atomic() {
+        return Err(ColorCommitError::refused(
+            "frame-associated color properties require atomic KMS",
+        ));
     }
-    if !dev.is_atomic() {
-        return Err(ColorCommitError::refused(format!(
-            "refusing {} scanout color assignments without atomic modesetting",
-            assignments.len()
-        )));
-    }
-    let mut request = AtomicModeReq::new();
-    for assignment in assignments {
-        let object = RawResourceHandle::new(assignment.object).ok_or_else(|| {
-            ColorCommitError::refused("invalid zero object id in atomic color request")
-        })?;
-        let property =
-            from_u32::<smithay::reexports::drm::control::property::Handle>(assignment.property)
-                .ok_or_else(|| {
-                    ColorCommitError::refused(
-                        "invalid zero property handle in atomic color request",
-                    )
-                })?;
-        request.add_raw_property(object, property, assignment.value);
-    }
-    let mut flags = AtomicCommitFlags::empty();
-    if let Err(test_error) = dev.atomic_commit(AtomicCommitFlags::TEST_ONLY, request.clone()) {
-        if scope != AtomicColorCommitScope::ConnectorSignalling {
-            return Err(ColorCommitError::from_io(
-                "test atomic color commit failed",
-                &test_error,
-            ));
-        }
-        dev.atomic_commit(
-            AtomicCommitFlags::ALLOW_MODESET | AtomicCommitFlags::TEST_ONLY,
-            request.clone(),
-        )
-        .map_err(|modeset_error| {
-            ColorCommitError::new(
-                format!(
-                    "test atomic color commit failed without ALLOW_MODESET ({test_error:?}) and with it ({modeset_error:?})"
-                ),
-                color_commit_verdict_from_errno(modeset_error.raw_os_error()),
-            )
-        })?;
-        log::info!(
-            "[kms-cm] the driver requires a modeset to change connector HDR signalling; committing with ALLOW_MODESET"
-        );
-        flags = AtomicCommitFlags::ALLOW_MODESET;
-    }
-    dev.atomic_commit(flags, request)
-        .map_err(|e| ColorCommitError::from_io("atomic color commit failed", &e))
+    Ok(())
 }
 
 /// Desired CRTC color-stage contents for one output. `None` clears the stage;
@@ -2183,8 +2116,28 @@ struct ColorDeliveryPlan {
     fallback_reason: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FrameColorTransaction {
+    generation: u64,
+    hdr: bool,
+}
+
+impl FrameColorTransaction {
+    fn is_reliable_observation(self, uncertain: bool, timestamp_available: bool) -> bool {
+        // The accepted queued framebuffer describes current scanout even if a
+        // newer desired generation was staged while this frame was pending.
+        !uncertain && timestamp_available
+    }
+
+    fn fulfills_desired(self, desired: u64) -> bool {
+        self.generation == desired
+    }
+}
+
 #[derive(Clone, Debug)]
 struct QueuedFrameData {
+    color_transaction: Option<FrameColorTransaction>,
+    companion: Option<crate::backend::compositor_common::companion_scene::FrameEvidence>,
     color_delivery: Option<ColorDeliveryPlan>,
 }
 
@@ -2375,8 +2328,9 @@ fn transfer_kind_name(
     }
 }
 
-fn output_primaries_name(output: &Output) -> String {
-    let params = crate::backend::wayland_udev::color_management::params_for_output(output);
+fn output_primaries_name_for_target(output: &Output, hdr: bool) -> String {
+    let params =
+        crate::backend::wayland_udev::color_management::params_for_output_target(output, hdr);
     match params.primaries_named {
         Some(1) => "srgb".into(),
         Some(6) => "bt2020".into(),
@@ -2860,6 +2814,7 @@ pub(super) struct KmsState {
     /// render loop treats a rejected queue as a device fault — so this is a
     /// precondition, not a preference.
     driver_supports_async_flip: bool,
+    driver_supports_monotonic_timestamp: bool,
 
     /// Mirrors the most recent `ColorPipelineDecision::delivery_blocked` so
     /// `render_if_needed` cannot submit an incompatible framebuffer after a
@@ -3237,8 +3192,69 @@ impl KmsState {
         }
     }
 
+    fn frame_color_properties(
+        &mut self,
+        output_idx: usize,
+    ) -> Result<Vec<smithay::backend::drm::FrameProperty>, String> {
+        let out = &self.outputs[output_idx];
+        if out.desired_color_generation == out.applied_color_generation {
+            return Ok(Vec::new());
+        }
+        let hdr = out.installed_hdr_metadata_blob.is_some();
+        let assignments = build_atomic_color_request(&[AtomicColorOutputPlan {
+            crtc: u32::from(out.crtc),
+            connector: u32::from(out.connector),
+            handles: out.color_property_handles,
+            target: ScanoutColorTarget {
+                degamma_lut: Some(0),
+                ctm: Some(out.installed_ctm.unwrap_or(0)),
+                gamma_lut: if out.legacy_gamma_override && !out.client_gamma_pending {
+                    None
+                } else {
+                    Some(out.installed_gamma_lut.map(|(id, _)| id).unwrap_or(0))
+                },
+                colorspace: Some(if hdr {
+                    out.color_property_handles
+                        .colorspace_bt2020_rgb
+                        .ok_or("missing BT2020_RGB")?
+                } else {
+                    0
+                }),
+                hdr_output_metadata: Some(out.installed_hdr_metadata_blob.unwrap_or(0)),
+            },
+        }])?;
+        if !self.drm_output_manager.lock().device().is_atomic() {
+            if hdr || out.installed_ctm.is_some() || out.installed_gamma_lut.is_some() {
+                return Err("color properties need atomic KMS".into());
+            }
+            return Ok(Vec::new());
+        }
+        assignments
+            .into_iter()
+            .map(|a| {
+                Ok(smithay::backend::drm::FrameProperty {
+                    object: smithay::reexports::drm::control::RawResourceHandle::new(a.object)
+                        .ok_or("zero DRM object")?,
+                    property: smithay::reexports::drm::control::from_u32(a.property)
+                        .ok_or("zero DRM property")?,
+                    value: a.value,
+                })
+            })
+            .collect()
+    }
+
     pub(super) fn request_render(&mut self) {
         self.needs_render = true;
+    }
+
+    fn request_color_delivery_after_desired_change(&mut self, output_idx: usize) {
+        let Some(out) = self.outputs.get_mut(output_idx) else {
+            return;
+        };
+        if !out.dpms_off {
+            out.color_delivery_retry_required = true;
+            self.needs_render = true;
+        }
     }
 
     fn invalidate_color_delivery_after_hardware_change(&mut self, output_idx: usize) {
@@ -4509,10 +4525,7 @@ impl KmsState {
         direct_scanout: bool,
     ) -> Option<ColorDeliveryPlan> {
         let output = self.outputs.get(output_idx)?;
-        let hdr_metadata_active =
-            crate::backend::wayland_udev::color_management::output_hdr_metadata_active(
-                &output.output,
-            );
+        let hdr_metadata_active = output.installed_hdr_metadata_blob.is_some();
         if direct_scanout {
             return Some(ColorDeliveryPlan {
                 policy_sequence: self.color_delivery_policy_sequence,
@@ -4540,7 +4553,7 @@ impl KmsState {
         let (target_transfer_function, target_primaries) = if prepared.targets_output_profile {
             (
                 transfer_kind_name(output.output_tf),
-                output_primaries_name(&output.output),
+                output_primaries_name_for_target(&output.output, hdr_metadata_active),
             )
         } else {
             ("srgb".into(), "srgb".into())
@@ -4574,9 +4587,11 @@ impl KmsState {
             .outputs
             .iter()
             .map(|output| {
-                let params = crate::backend::wayland_udev::color_management::params_for_output(
-                    &output.output,
-                );
+                let params =
+                    crate::backend::wayland_udev::color_management::params_for_output_target(
+                        &output.output,
+                        output.installed_hdr_metadata_blob.is_some(),
+                    );
                 output_color_target(&params)
             })
             .collect();
@@ -4784,10 +4799,10 @@ impl KmsState {
         }
     }
 
-    /// Push (or clear) the connector HDR signalling — HDR_OUTPUT_METADATA and
-    /// Colorspace together in ONE controlled atomic request (TEST_ONLY +
-    /// commit), so the sink never sees HDR metadata under a Default colorspace
-    /// or vice versa.
+    /// Stage connector HDR signalling for the next compatible framebuffer.
+    /// HDR_OUTPUT_METADATA, Colorspace, CRTC stages and FB_ID share that
+    /// framebuffer's TEST_ONLY and real request; this method touches no live
+    /// properties and does not publish a new output description.
     ///
     /// Pass `Some(&blob)` (32-byte CTA-861.3 HDR Static Metadata) to put the
     /// display into HDR mode, or `None` to revert to SDR (blob_id = 0,
@@ -4799,19 +4814,16 @@ impl KmsState {
     /// `set_hdr_metadata` rejects enables earlier; this layer stays correct
     /// even if that gate is lifted.)
     ///
-    /// `color_manager` is told the output's advertised image description
-    /// changed, so every surface already on the output gets
-    /// `preferred_changed` and every `wp_color_management_output_v1` gets
-    /// `image_description_changed`. Without it only surfaces *entering* the
-    /// output learned of the switch, and a video player mapped before the
-    /// enable kept rendering sRGB into an output now told PQ.
+    /// `color_manager` is notified only by the matching frame's vblank, so
+    /// clients cannot observe an HDR preferred description before the output
+    /// has presented the framebuffer encoded for that description.
     pub(super) fn set_hdr_metadata_for_output(
         &mut self,
         output_idx: usize,
         blob: Option<&[u8; 32]>,
         color_manager: Option<&crate::backend::wayland_udev::color_management::ColorManagerState>,
     ) -> Result<(), ColorCommitError> {
-        let (conn_handle, smithay_output, handles, swapchain_fourcc, plane_formats) = self
+        let (conn_handle, _smithay_output, handles, swapchain_fourcc, plane_formats) = self
             .outputs
             .get(output_idx)
             .map(|output| {
@@ -4841,6 +4853,20 @@ impl KmsState {
             )));
         }
 
+        let output = &self.outputs[output_idx];
+        let current = usize::from(output.installed_gamma_lut.is_some())
+            + usize::from(output.installed_ctm.is_some())
+            + usize::from(output.installed_hdr_metadata_blob.is_some());
+        if !color_blob_budget_allows(
+            output.retired_color_blobs.len(),
+            current,
+            usize::from(blob.is_some()),
+        ) {
+            return Err(ColorCommitError::new(
+                "color blob budget exhausted while waiting for presentation".into(),
+                ColorCommitVerdict::DeviceUnavailable,
+            ));
+        }
         let mgr = self.drm_output_manager.lock();
         let dev = mgr.device();
 
@@ -4883,38 +4909,27 @@ impl KmsState {
         }];
         let commit_result = build_atomic_color_request(&plan)
             .map_err(ColorCommitError::refused)
-            .and_then(|assignments| {
-                commit_atomic_color_request(
-                    dev,
-                    &assignments,
-                    AtomicColorCommitScope::ConnectorSignalling,
-                )
-            });
+            .and_then(|assignments| stage_atomic_color_request(dev, &assignments));
         if let Err(error) = commit_result {
             if blob_id != 0 {
                 let _ = dev.destroy_property_blob(blob_id);
             }
             return Err(error);
         }
-        // The blob the connector was holding is no longer referenced by
-        // anything. Freeing it here is what stops one kernel blob leaking per
-        // assert — and the reconcile loop asserts again every time a toast
-        // clears. `apply_scanout_color_goals` frees its replaced CRTC blobs
-        // the same way.
+        // The previous handle can still be referenced by current scanout or
+        // a pending framebuffer. Keep it until a matching current-generation
+        // vblank proves every older per-output frame has retired.
         if let Some(previous) = self.outputs[output_idx].installed_hdr_metadata_blob {
-            let _ = dev.destroy_property_blob(previous);
+            self.outputs[output_idx].retired_color_blobs.push(previous);
         }
         self.outputs[output_idx].installed_hdr_metadata_blob = (blob_id != 0).then_some(blob_id);
         drop(mgr);
 
-        crate::backend::wayland_udev::color_management::set_output_hdr_metadata_active(
-            &smithay_output,
-            blob.is_some(),
-        );
-        if let Some(color_manager) = color_manager {
-            color_manager.on_output_description_changed(&smithay_output);
-        }
-        self.invalidate_color_delivery_after_hardware_change(output_idx);
+        let _ = color_manager; // notified only after the matching frame presents.
+        self.outputs[output_idx].desired_color_generation = self.outputs[output_idx]
+            .desired_color_generation
+            .wrapping_add(1);
+        self.request_color_delivery_after_desired_change(output_idx);
         if !self.refresh_output_color_targets() {
             self.color_pipeline_delivery_blocked = true;
         }
@@ -4976,7 +4991,7 @@ impl KmsState {
         }
         match self.set_hdr_metadata_for_output(output_idx, None, color_manager) {
             Ok(()) => log::info!(
-                "[kms-cm] HDR signalling withdrawn on {} ({when})",
+                "[kms-cm] HDR signalling withdrawal staged for next frame on {} ({when}; not presenting)",
                 self.outputs[output_idx].output_name
             ),
             Err(error) => {
@@ -4987,6 +5002,7 @@ impl KmsState {
                 self.drop_hdr_claim(output_idx, color_manager);
             }
         }
+        self.drop_hdr_claim(output_idx, color_manager);
     }
 
     pub(super) fn output_index_by_name(&self, name: &str) -> Option<usize> {
@@ -5029,6 +5045,13 @@ impl KmsState {
             let participation_changed = self.outputs[output_idx].dpms_off == on;
             self.outputs[output_idx].dpms_off = !on;
             if participation_changed {
+                crate::backend::compositor_common::companion_scene::invalidate_presentation_evidence();
+                if !on {
+                    crate::backend::compositor_common::companion_scene::presentation_route(
+                        Vec::new(),
+                        false,
+                    );
+                }
                 // A presentation observed before a power/participation epoch
                 // cannot describe the first frame after re-enable. Keep the
                 // aggregate unknown until that frame reaches vblank.
@@ -5161,15 +5184,11 @@ impl KmsState {
     // KMS color pipeline activation (GAMMA_LUT + CTM)
     // ============================================================
 
-    /// Program every changed output's CRTC color stages in ONE controlled
-    /// atomic request (TEST_ONLY + commit), replacing the previous
-    /// per-property commit sequence whose intermediate states (e.g. LUT bound
-    /// while the paired CTM was not yet installed) could reach scanout. The
-    /// kernel's atomicity provides the all-or-nothing semantics the old
-    /// rollback loops emulated: on any failure no tracked state changes and
-    /// every newly created blob is destroyed. DEGAMMA is pinned to neutral in
-    /// the same request whenever the stage exists, so the complete
-    /// input→output color chain is always defined by one commit.
+    /// Stage changed CRTC color goals before rendering their framebuffers.
+    /// Each output's complete color chain is attached to its matching FB_ID
+    /// by Smithay; allocation failure destroys newly created ids and leaves
+    /// desired state untouched. Replaced ids remain owned until presentation.
+    /// DEGAMMA is neutralized in the same framebuffer request.
     fn apply_scanout_color_goals(
         &mut self,
         goals: &[(usize, OutputScanoutColorGoal)],
@@ -5213,6 +5232,18 @@ impl KmsState {
                 let dev = mgr.device();
                 for &(index, goal) in &changed {
                     let output = &state.outputs[index];
+                    let current = usize::from(output.installed_gamma_lut.is_some())
+                        + usize::from(output.installed_ctm.is_some())
+                        + usize::from(output.installed_hdr_metadata_blob.is_some());
+                    if !color_blob_budget_allows(
+                        output.retired_color_blobs.len(),
+                        current,
+                        usize::from(goal.gamma_lut.is_some()) + usize::from(goal.ctm.is_some()),
+                    ) {
+                        return Err(
+                            "color blob budget exhausted while waiting for presentation".into()
+                        );
+                    }
                     let caps = output
                         .color_pipeline_caps
                         .as_ref()
@@ -5261,7 +5292,7 @@ impl KmsState {
                     });
                 }
                 let assignments = build_atomic_color_request(&plans)?;
-                commit_atomic_color_request(dev, &assignments, AtomicColorCommitScope::CrtcStages)
+                stage_atomic_color_request(dev, &assignments)
                     .map_err(ColorCommitError::into_message)
             };
             commit_result.map(|_| plans.len())
@@ -5278,30 +5309,23 @@ impl KmsState {
             }
         };
 
-        // The request is live: swap tracked state and release the replaced
-        // blobs (the commit atomically dropped their hardware references),
-        // then invalidate delivery evidence for every changed output so no
-        // pre-transition frame can be reported under the new color state.
-        let mut replaced: Vec<u64> = Vec::new();
-        for entry in &staged {
-            let output = &self.outputs[entry.index];
-            if let Some((id, _)) = output.installed_gamma_lut {
-                replaced.push(id);
-            }
-            replaced.extend(output.installed_ctm);
-        }
+        // Publish desired state to the frame planner only. No hardware has
+        // changed; replaced ids remain owned until a current-generation frame
+        // completes. Public color descriptions stay on the presented state.
         for entry in staged {
-            self.outputs[entry.index].installed_gamma_lut = entry.gamma_lut;
-            self.outputs[entry.index].installed_ctm = entry.ctm;
-            self.invalidate_color_delivery_after_hardware_change(entry.index);
-        }
-        {
-            let mgr = self.drm_output_manager.lock();
-            for id in replaced {
-                let _ = mgr.device().destroy_property_blob(id);
+            let output = &mut self.outputs[entry.index];
+            if let Some((id, _)) = output.installed_gamma_lut {
+                output.retired_color_blobs.push(id);
             }
+            if let Some(id) = output.installed_ctm {
+                output.retired_color_blobs.push(id);
+            }
+            output.installed_gamma_lut = entry.gamma_lut;
+            output.installed_ctm = entry.ctm;
+            output.desired_color_generation = output.desired_color_generation.wrapping_add(1);
+            self.request_color_delivery_after_desired_change(entry.index);
         }
-        log::info!("[kms-cm] atomic color stage commit covered {committed} output(s)");
+        log::info!("[kms-cm] staged frame-associated color stages for {committed} output(s)");
         Ok(())
     }
 
@@ -5415,10 +5439,7 @@ impl KmsState {
         let mut ready = true;
         let color_manager = state.color_manager.as_ref();
         for index in 0..self.outputs.len() {
-            let claim_active =
-                crate::backend::wayland_udev::color_management::output_hdr_metadata_active(
-                    &self.outputs[index].output,
-                );
+            let claim_active = self.outputs[index].installed_hdr_metadata_blob.is_some();
             let connector_signalling = self.outputs[index].installed_hdr_metadata_blob.is_some();
             let participating = Self::output_participates(&self.outputs[index], state);
             let refusal = self.hdr_enable_refusal_for_output(
@@ -5482,8 +5503,8 @@ impl KmsState {
             };
             match self.set_hdr_metadata_for_output(index, blob.as_ref(), color_manager) {
                 Ok(()) => log::info!(
-                    "[kms-cm] HDR signalling {} on {}",
-                    if want { "asserted" } else { "withdrawn" },
+                    "[kms-cm] HDR signalling {} staged for frame on {}",
+                    if want { "assertion" } else { "withdrawal" },
                     self.outputs[index].output_name
                 ),
                 Err(error) => match hdr_commit_failure_response(want, error.verdict()) {
@@ -5781,6 +5802,7 @@ impl KmsState {
             output.hdr_requested = requested;
             if requested {
                 output.hdr_connector_commit_rejected = false;
+                output.scanout_color_commit_rejected = false;
             }
             self.needs_render = true;
         }
@@ -5923,6 +5945,10 @@ impl KmsState {
                 continue;
             }
             any_participating = true;
+            if self.outputs[i].scanout_color_commit_rejected {
+                lut_capable = false;
+                ctm_capable = false;
+            }
             let caps = self.outputs[i].color_pipeline_caps.as_ref();
             if !caps
                 .map(|c| c.gamma_lut_supported && c.gamma_lut_size >= 256)
@@ -6128,6 +6154,16 @@ impl KmsState {
             return Err(error);
         }
 
+        if self.outputs[output_idx].applied_color_generation
+            != self.outputs[output_idx].desired_color_generation
+        {
+            let output = &mut self.outputs[output_idx];
+            output.legacy_gamma_override = client_gamma.is_some();
+            output.client_gamma_pending = true;
+            output.client_gamma = client_gamma;
+            self.needs_render = true;
+            return Ok(());
+        }
         let result = self.write_legacy_gamma(crtc, gamma_size, ramp);
         let output = &mut self.outputs[output_idx];
         output.legacy_gamma_override = result.is_err() || !identity;
@@ -6171,6 +6207,9 @@ impl KmsState {
         let Some(output) = self.outputs.get(output_idx) else {
             return;
         };
+        if output.applied_color_generation != output.desired_color_generation {
+            return;
+        }
         if !client_gamma_ready_to_write(
             output.client_gamma_pending,
             output.installed_gamma_lut.is_some(),
@@ -8077,6 +8116,15 @@ impl KmsState {
         // render loop treats a rejected queue as a device fault and tries to
         // re-activate the backend — so an unconditional attempt would spin
         // that recovery path every frame.
+        let driver_supports_monotonic_timestamp = {
+            use smithay::reexports::drm::Device as _;
+            drm_output_manager
+                .device()
+                .get_driver_capability(
+                    smithay::reexports::drm::DriverCapability::MonotonicTimestamp,
+                )
+                .is_ok_and(|value| value != 0)
+        };
         let driver_supports_async_flip = {
             use smithay::reexports::drm::Device as _;
             drm_output_manager
@@ -8362,7 +8410,11 @@ impl KmsState {
                 client_gamma: None,
                 client_gamma_pending: false,
                 installed_hdr_metadata_blob: None,
+                desired_color_generation: 0,
+                applied_color_generation: 0,
+                retired_color_blobs: Vec::new(),
                 hdr_connector_commit_rejected: false,
+                scanout_color_commit_rejected: false,
                 vrr_supported_without_modeset,
                 vrr: VrrApplyRecord {
                     attempt: None,
@@ -8386,6 +8438,7 @@ impl KmsState {
         let cursor_theme = CursorTheme::load(&cursor_theme_name);
         log::info!("[cursor] theme={cursor_theme_name:?} size={cursor_size}px");
 
+        crate::backend::compositor_common::companion_scene::presentation_route(Vec::new(), false);
         let handle: KmsHandle = Rc::new(RefCell::new(KmsState {
             dev_path: dev_path.to_path_buf(),
             drm_device_fd: fd.clone(),
@@ -8425,6 +8478,7 @@ impl KmsState {
             last_presentation_outputs: Vec::new(),
             previous_presentation_outputs: Vec::new(),
             driver_supports_async_flip,
+            driver_supports_monotonic_timestamp,
             // Construction has not established the neutral hardware baseline
             // yet. Even though the event loop cannot dispatch this handle until
             // `new` returns, keep the invariant explicit in the state itself.
@@ -8444,7 +8498,7 @@ impl KmsState {
                 DrmEvent::VBlank(crtc) => {
                     let presented = {
                         let mut kms = handle_clone.borrow_mut();
-                        kms.on_vblank(crtc, metadata);
+                        kms.on_vblank(crtc, metadata, state.color_manager.as_ref());
                         kms.take_presented_locked_frames()
                     };
                     for (output_name, epoch) in presented {
@@ -8510,6 +8564,14 @@ impl KmsState {
         Ok(handle)
     }
 
+    pub(super) fn native_presentation_supported(&self) -> bool {
+        self.driver_supports_monotonic_timestamp
+            && self
+                .outputs
+                .iter()
+                .any(|out| !out.dpms_off && !out.drm_mode_uncertain)
+    }
+
     pub(super) fn render_if_needed(
         &mut self,
         state: &crate::backend::wayland::state::JwmWaylandState,
@@ -8517,6 +8579,18 @@ impl KmsState {
         compositor: Option<&super::super::compositor::WaylandCompositor>,
         builtin_session_lock_shield: bool,
     ) {
+        crate::backend::compositor_common::companion_scene::presentation_route(
+            self.outputs
+                .iter()
+                .filter(|out| {
+                    !out.dpms_off
+                        && !out.drm_mode_uncertain
+                        && !state.soft_disabled_outputs.contains(&out.output_name)
+                })
+                .map(|out| out.output_name.clone())
+                .collect(),
+            compositor.is_some() && self.native_presentation_supported(),
+        );
         // Ahead of the early return: a capture of a dark or replaced output
         // must be answered even when nothing on screen needs a frame.
         self.fail_unservable_output_captures(&state.soft_disabled_outputs);
@@ -9656,7 +9730,9 @@ impl KmsState {
             let flush_pending = self.flush_pending.clone();
             let out = &mut self.outputs[out_idx];
 
-            if out.color_delivery_retry_required {
+            if out.desired_color_generation != out.applied_color_generation {
+                out.drm_output.prepare_color_transition();
+            } else if out.color_delivery_retry_required {
                 // `needs_render` alone is insufficient on a static desktop:
                 // Smithay will return an empty frame when its damage history
                 // still matches the current buffer. Resetting the swapchain
@@ -9711,12 +9787,62 @@ impl KmsState {
                     // can be dropped and re-taken around the lookup.
                     let color_delivery =
                         self.color_delivery_plan_for_output(out_idx, client_direct_scanout);
+                    let properties = match self.frame_color_properties(out_idx) {
+                        Ok(properties) => properties,
+                        Err(error) => {
+                            log::warn!(
+                                "[kms-cm] refusing framebuffer with invalid color properties: {error}"
+                            );
+                            any_failed = true;
+                            continue;
+                        }
+                    };
                     let out = &mut self.outputs[out_idx];
-                    let frame_data = QueuedFrameData { color_delivery };
+                    let frame_data = QueuedFrameData {
+                        color_transaction: Some(FrameColorTransaction {
+                            generation: out.desired_color_generation,
+                            hdr: out.installed_hdr_metadata_blob.is_some(),
+                        }),
+                        color_delivery,
+                        companion: compositor
+                            .and_then(|comp| comp.companion_frame_evidence.clone())
+                            .map(|mut ticket| {
+                                ticket.body_drawn &= ticket.rect.is_some_and(|r| {
+                                    r[0] < (ox + out_w) as f32
+                                        && r[1] < (oy + out_h) as f32
+                                        && r[0] + r[2] > ox as f32
+                                        && r[1] + r[3] > oy as f32
+                                });
+                                ticket
+                            }),
+                    };
                     // Sample both DRM timestamp domains before submitting: a
                     // flip can happen immediately after the ioctl returns.
                     let queue_boundary = FrameQueueBoundary::now();
-                    if let Err(err) = out.drm_output.queue_frame(frame_data) {
+                    if let Err(err) = out
+                        .drm_output
+                        .queue_frame_with_properties(frame_data, properties)
+                    {
+                        let color_rejected = match &err {
+                            smithay::backend::drm::compositor::FrameError::DrmError(
+                                smithay::backend::drm::DrmError::TestFailed(_),
+                            ) => true,
+                            smithay::backend::drm::compositor::FrameError::DrmError(
+                                smithay::backend::drm::DrmError::Access(access),
+                            ) => {
+                                color_commit_verdict_from_errno(access.source.raw_os_error())
+                                    == ColorCommitVerdict::DriverRefused
+                            }
+                            _ => false,
+                        };
+                        if color_rejected
+                            && out.desired_color_generation != out.applied_color_generation
+                        {
+                            out.scanout_color_commit_rejected = true;
+                            if out.installed_hdr_metadata_blob.is_some() {
+                                out.hdr_connector_commit_rejected = true;
+                            }
+                        }
                         any_failed = true;
                         log::warn!("{}: {err:?}", renderer_ctx("queue DRM frame"));
 
@@ -9798,6 +9924,7 @@ impl KmsState {
         &mut self,
         crtc: crtc::Handle,
         metadata: &mut Option<DrmEventMetadata>,
+        color_manager: Option<&crate::backend::wayland_udev::color_management::ColorManagerState>,
     ) {
         let flush_tx = self.flush_tx.clone();
         let flush_pending = self.flush_pending.clone();
@@ -9846,6 +9973,49 @@ impl KmsState {
                     None
                 }
             };
+            if !uncertain {
+                if let Some(transaction) = submitted_frame
+                    .as_ref()
+                    .and_then(|frame| frame.color_transaction)
+                    .filter(|transaction| {
+                        transaction.is_reliable_observation(uncertain, metadata.is_some())
+                    })
+                {
+                    out.applied_color_generation = transaction.generation;
+                    let was_hdr =
+                        crate::backend::wayland_udev::color_management::output_hdr_metadata_active(
+                            &out.output,
+                        );
+                    crate::backend::wayland_udev::color_management::set_output_hdr_metadata_active(
+                        &out.output,
+                        transaction.hdr,
+                    );
+                    if was_hdr != transaction.hdr {
+                        if let Some(manager) = color_manager {
+                            manager.on_output_description_changed(&out.output);
+                        }
+                    }
+                    if transaction.fulfills_desired(out.desired_color_generation) {
+                        let mgr = self.drm_output_manager.lock();
+                        for blob in std::mem::take(&mut out.retired_color_blobs) {
+                            let _ = mgr.device().destroy_property_blob(blob);
+                        }
+                    }
+                }
+            }
+            if !uncertain && presentation_time.is_some() {
+                if let Some(ticket) = submitted_frame
+                    .as_ref()
+                    .and_then(|frame| frame.companion.clone())
+                {
+                    let serial = presentation_time.unwrap().as_nanos().min(u64::MAX as u128) as u64;
+                    crate::backend::compositor_common::companion_scene::confirm_frame_evidence(
+                        &out.output_name,
+                        ticket,
+                        serial,
+                    );
+                }
+            }
             let observation = submitted_color_delivery_observation(submitted_frame, uncertain);
             out.frame_pending = false;
             out.frame_pending_since = None;
@@ -9871,7 +10041,14 @@ impl KmsState {
             presentation_time,
             received_at,
         );
-        if promoted {
+        let desired_pending = self.outputs[output_idx].applied_color_generation
+            != self.outputs[output_idx].desired_color_generation;
+        if desired_pending {
+            // An accepted older framebuffer is a real observation, not
+            // completion of the newest target. Keep its replacement armed.
+            self.outputs[output_idx].color_delivery_retry_required = true;
+            self.needs_render = true;
+        } else if promoted {
             self.outputs[output_idx].color_delivery_retry_required = false;
         }
         if retry_color_delivery_observation
@@ -9881,6 +10058,7 @@ impl KmsState {
             self.needs_render = true;
         }
 
+        self.write_pending_client_gamma(output_idx);
         let out = &mut self.outputs[output_idx];
         Self::deliver_frame_callbacks(out, &flush_tx, &flush_pending, presentation_time);
     }
@@ -9894,6 +10072,7 @@ impl Drop for KmsState {
     /// Drop remains best-effort because orderly teardown may run after DRM
     /// master/session ownership has already been revoked.
     fn drop(&mut self) {
+        crate::backend::compositor_common::companion_scene::presentation_route(Vec::new(), false);
         let crtcs: Vec<_> = self.outputs.iter().map(|output| output.crtc).collect();
         let connectors: Vec<_> = self.outputs.iter().map(|output| output.connector).collect();
         let blobs: Vec<u64> = self
@@ -9905,6 +10084,7 @@ impl Drop for KmsState {
                     .into_iter()
                     .chain(o.installed_ctm)
                     .chain(o.installed_hdr_metadata_blob)
+                    .chain(o.retired_color_blobs.iter().copied())
             })
             .collect();
         let mgr = self.drm_output_manager.lock();
@@ -10985,46 +11165,36 @@ mod compositor_texture_ownership_tests {
     }
 
     #[test]
-    fn every_signalling_change_tells_the_clients_on_the_output() {
-        // `params_for_output` flips from sRGB to the EDID PQ/BT.2020 profile
-        // the moment the claim goes up, but the only emitter of
-        // `preferred_changed` used to be `on_surface_enters_output`, which
-        // returns early when the output is already in the surface's bucket.
-        // A player mapped before the enable therefore kept rendering sRGB
-        // into an output now told PQ, and never learned of the withdrawal
-        // either. Both the commit path and the claim-only path have to
-        // notify. `set_hdr_metadata_for_output` needs a device, so this is a
-        // source scan: the haystack is narrowed to each function and the
-        // needle assembled at runtime, so it cannot match its own literal.
+    fn every_presented_signalling_change_tells_the_clients_on_the_output() {
         const SOURCE: &str = include_str!("udev_kms.rs");
-        let needle = format!("color_manager.{}(", "on_output_description_changed");
-        for (start, end) in [
-            (
-                "pub(super) fn set_hdr_metadata_for_output(",
-                "fn drop_hdr_claim(",
-            ),
-            (
-                "fn drop_hdr_claim(",
-                "fn withdraw_hdr_signalling_outside_frame_loop(",
-            ),
-        ] {
-            let body = SOURCE
-                .split_once(start)
-                .unwrap_or_else(|| panic!("{start} exists"))
-                .1
-                .split_once(end)
-                .unwrap_or_else(|| panic!("{end} follows {start}"))
-                .0;
-            assert!(body.contains(&needle), "{start} must notify the clients");
-        }
+        let stage = SOURCE
+            .split_once("pub(super) fn set_hdr_metadata_for_output(")
+            .unwrap()
+            .1
+            .split_once("fn drop_hdr_claim(")
+            .unwrap()
+            .0;
         assert!(
-            !SOURCE
-                .split_once("pub(super) fn set_hdr_metadata_for_output(")
-                .expect("split")
-                .0
-                .contains(&needle),
-            "the needle must not appear before the first function, or this proves nothing"
+            !stage.contains("on_output_description_changed("),
+            "staging must not publish a description before its framebuffer"
         );
+        let present = SOURCE
+            .split_once("pub(super) fn on_vblank(")
+            .unwrap()
+            .1
+            .split_once("impl Drop for KmsState")
+            .unwrap()
+            .0;
+        assert!(present.contains("is_reliable_observation("));
+        assert!(present.contains("manager.on_output_description_changed(&out.output)"));
+        let dark = SOURCE
+            .split_once("fn drop_hdr_claim(")
+            .unwrap()
+            .1
+            .split_once("fn withdraw_hdr_signalling_outside_frame_loop(")
+            .unwrap()
+            .0;
+        assert!(dark.contains("color_manager.on_output_description_changed("));
     }
 
     #[test]
@@ -12401,18 +12571,14 @@ mod compositor_texture_ownership_tests {
             "migrated common-linear-aware overlays must not appear in the inventory"
         );
 
-        // Encoded-only overlays report their own names in draw order.
+        // Editor and local-only capture chrome now share linear delivery.
         let mut encoded = TailOverlayVisibility::default();
         encoded.recording_region_overlay = true;
         encoded.annotation = true;
         encoded.screenshot_toolbar = true;
         assert_eq!(
             linear_tail_blocker_names(&tail_status(true, &encoded), &safe_plan),
-            [
-                "annotation_overlay",
-                "screenshot_toolbar_overlay",
-                "recording_region_overlay"
-            ]
+            Vec::<&str>::new()
         );
 
         // Without a live linear target the tail reports the aggregate name,
@@ -12433,12 +12599,7 @@ mod compositor_texture_ownership_tests {
         );
         assert_eq!(
             linear_tail_blocker_names(&tail_status(true, &encoded), &blocked_plan),
-            [
-                "annotation_overlay",
-                "screenshot_toolbar_overlay",
-                "recording_region_overlay",
-                "cursor"
-            ]
+            ["cursor"]
         );
         // Capture/readback appears nowhere: it reads the independent encoded
         // capture view and never constrains the route (P0-4 decoupling).
@@ -13102,6 +13263,8 @@ mod compositor_texture_ownership_tests {
         // fail-closed and arm a replacement frame.
         let (first, retry) = submitted_color_delivery_observation(
             Some(QueuedFrameData {
+                color_transaction: None,
+                companion: None,
                 color_delivery: Some(plan.clone()),
             }),
             true,
@@ -13111,6 +13274,8 @@ mod compositor_texture_ownership_tests {
 
         let (second, retry) = submitted_color_delivery_observation(
             Some(QueuedFrameData {
+                color_transaction: None,
+                companion: None,
                 color_delivery: Some(plan),
             }),
             false,
@@ -13884,5 +14049,217 @@ mod seat_device_release_tests {
             .expect("a failed build returns the device");
         assert!(open_at < close_at);
         assert!(new.contains("if result.is_err()"));
+    }
+}
+
+#[cfg(test)]
+mod frame_color_transaction_tests {
+    use super::*;
+
+    #[test]
+    fn reliable_queued_frame_is_observed_even_after_a_newer_desire_is_staged() {
+        let hdr = FrameColorTransaction {
+            generation: 2,
+            hdr: true,
+        };
+        assert!(hdr.is_reliable_observation(false, true));
+        assert!(!hdr.fulfills_desired(3));
+        assert!(
+            !hdr.is_reliable_observation(true, true),
+            "watchdog/DPMS ambiguity remains fail-closed"
+        );
+        assert!(
+            !hdr.is_reliable_observation(false, false),
+            "missing queue timestamp is not evidence"
+        );
+    }
+
+    #[test]
+    fn sdr_hdr_sdr_interleaving_tracks_each_presented_frame_without_losing_new_desire() {
+        let mut desired = 1;
+        let mut applied = 1;
+        let mut public_hdr = false;
+        let mut retired = vec![101u64];
+        let mut tracker = OutputColorDeliveryTracker::default();
+        let mut status_generation = 0;
+        let now = std::time::Instant::now();
+        let plan = |hdr| ColorDeliveryPlan {
+            policy_sequence: if hdr { 2 } else { 3 },
+            route: "software_output_regions".into(),
+            working_space: "linear_srgb".into(),
+            target_transfer_function: if hdr { "st2084_pq" } else { "srgb" }.into(),
+            target_primaries: if hdr { "bt2020" } else { "srgb" }.into(),
+            hdr_metadata_active: hdr,
+            colorspace_signal: if hdr { "bt2020_rgb" } else { "default_sdr" }.into(),
+            fallback_reason: None,
+        };
+        tracker.present(Some(plan(false)), &mut status_generation, None, now);
+        desired += 1;
+        let queued_hdr = FrameColorTransaction {
+            generation: desired,
+            hdr: true,
+        };
+        desired += 1; // New SDR desired while the HDR FB is already queued.
+        assert_eq!((applied, public_hdr, desired), (1, false, 3));
+        assert!(
+            !tracker
+                .last_success_status(now)
+                .unwrap()
+                .hdr_metadata_active,
+            "staging preserves the previously confirmed SDR observation"
+        );
+        // Exact accepted gen2 vblank describes actual HDR scanout, even though
+        // the latest target is already SDR/gen3. No desired state is rolled back.
+        assert!(queued_hdr.is_reliable_observation(false, true));
+        applied = queued_hdr.generation;
+        public_hdr = queued_hdr.hdr;
+        tracker.present(Some(plan(public_hdr)), &mut status_generation, None, now);
+        if queued_hdr.fulfills_desired(desired) {
+            retired.clear();
+        }
+        assert_eq!((applied, public_hdr, desired), (2, true, 3));
+        assert!(
+            tracker
+                .last_success_status(now)
+                .unwrap()
+                .hdr_metadata_active
+        );
+        assert_eq!(
+            retired,
+            [101],
+            "gen2 must not release ids needed by the newer pending transition"
+        );
+        assert!(applied != desired, "gen3 retry/full repaint remains armed");
+        let queued_sdr = FrameColorTransaction {
+            generation: desired,
+            hdr: false,
+        };
+        assert!(queued_sdr.is_reliable_observation(false, true));
+        applied = queued_sdr.generation;
+        public_hdr = queued_sdr.hdr;
+        tracker.present(Some(plan(public_hdr)), &mut status_generation, None, now);
+        if queued_sdr.fulfills_desired(desired) {
+            retired.clear();
+        }
+        assert_eq!((applied, public_hdr, desired), (3, false, 3));
+        assert!(
+            !tracker
+                .last_success_status(now)
+                .unwrap()
+                .hdr_metadata_active
+        );
+        assert!(retired.is_empty());
+        assert_eq!(
+            applied, desired,
+            "only latest target confirmation permits clearing its retry"
+        );
+    }
+
+    #[test]
+    fn desired_staging_preserves_pending_queue_identity_and_last_success() {
+        let source = include_str!("udev_kms.rs");
+        let desired = source
+            .split_once("fn request_color_delivery_after_desired_change(")
+            .unwrap()
+            .1
+            .split_once("fn invalidate_color_delivery_after_hardware_change(")
+            .unwrap()
+            .0;
+        assert!(!desired.contains(".invalidate()"));
+        assert!(!desired.contains("observation_uncertain"));
+        assert!(desired.contains("color_delivery_retry_required = true"));
+        let hardware = source
+            .split_once("fn invalidate_color_delivery_after_hardware_change(")
+            .unwrap()
+            .1
+            .split_once("pub(super) fn any_frame_pending(")
+            .unwrap()
+            .0;
+        assert!(hardware.contains("out.color_delivery.invalidate()"));
+        assert!(hardware.contains("out.color_delivery_observation_uncertain = true"));
+        for (start, end) in [
+            (
+                "pub(super) fn set_hdr_metadata_for_output(",
+                "fn drop_hdr_claim(",
+            ),
+            (
+                "fn apply_scanout_color_goals(",
+                "pub(super) fn uninstall_gamma_lut(",
+            ),
+        ] {
+            let stage = source
+                .split_once(start)
+                .unwrap()
+                .1
+                .split_once(end)
+                .unwrap()
+                .0;
+            assert!(stage.contains("self.request_color_delivery_after_desired_change("));
+            assert!(!stage.contains("self.invalidate_color_delivery_after_hardware_change("));
+        }
+    }
+
+    #[test]
+    fn stalled_presentations_have_a_bounded_color_blob_budget_and_can_clear() {
+        let mut retired = 0;
+        let mut current = 0;
+        let mut accepted = 0;
+        // Repeated configuration updates while page flips/driver submission
+        // fail may retain old references, but can never allocate unbounded ids.
+        while color_blob_budget_allows(retired, current, 3) {
+            retired += current;
+            current = 3;
+            accepted += 1;
+        }
+        assert!(accepted > 1 && accepted < 64);
+        assert!(retired + current <= MAX_OWNED_COLOR_BLOBS);
+        assert!(!color_blob_budget_allows(retired, current, 3));
+        assert!(
+            color_blob_budget_allows(retired, current, 0),
+            "terminal SDR neutralization never needs a new blob"
+        );
+        retired += current;
+        current = 0;
+        assert!(retired + current <= MAX_OWNED_COLOR_BLOBS);
+        assert!(
+            color_blob_budget_allows(0, 0, 3),
+            "matching frame retirement releases the budget"
+        );
+    }
+
+    #[test]
+    fn staging_never_commits_or_publishes_a_new_output_description() {
+        let source = include_str!("udev_kms.rs");
+        let metadata = source
+            .split_once("pub(super) fn set_hdr_metadata_for_output(")
+            .unwrap()
+            .1
+            .split_once("fn drop_hdr_claim(")
+            .unwrap()
+            .0;
+        assert!(!metadata.contains(".atomic_commit("));
+        assert!(!metadata.contains("set_output_hdr_metadata_active("));
+        assert!(metadata.contains("retired_color_blobs.push(previous)"));
+        let stages = source
+            .split_once("fn apply_scanout_color_goals(")
+            .unwrap()
+            .1
+            .split_once("pub(super) fn uninstall_gamma_lut(")
+            .unwrap()
+            .0;
+        assert!(!stages.contains(".atomic_commit("));
+        assert!(stages.contains("retired_color_blobs.push(id)"));
+        let queue = source
+            .split_once("// Re-borrow for render_frame + queue_frame.")
+            .unwrap()
+            .1
+            .split_once("// ── ext-image-copy-capture")
+            .unwrap()
+            .0;
+        assert!(
+            queue.find("prepare_color_transition()").unwrap()
+                < queue.find(".render_frame(").unwrap()
+        );
+        assert!(queue.contains(".queue_frame_with_properties(frame_data, properties)"));
     }
 }

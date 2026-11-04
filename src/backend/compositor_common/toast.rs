@@ -94,7 +94,7 @@ pub(crate) const STACK_GAP: f32 = 12.0;
 /// the left; a nested output shrinks them to preserve the text column.
 #[must_use]
 pub(crate) fn card_pad(width: f32) -> (f32, f32) {
-    let theme_pad = ui_theme::palette().pad;
+    let theme_pad = ui_theme::palette().effective_pad();
     let theme_pad_left = (theme_pad + 12.0).max(theme_pad * 1.5);
     let width = if width.is_finite() {
         width.max(0.0)

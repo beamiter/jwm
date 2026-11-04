@@ -8,7 +8,8 @@
 //! unlabeled results.
 
 use crate::perf_contract::{
-    self, PerfBaselineV1, ScenarioResult, SystemLabel, VerdictOutcome, default_budgets,
+    self, MeasurementSemantics, PerfBaselineV1, ScenarioResult, SystemLabel, VerdictOutcome,
+    default_budgets,
 };
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -763,7 +764,7 @@ fn record_baseline(
                         "input_latency".into(),
                         if latency.is_empty() {
                             ScenarioResult::skipped(
-                                "no input-to-present timestamps observed during the window",
+                                "no input latency samples observed; X11 reports a CPU heuristic, not input-to-present",
                             )
                         } else {
                             ScenarioResult::recorded(latency)
@@ -898,6 +899,40 @@ fn record_baseline(
         resolution,
         config_fingerprint: config_fingerprint(&backend),
     };
+
+    for (name, result) in &mut scenarios {
+        if result.status != perf_contract::ScenarioStatus::Recorded {
+            continue;
+        }
+        let (kind, source, clock) = match name.as_str() {
+            "idle" => ("process_counters", "procfs", "linux_proc_ticks"),
+            "input_latency" => (
+                "cpu_heuristic",
+                "compositor_input_estimate",
+                "monotonic_plus_unvalidated_display_estimate",
+            ),
+            "steady_frame" => (
+                "cpu_render_pass_duration",
+                "compositor_benchmark",
+                "rust_instant_monotonic",
+            ),
+            "damage_redraw" => ("software_counters", "compositor_damage", "sample_window"),
+            "allocation_steady" => ("software_counters", "counting_allocator", "sample_window"),
+            "direct_scanout" => ("software_counters", "compositor_scanout", "sample_window"),
+            _ => ("topology_snapshot", "jwm_ipc", "not_applicable"),
+        };
+        result.measurement = Some(MeasurementSemantics {
+            measurement_kind: kind.into(),
+            source: source.into(),
+            clock_domain: clock.into(),
+            workload: if options.waterlily_workload && name != "idle" {
+                "waterlily_paced"
+            } else {
+                "ambient"
+            }
+            .into(),
+        });
+    }
 
     Ok(PerfBaselineV1 {
         schema_version: perf_contract::SCHEMA_VERSION,
@@ -1186,6 +1221,79 @@ fn write_report_atomic(
         io::ErrorKind::AlreadyExists,
         "baseline temporary namespace is exhausted",
     ))
+}
+
+/// Read-only process profiling without starting a compositor benchmark. An
+/// explicit extra PID is observed, never inferred from a service's active flag.
+pub fn run_idle(seconds: u32, additional: &[u32]) -> io::Result<()> {
+    if !(1..=3600).contains(&seconds) || additional.len() > 16 || additional.contains(&0) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "idle duration must be1..3600seconds and at most16positive component PIDs",
+        ));
+    }
+    let result = (|| -> Result<Value, String> {
+        let status = ipc_query("get_status")?;
+        let compositor = compositor_pid(&status)?;
+        let mut pids = vec![compositor];
+        pids.extend_from_slice(additional);
+        pids.sort_unstable();
+        pids.dedup();
+        let ticks = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+        if ticks <= 0 {
+            return Err("SC_CLK_TCK unavailable".into());
+        }
+        let first = pids
+            .iter()
+            .map(|pid| sample_proc(*pid))
+            .collect::<Result<Vec<_>, _>>()?;
+        let started = Instant::now();
+        std::thread::sleep(Duration::from_secs(u64::from(seconds)));
+        let second = pids
+            .iter()
+            .map(|pid| sample_proc(*pid))
+            .collect::<Result<Vec<_>, _>>()?;
+        let elapsed = started.elapsed().as_secs_f64();
+        let after = ipc_query("get_status")?;
+        if compositor_pid(&after)? != compositor
+            || status.get("wm_instance_id") != after.get("wm_instance_id")
+        {
+            return Err("compositor session changed during idle sampling".into());
+        }
+        let mut processes = Vec::new();
+        let mut cpu = 0.0;
+        let mut rss = 0.0;
+        let mut switches = 0.0;
+        for ((pid, first), second) in pids.iter().zip(&first).zip(&second) {
+            let mut metrics = idle_metrics(first, second, ticks as f64, elapsed)?;
+            let context_switches = metrics.remove("wakeups_per_s").unwrap_or(0.0);
+            metrics.insert(
+                "main_thread_voluntary_context_switches_per_s".into(),
+                context_switches,
+            );
+            cpu += metrics["cpu_percent_avg"];
+            rss += metrics["rss_mb"];
+            switches += context_switches;
+            processes.push(serde_json::json!({"pid":pid,"start_ticks":first.start_time,
+                "role":if *pid==compositor {"compositor"} else {"explicit_additional_component"},
+                "metrics":metrics}));
+        }
+        Ok(serde_json::json!({"format":1,"status":"recorded",
+            "measurement_kind":"process_cpu_rss_and_main_thread_voluntary_context_switch_proxy",
+            "source":"linux_procfs","clock_domain":"monotonic_elapsed_and_SC_CLK_TCK",
+            "requested_seconds":seconds,"sample_seconds":elapsed,
+            "scope":"only listed observed PIDs; RSS is additive, not PSS; context switches are not kernel wakeups",
+            "recorded_at":chrono::Utc::now().to_rfc3339(),"processes":processes,
+            "backend":status.get("backend"),"jwm_version":status.get("version"),
+            "wm_instance_id":status.get("wm_instance_id"),"cpu":cpu_model(),"kernel":kernel_release(),
+            "totals":{"cpu_percent_avg":cpu,"rss_mb":rss,"main_thread_voluntary_context_switches_per_s":switches}}))
+    })();
+    let report = result.map_err(io::Error::other)?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&report).map_err(io::Error::other)?
+    );
+    Ok(())
 }
 
 fn record_idle(pid: u32, seconds: u32) -> Result<BTreeMap<String, f64>, String> {

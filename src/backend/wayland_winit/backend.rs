@@ -2044,7 +2044,7 @@ fn process_input_event_windowed<B: InputBackend>(
                     });
 
                 if let Some(surface) = exclusive_surface {
-                    kbd.set_focus(state, Some(surface), serial);
+                    state.focus_keyboard_layer(surface, serial);
                 }
 
                 state.keyboard_input_for_popup(

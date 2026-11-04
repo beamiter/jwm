@@ -686,6 +686,7 @@ const fn shell_class(route: ShellRoute) -> &'static str {
         ShellRoute::Calendar => "shell-calendar",
         ShellRoute::Wallpaper => "shell-wallpaper",
         ShellRoute::Theme => "shell-theme",
+        ShellRoute::AgentSessions => "shell-agents",
     }
 }
 

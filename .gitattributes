@@ -1,0 +1,2 @@
+# Unified patches must retain their space-prefixed empty context lines.
+vendor/smithay/JWM_BACKPORT.patch -whitespace

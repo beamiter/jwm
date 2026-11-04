@@ -1,6 +1,16 @@
 # Shared shell validation evidence
 
-The current P4 inventory contains **28 successful frontend builds, 56 actual XCB/X11RB generic runs, and 56 actual sparse-tag interaction runs**. All 56 generic captures also pass the TaoGlow material, outer-boundary and transparent-corner checks. The inventory was validated at `2026-10-29T09:48:09.815893+00:00`; exact binaries, hashes, build logs, fixture hashes and captures are recorded in [shared-shell-coverage.json](shared-shell-coverage.json).
+The configured default is **Xilem (`xilem_bar`)**. TaoGlow and Leptos results
+below identify the exact frontend used in those historical runs; they do not
+select the current default or establish current-master compatibility. Changing
+shared schema, Shell, frontend, compositor or dependencies requires a fresh
+run. The matrix runner now records dependency fingerprints, source revision,
+compiler, binary hashes, backend and isolated validation level in format 2.
+Use `scripts/acceptance_evidence.py audit` for version-bound candidate records;
+`release` requires physical lifecycle evidence, two GPU vendors and an actually
+completed seven-day soak. Existing 2026-10-29 records remain historical.
+
+The historical P4 inventory contains **28 successful frontend builds, 56 actual XCB/X11RB generic runs, and 56 actual sparse-tag interaction runs**. All 56 generic captures also pass the TaoGlow material, outer-boundary and transparent-corner checks. The inventory was validated at `2026-10-29T09:48:09.815893+00:00`; exact binaries, hashes, build logs, fixture hashes and captures are recorded in [shared-shell-coverage.json](shared-shell-coverage.json).
 
 Every accepted case uses JWM `cbde73f7de2ebe9afc3847fca20040cd8bdc425df0c5fffc1468f013198da079` and shared host `bc2effeb8e564e015e48180fab7dc43566f21779dd830d49b2eb60d61dd06799`. Each frontend hash is checked against the current executable before acceptance and again after evidence persistence. The recorded Leptos release is `43bd73daf2cd5f6f95adea91d1426acac4df589a46d1fbda8e6970de773270b9` at `target/tauri-release/release/tauri_leptos_bar`. `binary` remains the matrix's canonical build destination; `validated_binary` identifies the executable actually tested.
 
@@ -66,7 +76,7 @@ Tauri clears native WebKit backing and uses the shared palette; it preserves an 
 | Shared lifecycle | [Current release deep runs](../artifacts/header-alignment/current-release-deep-performance/summary.json) pass 23 stages on each X11 backend, using the TaoGlow/Pixels release pair. They cover host/top restarts, app survival, stale identities, reservations and lifecycle recovery separately from this frontend matrix. |
 | Performance | [Current fixed-budget comparison](../artifacts/header-alignment/current-release-deep-performance/budget-comparison.json) evaluates the existing [budget](../docs/shared-shell-performance-budget.json); it does not substitute for frontend rendering gates. |
 | Legacy and visual profiles | [Current compatibility runs](../artifacts/header-alignment/current-release-compat-visual/summary.json) retain four legacy configuration cases and separate dark/small captures. |
-| Nested Wayland | [Current default-header result](../artifacts/header-alignment/native-wayland-header-final/summary.json) passes all 10 gates with this Leptos release, native nested panels and an XWayland header. The report retains recoverable EGL log counts. Physical DRM/KMS outputs remain unverified. |
+| Nested Wayland | [Historical Leptos header result](../artifacts/header-alignment/native-wayland-header-final/summary.json) passes all 10 gates with this Leptos release, native nested panels and an XWayland header. The report retains recoverable EGL log counts. Physical DRM/KMS outputs remain unverified. |
 | Installation and delivery | [Delivery](shared-shell-delivery.md) and the [completion audit](shared-shell-completion-audit.md) own packaging and release acceptance. The earlier real session-upgrade failure remains recorded; private lifecycle tests do not establish that historical transition was repaired. |
 
 Historical artifacts remain available and are listed in the inventory's `retained_attempts`. The interrupted pre-reboot matrix, earlier driver/alpha attempts, pre-identity raw headers, old Xilem white fill and old WebKit material are not accepted as current results. [The earlier shared-shell test index](../artifacts/shared-shell/final-checks/results.json) is retained as historical evidence rather than being relabeled with current binary hashes.

@@ -2120,6 +2120,27 @@ impl UdevBackend {
     }
 
     fn install_compositor(&mut self, mut compositor: WaylandCompositor) {
+        crate::backend::compositor_common::companion_scene::presentation_route(
+            self.state
+                .outputs
+                .iter()
+                .map(|output| output.name())
+                .collect(),
+            self.kms
+                .as_ref()
+                .is_some_and(|kms| kms.borrow().native_presentation_supported()),
+        );
+        if let Some(kms) = self.kms.as_ref() {
+            let signal = self.event_loop.get_signal();
+            let result = kms
+                .borrow_mut()
+                .with_renderer(|gl| unsafe { compositor.initialize_desktop_visual(gl, signal) });
+            match result {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => log::warn!("[wayland/DVR] unavailable: {error}"),
+                Err(error) => log::warn!("[wayland/DVR] GL context unavailable: {error:?}"),
+            }
+        }
         // new deliberately constructs a conservative all-off baseline.
         // Apply live config before replaying state-dependent commands.
         compositor.apply_config();
@@ -3519,7 +3540,9 @@ impl UdevBackend {
                                                     || data.layer == WlrLayer::Overlay)
                                                 // Bars/docks often set a non-zero exclusive zone to reserve space.
                                                 // Treat those as non-blocking for WM shortcuts.
-                                                && exclusive_zone == 0
+                                                && (exclusive_zone == 0 || state.surface_to_window.get(&layer.wl_surface().id())
+                                                    .and_then(|window| state.window_title.get(window))
+                                                    .is_some_and(|namespace| namespace.starts_with("jwm-shell-") && !namespace.ends_with("-sensor")))
                                         });
                                         if !exclusive {
                                             return None;
@@ -3552,7 +3575,7 @@ impl UdevBackend {
                                                 "[udev:key] handled_by_exclusive_layer=true"
                                             );
                                         }
-                                        kbd.set_focus(state, Some(surface), serial);
+                                        state.focus_keyboard_layer(surface, serial);
 
                                         state.keyboard_input_for_popup(
                                             keycode,
@@ -7104,6 +7127,23 @@ impl Backend for UdevBackend {
                         Some((o.name(), rect))
                     })
                     .collect();
+                let visual_outputs: Vec<_> = output_frames
+                    .iter()
+                    .map(|(name, rect)| {
+                        (
+                            name.clone(),
+                            [
+                                rect.loc.x as f32,
+                                rect.loc.y as f32,
+                                rect.size.w as f32,
+                                rect.size.h as f32,
+                            ],
+                        )
+                    })
+                    .collect();
+                let _ = kms.borrow_mut().with_renderer(|gl| unsafe {
+                    compositor.configure_desktop_visual_outputs(gl, &visual_outputs);
+                });
                 let output_cache: Vec<(Rectangle<i32, Logical>, ParametricParams)> = self
                     .state
                     .outputs
@@ -7505,58 +7545,44 @@ impl Backend for UdevBackend {
                         let mut output_mutation_attempted = false;
                         let mut touched_outputs = Vec::new();
                         let mut configuration_before = None;
-                        // Runtime target resize is allocation-transactional,
-                        // but a failed allocation after a successful DRM
-                        // modeset would still leave KMS and the retained FBO at
-                        // different dimensions. Until framebuffer preparation
-                        // can span the DRM transaction, allow only changes that
-                        // preserve the current physical envelope.
-                        if self.compositor.is_some()
-                            && let Some(ref kms) = self.kms
+                        // Prepare the complete GL chain before the first DRM or
+                        // advertised-state mutation. The existing explicit
+                        // modeset opt-in gates physical envelope changes too.
+                        let mut planned_framebuffer_size = None;
+                        if let (Some(compositor), Some(kms)) =
+                            (self.compositor.as_mut(), self.kms.as_ref())
                         {
                             let preflight = {
                                 let kms = kms.borrow();
                                 let current_size = kms.total_screen_size();
-                                let outputs = kms.outputs();
-                                let mut current_layout = Vec::with_capacity(outputs.len());
-                                let mut layout_error = None;
-                                for output in outputs {
-                                    let Some(mode) = output.current_mode() else {
-                                        layout_error = Some(format!(
-                                            "cannot validate framebuffer envelope: output '{}' has no current mode",
-                                            output.name()
-                                        ));
-                                        break;
-                                    };
+                                let current_layout = kms.outputs().into_iter().map(|output| {
+                                    let mode = output.current_mode().ok_or_else(|| format!(
+                                        "cannot validate framebuffer envelope: output '{}' has no current mode",
+                                        output.name()
+                                    ))?;
                                     let location = output.current_location();
-                                    current_layout.push((
-                                        output.name(),
-                                        (location.x, location.y),
-                                        (mode.size.w, mode.size.h),
-                                    ));
-                                }
-                                match layout_error {
-                                    Some(error) => Err(error),
-                                    None => proposed_output_framebuffer_size(
-                                        &current_layout,
-                                        &changes,
-                                    )
-                                    .and_then(|proposed_size| {
-                                        if proposed_size == current_size {
-                                            Ok(())
-                                        } else {
-                                            Err(format!(
-                                                "runtime framebuffer envelope change from {}x{} to {}x{} is not yet supported; reinitialize KMS to apply this layout",
-                                                current_size.0,
-                                                current_size.1,
-                                                proposed_size.0,
-                                                proposed_size.1
-                                            ))
-                                        }
-                                    }),
-                                }
+                                    Ok((output.name(), (location.x, location.y), (mode.size.w, mode.size.h)))
+                                }).collect::<Result<Vec<_>, String>>();
+                                current_layout.and_then(|layout| {
+                                    let proposed = proposed_output_framebuffer_size(&layout, &changes)?;
+                                    if proposed != current_size && !crate::config::CONFIG.load().behavior().wlr_output_mgmt_allow_modeset {
+                                        return Err("framebuffer envelope resize requires behavior.wlr_output_mgmt_allow_modeset=true".into());
+                                    }
+                                    Ok(proposed)
+                                })
                             };
-                            if let Err(error) = preflight {
+                            let prepared = preflight.and_then(|(width, height)| {
+                                kms.borrow_mut()
+                                    .with_renderer(|gl| unsafe {
+                                        compositor.prepare_resize(gl, width, height)
+                                    })
+                                    .map_err(|error| {
+                                        format!("cannot prepare output GL context: {error:?}")
+                                    })??;
+                                planned_framebuffer_size = Some((width, height));
+                                Ok(())
+                            });
+                            if let Err(error) = prepared {
                                 let mut failure = output_management_failure("*", error);
                                 failure.field = Some("layout_extent".into());
                                 failed_outputs.push(failure);
@@ -7687,6 +7713,49 @@ impl Backend for UdevBackend {
                                     all_ok = false;
                                     break;
                                 }
+                            }
+                        }
+                        // A successfully applied topology must match the plan
+                        // before storage publication. Context acquisition or a
+                        // stale candidate is a transaction failure, and uses
+                        // the same reverse KMS rollback as modeset failure.
+                        if all_ok
+                            && let (Some(compositor), Some(kms), Some(expected)) = (
+                                self.compositor.as_mut(),
+                                self.kms.as_ref(),
+                                planned_framebuffer_size,
+                            )
+                        {
+                            let actual = kms.borrow().total_screen_size();
+                            let installed = if actual != expected {
+                                Err(format!(
+                                    "output topology changed during transaction: expected {expected:?}, observed {actual:?}"
+                                ))
+                            } else {
+                                kms.borrow_mut()
+                                    .with_renderer(|gl| unsafe {
+                                        compositor.commit_prepared_resize(gl)
+                                    })
+                                    .map_err(|error| {
+                                        format!("cannot publish prepared output targets: {error:?}")
+                                    })
+                                    .and_then(|result| result)
+                            };
+                            if let Err(error) = installed {
+                                failed_outputs.push(output_management_failure("*", error));
+                                all_ok = false;
+                            }
+                        }
+                        if !all_ok
+                            && let (Some(compositor), Some(kms)) =
+                                (self.compositor.as_mut(), self.kms.as_ref())
+                        {
+                            // If context acquisition itself fails the candidate
+                            // remains owned by the compositor for later cleanup.
+                            if let Err(error) = kms.borrow_mut().with_renderer(|gl| unsafe {
+                                compositor.discard_prepared_resize(gl)
+                            }) {
+                                log::warn!("[output-mgmt] candidate cleanup deferred: {error:?}");
                             }
                         }
                         let mut rollback_attempted = false;

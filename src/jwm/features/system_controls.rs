@@ -1640,6 +1640,10 @@ fn test_control_queue_push(request: ControlRequest) -> Option<u64> {
 
 /// The brightness counterpart of [`volume_tool_known_absent`].
 pub(crate) fn brightness_tool_known_absent() -> bool {
+    #[cfg(test)]
+    if test_control_queue_is_installed() {
+        return false;
+    }
     matches!(BRIGHTNESS_TOOL.get(), Some(None))
 }
 

@@ -925,6 +925,11 @@ impl<C: CompositorConnection> Compositor<C> {
             );
         }
 
+        crate::backend::compositor_common::companion_scene::presentation_route(
+            vec!["x11-root".into()],
+            oml.as_ref()
+                .is_some_and(|oml| oml.get_sync_values().is_some()),
+        );
         let hdr_output_10bit = graphics.output_is_10bit();
 
         Ok(Self {
@@ -1081,6 +1086,8 @@ impl<C: CompositorConnection> Compositor<C> {
             eva_overlay: Default::default(),
             frame_sync: None,
             companion_node: None,
+            companion_drawn_this_frame: false,
+            companion_pending_presentation: None,
             companion_texture: None,
             eva_texture: None,
             eva_output_probe: crate::backend::eva_x11_output::EvaX11OutputProbe::new(),

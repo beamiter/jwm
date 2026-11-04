@@ -188,6 +188,7 @@ impl ControlSpec {
                 ShellRoute::Calendar => "Calendar",
                 ShellRoute::Wallpaper => "Wallpaper",
                 ShellRoute::Theme => "Theme settings",
+                ShellRoute::AgentSessions => "Agent sessions",
             },
             NodeId::Background => "Status bar",
         };

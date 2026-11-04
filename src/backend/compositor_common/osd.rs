@@ -30,7 +30,7 @@ const OSD_FADE_IN: f32 = 0.12;
 pub(crate) const OSD_CARD_HEIGHT: f32 = 64.0;
 /// Horizontal padding inside a slider card.
 fn osd_pad() -> f32 {
-    ui_theme::palette().pad
+    ui_theme::palette().effective_pad()
 }
 fn card_pad(w: f32) -> f32 {
     let pad = osd_pad();

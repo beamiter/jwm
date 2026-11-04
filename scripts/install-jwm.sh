@@ -829,6 +829,53 @@ sync_selected_bar_config() {
     done
 }
 
+# Seed a conventional frontend config only when no user choice already exists.
+# Existing TOML (including comments/unknown settings) is never rewritten.
+install_frontend_theme_defaults() {
+    local user_home config_dir destination
+    user_home=$(target_user_home)
+    config_dir=$(jwm_config_dir)
+    config_dir="${config_dir%/jwm}/xbar"
+    destination="$config_dir/config.toml"
+    # An explicit config path and Xilem's older saved theme are independent
+    # user overrides. A new conventional file must not outrank either one.
+    if [[ -n ${XBAR_CONFIG:-} || -e "$user_home/.config/xilem_bar/theme" || -L "$user_home/.config/xilem_bar/theme" ]]; then
+        info "保留已有 frontend 主题来源，不创建共享默认配置"
+        return
+    fi
+    local -a user_command=(python3 - "$destination")
+    if [[ "$(id -u)" -eq 0 && -n ${SUDO_USER:-} ]]; then
+        user_command=(sudo -u "$SUDO_USER" env "HOME=$user_home" python3 - "$destination")
+    fi
+    "${user_command[@]}" <<'PYBAR'
+import os
+from pathlib import Path
+import tempfile
+import sys
+
+destination = Path(sys.argv[1])
+if os.path.lexists(destination):
+    sys.exit(0)
+destination.parent.mkdir(parents=True, exist_ok=True)
+fd, temporary = tempfile.mkstemp(prefix=".config.toml.", dir=destination.parent)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as output:
+        output.write('# Follow JWM semantic themes; set ui_theme="standalone" for a local override.\nui_theme = "inherit"\n')
+        output.flush()
+        os.fsync(output.fileno())
+    os.chmod(temporary, 0o644)
+    try:
+        # Publish without replacing a file created by another writer.
+        os.link(temporary, destination, follow_symlinks=False)
+    except FileExistsError:
+        pass
+    else:
+        print(f"Created frontend theme defaults: {destination}")
+finally:
+    os.unlink(temporary)
+PYBAR
+}
+
 # ============================================================
 # 构建并安装 jwm-bridge 和 jwm-player
 #
@@ -929,6 +976,7 @@ build_and_install_jwm() {
     install_system_binary "$target_dir/jwm-support" /usr/local/bin
     install_system_binary "$target_dir/jwm-remote" /usr/local/bin
     install_system_binary "$PROJECT_ROOT/scripts/jwm-toggle-sidebar-mode" /usr/local/bin
+    install_system_binary "$PROJECT_ROOT/scripts/jwm-display-preview" /usr/local/bin
     sudo install -Dm644 "$PROJECT_ROOT/packaging/69-jwm-touchpad-gestures.rules" \
         /usr/lib/udev/rules.d/69-jwm-touchpad-gestures.rules
     if command -v udevadm >/dev/null 2>&1; then
@@ -1100,6 +1148,7 @@ fi
 # 4. 同步选中的 bar 到用户配置。放在 --gen-config 之后，避免重新生成配置覆盖选择。
 if [[ "$SKIP_BAR" == false && -n "$JWM_BAR_NAME" ]]; then
     sync_selected_bar_config "$JWM_BAR_NAME"
+    install_frontend_theme_defaults
 fi
 
 echo ""

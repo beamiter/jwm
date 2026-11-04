@@ -59,8 +59,82 @@ pub fn recovery(error: &std::io::Error) -> Recovery {
     }
 }
 
+/// Recognize only the local validator's fixed code/format. In particular,
+/// never search arbitrary provider prose or an unknown argument's value for
+/// words that might resemble a public error category.
+fn local_plan_validation_error(message: &str) -> bool {
+    const CODES: &[&str] = &[
+        "action_schema_not_loaded",
+        "missing_required_argument",
+        "unknown_argument",
+        "expected_object",
+        "expected_string",
+        "expected_integer",
+        "expected_number",
+        "expected_null",
+        "expected_boolean",
+        "expected_array",
+        "no_schema_alternative_matches",
+        "constant_mismatch",
+        "value_not_in_enum",
+        "string_length_out_of_range",
+        "integer_out_of_range",
+        "number_out_of_range",
+        "array_length_out_of_range",
+        "duplicate_array_item",
+        "schema_type_missing",
+        "schema_properties_missing",
+        "schema_required_missing",
+        "schema_invalid_required",
+        "unsupported_schema_type",
+        "execute_requires_actions_without_question",
+        "clarify_requires_question_without_actions",
+        "noop_cannot_contain_actions_or_question",
+        "undo_must_be_only_action",
+        "too_many_actions",
+        "plan_text_too_long",
+    ];
+    let (code, suffix) = message
+        .split_once(':')
+        .map_or((message, None), |(code, rest)| (code, Some(rest)));
+    if !CODES.contains(&code) {
+        return false;
+    }
+    let Some(suffix) = suffix else {
+        return true;
+    };
+    // validate_schema emits unknown_argument:<arbitrary model key>. The key
+    // is data, even if it contains auth/audio/network words, and is never shown.
+    if code == "unknown_argument" {
+        return !suffix.is_empty();
+    }
+    // session's local validate_plan wrapper appends exactly these diagnostic
+    // counts. Do not accept an arbitrary body after a familiar code.
+    let fields: Vec<_> = suffix.split_whitespace().collect();
+    if fields.len() != 3 {
+        return false;
+    }
+    let Some(count) = fields[0].strip_prefix("actions=") else {
+        return false;
+    };
+    !count.is_empty()
+        && count.bytes().all(|c| c.is_ascii_digit())
+        && count.parse::<usize>().is_ok()
+        && matches!(
+            fields[1],
+            "question_present=true" | "question_present=false"
+        )
+        && matches!(
+            fields[2],
+            "question_nonempty=true" | "question_nonempty=false"
+        )
+}
+
 pub fn describe(error: &std::io::Error) -> (&'static str, &'static str) {
     let s = error.to_string();
+    if local_plan_validation_error(&s) {
+        return ("plan_invalid", "未能确认完整操作计划，请重新说一次。");
+    }
     if s.contains("wake_setting_changed_after_stop") {
         (
             "wake_setting_changed_after_stop",
@@ -413,5 +487,126 @@ mod tests {
             super::describe(&std::io::Error::other("wake_setting_changed_after_stop")).0,
             "wake_setting_changed_after_stop"
         );
+    }
+    #[test]
+    fn actual_review_and_argument_validation_failures_have_fixed_plan_feedback() {
+        for code in [
+            "no_schema_alternative_matches", // v21 eva-016
+            "missing_required_argument",     // v21 eva-134
+            "action_schema_not_loaded",
+            "unknown_argument:arbitrary-model-key",
+            "expected_object",
+            "expected_string",
+            "expected_integer",
+            "expected_number",
+            "expected_null",
+            "expected_boolean",
+            "expected_array",
+            "constant_mismatch",
+            "value_not_in_enum",
+            "string_length_out_of_range",
+            "integer_out_of_range",
+            "number_out_of_range",
+            "array_length_out_of_range",
+            "duplicate_array_item",
+            "schema_type_missing",
+            "schema_properties_missing",
+            "schema_required_missing",
+            "schema_invalid_required",
+            "unsupported_schema_type",
+            "execute_requires_actions_without_question",
+            "clarify_requires_question_without_actions",
+            "noop_cannot_contain_actions_or_question",
+            "undo_must_be_only_action",
+            "too_many_actions",
+            "plan_text_too_long",
+            "missing_required_argument: actions=1 question_present=false question_nonempty=false",
+            "no_schema_alternative_matches: actions=1 question_present=false question_nonempty=false",
+        ] {
+            assert_eq!(
+                super::describe(&std::io::Error::other(code)),
+                ("plan_invalid", "未能确认完整操作计划，请重新说一次。"),
+                "{code}"
+            );
+        }
+    }
+    #[test]
+    fn known_validator_prefix_never_exposes_or_interprets_an_untrusted_argument_name() {
+        for key in [
+            "api_key=sk-private",
+            "audio_device:private/path",
+            "rate_limited",
+            "target_window_gone",
+            "https://private.invalid/secret",
+        ] {
+            let (category, text) =
+                super::describe(&std::io::Error::other(format!("unknown_argument:{key}")));
+            assert_eq!(category, "plan_invalid");
+            assert_eq!(text, "未能确认完整操作计划，请重新说一次。");
+            assert!(!text.contains(key));
+        }
+    }
+    #[test]
+    fn schema_words_inside_unrelated_errors_do_not_override_existing_categories() {
+        for (message, category) in [
+            ("auth_failed: missing_required_argument", "auth_failed"),
+            (
+                "rate_limited: no_schema_alternative_matches",
+                "rate_limited",
+            ),
+            ("quota_exceeded: expected_string", "quota_exceeded"),
+            (
+                "pulse_capture_failed: expected_integer",
+                "audio_unavailable",
+            ),
+            (
+                "input_audio_timestamp_overflow: expected_number",
+                "audio_sequence_invalid",
+            ),
+            (
+                "speech_target_gone: expected_array",
+                "local_voice_detection_failed",
+            ),
+            (
+                "target_window_gone: actions=1 question_present=false question_nonempty=false",
+                "stale_context",
+            ),
+            ("target_window_gone", "stale_context"), // v21 eva-116 unchanged
+            (
+                "connect_timeout: no_schema_alternative_matches",
+                "connect_timeout",
+            ),
+            (
+                "realtime_service_unavailable: missing_required_argument",
+                "service_unavailable",
+            ),
+            (
+                "realtime_request_rejected: expected_string",
+                "realtime_request_rejected",
+            ),
+            ("unsupported_action", "unsupported_action"),
+            ("session_locked", "session_locked"),
+            (
+                "private failure mentioning no_schema_alternative_matches",
+                "service_unavailable",
+            ),
+            ("not_missing_required_argument", "service_unavailable"),
+            ("missing_required_argument_extra", "service_unavailable"),
+            (
+                "missing_required_argument: arbitrary provider details",
+                "service_unavailable",
+            ),
+            (
+                "missing_required_argument: actions=private question_present=false question_nonempty=false",
+                "service_unavailable",
+            ),
+            ("unclassified-private-message", "service_unavailable"),
+        ] {
+            assert_eq!(
+                super::describe(&std::io::Error::other(message)).0,
+                category,
+                "{message}"
+            );
+        }
     }
 }

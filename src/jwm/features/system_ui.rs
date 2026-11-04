@@ -258,6 +258,8 @@ pub enum SystemUiState {
         /// close while the panel is up, which the focus path treats as a
         /// quiet no-op.
         windows: Vec<crate::jwm::features::launcher::WindowEntry>,
+        sessions: Vec<crate::jwm::features::launcher::AgentEntry>,
+        scenes: Vec<super::workscenes::Workscene>,
         matches: Vec<crate::jwm::features::launcher::LauncherRow>,
         selected: usize,
         /// Launch history, so what the user actually runs is at the top.
@@ -484,6 +486,7 @@ pub enum ListKind {
     Bluetooth,
     Wallpaper,
     Theme,
+    Workscene,
     AudioOutput,
     AudioInput,
     /// MPRIS bus suffixes the control-center media row can pin — the `o`
@@ -506,6 +509,7 @@ impl ListKind {
             Self::Bluetooth => "\u{f293}  BLUETOOTH",
             Self::Wallpaper => "\u{f03e}  WALLPAPER",
             Self::Theme => "\u{f1fc}  THEME",
+            Self::Workscene => "WORK SCENE · PREVIEW",
             Self::AudioOutput => "\u{f028}  AUDIO OUTPUT",
             Self::AudioInput => "\u{f130}  AUDIO INPUT",
             Self::MediaPlayers => "\u{f001}  PLAYERS",
@@ -550,13 +554,16 @@ impl ListKind {
             Self::Wallpaper => {
                 "type  filter    Click/Enter  apply    F5  refresh    PgUp/PgDn  page    Esc  close"
             }
-            Self::Theme => "Space  preview    Enter/click  save    Ctrl+Enter  session only    Esc  cancel",
+            Self::Theme => {
+                "Space preview · Enter choose · Home/End/Pg jump · Ctrl+Enter  session only · Esc"
+            }
             Self::Music | Self::Video => {
                 "type  filter    Enter  play    Shift+Enter  enqueue    Ctrl+Enter  play list    F5  refresh    Esc"
             }
             Self::AudioOutput | Self::AudioInput | Self::MediaPlayers => {
                 "Click/Enter  use    \u{f062}/\u{f063}  select    Esc  close"
             }
+            Self::Workscene => "Enter/click  perform selected action    ↑/↓  choose    Esc  cancel",
             Self::WindowSwitcher => {
                 "Tab/arrows  move    Home/End  ends    PgUp/PgDn  page    Enter / release Alt  switch    Del  close    Esc  cancel"
             }
@@ -568,6 +575,12 @@ impl ListKind {
     fn window(self) -> usize {
         match self {
             Self::Notifications | Self::Clipboard => 14,
+            Self::Theme => {
+                let cfg = crate::config::CONFIG.load();
+                let pixels =
+                    crate::backend::compositor_font::ui_font_pixel_size(cfg.system_ui_font());
+                ((12.0 * 18.0 / pixels).floor() as usize).clamp(6, 12)
+            }
             _ => 12,
         }
     }
@@ -607,6 +620,7 @@ pub enum RowData {
     },
     Wallpaper,
     Theme,
+    Workscene,
     /// The device id lives in the row's key, the way the wallpaper path does.
     AudioDevice,
     /// The MPRIS bus suffix lives in the row's key.
@@ -1199,6 +1213,8 @@ impl Clone for SystemUiState {
                 query,
                 entries,
                 windows,
+                sessions,
+                scenes,
                 matches,
                 selected,
                 usage,
@@ -1210,6 +1226,8 @@ impl Clone for SystemUiState {
                 query: query.clone(),
                 entries: Arc::clone(entries),
                 windows: windows.clone(),
+                sessions: sessions.clone(),
+                scenes: scenes.clone(),
                 matches: matches.clone(),
                 selected: *selected,
                 usage: usage.clone(),
@@ -1362,6 +1380,7 @@ impl SystemUiState {
                 ListKind::Bluetooth => "bluetooth_picker",
                 ListKind::Wallpaper => "wallpaper_picker",
                 ListKind::Theme => "theme_picker",
+                ListKind::Workscene => "workscene_preview",
                 ListKind::AudioOutput => "audio_output_picker",
                 ListKind::AudioInput => "audio_input_picker",
                 ListKind::MediaPlayers => "media_players",
@@ -1469,6 +1488,8 @@ impl SystemUiState {
             query: String::new(),
             entries,
             windows,
+            sessions: Vec::new(),
+            scenes: Vec::new(),
             matches: Vec::new(),
             selected: 0,
             usage,
@@ -1495,6 +1516,8 @@ impl SystemUiState {
                 .into_iter()
                 .filter(|window| window.minimized)
                 .collect(),
+            sessions: Vec::new(),
+            scenes: Vec::new(),
             matches: Vec::new(),
             selected: 0,
             usage: Default::default(),
@@ -1540,67 +1563,86 @@ impl SystemUiState {
     /// Preserve the highlighted application/window when it still exists so a
     /// TTL refresh cannot make Enter target a different row under the user's
     /// fingers.
+    fn launcher_row_key(&self, row: &LauncherRow) -> Option<String> {
+        let Self::Launcher {
+            entries,
+            windows,
+            sessions,
+            scenes,
+            ..
+        } = self
+        else {
+            return None;
+        };
+        match *row {
+            LauncherRow::App(index) => entries
+                .get(index)
+                .map(|entry| format!("app:{}:{:?}", entry.name, entry.command)),
+            LauncherRow::Window(index) => windows
+                .get(index)
+                .map(|entry| format!("window:{}", entry.id)),
+            LauncherRow::Session(index) => sessions
+                .get(index)
+                .map(|entry| format!("session:{}", entry.session_id)),
+            LauncherRow::Setting(route) => Some(format!("setting:{}", route.label())),
+            LauncherRow::Scene(index) => scenes
+                .get(index)
+                .map(|entry| format!("scene:{}", entry.name)),
+        }
+    }
+
+    fn selected_launcher_key(&self) -> Option<String> {
+        let Self::Launcher {
+            matches, selected, ..
+        } = self
+        else {
+            return None;
+        };
+        self.launcher_row_key(matches.get(*selected)?)
+    }
+
+    fn restore_launcher_key(&mut self, key: Option<String>) {
+        let Some(key) = key else {
+            return;
+        };
+        let position = {
+            let state: &Self = self;
+            let Self::Launcher { matches, .. } = state else {
+                return;
+            };
+            matches
+                .iter()
+                .position(|row| state.launcher_row_key(row).as_ref() == Some(&key))
+        };
+        if let Self::Launcher {
+            matches, selected, ..
+        } = self
+        {
+            // A removed selection is deliberately inactive until the next navigation.
+            *selected = position.unwrap_or(matches.len());
+        }
+    }
+
     pub fn set_launcher_entries(&mut self, new_entries: Arc<[LaunchEntry]>) -> bool {
         if self.is_restore_preview() {
             return false;
         }
-        enum Selection {
-            Application(String),
-            Window(u64),
-        }
-
-        let selection = match self {
-            Self::Launcher {
-                entries,
-                windows,
-                matches,
-                selected,
-                ..
-            } => matches.get(*selected).and_then(|row| match *row {
-                LauncherRow::App(index) => entries
-                    .get(index)
-                    .map(|entry| Selection::Application(entry.name.clone())),
-                LauncherRow::Window(index) => {
-                    windows.get(index).map(|entry| Selection::Window(entry.id))
-                }
-            }),
-            _ => return false,
-        };
-
+        let key = self.selected_launcher_key();
         let Self::Launcher {
             entries, indexing, ..
         } = self
         else {
-            unreachable!("launcher was matched above");
+            return false;
         };
         *entries = new_entries;
         *indexing = false;
         self.refresh_matches();
-
-        let Self::Launcher {
-            entries,
-            windows,
-            matches,
-            selected,
-            ..
-        } = self
-        else {
-            unreachable!("refreshing matches cannot change the panel kind");
-        };
-        if let Some(selection) = selection {
-            if let Some(position) = matches.iter().position(|row| match (&selection, *row) {
-                (Selection::Application(name), LauncherRow::App(index)) => {
-                    entries.get(index).is_some_and(|entry| entry.name == *name)
-                }
-                (Selection::Window(id), LauncherRow::Window(index)) => {
-                    windows.get(index).is_some_and(|entry| entry.id == *id)
-                }
-                _ => false,
-            }) {
-                *selected = position;
-            }
-        }
+        self.restore_launcher_key(key);
         true
+    }
+
+    pub fn is_agent_session_picker(&self) -> bool {
+        matches!(self, Self::Launcher {query,..} if matches!(super::launcher::parse_query(query), super::launcher::QueryMode::Sessions(_)))
     }
 
     pub fn is_launcher(&self) -> bool {
@@ -3271,13 +3313,39 @@ impl SystemUiState {
         }
     }
 
+    pub(crate) fn appearance_picker(config: &crate::config::Config) -> Self {
+        let mut panel = Self::theme_picker(config.ui_theme());
+        if let Self::ListPanel { rows, message, .. } = &mut panel {
+            rows.extend(
+                crate::jwm::features::theme_preview::PRESETS
+                    .iter()
+                    .map(|(key, label)| ListRow {
+                        key: (*key).into(),
+                        text: (*label).into(),
+                        data: RowData::Theme,
+                    }),
+            );
+            *message = format!(
+                "Global defaults · {} · surface {:.0}% · frontend overrides retained",
+                config.system_ui_font(),
+                config.ui_surface_opacity() * 100.0
+            );
+        }
+        panel
+    }
+    pub(crate) fn selected_appearance_choice(&self) -> Option<&str> {
+        Some(self.selected_row(ListKind::Theme)?.key.as_str())
+    }
+
     pub fn is_theme_picker(&self) -> bool {
         self.is_list(ListKind::Theme)
     }
 
     /// The theme id the selection rests on — what Enter would apply.
     pub fn selected_theme(&self) -> Option<&str> {
-        Some(self.selected_row(ListKind::Theme)?.key.as_str())
+        self.selected_row(ListKind::Theme)
+            .map(|row| row.key.as_str())
+            .filter(|theme| crate::config::KNOWN_UI_THEMES.contains(theme))
     }
 
     /// Refresh the current-theme badge without moving keyboard selection.
@@ -3290,7 +3358,9 @@ impl SystemUiState {
         } = self
         {
             for row in rows {
-                row.text = crate::jwm::features::shell_hub::theme_picker_row(&row.key, current);
+                if crate::config::KNOWN_UI_THEMES.contains(&row.key.as_str()) {
+                    row.text = crate::jwm::features::shell_hub::theme_picker_row(&row.key, current);
+                }
             }
             *message = status.to_owned();
         }
@@ -4258,7 +4328,11 @@ impl SystemUiState {
                 *selected = 0;
                 return;
             }
-            *selected = (*selected as isize + delta).rem_euclid(matches.len() as isize) as usize;
+            *selected = if *selected >= matches.len() {
+                if delta < 0 { matches.len() - 1 } else { 0 }
+            } else {
+                (*selected as isize + delta).rem_euclid(matches.len() as isize) as usize
+            };
         } else if let Self::Info {
             matches, offset, ..
         } = self
@@ -4766,6 +4840,73 @@ impl SystemUiState {
         })
     }
 
+    pub fn set_agent_sessions(&mut self, snapshot: &serde_json::Value) {
+        let key = self.selected_launcher_key();
+        let Self::Launcher { sessions, .. } = self else {
+            return;
+        };
+        let replacement = super::launcher::AgentEntry::from_snapshot(snapshot);
+        if *sessions == replacement {
+            return;
+        }
+        *sessions = replacement;
+        self.refresh_matches();
+        self.restore_launcher_key(key);
+    }
+
+    pub fn selected_agent_session(&self) -> Option<&super::launcher::AgentEntry> {
+        let Self::Launcher {
+            sessions,
+            matches,
+            selected,
+            ..
+        } = self
+        else {
+            return None;
+        };
+        match matches.get(*selected)? {
+            LauncherRow::Session(index) => sessions.get(*index),
+            _ => None,
+        }
+    }
+
+    pub fn selected_scene(&self) -> Option<&super::workscenes::Workscene> {
+        let Self::Launcher {
+            scenes,
+            matches,
+            selected,
+            ..
+        } = self
+        else {
+            return None;
+        };
+        match matches.get(*selected)? {
+            LauncherRow::Scene(index) => scenes.get(*index),
+            _ => None,
+        }
+    }
+
+    pub fn is_workscene_preview(&self) -> bool {
+        self.is_list(ListKind::Workscene)
+    }
+    pub fn selected_workscene_action(&self) -> Option<&str> {
+        Some(self.selected_row(ListKind::Workscene)?.key.as_str())
+    }
+
+    /// The same route used by Shell Hub buttons; never launches a helper process.
+    pub fn selected_setting(&self) -> Option<super::shell_hub::ShellHubRoute> {
+        let Self::Launcher {
+            matches, selected, ..
+        } = self
+        else {
+            return None;
+        };
+        match matches.get(*selected)? {
+            LauncherRow::Setting(route) => Some(*route),
+            _ => None,
+        }
+    }
+
     /// The window the highlighted row would focus, if it is a window row.
     pub fn selected_window(&self) -> Option<u64> {
         let Self::Launcher {
@@ -5006,7 +5147,10 @@ impl SystemUiState {
             Self::TagsOverview(overview) => OverlayParts {
                 title: "\u{f00a}  TAGS".into(),
                 query: None,
-                items: vec![format!("Tag {}", overview.selected + 1)],
+                items: vec![overview.cells.get(overview.selected).map(|cell| match cell.output_number {
+                    Some(output) => format!("Display {} / Tag {}", output + 1, cell.tag_index + 1),
+                    None => format!("Tag {}", cell.tag_index + 1),
+                }).unwrap_or_default()],
                 icons: None,
                 selected: Some(0),
                 hint: "\u{f060}\u{f061}\u{f062}\u{f063}  choose    Home/End / Pg  jump    Enter / middle  jump    wheel  browse    1-9  direct    Esc  close"
@@ -5090,6 +5234,8 @@ impl SystemUiState {
                 computed,
                 indexing,
                 restore_targets,
+                sessions,
+                scenes,
                 ..
             } => {
                 if let Some(result) = computed {
@@ -5130,6 +5276,18 @@ impl SystemUiState {
                         .skip(start)
                         .take(slice.rendered)
                         .map(|row| match row {
+                            LauncherRow::Scene(index) => {
+                                row_icons.push(None);
+                                format!("[Scene] {} · preview layout and recovery actions", scenes[*index].name)
+                            }
+                            LauncherRow::Session(index) => {
+                                row_icons.push(None);
+                                sessions[*index].row()
+                            }
+                            LauncherRow::Setting(route) => {
+                                row_icons.push(None);
+                                format!("{}  [Setting] {} · open controls", route.icon(), route.label())
+                            }
                             LauncherRow::Window(index) => {
                                 let entry = &windows[*index];
                                 row_icons.push(
@@ -5168,7 +5326,12 @@ impl SystemUiState {
                     } else if windows_only {
                         "\u{f2d0}  WINDOWS".into()
                     } else {
-                        "\u{f135}  APPLICATIONS".into()
+                        match crate::jwm::features::launcher::parse_query(query) {
+                            crate::jwm::features::launcher::QueryMode::Sessions(_) => "AGENT SESSIONS".into(),
+                            crate::jwm::features::launcher::QueryMode::Settings(_) => "SETTINGS".into(),
+                            crate::jwm::features::launcher::QueryMode::Scenes(_) => "WORK SCENES".into(),
+                            _ => "\u{f135}  APPLICATIONS".into(),
+                        }
                     },
                     query: Some(query.clone()),
                     selected: slice.selected(*selected),
@@ -5179,7 +5342,7 @@ impl SystemUiState {
                     hint: if restore_targets.is_some() {
                         "Click/Enter  restore    ↑/↓  select    Esc  cancel".into()
                     } else {
-                        "Click/Enter  open    /  windows    \u{f062}/\u{f063}  select    Esc  close"
+                        "Enter  open    / windows    settings: controls    sessions: agents    Esc close"
                             .into()
                     },
                     scroll,
@@ -5559,6 +5722,8 @@ impl SystemUiState {
                 query,
                 entries,
                 windows,
+                sessions,
+                scenes,
                 matches,
                 selected,
                 usage,
@@ -5595,6 +5760,13 @@ impl SystemUiState {
                 // before applications on a tie, then history — lives in the
                 // ranker, where it is a unit test rather than a live session.
                 *matches = launcher::rank_rows(&mode, &candidates, windows);
+                if restore_targets.is_none() {
+                    let mut session_rows = launcher::session_rows(&mode, sessions);
+                    session_rows.extend(launcher::scene_rows(&mode, scenes));
+                    session_rows.append(matches);
+                    session_rows.truncate(128);
+                    *matches = session_rows;
+                }
             }
             Self::Info {
                 query,
@@ -8465,7 +8637,12 @@ mod tests {
     #[test]
     fn theme_scope_and_preview_badges_do_not_move_the_selected_action() {
         let mut panel = SystemUiState::theme_picker("nord");
-        assert!(panel.overlay_parts().hint.contains("Ctrl+Enter  session only"));
+        assert!(
+            panel
+                .overlay_parts()
+                .hint
+                .contains("Ctrl+Enter  session only")
+        );
         panel.move_selection(1);
         panel.set_theme_status("paper", "Preview · configuration file unchanged");
         assert_eq!(panel.selected_theme(), Some("tokyo-night"));
@@ -9892,6 +10069,8 @@ mod tests {
             query: String::new(),
             entries: entries.into(),
             windows: Vec::new(),
+            sessions: Vec::new(),
+            scenes: Vec::new(),
             matches: Vec::new(),
             selected: 0,
             usage: crate::jwm::features::launcher::UsageStore::default(),
@@ -9956,6 +10135,8 @@ mod tests {
             query: String::new(),
             entries: entries.into(),
             windows: windows.to_vec(),
+            sessions: Vec::new(),
+            scenes: Vec::new(),
             matches: Vec::new(),
             selected: 0,
             usage: crate::jwm::features::launcher::UsageStore::parse(usage),
@@ -9965,6 +10146,59 @@ mod tests {
         };
         state.refresh_matches();
         state
+    }
+
+    #[test]
+    fn launcher_settings_survive_async_catalog_refresh_and_use_a_typed_route() {
+        let mut state = launcher_with(&[], "");
+        for ch in "settings: theme".chars() {
+            state.push_char(ch);
+        }
+        assert_eq!(
+            state.selected_setting(),
+            Some(super::super::shell_hub::ShellHubRoute::Theme)
+        );
+        assert!(state.selected_launch().is_none());
+        assert!(state.overlay_parts().items[0].contains("[Setting]"));
+        state.set_launcher_entries(Arc::from([]));
+        assert_eq!(
+            state.selected_setting(),
+            Some(super::super::shell_hub::ShellHubRoute::Theme)
+        );
+    }
+
+    #[test]
+    fn agent_refresh_preserves_application_identity_and_never_retargets_deleted_apps() {
+        let mut state = launcher_with(&[("cplus", false)], "");
+        for ch in "cplus".chars() {
+            state.push_char(ch);
+        }
+        assert_eq!(state.selected_launch().unwrap().id, "cplus");
+        state.set_agent_sessions(&serde_json::json!({"sessions":[{"session_id":"agent", "project_id":"cplus", "revision":1}]}));
+        assert_eq!(state.selected_launch().unwrap().id, "cplus");
+        state.set_launcher_entries(Arc::from([]));
+        assert!(state.selected_launch().is_none());
+        assert!(state.selected_agent_session().is_none());
+        state.move_selection(1);
+        assert_eq!(state.selected_agent_session().unwrap().session_id, "agent");
+    }
+
+    #[test]
+    fn missing_agent_selection_does_not_fall_through_to_another_session() {
+        let mut state = launcher_with(&[], "");
+        state.set_agent_sessions(&serde_json::json!({"sessions":[
+            {"session_id":"one", "revision":1}, {"session_id":"two", "revision":2}
+        ]}));
+        for ch in "sessions:".chars() {
+            state.push_char(ch);
+        }
+        assert_eq!(state.selected_agent_session().unwrap().session_id, "one");
+        state.set_agent_sessions(
+            &serde_json::json!({"sessions":[{"session_id":"two", "revision":2}]}),
+        );
+        assert!(state.selected_agent_session().is_none());
+        state.move_selection(1);
+        assert_eq!(state.selected_agent_session().unwrap().session_id, "two");
     }
 
     #[test]
@@ -10150,6 +10384,8 @@ mod tests {
             query: String::new(),
             entries: entries.into(),
             windows: Vec::new(),
+            sessions: Vec::new(),
+            scenes: Vec::new(),
             matches: Vec::new(),
             selected: 0,
             usage: crate::jwm::features::launcher::UsageStore::default(),
@@ -11464,4 +11700,3 @@ mod tests {
         assert_eq!(panel.selected_media_player(), Some("mpv"));
     }
 }
-

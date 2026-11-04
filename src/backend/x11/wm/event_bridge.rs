@@ -32,6 +32,10 @@ pub enum CompositorEventOp {
     RemoveWindow {
         window: u32,
     },
+    /// Retire the native drawable lifetime, not an ordinary unmap/remap.
+    DestroyWindow {
+        window: u32,
+    },
     /// Release a still-managed window without close particles or a fade.
     DiscardWindowSilently {
         window: u32,
@@ -161,13 +165,15 @@ pub fn compositor_event_ops(
         BackendEvent::WindowUnmapped {
             window,
             from_configure: false,
-        }
-        | BackendEvent::WindowDestroyed(window) => {
+        } => {
             if let Some(x11w) = (sources.resolve)(*window) {
                 ops.push(CompositorEventOp::RemoveWindow { window: x11w });
-                if matches!(event, BackendEvent::WindowDestroyed(_))
-                    && (sources.remote_capture_owner)() == Some(x11w)
-                {
+            }
+        }
+        BackendEvent::WindowDestroyed(window) => {
+            if let Some(x11w) = (sources.resolve)(*window) {
+                ops.push(CompositorEventOp::DestroyWindow { window: x11w });
+                if (sources.remote_capture_owner)() == Some(x11w) {
                     ops.push(CompositorEventOp::SetRemoteCaptureActive { active: false });
                 }
             }
@@ -473,7 +479,7 @@ mod tests {
                 &s,
             ),
             vec![
-                CompositorEventOp::RemoveWindow { window: owner },
+                CompositorEventOp::DestroyWindow { window: owner },
                 CompositorEventOp::SetRemoteCaptureActive { active: false },
             ]
         );
@@ -506,7 +512,7 @@ mod tests {
     }
 
     #[test]
-    fn unmap_and_destroy_both_remove_the_window() {
+    fn unmap_retains_the_drawable_lifetime_but_destroy_retires_it() {
         let s = sources(&|w| Some(w.raw() as u32), &|_| String::new(), &|_| false);
         for event in [
             BackendEvent::WindowUnmapped {
@@ -516,7 +522,12 @@ mod tests {
             BackendEvent::WindowDestroyed(win(9)),
         ] {
             let ops = compositor_event_ops(&event, ROOT, OVERLAY, &s);
-            assert_eq!(ops, vec![CompositorEventOp::RemoveWindow { window: 9 }]);
+            let expected = if matches!(event, BackendEvent::WindowDestroyed(_)) {
+                CompositorEventOp::DestroyWindow { window: 9 }
+            } else {
+                CompositorEventOp::RemoveWindow { window: 9 }
+            };
+            assert_eq!(ops, vec![expected]);
         }
     }
 

@@ -935,28 +935,32 @@ are converted using the window geometry current at that event, before any
 later resize or deferred rendering can reinterpret them.
 
 When adaptive JPEG quality has recovered, unchanged tiles previously sent at
-lower quality are gradually re-encoded at the **current** quality. After two
-seconds without pixel changes, the host may refine up to 256 tiles per two
-seconds, using the existing idle-capture tick and the same two-frame ACK
-credit. With the default 16-pixel tiles this is at most 65,536 encoded pixels
-(192 KiB of RGB atlas input) per batch; JPEG bytes depend on content. This
-is a conservative background budget, not a rapid full-screen refresh: a
-2560×1600 canvas entirely below the current quality needs about 126 seconds
-for one pass under ideal ACK/capture timing. Slow writes or renewed activity
-can extend that time. Round-robin tile selection avoids starving the tail
-when the current quality rises again during a pass.
+lower quality are re-encoded at the **current** quality. The two-second capture
+heartbeat supplies quality repairs without adding another readback producer.
+A static batch repairs at most 4,096 tiles (1,048,576 pixels / 3 MiB RGB atlas
+input at the default tile size); a batch containing ordinary pixel changes
+repairs at most 256 additional tiles. Both use the existing two-frame ACK credit
+and authenticated writer deadline. A 2560×1600 static canvas needs four such
+batches (about eight seconds under ideal capture/ACK timing) to clear one pass
+of debt to the current quality. This is a scheduling bound, not a LAN benchmark;
+encoding, slow ACKs and writes can extend it.
 
-Ordinary pixel changes take priority and restart the quiet interval, so
-continuous local changes such as a blinking caret can delay refinement.
-Sharper tiles are never downgraded by a quality-only refresh. Only successful
-record writes and flushes commit tile quality; failed or discarded sends do
-not clear debt. Resizing or reconnecting establishes a fresh keyframe. When
-all debt to the current quality is cleared, the sender returns to unchanged
-frame suppression and the existing four-second empty keepalive.
+The repair cursor advances only after successful record write and flush.
+Ordinary damage and repairs share one raster-ordered atlas without duplicates.
+Local changes such as a blinking caret no longer reset the repair clock or
+prevent unchanged text tiles from being visited. Quality-only refreshes never
+downgrade sharper tiles; resizing/reconnecting establishes a fresh keyframe.
+After debt is cleared the sender returns to unchanged suppression and
+four-second keepalives. Input event draining remains bounded to 256 X11 events
+per pass, so encoding/render work cannot indefinitely postpone input edges.
 
-This does not accelerate the ACK-driven quality controller or send an
-unrequested high-quality probe. A completely static 30-FPS-configured session
-still needs 24 healthy ACK samples to recover one quality point; with only
-four-second keepalives that can take roughly 96 seconds per point. Refinement
-ACKs use the normal quality epoch and congestion rules. Faster idle recovery
-and fairness during continuous local changes remain separate work.
+The adaptive controller still requires at least four healthy same-epoch ACKs,
+a three-second observation span, low send-to-ACK RTT and no remaining pressure
+before increasing quality by one point. Its sample target now follows measured
+ACK cadence (bounded4..24) instead of assuming the configuredFPS still describes
+an idle link. Fast bursts retain the24-sample requirement; four healthy
+four-second keepalives can recover a point in about16seconds rather than96.
+Epoch changes reset that history; congestion thresholds and multiplicative
+quality reduction remain unchanged. These are controller/scheduling bounds,
+not measured two-machine LAN results. Actual latency, text clarity and bandwidth
+still require separate acceptance evidence.

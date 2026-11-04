@@ -91,55 +91,37 @@ framebuffer and a wider LUT key.
 
 ## Withdrawal is automatic
 
-Every frame reconciles the latched request against that frame's evidence, so
-a toast appearing takes the signal off and the toast clearing puts it back —
-without the user touching anything. That is why the request is stored
-separately from the state: `hdr_metadata_active` is a post-commit fact, and
-with no latch the first toast would drop HDR permanently.
+Every frame reconciles the latched request against that frame's evidence.
+Migrated JWM chrome, including annotations, the screenshot toolbar and
+recording cues, no longer forces an encoded fallback. A remaining unsupported
+scene or external element can still require withdrawal. The request is intent;
+`hdr_metadata_active` is a confirmed presentation fact.
 
-A withdrawal clears `Colorspace` to Default and the metadata blob to zero in
-the same controlled atomic request that set them, so the sink is never left
-told BT.2020 with no metadata behind it. The kernel blob a previous assert
-installed is destroyed when it is replaced or cleared.
+An assert or withdrawal stages the complete target color chain without
+changing current scanout. Smithay associates it with the matching newly
+rendered framebuffer: FB_ID, CRTC stages, Colorspace and HDR_OUTPUT_METADATA
+share one TEST_ONLY request and the identical real atomic request. A failed
+probe or real submission retains the previous framebuffer/color pairing.
 
-Every assert and every withdrawal also tells clients: each surface already on
-the output gets `wp_color_management_surface_feedback_v1.preferred_changed`
-and each bound `wp_color_management_output_v1` gets
-`image_description_changed`. Without that only surfaces *entering* the output
-learned of the switch, so a player mapped before the enable kept rendering
-sRGB into an output now told PQ.
+Each exact queued framebuffer's accepted, timestamped vblank publishes its
+observed output description. A newer desired generation does not suppress the
+older framebuffer that actually reached scanout, and the observation never
+overwrites the newer target. Its retry remains armed until that target presents.
+Staging preserves the previous confirmed presentation and queue identity. Surfaces already on the output then receive
+`wp_color_management_surface_feedback_v1.preferred_changed`, and bound output
+objects receive `image_description_changed`. Disabling the advanced policy
+changes the desired next frame; the confirmed HDR description persists until
+the matching SDR withdrawal presents. Replaced blob IDs stay owned through
+pending/cancelled frames and are released only after the newest desired generation presents;
+the current/retired/new allocation budget is 64 IDs per output.
 
-A refusal the user cannot wait out — an SDR panel appearing on the connector,
-the advanced switch going off — also *drops* the request rather than parking
-it, because a request that can never be honoured would still steer the
-delivery route away from the CRTC pair for every output, paying the software
-shader path for nothing.
-
-The one exception is an output that has gone dark *while a frame loop is
-running* — DPMS off, or soft-disabled through wlr-output-management. There the
-claim is dropped without a commit: the properties belong to a display that is
-off, whether the commit is even accepted is driver-dependent, and a failure
-would hold presentation for every other output on the device.
-
-That leaves the claim and the connector temporarily disagreeing, so the
-reconciliation reads *both*. `Colorspace` and `HDR_OUTPUT_METADATA` are
-persistent connector state — DPMS-off does not reset them, and on power-on the
-driver re-programs the infoframes from them — so the connector's own bit is
-the truth, and the first participating frame brings it back in line with a
-real commit: re-asserting if the request still stands, withdrawing if it was
-dropped meanwhile. Reading only the claim meant that dropping the request
-while the screen was dark left the panel told PQ/BT.2020 under sRGB-encoded
-frames for the rest of the session — the exact error this gate exists to
-prevent, reintroduced from the other direction.
-
-The DPMS path withdraws the signal directly as well. It runs *after* the DPMS
-property write and only when that write succeeded — the same rule the LUT/CTM
-teardown beside it follows, because withdrawing first would leave a panel that
-failed to blank lit under sRGB with the request still standing. That makes it
-a commit to a connector that is already down, so it is best-effort: a refusal
-drops the claim, keeps the tracked blob, and is retried at power-on — so a
-session with no effects compositor (and therefore no reconciliation) does not
-leave a dark panel signalled either.
+A permanent refusal drops the request instead of paying for an HDR software
+route that cannot be delivered. Transient DRM ownership/resource errors retain
+the request for retry. Dark outputs may drop their public active claim while
+retaining connector state; the next participating framebuffer carries the
+complete desired state, so no differently encoded framebuffer is presented
+under inherited HDR properties. DPMS writes remain ordered before dark-output
+teardown; a failed blank never strips the visible framebuffer's color chain.
 
 A latched request also survives a rebuild of the KMS state. A VT switch back
 and every connector hotplug construct fresh outputs; the request and any
@@ -177,28 +159,22 @@ than carrying it forward, and reports `null` until a replacement frame lands.
 
 ## Limitations
 
-- **Entering or leaving HDR may be a modeset.** amdgpu forces a full modeset
-  when the metadata blob appears or disappears and when `Colorspace` changes,
-  so the plain `TEST_ONLY` commit is refused with `EINVAL` there. The
-  signalling request (and only that request — the CRTC LUT/CTM stages are
-  never allowed a modeset) retries the test with `ALLOW_MODESET` and commits
-  that way when it passes, logging once. The consequence is that a
-  toast-driven withdraw/re-assert cycle is a mode switch on such drivers.
-  A commit the driver refuses both ways is reported as
-  `connector_commit_rejected` and drops the request, rather than being retried
-  every other frame behind a held frame.
-- **Not verified against a real HDR display.** The compositor is proven
-  internally consistent — it never signals HDR over sRGB pixels, and the
-  pixel maths is pinned by a surfaceless-EGL oracle at LSB tolerance — but no
-  panel has confirmed that the 32-byte CTA-861.3 blob is interpreted as
-  intended. The kernel accepts a syntactically valid blob without validating
-  its meaning.
-- The framebuffer and the colour properties are not committed in one ioctl.
-  Smithay's `DrmCompositor` owns the framebuffer commit with no
-  property-injection hook, so pairing is guaranteed by ordering (the colour
-  request strictly precedes the frame's queue) plus a last-success
-  invalidation clock, and the swapchain's bit depth is covered by the chain
-  validation.
+- **Entering or leaving HDR may be a blocking modeset.** The frame-associated
+  transition is tested and submitted with ALLOW_MODESET because some drivers
+  require it for connector signaling. Stable color generations use an empty
+  property vector and keep Smithay's ordinary page-flip path. A permanent
+  combined-request rejection falls back to software/SDR policy; transient
+  device errors remain retryable.
+- **Not verified against a real HDR display.** Recorder fault tests establish
+  request association and failure boundaries; surfaceless GLES pixel tests
+  establish the software color/capture behavior. They do not certify a panel's
+  interpretation of CTA-861.3 metadata or driver support for a physical chain.
+- **Asynchronous tearing remains unsupported.** The maintained extension adds
+  frame-bound color properties, not PAGE_FLIP_ASYNC.
+- The local-only capture cues use an FP16 scratch copy and a second output
+  delivery after capture. This preserves capture exclusion and keeps the
+  persistent linear scene clean, at the cost of one extra copy/conversion on
+  frames showing those cues.
 - Non-D65 white points are Bradford-adapted, but there is no full chromatic
   adaptation transform selection.
 - Direct scanout stays blocked while the scene-linear path is active, so an
@@ -211,7 +187,8 @@ than carrying it forward, and reports `null` until a replacement frame lands.
 - `src/backend/udev_kms.rs` — `hdr_enable_refusal` (the policy),
   `hdr_signalling_action` and `hdr_withdrawal_reaches_connector` (the control
   loop), `hdr_scanout_chain_gap` (the 10-bit chain),
-  `set_hdr_metadata_for_output` (the atomic request),
+  `set_hdr_metadata_for_output` (staging), `frame_color_properties` (frame snapshot),
+  `on_vblank` (confirmed publication),
   `carry_latched_intents` (surviving a rebuild).
 - `src/backend/wayland_udev/color_management.rs` —
   `ColorManagerState::on_output_description_changed`, the client half of an
@@ -231,3 +208,6 @@ than carrying it forward, and reports `null` until a replacement frame lands.
 - [performance.md](performance.md) — direct scanout and the frame loop.
 
 `jwm-tool health` prints compact `hdr` for hdr operators.
+
+See [the maintained Smithay frame transaction extension](wayland/HDR_FRAME_TRANSACTIONS.md)
+for API ownership, generation, resource bounds and software validation details.

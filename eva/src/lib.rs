@@ -1,5 +1,6 @@
 //! Testable daemon components; the executable owns the single session actor.
 pub mod audio;
+pub mod clarification;
 mod companion;
 pub mod config;
 pub mod context;
@@ -30,3 +31,6 @@ pub mod telemetry;
 pub mod voice_control;
 pub mod wake;
 pub mod warm;
+
+#[cfg(test)]
+mod native_close_probe;

@@ -19,6 +19,7 @@ local draw
 -- ASS colors are BGR.
 local C = {white='F2F0F1', muted='969296', line='35312F', panel='171411',
     hover='302924', blue='F4AE88'}
+local theme_font, theme_font_scale, surface_opacity = 'sans-serif', 1, 1
 local function safe(value)
     return tostring(value or ''):gsub('[%c]', ' '):gsub('\\', '＼'):gsub('{', '｛'):gsub('}', '｝')
 end
@@ -303,6 +304,7 @@ draw = function()
     top_shown,bottom_shown = bar_visible('top'),bar_visible('bottom')
     local ass = assdraw.ass_new()
     local function shape(path, color, alpha, blur, clip)
+        if color == C.panel then alpha = math.floor(255 * (1 - (1 - (alpha or 0) / 255) * surface_opacity) + .5) end
         ass:new_event()
         ass:pos(0,0)
         ass:append(string.format('{\\an7\\bord0\\shad0\\1c&H%s&\\alpha&H%02X&\\blur%g}',color,alpha or 0,blur or 0))
@@ -338,8 +340,8 @@ draw = function()
     end
     local function text(x,y,value,size,color,align)
         ass:new_event(); ass:pos(x,y)
-        ass:append(string.format('{\\an%d\\fnsans-serif\\fs%g\\bord0\\shad0\\1c&H%s&}%s',
-            align or 7,size,color or C.white,safe(value)))
+        ass:append(string.format('{\\an%d\\fn%s\\fs%g\\bord0\\shad0\\1c&H%s&}%s',
+            align or 7,safe(theme_font),size*theme_font_scale,color or C.white,safe(value)))
     end
     local function line(x1,y1,x2,y2,color,thickness)
         local dx,dy = x2-x1,y2-y1
@@ -633,6 +635,34 @@ mp.observe_property('time-pos','native',function()
 end)
 mp.add_periodic_timer(.25,function()
     if bar_visible('top')~=top_shown or bar_visible('bottom')~=bottom_shown then draw() end
+end)
+mp.register_script_message('jwm-theme',function(encoded)
+    if type(encoded)~='string' or #encoded>32768 then return end
+    local value=utils.parse_json(encoded)
+    if type(value)~='table' or value.protocol_version~=1 or type(value.native_colors)~='table' or #value.native_colors~=8 then return end
+    local colors={}
+    for index,rgb in ipairs(value.native_colors) do
+        if type(rgb)~='table' or #rgb<3 then return end
+        local channel={}
+        for i=1,3 do
+            local n=rgb[i]
+            if type(n)~='number' or n~=n or n<0 or n>1 then return end
+            channel[i]=math.floor(n*255+.5)
+        end
+        colors[index]=string.format('%02X%02X%02X',channel[3],channel[2],channel[1])
+    end
+    local font=value.font
+    local revision=value.config_revision
+    local opacity=value.surface_opacity or 1
+    if type(font)~='string' or #font==0 or #font>1024 or font:find('%c') or type(revision)~='string' or #revision==0 or #revision>128 or revision:find('[^%w_:%-]') then return end
+    if type(opacity)~='number' or opacity~=opacity or opacity<.1 or opacity>1 then return end
+    local points=tonumber(font:match('%s+([%d%.]+)$'))
+    theme_font=font:gsub('%s+[%d%.]+$','')
+    theme_font_scale=points and points>=6 and points<=48 and points/11 or 1
+    surface_opacity=opacity
+    C.panel,C.hover,C.line,C.white,C.muted,C.blue=colors[2],colors[3],colors[4],colors[5],colors[6],colors[7]
+    draw()
+    utils.shared_script_property_set('jwm-theme-revision',revision)
 end)
 mp.register_script_message('jwm-queue',function() toggle('Queue') end)
 mp.register_script_message('jwm-subtitles',function() toggle('Subtitles') end)

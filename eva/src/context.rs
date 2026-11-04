@@ -161,6 +161,7 @@ impl ContextStore {
             .ok_or_else(|| io::Error::other("speech_target_gone"))?;
         latest["focus_token"] = json!(focus);
         latest["speech_focus_ref"] = window["window_ref"].clone();
+        latest["speech_focus_uncertain"] = json!(false);
         if latest
             .get("activation_monitor_token")
             .is_none_or(Value::is_null)
@@ -521,6 +522,7 @@ mod tests {
         assert_eq!(verified["selected_monitor_token"], "visible-output");
         assert_eq!(verified["focus_token"], "focus");
         assert_eq!(verified["speech_focus_ref"], "w1");
+        assert_eq!(verified["speech_focus_uncertain"], false);
     }
     #[test]
     fn missing_activation_output_is_rejected_and_old_servers_keep_window_scope() {

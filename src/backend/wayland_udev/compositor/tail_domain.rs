@@ -145,10 +145,10 @@ impl TailOverlayClass {
             | Self::DebugHud
             | Self::Toast
             | Self::Osd
-            | Self::SystemUi => TailOverlayDomain::CommonLinearAware,
-            Self::Annotation | Self::ScreenshotToolbar | Self::RecordingRegionOverlay => {
-                TailOverlayDomain::EncodedOnly
-            }
+            | Self::SystemUi
+            | Self::Annotation
+            | Self::ScreenshotToolbar
+            | Self::RecordingRegionOverlay => TailOverlayDomain::CommonLinearAware,
         }
     }
 
@@ -170,10 +170,10 @@ impl TailOverlayClass {
             | Self::DebugHud
             | Self::Toast
             | Self::Osd
-            | Self::SystemUi => None,
-            Self::Annotation => Some("annotation_overlay"),
-            Self::ScreenshotToolbar => Some("screenshot_toolbar_overlay"),
-            Self::RecordingRegionOverlay => Some("recording_region_overlay"),
+            | Self::SystemUi
+            | Self::Annotation
+            | Self::ScreenshotToolbar
+            | Self::RecordingRegionOverlay => None,
         }
     }
 
@@ -191,10 +191,10 @@ impl TailOverlayClass {
             | Self::DebugHud
             | Self::Toast
             | Self::Osd
-            | Self::SystemUi => TailOverlayStage::LinearTarget,
-            Self::Annotation | Self::ScreenshotToolbar | Self::RecordingRegionOverlay => {
-                TailOverlayStage::PostDelivery
-            }
+            | Self::SystemUi
+            | Self::Annotation
+            | Self::ScreenshotToolbar => TailOverlayStage::LinearTarget,
+            Self::RecordingRegionOverlay => TailOverlayStage::PostDelivery,
         }
     }
 
@@ -330,14 +330,20 @@ impl WaylandCompositor {
         &self,
         gl: &smithay::backend::renderer::gles::ffi::Gles2,
         class: TailOverlayClass,
+        scene_linear: bool,
     ) {
         debug_assert_eq!(class.stage(), TailOverlayStage::PostDelivery);
-        debug_assert_eq!(class.domain(), TailOverlayDomain::EncodedOnly);
+        debug_assert_eq!(class.domain(), TailOverlayDomain::CommonLinearAware);
         unsafe {
             gl.BindFramebuffer(
                 smithay::backend::renderer::gles::ffi::FRAMEBUFFER,
-                self.output_fbo,
+                if scene_linear {
+                    self.linear_fbo
+                } else {
+                    self.output_fbo
+                },
             );
+            self.sync_overlay_color_domain(gl, scene_linear);
         }
     }
 
@@ -468,8 +474,12 @@ mod tests {
             if class.domain() == TailOverlayDomain::CommonLinearAware {
                 assert_eq!(
                     class.stage(),
-                    TailOverlayStage::LinearTarget,
-                    "{class:?}: a common-linear draw must happen ahead of the delivery point"
+                    if class == TailOverlayClass::RecordingRegionOverlay {
+                        TailOverlayStage::PostDelivery
+                    } else {
+                        TailOverlayStage::LinearTarget
+                    },
+                    "{class:?}: local-only chrome has its own post-capture linear delivery"
                 );
             }
         }
@@ -513,10 +523,7 @@ mod tests {
         let blockers = tail_overlay_blockers(&visibility);
         // The workspace transition, Expose, Peek, the toast and the system
         // UI are common-linear-aware: visible but absent here.
-        assert_eq!(
-            blockers.iter().collect::<Vec<_>>(),
-            [TailOverlayClass::RecordingRegionOverlay,]
-        );
+        assert_eq!(blockers.iter().collect::<Vec<_>>(), []);
 
         let all_visible = TailOverlayVisibility {
             workspace_transition: true,
@@ -565,7 +572,7 @@ mod tests {
                 TailOverlayClass::ScreenshotToolbar,
             )),
         };
-        assert!(!status.linear_tail_safe());
+        assert!(status.linear_tail_safe());
         let status = LinearTailStatus {
             linear_target_ready: true,
             overlay_blockers: tail_overlay_blockers(&visibility_with(TailOverlayClass::Expose)),

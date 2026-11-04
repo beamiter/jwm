@@ -1,0 +1,545 @@
+#!/usr/bin/env python3
+"""Preview an advertised wlr-randr layout; Enter keeps, timeout/Esc restores.
+
+Requires wlr-randr>=0.5 with --json and an interactive TTY for changes.
+Snapshots, not process names, determine rollback ownership. Upstream JSON has
+no generation/serial/CAS: identical unplug/replug between polls and the narrow
+recheck→apply race cannot be proven absent; see docs/output-layout.md.
+"""
+
+import argparse
+import copy
+import json
+import math
+import os
+from pathlib import Path
+import re
+import select
+import signal
+import subprocess
+import sys
+import termios
+import time
+import tty
+
+TRANSFORMS = (
+    "normal",
+    "90",
+    "180",
+    "270",
+    "flipped",
+    "flipped-90",
+    "flipped-180",
+    "flipped-270",
+)
+VALUE_OPTIONS = (
+    "--output",
+    "--mode",
+    "--pos",
+    "--transform",
+    "--scale",
+    "--adaptive-sync",
+)
+FLAG_OPTIONS = ("--on", "--off")
+
+
+class PreviewError(Exception):
+    pass
+
+
+class RollbackError(PreviewError):
+    pass
+
+
+class Interrupted(Exception):
+    def __init__(self, number):
+        self.number = number
+
+
+def finite(number):
+    return (
+        isinstance(number, (int, float))
+        and not isinstance(number, bool)
+        and math.isfinite(number)
+    )
+
+
+def mode_key(mode):
+    if not isinstance(mode, dict) or not all(
+        isinstance(mode.get(k), int)
+        and not isinstance(mode[k], bool)
+        and 0 < mode[k] <= 65535
+        for k in ("width", "height")
+    ):
+        raise PreviewError("invalid advertised mode dimensions")
+    refresh = mode.get("refresh")
+    if not finite(refresh) or not 0 <= refresh <= 10000:
+        raise PreviewError("invalid advertised refresh rate (JSON uses Hz)")
+    return (mode["width"], mode["height"], int(round(refresh * 1000)))
+
+
+def normalize(value):
+    if not isinstance(value, list) or not 1 <= len(value) <= 32:
+        raise PreviewError("expected 1..32 output heads from wlr-randr --json")
+    outputs = {}
+    for head in value:
+        if not isinstance(head, dict):
+            raise PreviewError("invalid output head")
+        name = head.get("name")
+        if (
+            not isinstance(name, str)
+            or not name
+            or len(name) > 256
+            or any(ord(c) < 32 for c in name)
+        ):
+            raise PreviewError("invalid output name")
+        if name in outputs or not isinstance(head.get("enabled"), bool):
+            raise PreviewError("duplicate output or invalid enabled flag")
+        modes = head.get("modes")
+        if not isinstance(modes, list) or len(modes) > 1024:
+            raise PreviewError("invalid advertised mode list")
+        catalog = []
+        current = []
+        for mode in modes:
+            if not isinstance(mode, dict):
+                raise PreviewError("invalid advertised mode record")
+            if not isinstance(mode.get("preferred", False), bool) or not isinstance(
+                mode.get("current", False), bool
+            ):
+                raise PreviewError("invalid mode state flags")
+            key = mode_key(mode)
+            catalog.append((*key, bool(mode.get("preferred", False))))
+            if mode.get("current") is True:
+                current.append(key)
+        identity = {
+            k: head.get(k)
+            for k in ("description", "make", "model", "serial", "physical_size")
+        }
+        output = {
+            "identity": identity,
+            "enabled": head["enabled"],
+            "modes": sorted(catalog),
+            "mode": None,
+            "position": None,
+            "transform": None,
+            "scale": None,
+            "adaptive_sync": None,
+        }
+        if head["enabled"]:
+            if len(current) != 1 or current[0][2] <= 0:
+                raise PreviewError(
+                    f"{name}: enabled output lacks one exact current mode/refresh; cannot restore safely"
+                )
+            pos = head.get("position")
+            if not isinstance(pos, dict) or any(
+                not isinstance(pos.get(k), int) or isinstance(pos[k], bool)
+                for k in ("x", "y")
+            ):
+                raise PreviewError("invalid output position")
+            if (
+                head.get("transform") not in TRANSFORMS
+                or not finite(head.get("scale"))
+                or not 0 < head["scale"] <= 16
+            ):
+                raise PreviewError("invalid transform or scale")
+            adaptive = head.get("adaptive_sync")
+            if adaptive is not None and not isinstance(adaptive, bool):
+                raise PreviewError("invalid adaptive-sync state")
+            output.update(
+                mode=current[0],
+                position=(pos["x"], pos["y"]),
+                transform=head["transform"],
+                scale=round(head["scale"], 6),
+                adaptive_sync=adaptive,
+            )
+        outputs[name] = output
+    return outputs
+
+
+def desired_layout(before, args):
+    desired = copy.deepcopy(before)
+    selected = None
+    touched = set()
+    operations = {}
+    index = 0
+    while index < len(args):
+        flag = args[index]
+        index += 1
+        if flag in VALUE_OPTIONS:
+            if index >= len(args):
+                raise PreviewError(f"{flag} requires a value")
+            value = args[index]
+            index += 1
+        elif flag in FLAG_OPTIONS:
+            value = None
+        else:
+            raise PreviewError(
+                f"unsupported preview option {flag}; use explicit --output/--mode/--pos/--transform/--scale/--adaptive-sync/--on/--off"
+            )
+        if flag == "--output":
+            if value not in before:
+                raise PreviewError(f"unknown output {value}")
+            selected = value
+            touched.add(value)
+            continue
+        if selected is None:
+            raise PreviewError("select --output before changing its settings")
+        output = desired[selected]
+        previous = operations.setdefault(selected, [])
+        if (flag == "--off" and previous) or "--off" in previous:
+            raise PreviewError(
+                "--off must be the only setting for its output in a preview"
+            )
+        previous.append(flag)
+        if not before[selected]["enabled"] and flag != "--off":
+            raise PreviewError(
+                "enabling an originally-disabled head cannot restore its unreported geometry; use the compositor output manager"
+            )
+        if flag == "--off":
+            output.update(
+                enabled=False,
+                mode=None,
+                position=None,
+                transform=None,
+                scale=None,
+                adaptive_sync=None,
+            )
+        elif flag == "--on":
+            output["enabled"] = True
+        elif not output["enabled"]:
+            raise PreviewError("settings for a disabled output are not previewable")
+        elif flag == "--mode":
+            match = re.fullmatch(
+                r"(\d+)x(\d+)(?:@([0-9]+(?:\.[0-9]+)?)(?:Hz)?)?", value
+            )
+            if not match:
+                raise PreviewError("mode must be WIDTHxHEIGHT[@REFRESHHz]")
+            width, height = int(match[1]), int(match[2])
+            refresh = None if match[3] is None else int(round(float(match[3]) * 1000))
+            candidates = [
+                m[:3]
+                for m in output["modes"]
+                if m[:2] == (width, height) and (refresh is None or m[2] == refresh)
+            ]
+            if not candidates:
+                raise PreviewError(
+                    "preview requires an advertised mode with an exact restorable refresh"
+                )
+            if refresh is None and len(set(candidates)) > 1:
+                raise PreviewError(
+                    "multiple refresh rates match; specify an exact @REFRESHHz"
+                )
+            output["mode"] = candidates[0]
+        elif flag == "--pos":
+            match = re.fullmatch(r"(-?\d+),(-?\d+)", value)
+            if not match:
+                raise PreviewError("position must be X,Y")
+            position = (int(match[1]), int(match[2]))
+            if any(not -(2**31) <= coordinate < 2**31 for coordinate in position):
+                raise PreviewError("position exceeds the signed32-bit protocol range")
+            output["position"] = position
+        elif flag == "--transform":
+            if value not in TRANSFORMS:
+                raise PreviewError("invalid transform")
+            output["transform"] = value
+        elif flag == "--scale":
+            scale = float(value)
+            if not math.isfinite(scale) or not 0 < scale <= 16:
+                raise PreviewError("scale must be finite and within (0,16]")
+            # wl_fixed_from_double uses nearest8-bit fractional precision.
+            output["scale"] = round(round(scale * 256) / 256, 6)
+        elif flag == "--adaptive-sync":
+            if value not in ("enabled", "disabled") or output["adaptive_sync"] is None:
+                raise PreviewError("adaptive sync is unavailable or value is invalid")
+            output["adaptive_sync"] = value == "enabled"
+    if not touched:
+        raise PreviewError("at least one --output is required")
+    return desired, touched
+
+
+def restore_args(before, touched):
+    args = []
+    for name in sorted(touched):
+        head = before[name]
+        args.extend(["--output", name])
+        if not head["enabled"]:
+            args.append("--off")
+            continue
+        width, height, millihertz = head["mode"]
+        args.extend(
+            [
+                "--on",
+                "--mode",
+                f"{width}x{height}@{millihertz / 1000:.6f}Hz",
+                "--pos",
+                f"{head['position'][0]},{head['position'][1]}",
+                "--transform",
+                head["transform"],
+                "--scale",
+                f"{head['scale']:.6f}",
+            ]
+        )
+        if head["adaptive_sync"] is not None:
+            args.extend(
+                ["--adaptive-sync", "enabled" if head["adaptive_sync"] else "disabled"]
+            )
+    return args
+
+
+class Controller:
+    def __init__(self, executable):
+        self.executable = executable
+
+    def run(self, args, timeout=8):
+        try:
+            result = subprocess.run(
+                [self.executable, *args],
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise PreviewError(f"wlr-randr failed: {error}") from error
+        if len(result.stdout) > 1024 * 1024 or len(result.stderr) > 64 * 1024:
+            raise PreviewError("wlr-randr response exceeded bounds")
+        if result.returncode:
+            raise PreviewError(
+                f"wlr-randr exited {result.returncode}: {result.stderr.strip()[:1000]}"
+            )
+        return result.stdout
+
+    def snapshot(self, timeout=2):
+        try:
+            return normalize(json.loads(self.run(["--json"], timeout=timeout)))
+        except (ValueError, TypeError) as error:
+            raise PreviewError(f"invalid wlr-randr --json: {error}") from error
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=15.0,
+        help="countdown seconds(default 15, max 120)",
+    )
+    parser.add_argument(
+        "--wlr-randr", default="wlr-randr", help="wlr-randr>=0.5 executable"
+    )
+    parser.add_argument("--report", type=Path)
+    parser.add_argument(
+        "--snapshot",
+        action="store_true",
+        help="read JSON state without changing outputs",
+    )
+    parser.add_argument(
+        "settings",
+        nargs=argparse.REMAINDER,
+        help="-- followed by explicit output options",
+    )
+    args = parser.parse_args()
+    settings = args.settings[1:] if args.settings[:1] == ["--"] else args.settings
+    if not math.isfinite(args.timeout) or not 0.1 <= args.timeout <= 120:
+        parser.error("timeout must be within 0.1..120 seconds")
+    if not args.snapshot and (not settings or not sys.stdin.isatty()):
+        parser.error(
+            "changes require explicit settings and an interactive TTY; --snapshot is read-only"
+        )
+    controller = Controller(args.wlr_randr)
+    report = {
+        "format": 1,
+        "status": "not_applied",
+        "ownership": "snapshot_comparison_not_atomic_CAS",
+        "settings": settings,
+        "events": [],
+    }
+    owned = None
+    desired = None
+    apply_started = False
+    before = None
+    touched = set()
+    saved_terminal = None
+
+    def log(status, message):
+        report["status"] = status
+        report["events"].append(
+            {"at": time.monotonic(), "status": status, "message": message}
+        )
+        print(message, file=sys.stderr, flush=True)
+
+    def restore():
+        nonlocal owned
+        if owned is None or before is None:
+            return False
+        current = controller.snapshot()
+        if current != owned:
+            log(
+                "ownership_lost",
+                "Output state/identity changed; automatic restore cancelled to preserve the newer layout.",
+            )
+            return False
+        try:
+            controller.run(restore_args(before, touched))
+            if controller.snapshot() != before:
+                raise PreviewError(
+                    "restore command returned but original topology/settings were not observed"
+                )
+        except PreviewError as error:
+            raise RollbackError(str(error)) from error
+        owned = None
+        log("restored", "Original output settings restored and verified.")
+        return True
+
+    def interrupted(number, _frame):
+        raise Interrupted(number)
+
+    for number in (
+        signal.SIGINT,
+        signal.SIGTERM,
+        signal.SIGHUP,
+        signal.SIGQUIT,
+        signal.SIGTSTP,
+    ):
+        signal.signal(number, interrupted)
+    try:
+        before = controller.snapshot()
+        if args.snapshot:
+            print(json.dumps(before, indent=2))
+            return 0
+        desired, touched = desired_layout(before, settings)
+        report["before"] = before
+        report["requested"] = desired
+        # Never consume an Enter queued before the preview became visible.
+        saved_terminal = termios.tcgetattr(sys.stdin.fileno())
+        termios.tcflush(sys.stdin.fileno(), termios.TCIFLUSH)
+        tty.setcbreak(sys.stdin.fileno())
+        controller.run(["--dryrun", *settings])
+        if controller.snapshot() != before:
+            log(
+                "ownership_lost",
+                "Output state changed during dryrun; no preview was applied.",
+            )
+            return 3
+        try:
+            apply_started = True
+            controller.run(settings)
+        except PreviewError as error:
+            current = controller.snapshot()
+            if current == desired:
+                owned = desired
+                restore()
+            elif current != before:
+                log(
+                    "ownership_lost",
+                    "Failed apply left an unowned/partial layout; automatic writes stopped. Use the recorded original settings for manual recovery.",
+                )
+            raise error
+        owned = controller.snapshot()
+        if owned != desired:
+            owned = None
+            log(
+                "ownership_lost",
+                "Observed state differs from the requested preview; no rollback ownership claimed.",
+            )
+            return 3
+        log(
+            "previewing",
+            f"Preview active for {args.timeout:g}s. Enter keeps; Esc or timeout restores.",
+        )
+        deadline = time.monotonic() + args.timeout
+        last_tick = None
+        while time.monotonic() < deadline:
+            if (
+                controller.snapshot(
+                    timeout=max(0.05, min(1, deadline - time.monotonic()))
+                )
+                != owned
+            ):
+                log(
+                    "ownership_lost",
+                    "A newer topology/settings change was observed; preview relinquished ownership.",
+                )
+                return 3
+            remaining = max(0, math.ceil(deadline - time.monotonic()))
+            if remaining != last_tick:
+                print(
+                    f"\rKeep settings? Enter=keep Esc=restore [{remaining}s] ",
+                    end="",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                last_tick = remaining
+            ready, _, _ = select.select(
+                [sys.stdin], [], [], min(0.2, max(0, deadline - time.monotonic()))
+            )
+            if ready:
+                key = os.read(sys.stdin.fileno(), 1)
+                if key in (b"\n", b"\r"):
+                    # Confirm only if the owned state is still current.
+                    if controller.snapshot() != owned:
+                        log(
+                            "ownership_lost",
+                            "Layout changed before confirmation; confirmation ignored.",
+                        )
+                        return 3
+                    owned = None
+                    apply_started = False
+                    log("confirmed", "Display settings kept.")
+                    return 0
+                if key in (b"\x1b", b""):
+                    break
+        return 2 if restore() else 3
+    except RollbackError as error:
+        log("restore_failed", str(error))
+        return 4
+    except Interrupted as error:
+        try:
+            if owned is None and apply_started and desired is not None:
+                current = controller.snapshot()
+                if current == desired:
+                    owned = desired
+                elif current == before:
+                    log(
+                        "interrupted_no_change",
+                        "Interrupted apply: the original state is currently observed.",
+                    )
+                else:
+                    log(
+                        "ownership_lost",
+                        "Interrupted apply has no verifiable ownership; automatic writes stopped.",
+                    )
+            if owned is not None:
+                restore()
+        except PreviewError as rollback_error:
+            log("restore_failed", str(rollback_error))
+            return 4
+        return 128 + error.number
+    except (PreviewError, ValueError, OSError, termios.error) as error:
+        was_owned = owned is not None
+        if was_owned:
+            try:
+                restored = restore()
+            except PreviewError as rollback_error:
+                log("restore_failed", str(rollback_error))
+                return 4
+            if not restored:
+                return 3
+        log("apply_failed", str(error))
+        return 1
+    finally:
+        if saved_terminal is not None:
+            try:
+                termios.tcsetattr(sys.stdin.fileno(), termios.TCSANOW, saved_terminal)
+            except (OSError, termios.error):
+                pass  # A disconnected TTY must not hide the rollback result.
+        try:
+            print(file=sys.stderr, flush=True)
+        except OSError:
+            pass
+        if args.report:
+            args.report.parent.mkdir(parents=True, exist_ok=True)
+            args.report.write_text(json.dumps(report, indent=2) + "\n")
+
+
+if __name__ == "__main__":
+    sys.exit(main())

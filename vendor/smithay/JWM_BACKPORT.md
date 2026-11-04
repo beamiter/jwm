@@ -6,6 +6,24 @@ License: MIT, preserved in LICENSE.txt. Package version is unchanged. This tree 
 
 `JWM_BACKPORT.patch` is the complete difference from the base revision (`git diff d33a9c98..` of the vendored tree, excluding these two notes). Applying it to a pristine checkout of the base reproduces this directory.
 
+## Local framebuffer/color transaction extension (2026-11-03)
+
+`FrameProperty`, `queue_frame_with_properties` and `prepare_color_transition`
+are maintained JWM APIs, not upstream Smithay APIs. The property payload belongs
+to one queued framebuffer; only CRTC/connector color properties are accepted.
+Transitions require a full repaint, and TEST_ONLY and real commits carry the
+same framebuffer/property assignments. Failed probes do not submit, failed
+commits retain the old mode-blob owner, and properties never spill into the next
+frame. Public output descriptions are promoted by JWM after the matching vblank.
+
+See [the transaction contract](../../docs/wayland/HDR_FRAME_TRANSACTIONS.md).
+Four vendor recorder/transition regressions passed. The regenerated complete
+patch was applied to a reconstructed pristine snapshot and reproduced all 343
+tracked upstream files byte for byte; evidence is in
+`artifacts/gap-completion-20261103/hdr/vendor-patch-roundtrip.log` in the root
+workspace. This extension does not enable PAGE_FLIP_ASYNC or certify physical
+HDR output.
+
 ## Upstream backports
 
 Each commit below is taken verbatim (`git cherry-pick -x`, no conflicts) from upstream history between the base and `24647fc8d00131eb7f388efed26e35ea316b0018` (2026-10-20), in upstream order:

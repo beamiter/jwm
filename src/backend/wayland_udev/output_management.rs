@@ -1052,9 +1052,9 @@ fn build_changes(
         ));
     }
 
-    // Apply cannot transactionally grow/shrink the compositor's complete FBO
-    // chain yet. Keep Test honest by enforcing the same deterministic envelope
-    // constraint here, before either request can queue a backend mutation.
+    // Keep protocol Test and Apply under the same opt-in. Apply preallocates
+    // the complete replacement GL chain before mutating any output; physical
+    // envelope changes share the existing explicit modeset policy gate.
     let current_layout = state
         .outputs
         .iter()
@@ -1083,14 +1083,14 @@ fn build_changes(
         .map_err(OutputConfigValidationError::new)?;
     let proposed_size = proposed_output_framebuffer_size(&current_layout, &changes)
         .map_err(OutputConfigValidationError::new)?;
-    if proposed_size != current_size {
+    if proposed_size != current_size && !allow_modeset {
         return Err(OutputConfigValidationError::field(
             "*",
             "layout_extent",
             None,
             format!("{}x{}", proposed_size.0, proposed_size.1),
             format!(
-                "runtime framebuffer envelope change from {}x{} to {}x{} is not yet supported; reinitialize KMS to apply this layout",
+                "runtime framebuffer envelope change from {}x{} to {}x{} requires behavior.wlr_output_mgmt_allow_modeset=true",
                 current_size.0, current_size.1, proposed_size.0, proposed_size.1
             ),
         ));

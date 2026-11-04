@@ -13,6 +13,38 @@ pub struct DetectorStatus {
     pub degraded_reason: Option<&'static str>,
 }
 
+/// Provenance describes this probe only. It never promotes an initialized model
+/// to microphone, acoustic short-command, or end-to-end acceptance.
+pub fn diagnostic(status: &DetectorStatus) -> serde_json::Value {
+    let (model, hash, runtime) = if status.active == "silero" {
+        #[cfg(feature = "silero")]
+        {
+            (
+                Some("silero-v5.1.2"),
+                Some(super::silero::MODEL_SHA256),
+                super::silero::runtime_version(),
+            )
+        }
+        #[cfg(not(feature = "silero"))]
+        {
+            (None, None, None)
+        }
+    } else if status.active == "rnnoise" {
+        (Some("nnnoiseless-built-in-rnnoise"), None, None)
+    } else {
+        (None, None, None)
+    };
+    serde_json::json!({
+        "requested":status.requested,"active":status.active,
+        "degraded_reason":status.degraded_reason,"model":model,"model_sha256":hash,
+        "runtime_version":runtime,"capture_sample_rate":24000,
+        "model_sample_rate":if status.active=="silero"{Some(16000)}else{None},
+        "model_window_samples":if status.active=="silero"{Some(512)}else{None},
+        "verification":{"kind":"local_initialization","physical_audio":"not_tested",
+            "chinese_short_commands":"not_tested","last_physical_validation":null}
+    })
+}
+
 pub struct Detection {
     pub probability: f32,
     pub ready: bool,

@@ -1585,11 +1585,11 @@ mod tests {
         let source = include_str!("render.rs");
         let readback = format!("self.recording.{}(", "capture_frame");
         let rec = format!(
-            "let rec_chip_h = self.{}(gl, &projection);",
+            "self.{}(gl, &projection, tail_draws_linear);",
             "render_recording_indicator"
         );
         let mic = format!(
-            "let mic_chip_h = self.{}(gl, &projection, rec_chip_h);",
+            "self.{}(gl, &projection, tail_draws_linear, rec_chip_h);",
             "render_mic_indicator"
         );
         let at = |needle: &str| {
@@ -1613,7 +1613,7 @@ mod tests {
         );
         assert!(
             frame.contains(&format!(
-                "self.render_{}(gl, &projection);",
+                "self.render_{}(gl, &projection, tail_draws_linear);",
                 "recording_region_overlay"
             )),
             "the crop outline's own draw must remain"
@@ -1821,7 +1821,11 @@ impl WaylandCompositor {
     /// The output remains linear only when KMS performs the final OETF. In all
     /// other cases output_fbo is already encoded and legacy overlay textures
     /// must not be decoded a second time.
-    unsafe fn sync_overlay_color_domain(&self, gl: &ffi::Gles2, scene_linear_output: bool) {
+    pub(super) unsafe fn sync_overlay_color_domain(
+        &self,
+        gl: &ffi::Gles2,
+        scene_linear_output: bool,
+    ) {
         unsafe {
             gl.UseProgram(self.program);
             gl.Uniform1i(self.win_uniforms.color_managed, 0);
@@ -2785,8 +2789,28 @@ impl WaylandCompositor {
             } else {
                 match create_fbo_texture_fp16(gl, self.screen_w.max(1), self.screen_h.max(1)) {
                     Ok((fbo, texture)) => {
-                        self.linear_fbo = fbo;
-                        self.linear_texture = texture;
+                        match create_fbo_texture_fp16(
+                            gl,
+                            self.screen_w.max(1),
+                            self.screen_h.max(1),
+                        ) {
+                            Ok((scratch_fbo, scratch_texture)) => {
+                                gl.DeleteFramebuffers(1, &self.postprocess_fbo);
+                                gl.DeleteTextures(1, &self.postprocess_texture);
+                                self.postprocess_fbo = scratch_fbo;
+                                self.postprocess_texture = scratch_texture;
+                                self.linear_fbo = fbo;
+                                self.linear_texture = texture;
+                            }
+                            Err(status) => {
+                                gl.DeleteFramebuffers(1, &fbo);
+                                gl.DeleteTextures(1, &texture);
+                                self.scene_linear_requested = false;
+                                log::warn!(
+                                    "[udev/compositor] FP16 scratch target unavailable ({status:x}); keeping encoded-space pipeline"
+                                );
+                            }
+                        }
                     }
                     Err(status) => {
                         // Do not retry every frame, and more importantly do not
@@ -2914,6 +2938,12 @@ impl WaylandCompositor {
         >,
         capture_view_required: bool,
     ) -> bool {
+        self.companion_drawn_this_frame = false;
+        let mut companion_frame_evidence =
+            crate::backend::compositor_common::companion_scene::FrameEvidence::capture(
+                self.companion_node.as_ref(),
+            );
+        unsafe { self.poll_desktop_visual(gl) };
         let bar_wallpaper_probe = crate::backend::compositor_common::bar_wallpaper::begin_frame();
         if bar_wallpaper_probe {
             self.needs_render = true;
@@ -4927,6 +4957,7 @@ impl WaylandCompositor {
                 self.render_debug_hud(gl, &projection, tail_draws_linear);
             }
             gl.BindFramebuffer(ffi::FRAMEBUFFER, chrome_target);
+            self.render_desktop_visual(gl, &projection, tail_draws_linear);
             self.render_toasts(gl, &projection, tail_draws_linear);
             gl.BindFramebuffer(ffi::FRAMEBUFFER, chrome_target);
             self.render_osd(gl, &projection, tail_draws_linear);
@@ -4984,6 +5015,44 @@ impl WaylandCompositor {
             }
             ExternalElementPass::Skipped => {}
         }
+        // The lock shield (section 18a) is the top of the scene while locked:
+        // nothing the screenshot editor draws may land on it.
+        let locked = self
+            .system_ui
+            .as_ref()
+            .is_some_and(|overlay| overlay.locked);
+
+        // =================================================================
+        // 19c. Annotations overlay
+        // =================================================================
+        // Shapes first, then strokes over them: a redaction bar must not land
+        // on top of the arrow that points at it. The screenshot toolbar comes
+        // last of all, since it floats above everything it edits.
+        if self.annotation_active && !locked {
+            unsafe {
+                gl.BindFramebuffer(ffi::FRAMEBUFFER, chrome_target);
+                self.sync_overlay_color_domain(gl, tail_draws_linear);
+            }
+            self.refresh_annotation_labels(gl);
+            self.render_annotation_shapes(gl, &projection, tail_draws_linear);
+            if !self.annotation_strokes.is_empty() {
+                unsafe {
+                    self.render_annotations(gl, &projection, tail_draws_linear);
+                }
+            }
+        }
+        // A modal panel (drawn at 18a, before this) covers the editor's
+        // toolbar too: a panel opened over IPC while the editor is armed must
+        // not have the toolbar painted across its card.
+        if self.screenshot_toolbar.is_some() && !locked && self.system_ui.is_none() {
+            unsafe {
+                gl.BindFramebuffer(ffi::FRAMEBUFFER, chrome_target);
+                self.sync_overlay_color_domain(gl, tail_draws_linear);
+            }
+            self.refresh_screenshot_toolbar(gl);
+            self.render_screenshot_toolbar(gl, &projection, tail_draws_linear);
+        }
+
         // Idle dim / user brightness on the deferred routes: after every
         // linear-target layer, cursor included, and before delivery gives
         // output_fbo its output-referred domain.
@@ -5058,41 +5127,6 @@ impl WaylandCompositor {
         } else {
             CompositorCaptureView::Unavailable
         };
-
-        // The lock shield (section 18a) is the top of the scene while locked:
-        // nothing the screenshot editor draws may land on it.
-        let locked = self
-            .system_ui
-            .as_ref()
-            .is_some_and(|overlay| overlay.locked);
-
-        // =================================================================
-        // 19c. Annotations overlay
-        // =================================================================
-        // Shapes first, then strokes over them: a redaction bar must not land
-        // on top of the arrow that points at it. The screenshot toolbar comes
-        // last of all, since it floats above everything it edits.
-        if self.annotation_active && !locked {
-            self.bind_post_delivery_overlay_target(gl, tail_domain::TailOverlayClass::Annotation);
-            self.refresh_annotation_labels(gl);
-            self.render_annotation_shapes(gl, &projection);
-            if !self.annotation_strokes.is_empty() {
-                unsafe {
-                    self.render_annotations(gl, &projection);
-                }
-            }
-        }
-        // A modal panel (drawn at 18a, before this) covers the editor's
-        // toolbar too: a panel opened over IPC while the editor is armed must
-        // not have the toolbar painted across its card.
-        if self.screenshot_toolbar.is_some() && !locked && self.system_ui.is_none() {
-            self.bind_post_delivery_overlay_target(
-                gl,
-                tail_domain::TailOverlayClass::ScreenshotToolbar,
-            );
-            self.refresh_screenshot_toolbar(gl);
-            self.render_screenshot_toolbar(gl, &projection);
-        }
 
         // Final brightness multiply after toast/OSD/system UI so idle dim
         // covers compositor chrome. Mid-frame postprocess keeps u_brightness=1.
@@ -5234,30 +5268,84 @@ impl WaylandCompositor {
         // cue must not leak into a screen recording's frames either. The
         // texture arm keeps the block alive for the one frame after the MIC
         // state clears, so the label texture is freed while GL is current.
-        if self.recording_region_overlay.is_some()
+        let local_only_cues = self.recording_region_overlay.is_some()
             || self.recording.is_active()
             || self.mic_indicator_active
             || self.mic_indicator_texture.is_some()
             || self.capture_hint.is_some()
-            || self.capture_hint_texture.is_some()
-        {
+            || self.capture_hint_texture.is_some();
+        if local_only_cues {
+            // Reuse the completed FP16 postprocess scratch target for local-only
+            // chrome. Never contaminate the persistent linear scene: a later
+            // partial-damage capture must not inherit last frame's REC cue.
+            if tail_draws_linear {
+                self.blit_fbo(
+                    gl,
+                    self.linear_fbo,
+                    self.postprocess_fbo,
+                    self.screen_w,
+                    self.screen_h,
+                );
+                std::mem::swap(&mut self.linear_fbo, &mut self.postprocess_fbo);
+                std::mem::swap(&mut self.linear_texture, &mut self.postprocess_texture);
+            }
             self.bind_post_delivery_overlay_target(
                 gl,
                 tail_domain::TailOverlayClass::RecordingRegionOverlay,
+                tail_draws_linear,
             );
             unsafe {
                 if self.recording_region_overlay.is_some() {
-                    self.render_recording_region_overlay(gl, &projection);
+                    self.render_recording_region_overlay(gl, &projection, tail_draws_linear);
                 }
-                let rec_chip_h = self.render_recording_indicator(gl, &projection);
-                let mic_chip_h = self.render_mic_indicator(gl, &projection, rec_chip_h);
+                let rec_chip_h =
+                    self.render_recording_indicator(gl, &projection, tail_draws_linear);
+                let mic_chip_h =
+                    self.render_mic_indicator(gl, &projection, tail_draws_linear, rec_chip_h);
                 let hint_lift =
                     crate::backend::compositor_common::capture_hint::capture_hint_bottom_lift(
                         rec_chip_h, mic_chip_h,
                     );
-                self.render_capture_hint(gl, &projection, hint_lift);
+                self.render_capture_hint(gl, &projection, tail_draws_linear, hint_lift);
                 gl.BindFramebuffer(ffi::FRAMEBUFFER, 0);
             }
+        }
+
+        if tail_draws_linear && local_only_cues {
+            match output_route {
+                FrameOutputRoute::DeferredHardware => {
+                    self.blit_fbo(
+                        gl,
+                        self.linear_fbo,
+                        self.output_fbo,
+                        self.screen_w,
+                        self.screen_h,
+                    );
+                    unsafe {
+                        gl.BindFramebuffer(ffi::FRAMEBUFFER, self.output_fbo);
+                        gl.Viewport(0, 0, self.screen_w as i32, self.screen_h as i32);
+                        gl.Disable(ffi::SCISSOR_TEST);
+                        self.enable_premultiplied_blend(gl);
+                    }
+                }
+                FrameOutputRoute::DeferredRegions => {
+                    if let Some(regions) = software_output_regions {
+                        self.dispatch_output_color_regions(
+                            gl,
+                            &projection,
+                            regions,
+                            hw_encode_active,
+                            hw_ctm_active,
+                            None,
+                        );
+                    } else {
+                        debug_assert!(false, "deferred output route requires software regions");
+                    }
+                }
+                FrameOutputRoute::LegacyEncoded | FrameOutputRoute::EarlySrgbFallback => {}
+            }
+            std::mem::swap(&mut self.linear_fbo, &mut self.postprocess_fbo);
+            std::mem::swap(&mut self.linear_texture, &mut self.postprocess_texture);
         }
 
         // =================================================================
@@ -5337,6 +5425,8 @@ impl WaylandCompositor {
             .redundant_changes_avoided()
             .min(u32::MAX as u64) as u32;
 
+        companion_frame_evidence.body_drawn = self.companion_drawn_this_frame;
+        self.companion_frame_evidence = Some(companion_frame_evidence);
         true
     }
 
@@ -5413,7 +5503,7 @@ impl WaylandCompositor {
     /// `self.capture_view` as recomputed at section 18c: legacy/fallback
     /// frames read output_fbo (already canonical encoded sRGB), deferred
     /// frames read the dedicated encoded view.
-    fn capture_readback_fbo(&self) -> Option<u32> {
+    pub(super) fn capture_readback_fbo(&self) -> Option<u32> {
         match self.capture_view {
             CompositorCaptureView::EncodedOutput => Some(self.output_fbo),
             CompositorCaptureView::Dedicated { .. } => Some(self.capture_view_fbo),
@@ -6887,7 +6977,7 @@ impl WaylandCompositor {
         let label_cells = || {
             grid.cells[..drawn]
                 .iter()
-                .map(|content| (content.tag_index, content.occupied))
+                .map(|content| (content.tag_index, content.output_number, content.occupied))
         };
         if !self
             .tags_grid_labels_key
@@ -6901,7 +6991,7 @@ impl WaylandCompositor {
                 } else {
                     ui.hint_ink
                 };
-                let text = format!("{}", content.tag_index + 1);
+                let text = content.display_label();
                 if let Some((tex, w, h)) =
                     unsafe { rasterize_toast_text(gl, &text, description, text_size, color) }
                 {
@@ -8601,6 +8691,7 @@ impl WaylandCompositor {
             gl.Uniform4f(rp, x, y, w, h);
             gl.BindTexture(ffi::TEXTURE_2D, tex);
             self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
+            self.companion_drawn_this_frame = gl.GetError() == ffi::NO_ERROR;
             gl.BindVertexArray(0);
             gl.UseProgram(0);
         }
@@ -8911,6 +9002,7 @@ impl WaylandCompositor {
         &mut self,
         gl: &ffi::Gles2,
         projection: &[f32; 16],
+        scene_linear: bool,
     ) -> Option<f32> {
         use crate::backend::compositor_common::recording_indicator as indicator;
 
@@ -8951,7 +9043,7 @@ impl WaylandCompositor {
                 self.bind_quad_vao(gl);
                 gl.UseProgram(self.border_program);
                 self.set_projection_uniform(gl, self.border_uniforms.projection, projection);
-                gl.Uniform1i(self.border_uniforms.scene_linear, 0);
+                gl.Uniform1i(self.border_uniforms.scene_linear, i32::from(scene_linear));
                 // Flat pill rather than frosted glass: the chip is up for the
                 // whole recording, and a glass backdrop re-blurs the screen on
                 // every one of those frames.
@@ -8968,7 +9060,7 @@ impl WaylandCompositor {
                     rec_dot,
                 );
 
-                self.use_sysui_text_program(gl, false);
+                self.use_sysui_text_program(gl, scene_linear);
                 let text_rect = super::get_uniform_loc(gl, self.sysui_text_program, "u_rect");
                 let text_proj = super::get_uniform_loc(gl, self.sysui_text_program, "u_projection");
                 let text_tex = super::get_uniform_loc(gl, self.sysui_text_program, "u_texture");
@@ -9050,6 +9142,7 @@ impl WaylandCompositor {
         &mut self,
         gl: &ffi::Gles2,
         projection: &[f32; 16],
+        scene_linear: bool,
         rec_chip_h: Option<f32>,
     ) -> Option<f32> {
         use crate::backend::compositor_common::recording_indicator as indicator;
@@ -9101,7 +9194,7 @@ impl WaylandCompositor {
                 self.bind_quad_vao(gl);
                 gl.UseProgram(self.border_program);
                 self.set_projection_uniform(gl, self.border_uniforms.projection, projection);
-                gl.Uniform1i(self.border_uniforms.scene_linear, 0);
+                gl.Uniform1i(self.border_uniforms.scene_linear, i32::from(scene_linear));
                 // Flat pill rather than frosted glass, same as the REC chip: the
                 // chip is up for the whole recording, and a glass backdrop
                 // re-blurs the screen on every one of those frames.
@@ -9120,7 +9213,7 @@ impl WaylandCompositor {
                     },
                 );
 
-                self.use_sysui_text_program(gl, false);
+                self.use_sysui_text_program(gl, scene_linear);
                 let text_rect = super::get_uniform_loc(gl, self.sysui_text_program, "u_rect");
                 let text_proj = super::get_uniform_loc(gl, self.sysui_text_program, "u_projection");
                 let text_tex = super::get_uniform_loc(gl, self.sysui_text_program, "u_texture");
@@ -9196,6 +9289,7 @@ impl WaylandCompositor {
         &mut self,
         gl: &ffi::Gles2,
         projection: &[f32; 16],
+        scene_linear: bool,
         bottom_lift: f32,
     ) {
         use crate::backend::compositor_common::capture_hint as hint;
@@ -9232,10 +9326,10 @@ impl WaylandCompositor {
             self.bind_quad_vao(gl);
             gl.UseProgram(self.border_program);
             self.set_projection_uniform(gl, self.border_uniforms.projection, projection);
-            gl.Uniform1i(self.border_uniforms.scene_linear, 0);
+            gl.Uniform1i(self.border_uniforms.scene_linear, i32::from(scene_linear));
             self.sysui_fill_rounded(gl, chip_x, chip_y, chip_w, chip_h, chip_h / 2.0, ui.osd);
 
-            self.use_sysui_text_program(gl, false);
+            self.use_sysui_text_program(gl, scene_linear);
             let text_rect = super::get_uniform_loc(gl, self.sysui_text_program, "u_rect");
             let text_proj = super::get_uniform_loc(gl, self.sysui_text_program, "u_projection");
             let text_tex = super::get_uniform_loc(gl, self.sysui_text_program, "u_texture");
@@ -9284,7 +9378,12 @@ impl WaylandCompositor {
     }
 
     /// Render annotation strokes as GL_LINES using the line shader.
-    unsafe fn render_annotations(&self, gl: &ffi::Gles2, projection: &[f32; 16]) {
+    unsafe fn render_annotations(
+        &self,
+        gl: &ffi::Gles2,
+        projection: &[f32; 16],
+        scene_linear: bool,
+    ) {
         unsafe {
             gl.UseProgram(self.line_program);
             gl.UniformMatrix4fv(
@@ -9301,11 +9400,22 @@ impl WaylandCompositor {
                 }
 
                 gl.LineWidth(stroke.width);
+                let rgb = if scene_linear {
+                    [stroke.color[0], stroke.color[1], stroke.color[2]].map(|c| {
+                        if c <= 0.04045 {
+                            c / 12.92
+                        } else {
+                            ((c + 0.055) / 1.055).powf(2.4)
+                        }
+                    })
+                } else {
+                    [stroke.color[0], stroke.color[1], stroke.color[2]]
+                };
                 gl.Uniform4f(
                     self.line_uniform_color,
-                    stroke.color[0],
-                    stroke.color[1],
-                    stroke.color[2],
+                    rgb[0],
+                    rgb[1],
+                    rgb[2],
                     stroke.color[3],
                 );
 

@@ -13,6 +13,8 @@ use serde::{Deserialize, Serialize};
 /// allocation policies while still accommodating 8K and multi-monitor bars.
 pub const MAX_FRONTEND_FRAME_BYTES: usize = 512 * 1024 * 1024;
 
+#[cfg(feature = "theme-ipc")]
+pub mod agent_summary;
 pub mod app_icon;
 #[cfg(feature = "provider-alsa")]
 pub mod audio_manager;
@@ -52,6 +54,8 @@ pub mod shell_palette;
 pub mod surface;
 #[cfg(feature = "provider-system")]
 pub mod system_monitor;
+#[cfg(feature = "theme-ipc")]
+pub mod theme_inheritance;
 pub mod toolkit_dock;
 #[cfg(feature = "transport-shared")]
 pub mod transport;

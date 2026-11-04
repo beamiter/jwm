@@ -8,7 +8,7 @@ trap 'rm -rf -- "$TEST_ROOT"' EXIT
 REPO="$TEST_ROOT/project space"
 mkdir -p "$REPO/scripts" "$REPO/bars/tao_glow_bar" "$REPO/bars/xilem_bar" "$REPO/bars/tao_pixels_bar" "$REPO/bars/tauri_leptos_bar" "$REPO/crates/jwm_shell" "$REPO/crates/jwm_apps/dist" "$REPO/bridge/dist" "$REPO/eva/dist" "$REPO/assets/wallpapers" "$REPO/packaging" "$TEST_ROOT/bin"
 cp "$ROOT/packaging/69-jwm-touchpad-gestures.rules" "$REPO/packaging/"
-cp "$ROOT/scripts/install-jwm.sh" "$ROOT/scripts/install-wallpapers.sh" "$ROOT/scripts/jwm-toggle-sidebar-mode" "$ROOT/scripts/install-eva.sh" "$REPO/scripts/"
+cp "$ROOT/scripts/install-jwm.sh" "$ROOT/scripts/install-wallpapers.sh" "$ROOT/scripts/jwm-toggle-sidebar-mode" "$ROOT/scripts/jwm-display-preview" "$ROOT/scripts/install-eva.sh" "$REPO/scripts/"
 cp "$ROOT/scripts/set-jwm-defaults.py" "$REPO/scripts/"
 # Use a private prebuilt companion; these tests exercise JWM's installer and
 # must never fetch or build an external repository.

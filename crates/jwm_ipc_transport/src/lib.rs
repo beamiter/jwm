@@ -7,6 +7,33 @@ use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+/// Authenticate the connected endpoint before sending control-plane data.
+/// Checking pathname ownership alone does not bind a later connection to
+/// that inode; kernel peer credentials retain the JWM same-user boundary.
+pub fn verify_same_user(stream: &UnixStream) -> io::Result<()> {
+    let mut peer: libc::ucred = unsafe { std::mem::zeroed() };
+    let expected_size = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    let mut size = expected_size;
+    // SAFETY: stream owns a live socket; peer and size are writable buffers
+    // whose initial lengths match the requested Linux credential structure.
+    let result = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            (&mut peer as *mut libc::ucred).cast(),
+            &mut size,
+        )
+    };
+    if result != 0 || size != expected_size || peer.uid != unsafe { libc::geteuid() } {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "JWM peer user mismatch or invalid credentials",
+        ));
+    }
+    Ok(())
+}
+
 fn remaining(deadline: Instant) -> io::Result<Duration> {
     deadline
         .checked_duration_since(Instant::now())
@@ -244,6 +271,16 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn connected_endpoints_are_authenticated_with_kernel_peer_credentials() {
+        let directory = SocketDir::new();
+        let listener = UnixListener::bind(directory.socket()).unwrap();
+        let client = connect(&directory.socket(), Duration::from_secs(1)).unwrap();
+        let (server, _) = listener.accept().unwrap();
+        verify_same_user(&client).unwrap();
+        verify_same_user(&server).unwrap();
     }
 
     fn one_pending_connection(path: &Path) -> (UnixListener, UnixStream) {

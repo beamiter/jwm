@@ -35,7 +35,7 @@ use crate::backend::compositor_common::ui_theme;
 
 /// Padding between the card edge and its contents.
 fn pad() -> f32 {
-    ui_theme::palette().pad
+    ui_theme::palette().effective_pad()
 }
 fn card_pad(w: f32) -> f32 {
     if !(w.is_finite() && w > 0.0) {
@@ -45,7 +45,7 @@ fn card_pad(w: f32) -> f32 {
 }
 /// Vertical breathing room between bands.
 fn gap() -> f32 {
-    ui_theme::palette().gap
+    ui_theme::palette().effective_gap()
 }
 fn stack_gap(panel_h: f32) -> f32 {
     let gap = gap();

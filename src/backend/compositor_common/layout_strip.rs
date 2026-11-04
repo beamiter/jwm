@@ -120,7 +120,7 @@ pub fn selected_scale(cell: Rect) -> f32 {
 
 /// Padding between the panel edge and its contents.
 fn panel_pad(screen_w: f32, screen_h: f32) -> f32 {
-    let pad = ui_theme::palette().pad;
+    let pad = ui_theme::palette().effective_pad();
     let cap = screen_w.min(screen_h);
     if cap.is_finite() && cap > 0.0 {
         pad.min(cap * 0.08).max(4.0)
@@ -143,7 +143,7 @@ fn text_band(natural: f32, screen_h: f32) -> f32 {
 }
 /// Vertical breathing room between bands.
 fn gap_y(screen_h: f32) -> f32 {
-    let gap = ui_theme::palette().gap;
+    let gap = ui_theme::palette().effective_gap();
     if screen_h.is_finite() && screen_h > 0.0 && screen_h < 12.0 * gap {
         gap.min(screen_h * 0.05).max(2.0)
     } else {

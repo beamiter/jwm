@@ -558,6 +558,7 @@ pub struct JwmWaylandState {
     im_popup_warned: Mutex<HashSet<(ObjectId, ImPopupWarn)>>,
 
     pub active_toplevel: Option<WindowId>,
+    layer_keyboard_restore: HashMap<ObjectId, WlSurface>,
     pub popup_grab_toplevel: Option<WindowId>,
     pub popup_grab_prev_kbd_focus: Option<WlSurface>,
     pub output_rects: Vec<Rectangle<i32, Logical>>,
@@ -1597,6 +1598,62 @@ impl JwmWaylandState {
         if let Some(keyboard) = self.seat.get_keyboard() {
             keyboard.set_focus(self, focus, serial);
         }
+    }
+
+    /// Preserve the actual application owner before an explicit layer takes
+    /// keyboard focus. The WM's active-toplevel projection may lag this seat.
+    pub(crate) fn focus_keyboard_layer(&mut self, surface: WlSurface, serial: Serial) {
+        if self.session_locked {
+            return;
+        }
+        let current = self
+            .seat
+            .get_keyboard()
+            .and_then(|keyboard| keyboard.current_focus());
+        if current.as_ref() != Some(&surface) {
+            let restore = current
+                .map(|current| {
+                    self.layer_keyboard_restore
+                        .get(&current.id())
+                        .cloned()
+                        .unwrap_or(current)
+                })
+                .or_else(|| {
+                    self.active_toplevel
+                        .and_then(|window| self.surface_for_window(window))
+                })
+                .filter(|previous| previous != &surface && previous.is_alive());
+            if let Some(restore) = restore {
+                self.layer_keyboard_restore.insert(surface.id(), restore);
+            }
+        }
+        self.set_keyboard_focus(Some(surface), serial);
+    }
+
+    /// Returning an explicitly focused layer to hover mode restores its live
+    /// previous owner. A different current owner or locker is never stolen.
+    fn release_layer_keyboard_focus(&mut self, surface: &WlSurface) {
+        let previous = self.layer_keyboard_restore.remove(&surface.id());
+        if self.session_locked {
+            return;
+        }
+        let owns_focus = self
+            .seat
+            .get_keyboard()
+            .and_then(|keyboard| keyboard.current_focus())
+            .as_ref()
+            == Some(surface);
+        if !owns_focus {
+            return;
+        }
+        let restore = previous
+            .filter(|previous| previous != surface && previous.is_alive())
+            .or_else(|| {
+                self.active_toplevel
+                    .and_then(|window| self.surface_for_window(window))
+                    .filter(|candidate| candidate != surface && candidate.is_alive())
+            });
+        self.set_keyboard_focus(restore, SCOUNTER.next_serial());
     }
 
     /// Wrap only real backend key deliveries, never focus/enter or synthetic
@@ -3498,6 +3555,7 @@ impl JwmWaylandState {
                 pending_x11_wl_surfaces: HashMap::new(),
                 x11_wl_surfaces: HashMap::new(),
                 active_toplevel: None,
+                layer_keyboard_restore: HashMap::new(),
 
                 outputs: Vec::new(),
                 protocol_bind_counts: HashMap::new(),
@@ -4814,6 +4872,19 @@ impl CompositorHandler for JwmWaylandState {
 
             break;
         }
+        let inactive_layer = self
+            .layer_shell_state
+            .layer_surfaces()
+            .find(|layer| layer.wl_surface() == surface)
+            .is_some_and(|layer| {
+                layer.with_cached_state(|data| {
+                    data.keyboard_interactivity
+                        == smithay::wayland::shell::wlr_layer::KeyboardInteractivity::None
+                })
+            });
+        if inactive_layer || matches!(buf_state, BufferState::Removed) {
+            self.release_layer_keyboard_focus(surface);
+        }
     }
 
     fn destroyed(&mut self, surface: &WlSurface) {
@@ -6122,6 +6193,7 @@ impl WlrLayerShellHandler for JwmWaylandState {
     }
 
     fn layer_destroyed(&mut self, surface: WlrLayerSurface) {
+        self.release_layer_keyboard_focus(surface.wl_surface());
         for output in &self.outputs {
             let map = layer_map_for_output(output);
             let layer = map
@@ -7440,6 +7512,48 @@ mod protocol_hardening_tests {
             !body.contains("BackendEvent::WindowConfigured"),
             "a client-chosen geometry must not be adopted into the client model"
         );
+    }
+
+    #[test]
+    fn ending_layer_keyboard_mode_restores_application_focus() {
+        let mut server = Server::new();
+        server.state.outputs.push(test_output("KEYBOARD-LAYER"));
+        let mut app = RawClient::connect(&mut server, JwmClientState::default());
+        let (app_id, _, app_window) = create_toplevel(&mut server, &mut app);
+        let app_surface = app.surface(&server, app_id);
+        server.state.active_toplevel = Some(app_window);
+        let mut client = RawClient::connect(&mut server, JwmClientState::default());
+        let compositor = client.bind("wl_compositor", 6);
+        let shell = client.bind("zwlr_layer_shell_v1", 4);
+        let surface_id = client.new_id();
+        client.request(compositor, 0, &[surface_id]);
+        let layer = client.new_id();
+        let mut args = vec![layer, surface_id, 0, 2];
+        args.extend(string_words("explicit-keyboard-panel"));
+        client.request(shell, 0, &args);
+        server.roundtrip();
+        let layer_surface = client.surface(&server, surface_id);
+        let keyboard = server.state.seat.get_keyboard().unwrap();
+        server.state.set_keyboard_focus(
+            Some(app_surface.clone()),
+            smithay::utils::SERIAL_COUNTER.next_serial(),
+        );
+        server.state.focus_keyboard_layer(
+            layer_surface.clone(),
+            smithay::utils::SERIAL_COUNTER.next_serial(),
+        );
+        server.state.active_toplevel = None; // seat owner survives a lagging WM projection
+        assert_eq!(keyboard.current_focus(), Some(layer_surface.clone()));
+        // Layer-shell set_keyboard_interactivity(None), then wl_surface.commit.
+        client.request(layer, 0, &[64, 400]);
+        client.request(layer, 4, &[0]);
+        client.request(surface_id, 6, &[]);
+        server.roundtrip();
+        assert_eq!(keyboard.current_focus(), Some(app_surface.clone()));
+        // A later unfocused layer update cannot steal focus from its new owner.
+        client.request(surface_id, 6, &[]);
+        server.roundtrip();
+        assert_eq!(keyboard.current_focus(), Some(app_surface));
     }
 
     #[test]

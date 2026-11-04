@@ -1,10 +1,10 @@
 use std::io;
 use std::os::unix::io::{AsFd, BorrowedFd};
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
+use drm::control::{connector, crtc, framebuffer, plane, Device as ControlDevice, Mode};
 use drm::Device as BasicDevice;
-use drm::control::{Device as ControlDevice, Mode, connector, crtc, framebuffer, plane};
 
 use libc::dev_t;
 
@@ -13,13 +13,27 @@ pub(super) mod atomic;
 pub(super) mod gbm;
 pub(super) mod legacy;
 use super::{
-    DrmDeviceFd, PlaneClaim, PlaneInfo, PlaneType, Planes, device::PlaneClaimStorage, error::Error,
-    plane_type,
+    device::PlaneClaimStorage, error::Error, plane_type, DrmDeviceFd, PlaneClaim, PlaneInfo, PlaneType,
+    Planes,
 };
 use crate::utils::DevPath;
 use crate::utils::{Buffer, Physical, Point, Rectangle, Transform};
 use atomic::AtomicDrmSurface;
 use legacy::LegacyDrmSurface;
+
+/// One application-owned CRTC/connector property bound to a specific frame.
+///
+/// The caller must keep referenced property blobs alive until the frame has
+/// completed. Plane and modesetting properties remain owned by Smithay.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FrameProperty {
+    /// CRTC or connector receiving the property.
+    pub object: drm::control::RawResourceHandle,
+    /// Property handle belonging to that object.
+    pub property: drm::control::property::Handle,
+    /// Raw DRM property value (including blob ids).
+    pub value: u64,
+}
 
 /// An open crtc + plane combination that can be used for scan-out
 #[derive(Debug)]
@@ -424,6 +438,24 @@ impl DrmSurface {
                 let fb = ensure_legacy_planes(self, planes)?;
                 surf.commit(fb, event)
             }
+        }
+    }
+
+    /// Commit one framebuffer together with application-owned CRTC/connector
+    /// color properties. The atomic backend tests and submits the same complete
+    /// request. Legacy surfaces reject nonempty properties without mutation.
+    pub fn commit_with_properties<'a>(
+        &self,
+        planes: impl IntoIterator<Item = PlaneState<'a>>,
+        event: bool,
+        properties: &[FrameProperty],
+    ) -> Result<(), Error> {
+        if properties.is_empty() {
+            return self.commit(planes, event);
+        }
+        match &*self.internal {
+            DrmSurfaceInternal::Atomic(surf) => surf.commit_with_properties(planes, event, properties),
+            DrmSurfaceInternal::Legacy(_) => Err(Error::TestFailed(self.crtc)),
         }
     }
 

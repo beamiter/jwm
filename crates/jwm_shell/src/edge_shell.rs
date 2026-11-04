@@ -53,6 +53,9 @@ pub enum Action {
     CycleTasks,
     /// Local to the clicked panel; never sent over the WM action channel.
     HidePanel,
+    /// Explicit local keyboard mode; hover never requests keyboard focus.
+    KeyboardMode,
+    ToggleAgents,
     Files,
     Terminal,
     Browser,
@@ -69,6 +72,9 @@ pub struct ShellState {
     pub config: Option<EdgeShellConfig>,
     pub visible: Option<bool>,
     pub tasks: Option<Vec<crate::ipc::Task>>,
+    pub tokens: Option<xbar_core::shell_palette::SemanticTokens>,
+    pub font: Option<String>,
+    pub agents: Option<xbar_core::agent_summary::AgentSummary>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -107,6 +113,9 @@ impl EdgeShell {
                 config: None,
                 visible: None,
                 tasks: None,
+                tokens: None,
+                font: None,
+                agents: None,
             },
             handler,
         )
@@ -254,6 +263,9 @@ impl EdgeShell {
             config: None,
             visible: None,
             tasks: None,
+            tokens: None,
+            font: None,
+            agents: None,
         });
     }
 
@@ -316,6 +328,11 @@ impl Hit {
             }
             Action::CycleTasks => value["kind"] = "task_overflow".into(),
             Action::HidePanel => value["kind"] = "hide_panel".into(),
+            Action::KeyboardMode => value["kind"] = "keyboard_mode".into(),
+            Action::ToggleAgents => value["kind"] = "agent_toggle".into(),
+            Action::Model(UserAction::OpenShellHub(xbar_core::ShellRoute::AgentSessions)) => {
+                value["kind"] = "agent_sessions".into()
+            }
             Action::MediaOpen => value["kind"] = "media_open".into(),
             Action::MediaPrevious => value["kind"] = "media_previous".into(),
             Action::MediaNext => value["kind"] = "media_next".into(),
@@ -341,6 +358,7 @@ impl Hit {
 
 pub(crate) struct Panel {
     pub(crate) task_offset: usize,
+    pub(crate) agents_expanded: bool,
     pub(crate) edge: BarEdge,
     pub(crate) window: u32,
     pub(crate) sensor: u32,
@@ -423,6 +441,9 @@ struct Host {
     output: MonitorGeometry,
     snapshot: Option<BarSnapshot>,
     tasks: Vec<crate::ipc::Task>,
+    tokens: Option<xbar_core::shell_palette::SemanticTokens>,
+    font: String,
+    agents: Option<xbar_core::agent_summary::AgentSummary>,
     last_task_refresh: Option<Instant>,
     shown: bool,
     visibility_known: bool,
@@ -545,6 +566,9 @@ impl Host {
             output,
             snapshot: None,
             tasks: Vec::new(),
+            tokens: None,
+            font: config.font,
+            agents: None,
             last_task_refresh: None,
             shown: true,
             visibility_known: false,
@@ -676,6 +700,7 @@ impl Host {
             )?;
             host.panels.push(Panel {
                 task_offset: 0,
+                agents_expanded: false,
                 edge,
                 window,
                 sensor,
@@ -726,6 +751,9 @@ impl Host {
             config,
             visible,
             tasks,
+            tokens,
+            font,
+            agents,
         } = state;
         let new_session = self
             .snapshot
@@ -795,7 +823,16 @@ impl Host {
             }
         }
         let moved = self.output != output;
-        let changed = self.snapshot.as_ref() != Some(&snapshot);
+        let font_changed = font.as_ref().is_some_and(|font| *font != self.font);
+        if let Some(font) = font {
+            self.font = font;
+        }
+        let changed = self.snapshot.as_ref() != Some(&snapshot)
+            || self.tokens != tokens
+            || font_changed
+            || self.agents != agents;
+        self.agents = agents;
+        self.tokens = tokens;
         self.output = output;
         self.snapshot = Some(snapshot);
         if was_shown && !self.shown {
@@ -1312,6 +1349,10 @@ impl Host {
                                 self.withdraw_dock();
                             }
                             self.place(index)?;
+                        } else if pressed.action == Action::ToggleAgents {
+                            self.panels[index].agents_expanded =
+                                !self.panels[index].agents_expanded;
+                            self.paint(index)?;
                         } else if pressed.action == Action::CycleTasks {
                             self.panels[index].task_offset =
                                 (self.panels[index].task_offset + 1) % self.tasks.len().max(1);
@@ -1516,7 +1557,7 @@ impl Host {
                 y + 0.5,
                 (w - 1.0).max(1.0),
                 (h - 1.0).max(1.0),
-                32.0,
+                self.tokens.map_or(32.0, |tokens| f64::from(tokens.radius)),
             );
             ctx.save()?;
             ctx.clip();
@@ -1526,8 +1567,9 @@ impl Host {
                 ctx.set_source_surface(backdrop, 0.0, 0.0)?;
                 ctx.paint()?;
             }
+            painter::set_font(Some(&self.font));
             let dark = snapshot.theme == ThemeMode::Dark;
-            material(&ctx, [x, y, w, h], dark)?;
+            material(&ctx, [x, y, w, h], dark, self.tokens)?;
             ctx.restore()?;
             rounded(
                 &ctx,
@@ -1535,7 +1577,7 @@ impl Host {
                 y + 0.5,
                 (w - 1.0).max(1.0),
                 (h - 1.0).max(1.0),
-                32.0,
+                self.tokens.map_or(32.0, |tokens| f64::from(tokens.radius)),
             );
             ctx.set_source_rgba(1.0, 1.0, 1.0, if dark { 0.22 } else { 0.72 });
             ctx.set_line_width(1.0);
@@ -1546,6 +1588,8 @@ impl Host {
                 snapshot,
                 tasks: &self.tasks,
                 dark,
+                tokens: self.tokens,
+                agents: self.agents,
             };
             ctx.save()?;
             ctx.rectangle(x, y, w, h);
@@ -1704,10 +1748,19 @@ pub(crate) fn preview_delivery(
 /// adapters cannot expose X properties, so diagnostics and acceptance fixtures
 /// use the same hit allocation that paints their surfaces.
 pub fn inspect_controls(state: &ShellState, edge: BarEdge) -> Result<Vec<serde_json::Value>> {
+    inspect_controls_with_keyboard(state, edge, false)
+}
+
+pub fn inspect_controls_with_keyboard(
+    state: &ShellState,
+    edge: BarEdge,
+    keyboard: bool,
+) -> Result<Vec<serde_json::Value>> {
     let config = state.config.clone().unwrap_or_default();
     let placement = panel_geometry(state.output, edge, true, config.trigger_pixels);
     let mut panel = Panel {
         task_offset: 0,
+        agents_expanded: false,
         edge,
         window: 0,
         sensor: 0,
@@ -1746,8 +1799,14 @@ pub fn inspect_controls(state: &ShellState, edge: BarEdge) -> Result<Vec<serde_j
         snapshot: &state.snapshot,
         tasks: state.tasks.as_deref().unwrap_or_default(),
         dark: state.snapshot.theme == ThemeMode::Dark,
+        tokens: state.tokens,
+        agents: state.agents,
     };
-    painter.draw(x, y, w, h)?;
+    if keyboard {
+        painter.draw_with_keyboard(x, y, w, h, false)?;
+    } else {
+        painter.draw(x, y, w, h)?;
+    }
     Ok(panel
         .hits
         .iter()

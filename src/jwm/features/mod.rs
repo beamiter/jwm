@@ -10,6 +10,7 @@
 
 // Without media-audio only the state surface is exercised; the capture
 // helpers stay for the gated engines.
+pub(crate) mod agent_sessions;
 #[cfg_attr(not(feature = "media-audio"), allow(dead_code))]
 pub mod audio_recording;
 pub mod calendar;
@@ -54,6 +55,7 @@ pub mod wallpaper;
 pub mod wallpaper_colors;
 pub(crate) mod wallpaper_controls;
 pub mod wallpaper_rotation;
+pub mod workscenes;
 
 pub use audio_recording::AudioRecordingState;
 pub use calendar::CalendarView;
@@ -132,6 +134,7 @@ pub(crate) struct PendingRecordingStart {
 /// 所有特性的组合状态
 #[derive(Debug, Default)]
 pub struct FeatureStates {
+    pub(crate) agent_sessions: agent_sessions::AgentSessions,
     pub(crate) pointer_scroll: crate::jwm::scroll_input::WmScrollState,
     pub touchpad: touchpad::TouchpadGestures,
     /// Runtime compositor hand-off diagnostics retained even while the
@@ -224,6 +227,7 @@ pub struct FeatureStates {
     pub notifications: NotificationCenter,
     /// Built-in lock screen, application launcher, and display layout UI.
     pub system_ui: SystemUiState,
+    pub(crate) workscene_preview: Option<workscenes::WorkscenePlan>,
     /// Temporary Theme-page publication. Closing or replacing the page rolls
     /// it back only while it still owns the live configuration revision.
     pub(crate) theme_preview: Option<theme_preview::ThemePreview>,
@@ -380,4 +384,3 @@ mod tests {
         assert_eq!(state.attempts, u64::MAX);
     }
 }
-

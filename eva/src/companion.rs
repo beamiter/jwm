@@ -613,10 +613,11 @@ pub(crate) fn start() {
                     }
                     // Preserve semantic edges before consuming another turn;
                     // only periodic level/counter snapshots are coalesced.
-                    if let Some(value) = current.as_ref() {
-                        if accepted && !deliver(&mut client, value, &mut last_sent, &mut closed) {
-                            accepted = false;
-                        }
+                    if let Some(value) = current.as_ref()
+                        && accepted
+                        && !deliver(&mut client, value, &mut last_sent, &mut closed)
+                    {
+                        accepted = false;
                     }
                 }
                 if let Some(value) = current.as_mut() {
@@ -626,16 +627,15 @@ pub(crate) fn start() {
                     ) {
                         let mut playing = false;
                         let mut playback_at = None;
-                        if let Some(view) = history.as_ref() {
-                            if let Some((generated, played, drained, observed_at)) =
+                        if let Some(view) = history.as_ref()
+                            && let Some((generated, played, drained, observed_at)) =
                                 view.companion_snapshot()
-                            {
-                                playing = is_playing(generated, played, drained);
-                                playback_at = observed_at;
-                                value.generated = base_generated.saturating_add(generated);
-                                value.played =
-                                    base_played.zip(played).map(|(a, b)| a.saturating_add(b));
-                            }
+                        {
+                            playing = is_playing(generated, played, drained);
+                            playback_at = observed_at;
+                            value.generated = base_generated.saturating_add(generated);
+                            value.played =
+                                base_played.zip(played).map(|(a, b)| a.saturating_add(b));
                         }
                         let capture_at = CAPTURE_OBSERVED_NS.load(Ordering::Acquire);
                         let now = companion_voice::boottime_ns();

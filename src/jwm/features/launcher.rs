@@ -456,12 +456,217 @@ pub struct AppCandidate<'a> {
     pub usage: u32,
 }
 
+/// An explicitly registered terminal session. Status comes from the provider,
+/// never from a window title. The registry revalidates its revision on activation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentEntry {
+    pub session_id: String,
+    pub title: String,
+    pub project_id: String,
+    pub provider: String,
+    pub host_id: String,
+    pub pane_id: String,
+    pub status: String,
+    pub revision: u64,
+    pub monitor_token: String,
+    pub monitor: Option<i32>,
+    pub tag_mask: u64,
+    pub can_reveal: bool,
+    // Keep both original and lowercased text so edits to public fields cannot
+    // accidentally reuse stale search metadata. The snapshot still caps 1000.
+    search_sources: [String; 4],
+    search_lowercase: [String; 4],
+}
+
+impl AgentEntry {
+    pub fn from_snapshot(snapshot: &serde_json::Value) -> Vec<Self> {
+        snapshot
+            .get("sessions")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .take(1000)
+            .filter_map(|entry| {
+                let text = |key| {
+                    entry
+                        .get(key)
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("")
+                        .chars()
+                        .take(256)
+                        .collect::<String>()
+                };
+                let session_id = entry.get("session_id")?.as_str()?.to_owned();
+                if session_id.is_empty() || session_id.len() > 256 {
+                    return None;
+                }
+                let mut entry = Self {
+                    session_id,
+                    title: text("title"),
+                    project_id: text("project_id"),
+                    provider: text("provider"),
+                    host_id: text("host_id"),
+                    pane_id: text("pane_id"),
+                    status: text("status"),
+                    revision: entry.get("revision")?.as_u64()?,
+                    monitor_token: text("monitor_token"),
+                    monitor: entry
+                        .get("monitor")
+                        .and_then(serde_json::Value::as_i64)
+                        .and_then(|number| i32::try_from(number).ok()),
+                    tag_mask: entry
+                        .get("tag_mask")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or(0),
+                    can_reveal: entry
+                        .get("can_reveal")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false),
+                    search_sources: Default::default(),
+                    search_lowercase: Default::default(),
+                };
+                entry.search_sources = [
+                    entry.title.clone(),
+                    entry.project_id.clone(),
+                    entry.provider.clone(),
+                    entry.session_id.clone(),
+                ];
+                entry.search_lowercase =
+                    std::array::from_fn(|i| entry.search_sources[i].to_lowercase());
+                Some(entry)
+            })
+            .collect()
+    }
+
+    fn search_fields(&self) -> [std::borrow::Cow<'_, str>; 4] {
+        let current = [
+            &self.title,
+            &self.project_id,
+            &self.provider,
+            &self.session_id,
+        ];
+        std::array::from_fn(|i| {
+            if current[i].as_str() == self.search_sources[i] {
+                std::borrow::Cow::Borrowed(self.search_lowercase[i].as_str())
+            } else {
+                std::borrow::Cow::Owned(current[i].to_lowercase())
+            }
+        })
+    }
+
+    pub fn row(&self) -> String {
+        let status = if self.can_reveal {
+            self.status.as_str()
+        } else {
+            "Disconnected"
+        };
+        let title = if self.title.is_empty() {
+            &self.project_id
+        } else {
+            &self.title
+        };
+        let location = match (self.monitor, self.tag_mask) {
+            (Some(monitor), mask) if mask != 0 => format!(
+                "Display {} / Tag {}",
+                monitor + 1,
+                mask.trailing_zeros() + 1
+            ),
+            _ => "location unavailable".into(),
+        };
+        format!(
+            "[Agent] {} · {} · {}/{} · {} · {}",
+            ellipsize(&one_line(status), 12),
+            location,
+            ellipsize(&one_line(&self.provider), 8),
+            {
+                let pane = one_line(&self.pane_id);
+                if pane.chars().count() > 10 {
+                    format!(
+                        "…{}",
+                        pane.chars()
+                            .rev()
+                            .take(8)
+                            .collect::<Vec<_>>()
+                            .into_iter()
+                            .rev()
+                            .collect::<String>()
+                    )
+                } else {
+                    pane
+                }
+            },
+            ellipsize(&one_line(&self.project_id), 18),
+            ellipsize(&one_line(title), 28)
+        )
+    }
+}
+
+/// Match a prebuilt, bounded index. No provider calls or filesystem access.
+pub fn session_rows(mode: &QueryMode, sessions: &[AgentEntry]) -> Vec<LauncherRow> {
+    let needle = match mode {
+        QueryMode::Sessions(needle) => needle,
+        QueryMode::Search(needle) if !needle.is_empty() && !needle.starts_with('>') => needle,
+        _ => return Vec::new(),
+    };
+    let mut matches: Vec<_> = sessions
+        .iter()
+        .enumerate()
+        .filter_map(|(index, entry)| {
+            let mut best = None;
+            for text in entry.search_fields() {
+                if let Some(score) = fuzzy_score(text.as_ref(), needle) {
+                    best = Some(best.map_or(score, |previous: usize| previous.max(score)));
+                    // A substring at byte zero is the maximum possible score;
+                    // remaining fields cannot change this entry's ranking.
+                    if score == usize::MAX {
+                        break;
+                    }
+                }
+            }
+            best.map(|score| (index, score))
+        })
+        .collect();
+    matches.sort_by_key(|(index, score)| (Reverse(*score), &sessions[*index].session_id));
+    matches
+        .into_iter()
+        .take(128)
+        .map(|(index, _)| LauncherRow::Session(index))
+        .collect()
+}
+
+pub fn scene_rows(mode: &QueryMode, scenes: &[super::workscenes::Workscene]) -> Vec<LauncherRow> {
+    let needle = match mode {
+        QueryMode::Scenes(needle) => needle,
+        QueryMode::Search(needle) if needle.chars().count() >= 2 && !needle.starts_with('>') => {
+            needle
+        }
+        _ => return Vec::new(),
+    };
+    let mut matches: Vec<_> = scenes
+        .iter()
+        .take(128)
+        .enumerate()
+        .filter_map(|(index, scene)| {
+            fuzzy_score(&scene.name.to_lowercase(), needle).map(|score| (index, score))
+        })
+        .collect();
+    matches.sort_by_key(|(index, score)| (Reverse(*score), &scenes[*index].name));
+    matches
+        .into_iter()
+        .map(|(index, _)| LauncherRow::Scene(index))
+        .collect()
+}
+
 /// A row of the merged list: an index into the windows, or into the
 /// applications.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LauncherRow {
     Window(usize),
     App(usize),
+    /// Canonical Shell Hub route, shared by pointer and keyboard activation.
+    Setting(super::shell_hub::ShellHubRoute),
+    Session(usize),
+    Scene(usize),
 }
 
 /// What the query is asking for, decided once so the panel and the ranker
@@ -472,6 +677,10 @@ pub enum QueryMode {
     Answer(f64),
     /// A leading slash: open windows only, matched on the rest.
     Windows(String),
+    /// Explicit provider filter; existing slash and command prefixes stay intact.
+    Settings(String),
+    Sessions(String),
+    Scenes(String),
     /// Applications, joined by open windows once something is typed.
     Search(String),
 }
@@ -479,6 +688,22 @@ pub enum QueryMode {
 /// Read the query.
 #[must_use]
 pub fn parse_query(query: &str) -> QueryMode {
+    let trimmed = query.trim();
+    for prefix in ["scenes:", "scene:", "场景:", "场景："] {
+        if let Some(rest) = trimmed.strip_prefix(prefix) {
+            return QueryMode::Scenes(rest.trim().to_lowercase());
+        }
+    }
+    for prefix in ["sessions:", "session:", "agent:", "会话:", "会话："] {
+        if let Some(rest) = trimmed.strip_prefix(prefix) {
+            return QueryMode::Sessions(rest.trim().to_lowercase());
+        }
+    }
+    for prefix in ["settings:", "setting:", "设置:", "设置："] {
+        if let Some(rest) = trimmed.strip_prefix(prefix) {
+            return QueryMode::Settings(rest.trim().to_lowercase());
+        }
+    }
     if let Some(value) = evaluate(query) {
         return QueryMode::Answer(value);
     }
@@ -527,6 +752,9 @@ pub fn rank_rows(
     let (needle, want_apps, want_windows) = match mode {
         QueryMode::Answer(_) => return Vec::new(),
         QueryMode::Windows(needle) => (needle.as_str(), false, true),
+        QueryMode::Settings(needle) | QueryMode::Sessions(needle) | QueryMode::Scenes(needle) => {
+            (needle.as_str(), false, false)
+        }
         QueryMode::Search(needle) => (needle.as_str(), true, !needle.is_empty()),
     };
 
@@ -578,6 +806,44 @@ pub fn rank_rows(
             app_at += 1;
         }
     }
+    if matches!(mode, QueryMode::Settings(_))
+        || matches!(mode, QueryMode::Search(needle) if needle.chars().count() >= 2 && !needle.starts_with('>'))
+    {
+        let mut settings: Vec<_> = super::shell_hub::ShellHubRoute::ALL
+            .into_iter()
+            .filter(|route| *route != super::shell_hub::ShellHubRoute::Applications)
+            .filter_map(|route| {
+                let keywords = match route {
+                    super::shell_hub::ShellHubRoute::Theme => {
+                        "theme appearance font color 主题 外观 字体 颜色"
+                    }
+                    super::shell_hub::ShellHubRoute::Wallpaper => "wallpaper background 壁纸 背景",
+                    super::shell_hub::ShellHubRoute::Notifications => "notifications 通知",
+                    super::shell_hub::ShellHubRoute::Clipboard => "clipboard 剪贴板",
+                    super::shell_hub::ShellHubRoute::Calendar => "calendar 日历",
+                    super::shell_hub::ShellHubRoute::Music => "music audio media 音乐 音频 媒体",
+                    super::shell_hub::ShellHubRoute::Video => "video player 视频 播放器",
+                    super::shell_hub::ShellHubRoute::AgentSessions => {
+                        "agents sessions 会话 终端 智能体"
+                    }
+                    super::shell_hub::ShellHubRoute::Applications => unreachable!(),
+                };
+                keywords
+                    .split_whitespace()
+                    .filter_map(|word| fuzzy_score(word, needle))
+                    .max()
+                    .map(|score| (route, score))
+            })
+            .collect();
+        settings.sort_by_key(|(route, score)| (Reverse(*score), route.label()));
+        rows.extend(
+            settings
+                .into_iter()
+                .map(|(route, _)| LauncherRow::Setting(route)),
+        );
+    }
+    // Bound the result payload independently of provider index size.
+    rows.truncate(128);
     rows
 }
 
@@ -665,6 +931,10 @@ pub fn fuzzy_score(haystack: &str, needle: &str) -> Option<usize> {
     if needle.is_empty() {
         return Some(0);
     }
+    // Exact character matches cannot consume fewer UTF-8 bytes than the query.
+    if needle.len() > haystack.len() {
+        return None;
+    }
     if let Some(pos) = haystack.find(needle) {
         // Rust strings cannot exceed isize::MAX bytes, so this keeps every
         // substring above the bounded subsequence range without underflow.
@@ -674,9 +944,20 @@ pub fn fuzzy_score(haystack: &str, needle: &str) -> Option<usize> {
     }
     let mut at = 0;
     let mut score = 0;
-    for ch in needle.chars() {
-        let rel = haystack[at..].find(ch)?;
-        at += rel + ch.len_utf8();
+    // Walk the UTF-8 input once. Repeated str::find(char) constructs a new
+    // searcher for every query character, particularly costly for long Unicode
+    // queries in debug builds. char_indices preserves the original byte-gap
+    // scoring while keeping subsequence matching linear in the haystack.
+    let mut characters = haystack.char_indices();
+    for (needle_at, ch) in needle.char_indices() {
+        let (position, _) = characters.find(|&(_, candidate)| candidate == ch)?;
+        let rel = position - at;
+        at = position + ch.len_utf8();
+        // Each remaining exact character needs the same UTF-8 bytes in both
+        // strings. Stop an impossible long query before scanning the suffix.
+        if haystack.len() - at < needle.len() - needle_at - ch.len_utf8() {
+            return None;
+        }
         score = (score + 100usize.saturating_sub(rel)).min(9_999);
     }
     Some(score)
@@ -996,6 +1277,76 @@ mod tests {
     const DAY: u64 = 86_400;
     const WEEK: u64 = 604_800;
     const NOW: u64 = 1_800_000_000;
+
+    #[test]
+    fn settings_provider_is_explicit_and_does_not_replace_existing_prefixes() {
+        use super::super::shell_hub::ShellHubRoute;
+        assert_eq!(
+            rank_rows(&parse_query("settings: 主题"), &[], &[]),
+            vec![LauncherRow::Setting(ShellHubRoute::Theme)]
+        );
+        assert!(
+            rank_rows(&parse_query("settings:"), &[], &[])
+                .iter()
+                .all(|row| matches!(row, LauncherRow::Setting(_)))
+        );
+        assert!(rank_rows(&parse_query("/theme"), &[], &[]).is_empty());
+        assert!(rank_rows(&parse_query(">theme"), &[], &[]).is_empty());
+        assert!(matches!(parse_query("2+2"), QueryMode::Answer(4.0)));
+    }
+
+    #[test]
+    fn agent_search_cache_never_hides_edits_to_public_metadata() {
+        let mut sessions = AgentEntry::from_snapshot(&serde_json::json!({"sessions":[{
+            "session_id":"old-session","title":"Alpha","project_id":"Oldproject",
+            "provider":"forge","revision":1,"can_reveal":true
+        }]}));
+        assert_eq!(
+            session_rows(&QueryMode::Sessions("alpha".into()), &sessions).len(),
+            1
+        );
+        sessions[0].title = "Beta".into();
+        sessions[0].project_id = "Newproject".into();
+        sessions[0].provider = "frost".into();
+        sessions[0].session_id = "new-session".into();
+        assert!(session_rows(&QueryMode::Sessions("alpha".into()), &sessions).is_empty());
+        for needle in ["beta", "newproject", "frost", "new-session"] {
+            assert_eq!(
+                session_rows(&QueryMode::Sessions(needle.into()), &sessions).len(),
+                1
+            );
+        }
+    }
+
+    #[test]
+    fn agent_rows_keep_target_location_before_long_labels_without_shortening_identity() {
+        let pane = "common-pane-prefix-12345678";
+        let entries = AgentEntry::from_snapshot(
+            &serde_json::json!({"sessions":[{"session_id":"stable", "revision":1, "project_id":"cplus", "provider":"forge", "pane_id":pane, "title":"An unusually long title that would otherwise push location off screen", "status":"waiting", "can_reveal":true, "monitor":1, "tag_mask":4}]}),
+        );
+        let entry = &entries[0];
+        let row = entry.row();
+        assert!(row.find("Display 2").unwrap() < row.find("cplus").unwrap());
+        assert!(row.contains("Tag 3") && row.contains("…12345678"));
+        assert_eq!(entry.pane_id, pane);
+        assert_eq!(entry.session_id, "stable");
+    }
+
+    #[test]
+    fn agent_search_uses_registered_identity_and_reports_disconnected_status() {
+        let sessions = AgentEntry::from_snapshot(&serde_json::json!({"sessions":[{
+            "session_id":"stable-123", "project_id":"cplus", "provider":"Forge", "title":"compile",
+            "pane_id":"pane-2", "status":"waiting", "revision":42, "can_reveal":true
+        }, {"session_id":"lost", "project_id":"cplus", "revision":43}]}));
+        assert_eq!(sessions.len(), 2);
+        assert_eq!(
+            session_rows(&parse_query("sessions: stable-123"), &sessions),
+            vec![LauncherRow::Session(0)]
+        );
+        assert_eq!(session_rows(&parse_query("/cplus"), &sessions), vec![]);
+        assert!(sessions[0].row().contains("waiting"));
+        assert!(sessions[1].row().contains("Disconnected"));
+    }
 
     #[test]
     fn recent_use_outranks_old_use() {
@@ -1595,6 +1946,69 @@ mod tests {
     fn fuzzy_matching() {
         assert!(fuzzy_score("visual studio code", "vsc").is_some());
         assert!(fuzzy_score("firefox", "zzz").is_none());
+    }
+
+    #[test]
+    fn subsequence_scores_keep_unicode_byte_gap_semantics() {
+        // No substring in these examples: penalties are UTF-8 byte gaps.
+        assert_eq!(fuzzy_score("σxσxσ", "σσσ"), Some(298));
+        assert_eq!(fuzzy_score("中x文", "中文"), Some(199));
+        assert_eq!(fuzzy_score("🙂x🙂", "🙂🙂"), Some(199));
+        assert_eq!(fuzzy_score("a中b", "ab"), Some(197));
+        assert_eq!(fuzzy_score("σ🙂σ", "σσ"), Some(196));
+        assert_eq!(fuzzy_score("σxσ", "σσσ"), None);
+        assert_eq!(fuzzy_score(&"ab".repeat(128), &"a".repeat(247)), None);
+    }
+
+    #[test]
+    fn optimized_subsequences_match_reference_utf8_scores() {
+        fn reference(haystack: &str, needle: &str) -> Option<usize> {
+            if needle.is_empty() {
+                return Some(0);
+            }
+            if let Some(position) = haystack.find(needle) {
+                return Some(usize::MAX - position);
+            }
+            let mut at = 0;
+            let mut score = 0;
+            for ch in needle.chars() {
+                let relative = haystack[at..].find(ch)?;
+                at += relative + ch.len_utf8();
+                score = (score + 100usize.saturating_sub(relative)).min(9_999);
+            }
+            Some(score)
+        }
+        fn words(maximum: usize) -> Vec<String> {
+            let mut result = vec![String::new()];
+            let mut layer = vec![String::new()];
+            for _ in 0..maximum {
+                layer = layer
+                    .iter()
+                    .flat_map(|prefix| ['a', 'σ', '中', '🙂'].map(|ch| format!("{prefix}{ch}")))
+                    .collect();
+                result.extend(layer.iter().cloned());
+            }
+            result
+        }
+        for haystack in words(4) {
+            for needle in words(3) {
+                assert_eq!(
+                    fuzzy_score(&haystack, &needle),
+                    reference(&haystack, &needle),
+                    "haystack={haystack:?}, needle={needle:?}"
+                );
+            }
+        }
+        for (haystack, needle) in [
+            ("ab".repeat(128), "a".repeat(247)),
+            ("σ🙂".repeat(128), "σ".repeat(247)),
+            ("a中".repeat(256), "a".repeat(247)),
+        ] {
+            assert_eq!(
+                fuzzy_score(&haystack, &needle),
+                reference(&haystack, &needle)
+            );
+        }
     }
 
     #[test]

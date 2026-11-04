@@ -51,7 +51,12 @@ impl WaylandCompositor {
     }
 
     /// Paint the annotation overlay's filled shapes and labels.
-    pub(crate) fn render_annotation_shapes(&mut self, gl: &ffi::Gles2, projection: &[f32; 16]) {
+    pub(crate) fn render_annotation_shapes(
+        &mut self,
+        gl: &ffi::Gles2,
+        projection: &[f32; 16],
+        scene_linear: bool,
+    ) {
         if self.annotation_quads.is_empty() && self.annotation_label_textures.is_empty() {
             return;
         }
@@ -67,7 +72,7 @@ impl WaylandCompositor {
             if !self.annotation_quads.is_empty() {
                 gl.UseProgram(self.border_program);
                 self.set_projection_uniform(gl, self.border_uniforms.projection, projection);
-                gl.Uniform1i(self.border_uniforms.scene_linear, 0);
+                gl.Uniform1i(self.border_uniforms.scene_linear, i32::from(scene_linear));
                 for quad in &self.annotation_quads {
                     self.sysui_fill_rounded(
                         gl,
@@ -82,7 +87,7 @@ impl WaylandCompositor {
             }
 
             if !self.annotation_label_textures.is_empty() {
-                self.use_sysui_text_program(gl, false);
+                self.use_sysui_text_program(gl, scene_linear);
                 self.set_projection_uniform(gl, text_proj, projection);
                 gl.Uniform1i(text_tex, 0);
                 gl.Uniform1f(text_opacity, 1.0);
@@ -167,7 +172,12 @@ impl WaylandCompositor {
     /// through `screenshot_toolbar_appear`, multiplied into every layer as
     /// alpha. With motion off the first frame is already full and no extra
     /// frames tick.
-    pub(crate) fn render_screenshot_toolbar(&mut self, gl: &ffi::Gles2, projection: &[f32; 16]) {
+    pub(crate) fn render_screenshot_toolbar(
+        &mut self,
+        gl: &ffi::Gles2,
+        projection: &[f32; 16],
+        scene_linear: bool,
+    ) {
         // The hover wash eases in on the button under the pointer instead of
         // flipping on in a single frame, and is gone the same frame the hover
         // leaves — JWM draws no fade-outs. The envelope is draw strength
@@ -208,7 +218,7 @@ impl WaylandCompositor {
             return;
         }
         let ui = ui_theme::palette();
-        self.ensure_glass_backdrop(gl, ui, projection, false);
+        self.ensure_glass_backdrop(gl, ui, projection, scene_linear);
         let accent = self.border_gradient_color_a;
         let (text_rect, text_proj, text_tex, text_opacity) = text_uniforms(gl, self);
 
@@ -229,7 +239,7 @@ impl WaylandCompositor {
                 track_radius,
                 ui.card,
                 appear,
-                false,
+                scene_linear,
             );
 
             for (index, button) in bar.buttons.iter().enumerate() {
@@ -290,7 +300,7 @@ impl WaylandCompositor {
                 );
             }
 
-            self.use_sysui_text_program(gl, false);
+            self.use_sysui_text_program(gl, scene_linear);
             self.set_projection_uniform(gl, text_proj, projection);
             gl.Uniform1i(text_tex, 0);
             gl.ActiveTexture(ffi::TEXTURE0);

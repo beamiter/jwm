@@ -20,12 +20,12 @@ enum Evidence {
     Failed,
     Unknown(&'static str),
 }
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct Observed {
     id: Option<String>,
     evidence: Evidence,
 }
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct OutcomeCache {
     steps: Vec<Observed>,
     invalid_evidence: bool,
@@ -39,9 +39,31 @@ pub struct InterruptedTask {
     wm_instance_id: String,
     window_anchors: BTreeMap<String, String>,
     monitor_anchors: BTreeMap<String, String>,
+    session_anchors: BTreeMap<String, String>,
     // Terminal and uncertain evidence survives ledger pruning. Missing evidence
     // never turns a previously observed dispatch into permission to replay it.
     outcomes: Mutex<OutcomeCache>,
+}
+// A private planning preview may check task decisions without retiring actor
+// memory. Poisoned evidence copies remain fail-closed, never become empty truth.
+impl Clone for InterruptedTask {
+    fn clone(&self) -> Self {
+        Self {
+            semantic: self.semantic.clone(),
+            frozen: self.frozen.clone(),
+            plan_hash: self.plan_hash.clone(),
+            wm_instance_id: self.wm_instance_id.clone(),
+            window_anchors: self.window_anchors.clone(),
+            monitor_anchors: self.monitor_anchors.clone(),
+            session_anchors: self.session_anchors.clone(),
+            outcomes: Mutex::new(self.outcomes.lock().map(|cache| cache.clone()).unwrap_or(
+                OutcomeCache {
+                    steps: Vec::new(),
+                    invalid_evidence: true,
+                },
+            )),
+        }
+    }
 }
 impl InterruptedTask {
     pub fn new(original: &Plan, prepared: &FrozenPlan, context: &Value) -> Result<Self, String> {
@@ -85,6 +107,7 @@ impl InterruptedTask {
         }
         let mut window_anchors = BTreeMap::new();
         let mut monitor_anchors = BTreeMap::new();
+        let mut session_anchors = BTreeMap::new();
         for action in &original.actions {
             for (field, list, ref_field, token_field, anchors) in [
                 (
@@ -101,6 +124,13 @@ impl InterruptedTask {
                     "monitor_token",
                     &mut monitor_anchors,
                 ),
+                (
+                    "session_ref",
+                    "agent_sessions",
+                    "session_ref",
+                    "association_token",
+                    &mut session_anchors,
+                ),
             ] {
                 if let Some(reference) = action.arguments.get(field) {
                     let reference = reference.as_str().ok_or("invalid_target_reference")?;
@@ -113,8 +143,14 @@ impl InterruptedTask {
                 }
             }
         }
-        let bytes = serde_json::to_vec(&(original, prepared, &window_anchors, &monitor_anchors))
-            .map_err(|_| "invalid_interrupted_task")?;
+        let bytes = serde_json::to_vec(&(
+            original,
+            prepared,
+            &window_anchors,
+            &monitor_anchors,
+            &session_anchors,
+        ))
+        .map_err(|_| "invalid_interrupted_task")?;
         if bytes.len() > MAX_BYTES {
             return Err("interrupted_task_too_large".into());
         }
@@ -125,6 +161,7 @@ impl InterruptedTask {
             wm_instance_id: prepared.wm_instance_id.clone(),
             window_anchors,
             monitor_anchors,
+            session_anchors,
             outcomes: Mutex::new(OutcomeCache {
                 steps: original
                     .actions
@@ -252,6 +289,13 @@ impl InterruptedTask {
                 "monitor_ref",
                 "monitor_token",
                 &self.monitor_anchors,
+            ),
+            (
+                "session_ref",
+                "agent_sessions",
+                "session_ref",
+                "association_token",
+                &self.session_anchors,
             ),
         ] {
             let Some(reference) = action.arguments.get(field) else {

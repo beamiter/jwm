@@ -8,6 +8,7 @@ mod app;
 mod editor;
 mod host;
 pub mod notes;
+mod theme;
 mod ui;
 pub mod viewer;
 

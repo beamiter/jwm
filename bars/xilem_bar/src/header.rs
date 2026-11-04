@@ -14,7 +14,9 @@ thread_local! {
     static IMAGES: RefCell<Vec<(u64, Option<masonry::peniko::ImageData>)>> = const { RefCell::new(Vec::new()) };
 }
 
-struct Metrics;
+struct Metrics {
+    family: String,
+}
 impl TextMeasurer for Metrics {
     fn measure(&self, text: &str, size: f32) -> xbar_core::presentation::Size {
         METRICS.with(|metrics| {
@@ -23,7 +25,7 @@ impl TextMeasurer for Metrics {
             let mut builder = context.ranged_builder(fonts, text, 1.0, true);
             builder.push_default(StyleProperty::FontSize(size));
             builder.push_default(StyleProperty::FontFamily(FontFamily::Single(
-                FontFamilyName::Generic(masonry::parley::GenericFamily::SansSerif),
+                FontFamilyName::Named(std::borrow::Cow::Borrowed(&self.family)),
             )));
             let mut layout = builder.build(text);
             layout.break_all_lines(None);
@@ -92,11 +94,52 @@ pub fn view(state: &mut XilemBar) -> Box<xilem::AnyWidgetView<XilemBar>> {
         geometry.width as f32 / scale as f32,
         state.presentation.logical_thickness(scale) as f32,
     );
-    let scene = LayoutEngine::new(state.presentation.clone(), Metrics).build(
-        state.runtime.view(),
-        viewport,
-        &InteractionState::default(),
-    );
+    let inherited_font = state
+        .font_override
+        .as_deref()
+        .or_else(|| {
+            state
+                .semantic_theme
+                .as_ref()
+                .filter(|_| state.inherit_theme)
+                .and_then(|theme| theme.font.as_deref())
+        })
+        .unwrap_or("Sans 11");
+    let (family, point_size) = xbar_core::theme_inheritance::font_spec(inherited_font);
+    let mut presentation = state.presentation.clone();
+    if state.font_override.is_some() || (state.semantic_theme.is_some() && state.inherit_theme) {
+        presentation.font_size = point_size * 96.0 / 72.0;
+    }
+    if let Some(theme) = state
+        .semantic_theme
+        .as_ref()
+        .filter(|_| state.inherit_theme)
+    {
+        let density = theme.tokens.density;
+        // Typography follows the independent font preference, not density.
+        presentation.horizontal_padding *= density;
+        presentation.vertical_padding *= density;
+        presentation.item_gap *= density;
+        presentation.pill_horizontal_padding *= density;
+        presentation.corner_radius *= density;
+    }
+    let mut scene = LayoutEngine::new(
+        presentation,
+        Metrics {
+            family: family.clone(),
+        },
+    )
+    .build(state.runtime.view(), viewport, &InteractionState::default());
+    if let Some(theme) = state
+        .semantic_theme
+        .as_ref()
+        .filter(|_| state.inherit_theme)
+    {
+        scene.adapt_semantic_tokens(state.runtime.view().theme, theme.tokens);
+    }
+    if let Some(summary) = state.agent_summary {
+        scene.add_agent_summary(summary, state.runtime.view().theme);
+    }
     let hits = scene.hits.clone();
     let bounds = xbar_core::presentation::Rect::from_size(viewport);
     let alpha = xbar_core::background::bar_background_opacity(
@@ -104,6 +147,13 @@ pub fn view(state: &mut XilemBar) -> Box<xilem::AnyWidgetView<XilemBar>> {
         state.background_opacity,
         state.translucent,
     ) as f32;
+    let corner_radius = state
+        .semantic_theme
+        .as_ref()
+        .filter(|_| state.inherit_theme)
+        .map_or(f64::from(viewport.height) * 0.5, |theme| {
+            f64::from(theme.tokens.radius).min(f64::from(viewport.height) * 0.5)
+        });
     let drawing = canvas(move |_: &mut XilemBar, ctx, recording, _size| {
         let mut painter = Painter::new(recording);
         let outer = RoundedRect::new(
@@ -111,7 +161,7 @@ pub fn view(state: &mut XilemBar) -> Box<xilem::AnyWidgetView<XilemBar>> {
             0.0,
             f64::from(viewport.width),
             f64::from(viewport.height),
-            f64::from(viewport.height) * 0.5,
+            corner_radius,
         );
         painter.with_fill_clip(outer, |painter| {
             for node in &scene.nodes {
@@ -157,7 +207,7 @@ pub fn view(state: &mut XilemBar) -> Box<xilem::AnyWidgetView<XilemBar>> {
                         let mut builder = layouts.ranged_builder(fonts, text, 1.0, true);
                         builder.push_default(StyleProperty::FontSize(*size));
                         builder.push_default(StyleProperty::FontFamily(FontFamily::Single(
-                            FontFamilyName::Generic(masonry::parley::GenericFamily::SansSerif),
+                            FontFamilyName::Named(std::borrow::Cow::Borrowed(&family)),
                         )));
                         let mut layout = builder.build(text);
                         layout.break_all_lines(None);

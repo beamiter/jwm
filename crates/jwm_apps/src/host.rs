@@ -31,6 +31,7 @@ struct NativeWindow {
 }
 struct Host {
     id: String,
+    theme: crate::theme::ThemeWatcher,
     initial: Option<(bool, Vec<PathBuf>)>,
     windows: HashMap<WindowId, NativeWindow>,
     clipboard: Option<arboard::Clipboard>,
@@ -64,6 +65,7 @@ pub(crate) fn run(id: &str, notes: bool, paths: Vec<PathBuf>) -> Result<(), Erro
     let event_loop = EventLoop::new()?;
     let mut host = Host {
         id: id.into(),
+        theme: crate::theme::ThemeWatcher::start(),
         initial: Some((notes, paths)),
         windows: HashMap::new(),
         clipboard: arboard::Clipboard::new().ok(),
@@ -249,7 +251,7 @@ impl ApplicationHandler for Host {
                 state: ElementState::Pressed,
                 button: MouseButton::Right,
                 ..
-            } if native.app.pointer.1 < crate::ui::HEADER => {
+            } if native.app.pointer.1 < crate::ui::header() => {
                 native.window.show_window_menu(LogicalPosition::new(
                     native.app.pointer.0,
                     native.app.pointer.1,
@@ -297,6 +299,13 @@ impl ApplicationHandler for Host {
         self.effects(event_loop, id);
     }
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if let Some(theme) = self.theme.take()
+            && crate::ui::apply_theme(theme)
+        {
+            for native in self.windows.values() {
+                native.window.request_redraw();
+            }
+        }
         let context = gio::glib::MainContext::default();
         for _ in 0..16 {
             if !context.pending() {

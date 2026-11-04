@@ -51,6 +51,8 @@ jobs:
           cargo build --locked --manifest-path crates/jwm_apps/Cargo.toml --target-dir target/native-apps
       - name: Exercise native Cairo windows on a private display
         run: /usr/bin/python3 scripts/test-native-apps.py --evidence-dir artifacts/native-apps
+      - name: Exercise native live theme inheritance on a private IPC endpoint
+        run: python3 scripts/test-native-app-theme.py --evidence-dir artifacts/native-app-theme
       - name: Exercise native Wayland input and software surfaces at 1x and 2x
         run: |
           for scale in 1 2; do
@@ -92,20 +94,34 @@ jobs:
 
       - name: Exercise source installer build recovery
         run: |
-          bash scripts/test-install-jwm-build.sh
-          bash scripts/test-tauri-webkit-version.sh
-          python3 scripts/test-media-defaults.py
-          bash scripts/test-wallpaper-install.sh
-          bash scripts/test-install-portal.sh
-          bash scripts/test-ensure-pipewire.sh
-          bash scripts/test-runtime-helpers.sh
-          bash scripts/test-bootstrap-deps.sh
-          python3 scripts/test-release-install-failures.py
-          python3 scripts/test-showcase-lifecycle.py
-          python3 scripts/test-collector.py
-          python3 scripts/test-installer-config.py
-          python3 scripts/test-install-config-update.py
-          python3 scripts/test-compositor-init-lifecycle.py
+          run_step() {
+            echo "::group::$*"
+            if "$@"; then
+              echo "::endgroup::"
+            else
+              local status=$?
+              echo "::endgroup::"
+              echo "::error::Installer recovery substep failed ($status): $*"
+              return "$status"
+            fi
+          }
+          run_step bash scripts/test-install-jwm-build.sh
+          run_step bash scripts/test-tauri-webkit-version.sh
+          run_step python3 scripts/test-media-defaults.py
+          run_step bash scripts/test-wallpaper-install.sh
+          run_step bash scripts/test-install-portal.sh
+          run_step bash scripts/test-ensure-pipewire.sh
+          run_step bash scripts/test-runtime-helpers.sh
+          run_step bash scripts/test-bootstrap-deps.sh
+          run_step python3 scripts/test-release-install-failures.py
+          run_step python3 scripts/test-showcase-lifecycle.py
+          run_step python3 scripts/test-collector.py
+          run_step python3 scripts/test-installer-config.py
+          run_step python3 scripts/test-install-config-update.py
+          run_step python3 scripts/test-compositor-init-lifecycle.py
+          run_step python3 scripts/test-acceptance-evidence.py
+          run_step python3 scripts/test-frontend-theme-defaults.py
+          run_step python3 scripts/test-display-preview.py
 
       - name: Exercise video automation contracts without a desktop
         run: PYTHONPATH=video-demo python3 -m unittest discover -s video-demo/tests -v
@@ -168,6 +184,7 @@ jobs:
             xdotool \
             x11-apps \
             x11-utils \
+            python3-pil imagemagick \
             dbus-daemon \
             xvfb
 
@@ -196,10 +213,41 @@ jobs:
         env:
           JWM_REQUIRE_HEADLESS_GL: 1
 
+      - name: DVR X11 GL and native Wayland GLES shader regressions
+        run: |
+          python3 scripts/test-desktop-visual-gl.py
+          JWM_DVR_GL_BACKEND=wayland python3 scripts/test-desktop-visual-gl.py
+        env:
+          LIBGL_ALWAYS_SOFTWARE: '1'
+          EGL_PLATFORM: surfaceless
+
       - name: Native wallpaper and real X11 restart ownership regression
         run: |
-          cargo build --locked -p jwm --bin jwm
+          cargo build --locked -p jwm --bin jwm --bin jwm-tool
           python3 scripts/test-restart-x11.py --jwm target/debug/jwm --compositor both --triggers hotkey,ipc --stale-published-owner foreign
+
+      - name: Recycled drawable and live remap pixel regressions
+        run: |
+          for backend in x11rb xcb; do
+            for lifecycle in reopen remap; do
+              python3 scripts/test-private-perf.py --jwm target/debug/jwm --tool target/debug/jwm-tool \
+                --backend "$backend" --samples 2 --seconds 2 --warmup-seconds 1 --idle-seconds 0 \
+                --"$lifecycle"-producer --output "artifacts/native-lifecycle-$backend-$lifecycle"
+            done
+          done
+        env:
+          LIBGL_ALWAYS_SOFTWARE: '1'
+          __GLX_VENDOR_LIBRARY_NAME: mesa
+          __EGL_VENDOR_LIBRARY_FILENAMES: /usr/share/glvnd/egl_vendor.d/50_mesa.json
+          LP_NUM_THREADS: '2'
+
+      - name: Retain native lifecycle diagnostics
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: native-drawable-lifecycle
+          path: artifacts/native-lifecycle-*
+          if-no-files-found: ignore
 
   feature-profiles:
     name: Feature profile (${{ matrix.profile.name }})

@@ -1,0 +1,636 @@
+{
+  "format": 1,
+  "plan": "JWM_Upgrade_Plan_2026-11-03.html",
+  "baseline_source_sha": "46fadfb529730cd8d87cabcfe95d7d9039673c95",
+  "status": "offline_corrections_ready_waiting_upstream_quota_and_eva_acceptance",
+  "qualification": "Code and isolated validation are recorded separately from hardware, cloud API, hosted CI and presentation acceptance. Named user waivers are not passes. Intermediate binaries are excluded from final-current-source acceptance.",
+  "packages": [
+    {
+      "id": "R01",
+      "status": "local_gates_passed_hosted_ci_not_run",
+      "implemented": [
+        "Installer recovery substeps now print explicit CI group and failed command.",
+        "Native apps existing lint fixes verified; Python3.10 installer test uses tomli fallback."
+      ],
+      "validation": [
+        "NativeappsClippy -Dwarnings passed.",
+        "Newtheme privateXvfb apps and headlessSway1x/2x passed.",
+        "All14 original grouped source-installer recovery CI commands passed,including downstream scripts."
+      ],
+      "pending": [
+        "Hosted CI for final local commits was not run or claimed; final local core library7390+CLI/integration239 and strict all-target Clippy passed."
+      ],
+      "implementation_status": "implemented; final local checks and hosted CI tracked separately"
+    },
+    {
+      "id": "R02",
+      "status": "current_source_28_frontend_runtime_verified",
+      "implemented": [
+        "Xilem default is explicit; historical TaoGlow/Leptos evidence remains separately named.",
+        "Matrix format2 captures source/toolchain/dependency/binary/backend/validation scope.",
+        "Acceptance record/audit validates source additions/removals and executable/config/raw-log hashes.",
+        "Fresh frontend defaults use ui_theme=inherit; existing explicit config/comments/symlinks and legacy Xilem theme remain unchanged."
+      ],
+      "validation": [
+        "Final current-source matrix28/28 and56/56 actual private XCB/X11RB runtime cases passed; source,dependency,ELF,and raw-log audit has no issues.",
+        "Profiles are explicit:8ordinary Release and20debug; local Nix ABI dependencies are not a portable public-release certification.",
+        "Evidence: artifacts/upgrade-20261103/final-current-28-matrix.json.",
+        "New a49a539/8d1c core refreshed all28 existing frontend ELFs through56private XCB/X11RB cases; 315evidence hashes/audit issues[]; runtime-v2/frontend-matrix-v2/summary.json. Source/frontend profile/local ABI boundaries remain explicit."
+      ],
+      "pending": [],
+      "implementation_status": "implemented version-bound inventories and preserved frontend defaults"
+    },
+    {
+      "id": "R03",
+      "status": "isolated_current_and_old_resident_upgrade_runtime_verified",
+      "implemented": [
+        "Existing private X11 restart harness retained.",
+        "Version-bound release gate requires separate physical login-upgrade/bad-binary/rollback/crash-recovery/active-exit cases."
+      ],
+      "validation": [
+        "Final Release XCB/X11RB private login-lifetime tests passed exec,bad replacement,recovery,rollback and explicit logout with sharedShell and5applications. Normal exec retained PID/XIDs/tags/view/layout; rollback after failed replacement proved recovery and client survival, not crash-layout restoration.",
+        "An independent successful-upgrade variant used the exact resident old WM/old supervisor/old shell/header executable bytes,then atomically switched only its private stable files to final Release; exact main hash changed while process/application identities and layout survived.",
+        "Evidence: artifacts/gap-completion-20261103/runtime-final/candidate-x11-native-summary.json and deployment/resident-to-final-result.json.",
+        "New core private XCB/X11RB full lifetime and exact residentf287→a49a upgrade variants passed with5app PID/nativeXIDs/tags/layout/view retained; runtime-v2/validation-summary.json. Actual current login exec retained GDM4234/Xorg4236/supervisor4281 and all5app nativeXIDs/PIDs/state/focus; deployment/live-core-v2-activation.json."
+      ],
+      "pending": [
+        "Actual DM/PAM/logind physical login certification is not claimed. The old current-session supervisor must remain resident; its installed replacement activates on a later login."
+      ],
+      "implementation_status": "existing recovery path plus isolated lifecycle harness and explicit physical evidence boundary"
+    },
+    {
+      "id": "R04",
+      "status": "frame_based_diagnostic_foundation_recorded",
+      "implemented": [
+        "Each recorded perf scenario carries measurement_kind/source/clock_domain/workload.",
+        "Comparison rejects changed timing semantics; X11 latency is explicitly a CPU+unvalidated display estimate.",
+        "Legacybenchmark fps_avg explicitlydocumented asinverseCPU render-passcost; harnessrecords separatewholecommand frame-count/elapsed render rate, never presentationFPS.",
+        "Read-only perf idle command samples only explicit observed PIDs, with per-process identities and honest context-switch semantics; no frame benchmark starts.",
+        "Read-only idle CLI accepts explicit additional component PIDs; per-process startup identity and unchangedWM checks prevent mixed lifecycle samples."
+      ],
+      "validation": [
+        "Finalsource/ELF manifests: allcompileddependency fingerprints and11releasebinary SHA256 values stillmatch afterchecks.",
+        "Controlled30s quietcore: explicitShellfalse/hostPIDnull, interiorpointer+5ssettle, renderedframe_delta0, CPU0.667%onecore, mainthreadvoluntaryctxproxy3.43/s,RSS295.03MiB. No JWM+defaultShell totalclaim.",
+        "3fixedworkload repeats each1800measuredCPUrender samples after300warmup; actualwholecommand durations64.91/66.39/82.22s include warmup/procfs/poll. Exactmeasured-phasewall/GPU/presentation timing notexported orclaimed.",
+        "ActualCLI same-sample clockcomparison exits0; incompatible clock domain rejected1. Same-file budgetresult is a parser/control,notindependent performance acceptance."
+      ],
+      "pending": [
+        "Calibrated reference-machine combined JWM+defaultShell CPU/wakeup and presentation/input-to-photon budgets remain uncertified; the named user waivers do not waive all physical performance acceptance.",
+        "The frozen search candidate passed all6 debug/Release p95 runs described in R07. This CPU search result is not a universal machine or presentation budget."
+      ],
+      "implementation_status": "implemented measurement semantics, typed-search diagnostic and read-only idle/fixed-workload tools"
+    },
+    {
+      "id": "R05",
+      "status": "isolated_component_theme_inheritance_verified",
+      "implemented": [
+        "get_ui_theme publishes semantic palette/nativeopaque colors/font/radius,withsource andscope.",
+        "Native apps inherit themes from off-thread bounded IPC; explicitJWM_APP_THEME/JWM_APP_FONT overrides retain ownership.",
+        "Shared semantic tokens consumed by core7-theme adapter and defaultXilemcolors.",
+        "Player live theme adapter uses semantic tokens,RGB-to-ASS conversion,font size andreadback before applied status."
+      ],
+      "validation": [
+        "NativeClippy,test/build and actualXvfb/Sway1x/2xGUIpassed after adapterchanges.",
+        "Actualcanvaspixel test passes live dark-to-light IPC and rejects malformedpartial theme.",
+        "Xilem standalone cargo check passed.",
+        "Native theme/font IPC pixel test passed: Sans11→18 changed2575header pixels while theme colors remained; malformed updates rejected."
+      ],
+      "pending": [
+        "PhysicalmixedfractionalDPI/HDR/IME and firstinput-to-visible budgets notcertified."
+      ],
+      "implementation_status": "implemented semantic inheritance for core, shared Shell, Xilem, native apps and Player"
+    },
+    {
+      "id": "R06",
+      "status": "isolated_staged_settings_gui_verified",
+      "implemented": [
+        "Generic theme,density,font,opacity,motion/effect presets staged with explicit Save/Keep/Cancel.",
+        "Key-only TOML persistence preserves comments,untouchedfields/frontend overrides; revision-owned cancel rejects conflicting publications.",
+        "NativeWayland sharedpanel explicit keyboard mode/focus return; hover does not grab keys."
+      ],
+      "validation": [
+        "Theme-preview ownership tests present.",
+        "SharedShell standalone check+20tests passed.",
+        "Build5actualisolatedWaylandkeyboardgatespassed hoverkey,Tabowner,Esc/Enterpriorfocusreturn andno keyleak; physicalpresentation notclaimed.",
+        "Settled appearance GUI(build8) passed preview/no-write,Escape rollback,explicit Save with comments,concurrent IPC revision ownership and large-font card/footer bounds. First-present latency was not accepted by this fixture.",
+        "Finalfixed631b appearanceGUI passed alongside fouractual native terminalGUI workflows; scope remains isolatedsoftware/syntheticprovider,noAPI orphysicalacceptance.",
+        "Final ordinary Release native Wayland-winit software-renderer sharedShell fixture passed17steps; exact source/ELF/environment and initial nested NVIDIA failure remain separately recorded in runtime-final/wayland-software."
+      ],
+      "pending": [
+        "Cold/warm CPUpaint traces are not input-to-present/physicalpresentation timings; latencybudget notcertified."
+      ],
+      "implementation_status": "implemented staged theme/density/font/opacity/motion/effects and guarded persistence/keyboard ownership"
+    },
+    {
+      "id": "R07",
+      "status": "bounded_search_and_frozen_benchmark_software_verified",
+      "implemented": [
+        "Launcher settings provider and sessions provider use typed identities and bounded registry snapshots.",
+        "Existing prefix syntax retained.",
+        "Settings/session/scene filters and stableidentityselection acrossproviderrefresh; removedtargets disableEnter.",
+        "Precomputed lowercase search fields at snapshot ingestion; public-field mutations use fresh fallback,1000-entry/128-result limits retained."
+      ],
+      "validation": [
+        "55launcher tests passed,including28985 ASCII/multibyte Unicode scorer-equivalence pairs and long-string cases.",
+        "All6 complete200-sample debug/Release runs met candidate p95<=50ms; worst debug6.032ms and Release1.190ms. The earlier57.602ms failure is preserved.",
+        "Evidence: artifacts/upgrade-20261103/search/final-summary.json; in-process production character filtering/ranking/visible-row CPU elapsed,not input-to-photon or a portable machine budget."
+      ],
+      "pending": [],
+      "implementation_status": "implemented typed settings/session/scene search with bounded mutation-safe search index"
+    },
+    {
+      "id": "R08",
+      "status": "four_actual_native_terminal_workflows_verified",
+      "implemented": [
+        "JWM session registration validates window generation,host incarnation and session revision.",
+        "Activation queues terminal reveal and waits for correlated receipt; timeout stays Unknown.",
+        "Sharedjterm_coredesktop_sessions worker wired toForge/Anvil/Ember/Frost; actualfourbinaries built.",
+        "Atomicqueued-to-claimed-to-revealed boundary prevents dispatch-after-cancel; claimedactions truthfullyremaininflight."
+      ],
+      "validation": [
+        "Two sharedcoreworker tests passed; fourterminalbuilds passed.",
+        "ActualForge/Anvil/Ember/FrostGUI integrationpassed twoexistingpane reveals,correlatedreceipts,noduplicateCLI andstalerevision refusal onintermediatecandidate.",
+        "FinalV2 exact631b/sourceD131 matrix5/5pass: actualForge/Anvil/Ember/Frost nativeGUI +appearance; twoexistingpane reveal/claimreceipts, no duplicateCLI andstalerevision refusal. See fixed-final-native-validation/final-matrix.json.",
+        "Final core4d6f4cef/f2870b8a plus installed Release terminals passed all4 actual native existing-pane/revision/receipt cases again; runtime-final/candidate-x11-native-summary.json. Provider remains inert/synthetic, not cloud session certification."
+      ],
+      "pending": [
+        "Actualcloudprovider/network and physicaldesktopacceptance remain separate from inertCLI/synthetic-history GUI verification."
+      ],
+      "implementation_status": "implemented four native terminal adapters and correlated identity/claim/reveal receipts"
+    },
+    {
+      "id": "R09",
+      "status": "partial",
+      "implemented": [
+        "Eva doctor reports actual detector/model hash/native runtime version/device selection.",
+        "AEC is unknown/unavailable until observed-active proof exists."
+      ],
+      "validation": [],
+      "pending": [
+        "Current Silero real microphone/model regression.",
+        "Chinese short-token recall by noise/device and physical acoustic stop latency.",
+        "External speaker routing/reference/device-clock AEC evidence."
+      ],
+      "implementation_status": "implemented actual detector/runtime/device/AEC diagnostics; real acoustic acceptance user-waived"
+    },
+    {
+      "id": "R10",
+      "status": "offline_corrections_ready_genuine_acceptance_waiting_upstream_quota",
+      "implemented": [
+        "All16 previously dynamic-blocked corpus cases now construct frozen previous-turn history and topology fixtures."
+      ],
+      "validation": [
+        "Current v29 fully completed241 genuine cases:207 semantic accepted/21 rejected/13 errors, critical0; eleven upstream quota errors and one incomplete response remain unaccepted. Original grades/fees retained. Corrected v30 source0546df87 fixture14 has661 tests passed/30ignored, strictClippy passed, two actual protocol compatibility checks and same-ELF complete offline binding; not yet genuine-model accepted or installed.",
+        "Frozen fullv10 recorded all241: original automatic120passed/36failed/30error/55manual; independent55manual44planning-semantic accepted/11not, plus3verified narrow already-state Noops. It was not accepted, and actual voice/dispatch/postconditions were not evaluated.",
+        "Directed close actual private XCB/X11RB native tests passed unconfirmed/incomplete/stale/dead/recycled zero-prefix rejection, exact background native close without refocus, pending WM_DELETE replay without redispatch and actual terminal receipt only after client disappearance; runtime-v2/native-directed-close-r3/summary.json.",
+        "Corrective v11 was stopped with81recorded after repeated missing-current-profile resolution failures made the target unattainable; original report and1genuine unknown reserve are retained. Subsequent layout cohort v12 recorded12exact passes/1already-target Noop/1provider response_not_completed, not a complete241 acceptance. Current property-profile fixes are pending a new full frozen campaign."
+      ],
+      "pending": [
+        "Restore external upstream quota, then run a new complete frozen241 genuine campaign and independent structure/intent/target review; require>=229accepted and0critical. Actual voice and postconditions are separate.",
+        "After genuine acceptance, build/install/verify corrected EVA and complete main local integration; current active EVA remains the previous binary."
+      ],
+      "implementation_status": "Current offline correction batch implemented and independently bound; genuine-model acceptance, Release and activation remain pending upstream quota restoration."
+    },
+    {
+      "id": "R11",
+      "status": "overview_scene_code_and_guards_verified",
+      "implemented": [
+        "Overview is desktop-wide with per-output rows/live cells.",
+        "Monitor generations and ClientKey targets protect cross-output actions.",
+        "EditableTOML workscenes[] withseparatelayout/session/missingapp preview, revision/disconnect guards andsingle-useappspawn."
+      ],
+      "validation": [
+        "Final core library suite passed desktop_overview_addresses_the_same_tag_on_distinct_outputs, output-geometry/monitor-change gesture cancellation, stable-reference scene schema, disconnected-target rejection and existing-terminal spawn deduplication; core/default-tests-v3.log. This is behavior/unit evidence, not physical mixed-scale placement."
+      ],
+      "pending": [
+        "Physicalmultipleoutputs/fractionalscale placement notcertified; currentsoftware scene/identity guards and sourcechecks are separateevidence."
+      ],
+      "implementation_status": "implemented per-monitor overview and guarded named scene preview/restore"
+    },
+    {
+      "id": "R12",
+      "status": "native_drawable_lifecycle_regression_fixed_and_verified",
+      "implemented": [
+        "Existing damage/scanout/render scheduling retained.",
+        "Wayland DVR requests work for new mailbox payloads instead of an animation tick."
+      ],
+      "validation": [
+        "Before candidate50c: sameRawXID destroy/recreate had correctnewlogicaltoken but0frame/0pixel progress. CausalnewDamage experiment andproductiondestroy-vs-unmap split fixed thisboundary.",
+        "Final631b actualX11RB/XCB3cycleDestroy/recreate +2cycleliveUnmap/remap allpass withfreshpixels/activeframes; oldlogicaltokens absent,newtokens differ on recyclednativeXID; samePID/liveNative Unmap/remap behavior retained.",
+        "Controlledquiet-core sample has0renderedframes over30s; source/runtime qualification explicit."
+      ],
+      "pending": [
+        "One-hour memory/VRAM stability and physicaldual-screen/fullscreen/captureperformance budgets notcertified."
+      ],
+      "implementation_status": "implemented candidate scheduling/damage refinements; physical/long-duration targets not certified"
+    },
+    {
+      "id": "R13",
+      "status": "partial",
+      "implemented": [
+        "Output resize stages GLES resource preparation before KMS and publishes only after verified extent.",
+        "Failure discards prepared resources and enters reverse KMS rollback.",
+        "Existing modeset opt-in enables candidate; default refusal remains.",
+        "Installed jwm-display-preview operator wrapper: TTY countdown,Enterconfirm,timeout/Esc/signals restore only observed-owned output state; dryrun and exact Hz conversion."
+      ],
+      "validation": [
+        "Offscreen resource prepare/cancel/publish and stale/failure tests added.",
+        "8fakeCLI/privateTTY tests pass timeout/confirm/concurrentchange/disconnect/replacement/applyfail/rollbackfail/signal/Hz/quantizedscale cases; no actual display mutations.",
+        "Source/release installation and exact helper-path allowlists verified; full legacy upgrade/rollback/uninstall package lifecycle passed."
+      ],
+      "pending": [
+        "Physical repeated topology stress not run or waived; the named microphone-device waiver does not apply to display acceptance.",
+        "Native persistent protocol client would be needed for atomic serial/CAS; currentCLI wrapper cannotexclude identicalunplug/replug or last-check/apply race."
+      ],
+      "implementation_status": "implemented opt-in prepare/publish/rollback and interactive guarded operator preview"
+    },
+    {
+      "id": "R14",
+      "status": "partial",
+      "implemented": [
+        "Remote unions bounded round-robin quality repairs with ordinary damage in raster order.",
+        "Continuous local damage cannot postpone the first or later repair deadlines.",
+        "Static4096-tile batches clear16000tiles in4capture ticks; active repairs retain256-tile limit.",
+        "JPEG target recovery follows observed healthy same-epoch ACK cadence within existing4..24samples/3second bounds."
+      ],
+      "validation": [
+        "Core test3 passed codec blinking-tile/raster wraparound,firstrepair fairness,idleACK cadence and fastburst non-idle proof tests."
+      ],
+      "pending": [
+        "Fresh two-machine LAN quality/input/bandwidth benchmarks.",
+        "Wayland Remote not implemented."
+      ],
+      "implementation_status": "implemented bounded quality repair/fairness and observed-ACK cadence recovery"
+    },
+    {
+      "id": "R15",
+      "status": "frame_associated_color_and_all_chrome_software_verified",
+      "implemented": [
+        "Existing wl_surface.commit color description latching retained.",
+        "Maintained Smithay queue_frame_with_properties carries immutable per-frame color properties into the same framebuffer TEST_ONLY/real atomic request; changed color rejects partial/empty framebuffers and forces full repaint.",
+        "Desired/observed generations separate render planning from matching-vblank public HDR/profile publication; failures retain old scanout, replaced blob ownership and retry/fallback boundaries. Current+retired+new color resources are capped at64peroutput.",
+        "Annotation shapes/strokes/text and screenshot toolbar use common-linear delivery; local-only recording/MIC/capture cues use FP16 scratch and second delivery after canonical capture without contaminating persistent scene.",
+        "V3 observer fix: newer desired staging preserves prior confirmed scanout and pending queue identity; each reliable exact ticket updates observed state, while latest desired alone permits blob retirement/retry completion."
+      ],
+      "validation": [
+        "Vendor production request-recorder/fault/full-frame tests4passed; JWM KMS109passed including generation/timestamp/uncertainty and resource budget cases.",
+        "Required headless GLES compositor suite387passed,1explicitmanualgalleryignored; new actualpixel test covers software-region and hardware-OETF preparation, shapes/strokes/text/toolbar and cue capture exclusion.",
+        "Presented output policy enable/disable unit test passed; public profile remains confirmed-state while the new policy waits for matching frame.",
+        "Evidence: artifacts/gap-completion-20261103/hdr/validation.json.",
+        "V3 observer targeted KMS111+profile1passed, including explicit SDRgen1→queuedHDRgen2→desiredSDRgen3→acceptedgen2→acceptedgen3 interleaving; artifacts/gap-completion-20261103/hdr/observer-v3/validation.json."
+      ],
+      "pending": [
+        "Physical HDR/SDR display certification was not run or claimed. Named user waivers remain limited to the explicit user_waivers entries.",
+        "PAGE_FLIP_ASYNC remains unsupported by the submission path."
+      ],
+      "implementation_status": "implemented same-request framebuffer/color association and all remaining common-linear chrome; asynchronous tearing and physical panel certification remain explicit limits"
+    },
+    {
+      "id": "R16",
+      "status": "native_output_routes_and_completion_evidence_software_verified",
+      "implemented": [
+        "Native Wayland DVR full-canvas SDR latest-wins consumer added; no new payload capability.",
+        "sRGB ingress decodes into common-linear scene before blending.",
+        "Trusted full terminal-window anchors derive from unique live host/window registration with near-edge avoidance; conflicting/stale/recycled associations have no anchor.",
+        "Native Wayland per-output SDR endpoints preserve v1 handshake and advertise selected canvas extent; at most four selected routes, latest-wins 32MiB frame limit, hotplug/movement/resize/path invalidation and fresh reconnect.",
+        "Companion Presented requires actual successful intersecting-output draw plus exact native frame completion; Retired waits for post-revoke body-free completion on all active outputs in one route generation.",
+        "KMS requires DRM_CAP_TIMESTAMP_MONOTONIC and timestamp-validated accepted queue data; GLX requires later OML completed-SBC observation. EGL/nested without completion sources advertise None."
+      ],
+      "validation": [
+        "X11 offscreen GL4pass+1route-specific skip.",
+        "Wayland offscreen GLES5pass on reported NVIDIA RTX4090D renderer.",
+        "Seven behavior unit tests passed: six companion scene tests plus OML completed-SBC/probe-failure test.",
+        "Actual headless GLES/socket selected-output crop, unplug withdrawal and same-size replug passed. Provenance/logs: artifacts/gap-completion-20261103/visual/validation.json.",
+        "Final cargo check --locked -j2 --all-targets passed after monotonic capability gate; final root checks include worker no-ownership reconnect refinement."
+      ],
+      "pending": [
+        "HDR/dma-buf DVR payloads and selected-output DVR on X11/nested remain unsupported.",
+        "Physical-panel presentation certification was not performed or claimed; pane-local geometry requires a verified mapping beyond the registered whole-window anchor."
+      ],
+      "implementation_status": "implemented native Wayland selected-output SDR endpoints and actual KMS/GLX completion callbacks; physical-panel certification remains unverified, outside the three named user waivers"
+    },
+    {
+      "id": "R17",
+      "status": "reproducible_local_candidate_not_hardware_certified",
+      "implemented": [
+        "Machine-readable release gate rejects stale/failed evidence,software GPU substitution and planned/future soak."
+      ],
+      "validation": [
+        "Evidence tests reject missing second physical vendor and future soak.",
+        "Fiveauxiliaryrepositories safelyfastforwarded localmastersclean atunchangedprovedtrees; no remotepush. JWM local master remains pending final EVA acceptance and verified deployment.",
+        "Actual two-version bundle install/upgrade/rollback/uninstall plus25fault transaction cases passed. Core and8userbar entrypoints installed; live WM updated with session and5applications retained;4terminal Release binaries installed. Installed-file audit rechecked25expected hashes and dynamic-library resolution with no mismatch. Eva deployment remains separately pending.",
+        "Actual local .2 archive7e246fc3 install/upgrade/rollback/uninstall passed config+state/legacy preservation with13ELFs and28stable paths; package-v2/summary.json. Actual .2core installed/WM activated, old login supervisor retained. ABI remains this machine with pinned Nix runtime, no hosted attestation/public portability certification."
+      ],
+      "pending": [
+        "Hosted CI and physical independent-login/hardware certification are not claimed.",
+        "Named external-device/seven-day gates are user-waived, not passed; corrective real-model semantic acceptance is still in progress."
+      ],
+      "implementation_status": "implemented reproducible packaging/evidence/waiver gates; hardware certification not claimed"
+    }
+  ],
+  "user_waivers": {
+    "second_gpu_vendor": "用户明确：没有现成设备，这一part算了。",
+    "real_microphone_external_device_acceptance": "用户明确：没有现成设备，这一part算了。",
+    "seven_day_soak": "用户明确：没有现成设备，这一part算了。"
+  },
+  "plan_source_sha": "78183b8dadbc76558c5ff275c0b62aa2a16595be",
+  "evidence_root": "artifacts/gap-completion-20261103",
+  "unavailable_acceptance": [
+    {
+      "case": "real_model_corpus_241",
+      "status": "corrected_offline_source_ready_waiting_upstream_quota",
+      "reason": "Latest genuine v29 completed241 with207 accepted/21 rejected/13 errors and0critical, below229. Corrected v30 source0546df87/fixture14 has completed offline gates and immutable binding, but no new genuine run or installation. Upstream quota restoration is required; physical voice and actual desktop completion remain separate.",
+      "evidence": "artifacts/gap-completion-20261103/eva/v29-independent-audit/full-audit.json"
+    }
+  ],
+  "not_claimed": [
+    "Hosted GitHub Actions success for the final unpushed candidate",
+    "Measured input-to-photon or GPU durations from CPU instrumentation",
+    "Actual kernel wakeups from voluntary-context-switch counters",
+    "Completed two-vendor physical acceptance or seven-day soak",
+    "Physical HDR output or hardware modeset stress",
+    "Wayland Remote, HDR/dma-buf DVR payloads, selected-output DVR on X11/nested, or physical-panel companion certification"
+  ],
+  "source_checkpoint_commit": "7ca4e553",
+  "all_plan_acceptance_passed": false,
+  "compiled_source_commit": "7ca4e553",
+  "final_binary_sha256": {
+    "jwm": "a49a539deceb61e24b515f932daea1b2fac6cce37613f1a37752865daeb8cf5e",
+    "jwm-tool": "8d1c04d427228f02b32b0c35451bf5180b1261d8759699a1d45234958698929c"
+  },
+  "final_evidence_summary": "artifacts/gap-completion-20261103/candidate-v2/manifest.json",
+  "local_integration_manifest": "artifacts/gap-completion-20261103/deployment/live-core-v2-activation.json",
+  "remote_push_performed": false,
+  "previous_candidate": {
+    "compiled_source_commit": "d1318e51a16ff75f04e0b23a13a3d851e5555cbc",
+    "final_binary_sha256": {
+      "jwm": "631b76015df55b21ee0cb39d0c0fd8c51986260f7478a9cbb2f8c74e3975c55b",
+      "jwm-tool": "1cbf6dca4b8afa9fd3065fada114944b7f4dffc9cac3d887156884630bb3e113"
+    },
+    "final_evidence_summary": "artifacts/upgrade-20261103/final-fixed-acceptance-summary.json",
+    "local_integration_manifest": "artifacts/upgrade-20261103/local-integration.json",
+    "source_checkpoint_commit": "d1318e51a16ff75f04e0b23a13a3d851e5555cbc"
+  },
+  "candidate_scope": "Core7ca4e553 ordinary Release .2 is installed and active in the actual X11 session with all application/window state retained. Corrected Eva executable is still under real-model acceptance and has not replaced the installed Eva service. Physical/hosted gates are not inferred from software tests.",
+  "core_software_validation": {
+    "source_commit": "7ca4e553",
+    "core_library_tests_passed": 7390,
+    "core_cli_integration_tests_passed": 239,
+    "ignored_library_tests": 2,
+    "strict_clippy": "passed",
+    "ordinary_release_build": "passed",
+    "runtime": "artifacts/gap-completion-20261103/runtime-v2/validation-summary.json",
+    "wayland_shell": "artifacts/gap-completion-20261103/runtime-final/wayland-software/wayland-winit-xilem_bar-1280x800-light-host1x/result.json",
+    "native_apps_player": "artifacts/gap-completion-20261103/runtime-final/native-apps-player-validation.json",
+    "frontend_matrix": "artifacts/gap-completion-20261103/runtime-v2/frontend-matrix-v2/summary.json",
+    "validated_production_source": "f1dc2ce6",
+    "directed_close": "artifacts/gap-completion-20261103/runtime-v2/native-directed-close-r3/summary.json"
+  },
+  "live_core_deployment": {
+    "status": "passed",
+    "version": "0.2.0-local.20261103.2",
+    "wm_pid": 4353,
+    "supervisor_pid": 4281,
+    "applications_preserved": 5,
+    "outputs_ready": 2,
+    "focus_preserved": true,
+    "native_xids_compared_directly": true,
+    "source_commit": "7ca4e553",
+    "evidence": "artifacts/gap-completion-20261103/deployment/live-core-v2-activation.json",
+    "boundary": "Only same-process WM IPC restart used. Original4281 login supervisor retained; new supervisor file activates on subsequent normal login. No app was deliberately closed; billing/execution ledger not restored."
+  },
+  "installed_files_audit": "artifacts/gap-completion-20261103/deployment/installed-files-audit-v2.json",
+  "previous_core_deployment_v1": {
+    "compiled_source_commit": "4d6f4cef",
+    "final_binary_sha256": {
+      "jwm": "f2870b8a07781e195dfa127615c1a5cc4020facf54976cb1a26df78d500f5fb3",
+      "jwm-tool": "2427f34bde43b64b091e779f1be5ed348d73a9128efea557e413d7ceb012ef81"
+    },
+    "live_core_deployment": {
+      "status": "passed",
+      "version": "0.2.0-local.20261103",
+      "wm_pid": 4353,
+      "supervisor_pid": 4281,
+      "applications_preserved": 5,
+      "outputs_ready": 2,
+      "panels_ready": 6,
+      "focus_preserved": true,
+      "source_commit": "4d6f4cef",
+      "evidence": "artifacts/gap-completion-20261103/deployment/live-activation.json",
+      "boundary": "The old current-login supervisor remains resident; its new file activates on a subsequent safe login. Live direct before/after native XID comparison was not recorded; the exact resident-to-final independent fixture separately proved native identity retention."
+    }
+  },
+  "software_acceptance_passed": false,
+  "core_rollback_manifest": "artifacts/gap-completion-20261103/deployment/rollback-v2-manifest.json",
+  "current_eva_acceptance_attempt": {
+    "candidate": "v29",
+    "status": "not_accepted_full_corpus_complete",
+    "source_commit": "bbc97e42f502b96715f8d53874b1a5bf771fc11c",
+    "source_fingerprint": "6e3f635477bebb3ea14db3ed1069179dfc71a45cfdaa580166d3b598d80954d3",
+    "config_fingerprint": "be46dae9ea764c009088c7b5cf37c2d3ca5a6d5910c8e2fced0d24fd5df67863",
+    "fixture_version": 12,
+    "executable_sha256": "c7bcb972a2b0ef110f543cf1dbbe19542d216cad053e4953894e8cca3e1ec75f",
+    "recorded": 241,
+    "planning_semantic_accepted": 207,
+    "planning_semantic_rejected": 21,
+    "errors_not_evaluated": 13,
+    "not_run": 0,
+    "denominator": 241,
+    "critical_violations": 0,
+    "best_possible_full_corpus_accepted": 207,
+    "required_success_rate": 0.95,
+    "required_accepted": 229,
+    "actual_voice_and_desktop_completion": "not_evaluated",
+    "raw_report": "artifacts/gap-completion-20261103/eva/v29-live-corpus.json",
+    "raw_report_sha256": "e3776905ad2e5e20225d6ffe4bbbeaca192730b57d35ed3920f8158ba0a85c47",
+    "immutable_raw_snapshot": "artifacts/gap-completion-20261103/eva/v29-independent-audit/1793754242333994702.json",
+    "independent_audit": "artifacts/gap-completion-20261103/eva/v29-independent-audit/full-audit.json",
+    "independent_audit_sha256": "e5a1eec943f447f8e42348b247ec6742fb430b54046565192aa46257e8ef04ce",
+    "genuine_settled_local_estimate_microusd": 25943533,
+    "new_unknown_reserved_microusd": 0,
+    "qualification": "All 241 cases completed under the user-authorized no-fee-ceiling coverage policy. Ordinary losses did not stop the campaign; only an independently confirmed critical violation would have stopped it. Original automatic grades, independent decisions and genuine costs remain unchanged. Accepted 207/241 is below required 229; installed EVA remains the previous version. Automatic safety flag 221 is an independently verified exact-grader false positive; its raw grade remains intact.",
+    "operating_policy_update": "artifacts/gap-completion-20261103/eva/v29-freeze/policy-update-20261104T003749Z-critical-only.json",
+    "errors_breakdown": {
+      "local_plan_text_length": {
+        "count": 1,
+        "case": "088"
+      },
+      "upstream_quota_family": {
+        "count": 11,
+        "cases": "230-234,236-241",
+        "stage": "before planning response or cost record"
+      },
+      "incomplete_response": {
+        "count": 1,
+        "case": "235"
+      }
+    }
+  },
+  "previous_eva_acceptance_attempts": [
+    {
+      "candidate": "v20",
+      "status": "not_accepted_stopped_at_case_boundary",
+      "source_commit": "0dba2385f72a51fe5ec45c39e96629dc0356f653",
+      "source_fingerprint": "c620ef049e1fbf04b9eacc6a2c3a38ed08dfe5d063c7ace61f162938c592fc4e",
+      "executable_sha256": "7c6f716df1de1c0b4da103ef0477acb500486ddd22e101d485d4ce33ed73f699",
+      "recorded": 124,
+      "planning_semantic_accepted": 109,
+      "planning_semantic_rejected": 13,
+      "errors_not_evaluated": 2,
+      "not_run": 117,
+      "denominator": 241,
+      "critical_violations": 0,
+      "best_possible_full_corpus_accepted": 226,
+      "required_success_rate": 0.95,
+      "actual_voice_and_desktop_completion": "not_evaluated",
+      "raw_report": "artifacts/gap-completion-20261103/eva/v20-live-corpus.json",
+      "raw_report_sha256": "2f2f934a8e41372c5a4f0a138f36740bd7675da2bf0068b20d63ee3cbeba75d6",
+      "independent_audit": "artifacts/gap-completion-20261103/eva/v20-independent-audit/audit.json",
+      "independent_audit_sha256": "4a83c500f62078f83147e962de7afa2595b69790f3b0a1e6085d0b78899a2aa9",
+      "genuine_settled_local_estimate_microusd": 9007592,
+      "new_unknown_reserved_microusd": 0,
+      "qualification": "Original automatic grades and genuine cost records remain unchanged; later fixes require a newly frozen candidate. Existing historical unknown reserves remain preserved. Installed EVA binary is still the previous version."
+    },
+    {
+      "candidate": "v26",
+      "status": "not_accepted_stopped_at_case_boundary",
+      "source_commit": "f630cc43f95413e338073e03e23273e963e87dc2",
+      "source_fingerprint": "9dbc011d1d4a72c57e064089200e6fceacba11cc55ab7180f49bd2a2aac74c2b",
+      "config_fingerprint": "be46dae9ea764c009088c7b5cf37c2d3ca5a6d5910c8e2fced0d24fd5df67863",
+      "fixture_version": 12,
+      "executable_sha256": "85b1976ddcec539dece764de04b4f775416822610d381298813e1ac2a8118fb5",
+      "recorded": 189,
+      "planning_semantic_accepted": 172,
+      "planning_semantic_rejected": 16,
+      "errors_not_evaluated": 1,
+      "not_run": 52,
+      "denominator": 241,
+      "critical_violations": 0,
+      "best_possible_full_corpus_accepted": 224,
+      "required_success_rate": 0.95,
+      "required_accepted": 229,
+      "actual_voice_and_desktop_completion": "not_evaluated",
+      "raw_report": "artifacts/gap-completion-20261103/eva/v26-live-corpus.json",
+      "raw_report_sha256": "49fdd90676452411b807f71cf65edf97c43cf09550c3675a594b4ec74d2c7dc1",
+      "immutable_raw_snapshot": "artifacts/gap-completion-20261103/eva/v26-independent-audit/1793744092556153188.json",
+      "independent_audit": "artifacts/gap-completion-20261103/eva/v26-independent-audit/full-audit.json",
+      "independent_audit_sha256": "e8c2edb9884162f9be8be3a5b3f82f798f8c26cf016955129f50724eac7e4f21",
+      "genuine_settled_local_estimate_microusd": 23363537,
+      "new_unknown_reserved_microusd": 0,
+      "qualification": "Original automatic grades and genuine cost records remain unchanged. The campaign cannot reach the release gate even if all remaining cases pass. Later source fixes require a new frozen candidate. Historical unknown reserves remain preserved; installed EVA is still the previous version."
+    },
+    {
+      "candidate": "v27",
+      "status": "not_accepted_stopped_at_case_boundary",
+      "source_commit": "1163e8b1d1f506aeb82e82139040a57b4f97d323",
+      "source_fingerprint": "8de97e0deddac1ab21382443441a57a56a1ebafaed4e5302729166d35c6d7c7c",
+      "config_fingerprint": "be46dae9ea764c009088c7b5cf37c2d3ca5a6d5910c8e2fced0d24fd5df67863",
+      "fixture_version": 12,
+      "executable_sha256": "2e7c6effc407d8cbfb911d9ce25d39fee9f90ba2ce2102334556ef911d61b98f",
+      "recorded": 150,
+      "planning_semantic_accepted": 137,
+      "planning_semantic_rejected": 12,
+      "errors_not_evaluated": 1,
+      "not_run": 91,
+      "denominator": 241,
+      "critical_violations": 0,
+      "best_possible_full_corpus_accepted": 228,
+      "required_success_rate": 0.95,
+      "required_accepted": 229,
+      "actual_voice_and_desktop_completion": "not_evaluated",
+      "raw_report": "artifacts/gap-completion-20261103/eva/v27-live-corpus.json",
+      "raw_report_sha256": "a1f10380c1ea43d032b839b96163e5158fd1ab8b7fb4bc95207758f1afa80cec",
+      "immutable_raw_snapshot": "artifacts/gap-completion-20261103/eva/v27-independent-audit/1793748388596559680.json",
+      "independent_audit": "artifacts/gap-completion-20261103/eva/v27-independent-audit/full-audit.json",
+      "independent_audit_sha256": "f574daad4747bd903a1cd0f235683bfd77f1e06c834b5fa69bad8ba806e7b7c0",
+      "genuine_settled_local_estimate_microusd": 17834071,
+      "new_unknown_reserved_microusd": 0,
+      "qualification": "The authorized case-boundary STOP was touched immediately on the thirteenth independently confirmed nonaccepted result. Inflight work settled naturally; the original automatic grades, independent decisions and genuine cost records remain unchanged. The campaign cannot reach 229/241. Historical unknown reserves remain preserved; installed EVA is still the previous version."
+    },
+    {
+      "candidate": "v28",
+      "status": "not_accepted_stopped_at_case_boundary",
+      "source_commit": "b5fcb5a878bbc38953a9aeeadc82c76062dc081e",
+      "source_fingerprint": "d9364750d487945b73225529a091cc4c8185224bfb982a78eac49e8fb95885c9",
+      "config_fingerprint": "be46dae9ea764c009088c7b5cf37c2d3ca5a6d5910c8e2fced0d24fd5df67863",
+      "fixture_version": 12,
+      "executable_sha256": "0d85e03458effeec256c902c062cc1778700668af0bfb90bae4fdd7a799148f7",
+      "recorded": 196,
+      "planning_semantic_accepted": 183,
+      "planning_semantic_rejected": 12,
+      "errors_not_evaluated": 1,
+      "not_run": 45,
+      "denominator": 241,
+      "critical_violations": 0,
+      "best_possible_full_corpus_accepted": 228,
+      "required_success_rate": 0.95,
+      "required_accepted": 229,
+      "actual_voice_and_desktop_completion": "not_evaluated",
+      "raw_report": "artifacts/gap-completion-20261103/eva/v28-live-corpus.json",
+      "raw_report_sha256": "a5a8a345064ff8ef41f1699f4c957e9622c36b511c7b8d00b129c3f8386fddae",
+      "immutable_raw_snapshot": "artifacts/gap-completion-20261103/eva/v28-independent-audit/1793751164627308669.json",
+      "independent_audit": "artifacts/gap-completion-20261103/eva/v28-independent-audit/full-audit.json",
+      "independent_audit_sha256": "079391932b224dbe7093333f16a4198c1f5815733fd8d2e8d49a1fd83cfdccf2",
+      "genuine_settled_local_estimate_microusd": 20849154,
+      "new_unknown_reserved_microusd": 0,
+      "qualification": "The authorized case-boundary STOP was touched immediately on the thirteenth independently confirmed nonaccepted result. Inflight work settled naturally; the original automatic grades, independent decisions and genuine cost records remain unchanged. The campaign cannot reach 229/241. Historical unknown reserves remain preserved; installed EVA is still the previous version."
+    }
+  ],
+  "eva_gap_closure_current": {
+    "candidate": "v30",
+    "status": "ready_offline_waiting_upstream_quota",
+    "tested_source_commit": "0546df87d5a773229dada45ff31a43bbc76bdb5e",
+    "source_fingerprint": "cc7bdabaa26e789d7e5630a4fdf6210e8dc53a31e563653de44e13a134054592",
+    "source_inputs": 39,
+    "fixture_version": 14,
+    "test_executable_sha256": "caab5451f4ce959e766646fce71f06c95d404aa98a61dc6a22b2796cd4a557e6",
+    "config_sha256": "0b4daaab0b0eccf4ee020a0524b51b5f4769cb8942c160019066098a7a328ba0",
+    "state_pointer": "artifacts/gap-completion-20261103/eva/finalizer-current-state.json",
+    "implemented_batch": [
+      "Shared query-purpose/result hints intersect actual backend declarations, policy enum and canonical catalog; no extra queries or operational capability.",
+      "Uniform 160-Unicode-character repair hints preserve hard validation, original arguments and bounded retry.",
+      "Exact ordinary-candidate proofs for inactive workspace layout, Bluetooth picker and unique native Firefox focus; unknown class metadata rejects uniqueness.",
+      "Complete external-text execution prohibition and effect-free missing-referent/domain questions; all generic question rewrites share task/control/unsettled/selector/confirmation/end fences.",
+      "Snap maximize Toggle is not treated as absolute fullscreen/maximize; no candidate replacement.",
+      "Fixture14 advertises actual implemented responders and uses native audio finalizing field; fixture13 and all prior reports remain historical."
+    ],
+    "package_tests": {
+      "passed": 661,
+      "failed": 0,
+      "ignored": 30
+    },
+    "strict_clippy": "passed",
+    "actual_protocol_shape_tests_passed": 2,
+    "freeze": "artifacts/gap-completion-20261103/eva/v30-freeze-r2/freeze.json",
+    "offline_closure": "artifacts/gap-completion-20261103/eva/v30-freeze-r2/offline-closure.json",
+    "offline_closure_sha256": "383c3f114d59b7e8beda23d11d85e42e64150d717e2033c4bb89ac7c370a793b",
+    "independent_binding_audit": "artifacts/gap-completion-20261103/eva/v30-independent-audit/fixture14-final-binding-summary.json",
+    "independent_binding_audit_sha256": "9d5843e018cfb4ab9f45f3b811592389b37e53265843d961c00bea1ac4f19d69",
+    "all241_offline": "Complete: 175 exact synthetic proposals, 60 nonexecution shape checks, 1 fixture-state Noop, 1 capability-answer manual-fact category, 1 unsupported config overwrite, 2 missing required paths and 1 conservative reduction. Not 241 genuine semantic passes.",
+    "original241_replay": "Complete: 183 parameter replays with new synthetic transport, 1 retained error, 46 missing complete primary parameters, 11 cases without model events. Only 033/100/130/195/200 final results change; original arguments remain unchanged. 195/200 include explicitly labeled reconstructed semantics, not original wire recovery.",
+    "genuine_model_acceptance": "not_run_on_this_source_waiting_upstream_quota",
+    "ordinary_release_build": "not_built_on_this_source",
+    "installed_or_activated": false,
+    "installed_eva_sha256": "20a607bcc5338dc64f9011679067089085407f2b78e61a641317c4d3a2a44a4f",
+    "qualification": "This batch is ready for a new immutable-source genuine full241 run after the external quota issue is resolved. Offline success does not establish real-model, physical voice or actual dispatch acceptance. Protected-close and two-step independent-Allow requirements remain unchanged."
+  },
+  "upstream_quota_block": {
+    "observed": "upstream quota error family on 11 late cases; one separate incomplete response",
+    "local_budget_enabled": false,
+    "rate_limit_error_distinguished": true,
+    "raw_upstream_error_detail": "not retained; existing transport sanitizes several upstream quota codes to quota_exceeded, so exact balance/project/remote message is unknown",
+    "user_action": "User asked to restore service quota or configure available credentials in their own terminal; no key requested in chat. No further API calls while waiting; offline fixes continue.",
+    "fee_preference": "User explicitly states no token fee ceiling. Costs continue to be recorded; local budget remains disabled."
+  },
+  "installed_state_preservation_after_offline_batch": {
+    "evidence": "artifacts/gap-completion-20261103/deployment/preservation-v30-1793756773577958509.json",
+    "sha256": "e450eb3b1dfe22d29c54c2f5a3fc627972e10bdf8aff5b8802fc238e39858662",
+    "checks": "All true: same live WM and supervisor identities/binaries, old EVA installed and active, original config hash. No provider calls or activation."
+  },
+  "remaining_actions": [
+    "Restore upstream service quota or configure available credentials; user input remains pending.",
+    "Run new frozen-source genuine full241 and independent semantic review; require at least229/241 accepted and zero critical violations. Ordinary failures do not stop coverage; critical violations do.",
+    "After genuine acceptance, build ordinary Release, atomically replace only EVA binary and restart only an idle EVA service, verify live executable/config/runtime/credential readiness while preserving genuine ledgers.",
+    "After verified deployment, finalize evidence and fast-forward local master; no remote push. Unwaived physical/hosted acceptance stays separately unverified."
+  ]
+}

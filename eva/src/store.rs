@@ -367,14 +367,12 @@ impl Store {
                 response["id"].as_str().filter(|id| {
                     !id.is_empty() && id.len() <= 128 && !id.chars().any(char::is_control)
                 }),
-            ) {
-                if request != id
-                    && self.usage.records.contains_key(request)
-                    && !self.usage.records.contains_key(id)
-                    && !self.usage.is_archived(id)
-                {
-                    self.associate(request, id)?;
-                }
+            ) && request != id
+                && self.usage.records.contains_key(request)
+                && !self.usage.records.contains_key(id)
+                && !self.usage.is_archived(id)
+            {
+                self.associate(request, id)?;
             }
         }
         if matches!(

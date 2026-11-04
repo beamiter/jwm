@@ -111,12 +111,14 @@ valid_stable_path() {
         usr/local/bin/jwm|\
         usr/local/bin/jwm-tool|\
         usr/local/bin/jwm-support|\
+        usr/local/bin/jwm-remote|\
         usr/local/bin/jwm-bridge|\
         usr/local/bin/jwm-player|\
         usr/local/bin/jwm-notes|\
         usr/local/bin/jwm-image-viewer|\
         usr/local/bin/jwm-shell|\
         usr/local/bin/jwm-toggle-sidebar-mode|\
+        usr/local/bin/jwm-display-preview|\
         usr/lib/udev/rules.d/69-jwm-touchpad-gestures.rules|\
         usr/local/bin/tauri_leptos_bar|\
         usr/local/bin/xilem_bar|\

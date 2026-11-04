@@ -635,6 +635,14 @@ struct XilemBar {
     dock: DockBridge,
     worker_signal: Arc<WorkerSignal>,
     theme: Theme,
+    theme_watcher: xbar_core::theme_inheritance::ThemeWatcher,
+    agent_watcher: xbar_core::agent_summary::AgentWatcher,
+    agent_summary: Option<xbar_core::agent_summary::AgentSummary>,
+    last_agent_request: Instant,
+    semantic_theme: Option<xbar_core::theme_inheritance::ThemeUpdate>,
+    inherit_theme: bool,
+    font_override: Option<String>,
+    last_theme_request: Instant,
 
     /// The startup decision from `main`: a translucent window washes its
     /// background to `background_opacity`, a solid one paints it opaque.
@@ -675,6 +683,18 @@ impl XilemBar {
             BarRuntime::with_managed_transport(config, recovery)
         };
         let runtime = runtime.expect("xilem bar model configuration is valid");
+        let theme_override = env::var("JWM_BAR_THEME")
+            .ok()
+            .or_else(|| app_config.ui_theme.clone())
+            .or_else(|| {
+                theme_config_path()
+                    .filter(|path| path.is_file())
+                    .map(|_| "standalone".into())
+            });
+        let inherit_theme = theme_override.as_deref() != Some("standalone");
+        let theme_watcher = xbar_core::theme_inheritance::ThemeWatcher::start(theme_override);
+        let font_override = (app_config.font != xbar_core::config::BarConfig::default().font)
+            .then(|| app_config.font.clone());
         let background_opacity = app_config.background_opacity;
         let mut dock = DockBridge::new();
         dock.set_edge(app_config.presentation.edge);
@@ -690,12 +710,22 @@ impl XilemBar {
             presentation: app_config.presentation,
             worker_signal: Arc::new(WorkerSignal::default()),
             theme: Theme::from_mode(theme_mode),
+            theme_watcher,
+            agent_watcher: xbar_core::agent_summary::AgentWatcher::start(),
+            agent_summary: None,
+            last_agent_request: Instant::now() - Duration::from_secs(2),
+            semantic_theme: None,
+            inherit_theme,
+            font_override,
+            last_theme_request: Instant::now() - Duration::from_secs(2),
             translucent,
             background_opacity,
         }
     }
 
     fn toggle_theme(&mut self) {
+        self.inherit_theme = false;
+        self.semantic_theme = None;
         let update = self.runtime.dispatch(UserAction::ToggleTheme);
         self.handle_runtime_update(update);
         save_theme_mode(self.runtime.view().theme);
@@ -778,12 +808,35 @@ impl XilemBar {
                 unhandled => warn!("unhandled xbar platform effect: {unhandled:?}"),
             }
         }
-        self.theme = Theme::from_mode(self.runtime.view().theme);
+        self.theme = self
+            .semantic_theme
+            .as_ref()
+            .filter(|_| self.inherit_theme)
+            .map(|theme| Theme::from_tokens(self.runtime.view().theme, theme.tokens))
+            .unwrap_or_else(|| Theme::from_mode(self.runtime.view().theme));
     }
 
     fn on_worker(&mut self, ev: WorkerEvent) {
         match ev {
             WorkerEvent::Drive(signal) => {
+                if self.last_agent_request.elapsed() >= Duration::from_secs(1) {
+                    self.agent_watcher.request_refresh();
+                    self.last_agent_request = Instant::now();
+                }
+                if let Some(summary) = self.agent_watcher.take() {
+                    info!("agent summary: {}", summary.label());
+                    self.agent_summary = Some(summary);
+                }
+                if self.inherit_theme {
+                    if self.last_theme_request.elapsed() >= Duration::from_secs(1) {
+                        self.theme_watcher.request_refresh();
+                        self.last_theme_request = Instant::now();
+                    }
+                    if let Some(theme) = self.theme_watcher.take() {
+                        info!("inherited appearance: {}", theme.name);
+                        self.semantic_theme = Some(theme);
+                    }
+                }
                 let update = self.schedule.service(&mut self.runtime);
                 self.handle_runtime_update(update);
                 self.service_dock();
@@ -898,11 +951,35 @@ impl Theme {
             pink: Color::from_rgba8(0xEA, 0x76, 0xCB, 255),
         }
     }
-    const fn from_mode(mode: ThemeMode) -> Self {
-        match mode {
+    fn from_tokens(mode: ThemeMode, tokens: xbar_core::shell_palette::SemanticTokens) -> Self {
+        let mut theme = Self::from_mode(mode);
+        let color = |value| {
+            let [r, g, b, a] = xbar_core::shell_palette::ShellPalette::ink8(value);
+            Color::from_rgba8(r, g, b, a)
+        };
+        theme.fg = color(tokens.text);
+        theme.subtle = color(tokens.muted);
+        theme.blue = color(tokens.accent);
+        theme.yellow = color(tokens.warning);
+        theme
+    }
+
+    fn from_mode(mode: ThemeMode) -> Self {
+        let mut theme = match mode {
             ThemeMode::Dark => Self::mocha(),
             ThemeMode::Light => Self::latte(),
-        }
+        };
+        let tokens =
+            xbar_core::shell_palette::ShellPalette::for_dark(mode == ThemeMode::Dark).tokens();
+        let color = |value| {
+            let [r, g, b, a] = xbar_core::shell_palette::ShellPalette::ink8(value);
+            Color::from_rgba8(r, g, b, a)
+        };
+        theme.fg = color(tokens.text);
+        theme.subtle = color(tokens.muted);
+        theme.blue = color(tokens.accent);
+        theme.yellow = color(tokens.warning);
+        theme
     }
 }
 
@@ -2044,7 +2121,16 @@ fn root(state: &mut XilemBar) -> Box<xilem::AnyWidgetView<XilemBar>> {
         state.background_opacity,
         state.translucent,
     );
-    let bar_bg = with_alpha(rgb(r, g, b), alpha as f32);
+    let base = state
+        .semantic_theme
+        .as_ref()
+        .filter(|_| state.inherit_theme)
+        .map(|theme| {
+            let [r, g, b, _] = xbar_core::shell_palette::ShellPalette::ink8(theme.tokens.surface);
+            rgb(r, g, b)
+        })
+        .unwrap_or_else(|| rgb(r, g, b));
+    let bar_bg = with_alpha(base, alpha as f32);
     if state.presentation.desktop_header && !state.presentation.edge.is_vertical() {
         return fork(header::view(state), (driver_task(),)).boxed();
     }

@@ -1,9 +1,9 @@
-use drm::control::Device as ControlDevice;
 use drm::control::atomic::AtomicModeReq;
 use drm::control::connector::Interface;
 use drm::control::property::ValueType;
+use drm::control::Device as ControlDevice;
 use drm::control::{
-    AtomicCommitFlags, Mode, PlaneType, connector, crtc, dumbbuffer::DumbBuffer, framebuffer, plane, property,
+    connector, crtc, dumbbuffer::DumbBuffer, framebuffer, plane, property, AtomicCommitFlags, Mode, PlaneType,
 };
 
 #[cfg(debug_assertions)]
@@ -13,8 +13,8 @@ use std::collections::HashSet;
 use std::fmt;
 use std::os::unix::io::AsRawFd;
 use std::sync::{
-    Arc, Mutex, RwLock,
     atomic::{AtomicBool, Ordering},
+    Arc, Mutex, RwLock,
 };
 
 use crate::backend::drm::error::AccessError;
@@ -23,11 +23,10 @@ use crate::{
     backend::{
         allocator::format::{get_bpp, get_depth},
         drm::{
-            DrmDeviceFd,
+            device::atomic::{map_props, PropMapping},
             device::DrmDeviceInternal,
-            device::atomic::{PropMapping, map_props},
             error::Error,
-            plane_type,
+            plane_type, DrmDeviceFd,
         },
     },
     utils::DevPath,
@@ -173,6 +172,26 @@ pub struct AtomicDrmSurface {
     state: RwLock<State>,
     pending: RwLock<State>,
     pub(super) span: tracing::Span,
+}
+
+#[derive(Debug)]
+struct FrameRequestFailure {
+    test: bool,
+    source: std::io::Error,
+}
+
+fn submit_frame_request(
+    request: AtomicModeReq,
+    flags: AtomicCommitFlags,
+    mut submit: impl FnMut(AtomicCommitFlags, AtomicModeReq) -> std::io::Result<()>,
+) -> Result<(), FrameRequestFailure> {
+    submit(
+        (flags & !AtomicCommitFlags::PAGE_FLIP_EVENT & !AtomicCommitFlags::NONBLOCK)
+            | AtomicCommitFlags::TEST_ONLY,
+        request.clone(),
+    )
+    .map_err(|source| FrameRequestFailure { test: true, source })?;
+    submit(flags, request).map_err(|source| FrameRequestFailure { test: false, source })
 }
 
 impl AtomicDrmSurface {
@@ -751,6 +770,15 @@ impl AtomicDrmSurface {
         planes: impl IntoIterator<Item = PlaneState<'a>>,
         event: bool,
     ) -> Result<(), Error> {
+        self.commit_with_properties(planes, event, &[])
+    }
+
+    pub fn commit_with_properties<'a>(
+        &self,
+        planes: impl IntoIterator<Item = PlaneState<'a>>,
+        event: bool,
+        properties: &[super::FrameProperty],
+    ) -> Result<(), Error> {
         if !self.active.load(Ordering::SeqCst) {
             return Err(Error::DeviceInactive);
         }
@@ -802,54 +830,68 @@ impl AtomicDrmSurface {
                 &*planes,
             )?;
 
-            if let Err(err) = self.fd.atomic_commit(
-                AtomicCommitFlags::ALLOW_MODESET | AtomicCommitFlags::TEST_ONLY,
-                req.build()?,
-            ) {
-                warn!("New screen configuration invalid!:\n\t{:?}\n\t{}\n", req, err);
-
-                return Err(Error::TestFailed(self.crtc));
-            } else {
-                if current.mode != pending.mode {
-                    if let Err(err) = self.fd.destroy_property_blob(current.blob.into()) {
-                        warn!("Failed to destroy old mode property blob: {}", err);
-                    }
+            let mut request = req.build()?;
+            // Never allow an application to replace Smithay's plane FB_ID,
+            // CRTC_ID, mode or connector routing assignments.
+            for property in properties {
+                let is_crtc = property.object == self.crtc.into();
+                let is_connector = pending_conns
+                    .iter()
+                    .any(|connector| property.object == (*connector).into());
+                let info = self.fd.get_property(property.property).map_err(|source| {
+                    Error::Access(AccessError {
+                        errmsg: "Cannot inspect frame color property",
+                        dev: self.fd.dev_path(),
+                        source,
+                    })
+                })?;
+                let allowed = match info.name().to_str().unwrap_or("") {
+                    "DEGAMMA_LUT" | "CTM" | "GAMMA_LUT" => is_crtc,
+                    "Colorspace" | "HDR_OUTPUT_METADATA" => is_connector,
+                    _ => false,
+                };
+                if !allowed {
+                    return Err(Error::TestFailed(self.crtc));
                 }
-
-                // new config
-                req
+                request.add_raw_property(property.object, property.property, property.value);
             }
+            request
         };
 
         debug!("Setting screen: {:?}", req);
-        let result = self
-            .fd
-            .atomic_commit(
-                if event {
-                    // on the atomic api we can modeset and trigger a page_flip event on the same call!
-                    AtomicCommitFlags::PAGE_FLIP_EVENT | AtomicCommitFlags::ALLOW_MODESET
-                    // we also *should* not need to wait for completion, like with `set_crtc`,
-                    // because we have tested this exact commit already, so we do not expect any errors later down the line.
-                    //
-                    // but there is always an exception and `amdgpu` can fail in interesting ways with this flag set...
-                    // https://gitlab.freedesktop.org/drm/amd/-/issues?scope=all&utf8=%E2%9C%93&state=opened&search=drm_atomic_helper_wait_for_flip_done
-                    //
-                    // so we skip this flag:
-                    // AtomicCommitFlags::Nonblock,
+        let flags = if event {
+            AtomicCommitFlags::PAGE_FLIP_EVENT | AtomicCommitFlags::ALLOW_MODESET
+        } else {
+            AtomicCommitFlags::ALLOW_MODESET
+        };
+        let result = submit_frame_request(req, flags, |flags, request| self.fd.atomic_commit(flags, request))
+            .map_err(|failure| {
+                let errno = failure.source.raw_os_error();
+                // A transient ownership/resource failure is not a driver
+                // verdict on the color state and must remain retryable.
+                if failure.test && matches!(errno, Some(libc::EINVAL | libc::ERANGE | libc::EOPNOTSUPP)) {
+                    Error::TestFailed(self.crtc)
                 } else {
-                    AtomicCommitFlags::ALLOW_MODESET
-                },
-                req.build()?,
-            )
-            .map_err(|source| {
-                Error::Access(AccessError {
-                    errmsg: "Error setting crtc",
-                    dev: self.fd.dev_path(),
-                    source,
-                })
+                    Error::Access(AccessError {
+                        errmsg: if failure.test {
+                            "Atomic framebuffer/color test failed"
+                        } else {
+                            "Atomic framebuffer/color commit failed"
+                        },
+                        dev: self.fd.dev_path(),
+                        source: failure.source,
+                    })
+                }
             });
 
         if result.is_ok() {
+            // TEST_ONLY does not transfer ownership. A failed real commit
+            // must retain the old mode blob so the current scanout is valid.
+            if current.mode != pending.mode {
+                if let Err(err) = self.fd.destroy_property_blob(current.blob.into()) {
+                    warn!("Failed to destroy old mode property blob: {}", err);
+                }
+            }
             *current = pending.clone();
             for plane in planes.iter() {
                 if plane.config.is_some() {
@@ -1673,5 +1715,97 @@ impl<'a> AtomicRequest<'a> {
         }
 
         Ok(req)
+    }
+}
+
+#[cfg(test)]
+mod frame_color_request_tests {
+    use super::*;
+    use drm::control::{from_u32, RawResourceHandle};
+
+    fn request(framebuffer: u64, color_blob: u64) -> AtomicModeReq {
+        let mut request = AtomicModeReq::new();
+        request.add_raw_property(
+            RawResourceHandle::new(10).unwrap(),
+            from_u32(11).unwrap(),
+            framebuffer,
+        );
+        request.add_raw_property(
+            RawResourceHandle::new(20).unwrap(),
+            from_u32(21).unwrap(),
+            color_blob,
+        );
+        request
+    }
+
+    #[test]
+    fn framebuffer_and_color_are_identical_in_test_and_real_request() {
+        let mut calls = Vec::new();
+        submit_frame_request(
+            request(333, 888),
+            AtomicCommitFlags::ALLOW_MODESET,
+            |flags, req| {
+                calls.push((flags, format!("{req:?}")));
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(calls.len(), 2);
+        assert!(calls[0].0.contains(AtomicCommitFlags::TEST_ONLY));
+        assert!(!calls[1].0.contains(AtomicCommitFlags::TEST_ONLY));
+        assert_eq!(calls[0].1, calls[1].1);
+        assert!(calls[0].1.contains("333") && calls[0].1.contains("888"));
+    }
+
+    #[test]
+    fn test_failure_cannot_submit_and_next_frame_has_its_own_properties() {
+        let mut calls = Vec::new();
+        let failure = submit_frame_request(request(333, 888), AtomicCommitFlags::ALLOW_MODESET, |_, req| {
+            calls.push(format!("{req:?}"));
+            Err(std::io::Error::from_raw_os_error(libc::EINVAL))
+        })
+        .unwrap_err();
+        assert!(failure.test);
+        assert_eq!(calls.len(), 1);
+        calls.clear();
+        submit_frame_request(request(444, 999), AtomicCommitFlags::ALLOW_MODESET, |_, req| {
+            calls.push(format!("{req:?}"));
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(calls.len(), 2);
+        assert!(calls.iter().all(|req| req.contains("444")
+            && req.contains("999")
+            && !req.contains("888")
+            && !req.contains("333")));
+    }
+
+    #[test]
+    fn real_failure_retains_ownership_and_never_replays_failed_properties() {
+        let mut calls = 0;
+        let failure = submit_frame_request(request(333, 888), AtomicCommitFlags::ALLOW_MODESET, |_, _| {
+            calls += 1;
+            if calls == 2 {
+                Err(std::io::Error::from_raw_os_error(libc::EIO))
+            } else {
+                Ok(())
+            }
+        })
+        .unwrap_err();
+        assert!(!failure.test);
+        assert_eq!(calls, 2);
+        // The production caller retires mode/blob ownership only on Ok(()).
+        let source = include_str!("atomic.rs");
+        let body = source
+            .split_once("pub fn commit_with_properties")
+            .unwrap()
+            .1
+            .split_once("pub fn page_flip")
+            .unwrap()
+            .0;
+        assert!(
+            body.find("if result.is_ok()").unwrap()
+                < body.find("destroy_property_blob(current.blob.into())").unwrap()
+        );
     }
 }
