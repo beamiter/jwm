@@ -5,6 +5,14 @@ monorepo use independent Semantic Versions.
 
 ## [Unreleased]
 
+### Status bars no longer outlive their window manager
+
+- Restarting JWM through `jwm-tool daemon` (SIGTERM, then SIGKILL) or a
+  crash left the old status bars running, reparented to init, mapped over
+  the new bars and redrawing the dead session's state. Bars are now started
+  with a parent-death signal, so the kernel stops them whenever JWM goes
+  away; normal exit and JWM's own restart still stop them in cleanup.
+
 ### Remote view without half-drawn frames on NVIDIA
 
 - On NVIDIA's proprietary driver the remote view intermittently flashed the

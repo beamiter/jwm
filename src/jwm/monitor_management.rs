@@ -145,6 +145,43 @@ fn secondary_bar_command(bar_name: &str, shared_path: &str, monitor_id: i32) -> 
     )
 }
 
+/// Have the kernel stop the bar when this window manager dies.
+///
+/// A bar draws state that only this WM publishes, so once the WM is gone it
+/// can only show a frozen past. Normal exit and JWM's own restart stop bars
+/// in cleanup, but nothing runs on a SIGTERM -- JWM installs no handler, and
+/// `jwm-tool daemon`'s restart sends exactly that, then SIGKILL -- or on a
+/// crash. After one such restart the old bars kept running, reparented to
+/// init, mapped over the new ones and redrawing for four hours.
+///
+/// The signal fires when the spawning *thread* ends. Bars are spawned on the
+/// event thread, which lives as long as the process, and `exec` (JWM's own
+/// restart) does not end it, so this cannot fire early.
+fn stop_with_window_manager(command: &mut Command) {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::process::CommandExt;
+        let window_manager = std::process::id();
+        // SAFETY: prctl and getppid are async-signal-safe and only touch the
+        // forked child's own state; the errors built here do not allocate.
+        unsafe {
+            command.pre_exec(move || {
+                if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) != 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                // The WM may have died between fork and prctl, in which case
+                // the signal will never come; do not start an orphan.
+                if libc::getppid().cast_unsigned() != window_manager {
+                    return Err(io::Error::from_raw_os_error(libc::ESRCH));
+                }
+                Ok(())
+            });
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = command;
+}
+
 fn secondary_bar_command_with_environment(
     bar_name: &str,
     shared_path: &str,
@@ -196,6 +233,7 @@ fn secondary_bar_command_with_environment(
     // loop's signalfd; std would hand the bar that mask. Only the mask is
     // reset: the bar stays in JWM's session (no `setsid`).
     crate::external_command::unblock_sigchld_in_child(&mut command);
+    stop_with_window_manager(&mut command);
 
     command
         .stdin(Stdio::null())
@@ -990,6 +1028,40 @@ mod secondary_bar_child_tests {
                 assert_eq!(after, before, "{name}={value:?}");
             }
         }
+    }
+
+    /// A bar must not outlive the WM that spawned it. Spawning from a thread
+    /// that then ends stands in for the WM dying: the parent-death signal is
+    /// tied to the spawning thread.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_bar_is_stopped_when_its_window_manager_dies() {
+        use std::os::unix::process::ExitStatusExt;
+        let environment = crate::child_environment::ChildEnvironment::default();
+        let mut bar = std::thread::spawn(move || {
+            // `sleep 30` stands in for the bar binary and its shm argument.
+            super::secondary_bar_command_with_environment("sleep", "30", 0, &environment)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .expect("spawn stand-in bar")
+        })
+        .join()
+        .expect("spawning thread");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let status = loop {
+            if let Some(status) = bar.try_wait().expect("poll stand-in bar") {
+                break status;
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = bar.kill();
+                let _ = bar.wait();
+                panic!("the bar outlived the thread that spawned it");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        };
+        assert_eq!(status.signal(), Some(libc::SIGTERM));
     }
 
     #[test]
