@@ -19,8 +19,10 @@ monorepo use independent Semantic Versions.
 - Viewer windows are titled with the machine they show.
 - Running `jwm-remote ssh` again for the same machine and monitor brings the
   open viewer to the front instead of starting a second session, also while
-  the first is still connecting, so it can sit on one key. `--notify` reports
-  failures as a desktop notification for shortcut launches.
+  the first is still connecting, so it can sit on one key. For another
+  monitor of that machine it switches: the open viewer is closed and the
+  requested monitor opens (one host captures a screen at a time). `--notify`
+  reports failures as a desktop notification for shortcut launches.
 
 ### Remote control between two real desktops
 

@@ -98,7 +98,7 @@ transport lacks.
 
 ### One key for a machine you use often
 
-Bind the command in `config_x11.toml`:
+Bind the command in `config_x11.toml`, one key per monitor if you like:
 
 ```toml
 [[keybindings.keys]]
@@ -106,12 +106,24 @@ modifier = ["Mod4"]
 key = "r"
 function = "spawn"
 argument = ["jwm-remote", "ssh", "user@desktop", "--grab-input", "--monitor", "DP-0", "--notify"]
+
+[[keybindings.keys]]
+modifier = ["Mod4", "Shift"]
+key = "r"
+function = "spawn"
+argument = ["jwm-remote", "ssh", "user@desktop", "--grab-input", "--monitor", "DP-2", "--notify"]
 ```
 
-Pressing it again brings the open window back to the front instead of
-starting a second session: one session per machine and monitor runs at a
-time, guarded by a lock in `$XDG_RUNTIME_DIR`, so a second press while the
-first is still connecting does nothing either. `--notify` reports a failure
+A machine has one session at a time, because one host captures a screen at a
+time; a lock in `$XDG_RUNTIME_DIR` records which monitor it shows. Pressing
+the key of the monitor already shown brings its window to the front. Pressing
+another monitor's key **switches**: the open viewer is closed the way its close
+button does it, its host stops, and the new monitor opens — about 1.2 seconds
+on a LAN. A press while a session is still connecting does nothing.
+
+While the viewer has the keyboard grabbed, every key goes to the remote
+machine, these shortcuts included. Double-tap F12 to release it first, then
+press the other monitor's key. `--notify` reports a failure
 (`ssh could not connect or log in`, a busy desktop, ...) as a desktop
 notification, since a shortcut has no terminal. A shortcut cannot answer a
 password prompt, so use a key without a passphrase or one loaded in an agent

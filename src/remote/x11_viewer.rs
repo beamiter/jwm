@@ -2681,6 +2681,49 @@ fn is_closed_window_error(error: &X11Error, window: Window) -> bool {
 /// desktop is pressed again to get back to it, and a second session to the
 /// same machine would only fight the first over its input.
 pub fn focus_existing_viewer(display: Option<&str>, peer_label: &str) -> RemoteResult<bool> {
+    let (conn, root) = open_root(display)?;
+    let Some(window) = find_viewer_window(&conn, root, peer_label)? else {
+        return Ok(false);
+    };
+    let active_window = intern_atom(&conn, b"_NET_ACTIVE_WINDOW")?;
+    // Source 2: a pager-like request on the user's behalf, which window
+    // managers honour without focus-stealing prevention.
+    let event = ClientMessageEvent::new(32, window, active_window, [2, CURRENT_TIME, 0, 0, 0]);
+    conn.send_event(
+        false,
+        root,
+        EventMask::SUBSTRUCTURE_REDIRECT | EventMask::SUBSTRUCTURE_NOTIFY,
+        event,
+    )?;
+    conn.flush()?;
+    Ok(true)
+}
+
+/// Close an open viewer of `peer_label` the way its close button does.
+///
+/// Returns whether one was found. The viewer releases any held input, tells
+/// the host it is leaving and exits; a host started by `jwm-remote ssh`
+/// stops with it. Used to switch to another monitor of the same machine,
+/// since one host captures a screen at a time.
+pub fn close_existing_viewer(display: Option<&str>, peer_label: &str) -> RemoteResult<bool> {
+    let (conn, root) = open_root(display)?;
+    let Some(window) = find_viewer_window(&conn, root, peer_label)? else {
+        return Ok(false);
+    };
+    let wm_protocols = intern_atom(&conn, b"WM_PROTOCOLS")?;
+    let wm_delete_window = intern_atom(&conn, b"WM_DELETE_WINDOW")?;
+    let event = ClientMessageEvent::new(
+        32,
+        window,
+        wm_protocols,
+        [wm_delete_window, CURRENT_TIME, 0, 0, 0],
+    );
+    conn.send_event(false, window, EventMask::NO_EVENT, event)?;
+    conn.flush()?;
+    Ok(true)
+}
+
+fn open_root(display: Option<&str>) -> RemoteResult<(RustConnection, Window)> {
     let (conn, screen_num) = xbar_core::x11_connection::connect(display)?;
     let root = conn
         .setup()
@@ -2688,11 +2731,18 @@ pub fn focus_existing_viewer(display: Option<&str>, peer_label: &str) -> RemoteR
         .get(screen_num)
         .ok_or_else(|| invalid_data("X11 selected an unavailable screen"))?
         .root;
-    let client_list = intern_atom(&conn, b"_NET_CLIENT_LIST")?;
-    let active_window = intern_atom(&conn, b"_NET_ACTIVE_WINDOW")?;
-    let net_wm_name = intern_atom(&conn, b"_NET_WM_NAME")?;
-    let utf8_string = intern_atom(&conn, b"UTF8_STRING")?;
+    Ok((conn, root))
+}
 
+/// The viewer window showing `peer_label`, if one is open.
+fn find_viewer_window(
+    conn: &RustConnection,
+    root: Window,
+    peer_label: &str,
+) -> RemoteResult<Option<Window>> {
+    let client_list = intern_atom(conn, b"_NET_CLIENT_LIST")?;
+    let net_wm_name = intern_atom(conn, b"_NET_WM_NAME")?;
+    let utf8_string = intern_atom(conn, b"UTF8_STRING")?;
     // Managed clients, plus top-level windows for a session with no window
     // manager to keep that list.
     let mut candidates: Vec<Window> = conn
@@ -2716,22 +2766,11 @@ pub fn focus_existing_viewer(display: Option<&str>, peer_label: &str) -> RemoteR
             .reply()
             .map(|reply| reply.value)
             .unwrap_or_default();
-        if !is_viewer_of(&title, peer_label) {
-            continue;
+        if is_viewer_of(&title, peer_label) {
+            return Ok(Some(window));
         }
-        // Source 2: a pager-like request on the user's behalf, which window
-        // managers honour without focus-stealing prevention.
-        let event = ClientMessageEvent::new(32, window, active_window, [2, CURRENT_TIME, 0, 0, 0]);
-        conn.send_event(
-            false,
-            root,
-            EventMask::SUBSTRUCTURE_REDIRECT | EventMask::SUBSTRUCTURE_NOTIFY,
-            event,
-        )?;
-        conn.flush()?;
-        return Ok(true);
     }
-    Ok(false)
+    Ok(None)
 }
 
 /// Whether a viewer window title belongs to `peer_label`.
