@@ -9,7 +9,7 @@ use jwm::remote::ssh::{SshOptions, run_ssh};
 use jwm::remote::usability::{
     default_key_path, key_metadata, normalize_address, normalize_listen_address,
 };
-use jwm::remote::x11_capture::{CaptureArea, CaptureRegion, CaptureSource};
+use jwm::remote::x11_capture::{CaptureArea, CaptureRegion, CaptureSource, ScalingPolicy};
 use jwm::remote::x11_viewer::DEFAULT_ESCAPE_KEY;
 use jwm::remote::{RemoteResult, messages::APPLICATION_VERSION, protocol::TRANSPORT_VERSION};
 use std::path::PathBuf;
@@ -117,6 +117,16 @@ enum Command {
         /// auto prefers JWM's Composite overlay and falls back to root.
         #[arg(long, default_value = "auto", value_parser = parse_capture_source)]
         capture_source: CaptureSource,
+
+        /// Where frames are shrunk to the viewer's size: auto, gpu or cpu.
+        ///
+        /// gpu uses XRender in the X server and reads back only what is sent.
+        /// auto does that except on NVIDIA's proprietary driver, where such
+        /// reads can return a half-drawn frame (a flash of bare wallpaper or
+        /// blocky noise); there it reads the screen directly and scales on
+        /// the CPU.
+        #[arg(long, default_value = "auto", value_parser = parse_scaling)]
+        scaling: ScalingPolicy,
 
         /// Share one RandR monitor instead of the whole root, by name.
         ///
@@ -307,6 +317,7 @@ fn run(command: Command) -> RemoteResult<()> {
             fixed_jpeg_quality,
             max_width,
             capture_source,
+            scaling,
             monitor,
             region,
             allow_lan,
@@ -337,6 +348,7 @@ fn run(command: Command) -> RemoteResult<()> {
                 max_width,
                 capture_source,
                 capture_area,
+                scaling,
                 allow_lan,
                 allow_input,
                 allow_clipboard,
@@ -503,6 +515,10 @@ fn parse_max_width(value: &str) -> Result<u16, String> {
 }
 
 fn parse_capture_source(value: &str) -> Result<CaptureSource, String> {
+    value.parse()
+}
+
+fn parse_scaling(value: &str) -> Result<ScalingPolicy, String> {
     value.parse()
 }
 

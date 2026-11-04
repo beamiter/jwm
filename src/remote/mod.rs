@@ -18,6 +18,7 @@ pub type RemoteResult<T> = Result<T, RemoteError>;
 
 pub mod client;
 mod deadline;
+mod downscale;
 pub mod frame;
 pub mod host;
 pub mod key;

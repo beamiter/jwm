@@ -999,13 +999,41 @@ jwm-remote: host 5.0s mode overlay/xrender/shm/damage/cursor-events scheduled 60
 jwm-remote: capture mode now overlay/cpu-resize/shm/damage/cursor-events
 ```
 
-The healthy reading is `overlay/xrender/shm/damage/cursor-events`. Each field
+The healthy reading is `overlay/xrender/shm/damage/cursor-events`, or
+`overlay/cpu-resize/shm/damage/cursor-events` on NVIDIA's proprietary driver
+(see [Half-drawn frames on NVIDIA](#half-drawn-frames-on-nvidia)). Each field
 names its fallback explicitly rather than disappearing, so a degraded session
 is obvious at a glance: `root`, `cpu-resize`, `core-getimage`, `no-damage`,
 `cursor-poll`, and the `geometry-poll` / `compositor-poll` fields that appear
 only when those caches have stopped following notifications. `cpu-resize` and
 `no-damage` in particular are large, and each of them used to be announced only
 once, by a line that had long since scrolled away.
+
+### Half-drawn frames on NVIDIA
+
+Symptom: the viewer flashes the bare, blurred wallpaper for a frame or a few,
+or shows blocky black-and-white noise, most often across the top of the
+screen where the clock and status bar redraw every second. The host machine's
+own screen shows nothing of the kind.
+
+Cause: on NVIDIA's proprietary driver, XRender and CopyArea reads of the
+GL-composited screen can return a frame the compositor is still drawing —
+its blurred backdrop before any window, or a partial blur pass. The host
+reads right after every Damage notification, so it lands in that window far
+more often than a periodic screen grab would. Measured on an RTX 4090 D
+(driver 570) over 45 seconds of a jwm session: 20 such frames through
+XRender; 0 through a core `GetImage`, which the driver synchronizes with GL
+rendering; 0 in 2,700 frames of ffmpeg recording the host's screen directly.
+
+`--scaling auto`, the default, therefore reads the screen with `GetImage` and
+shrinks it on the CPU when the X server has the `NV-GLX` or `NV-CONTROL`
+extension, and says so at session start. The CPU path averages each output
+pixel's source area across threads; it took the place of a generic filter
+that cost about 90 ms per 2560x1440 frame. On the same loaded desktop the
+corrected path captured at about 152 ms per frame against 117 ms through
+XRender, both dominated by waiting for the GPU. `--scaling gpu` restores
+XRender for anyone who prefers that speed and does not see the artifacts;
+`--scaling cpu` forces the direct path elsewhere.
 
 - A black/invalid Composite overlay can be bypassed with
   `--capture-source root`. Root capture is a compatibility fallback and may

@@ -5,6 +5,16 @@ monorepo use independent Semantic Versions.
 
 ## [Unreleased]
 
+### Remote view without half-drawn frames on NVIDIA
+
+- On NVIDIA's proprietary driver the remote view intermittently flashed the
+  bare blurred wallpaper or blocky black-and-white noise, mostly across the
+  top of the screen: XRender reads of the GL-composited screen could return a
+  frame still being drawn. The host now reads the screen directly there
+  (`--scaling auto`, the default) and shrinks it with a new multi-threaded
+  area-average downscaler; measured flashes fell from 20 to 0 in 45 s.
+  `--scaling gpu|cpu` overrides the choice.
+
 ### One-command remote control over SSH
 
 - `jwm-remote ssh [USER@]HOST` controls another JWM desktop with nothing set

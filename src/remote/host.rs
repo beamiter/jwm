@@ -15,8 +15,8 @@ use super::protocol::{
 use super::tile::{TileEncodeRequest, TileEncoder, TilePlan};
 use super::usability::listener_bind_error;
 use super::x11_capture::{
-    CaptureArea, CaptureMode, CaptureOutcome, CaptureSource, CapturedFrame, X11Capture,
-    validate_capture_area,
+    CaptureArea, CaptureMode, CaptureOutcome, CaptureSource, CapturedFrame, ScalingPolicy,
+    X11Capture, validate_capture_area,
 };
 use super::x11_input::{InputArea, InputInjector};
 use super::x11_keymap::{KeymapMatch, KeymapTable};
@@ -1392,6 +1392,8 @@ pub struct HostOptions {
     pub capture_source: CaptureSource,
     /// Which part of the root to share; the whole root by default.
     pub capture_area: CaptureArea,
+    /// Where frames are shrunk to the viewer's size.
+    pub scaling: ScalingPolicy,
     pub allow_lan: bool,
     pub allow_input: bool,
     pub allow_clipboard: bool,
@@ -1753,6 +1755,7 @@ fn serve_authenticated(
         options.capture_source,
         options.max_width,
         options.capture_area.clone(),
+        options.scaling,
     ) {
         Ok(capture) => capture,
         Err(error) => {
@@ -3901,6 +3904,7 @@ mod tests {
             max_width: 0,
             capture_source: CaptureSource::Auto,
             capture_area: CaptureArea::Root,
+            scaling: ScalingPolicy::Auto,
             allow_lan: false,
             allow_input: false,
             allow_clipboard: false,

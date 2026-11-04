@@ -200,6 +200,44 @@ impl EventAttribution {
 pub(crate) const DAMAGE_FORCE_REFRESH: Duration = Duration::from_secs(2);
 const ROOT_STAGING_MAX_BYTES: usize = 64 * 1024 * 1024;
 
+/// Where a frame is shrunk to the viewer's size.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ScalingPolicy {
+    /// XRender in the X server, except on NVIDIA's proprietary driver.
+    #[default]
+    Auto,
+    /// Always XRender, which reads back only the encoded size.
+    Gpu,
+    /// Always a full-size readback, shrunk on the CPU.
+    Cpu,
+}
+
+impl ScalingPolicy {
+    /// Whether XRender may scale on this X server.
+    ///
+    /// On NVIDIA's proprietary driver, XRender and CopyArea reads of the
+    /// GL-composited screen can return a frame the compositor is still
+    /// drawing: measured over 45 s of a jwm session it showed only the
+    /// blurred wallpaper on 20 frames, and other partial passes appear as
+    /// blocky black-and-white noise. A core GetImage is synchronized with GL
+    /// rendering and showed none, so `Auto` takes that path there.
+    fn allows_gpu(self, nvidia_driver: bool) -> bool {
+        match self {
+            Self::Gpu => true,
+            Self::Cpu => false,
+            Self::Auto => !nvidia_driver,
+        }
+    }
+}
+
+/// Whether the X server runs NVIDIA's proprietary driver, by the extensions
+/// only that driver registers.
+fn nvidia_driver(conn: &RustConnection) -> bool {
+    ["NV-GLX", "NV-CONTROL"]
+        .iter()
+        .any(|name| conn.extension_information(name).ok().flatten().is_some())
+}
+
 /// Which X drawable supplies the remote desktop image.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum CaptureSource {
@@ -237,6 +275,21 @@ impl std::str::FromStr for CaptureRegion {
             width,
             height,
         })
+    }
+}
+
+impl std::str::FromStr for ScalingPolicy {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.to_ascii_lowercase().as_str() {
+            "auto" => Ok(Self::Auto),
+            "gpu" | "xrender" => Ok(Self::Gpu),
+            "cpu" => Ok(Self::Cpu),
+            _ => Err(format!(
+                "unknown scaling {value:?}; expected auto, gpu, or cpu"
+            )),
+        }
     }
 }
 
@@ -957,6 +1010,8 @@ pub struct X11Capture {
     /// When XRender scaling may be attempted again after a rejected request.
     render_suspended_until: Option<Instant>,
     render_failures: u32,
+    /// Whether XRender may scale at all; see [`ScalingPolicy`].
+    gpu_scaling: bool,
     event_attribution: EventAttribution,
     shm_readback: ShmReadback,
 }
@@ -967,6 +1022,7 @@ impl X11Capture {
         requested_source: CaptureSource,
         max_width: u16,
         area: CaptureArea,
+        scaling: ScalingPolicy,
     ) -> RemoteResult<Self> {
         let (conn, screen_num) = open_display(display)?;
         let screen = conn
@@ -1053,7 +1109,14 @@ impl X11Capture {
                 return Err(error);
             }
         };
-        let render_scaler = if max_width == 0 {
+        let gpu_scaling = scaling.allows_gpu(nvidia_driver(&conn));
+        if !gpu_scaling && scaling == ScalingPolicy::Auto {
+            eprintln!(
+                "jwm-remote: NVIDIA driver: scaling on the CPU, because XRender reads of the \
+                 composited screen can return unfinished frames (--scaling gpu overrides)"
+            );
+        }
+        let render_scaler = if max_width == 0 || !gpu_scaling {
             None
         } else {
             match RenderScaler::connect(&conn, screen_num, screen) {
@@ -1097,6 +1160,7 @@ impl X11Capture {
             render_scaler,
             render_suspended_until: None,
             render_failures: 0,
+            gpu_scaling,
             event_attribution,
             shm_readback,
         };
@@ -1389,6 +1453,12 @@ impl X11Capture {
             .map_err(CaptureFailure::fatal)?;
         let image = if output_width == source_width && output_height == source_height {
             image
+        } else if output_width <= source_width && output_height <= source_height {
+            super::downscale::area_downscale(
+                &image,
+                u32::from(output_width),
+                u32::from(output_height),
+            )
         } else {
             image::imageops::resize(
                 &image,
@@ -1673,7 +1743,11 @@ impl X11Capture {
         }
         // A native-width session never built a scaler. Downscaling now needs
         // one, and the CPU resize fallback would otherwise be permanent.
-        if max_width != 0 && self.render_scaler.is_none() && self.render_failures == 0 {
+        if max_width != 0
+            && self.gpu_scaling
+            && self.render_scaler.is_none()
+            && self.render_failures == 0
+        {
             match self.screen() {
                 Ok(screen) => {
                     let screen = screen.clone();
@@ -4216,6 +4290,18 @@ fn invalid_data(message: impl Into<String>) -> io::Error {
 mod tests {
     use super::*;
     use std::cell::Cell;
+
+    #[test]
+    fn auto_scaling_avoids_xrender_only_on_the_nvidia_driver() {
+        assert!(ScalingPolicy::Auto.allows_gpu(false));
+        assert!(!ScalingPolicy::Auto.allows_gpu(true));
+        // An explicit choice wins either way.
+        assert!(ScalingPolicy::Gpu.allows_gpu(true));
+        assert!(!ScalingPolicy::Cpu.allows_gpu(false));
+        assert_eq!("XRender".parse(), Ok(ScalingPolicy::Gpu));
+        assert_eq!("cpu".parse(), Ok(ScalingPolicy::Cpu));
+        assert!("fast".parse::<ScalingPolicy>().is_err());
+    }
 
     #[test]
     fn an_unreachable_display_is_named_rather_than_reported_as_a_network_error() {
