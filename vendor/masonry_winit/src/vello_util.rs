@@ -463,7 +463,14 @@ fn native_x11_argb_surface(target: &wgpu::SurfaceTarget<'_>) -> bool {
     // Winit's X11 window belongs to the active DISPLAY. Verify its accepted
     // depth and visual through safe protocol queries; never dereference the
     // borrowed display pointer. Non-X11 and unavailable evidence fail closed.
-    let Ok((connection, _)) = x11rb::connect(None) else {
+    // Match winit's native transport. RustConnection does not try Linux's
+    // abstract X11 socket, which can work while the filesystem socket is absent.
+    // Missing that connection silently skips premultiplication and turns
+    // antialiased edges into bright, jagged pixels on opaque-only Vulkan WSI.
+    if x11rb::xcb_ffi::load_libxcb().is_err() {
+        return false;
+    }
+    let Ok((connection, _)) = x11rb::xcb_ffi::XCBConnection::connect(None) else {
         return false;
     };
     let Some(geometry) = connection
@@ -553,5 +560,34 @@ mod native_alpha_tests {
             &[Alpha::PostMultiplied]
         ));
         assert!(!native_x11_premultiplied_blit(true, Backend::Gl, &[]));
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    #[ignore = "requires an X11 display with a compositing manager"]
+    fn native_argb_detection_accepts_a_real_transparent_window() {
+        use winit::event_loop::EventLoop;
+        use winit::platform::x11::EventLoopBuilderExtX11;
+        use winit::window::Window;
+
+        let mut builder = EventLoop::<()>::with_user_event();
+        builder.with_x11().with_any_thread(true);
+        let event_loop = builder.build().unwrap();
+        #[expect(
+            deprecated,
+            reason = "create one hidden window without running a UI loop"
+        )]
+        let window = event_loop
+            .create_window(
+                Window::default_attributes()
+                    .with_visible(false)
+                    .with_transparent(true),
+            )
+            .unwrap();
+        // Also run on abstract-socket-only sessions: the window is valid even
+        // when /tmp/.X11-unix/Xn is missing and RustConnection cannot connect.
+        assert!(super::native_x11_argb_surface(
+            &wgpu::SurfaceTarget::Window(Box::new(window))
+        ));
     }
 }

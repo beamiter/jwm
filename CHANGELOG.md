@@ -5,6 +5,13 @@ monorepo use independent Semantic Versions.
 
 ## [Unreleased]
 
+### Smooth Xilem status-bar edges on abstract X11 sockets
+
+- Fixed bright, jagged outlines around `xilem_bar` workspace buttons and text
+  when the X11 filesystem socket is missing but its Linux abstract socket is
+  available. Native ARGB detection now uses the same libxcb transport as window
+  creation, preserving alpha premultiplication on opaque-only Vulkan surfaces.
+
 ### Copy and paste files and images through jwm-remote
 
 - With `--clipboard`, a remote session now shares images and files as well
