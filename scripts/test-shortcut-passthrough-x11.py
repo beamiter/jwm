@@ -103,8 +103,28 @@ def main():
             run("xdpyinfo")
             run(str(BIN / "jwm"), "--backend", BACKEND, "--gen-config")
             config = work / "config/jwm/config_x11.toml"
-            text = config.read_text().replace("show_bar = true", "show_bar = false")
-            text = text.replace('name = "tao_glow_bar"', 'name = "/bin/true"')
+            text = config.read_text()
+            # Keep shell/bar processes out of the keyboard fixture, regardless
+            # of which frontend is the current generated default.
+            for section, setting, value in [
+                ("status_bar", "show_bar", "false"),
+                ("status_bar", "name", '"/bin/true"'),
+                ("desktop_shell", "enabled", "false"),
+                ("behavior", "eva_companion_enabled", "false"),
+            ]:
+                pattern = rf"(?ms)(^\[{section}\]\n)(.*?)(?=^\[|\Z)"
+
+                def update(match):
+                    body, count = re.subn(rf"(?m)^{setting} = .*?$", f"{setting} = {value}",
+                                          match[2], count=1)
+                    if not count:
+                        body = f"{setting} = {value}\n" + body
+                    return match[1] + body
+
+                text, count = re.subn(pattern, update, text, count=1)
+                if not count:
+                    assert section == "desktop_shell", f"missing generated section: {section}"
+                    text += f"\n[{section}]\n{setting} = {value}\n"
             text = text.replace('wallpaper_effect = "daily"', 'wallpaper_effect = "none"')
             text = text.replace('leader_key = ""', 'leader_key = "space"')
             text = text.replace('leader_modifier = []', 'leader_modifier = ["Mod1"]')
@@ -120,7 +140,7 @@ def main():
                 window = wait_for(lambda: next(w for w in msg("get_windows") if w["name"] == name))
                 windows.append((window["id"], path, child))
             remote, remote_log, remote_process = windows[0]
-            local, local_log, _ = windows[1]
+            local, local_log, local_process = windows[1]
             # Xlib clients can initialize Xvfb's XKB map lazily. Install grabs
             # against that final map before asserting baseline key delivery.
             msg("reload_config")
@@ -191,12 +211,26 @@ def main():
 
             focus(remote)
             key("ctrl+super+F12")
-            remote_process.terminate()
+            # A crash cannot run a client-side exit hook or the toggle.
+            remote_process.kill()
             remote_process.wait(timeout=5)
             wait_for(lambda: focused(local))
+            before = received(local_log, "a")
+            key("a")
+            wait_for(lambda: received(local_log, "a") >= before + 2)
             key("alt+n")
             wait_for(lambda: next(w for w in msg("get_windows") if w["id"] == local)["is_minimized"])
-            print(f"PASS ({BACKEND}): actual press/release forwarding, chord, reload, held toggle, lock-modified escape, focus, close")
+
+            # The last client can crash too: recovery must not depend on a
+            # surviving application accepting focus. Exercise a root shortcut.
+            focus(local)
+            key("ctrl+super+F12")
+            local_process.kill()
+            local_process.wait(timeout=5)
+            wait_for(lambda: not msg("get_windows"))
+            key("alt+2")
+            wait_for(lambda: msg("get_monitors")[0]["active_tags"] == 2)
+            print(f"PASS ({BACKEND}): actual press/release forwarding, chord, reload, held toggle, lock-modified escape, focus, SIGKILL with/without surviving clients")
         except BaseException:
             for output in logs:
                 output.flush()

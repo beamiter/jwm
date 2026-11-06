@@ -5711,6 +5711,7 @@ mod tests {
         capture_hint: Option<String>,
         compositor_enabled: bool,
         session_locked: bool,
+        fail_focus_change: bool,
     }
 
     impl ConfigureReplyBackend {
@@ -5732,6 +5733,7 @@ mod tests {
                 capture_hint: None,
                 compositor_enabled: false,
                 session_locked: false,
+                fail_focus_change: false,
             }
         }
     }
@@ -5821,6 +5823,18 @@ mod tests {
 
         fn root_window(&self) -> Option<WindowId> {
             Some(WindowId::from_raw(0))
+        }
+
+        fn on_focused_client_changed(
+            &mut self,
+            _win: Option<WindowId>,
+        ) -> Result<(), BackendError> {
+            if self.fail_focus_change {
+                return Err(
+                    std::io::Error::other("simulated focus failure after client exit").into(),
+                );
+            }
+            Ok(())
         }
 
         fn as_any(&self) -> &dyn Any {
@@ -6665,6 +6679,60 @@ mod tests {
             );
             jwm.setfocus(&mut backend, key).unwrap();
             assert_eq!(jwm.shortcut_passthrough_owner, None);
+        }
+    }
+
+    #[test]
+    fn shortcut_passthrough_owner_exit_restores_grabs_even_when_refocus_fails() {
+        for destroyed in [false, true] {
+            let (mut jwm, mut backend, input, key) = shortcut_passthrough_fixture();
+            jwm.toggle_shortcut_passthrough(&mut backend, &WMArgEnum::Int(0))
+                .unwrap();
+            backend.fail_focus_change = true;
+            assert!(jwm.unmanage(&mut backend, Some(key), destroyed).is_err());
+            assert!(!jwm.state.clients.contains_key(key));
+            assert_eq!(jwm.shortcut_passthrough_owner, None);
+            let grabs = input.key_grabs.lock().unwrap();
+            let restored = grabs.last().unwrap();
+            assert!(restored.contains(&(Mods::ALT, keys::KEY_r)));
+            assert!(restored.contains(&(Mods::ALT, keys::KEY_space)));
+            drop(grabs);
+            // Recovery must also restore policy dispatch, including repeats.
+            backend.fail_focus_change = false;
+            backend.toast_log.lock().unwrap().clear();
+            input.select(keys::KEY_r);
+            jwm.on_key_press_internal_with_repeat(&mut backend, 1, Mods::ALT.bits(), true)
+                .unwrap();
+            assert_eq!(backend.toast_log.lock().unwrap().len(), 1);
+        }
+    }
+
+    #[test]
+    fn shortcut_passthrough_focus_failure_still_restores_local_grabs() {
+        for root in [false, true] {
+            let (mut jwm, mut backend, input, _) = shortcut_passthrough_fixture();
+            jwm.toggle_shortcut_passthrough(&mut backend, &WMArgEnum::Int(0))
+                .unwrap();
+            backend.fail_focus_change = true;
+            let result = if root {
+                jwm.set_root_focus(&mut backend)
+            } else {
+                let other = jwm.insert_client(crate::core::models::WMClient::new(
+                    WindowId::from_raw(0x998),
+                ));
+                jwm.setfocus(&mut backend, other)
+            };
+            assert!(result.is_err());
+            assert_eq!(jwm.shortcut_passthrough_owner, None);
+            assert!(
+                input
+                    .key_grabs
+                    .lock()
+                    .unwrap()
+                    .last()
+                    .unwrap()
+                    .contains(&(Mods::ALT, keys::KEY_r))
+            );
         }
     }
 

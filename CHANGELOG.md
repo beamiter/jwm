@@ -5,6 +5,12 @@ monorepo use independent Semantic Versions.
 
 ## [Unreleased]
 
+### Restore local shortcuts when a remote window crashes
+
+- Shortcut passthrough now ends before its owner window is torn down or
+  focus is moved away. A client crash or failed focus request can no longer
+  leave local shortcuts disabled until Ctrl+Super+F12 is pressed again.
+
 ### Unified remote-control release shortcut
 
 - The built-in `jwm-remote` viewer now releases grabbed keyboard/pointer input

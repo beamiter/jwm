@@ -119,8 +119,8 @@ impl Jwm {
             self.update_client_decoration(backend, client_key, false)?;
             self.grabbuttons(backend, client_key, false);
             if setfocus {
-                backend.on_focused_client_changed(None)?;
                 self.sync_shortcut_passthrough_focus(backend, None)?;
+                backend.on_focused_client_changed(None)?;
             }
         }
         Ok(())
@@ -132,8 +132,9 @@ impl Jwm {
         client_key: ClientKey,
     ) -> Result<(), Box<dyn std::error::Error>> {
         if let Some(client) = self.state.clients.get(client_key) {
-            backend.on_focused_client_changed(Some(client.win))?;
+            let win = client.win;
             self.sync_shortcut_passthrough_focus(backend, Some(client_key))?;
+            backend.on_focused_client_changed(Some(win))?;
         }
         Ok(())
     }
@@ -142,9 +143,12 @@ impl Jwm {
         &mut self,
         backend: &mut dyn Backend,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        // Releasing local shortcuts must not depend on the focus request
+        // succeeding; a disappearing X11 target can reject that request.
+        self.sync_shortcut_passthrough_focus(backend, None)?;
         backend.window_ops().set_input_focus_root()?;
         backend.on_focused_client_changed(None)?;
-        self.sync_shortcut_passthrough_focus(backend, None)
+        Ok(())
     }
 
     pub(crate) fn update_ewmh_desktop(

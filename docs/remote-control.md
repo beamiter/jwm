@@ -12,6 +12,8 @@ combinations such as Alt+J, Alt+1, Alt+Shift+Return and chord leaders.
 Press the same key again to restore local shortcuts. Focusing another window
 or the desktop, closing the owner window, or restarting JWM also ends the
 mode. Returning to the remote window does not re-enable it automatically.
+Window withdrawal or destruction restores local shortcuts before teardown
+and refocusing, including a client crash or `kill -9`, even if refocusing fails.
 The toggle is reserved locally during passthrough. Built-in lock and modal
 shell surfaces retain their input ownership. Mouse shortcuts are unchanged.
 

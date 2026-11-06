@@ -1727,6 +1727,14 @@ impl Jwm {
             None => return Ok(()),
         };
 
+        // A crashed passthrough owner may leave no focusable replacement, or
+        // refocusing may fail against another exiting X11 window. Restore the
+        // local grabs before any fallible teardown, rather than relying on
+        // the focus change at the end of unmanage_regular_client.
+        if self.shortcut_passthrough_owner == Some(client_key) {
+            self.sync_shortcut_passthrough_focus(backend, None)?;
+        }
+
         let win = if let Some(client) = self.state.clients.get(client_key) {
             client.win
         } else {
