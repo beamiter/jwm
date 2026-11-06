@@ -189,11 +189,11 @@ enum Command {
         #[arg(long)]
         view_only: bool,
 
-        /// Click the viewer to grab local input; double-tap the escape key to release.
+        /// Click the viewer to grab local input; Ctrl+Super+F12 releases it.
         #[arg(long, conflicts_with = "view_only")]
         grab_input: bool,
 
-        /// X keysym name that releases the grab when tapped twice quickly.
+        /// Base X keysym of the Ctrl+Super grab-release shortcut.
         #[arg(long, default_value = DEFAULT_ESCAPE_KEY, value_name = "KEYSYM")]
         escape_key: String,
 
@@ -238,13 +238,13 @@ enum Command {
         #[arg(long)]
         view_only: bool,
 
-        /// Click the viewer to grab local input; double-tap the escape key to release.
+        /// Click the viewer to grab local input; Ctrl+Super+F12 releases it.
         #[arg(long, conflicts_with = "view_only")]
         grab_input: bool,
 
-        /// X keysym name that releases the grab when tapped twice quickly.
+        /// Base X keysym of the Ctrl+Super grab-release shortcut.
         ///
-        /// A single press is forwarded to the remote machine as usual.
+        /// Without Ctrl+Super, this key is forwarded to the remote as usual.
         #[arg(long, default_value = DEFAULT_ESCAPE_KEY, value_name = "KEYSYM")]
         escape_key: String,
 

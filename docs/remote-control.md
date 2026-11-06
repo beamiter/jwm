@@ -123,7 +123,7 @@ button does it, its host stops, and the new monitor opens — about 1.2 seconds
 on a LAN. A press while a session is still connecting does nothing.
 
 While the viewer has the keyboard grabbed, every key goes to the remote
-machine, these shortcuts included. Double-tap F12 to release it first, then
+machine, these shortcuts included. Press Ctrl+Super+F12 to release it first, then
 press the other monitor's key. `--notify` reports a failure
 (`ssh could not connect or log in`, a busy desktop, ...) as a desktop
 notification, since a shortcut has no terminal. A shortcut cannot answer a
@@ -218,10 +218,10 @@ To control the machine, stop/restart the host with `--allow-input`, then run:
 jwm-remote connect HOST --grab-input
 ```
 
-Click the viewer to take control. Double-tap F12 quickly to release input;
-close the viewer to disconnect. Use `--escape-key Pause` if needed. Clipboard
-stays off unless the host has `--allow-clipboard` **and** the viewer has
-`--clipboard`.
+Click the viewer to take control. Press **Ctrl+Super+F12** to release input;
+close the viewer to disconnect. Use `--escape-key Pause` for Ctrl+Super+Pause if
+needed. Clipboard stays off unless the host has `--allow-clipboard` **and** the
+viewer has `--clipboard`.
 
 ### Know what is connected
 
@@ -305,10 +305,12 @@ contents into a shell command or a reconnect script.
    Confirm the first desktop appears before the connected line, and input and
    clipboard remain disabled.
 3. Restart the host with `--allow-input`; connect with `--grab-input`. Confirm
-   click-to-control, the grabbed/released title changes, and double-F12 releases
+   click-to-control, the grabbed/released title changes, and Ctrl+Super+F12 releases
    all remotely held input. With differing XKB maps, verify pointer-only status.
-   In both modes, hold F12 past the keyboard repeat delay: control must stay
-   grabbed, while a real double tap must release it. Pointer-only keys stay local.
+   In both modes, hold F12 past the keyboard repeat delay and double-tap it:
+   control must stay grabbed. Ctrl+Super+F12 must release it in either mode,
+   including with Caps Lock/Num Lock on or a mouse button held. Pointer-only
+   keys stay local.
 4. Close the viewer normally, then reconnect deliberately. Interrupt the host
    or network and confirm a clear session-stage reason; no automatic reconnect.
 5. Select a monitor/region, change its position/size, and verify fail-closed
@@ -527,18 +529,16 @@ jwm-remote connect 192.168.1.50:48221 \
 ```
 
 With `--grab-input`, click inside the viewer before using JWM shortcuts. Press
-F12 **twice in quick succession** to release the local keyboard/pointer grab
-and release every remotely held
-key/button. The client refuses `--grab-input` if its base keymap has no plain
-F12 escape key; `--escape-key` takes any X keysym name, such as `Pause` or
-`Scroll_Lock`, for keyboards without a usable F12.
+**Ctrl+Super+F12** (Super is the Win key) to release the local keyboard/pointer
+grab and every remotely held key/button. This matches JWM's default shortcut
+for third-party remote desktop passthrough. Caps Lock, Num Lock and held mouse
+buttons do not prevent release. The client refuses `--grab-input` if its base
+keymap has no plain F12 key; `--escape-key` changes the shortcut's base X keysym.
+For example, `--escape-key Pause` uses Ctrl+Super+Pause.
 
-A *single* press of the escape key is forwarded to the remote machine like any
-other key. Only a second press within half a second releases the grab. The
-earlier behaviour swallowed the key entirely, which meant a grabbed session
-could never send it at all — an application on the remote side that wanted F12
-simply could not be driven. Closing the viewer also performs that release.
-Without
+Without Ctrl+Super, F12 is forwarded to the remote machine like any other key,
+including repeated presses and double taps. The release shortcut itself is
+handled locally. Closing the viewer also releases input. Without
 `--grab-input`, ordinary pointer and key events are forwarded while the viewer
 has focus, but local JWM global shortcuts may win their passive grabs.
 

@@ -311,7 +311,7 @@ pub fn viewer_title(
     } else if grab_input && !grabbed {
         "; input released - click to control".to_owned()
     } else if grab_input {
-        format!("; grabbed - double-tap {escape} to release")
+        format!("; grabbed - Ctrl+Super+{escape} to release")
     } else {
         "; input while focused".to_owned()
     };
@@ -578,7 +578,7 @@ mod tests {
         );
         assert!(
             viewer_title("desk", true, true, true, true, true, None, "Pause")
-                .contains("double-tap Pause to release; clipboard ON")
+                .contains("Ctrl+Super+Pause to release; clipboard ON")
         );
         assert!(
             viewer_title(

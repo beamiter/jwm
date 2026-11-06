@@ -5,6 +5,13 @@ monorepo use independent Semantic Versions.
 
 ## [Unreleased]
 
+### Unified remote-control release shortcut
+
+- The built-in `jwm-remote` viewer now releases grabbed keyboard/pointer input
+  with Ctrl+Super+F12, matching third-party remote desktop passthrough. Plain
+  F12 presses and double taps reach the remote desktop. `--escape-key Pause`
+  changes the release shortcut to Ctrl+Super+Pause.
+
 ### Smooth Xilem status-bar edges on abstract X11 sockets
 
 - Fixed bright, jagged outlines around `xilem_bar` workspace buttons and text

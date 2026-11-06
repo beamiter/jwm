@@ -59,7 +59,7 @@ pub struct ClientOptions {
     pub clipboard: bool,
     /// Largest file copy shared through the clipboard; 0 shares no files.
     pub clipboard_file_limit: u64,
-    /// X keysym name that releases the local grab on a double tap.
+    /// Base X keysym of the Ctrl+Super local grab-release shortcut.
     pub escape_key: String,
 }
 
@@ -278,7 +278,7 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
     );
     if options.grab_input && (hello.pointer_enabled || hello.keyboard_enabled) {
         eprintln!(
-            "jwm-remote: click the viewer to control; double-tap {} to release input",
+            "jwm-remote: click the viewer to control; Ctrl+Super+{} to release input",
             options.escape_key
         );
     }
@@ -1929,7 +1929,7 @@ mod tests {
     }
 
     #[test]
-    fn f12_release_all_partitions_pointer_runs() {
+    fn escape_shortcut_release_all_partitions_pointer_runs() {
         let (batches, _) = collect_input_batches(
             [
                 ViewerEvent::Key {
@@ -1938,7 +1938,7 @@ mod tests {
                 },
                 pointer(20),
                 pointer(21),
-                // A double-tapped escape key releases the grab, which the
+                // The escape shortcut releases the grab, which the
                 // viewer represents upstream as this ReleaseAll edge.
                 ViewerEvent::ReleaseAll,
                 pointer(22),

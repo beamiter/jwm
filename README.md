@@ -455,6 +455,9 @@ jwm-remote ssh user@desktop --grab-input            # whole desktop
 jwm-remote ssh user@desktop --grab-input --monitor DP-0
 ```
 
+Click the viewer to take control; press **Ctrl+Super+F12** (Super is the Win
+key) to release the local keyboard and pointer.
+
 Nothing is copied, kept or opened on the LAN, and closing the viewer stops the
 host. Both machines need the same `jwm-remote` version. For a standing host
 without SSH, generate and securely copy one private key, explicitly expose the
