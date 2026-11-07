@@ -6,13 +6,17 @@
 //! about 90 ms for a 2560x1440 monitor, which capped the whole session near
 //! ten frames a second. Averaging each output pixel's exact source area is
 //! the right filter for a pure reduction, needs no floating point, and splits
-//! into two passes. The reusable scaler uses a serial path, avoiding thread
-//! creation and per-frame scratch allocations.
+//! into two passes. Large frames use a persistent bounded worker pool; small
+//! frames stay serial. Neither path creates threads or scratch per frame.
 
 use image::RgbImage;
+use rayon::prelude::*;
 
 /// Fixed-point unity for coverage weights.
 const ONE: u32 = 1 << 16;
+const MAX_WORKERS: usize = 4;
+const PARALLEL_MIN_PIXELS: usize = 512 * 1024;
+const MIN_ROWS_PER_WORKER: usize = 64;
 
 /// The source samples one output sample averages, with their coverage.
 struct Spans {
@@ -82,6 +86,8 @@ pub(crate) struct CpuScaler {
     spans: Option<(Spans, Spans)>,
     narrow: Vec<u8>,
     accumulator: Vec<u32>,
+    pool: Option<rayon::ThreadPool>,
+    pool_attempted: bool,
 }
 
 impl CpuScaler {
@@ -101,39 +107,123 @@ impl CpuScaler {
             width > 0 && height > 0 && width <= source_width && height <= source_height,
             "area_downscale only shrinks"
         );
+        let parallel = source_width * source_height >= PARALLEL_MIN_PIXELS
+            && source_height >= MIN_ROWS_PER_WORKER * 2
+            && height >= MIN_ROWS_PER_WORKER * 2;
+        if parallel && !self.pool_attempted {
+            // Try once per session, not once per frame, including on resource
+            // exhaustion. No global Rayon pool or environment-sized pool is used.
+            self.pool_attempted = true;
+            let workers = std::thread::available_parallelism()
+                .map_or(1, usize::from)
+                .min(MAX_WORKERS);
+            if workers > 1 {
+                self.pool = rayon::ThreadPoolBuilder::new()
+                    .num_threads(workers)
+                    .thread_name(|index| format!("jwm-remote-scale-{index}"))
+                    .build()
+                    .ok();
+            }
+        }
+        let workers = self
+            .pool
+            .as_ref()
+            .map_or(1, rayon::ThreadPool::current_num_threads);
         if self.dimensions != Some(dimensions) {
             self.spans = Some((
                 Spans::new(source_width, width),
                 Spans::new(source_height, height),
             ));
             self.narrow.resize(source_height * width * 3, 0);
-            self.accumulator.resize(width * 3, 0);
+            self.accumulator.resize(width * 3 * workers, 0);
             self.dimensions = Some(dimensions);
         }
         let (columns, rows) = self.spans.as_ref().expect("scaler geometry initialized");
-        for (row, out_row) in image
-            .as_raw()
-            .chunks_exact(source_width * 3)
-            .zip(self.narrow.chunks_exact_mut(width * 3))
-        {
-            shrink_row(row, out_row, columns);
-        }
         output.resize(height * width * 3, 0);
-        for (index, out_row) in output.chunks_exact_mut(width * 3).enumerate() {
-            let (start, weights) = rows.of(index);
-            self.accumulator.fill(ONE / 2);
-            for (k, &weight) in weights.iter().enumerate() {
-                let row = &self.narrow[(start + k) * width * 3..][..width * 3];
-                for (sum, &value) in self.accumulator.iter_mut().zip(row) {
-                    *sum += weight * u32::from(value);
-                }
-            }
-            for (pixel, &sum) in out_row.iter_mut().zip(&self.accumulator) {
-                *pixel = (sum >> 16) as u8;
-            }
+        if let Some(pool) = self.pool.as_ref().filter(|_| parallel) {
+            let narrow = &mut self.narrow;
+            let accumulator = &mut self.accumulator;
+            pool.install(|| {
+                let narrow_rows = source_height.div_ceil(workers);
+                narrow
+                    .par_chunks_mut(narrow_rows * width * 3)
+                    .enumerate()
+                    .for_each(|(chunk, target)| {
+                        let first = chunk * narrow_rows * source_width * 3;
+                        shrink_horizontal(
+                            &image.as_raw()[first..],
+                            target,
+                            columns,
+                            source_width,
+                            width,
+                        );
+                    });
+                let output_rows = height.div_ceil(workers);
+                output
+                    .par_chunks_mut(output_rows * width * 3)
+                    .zip(accumulator.par_chunks_mut(width * 3))
+                    .enumerate()
+                    .for_each(|(chunk, (target, scratch))| {
+                        shrink_vertical(narrow, target, rows, scratch, width, chunk * output_rows);
+                    });
+            });
+        } else {
+            shrink_horizontal(
+                image.as_raw(),
+                &mut self.narrow,
+                columns,
+                source_width,
+                width,
+            );
+            shrink_vertical(
+                &self.narrow,
+                &mut output,
+                rows,
+                &mut self.accumulator[..width * 3],
+                width,
+                0,
+            );
         }
         RgbImage::from_raw(width as u32, height as u32, output)
             .expect("output buffer matches its dimensions")
+    }
+}
+
+fn shrink_horizontal(
+    source: &[u8],
+    output: &mut [u8],
+    columns: &Spans,
+    source_width: usize,
+    width: usize,
+) {
+    for (row, out_row) in source
+        .chunks_exact(source_width * 3)
+        .zip(output.chunks_exact_mut(width * 3))
+    {
+        shrink_row(row, out_row, columns);
+    }
+}
+
+fn shrink_vertical(
+    narrow: &[u8],
+    output: &mut [u8],
+    rows: &Spans,
+    accumulator: &mut [u32],
+    width: usize,
+    first_row: usize,
+) {
+    for (index, out_row) in output.chunks_exact_mut(width * 3).enumerate() {
+        let (start, weights) = rows.of(first_row + index);
+        accumulator.fill(ONE / 2);
+        for (k, &weight) in weights.iter().enumerate() {
+            let row = &narrow[(start + k) * width * 3..][..width * 3];
+            for (sum, &value) in accumulator.iter_mut().zip(row) {
+                *sum += weight * u32::from(value);
+            }
+        }
+        for (pixel, &sum) in out_row.iter_mut().zip(accumulator.iter()) {
+            *pixel = (sum >> 16) as u8;
+        }
     }
 }
 
@@ -162,6 +252,139 @@ fn shrink_row(row: &[u8], out_row: &mut [u8], columns: &Spans) {
 mod tests {
     use super::*;
     use image::Rgb;
+
+    fn serial_scaler() -> CpuScaler {
+        CpuScaler {
+            pool_attempted: true,
+            ..CpuScaler::default()
+        }
+    }
+
+    #[test]
+    fn persistent_pool_matches_serial_across_geometry_changes() {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(2)
+            .build()
+            .unwrap();
+        let mut parallel = CpuScaler {
+            pool: Some(pool),
+            pool_attempted: true,
+            ..CpuScaler::default()
+        };
+        let mut serial = serial_scaler();
+        let mut output = Vec::new();
+        for (w, h, target_w, target_h) in [
+            (1025, 513, 769, 257),
+            (1920, 1080, 960, 540),
+            (9, 7, 4, 3),
+            (1025, 513, 769, 257),
+        ] {
+            let image = RgbImage::from_fn(w, h, |x, y| {
+                Rgb([
+                    (x.wrapping_mul(31) ^ y) as u8,
+                    (y.wrapping_mul(13) ^ x) as u8,
+                    (x + y) as u8,
+                ])
+            });
+            let scaled = parallel.scale_into(&image, target_w, target_h, output);
+            assert_eq!(
+                scaled,
+                serial.scale_into(&image, target_w, target_h, Vec::new())
+            );
+            let narrow = parallel.narrow.as_ptr();
+            let scratch = parallel.accumulator.as_ptr();
+            let output_ptr = scaled.as_raw().as_ptr();
+            let repeated = parallel.scale_into(&image, target_w, target_h, scaled.into_raw());
+            assert_eq!(parallel.narrow.as_ptr(), narrow);
+            assert_eq!(parallel.accumulator.as_ptr(), scratch);
+            assert_eq!(repeated.as_raw().as_ptr(), output_ptr);
+            assert_eq!(parallel.pool.as_ref().unwrap().current_num_threads(), 2);
+            output = repeated.into_raw();
+        }
+    }
+
+    #[test]
+    fn small_frames_do_not_initialize_workers_and_large_pool_is_bounded() {
+        let mut scaler = CpuScaler::default();
+        scaler.scale_into(&RgbImage::new(32, 32), 16, 16, Vec::new());
+        assert!(!scaler.pool_attempted);
+        assert!(scaler.pool.is_none());
+        scaler.scale_into(&RgbImage::new(1024, 768), 512, 384, Vec::new());
+        assert!(scaler.pool_attempted);
+        if let Some(pool) = &scaler.pool {
+            assert!(pool.current_num_threads() <= MAX_WORKERS);
+        }
+        // A failed/disabled initialization is sticky and still yields pixels.
+        let mut fallback = serial_scaler();
+        assert_eq!(
+            fallback
+                .scale_into(
+                    &RgbImage::from_pixel(1024, 768, Rgb([4, 5, 6])),
+                    512,
+                    384,
+                    Vec::new()
+                )
+                .get_pixel(0, 0),
+            &Rgb([4, 5, 6])
+        );
+        assert!(fallback.pool.is_none());
+    }
+
+    /// Deterministic CPU-only microbenchmark, not X11/network performance.
+    #[test]
+    #[ignore = "release CPU microbenchmark; run explicitly with --release --ignored --nocapture"]
+    fn benchmark_cached_serial_and_pool() {
+        use std::hint::black_box;
+        use std::time::Instant;
+        for (w, h, target_w, target_h) in [
+            (640, 360, 320, 180),
+            (1920, 1080, 1280, 720),
+            (2560, 1440, 1920, 1080),
+            (3840, 2160, 1920, 1080),
+        ] {
+            let image = RgbImage::from_fn(w, h, |x, y| {
+                Rgb([
+                    (x.wrapping_mul(31) ^ y) as u8,
+                    (y.wrapping_mul(13) ^ x) as u8,
+                    (x + y) as u8,
+                ])
+            });
+            let mut scalers = [serial_scaler(), CpuScaler::default()];
+            let mut buffers = [Vec::new(), Vec::new()];
+            let mut samples = [Vec::new(), Vec::new()];
+            for iteration in 0..50 {
+                for index in [iteration % 2, (iteration + 1) % 2] {
+                    let started = Instant::now();
+                    let result = scalers[index].scale_into(
+                        black_box(&image),
+                        target_w,
+                        target_h,
+                        std::mem::take(&mut buffers[index]),
+                    );
+                    let elapsed = started.elapsed().as_secs_f64() * 1000.0;
+                    buffers[index] = black_box(result).into_raw();
+                    if iteration >= 10 {
+                        samples[index].push(elapsed);
+                    }
+                }
+            }
+            assert_eq!(buffers[0], buffers[1]);
+            for values in &mut samples {
+                values.sort_by(f64::total_cmp);
+            }
+            eprintln!(
+                "{w}x{h}->{target_w}x{target_h}: serial p50={:.3}ms p95={:.3}ms; selected p50={:.3}ms p95={:.3}ms workers={}",
+                samples[0][20],
+                samples[0][38],
+                samples[1][20],
+                samples[1][38],
+                scalers[1]
+                    .pool
+                    .as_ref()
+                    .map_or(1, rayon::ThreadPool::current_num_threads)
+            );
+        }
+    }
 
     #[test]
     fn scaler_reuses_storage_and_invalidates_weights_on_geometry_changes() {

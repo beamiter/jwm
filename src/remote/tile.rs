@@ -28,6 +28,7 @@
 //! tile_log2      u8    flags          u8
 //! atlas_columns  u16
 //! dirty_tiles    u32
+//! geometry_epoch u64
 //! bitmap         ceil(tiles_across * tiles_down / 8) bytes, raster order
 //! atlas          JPEG, present only when dirty_tiles > 0
 //! ```
@@ -35,16 +36,17 @@
 use super::RemoteResult;
 use super::frame::{
     BoundedPayloadWriter, FrameDamage, MAX_DIMENSION, RecyclableDecodedFrame,
-    SharedDecodeBufferPool, decode_rgb8_into_pool, invalid_data, validate_dimensions,
+    SharedDecodeBufferPool, TileSnapshot, invalid_data, validate_dimensions,
 };
 use super::protocol::MAX_PAYLOAD_LEN;
 use super::x11_capture::CapturedFrame;
 use image::codecs::jpeg::{JpegDecoder, JpegEncoder};
 use image::{ColorType, DynamicImage, ExtendedColorType, ImageDecoder, Limits, RgbImage};
 use std::io::Cursor;
+use std::time::{Duration, Instant};
 
 /// Byte length of the fixed tile-frame header preceding the dirty bitmap.
-pub(crate) const TILE_HEADER_LEN: usize = 24;
+pub(crate) const TILE_HEADER_LEN: usize = 32;
 
 /// Tile edge is `1 << TILE_LOG2`.  Sixteen pixels keeps every tile aligned to a
 /// 4:2:0 JPEG minimum coded unit, so atlas neighbours cannot bleed chroma into
@@ -98,6 +100,7 @@ pub(crate) struct TilePlan {
 /// Geometry the planner resolved, consumed by the matching encode.
 #[derive(Debug, Clone, Copy)]
 struct PlannedFrame {
+    geometry_epoch: u64,
     keyframe: bool,
     refinement_cursor: Option<usize>,
     dirty_tiles: u32,
@@ -111,6 +114,7 @@ struct PlannedFrame {
 /// One capture's pixel damage, reusable while the quality controller changes epoch.
 #[derive(Debug, Clone, Copy)]
 struct DetectedFrame {
+    geometry_epoch: u64,
     keyframe: bool,
     request: TileEncodeRequest,
     encoded: (u16, u16),
@@ -118,9 +122,17 @@ struct DetectedFrame {
     total_tiles: u32,
 }
 
+/// Non-overlapping costs for the atlas of the latest successful encode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct EncodeStageTimings {
+    pub(crate) atlas_pack: Duration,
+    pub(crate) jpeg: Duration,
+}
+
 /// Host-side delta encoder holding the host's model of the viewer's canvas.
 #[derive(Debug)]
 pub(crate) struct TileEncoder {
+    geometry_epoch: u64,
     tile_log2: u8,
     tolerance: u8,
     /// Pixels the viewer has been sent.  `None` until the first commit.
@@ -135,6 +147,7 @@ pub(crate) struct TileEncoder {
     bitmap: Vec<u8>,
     dirty: Vec<u32>,
     atlas: Vec<u8>,
+    encode_timings: Option<EncodeStageTimings>,
     /// Dirty set of the last successful encode, awaiting commit or discard.
     pending: bool,
     planned: Option<PlannedFrame>,
@@ -152,6 +165,7 @@ impl TileEncoder {
 
     pub(crate) fn with_settings(tile_log2: u8, tolerance: u8) -> Self {
         Self {
+            geometry_epoch: 0,
             tile_log2: tile_log2.clamp(MIN_TILE_LOG2, MAX_TILE_LOG2),
             tolerance,
             reference: None,
@@ -164,6 +178,7 @@ impl TileEncoder {
             bitmap: Vec::new(),
             dirty: Vec::new(),
             atlas: Vec::new(),
+            encode_timings: None,
             pending: false,
             planned: None,
             detected: None,
@@ -182,7 +197,8 @@ impl TileEncoder {
         let Some(reference) = self.reference.as_ref() else {
             return true;
         };
-        reference.dimensions() != frame.image.dimensions()
+        self.geometry_epoch != frame.geometry_epoch
+            || reference.dimensions() != frame.image.dimensions()
             || self.source != (frame.source_width, frame.source_height)
     }
 
@@ -263,6 +279,7 @@ impl TileEncoder {
 
         self.detected_dirty.clone_from(&self.dirty);
         self.detected = Some(DetectedFrame {
+            geometry_epoch: frame.geometry_epoch,
             keyframe,
             request,
             encoded: (encoded_width, encoded_height),
@@ -286,6 +303,7 @@ impl TileEncoder {
             .detected
             .ok_or_else(|| invalid_data("tile refinement selected without detection"))?;
         let DetectedFrame {
+            geometry_epoch,
             keyframe,
             request,
             encoded: (encoded_width, encoded_height),
@@ -353,6 +371,7 @@ impl TileEncoder {
         };
 
         self.planned = Some(PlannedFrame {
+            geometry_epoch,
             keyframe,
             refinement_cursor,
             dirty_tiles,
@@ -381,9 +400,26 @@ impl TileEncoder {
         frame: &CapturedFrame,
         quality: u8,
     ) -> RemoteResult<()> {
+        self.encode_with_clock(payload, sequence, frame, quality, Instant::now)
+    }
+
+    /// None for failed encodes and keepalives, which perform neither stage.
+    pub(crate) fn encode_timings(&self) -> Option<EncodeStageTimings> {
+        self.encode_timings
+    }
+
+    fn encode_with_clock(
+        &mut self,
+        payload: &mut Vec<u8>,
+        sequence: u64,
+        frame: &CapturedFrame,
+        quality: u8,
+        mut now: impl FnMut() -> Instant,
+    ) -> RemoteResult<()> {
+        self.encode_timings = None;
         self.detected = None;
         payload.clear();
-        let result = self.encode_inner(payload, sequence, frame, quality);
+        let result = self.encode_inner(payload, sequence, frame, quality, &mut now);
         if result.is_err() {
             payload.clear();
             self.pending = false;
@@ -398,6 +434,7 @@ impl TileEncoder {
         sequence: u64,
         frame: &CapturedFrame,
         quality: u8,
+        now: &mut impl FnMut() -> Instant,
     ) -> RemoteResult<()> {
         let planned = self
             .planned
@@ -406,7 +443,9 @@ impl TileEncoder {
             u16::try_from(frame.image.width()).unwrap_or(0),
             u16::try_from(frame.image.height()).unwrap_or(0),
         );
-        if planned.encoded != encoded || planned.source != (frame.source_width, frame.source_height)
+        if planned.geometry_epoch != frame.geometry_epoch
+            || planned.encoded != encoded
+            || planned.source != (frame.source_width, frame.source_height)
         {
             return Err(invalid_data("tile frame does not match its plan").into());
         }
@@ -424,11 +463,14 @@ impl TileEncoder {
                 .to_be_bytes(),
         );
         payload.extend_from_slice(&planned.dirty_tiles.to_be_bytes());
+        payload.extend_from_slice(&frame.geometry_epoch.to_be_bytes());
         payload.extend_from_slice(&self.bitmap);
         debug_assert_eq!(payload.len(), TILE_HEADER_LEN + self.bitmap.len());
 
         if let Some((rows, atlas_width, atlas_height)) = planned.atlas {
+            let pack_started = now();
             self.pack_atlas(&frame.image, planned.columns, rows);
+            let jpeg_started = now();
             JpegEncoder::new_with_quality(
                 BoundedPayloadWriter::new(payload, MAX_PAYLOAD_LEN),
                 quality.clamp(1, 100),
@@ -439,6 +481,10 @@ impl TileEncoder {
                 u32::from(atlas_height),
                 ExtendedColorType::Rgb8,
             )?;
+            self.encode_timings = Some(EncodeStageTimings {
+                atlas_pack: jpeg_started.saturating_duration_since(pack_started),
+                jpeg: now().saturating_duration_since(jpeg_started),
+            });
         }
 
         self.pending = true;
@@ -461,6 +507,7 @@ impl TileEncoder {
             self.refinement_cursor = cursor;
         }
         self.source = (frame.source_width, frame.source_height);
+        self.geometry_epoch = frame.geometry_epoch;
         let tile = self.tile();
         let (grid_w, grid_h) = self.grid;
         self.qualities.resize(grid_w * grid_h, 0);
@@ -626,6 +673,8 @@ impl TileEncoder {
 /// Viewer-side canvas that reassembles dirty tiles into whole frames.
 #[derive(Debug, Default)]
 pub(crate) struct TileDecoder {
+    geometry_epoch: u64,
+    snapshot: Option<TileSnapshot>,
     last_sequence: Option<u64>,
     canvas: Option<RgbImage>,
     source: (u16, u16),
@@ -644,6 +693,10 @@ impl TileDecoder {
         pool: SharedDecodeBufferPool,
     ) -> RemoteResult<RecyclableDecodedFrame> {
         let header = TileHeader::parse(payload)?;
+        if header.geometry_epoch < self.geometry_epoch {
+            return Err(invalid_data("video geometry epoch moved backwards").into());
+        }
+
         let bitmap_len = bitmap_len(header.total_tiles);
         let body_start = TILE_HEADER_LEN
             .checked_add(bitmap_len)
@@ -665,7 +718,10 @@ impl TileDecoder {
         // A delta reuses the established pixels and therefore their source
         // coordinate space. Only a self-contained keyframe may change it.
         // Reject before mutating the canvas, source metadata or atlas scratch.
-        if !header.keyframe && self.source != (header.source_width, header.source_height) {
+        if !header.keyframe
+            && (self.geometry_epoch != header.geometry_epoch
+                || self.source != (header.source_width, header.source_height))
+        {
             return Err(invalid_data(
                 "tile delta frame does not match the current source geometry",
             )
@@ -685,6 +741,11 @@ impl TileDecoder {
                 }
             }
         }
+        if header.geometry_epoch != self.geometry_epoch {
+            self.snapshot = None;
+            self.last_sequence = None;
+        }
+        self.geometry_epoch = header.geometry_epoch;
         self.source = (header.source_width, header.source_height);
         let Self { canvas, atlas, .. } = self;
         let canvas = canvas
@@ -746,18 +807,23 @@ impl TileDecoder {
                 ),
             })
         };
-        let expected_len = (canvas.as_raw().len(), canvas.dimensions());
-        let image = clone_into_pool(canvas, &pool)?;
-        debug_assert_eq!((image.as_raw().len(), image.dimensions()), expected_len);
+        let snapshot = TileSnapshot::update(
+            canvas,
+            self.snapshot.as_ref(),
+            bitmap,
+            1usize << header.tile_log2,
+        );
+        self.snapshot = Some(snapshot.clone());
         self.last_sequence = Some(header.sequence);
-        Ok(RecyclableDecodedFrame::new(
+        Ok(RecyclableDecodedFrame::from_tiles(
             header.sequence,
             header.source_width,
             header.source_height,
-            image,
+            snapshot,
             pool,
         )
-        .with_damage(damage))
+        .with_damage(damage)
+        .with_geometry_epoch(header.geometry_epoch))
     }
 
     #[cfg(test)]
@@ -823,6 +889,7 @@ fn decode_atlas(
 
 #[derive(Debug, Clone, Copy)]
 struct TileHeader {
+    geometry_epoch: u64,
     sequence: u64,
     source_width: u16,
     source_height: u16,
@@ -849,6 +916,7 @@ impl TileHeader {
         let flags = payload[17];
         let atlas_columns = u16::from_be_bytes(payload[18..20].try_into().unwrap());
         let dirty_tiles = u32::from_be_bytes(payload[20..24].try_into().unwrap());
+        let geometry_epoch = u64::from_be_bytes(payload[24..32].try_into().unwrap());
 
         validate_dimensions(source_width, source_height)?;
         validate_dimensions(encoded_width, encoded_height)?;
@@ -868,6 +936,7 @@ impl TileHeader {
             return Err(invalid_data("tile frame declares more dirty tiles than exist").into());
         }
         Ok(Self {
+            geometry_epoch,
             sequence,
             source_width,
             source_height,
@@ -941,14 +1010,6 @@ fn dirty_bounds(
     bounds.map(|(x0, y0, x1, y1)| (x0 as u16, y0 as u16, (x1 - x0) as u16, (y1 - y0) as u16))
 }
 
-fn clone_into_pool(canvas: &RgbImage, pool: &SharedDecodeBufferPool) -> RemoteResult<RgbImage> {
-    let raw = canvas.as_raw();
-    decode_rgb8_into_pool(canvas.width(), canvas.height(), raw.len(), pool, |pixels| {
-        pixels.copy_from_slice(raw);
-        Ok(())
-    })
-}
-
 fn tile_bounds(
     index: usize,
     grid_w: usize,
@@ -1015,6 +1076,7 @@ mod tests {
             *pixel = fill(x, y);
         }
         CapturedFrame {
+            geometry_epoch: 0,
             image,
             source_width: u16::try_from(width * 2).unwrap(),
             source_height: u16::try_from(height * 2).unwrap(),
@@ -1090,6 +1152,48 @@ mod tests {
             .map(|(a, b)| a.abs_diff(*b))
             .max()
             .unwrap_or(0)
+    }
+
+    #[test]
+    fn encode_stage_timings_split_pack_and_jpeg_and_reset_on_keepalive_or_failure() {
+        let captured = frame(64, 64, |_, _| Rgb([23, 45, 67]));
+        let mut encoder = TileEncoder::new();
+        let mut payload = Vec::new();
+        encoder
+            .plan(&captured, TileEncodeRequest::Keyframe)
+            .unwrap();
+        let base = Instant::now();
+        let mut ticks = [0, 3, 10].into_iter();
+        encoder
+            .encode_with_clock(&mut payload, 0, &captured, 85, || {
+                base + Duration::from_millis(ticks.next().expect("exactly three timing boundaries"))
+            })
+            .unwrap();
+        assert_eq!(ticks.next(), None);
+        assert_eq!(
+            encoder.encode_timings(),
+            Some(EncodeStageTimings {
+                atlas_pack: Duration::from_millis(3),
+                jpeg: Duration::from_millis(7),
+            })
+        );
+        encoder.commit(&captured);
+        encoder
+            .plan(&captured, TileEncodeRequest::Keepalive)
+            .unwrap();
+        encoder
+            .encode_with_clock(&mut payload, 1, &captured, 85, || {
+                panic!("keepalive must not run atlas stages")
+            })
+            .unwrap();
+        assert_eq!(encoder.encode_timings(), None);
+        encoder
+            .plan(&captured, TileEncodeRequest::Keyframe)
+            .unwrap();
+        encoder.encode_into(&mut payload, 2, &captured, 85).unwrap();
+        assert!(encoder.encode_timings().is_some());
+        assert!(encoder.encode_into(&mut payload, 3, &captured, 85).is_err());
+        assert_eq!(encoder.encode_timings(), None);
     }
 
     #[test]
@@ -1347,6 +1451,53 @@ mod tests {
             TileEncodeRequest::Delta,
         );
         assert!(plan.emit && !plan.keyframe && plan.dirty_tiles > 0);
+    }
+
+    #[test]
+    fn same_size_geometry_epoch_forces_keyframe_and_rejects_old_deltas() {
+        let mut encoder = TileEncoder::new();
+        let mut decoder = TileDecoder::new();
+        let pool = new_decode_buffer_pool();
+        let mut first = flat(64, 64, 10);
+        first.geometry_epoch = 1;
+        let mut payload = Vec::new();
+        encode(
+            &mut encoder,
+            &mut payload,
+            0,
+            &first,
+            90,
+            TileEncodeRequest::Delta,
+        );
+        encoder.commit(&first);
+        let decoded = decoder.decode_into(&payload, pool.clone()).unwrap();
+        assert_eq!(decoded.geometry_epoch(), 1);
+        let baseline = payload.clone();
+        first.geometry_epoch = 2;
+        let plan = encode(
+            &mut encoder,
+            &mut payload,
+            1,
+            &first,
+            90,
+            TileEncodeRequest::Delta,
+        );
+        assert!(plan.keyframe && plan.emit);
+        encoder.commit(&first);
+        let decoded = decoder.decode_into(&payload, pool.clone()).unwrap();
+        assert_eq!(decoded.geometry_epoch(), 2);
+        assert!(decoded.damage().is_none());
+        assert!(decoder.decode_into(&baseline, pool.clone()).is_err());
+        encode(
+            &mut encoder,
+            &mut payload,
+            2,
+            &first,
+            90,
+            TileEncodeRequest::Keepalive,
+        );
+        payload[24..32].copy_from_slice(&3_u64.to_be_bytes());
+        assert!(decoder.decode_into(&payload, pool).is_err());
     }
 
     #[test]

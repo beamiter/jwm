@@ -52,6 +52,9 @@ pub struct SshOptions {
     pub remote_command: Option<String>,
     /// Share one RandR monitor of the other machine.
     pub monitor: Option<String>,
+    pub fps: Option<u16>,
+    pub jpeg_quality: Option<u8>,
+    pub max_width: Option<u16>,
     /// Local X11 display for the viewer window.
     pub display: Option<String>,
     pub view_only: bool,
@@ -395,7 +398,7 @@ fn peer_label(options: &SshOptions) -> String {
 
 /// An SSH destination as accepted here: no option-like or multi-word values,
 /// so it can only ever be read by `ssh` as the destination.
-fn validate_destination(destination: &str) -> io::Result<()> {
+pub fn validate_destination(destination: &str) -> io::Result<()> {
     if destination.is_empty()
         || destination.starts_with('-')
         || destination
@@ -481,6 +484,15 @@ fn remote_host_script_with(options: &SshOptions, remote_port: u16, managed: &str
         host.push_str(" --monitor ");
         host.push_str(&shell_quote(monitor));
     }
+    for (flag, value) in [
+        ("--fps", options.fps.map(u64::from)),
+        ("--jpeg-quality", options.jpeg_quality.map(u64::from)),
+        ("--max-width", options.max_width.map(u64::from)),
+    ] {
+        if let Some(value) = value {
+            host.push_str(&format!(" {flag} {value}"));
+        }
+    }
     format!(
         "for candidate in {candidates}; do \
          if command -v \"$candidate\" >/dev/null 2>&1; then exec \"$candidate\" {host}; fi; \
@@ -506,6 +518,9 @@ mod tests {
             ssh_options: Vec::new(),
             remote_command: None,
             monitor: None,
+            fps: None,
+            jpeg_quality: None,
+            max_width: None,
             display: None,
             view_only: false,
             grab_input: true,
@@ -561,10 +576,17 @@ mod tests {
         let mut view = options();
         view.view_only = true;
         view.clipboard = true;
+        view.fps = Some(24);
+        view.jpeg_quality = Some(70);
+        view.max_width = Some(1280);
         let output = run_script(&remote_host_script(&view, 50001), &path);
         let printed = String::from_utf8(output.stdout).unwrap();
         assert!(!printed.contains("--allow-input"), "{printed}");
         assert!(printed.contains("[--allow-clipboard]"), "{printed}");
+        assert!(
+            printed.contains("[--fps]\n[24]\n[--jpeg-quality]\n[70]\n[--max-width]\n[1280]\n"),
+            "{printed}"
+        );
         // The host enforces the viewer's file limit too.
         assert!(
             printed.contains("[--clipboard-file-limit]\n[2147483648]\n"),

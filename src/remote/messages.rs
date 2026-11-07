@@ -8,10 +8,13 @@ use super::x11_keymap::{KeymapTable, MAX_ENCODED_KEYMAP_LEN};
 use std::io;
 
 const APPLICATION_MAGIC: &[u8; 8] = b"JWMREM01";
-pub const APPLICATION_VERSION: u16 = 6;
-const SERVER_HELLO_LEN: usize = 11;
+pub const APPLICATION_VERSION: u16 = 9;
+const HELLO_PREFIX_LEN: usize = 11;
+const STREAM_CAPABILITIES_LEN: usize = 11;
+const SERVER_HELLO_LEN: usize = HELLO_PREFIX_LEN + STREAM_CAPABILITIES_LEN;
+const CLIENT_HELLO_HEADER_LEN: usize = SERVER_HELLO_LEN + 4;
 /// Largest client hello: the shared prefix plus a full keymap table.
-pub const MAX_CLIENT_HELLO_LEN: usize = SERVER_HELLO_LEN + MAX_ENCODED_KEYMAP_LEN;
+pub const MAX_CLIENT_HELLO_LEN: usize = CLIENT_HELLO_HEADER_LEN + MAX_ENCODED_KEYMAP_LEN;
 const FLAG_POINTER: u8 = 1 << 0;
 const FLAG_KEYBOARD: u8 = 1 << 1;
 const FLAG_CLIPBOARD: u8 = 1 << 2;
@@ -35,8 +38,90 @@ pub const MAX_INPUT_BATCH_EVENTS: usize = 128;
 /// one count byte followed by 128 five-byte operations.
 pub const MAX_INPUT_BATCH_PAYLOAD_LEN: usize = 1 + MAX_INPUT_BATCH_EVENTS * POINTER_INPUT_LEN;
 
+/// The implemented stream profile. Selectors are explicit so a peer cannot
+/// silently interpret a future codec, cursor plane or input coordinate space.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct StreamCapabilities {
+    pub codec: FrameCodec,
+    pub cursor: CursorMode,
+    pub input: InputMode,
+    /// Maximum aggregate copied-file bytes; zero disables files.
+    pub clipboard_file_limit: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[repr(u8)]
+pub enum FrameCodec {
+    #[default]
+    JpegTiles = 1,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[repr(u8)]
+pub enum CursorMode {
+    /// Cursor pixels remain in the captured video, never a second local plane.
+    #[default]
+    Composited = 1,
+    /// Viewer supports independent shape/position records; host may fall back.
+    Independent = 2,
+}
+
+impl CursorMode {
+    /// A viewer offering separation also accepts the safe composited fallback.
+    #[must_use]
+    pub fn negotiate(self, host_can_separate: bool) -> Self {
+        if self == Self::Independent && host_can_separate {
+            Self::Independent
+        } else {
+            Self::Composited
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[repr(u8)]
+pub enum InputMode {
+    #[default]
+    X11Keycodes = 1,
+}
+
+impl StreamCapabilities {
+    fn encode(self) -> [u8; STREAM_CAPABILITIES_LEN] {
+        let mut payload = [0; STREAM_CAPABILITIES_LEN];
+        payload[..3].copy_from_slice(&[self.codec as u8, self.cursor as u8, self.input as u8]);
+        payload[3..11].copy_from_slice(&self.clipboard_file_limit.to_be_bytes());
+        payload
+    }
+
+    fn decode(payload: &[u8]) -> RemoteResult<Self> {
+        if payload.len() != STREAM_CAPABILITIES_LEN {
+            return Err(invalid_data("invalid bounded stream profile length").into());
+        }
+        let cursor = match &payload[..3] {
+            [1, 1, 1] => CursorMode::Composited,
+            [1, 2, 1] => CursorMode::Independent,
+            _ => return Err(invalid_data("unsupported remote codec, cursor or input mode").into()),
+        };
+        Ok(Self {
+            cursor,
+            clipboard_file_limit: u64::from_be_bytes(payload[3..11].try_into().unwrap()),
+            ..Self::default()
+        })
+    }
+
+    /// Both directions use the stricter operator limit. A zero on either side
+    /// disables files, without disabling text and image sharing.
+    #[must_use]
+    pub fn negotiate_file_limit(self, host_limit: u64) -> u64 {
+        self.clipboard_file_limit.min(host_limit)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ClientHello {
+    pub stream: StreamCapabilities,
+    /// Desired first-frame bounds; None requests the host default.
+    pub initial_viewport: Option<(u16, u16)>,
     pub request_input: bool,
     pub request_clipboard: bool,
     /// Also share copied files. Requires `request_clipboard`.
@@ -48,6 +133,7 @@ pub struct ClientHello {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ServerHello {
+    pub stream: StreamCapabilities,
     pub pointer_enabled: bool,
     pub keyboard_enabled: bool,
     pub clipboard_enabled: bool,
@@ -66,20 +152,34 @@ impl ClientHello {
             }
         }
         let mut payload = Vec::with_capacity(MAX_CLIENT_HELLO_LEN);
-        payload.extend_from_slice(&encode_hello(flags));
+        payload.extend_from_slice(&encode_hello(flags, self.stream));
+        let (width, height) = self.initial_viewport.unwrap_or((0, 0));
+        payload.extend_from_slice(&encode_viewport(width, height));
         self.keymap.encode_into(&mut payload);
         payload
     }
 
     pub fn decode(payload: &[u8]) -> RemoteResult<Self> {
-        if payload.len() < SERVER_HELLO_LEN || payload.len() > MAX_CLIENT_HELLO_LEN {
+        if payload.len() < HELLO_PREFIX_LEN || payload.len() > MAX_CLIENT_HELLO_LEN {
             return Err(invalid_data("client hello has an invalid length").into());
         }
         // The version is checked before the keymap, so an older viewer is
         // told its version is unsupported rather than that its table is bad.
-        let flags = decode_hello(&payload[..SERVER_HELLO_LEN])?;
-        let keymap = KeymapTable::decode(&payload[SERVER_HELLO_LEN..])?;
+        let flags = decode_prefix(&payload[..HELLO_PREFIX_LEN])?;
+        if payload.len() < CLIENT_HELLO_HEADER_LEN {
+            return Err(invalid_data("client hello header is truncated").into());
+        }
+        let stream = StreamCapabilities::decode(&payload[HELLO_PREFIX_LEN..SERVER_HELLO_LEN])?;
+        let viewport = &payload[SERVER_HELLO_LEN..CLIENT_HELLO_HEADER_LEN];
+        let initial_viewport = if viewport == [0; 4] {
+            None
+        } else {
+            Some(decode_viewport(viewport)?)
+        };
+        let keymap = KeymapTable::decode(&payload[CLIENT_HELLO_HEADER_LEN..])?;
         Ok(Self {
+            stream,
+            initial_viewport,
             request_input: flags & INPUT_FLAGS != 0,
             request_clipboard: flags & FLAG_CLIPBOARD != 0,
             request_clipboard_files: flags & FLAG_CLIPBOARD_FILES != 0,
@@ -104,12 +204,20 @@ impl ServerHello {
                 flags |= FLAG_CLIPBOARD_FILES;
             }
         }
-        encode_hello(flags)
+        encode_hello(flags, self.stream)
     }
 
     pub fn decode(payload: &[u8]) -> RemoteResult<Self> {
-        let flags = decode_hello(payload)?;
+        if payload.len() < HELLO_PREFIX_LEN {
+            return Err(invalid_data("server hello header is truncated").into());
+        }
+        let flags = decode_prefix(&payload[..HELLO_PREFIX_LEN])?;
+        if payload.len() != SERVER_HELLO_LEN {
+            return Err(invalid_data("server hello has an invalid length").into());
+        }
+        let stream = StreamCapabilities::decode(&payload[HELLO_PREFIX_LEN..])?;
         Ok(Self {
+            stream,
             pointer_enabled: flags & FLAG_POINTER != 0,
             keyboard_enabled: flags & FLAG_KEYBOARD != 0,
             clipboard_enabled: flags & FLAG_CLIPBOARD != 0,
@@ -118,16 +226,17 @@ impl ServerHello {
     }
 }
 
-fn encode_hello(flags: u8) -> [u8; SERVER_HELLO_LEN] {
+fn encode_hello(flags: u8, stream: StreamCapabilities) -> [u8; SERVER_HELLO_LEN] {
     let mut payload = [0_u8; SERVER_HELLO_LEN];
     payload[..8].copy_from_slice(APPLICATION_MAGIC);
     payload[8..10].copy_from_slice(&APPLICATION_VERSION.to_be_bytes());
     payload[10] = flags;
+    payload[HELLO_PREFIX_LEN..].copy_from_slice(&stream.encode());
     payload
 }
 
-fn decode_hello(payload: &[u8]) -> RemoteResult<u8> {
-    if payload.len() != SERVER_HELLO_LEN || &payload[..8] != APPLICATION_MAGIC {
+fn decode_prefix(payload: &[u8]) -> RemoteResult<u8> {
+    if payload.len() != HELLO_PREFIX_LEN || &payload[..8] != APPLICATION_MAGIC {
         return Err(invalid_data("peer is not using the JWM remote protocol").into());
     }
     let version = u16::from_be_bytes(payload[8..10].try_into().unwrap());
@@ -450,8 +559,131 @@ mod tests {
     use super::*;
 
     #[test]
+    fn bounded_profile_round_trips_and_rejects_truncation() {
+        let stream = StreamCapabilities {
+            clipboard_file_limit: u64::MAX,
+            ..Default::default()
+        };
+        let payload = stream.encode();
+        assert_eq!(StreamCapabilities::decode(&payload).unwrap(), stream);
+        for end in 0..payload.len() {
+            assert!(StreamCapabilities::decode(&payload[..end]).is_err());
+        }
+    }
+
+    #[test]
+    fn file_budget_is_the_minimum_of_both_peers_including_disabled() {
+        for (viewer, host, expected) in [
+            (0, 100, 0),
+            (100, 0, 0),
+            (100, 50, 50),
+            (50, 100, 50),
+            (u64::MAX, 42, 42),
+        ] {
+            let stream = StreamCapabilities {
+                clipboard_file_limit: viewer,
+                ..Default::default()
+            };
+            assert_eq!(stream.negotiate_file_limit(host), expected);
+        }
+    }
+
+    #[test]
+    fn cursor_capability_is_explicit_and_has_a_composited_fallback() {
+        for (request, available, expected) in [
+            (CursorMode::Composited, false, CursorMode::Composited),
+            (CursorMode::Composited, true, CursorMode::Composited),
+            (CursorMode::Independent, false, CursorMode::Composited),
+            (CursorMode::Independent, true, CursorMode::Independent),
+        ] {
+            assert_eq!(request.negotiate(available), expected);
+            let stream = StreamCapabilities {
+                cursor: request,
+                ..Default::default()
+            };
+            assert_eq!(
+                StreamCapabilities::decode(&stream.encode()).unwrap(),
+                stream
+            );
+        }
+    }
+
+    #[test]
+    fn initial_viewport_round_trips_and_rejects_half_empty_dimensions() {
+        for initial_viewport in [
+            None,
+            Some((320, 200)),
+            Some((1920, 1080)),
+            Some((u16::MAX, u16::MAX)),
+        ] {
+            let hello = ClientHello {
+                stream: Default::default(),
+                initial_viewport,
+                request_input: false,
+                request_clipboard: false,
+                request_clipboard_files: false,
+                keymap: KeymapTable::empty(),
+            };
+            let payload = hello.encode();
+            assert_eq!(ClientHello::decode(&payload).unwrap(), hello);
+            for dimensions in [(0, 200), (320, 0)] {
+                let mut malformed = payload.clone();
+                malformed[SERVER_HELLO_LEN..CLIENT_HELLO_HEADER_LEN]
+                    .copy_from_slice(&encode_viewport(dimensions.0, dimensions.1));
+                assert!(ClientHello::decode(&malformed).is_err());
+            }
+            for end in 0..payload.len() {
+                assert!(ClientHello::decode(&payload[..end]).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn hello_refuses_unimplemented_profiles_before_any_stream_work() {
+        let client = ClientHello {
+            stream: Default::default(),
+            initial_viewport: Some((1920, 1080)),
+            request_input: false,
+            request_clipboard: false,
+            request_clipboard_files: false,
+            keymap: KeymapTable::empty(),
+        }
+        .encode();
+        let server = ServerHello {
+            stream: Default::default(),
+            pointer_enabled: false,
+            keyboard_enabled: false,
+            clipboard_enabled: false,
+            clipboard_files_enabled: false,
+        }
+        .encode();
+        for offset in HELLO_PREFIX_LEN..HELLO_PREFIX_LEN + 3 {
+            for unsupported in [0, 3, u8::MAX] {
+                let mut client = client.clone();
+                client[offset] = unsupported;
+                assert!(ClientHello::decode(&client).is_err());
+                let mut server = server;
+                server[offset] = unsupported;
+                assert!(ServerHello::decode(&server).is_err());
+            }
+        }
+        // A true old wire prefix, not a v9-sized payload with only its version
+        // changed, still produces the actionable version error.
+        let mut legacy = server[..HELLO_PREFIX_LEN].to_vec();
+        legacy[8..10].copy_from_slice(&6_u16.to_be_bytes());
+        for error in [
+            ClientHello::decode(&legacy).unwrap_err(),
+            ServerHello::decode(&legacy).unwrap_err(),
+        ] {
+            assert!(error.to_string().contains("version 6; expected 9"));
+        }
+    }
+
+    #[test]
     fn hello_is_versioned_and_rejects_unknown_flags() {
         let payload = ClientHello {
+            stream: Default::default(),
+            initial_viewport: None,
             request_input: true,
             request_clipboard: false,
             request_clipboard_files: false,
@@ -477,6 +709,8 @@ mod tests {
         {
             let decoded = ClientHello::decode(
                 &ClientHello {
+                    stream: Default::default(),
+                    initial_viewport: None,
                     request_input,
                     request_clipboard,
                     request_clipboard_files: request_clipboard,
@@ -498,6 +732,7 @@ mod tests {
         ] {
             let decoded = ServerHello::decode(
                 &ServerHello {
+                    stream: Default::default(),
                     pointer_enabled: pointer,
                     keyboard_enabled: keyboard,
                     clipboard_enabled: clipboard,
@@ -522,6 +757,8 @@ mod tests {
         }
         let keymap = KeymapTable::decode(&wire).unwrap();
         let hello = ClientHello {
+            stream: Default::default(),
+            initial_viewport: None,
             request_input: true,
             request_clipboard: true,
             request_clipboard_files: false,
@@ -538,32 +775,33 @@ mod tests {
     }
 
     #[test]
-    fn hello_uses_version_six_and_rejects_neighbouring_versions() {
+    fn hello_uses_version_nine_and_rejects_neighbouring_versions() {
         let payload = ServerHello {
+            stream: Default::default(),
             pointer_enabled: false,
             keyboard_enabled: false,
             clipboard_enabled: false,
             clipboard_files_enabled: false,
         }
         .encode();
-        assert_eq!(&payload[8..10], &6_u16.to_be_bytes());
+        assert_eq!(&payload[8..10], &9_u16.to_be_bytes());
 
         // Version 5 had no clipboard transfer records: a version-5 peer
         // would end the session on the first copied image or file. It must
         // fail on its version instead. Version 4 sent one digest of the whole
         // keymap where later versions send a per-keycode table.
-        for older in [4_u16, 5] {
+        for older in [4_u16, 5, 6, 7, 8] {
             let mut previous = payload;
             previous[8..10].copy_from_slice(&older.to_be_bytes());
             let error = ServerHello::decode(&previous).unwrap_err();
             assert!(
                 error
                     .to_string()
-                    .contains(&format!("application version {older}; expected 6"))
+                    .contains(&format!("application version {older}; expected 9"))
             );
         }
 
-        for rejected in [0_u16, 2, 3, 7, u16::MAX] {
+        for rejected in [0_u16, 2, 3, 10, u16::MAX] {
             let mut other = payload;
             other[8..10].copy_from_slice(&rejected.to_be_bytes());
             assert!(
@@ -576,6 +814,7 @@ mod tests {
     #[test]
     fn file_sharing_is_negotiated_only_alongside_clipboard_sharing() {
         let both = ServerHello {
+            stream: Default::default(),
             pointer_enabled: false,
             keyboard_enabled: false,
             clipboard_enabled: true,
@@ -593,6 +832,8 @@ mod tests {
                 .clipboard_files_enabled
         );
         let hello = ClientHello {
+            stream: Default::default(),
+            initial_viewport: None,
             request_input: false,
             request_clipboard: false,
             request_clipboard_files: true,
@@ -898,6 +1139,7 @@ mod tests {
     #[test]
     fn server_can_negotiate_pointer_without_keyboard() {
         let payload = ServerHello {
+            stream: Default::default(),
             pointer_enabled: true,
             keyboard_enabled: false,
             clipboard_enabled: false,

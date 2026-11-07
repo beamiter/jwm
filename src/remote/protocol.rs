@@ -158,6 +158,10 @@ pub enum MessageKind {
     /// One step of a chunked clipboard image or file transfer, or its flow
     /// control. Travels in both directions; see `clipboard_sync`.
     ClipboardTransfer = 14,
+    /// Bounded independent cursor shape (server to viewer).
+    CursorShape = 15,
+    /// Latest cursor position tied to a video geometry epoch.
+    CursorPosition = 16,
 }
 
 impl TryFrom<u8> for MessageKind {
@@ -179,6 +183,8 @@ impl TryFrom<u8> for MessageKind {
             12 => Ok(Self::Viewport),
             13 => Ok(Self::Clipboard),
             14 => Ok(Self::ClipboardTransfer),
+            15 => Ok(Self::CursorShape),
+            16 => Ok(Self::CursorPosition),
             other => Err(ProtocolError::UnknownMessageKind(other)),
         }
     }

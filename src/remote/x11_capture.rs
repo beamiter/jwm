@@ -312,6 +312,8 @@ impl std::str::FromStr for CaptureSource {
 /// One top-to-bottom RGB frame plus the unscaled root coordinate space.
 #[derive(Debug)]
 pub struct CapturedFrame {
+    /// Coordinate-space identity captured before readback begins.
+    pub geometry_epoch: u64,
     pub image: RgbImage,
     pub source_width: u16,
     pub source_height: u16,
@@ -985,6 +987,19 @@ fn overlay_sync_decision(
     }
 }
 
+/// An authoritative pointer sample, independent of video and input injection.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CursorSample {
+    pub geometry_epoch: u64,
+    pub source_width: u16,
+    pub source_height: u16,
+    pub shape_id: u64,
+    pub shape: Option<super::cursor::CursorShape>,
+    pub x: i32,
+    pub y: i32,
+    pub visible: bool,
+}
+
 pub struct X11Capture {
     conn: RustConnection,
     screen_num: usize,
@@ -996,6 +1011,10 @@ pub struct X11Capture {
     composite_ready: bool,
     damage: DamageTracker,
     cursor: CursorCapture,
+    cursor_plane: bool,
+    last_cursor_sample: Option<CursorSample>,
+    cursor_shape_epoch: Option<u64>,
+    layout_epoch: u64,
     root_geometry: RootGeometryCache,
     inhibitor_atom: Atom,
     inhibitor_window: Window,
@@ -1152,6 +1171,10 @@ impl X11Capture {
             composite_ready,
             damage,
             cursor,
+            cursor_plane: false,
+            last_cursor_sample: None,
+            cursor_shape_epoch: None,
+            layout_epoch: 1,
             root_geometry,
             inhibitor_atom,
             inhibitor_window,
@@ -1179,6 +1202,93 @@ impl X11Capture {
         let damage_target = capture.damage_target();
         capture.damage.sync_target(&capture.conn, damage_target)?;
         Ok(capture)
+    }
+
+    /// Enable only after the peer negotiates the independent cursor capability.
+    /// Without XFixes or on a multi-root X server, keep composited video.
+    pub fn enable_cursor_plane(&mut self) -> bool {
+        if !cursor_plane_supported(
+            self.conn.setup().roots.len(),
+            self.cursor.mode != CursorMode::Disabled,
+        ) {
+            return false;
+        }
+        if !self.cursor_plane {
+            self.cursor_plane = true;
+            self.last_cursor_sample = None;
+            self.damage.invalidate();
+        }
+        true
+    }
+
+    #[must_use]
+    pub fn cursor_plane_enabled(&self) -> bool {
+        self.cursor_plane
+    }
+
+    #[must_use]
+    pub fn geometry_epoch(&self) -> u64 {
+        self.layout_epoch.saturating_add(self.root_geometry.epoch())
+    }
+
+    /// Poll on every host tick, before video pacing/backpressure decisions.
+    /// Position is queried even for read-only peers and host-local pointer motion.
+    pub fn poll_cursor_plane(&mut self) -> RemoteResult<Option<CursorSample>> {
+        if !self.cursor_plane {
+            return Ok(None);
+        }
+        self.drain_dynamic_events()?;
+        self.refresh_region()?;
+        let dimensions = self.root_geometry.dimensions(&self.conn, self.root)?;
+        let (source_width, source_height) = scoped_dimensions(self.region, dimensions);
+        let geometry_epoch = self.geometry_epoch();
+        if self.cursor_shape_epoch != Some(geometry_epoch) {
+            // Never admit a cached shape from a private region on a later
+            // pointer-only query, even if a serial notification cleared dirty.
+            self.cursor.dirty = true;
+        }
+        self.cursor.sampled_shape_position = None;
+        let pending = prepare_cursor_for_frame(&self.conn, self.root, &mut self.cursor)
+            .map_err(|failure| failure.error)?;
+        let pointer = resolve_cursor_for_frame(&self.conn, self.root, &mut self.cursor, pending)
+            .map_err(|failure| failure.error)?;
+        let fresh_shape_position = self.cursor.sampled_shape_position.take();
+        self.drain_dynamic_events()?;
+        let geometry_current = geometry_epoch == self.geometry_epoch();
+        let position =
+            cursor_plane_snapshot_position(pointer, fresh_shape_position, geometry_current);
+        let position = translate_cursor(position, self.origin());
+        if fresh_shape_position.is_some() || !geometry_current {
+            self.cursor_shape_epoch = (geometry_current
+                && !self.cursor.dirty
+                && cursor_in_source(position, source_width, source_height))
+            .then_some(geometry_epoch);
+        }
+        let sprite = self.cursor.shape.as_ref().filter(|shape| {
+            self.cursor_shape_epoch == Some(geometry_epoch)
+                && !self.cursor.dirty
+                && shape.width > 0
+                && shape.height > 0
+                && shape.width <= super::cursor::MAX_CURSOR_DIMENSION
+                && shape.height <= super::cursor::MAX_CURSOR_DIMENSION
+                && shape.xhot < shape.width
+                && shape.yhot < shape.height
+        });
+        let (mut sample, sprite) = scoped_cursor_plane_sample(
+            position,
+            sprite,
+            geometry_epoch,
+            source_width,
+            source_height,
+        );
+        if self.last_cursor_sample.as_ref() == Some(&sample) {
+            return Ok(None);
+        }
+        self.last_cursor_sample = Some(sample.clone());
+        // Every emitted sample is self-contained: a latest-only mailbox may
+        // replace an intermediate shape update before the sender consumes it.
+        sample.shape = Some(export_cursor_plane_shape(sprite));
+        Ok(Some(sample))
     }
 
     /// A bounded return path for buffers released by the sender thread.
@@ -1214,8 +1324,14 @@ impl X11Capture {
             let decision = match self.damage.decide_with_cursor_probe(
                 Instant::now(),
                 (source_width, source_height),
-                self.cursor.needs_shape(),
-                || self.cursor.gate_snapshot(&self.conn, self.root),
+                !self.cursor_plane && self.cursor.needs_shape(),
+                || {
+                    if self.cursor_plane {
+                        Ok(Some(CursorSnapshot::Disabled))
+                    } else {
+                        self.cursor.gate_snapshot(&self.conn, self.root)
+                    }
+                },
             ) {
                 Ok(decision) => decision,
                 Err(failure) => match cursor_probe_failure_action(failure.kind) {
@@ -1360,6 +1476,7 @@ impl X11Capture {
         allow_render: bool,
     ) -> Result<CaptureDrawableOutcome, CaptureFailure> {
         let origin = self.origin();
+        let geometry_epoch = self.geometry_epoch();
         let (output_width, output_height) =
             scaled_dimensions(source_width, source_height, self.max_width, self.max_height);
         let render_source = render_capture_source(self.root, drawable);
@@ -1373,7 +1490,11 @@ impl X11Capture {
             && render_allowed_for_source
             && !self.render_suspended(Instant::now())
         {
-            let pending_cursor = prepare_cursor_for_frame(&self.conn, self.root, &mut self.cursor)?;
+            let pending_cursor = if self.cursor_plane {
+                PendingCursor::Disabled
+            } else {
+                prepare_cursor_for_frame(&self.conn, self.root, &mut self.cursor)?
+            };
             let render_result = self
                 .render_scaler
                 .as_mut()
@@ -1422,8 +1543,13 @@ impl X11Capture {
                         return Ok(CaptureDrawableOutcome::RootGeometryChanged);
                     }
                     return Ok(CaptureDrawableOutcome::Frame(CapturedDrawable {
-                        cursor: captured_cursor_snapshot(&self.cursor, root_position),
+                        cursor: if self.cursor_plane {
+                            CursorSnapshot::Disabled
+                        } else {
+                            captured_cursor_snapshot(&self.cursor, root_position)
+                        },
                         frame: CapturedFrame {
+                            geometry_epoch,
                             image,
                             source_width,
                             source_height,
@@ -1438,7 +1564,11 @@ impl X11Capture {
         }
 
         let root_depth = self.screen().map_err(CaptureFailure::fatal)?.root_depth;
-        let pending_cursor = prepare_cursor_for_frame(&self.conn, self.root, &mut self.cursor)?;
+        let pending_cursor = if self.cursor_plane {
+            PendingCursor::Disabled
+        } else {
+            prepare_cursor_for_frame(&self.conn, self.root, &mut self.cursor)?
+        };
         let image_result = self.shm_readback.capture_rgb(
             &self.conn,
             drawable,
@@ -1489,8 +1619,13 @@ impl X11Capture {
         };
 
         Ok(CaptureDrawableOutcome::Frame(CapturedDrawable {
-            cursor: captured_cursor_snapshot(&self.cursor, root_position),
+            cursor: if self.cursor_plane {
+                CursorSnapshot::Disabled
+            } else {
+                captured_cursor_snapshot(&self.cursor, root_position)
+            },
             frame: CapturedFrame {
+                geometry_epoch,
                 image,
                 source_width,
                 source_height,
@@ -1509,7 +1644,9 @@ impl X11Capture {
         // flight. Consume the notification before using the cached sprite; a
         // serial mismatch suppresses this frame and refreshes on the next one.
         self.drain_dynamic_events()?;
-        if let Some((x, y)) = position {
+        if !self.cursor_plane
+            && let Some((x, y)) = position
+        {
             self.cursor
                 .composite_at(image, x, y, source_width, source_height);
         }
@@ -1761,6 +1898,7 @@ impl X11Capture {
         ) {
             return false;
         }
+        self.layout_epoch = self.layout_epoch.saturating_add(1);
         // A native-width session never built a scaler. Downscaling now needs
         // one, and the CPU resize fallback would otherwise be permanent.
         if max_width != 0
@@ -1792,6 +1930,10 @@ impl X11Capture {
         let region =
             resolve_capture_area(&self.conn, self.root, &self.area, root_width, root_height)?;
         validate_scope_transition(self.region, region)?;
+        if self.region != region {
+            self.layout_epoch = self.layout_epoch.saturating_add(1);
+            self.damage.invalidate();
+        }
         self.region = region;
         Ok(())
     }
@@ -2112,6 +2254,7 @@ struct CursorCapture {
     dirty: bool,
     pending_serial: Option<u32>,
     shape: Option<CursorShape>,
+    sampled_shape_position: Option<(i32, i32)>,
 }
 
 impl CursorCapture {
@@ -2121,6 +2264,7 @@ impl CursorCapture {
             dirty: false,
             pending_serial: None,
             shape: None,
+            sampled_shape_position: None,
         }
     }
 
@@ -2134,6 +2278,7 @@ impl CursorCapture {
             dirty: true,
             pending_serial: None,
             shape: None,
+            sampled_shape_position: None,
         }
     }
 
@@ -2142,6 +2287,7 @@ impl CursorCapture {
         self.dirty = false;
         self.pending_serial = None;
         self.shape = None;
+        self.sampled_shape_position = None;
     }
 
     fn fall_back_to_polling(&mut self) -> bool {
@@ -2197,6 +2343,7 @@ impl CursorCapture {
     }
 
     fn update_shape(&mut self, reply: &xfixes::GetCursorImageReply) -> RemoteResult<()> {
+        self.sampled_shape_position = Some((i32::from(reply.x), i32::from(reply.y)));
         let pending_serial = self.pending_serial.take();
         let replace = self
             .shape
@@ -2305,6 +2452,93 @@ impl CursorCapture {
             shape.composite(image, pointer_x, pointer_y, source_width, source_height);
         }
     }
+}
+
+/// XFixes cursor images carry coordinates but no root identity. On multi-root
+/// servers an earlier QueryPointer same-screen check can race a screen switch.
+/// Single-root RandR multi-monitor layouts do not have that ambiguity.
+fn cursor_plane_supported(root_count: usize, xfixes_available: bool) -> bool {
+    root_count == 1 && xfixes_available
+}
+
+/// Fresh pixels and coordinates must come from the same XFixes reply. The
+/// earlier QueryPointer reply is only a same-screen guard for fresh shapes;
+/// it may otherwise locate already-admitted cached shapes.
+fn cursor_plane_snapshot_position(
+    pointer: Option<(i32, i32)>,
+    fresh_shape_position: Option<(i32, i32)>,
+    geometry_current: bool,
+) -> Option<(i32, i32)> {
+    if !geometry_current || pointer.is_none() {
+        return None;
+    }
+    fresh_shape_position.or(pointer)
+}
+
+/// Filter at the sharing boundary before exporting any cursor data. A cursor
+/// over a private window must not reveal its sprite, serial or root position.
+fn scoped_cursor_plane_sample(
+    position: Option<(i32, i32)>,
+    sprite: Option<&CursorShape>,
+    geometry_epoch: u64,
+    source_width: u16,
+    source_height: u16,
+) -> (CursorSample, Option<&CursorShape>) {
+    let visible = sprite.is_some() && cursor_in_source(position, source_width, source_height);
+    let sprite = sprite.filter(|_| visible);
+    let (x, y) = if visible {
+        position.unwrap_or((0, 0))
+    } else {
+        (0, 0)
+    };
+    (
+        CursorSample {
+            geometry_epoch,
+            source_width,
+            source_height,
+            shape_id: cursor_plane_shape_id(sprite),
+            shape: None,
+            x,
+            y,
+            visible,
+        },
+        sprite,
+    )
+}
+
+// XFixes serial zero is valid, but the wire reserves zero for no identity.
+// The sentinel cannot collide with a widened 32-bit XFixes serial plus one.
+fn cursor_plane_shape_id(shape: Option<&CursorShape>) -> u64 {
+    shape.map_or(u64::MAX, |shape| u64::from(shape.serial) + 1)
+}
+
+fn export_cursor_plane_shape(shape: Option<&CursorShape>) -> super::cursor::CursorShape {
+    let id = cursor_plane_shape_id(shape);
+    match shape {
+        Some(shape) => super::cursor::CursorShape {
+            id,
+            width: shape.width,
+            height: shape.height,
+            hotspot_x: shape.xhot,
+            hotspot_y: shape.yhot,
+            rgba: shape.image.as_raw().clone(),
+        },
+        // Even invisible positions must refer to a known shape. Publish a
+        // transparent sentinel after recoverable XFixes failures or while a
+        // shape is unavailable, so the viewer can clear an earlier cursor.
+        None => super::cursor::CursorShape {
+            id,
+            width: 1,
+            height: 1,
+            hotspot_x: 0,
+            hotspot_y: 0,
+            rgba: vec![0; 4],
+        },
+    }
+}
+
+fn cursor_in_source(position: Option<(i32, i32)>, width: u16, height: u16) -> bool {
+    position.is_some_and(|(x, y)| x >= 0 && y >= 0 && x < i32::from(width) && y < i32::from(height))
 }
 
 fn pointer_position(root: Window, pointer: &QueryPointerReply) -> Option<(i32, i32)> {
@@ -4411,6 +4645,18 @@ fn invalid_data(message: impl Into<String>) -> io::Error {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn independent_cursor_requires_exactly_one_x_root() {
+        assert!(
+            super::cursor_plane_supported(1, true),
+            "single-root multi-monitor is supported"
+        );
+        for roots in [0, 2, 3, usize::MAX] {
+            assert!(!super::cursor_plane_supported(roots, true));
+        }
+        assert!(!super::cursor_plane_supported(1, false));
+    }
+
     use super::*;
     use std::cell::Cell;
 
@@ -4500,6 +4746,156 @@ mod tests {
             .is_err()
         );
         assert!(validate_scope_transition(Some(selected), None).is_err());
+    }
+
+    #[test]
+    fn cursor_shape_admission_uses_atomic_reply_position_not_stale_pointer() {
+        let stale_inside = Some((10, 20));
+        let fresh_outside = Some((110, 20));
+        let position = cursor_plane_snapshot_position(stale_inside, fresh_outside, true);
+        assert_eq!(position, fresh_outside);
+        assert!(!cursor_in_source(position, 100, 80));
+        assert_eq!(
+            cursor_plane_snapshot_position(stale_inside, None, true),
+            stale_inside
+        );
+        assert_eq!(
+            cursor_plane_snapshot_position(stale_inside, Some((15, 25)), false),
+            None
+        );
+        assert_eq!(
+            cursor_plane_snapshot_position(None, Some((15, 25)), true),
+            None
+        );
+        let reply = xfixes::GetCursorImageReply {
+            x: 110,
+            y: 20,
+            width: 1,
+            height: 1,
+            cursor_serial: 42,
+            cursor_image: vec![0xffff_0000],
+            ..Default::default()
+        };
+        let mut cursor = CursorCapture::new(true);
+        cursor.update_shape(&reply).unwrap();
+        assert_eq!(cursor.sampled_shape_position, fresh_outside);
+        let (sample, sprite) =
+            scoped_cursor_plane_sample(position, cursor.shape.as_ref(), 7, 100, 80);
+        assert!(!sample.visible);
+        assert_eq!((sample.x, sample.y), (0, 0));
+        assert_eq!(sample.shape_id, u64::MAX);
+        assert!(sprite.is_none());
+    }
+
+    #[test]
+    fn cursor_outside_shared_region_hides_pixels_identity_and_coordinates() {
+        let reply = xfixes::GetCursorImageReply {
+            width: 1,
+            height: 1,
+            cursor_serial: 42,
+            cursor_image: vec![0xffff_0000],
+            ..Default::default()
+        };
+        let private_shape = CursorShape::from_reply(&reply).unwrap();
+        for position in [
+            None,
+            Some((-1, 20)),
+            Some((100, 20)),
+            Some((10, -1)),
+            Some((10, 80)),
+        ] {
+            let (sample, sprite) =
+                scoped_cursor_plane_sample(position, Some(&private_shape), 7, 100, 80);
+            assert!(!sample.visible);
+            assert_eq!((sample.x, sample.y), (0, 0));
+            assert_eq!(sample.shape_id, u64::MAX);
+            assert!(sprite.is_none());
+            let exported = export_cursor_plane_shape(sprite);
+            assert_eq!(exported.rgba, vec![0; 4]);
+            exported.validate().unwrap();
+        }
+        let (sample, sprite) =
+            scoped_cursor_plane_sample(Some((99, 79)), Some(&private_shape), 7, 100, 80);
+        assert!(sample.visible);
+        assert_eq!((sample.x, sample.y), (99, 79));
+        assert_eq!(sample.shape_id, 43);
+        assert!(sprite.is_some());
+    }
+
+    #[test]
+    fn cursor_plane_hidden_sentinel_and_zero_serial_are_valid_wire_shapes() {
+        let hidden = export_cursor_plane_shape(None);
+        hidden.validate().unwrap();
+        assert_eq!(hidden.id, u64::MAX);
+        assert_eq!(hidden.rgba, vec![0; 4]);
+        for serial in [0, u32::MAX] {
+            let reply = xfixes::GetCursorImageReply {
+                width: 1,
+                height: 1,
+                cursor_serial: serial,
+                cursor_image: vec![0xffff_ffff],
+                ..Default::default()
+            };
+            let shape = CursorShape::from_reply(&reply).unwrap();
+            let visible = export_cursor_plane_shape(Some(&shape));
+            visible.validate().unwrap();
+            assert_eq!(visible.id, u64::from(serial) + 1);
+            assert_ne!(visible.id, hidden.id);
+        }
+        let mut cursor = CursorCapture::new(true);
+        cursor.disable();
+        assert_eq!(export_cursor_plane_shape(cursor.shape.as_ref()), hidden);
+    }
+
+    #[test]
+    fn cursor_plane_visibility_uses_shared_source_bounds() {
+        assert!(cursor_in_source(Some((0, 0)), 100, 80));
+        assert!(cursor_in_source(Some((99, 79)), 100, 80));
+        for position in [
+            None,
+            Some((-1, 10)),
+            Some((100, 10)),
+            Some((10, -1)),
+            Some((10, 80)),
+        ] {
+            assert!(!cursor_in_source(position, 100, 80));
+        }
+        assert!(cursor_in_source(
+            translate_cursor(Some((1930, 20)), (1920, 0)),
+            100,
+            80
+        ));
+        assert!(!cursor_in_source(
+            translate_cursor(Some((1910, 20)), (1920, 0)),
+            100,
+            80
+        ));
+    }
+
+    #[test]
+    fn independent_cursor_does_not_invalidate_clean_video_gate() {
+        let now = Instant::now();
+        let gate = clean_damage_gate(now, (1920, 1080), CursorSnapshot::Disabled);
+        // Independent mode supplies neither shape dirtiness nor a pointer
+        // snapshot, irrespective of host-local motion or shape changes.
+        assert_eq!(
+            gate.decide(
+                now + Duration::from_millis(10),
+                (1920, 1080),
+                CursorSnapshot::Disabled,
+                false
+            ),
+            DamageGateDecision::NoChange
+        );
+        assert_eq!(
+            gate.decide(
+                now + DAMAGE_FORCE_REFRESH,
+                (1920, 1080),
+                CursorSnapshot::Disabled,
+                false
+            ),
+            DamageGateDecision::Capture
+        );
     }
 
     #[test]

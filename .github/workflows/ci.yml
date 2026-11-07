@@ -117,6 +117,8 @@ jobs:
           run_step python3 scripts/test-showcase-lifecycle.py
           run_step python3 scripts/test-collector.py
           run_step python3 scripts/test-installer-config.py
+          run_step python3 scripts/test-remote-fault-proxy.py
+          run_step python3 scripts/test-remote-benchmark-metadata.py
           run_step python3 scripts/test-install-config-update.py
           run_step python3 scripts/test-compositor-init-lifecycle.py
           run_step python3 scripts/test-acceptance-evidence.py
@@ -330,6 +332,24 @@ jobs:
         run: >
           cargo check --locked --all-targets --no-default-features
           ${{ matrix.profile.features != '' && format('--features {0}', matrix.profile.features) || '' }}
+
+
+      - name: Test remote protocol and viewer state machines
+        if: matrix.profile.name == 'remote-x11'
+        env:
+          RUSTFLAGS: -D warnings
+        run: |
+          cargo test --locked --no-default-features --features remote-x11 --lib remote::
+          cargo test --locked --no-default-features --features remote-x11 --bin jwm-remote
+
+      - name: Test SHM and cursor overlay on an isolated X server
+        if: matrix.profile.name == 'remote-x11'
+        env:
+          RUSTFLAGS: -D warnings
+        run: |
+          sudo apt-get install -y --no-install-recommends xvfb xauth
+          xvfb-run -a -s '-screen 0 1024x768x24 -nolisten tcp' \
+            sh -c 'JWM_TEST_X11_DISPLAY="$DISPLAY" cargo test --locked --no-default-features --features remote-x11 --lib remote::x11_viewer::tests:: -- --ignored --nocapture --test-threads=1'
 
   portal:
     name: Portal (xdg-desktop-portal ScreenCast backend)

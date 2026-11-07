@@ -5,6 +5,7 @@ use jwm::remote::client::{ClientOptions, run_client};
 use jwm::remote::clipboard_files::parse_size;
 use jwm::remote::host::{HostOptions, run_host};
 use jwm::remote::key::{KeySource, generate_key_file};
+use jwm::remote::profiles::{Connection, Profile, Store, Viewer};
 use jwm::remote::session_env;
 use jwm::remote::ssh::{SshOptions, run_ssh};
 use jwm::remote::usability::{
@@ -39,6 +40,14 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Save, inspect and explicitly run named connection settings (no credentials).
+    Profile {
+        /// Existing private directory. Default: JWM config directory/remote-profiles.
+        #[arg(long, global = true, value_name = "DIRECTORY")]
+        directory: Option<PathBuf>,
+        #[command(subcommand)]
+        action: ProfileAction,
+    },
     /// Generate a new private pre-shared key file (never overwrites).
     #[command(
         after_help = "First create the private parent directory yourself if needed. For the HOME default:\n  mkdir -p -m 700 \"$HOME/.config/jwm\"\n  jwm-remote keygen\nIf XDG_CONFIG_HOME is set, use \"$XDG_CONFIG_HOME/jwm\" instead.\nExisting directories are not repaired or chmodded. Copy the generated key only through a secure channel."
@@ -184,6 +193,16 @@ enum Command {
         #[arg(value_name = "[USER@]HOST")]
         destination: String,
 
+        /// Host frame-rate ceiling (same range as host --fps).
+        #[arg(long, value_parser = parse_fps)]
+        fps: Option<u16>,
+        /// Host adaptive JPEG quality ceiling (same range as host).
+        #[arg(long, value_parser = parse_quality)]
+        jpeg_quality: Option<u8>,
+        /// Host encoded width ceiling; 0 fits the viewer to native width.
+        #[arg(long, value_parser = parse_max_width)]
+        max_width: Option<u16>,
+
         /// Share one monitor of the other machine by RandR name (see
         /// `xrandr --listmonitors` there), instead of all of them.
         #[arg(long, value_name = "NAME")]
@@ -266,6 +285,36 @@ enum Command {
     },
 }
 
+#[derive(Debug, Subcommand)]
+enum ProfileAction {
+    /// Create the private profile directory explicitly; never changes existing permissions.
+    Init,
+    /// Save settings without connecting. Example: save desk -- ssh user@desk --view-only
+    Save {
+        name: String,
+        #[arg(long)]
+        replace: bool,
+        /// A connect or ssh invocation, following --. No SSH options/commands are stored.
+        #[arg(required = true, num_args = 1.., trailing_var_arg = true, allow_hyphen_values = true)]
+        connection: Vec<String>,
+    },
+    List,
+    Show {
+        name: String,
+    },
+    /// Start exactly the saved settings; optional flags only reduce permissions.
+    Run {
+        name: String,
+        #[arg(long)]
+        view_only: bool,
+        #[arg(long)]
+        no_clipboard: bool,
+    },
+    Remove {
+        name: String,
+    },
+}
+
 fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
     match run(cli.command) {
@@ -278,6 +327,242 @@ fn main() -> std::process::ExitCode {
             std::process::ExitCode::FAILURE
         }
     }
+}
+
+fn profile_error(message: &str) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::InvalidInput, message)
+}
+
+fn profile_from_command(command: Command) -> RemoteResult<Profile> {
+    let (connection, viewer) = match command {
+        Command::Connect {
+            address,
+            key_file,
+            display,
+            view_only,
+            grab_input,
+            escape_key,
+            clipboard,
+            clipboard_file_limit,
+        } => {
+            if key_file.as_ref().is_some_and(|path| !path.is_absolute()) {
+                return Err(profile_error(
+                    "saved key paths must be absolute (contents are never stored)",
+                )
+                .into());
+            }
+            (
+                Connection::Connect { address, key_file },
+                Viewer {
+                    display,
+                    view_only,
+                    grab_input,
+                    escape_key,
+                    clipboard,
+                    clipboard_file_limit,
+                },
+            )
+        }
+        Command::Ssh {
+            destination,
+            monitor,
+            fps,
+            jpeg_quality,
+            max_width,
+            display,
+            view_only,
+            grab_input,
+            escape_key,
+            clipboard,
+            clipboard_file_limit,
+            remote_command,
+            ssh_options,
+        } => {
+            jwm::remote::ssh::validate_destination(&destination)?;
+            if remote_command.is_some() || !ssh_options.is_empty() {
+                return Err(profile_error("profiles do not store SSH commands or arbitrary options; use an SSH config alias").into());
+            }
+            (
+                Connection::Ssh {
+                    destination,
+                    monitor,
+                    fps,
+                    jpeg_quality,
+                    max_width,
+                },
+                Viewer {
+                    display,
+                    view_only,
+                    grab_input,
+                    escape_key,
+                    clipboard,
+                    clipboard_file_limit,
+                },
+            )
+        }
+        _ => return Err(profile_error("only connect and ssh commands can be saved").into()),
+    };
+    jwm::remote::x11_viewer::validate_escape_key(&viewer.escape_key)?;
+    let profile = Profile {
+        version: 1,
+        connection,
+        viewer,
+    };
+    // Reject control characters and unbounded strings even in manually edited JSON.
+    let text = serde_json::to_value(&profile)?;
+    fn check(value: &serde_json::Value) -> bool {
+        match value {
+            serde_json::Value::String(value) => {
+                value.len() <= 4096 && !value.chars().any(char::is_control)
+            }
+            serde_json::Value::Array(values) => values.iter().all(check),
+            serde_json::Value::Object(values) => values.values().all(check),
+            _ => true,
+        }
+    }
+    if !check(&text) {
+        return Err(profile_error(
+            "profile strings must be bounded and contain no control characters",
+        )
+        .into());
+    }
+    Ok(profile)
+}
+
+/// Reuse the real CLI parser on every load: ranges/conflicts cannot drift.
+fn command_from_profile(profile: &Profile) -> RemoteResult<Command> {
+    let mut args = vec!["jwm-remote".to_owned()];
+    match &profile.connection {
+        Connection::Connect { address, key_file } => {
+            args.extend(["connect".to_owned(), address.clone()]);
+            if let Some(path) = key_file {
+                args.extend([
+                    "--key-file".to_owned(),
+                    path.to_str()
+                        .ok_or_else(|| profile_error("profile key path must be UTF-8"))?
+                        .to_owned(),
+                ]);
+            }
+        }
+        Connection::Ssh {
+            destination,
+            monitor,
+            fps,
+            jpeg_quality,
+            max_width,
+        } => {
+            args.extend(["ssh".to_owned(), destination.clone()]);
+            if let Some(monitor) = monitor {
+                args.extend(["--monitor".to_owned(), monitor.clone()]);
+            }
+            for (flag, value) in [
+                ("--fps", fps.map(u64::from)),
+                ("--jpeg-quality", jpeg_quality.map(u64::from)),
+                ("--max-width", max_width.map(u64::from)),
+            ] {
+                if let Some(value) = value {
+                    args.extend([flag.to_owned(), value.to_string()]);
+                }
+            }
+        }
+    }
+    let viewer = &profile.viewer;
+    if let Some(display) = &viewer.display {
+        args.extend(["--display".to_owned(), display.clone()]);
+    }
+    for (flag, enabled) in [
+        ("--view-only", viewer.view_only),
+        ("--grab-input", viewer.grab_input),
+        ("--clipboard", viewer.clipboard),
+    ] {
+        if enabled {
+            args.push(flag.to_owned());
+        }
+    }
+    args.extend([
+        "--escape-key".to_owned(),
+        viewer.escape_key.clone(),
+        "--clipboard-file-limit".to_owned(),
+        viewer.clipboard_file_limit.to_string(),
+    ]);
+    Ok(Cli::try_parse_from(args)?.command)
+}
+
+fn validated_profile(profile: Profile) -> RemoteResult<Profile> {
+    if profile.version != 1 {
+        return Err(profile_error("unsupported profile schema version").into());
+    }
+    let validated = profile_from_command(command_from_profile(&profile)?)?;
+    if validated.viewer.clipboard_file_limit != profile.viewer.clipboard_file_limit {
+        return Err(profile_error(
+            "profile clipboard limit cannot round-trip through the CLI size parser",
+        )
+        .into());
+    }
+    Ok(validated)
+}
+
+fn run_profile(directory: Option<PathBuf>, action: ProfileAction) -> RemoteResult<()> {
+    let directory = match directory {
+        Some(path) => path,
+        None => resolve_key_path(None)?
+            .parent()
+            .ok_or_else(|| profile_error("missing config directory"))?
+            .join("remote-profiles"),
+    };
+    if matches!(action, ProfileAction::Init) {
+        Store::init(&directory)?;
+        println!("Initialized private profile directory: {directory:?}");
+        return Ok(());
+    }
+    let store = Store::open(&directory)?;
+    match action {
+        ProfileAction::Init => unreachable!("handled before opening store"),
+        ProfileAction::Save {
+            name,
+            replace,
+            connection,
+        } => {
+            let cli =
+                Cli::try_parse_from(std::iter::once("jwm-remote".to_owned()).chain(connection))?;
+            let profile = validated_profile(profile_from_command(cli.command)?)?;
+            store.save(&name, &profile, replace)?;
+            println!("Saved profile {name}; no connection was started.");
+        }
+        ProfileAction::List => {
+            for name in store.list()? {
+                validated_profile(store.load(&name)?)?;
+                println!("{name}");
+            }
+        }
+        ProfileAction::Show { name } => println!(
+            "{}",
+            serde_json::to_string_pretty(&validated_profile(store.load(&name)?)?)?
+        ),
+        ProfileAction::Remove { name } => {
+            store.remove(&name)?;
+            println!("Removed profile {name}.");
+        }
+        ProfileAction::Run {
+            name,
+            view_only,
+            no_clipboard,
+        } => {
+            let mut profile = validated_profile(store.load(&name)?)?;
+            if view_only {
+                profile.viewer.view_only = true;
+                profile.viewer.grab_input = false;
+            }
+            if no_clipboard {
+                profile.viewer.clipboard = false;
+            }
+            let command = command_from_profile(&profile)?;
+            // Do not retain the store lock for the session lifetime.
+            drop(store);
+            return run(command);
+        }
+    }
+    Ok(())
 }
 
 /// Show a failure through the desktop's notification service, best effort.
@@ -318,6 +603,7 @@ fn resolve_key_path(explicit: Option<PathBuf>) -> std::io::Result<PathBuf> {
 
 fn run(command: Command) -> RemoteResult<()> {
     match command {
+        Command::Profile { directory, action } => run_profile(directory, action),
         Command::Keygen { output } => {
             let output = resolve_key_path(output)?;
             if let Some(parent) = output.parent().filter(|path| !path.as_os_str().is_empty())
@@ -386,6 +672,9 @@ fn run(command: Command) -> RemoteResult<()> {
         }
         Command::Ssh {
             destination,
+            fps,
+            jpeg_quality,
+            max_width,
             monitor,
             view_only,
             grab_input,
@@ -397,6 +686,9 @@ fn run(command: Command) -> RemoteResult<()> {
             ssh_options,
         } => run_ssh(SshOptions {
             destination,
+            fps,
+            jpeg_quality,
+            max_width,
             ssh_options,
             remote_command,
             monitor,
@@ -576,6 +868,205 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn profile_cli_lifecycle_only_uses_an_explicit_temporary_store() {
+        let directory =
+            std::env::temp_dir().join(format!("jwm-profile-cli-{:032x}", rand::random::<u128>()));
+        run_profile(Some(directory.clone()), ProfileAction::Init).unwrap();
+        let save = |replace| ProfileAction::Save {
+            name: "desk".into(),
+            replace,
+            connection: ["ssh", "user@desk", "--view-only"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
+        };
+        run_profile(Some(directory.clone()), save(false)).unwrap();
+        assert!(run_profile(Some(directory.clone()), save(false)).is_err());
+        run_profile(Some(directory.clone()), save(true)).unwrap();
+        run_profile(Some(directory.clone()), ProfileAction::List).unwrap();
+        run_profile(
+            Some(directory.clone()),
+            ProfileAction::Show {
+                name: "desk".into(),
+            },
+        )
+        .unwrap();
+        run_profile(
+            Some(directory.clone()),
+            ProfileAction::Remove {
+                name: "desk".into(),
+            },
+        )
+        .unwrap();
+        assert!(Store::open(&directory).unwrap().list().unwrap().is_empty());
+        std::fs::remove_dir(directory).unwrap();
+    }
+
+    #[test]
+    fn profile_cli_roundtrips_settings_without_starting_a_session() {
+        for args in [
+            vec![
+                "jwm-remote",
+                "profile",
+                "save",
+                "desk",
+                "--",
+                "ssh",
+                "user@desk",
+                "--monitor",
+                "DP-0",
+                "--fps",
+                "24",
+                "--jpeg-quality",
+                "70",
+                "--max-width",
+                "1280",
+                "--view-only",
+            ],
+            vec![
+                "jwm-remote",
+                "profile",
+                "save",
+                "desk",
+                "--",
+                "connect",
+                "host",
+                "--key-file",
+                "/tmp/key",
+                "--clipboard",
+                "--clipboard-file-limit",
+                "512M",
+                "--grab-input",
+                "--display",
+                ":1",
+            ],
+        ] {
+            let Command::Profile {
+                action:
+                    ProfileAction::Save {
+                        name, connection, ..
+                    },
+                ..
+            } = Cli::try_parse_from(args).unwrap().command
+            else {
+                panic!("save expected");
+            };
+            assert_eq!(name, "desk");
+            let command =
+                Cli::try_parse_from(std::iter::once("jwm-remote".into()).chain(connection))
+                    .unwrap()
+                    .command;
+            let profile = profile_from_command(command).unwrap();
+            assert_eq!(validated_profile(profile.clone()).unwrap(), profile);
+            let encoded = serde_json::to_vec(&profile).unwrap();
+            assert_eq!(Profile::decode(&encoded).unwrap(), profile);
+        }
+        for args in [
+            vec!["jwm-remote", "profile", "list"],
+            vec![
+                "jwm-remote",
+                "profile",
+                "--directory",
+                "/tmp/profiles",
+                "show",
+                "desk",
+            ],
+            vec![
+                "jwm-remote",
+                "profile",
+                "run",
+                "desk",
+                "--view-only",
+                "--no-clipboard",
+            ],
+            vec!["jwm-remote", "profile", "remove", "desk"],
+        ] {
+            assert!(Cli::try_parse_from(args).is_ok());
+        }
+        let Command::Profile {
+            action:
+                ProfileAction::Save {
+                    replace,
+                    connection,
+                    ..
+                },
+            ..
+        } = Cli::try_parse_from([
+            "jwm-remote",
+            "profile",
+            "save",
+            "desk",
+            "--replace",
+            "--",
+            "ssh",
+            "desk",
+        ])
+        .unwrap()
+        .command
+        else {
+            panic!("save expected");
+        };
+        assert!(replace);
+        assert_eq!(connection, ["ssh", "desk"]);
+        assert!(
+            Cli::try_parse_from(["jwm-remote", "profile", "run", "desk", "--clipboard"]).is_err()
+        );
+    }
+
+    #[test]
+    fn saved_profiles_reject_commands_secrets_and_invalid_semantics() {
+        for args in [
+            vec!["jwm-remote", "host"],
+            vec!["jwm-remote", "ssh", "desk", "--remote-command", "custom"],
+            vec![
+                "jwm-remote",
+                "ssh",
+                "desk",
+                "--ssh-option",
+                "ProxyCommand=custom",
+            ],
+            vec![
+                "jwm-remote",
+                "connect",
+                "desk",
+                "--key-file",
+                "relative.key",
+            ],
+            vec!["jwm-remote", "ssh", "bad host"],
+            vec!["jwm-remote", "ssh", "desk", "--monitor", "bad\nname"],
+            vec!["jwm-remote", "ssh", "desk", "--escape-key", "not_a_keysym"],
+        ] {
+            assert!(profile_from_command(Cli::try_parse_from(args).unwrap().command).is_err());
+        }
+        let profile = profile_from_command(
+            Cli::try_parse_from(["jwm-remote", "ssh", "desk", "--view-only"])
+                .unwrap()
+                .command,
+        )
+        .unwrap();
+        assert!(profile.viewer.view_only);
+        assert!(!profile.viewer.clipboard);
+        let mut bad = profile.clone();
+        bad.viewer.grab_input = true;
+        assert!(validated_profile(bad).is_err());
+        for (fps, quality, width) in [
+            (Some(0), None, None),
+            (None, Some(101), None),
+            (None, None, Some(1)),
+        ] {
+            let mut bad = profile.clone();
+            bad.connection = Connection::Ssh {
+                destination: "desk".into(),
+                monitor: None,
+                fps,
+                jpeg_quality: quality,
+                max_width: width,
+            };
+            assert!(validated_profile(bad).is_err());
+        }
+    }
 
     #[test]
     fn interactive_defaults_keep_native_fit_and_congestion_escape_floor() {

@@ -544,6 +544,11 @@ struct HostTelemetryWindow {
     credit_samples: StageSamples,
     dirty_scan_samples: StageSamples,
     encode_samples: StageSamples,
+    atlas_encoded: u64,
+    atlas_pack_elapsed: Duration,
+    jpeg_elapsed: Duration,
+    atlas_pack_samples: StageSamples,
+    jpeg_samples: StageSamples,
     writer_wait_samples: StageSamples,
     socket_write_samples: StageSamples,
     capture_to_ack_samples: StageSamples,
@@ -692,6 +697,16 @@ impl HostTelemetry {
             window.total_tiles = window
                 .total_tiles
                 .saturating_add(u64::from(plan.total_tiles));
+        });
+    }
+
+    fn record_encode_stages(&self, stages: super::tile::EncodeStageTimings) {
+        self.update(|window| {
+            window.atlas_encoded = window.atlas_encoded.saturating_add(1);
+            window.atlas_pack_elapsed = window.atlas_pack_elapsed.saturating_add(stages.atlas_pack);
+            window.jpeg_elapsed = window.jpeg_elapsed.saturating_add(stages.jpeg);
+            window.atlas_pack_samples.record(stages.atlas_pack);
+            window.jpeg_samples.record(stages.jpeg);
         });
     }
 
@@ -1842,8 +1857,10 @@ fn serve_authenticated(
     // request is consent. Sending clipboard records to a peer that asked for
     // none would be a protocol violation on arrival.
     let clipboard_enabled = options.allow_clipboard && hello.request_clipboard;
-    let files_enabled =
-        clipboard_enabled && hello.request_clipboard_files && options.clipboard_file_limit > 0;
+    let file_limit = hello
+        .stream
+        .negotiate_file_limit(options.clipboard_file_limit);
+    let files_enabled = clipboard_enabled && hello.request_clipboard_files && file_limit > 0;
     let mut capture = match X11Capture::connect(
         options.display.as_deref(),
         options.capture_source,
@@ -1863,6 +1880,14 @@ fn serve_authenticated(
             return Err(error);
         }
     };
+    if let Some(requested) = hello.initial_viewport {
+        let (width, height) = effective_encoded_bounds(options.max_width, requested);
+        capture.set_encoded_bounds(width, height);
+    }
+    let mut negotiated_stream = hello.stream;
+    let can_separate = hello.stream.cursor == super::messages::CursorMode::Independent
+        && capture.enable_cursor_plane();
+    negotiated_stream.cursor = hello.stream.cursor.negotiate(can_separate);
     // Injected pointer coordinates arrive in shared-area space; XTEST wants
     // root coordinates. Resolved once here rather than per event.
     let input_area = capture.input_area();
@@ -1911,7 +1936,7 @@ fn serve_authenticated(
             options.display.as_deref(),
             SyncOptions {
                 files: files_enabled,
-                file_limit: options.clipboard_file_limit,
+                file_limit,
                 share_existing: false,
             },
             None,
@@ -1939,12 +1964,14 @@ fn serve_authenticated(
     };
     let clipboard_enabled = clipboard_sync.is_some();
     let files_enabled = files_enabled && clipboard_enabled;
+    negotiated_stream.clipboard_file_limit = if files_enabled { file_limit } else { 0 };
     if clipboard_enabled {
         reader.set_max_payload_len(MAX_INBOUND_CLIPBOARD_PAYLOAD_LEN);
     }
     writer.write_message(
         MessageKind::HelloAck,
         &ServerHello {
+            stream: negotiated_stream,
             pointer_enabled,
             keyboard_enabled,
             clipboard_enabled,
@@ -2206,6 +2233,9 @@ fn stream_frames(
     // when the surface and composited cursor have not changed.
     let mut next_capture_allowed = Instant::now();
     let mut reported_mode: Option<CaptureMode> = None;
+    let mut cursor_sender = CursorSender::default();
+    let mut next_cursor_poll = Instant::now();
+    let cursor_interval = Duration::from_millis(16);
     let capture_result = (|| -> RemoteResult<()> {
         while running.load(Ordering::Acquire) && !shutdown.load(Ordering::Acquire) {
             let now = Instant::now();
@@ -2230,6 +2260,16 @@ fn stream_frames(
                 reported_mode = Some(mode);
             }
             report_host_if_due(telemetry, credits, now);
+            // Cursor movement has its own bounded cadence, independent of the
+            // configured video FPS and video-credit backpressure.
+            if capture.cursor_plane_enabled() && Instant::now() >= next_cursor_poll {
+                if let Some(sample) = capture.poll_cursor_plane()? {
+                    let mut writer = writer.lock().unwrap();
+                    cursor_sender.send(&mut writer, sample)?;
+                }
+                next_cursor_poll = Instant::now() + cursor_interval;
+            }
+
             if let Some(wait) = capture_rate_limit_wait(
                 Instant::now(),
                 next_capture_allowed,
@@ -2238,6 +2278,11 @@ fn stream_frames(
                 // X11 events may wake early, but cannot bypass the rate limit.
                 // Recheck the absolute deadline rather than adding another
                 // full wait after it. Cursor motion need not signal XDamage.
+                let wait = if capture.cursor_plane_enabled() {
+                    wait.min(next_cursor_poll.saturating_duration_since(Instant::now()))
+                } else {
+                    wait
+                };
                 capture.wait_for_activity(wait)?;
                 continue;
             }
@@ -2445,6 +2490,9 @@ fn send_frames_with_encoder<W: std::io::Write + SetWriteTimeout>(
             .encoder
             .encode_into(&mut payload, sequence, &pending.frame, quality.quality)?;
         telemetry.record_encoded(encode_started.elapsed(), plan);
+        if let Some(stages) = sender.encoder.encode_timings() {
+            telemetry.record_encode_stages(stages);
+        }
         // Publish the application sequence before the bytes reach the peer so
         // an immediate cumulative ACK can never race ahead of host state.
         let sent_at = Instant::now();
@@ -2626,6 +2674,59 @@ fn lock_writer<W>(
     }
 }
 
+#[derive(Default)]
+struct CursorSender {
+    sequence: u64,
+    shape_id: Option<u64>,
+}
+
+impl CursorSender {
+    fn send<W: std::io::Write + SetWriteTimeout>(
+        &mut self,
+        writer: &mut SessionWriter<DeadlineWriter<W>>,
+        sample: super::x11_capture::CursorSample,
+    ) -> RemoteResult<()> {
+        let shape = sample
+            .shape
+            .ok_or_else(|| invalid_data("cursor sample has no shape"))?;
+        if shape.id != sample.shape_id {
+            return Err(invalid_data("cursor sample shape id mismatch").into());
+        }
+        let next = self
+            .sequence
+            .checked_add(1)
+            .ok_or_else(|| invalid_data("cursor sequence exhausted"))?;
+        let position = super::cursor::CursorPosition {
+            sequence: self.sequence,
+            geometry_epoch: sample.geometry_epoch,
+            shape_id: sample.shape_id,
+            source_width: sample.source_width,
+            source_height: sample.source_height,
+            x: sample.x,
+            y: sample.y,
+            visible: sample.visible,
+        }
+        .encode()?;
+        if self.shape_id != Some(shape.id) {
+            write_session_record(
+                writer,
+                MessageKind::CursorShape,
+                &shape.encode()?,
+                FRAME_WRITE_DEADLINE,
+            )?;
+        }
+        write_session_record(
+            writer,
+            MessageKind::CursorPosition,
+            &position,
+            FRAME_WRITE_DEADLINE,
+        )?;
+        self.shape_id = Some(shape.id);
+        self.sequence = next;
+        Ok(())
+    }
+}
+
 fn write_frame_record<W: std::io::Write + SetWriteTimeout>(
     writer: &mut SessionWriter<DeadlineWriter<W>>,
     payload: &[u8],
@@ -2700,6 +2801,8 @@ fn host_telemetry_json(snapshot: HostTelemetrySnapshot, outstanding: u64) -> ser
             "mailbox_age_ms": {"mean": average_millis(w.queue_elapsed, w.dequeued), "quantiles": w.queue_samples.json()},
             "credit_wait_ms": {"mean": average_millis(w.credit_wait_elapsed, w.dequeued), "quantiles": w.credit_samples.json()},
             "dirty_scan_ms": {"mean": average_millis(w.dirty_scan_elapsed, w.dirty_scans), "quantiles": w.dirty_scan_samples.json()},
+            "atlas_pack_ms": {"mean": average_millis(w.atlas_pack_elapsed, w.atlas_encoded), "quantiles": w.atlas_pack_samples.json()},
+            "jpeg_ms": {"mean": average_millis(w.jpeg_elapsed, w.atlas_encoded), "quantiles": w.jpeg_samples.json()},
             "atlas_pack_and_jpeg_ms": {"mean": average_millis(w.encode_elapsed, w.encoded), "quantiles": w.encode_samples.json()},
             "writer_wait_ms": {"mean": average_millis(w.writer_wait_elapsed, w.sent), "quantiles": w.writer_wait_samples.json()},
             "socket_write_ms": {"mean": average_millis(w.socket_write_elapsed, w.sent), "quantiles": w.socket_write_samples.json()},
@@ -2884,7 +2987,11 @@ fn receive_input(
                         telemetry.record_ack(ack);
                     }
                 }
-                MessageKind::Hello | MessageKind::HelloAck | MessageKind::Frame => {
+                MessageKind::Hello
+                | MessageKind::HelloAck
+                | MessageKind::Frame
+                | MessageKind::CursorShape
+                | MessageKind::CursorPosition => {
                     return Err(invalid_data(format!("unexpected client message: {kind:?}")).into());
                 }
             }
@@ -3613,6 +3720,89 @@ mod tests {
     }
 
     #[test]
+    fn cursor_sender_caches_shapes_and_orders_positions_without_video_credit() {
+        let key = [0x5d; 32];
+        let mut writer = SessionWriter::new(
+            DeadlineWriter::new(
+                DripWriter {
+                    bytes: Vec::new(),
+                    max_chunk: usize::MAX,
+                    write_delay: Duration::ZERO,
+                    flush_delay: Duration::ZERO,
+                    flushes: 0,
+                },
+                WRITE_TIMEOUT,
+            ),
+            key,
+        );
+        let mut sender = CursorSender::default();
+        for x in [10, 20] {
+            sender
+                .send(
+                    &mut writer,
+                    super::super::x11_capture::CursorSample {
+                        geometry_epoch: 2,
+                        source_width: 640,
+                        source_height: 480,
+                        shape_id: 1,
+                        shape: Some(super::super::cursor::CursorShape {
+                            id: 1,
+                            width: 1,
+                            height: 1,
+                            hotspot_x: 0,
+                            hotspot_y: 0,
+                            rgba: vec![255; 4],
+                        }),
+                        x,
+                        y: 10,
+                        visible: true,
+                    },
+                )
+                .unwrap();
+        }
+        let mut reader =
+            SessionReader::new(Cursor::new(writer.get_ref().get_ref().bytes.clone()), key);
+        let (kind, payload) = reader.read_message().unwrap();
+        assert_eq!(kind, MessageKind::CursorShape);
+        assert_eq!(
+            super::super::cursor::CursorShape::decode(&payload)
+                .unwrap()
+                .id,
+            1
+        );
+        for (sequence, x) in [(0, 10), (1, 20)] {
+            let (kind, payload) = reader.read_message().unwrap();
+            assert_eq!(kind, MessageKind::CursorPosition);
+            let p = super::super::cursor::CursorPosition::decode(&payload).unwrap();
+            assert_eq!((p.sequence, p.x, p.geometry_epoch), (sequence, x, 2));
+        }
+        assert!(reader.read_message().is_err());
+    }
+
+    #[test]
+    fn initial_viewport_is_applied_before_ack_and_capture_worker_start() {
+        // Protect orchestration order without requiring a live X server: the
+        // hello must narrow the scaler synchronously, not race the input thread.
+        let source = include_str!("host.rs");
+        let body = source
+            .split("fn serve_authenticated(")
+            .nth(1)
+            .unwrap()
+            .split("fn stream_frames(")
+            .next()
+            .unwrap();
+        let initial = body
+            .find("if let Some(requested) = hello.initial_viewport")
+            .unwrap();
+        let bounds = body
+            .find("capture.set_encoded_bounds(width, height)")
+            .unwrap();
+        let ack = body.find("MessageKind::HelloAck").unwrap();
+        let stream = body.find("let stream_result = stream_frames(").unwrap();
+        assert!(initial < bounds && bounds < ack && ack < stream);
+    }
+
+    #[test]
     fn a_viewport_request_can_only_narrow_the_operator_ceiling() {
         // A peer asking for more pixels than the operator allowed gets the
         // ceiling. Otherwise the viewer would dictate host CPU, readback size
@@ -3738,6 +3928,7 @@ mod tests {
 
     fn test_captured_frame(red: u8) -> CapturedFrame {
         CapturedFrame {
+            geometry_epoch: 0,
             image: RgbImage::from_pixel(2, 2, Rgb([red, 0, 0])),
             source_width: 2,
             source_height: 2,
@@ -3923,6 +4114,7 @@ mod tests {
 
         fn acknowledge(mut peer: AuthenticatedPeer) -> RemoteResult<()> {
             let hello = ServerHello {
+                stream: Default::default(),
                 pointer_enabled: false,
                 keyboard_enabled: false,
                 clipboard_enabled: false,
@@ -3946,6 +4138,8 @@ mod tests {
             let mut reader = SessionReader::new(stream.try_clone().unwrap(), receive);
             let mut writer = SessionWriter::new(stream.try_clone().unwrap(), send);
             let hello = ClientHello {
+                stream: Default::default(),
+                initial_viewport: None,
                 request_input: false,
                 request_clipboard: false,
                 request_clipboard_files: false,
@@ -3975,6 +4169,8 @@ mod tests {
             // A version-4 viewer: same prefix, the older version number and
             // its single 32-byte keymap digest.
             let mut hello = ClientHello {
+                stream: Default::default(),
+                initial_viewport: None,
                 request_input: false,
                 request_clipboard: false,
                 request_clipboard_files: false,
@@ -3989,7 +4185,7 @@ mod tests {
             let (kind, reason) = reader.read_message().unwrap();
             assert_eq!(kind, MessageKind::Close);
             let reason = String::from_utf8(reason).unwrap();
-            assert!(reason.contains("version 4; expected 6"), "{reason}");
+            assert!(reason.contains("version 4; expected 9"), "{reason}");
             assert!(
                 reason.contains("update jwm-remote on both machines"),
                 "{reason}"
@@ -4065,6 +4261,8 @@ mod tests {
             let (_, send) = keys.into_client();
             let mut writer = SessionWriter::new(stream.try_clone().unwrap(), send);
             let hello = ClientHello {
+                stream: Default::default(),
+                initial_viewport: None,
                 request_input: false,
                 request_clipboard: false,
                 request_clipboard_files: false,
@@ -4169,6 +4367,7 @@ mod tests {
         );
 
         let image_geometry_changed = CapturedFrame {
+            geometry_epoch: 0,
             image: RgbImage::from_pixel(1, 4, Rgb([10, 0, 0])),
             source_width: 2,
             source_height: 2,
@@ -4908,6 +5107,10 @@ mod tests {
         telemetry.record_dequeued(Duration::from_millis(5), Duration::from_millis(7));
         telemetry.record_dirty_scan(Duration::from_millis(4));
         telemetry.record_encoded(Duration::from_millis(6), test_tile_plan(1, 4));
+        telemetry.record_encode_stages(super::super::tile::EncodeStageTimings {
+            atlas_pack: Duration::from_millis(2),
+            jpeg: Duration::from_millis(4),
+        });
         telemetry.record_write_stages(Duration::from_millis(2), Duration::from_millis(3));
         telemetry.record_sent(100, Duration::from_millis(5));
         let snapshot = telemetry.take_due_at(base + TELEMETRY_INTERVAL).unwrap();
@@ -4918,6 +5121,8 @@ mod tests {
         assert_eq!(parsed["stages"]["capture_ms"]["mean"], 30.0);
         assert_eq!(parsed["stages"]["mailbox_age_ms"]["mean"], 5.0);
         assert_eq!(parsed["stages"]["dirty_scan_ms"]["mean"], 4.0);
+        assert_eq!(parsed["stages"]["atlas_pack_ms"]["mean"], 2.0);
+        assert_eq!(parsed["stages"]["jpeg_ms"]["quantiles"]["p99_ms"], 4.0);
         assert_eq!(parsed["stages"]["writer_wait_ms"]["mean"], 2.0);
         assert_eq!(parsed["stages"]["socket_write_ms"]["mean"], 3.0);
         let reset = telemetry
@@ -4925,6 +5130,8 @@ mod tests {
             .unwrap();
         assert_eq!(reset.window.capture_samples.count, 0);
         assert_eq!(reset.window.dirty_scans, 0);
+        assert_eq!(reset.window.atlas_encoded, 0);
+        assert_eq!(reset.window.jpeg_samples.count, 0);
     }
 
     #[test]

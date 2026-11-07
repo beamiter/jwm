@@ -6,7 +6,7 @@ use super::x11_capture::CapturedFrame;
 use image::codecs::jpeg::{JpegDecoder, JpegEncoder};
 use image::{ColorType, DynamicImage, ExtendedColorType, ImageDecoder, Limits, RgbImage};
 use std::io::{self, Cursor, Write};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 const FRAME_HEADER_LEN: usize = 16;
 const ENCODE_RESERVE_SOFT_LIMIT: usize = 4 * 1024 * 1024;
@@ -88,14 +88,106 @@ pub(crate) struct FrameDamage {
     pub rect: Option<(u16, u16, u16, u16)>,
 }
 
+/// Immutable, complete tile state. Cloning a frame shares unchanged pixels;
+/// a latest-only mailbox can discard any number of intermediate snapshots.
+#[derive(Clone, Debug)]
+pub(crate) struct TileSnapshot {
+    width: u32,
+    height: u32,
+    tile: usize,
+    pixels: Arc<Vec<Arc<[u8]>>>,
+}
+
+impl TileSnapshot {
+    pub(crate) fn update(
+        canvas: &RgbImage,
+        previous: Option<&Self>,
+        bitmap: &[u8],
+        tile: usize,
+    ) -> Self {
+        let (width, height) = canvas.dimensions();
+        let columns = (width as usize).div_ceil(tile);
+        let count = columns * (height as usize).div_ceil(tile);
+        let compatible = previous.filter(|p| (p.width, p.height, p.tile) == (width, height, tile));
+        if let Some(previous) = compatible
+            && bitmap.iter().all(|byte| *byte == 0)
+        {
+            return previous.clone();
+        }
+        let mut pixels = compatible
+            .map(|p| p.pixels.as_ref().clone())
+            .unwrap_or_else(|| vec![Arc::from([]); count]);
+        for (index, slot) in pixels.iter_mut().enumerate() {
+            if compatible.is_some() && bitmap[index / 8] & (1 << (index % 8)) == 0 {
+                continue;
+            }
+            let x = (index % columns) * tile;
+            let y = (index / columns) * tile;
+            let w = tile.min(width as usize - x);
+            let h = tile.min(height as usize - y);
+            let mut bytes = Vec::with_capacity(w * h * 3);
+            for row in y..y + h {
+                let start = (row * width as usize + x) * 3;
+                bytes.extend_from_slice(&canvas.as_raw()[start..start + w * 3]);
+            }
+            *slot = bytes.into();
+        }
+        Self {
+            width,
+            height,
+            tile,
+            pixels: Arc::new(pixels),
+        }
+    }
+
+    fn materialize(&self) -> RgbImage {
+        let mut image = RgbImage::new(self.width, self.height);
+        self.apply(&mut image, None);
+        image
+    }
+
+    /// Apply differences against the actual viewer predecessor, not the last
+    /// received frame. Returns the bounding rectangle of copied pixels.
+    fn apply(&self, image: &mut RgbImage, previous: Option<&Self>) -> Option<(u16, u16, u16, u16)> {
+        assert_eq!(image.dimensions(), (self.width, self.height));
+        let previous = previous
+            .filter(|p| (p.width, p.height, p.tile) == (self.width, self.height, self.tile));
+        let columns = (self.width as usize).div_ceil(self.tile);
+        let mut bounds: Option<(usize, usize, usize, usize)> = None;
+        for (index, bytes) in self.pixels.iter().enumerate() {
+            if previous.is_some_and(|p| Arc::ptr_eq(&p.pixels[index], bytes)) {
+                continue;
+            }
+            let x = index % columns * self.tile;
+            let y = index / columns * self.tile;
+            let w = self.tile.min(self.width as usize - x);
+            let h = self.tile.min(self.height as usize - y);
+            for row in 0..h {
+                let start = ((y + row) * self.width as usize + x) * 3;
+                image.as_mut()[start..start + w * 3]
+                    .copy_from_slice(&bytes[row * w * 3..(row + 1) * w * 3]);
+            }
+            bounds = Some(match bounds {
+                None => (x, y, x + w, y + h),
+                Some((a, b, c, d)) => (a.min(x), b.min(y), c.max(x + w), d.max(y + h)),
+            });
+        }
+        bounds.map(|(x, y, r, b)| (x as u16, y as u16, (r - x) as u16, (b - y) as u16))
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct RecyclableDecodedFrame {
+    geometry_epoch: u64,
     sequence: u64,
     source_width: u16,
     source_height: u16,
     image: Option<RgbImage>,
     pool: SharedDecodeBufferPool,
     damage: Option<FrameDamage>,
+    encoded_dimensions: (u32, u32),
+    tiles: Option<TileSnapshot>,
+    materialized: OnceLock<RgbImage>,
 }
 
 impl RecyclableDecodedFrame {
@@ -107,13 +199,79 @@ impl RecyclableDecodedFrame {
         pool: SharedDecodeBufferPool,
     ) -> Self {
         Self {
+            geometry_epoch: 0,
             sequence,
             source_width,
             source_height,
+            encoded_dimensions: image.dimensions(),
             image: Some(image),
             pool,
             damage: None,
+            tiles: None,
+            materialized: OnceLock::new(),
         }
+    }
+
+    pub(crate) fn from_tiles(
+        sequence: u64,
+        source_width: u16,
+        source_height: u16,
+        tiles: TileSnapshot,
+        pool: SharedDecodeBufferPool,
+    ) -> Self {
+        Self {
+            geometry_epoch: 0,
+            sequence,
+            source_width,
+            source_height,
+            image: None,
+            pool,
+            damage: None,
+            encoded_dimensions: (tiles.width, tiles.height),
+            tiles: Some(tiles),
+            materialized: OnceLock::new(),
+        }
+    }
+
+    pub(crate) fn with_geometry_epoch(mut self, epoch: u64) -> Self {
+        self.geometry_epoch = epoch;
+        self
+    }
+
+    pub(crate) fn geometry_epoch(&self) -> u64 {
+        self.geometry_epoch
+    }
+
+    pub(crate) fn dimensions(&self) -> (u32, u32) {
+        self.encoded_dimensions
+    }
+
+    /// Transfer the viewer's allocation and patch only changed shared tiles.
+    /// The old frame must be replaced immediately after this operation.
+    pub(crate) fn reuse_canvas_from(&mut self, previous: &mut Self) {
+        let Some(tiles) = self.tiles.as_ref() else {
+            return;
+        };
+        if self.geometry_epoch != previous.geometry_epoch
+            || self.dimensions() != previous.dimensions()
+            || (self.source_width, self.source_height)
+                != (previous.source_width, previous.source_height)
+        {
+            return;
+        }
+        let Some(mut image) = previous
+            .image
+            .take()
+            .or_else(|| previous.materialized.take())
+        else {
+            return;
+        };
+        let rect = tiles.apply(&mut image, previous.tiles.as_ref());
+        self.image = Some(image);
+        self.damage = Some(FrameDamage {
+            base_sequence: previous.sequence,
+            rect,
+        });
     }
 
     pub(crate) fn with_damage(mut self, damage: Option<FrameDamage>) -> Self {
@@ -153,9 +311,14 @@ impl RecyclableDecodedFrame {
 
     #[must_use]
     pub(crate) fn image(&self) -> &RgbImage {
-        self.image
-            .as_ref()
-            .expect("recyclable decoded frame always owns its image before Drop")
+        self.image.as_ref().unwrap_or_else(|| {
+            self.materialized.get_or_init(|| {
+                self.tiles
+                    .as_ref()
+                    .expect("frame has RGB or tile storage")
+                    .materialize()
+            })
+        })
     }
 
     fn into_decoded(mut self) -> DecodedFrame {
@@ -166,14 +329,15 @@ impl RecyclableDecodedFrame {
             image: self
                 .image
                 .take()
-                .expect("recyclable decoded frame always owns its image before conversion"),
+                .or_else(|| self.materialized.take())
+                .unwrap_or_else(|| self.tiles.as_ref().expect("tile frame").materialize()),
         }
     }
 }
 
 impl Drop for RecyclableDecodedFrame {
     fn drop(&mut self) {
-        if let Some(image) = self.image.take() {
+        if let Some(image) = self.image.take().or_else(|| self.materialized.take()) {
             recycle_decode_buffer(&self.pool, image.into_raw());
         }
     }
@@ -464,6 +628,106 @@ pub(crate) fn invalid_data(message: impl Into<String>) -> io::Error {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn tile_snapshots_share_pixels_and_reuse_viewer_canvas_across_skips() {
+        let mut canvas = RgbImage::from_pixel(5, 3, image::Rgb([10, 20, 30]));
+        let original = TileSnapshot::update(&canvas, None, &[0b11_1111], 2);
+        let pool = new_decode_buffer_pool();
+        let mut displayed =
+            RecyclableDecodedFrame::from_tiles(1, 5, 3, original.clone(), pool.clone());
+        assert!(displayed.image.is_none());
+        assert!(displayed.materialized.get().is_none());
+        let pointer = displayed.image().as_raw().as_ptr();
+        canvas.put_pixel(0, 0, image::Rgb([90, 0, 0]));
+        let skipped = TileSnapshot::update(&canvas, Some(&original), &[1], 2);
+        assert!(Arc::ptr_eq(&original.pixels[1], &skipped.pixels[1]));
+        assert!(!Arc::ptr_eq(&original.pixels[0], &skipped.pixels[0]));
+        canvas.put_pixel(4, 2, image::Rgb([0, 90, 0]));
+        let newest = TileSnapshot::update(&canvas, Some(&skipped), &[32], 2);
+        drop(skipped);
+        let mut next = RecyclableDecodedFrame::from_tiles(3, 5, 3, newest, pool);
+        next.reuse_canvas_from(&mut displayed);
+        assert_eq!(next.image().as_raw().as_ptr(), pointer);
+        assert_eq!(next.image(), &canvas);
+        assert_eq!(
+            next.damage(),
+            Some(FrameDamage {
+                base_sequence: 1,
+                rect: Some((0, 0, 5, 3))
+            })
+        );
+        assert!(displayed.materialized.get().is_none());
+        assert_eq!(displayed.dimensions(), (5, 3));
+        assert_eq!(
+            &*original.pixels[0],
+            &[10, 20, 30, 10, 20, 30, 10, 20, 30, 10, 20, 30]
+        );
+    }
+
+    #[test]
+    fn identical_dimensions_do_not_reuse_a_canvas_from_another_geometry_epoch() {
+        let canvas = RgbImage::from_pixel(4, 4, image::Rgb([3, 4, 5]));
+        let snapshot = TileSnapshot::update(&canvas, None, &[15], 2);
+        let pool = new_decode_buffer_pool();
+        let mut previous =
+            RecyclableDecodedFrame::from_tiles(0, 4, 4, snapshot.clone(), pool.clone())
+                .with_geometry_epoch(1);
+        let pointer = previous.image().as_raw().as_ptr();
+        let mut next =
+            RecyclableDecodedFrame::from_tiles(1, 4, 4, snapshot, pool).with_geometry_epoch(2);
+        next.reuse_canvas_from(&mut previous);
+        assert_eq!(previous.image().as_raw().as_ptr(), pointer);
+        assert_ne!(next.image().as_raw().as_ptr(), pointer);
+        assert!(next.damage().is_none());
+    }
+
+    #[test]
+    fn unchanged_tile_snapshot_has_no_pixel_copy_or_upload_damage() {
+        let canvas = RgbImage::from_pixel(4, 4, image::Rgb([3, 4, 5]));
+        let first = TileSnapshot::update(&canvas, None, &[15], 2);
+        let next = TileSnapshot::update(&canvas, Some(&first), &[0], 2);
+        assert!(Arc::ptr_eq(&first.pixels, &next.pixels));
+        let pool = new_decode_buffer_pool();
+        let mut previous = RecyclableDecodedFrame::from_tiles(4, 4, 4, first, pool.clone());
+        let pointer = previous.image().as_raw().as_ptr();
+        let mut current = RecyclableDecodedFrame::from_tiles(5, 4, 4, next, pool);
+        current.reuse_canvas_from(&mut previous);
+        assert_eq!(current.image().as_raw().as_ptr(), pointer);
+        assert_eq!(
+            current.damage(),
+            Some(FrameDamage {
+                base_sequence: 4,
+                rect: None
+            })
+        );
+    }
+
+    #[test]
+    fn snapshot_geometry_change_keeps_previous_allocation_owned() {
+        let pool = new_decode_buffer_pool();
+        let first = RgbImage::from_pixel(4, 4, image::Rgb([1, 2, 3]));
+        let second = RgbImage::from_pixel(3, 5, image::Rgb([4, 5, 6]));
+        let mut previous = RecyclableDecodedFrame::from_tiles(
+            1,
+            4,
+            4,
+            TileSnapshot::update(&first, None, &[15], 2),
+            pool.clone(),
+        );
+        let mut next = RecyclableDecodedFrame::from_tiles(
+            2,
+            3,
+            5,
+            TileSnapshot::update(&second, None, &[63], 2),
+            pool,
+        );
+        let _ = previous.image();
+        next.reuse_canvas_from(&mut previous);
+        assert_eq!(previous.image(), &first);
+        assert_eq!(next.image(), &second);
+        assert_eq!(next.damage(), None);
+    }
+
     use super::*;
     use image::{Rgb, RgbImage};
     use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -472,6 +736,7 @@ mod tests {
         encode_frame(
             sequence,
             &CapturedFrame {
+                geometry_epoch: 0,
                 image: RgbImage::from_fn(width, height, |x, y| {
                     Rgb([
                         (x.wrapping_mul(31) ^ y) as u8,
@@ -493,6 +758,7 @@ mod tests {
         let payload = encode_frame(
             17,
             &CapturedFrame {
+                geometry_epoch: 0,
                 image,
                 source_width: 1920,
                 source_height: 1080,
@@ -509,6 +775,7 @@ mod tests {
     #[test]
     fn repeated_encoding_reuses_capacity_without_leaking_previous_bytes() {
         let large = CapturedFrame {
+            geometry_epoch: 0,
             image: RgbImage::from_fn(64, 48, |x, y| {
                 Rgb([(x * 3) as u8, (y * 5) as u8, (x ^ y) as u8])
             }),
@@ -516,6 +783,7 @@ mod tests {
             source_height: 1080,
         };
         let small = CapturedFrame {
+            geometry_epoch: 0,
             image: RgbImage::from_pixel(8, 4, Rgb([20, 80, 160])),
             source_width: 800,
             source_height: 600,
@@ -542,11 +810,13 @@ mod tests {
     #[test]
     fn failed_encoding_clears_payload_but_keeps_it_reusable() {
         let valid = CapturedFrame {
+            geometry_epoch: 0,
             image: RgbImage::from_pixel(16, 8, Rgb([10, 20, 30])),
             source_width: 16,
             source_height: 8,
         };
         let invalid = CapturedFrame {
+            geometry_epoch: 0,
             image: RgbImage::from_pixel(16, 8, Rgb([40, 50, 60])),
             source_width: 0,
             source_height: 8,
@@ -595,6 +865,7 @@ mod tests {
         let mut payload = encode_frame(
             1,
             &CapturedFrame {
+                geometry_epoch: 0,
                 image,
                 source_width: 4,
                 source_height: 4,

@@ -132,6 +132,9 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
     } else {
         KeymapTable::empty()
     };
+    let initial_viewport = super::x11_viewer::initial_viewport(options.display.as_deref())?;
+    let request_cursor_plane =
+        super::x11_viewer::supports_cursor_plane(options.display.as_deref())?;
     *stage = ClientStage::Connect;
     eprintln!("jwm-remote: connecting to {}", options.peer_label);
     let stream = connect_with_timeout(&options.address, CONNECT_TIMEOUT)?;
@@ -142,8 +145,10 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
         &key,
         request_input,
         options.clipboard,
-        options.clipboard && options.clipboard_file_limit > 0,
+        options.clipboard_file_limit,
         &keymap,
+        Some(initial_viewport),
+        request_cursor_plane,
         HANDSHAKE_TIMEOUT,
     )?;
     *stage = ClientStage::FirstFrame;
@@ -179,7 +184,7 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
             options.display.as_deref(),
             SyncOptions {
                 files: hello.clipboard_files_enabled,
-                file_limit: options.clipboard_file_limit,
+                file_limit: hello.stream.clipboard_file_limit,
                 // What you copied just before connecting is what you most
                 // likely mean to paste over there.
                 share_existing: true,
@@ -213,12 +218,20 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
 
     *stage = ClientStage::FirstFrame;
     let state = Arc::new(ReceiveState::new());
+    state.cursor_enabled.store(
+        hello.stream.cursor == super::messages::CursorMode::Independent,
+        Ordering::Release,
+    );
     let mut telemetry_reporter = ClientTelemetryReporter::new(&state.telemetry);
     let payload = read_initial_frame(
         &mut reader,
         hello.clipboard_enabled,
+        state.cursor_enabled.load(Ordering::Acquire),
         FIRST_FRAME_TIMEOUT,
         |kind, payload| {
+            if matches!(kind, MessageKind::CursorShape | MessageKind::CursorPosition) {
+                return receive_cursor(&state, kind, payload);
+            }
             clipboard_inbox
                 .as_ref()
                 .ok_or_else(|| invalid_data("clipboard sharing was not negotiated"))?
@@ -256,6 +269,10 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
         &options.peer_label,
     )?;
     viewer.set_clipboard_status(hello.clipboard_enabled);
+    if state.cursor_enabled.load(Ordering::Acquire) {
+        viewer.enable_cursor_plane()?;
+        apply_pending_cursor(&mut viewer, &state)?;
+    }
     let control = writer.get_ref().try_clone()?;
     let sender_state = Arc::clone(&state);
     let mut writer = Sender::spawn(
@@ -267,15 +284,8 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
             }
         },
     )?;
-    let mut first_frame_presented = false;
-    draw_and_ack(&mut writer, first_frame, &state.telemetry, |frame| {
-        first_frame_presented = viewer.draw_recyclable(frame)?;
-        if first_frame_presented {
-            *stage = ClientStage::FirstFrameAck;
-        }
-        Ok(first_frame_presented)
-    })?;
-    if !first_frame_presented {
+    let mut pending_presentations = std::collections::VecDeque::new();
+    if !submit_frame(&mut viewer, first_frame, &mut pending_presentations)? {
         return Ok(());
     }
 
@@ -324,6 +334,7 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
         &mut wake_receiver,
         clipboard_outbox.as_ref(),
         clipboard_status.as_deref(),
+        &mut pending_presentations,
     );
     let graceful_close = matches!(
         &loop_result,
@@ -356,14 +367,17 @@ fn negotiate_session(
     key: &[u8],
     request_input: bool,
     request_clipboard: bool,
-    request_clipboard_files: bool,
+    clipboard_file_limit: u64,
     keymap: &KeymapTable,
+    initial_viewport: Option<(u16, u16)>,
+    request_cursor_plane: bool,
     negotiation_timeout: Duration,
 ) -> RemoteResult<(
     SessionReader<TcpStream>,
     SessionWriter<TcpStream>,
     ServerHello,
 )> {
+    let request_clipboard_files = request_clipboard && clipboard_file_limit > 0;
     stream.set_nodelay(true)?;
     stream.set_read_timeout(Some(negotiation_timeout))?;
     stream.set_write_timeout(Some(negotiation_timeout))?;
@@ -382,6 +396,20 @@ fn negotiate_session(
     writer.write_message(
         MessageKind::Hello,
         &ClientHello {
+            stream: super::messages::StreamCapabilities {
+                clipboard_file_limit: if request_clipboard_files {
+                    clipboard_file_limit
+                } else {
+                    0
+                },
+                cursor: if request_cursor_plane {
+                    super::messages::CursorMode::Independent
+                } else {
+                    super::messages::CursorMode::Composited
+                },
+                ..Default::default()
+            },
+            initial_viewport,
             request_input,
             request_clipboard,
             request_clipboard_files,
@@ -409,12 +437,16 @@ fn negotiate_session(
         return Err(invalid_data("host did not acknowledge remote session negotiation").into());
     }
     let hello = ServerHello::decode(&payload)?;
+    if hello.stream.cursor == super::messages::CursorMode::Independent && !request_cursor_plane {
+        return Err(invalid_data("host enabled independent cursor without viewer support").into());
+    }
     validate_server_capabilities(
         &hello,
         request_input,
         request_clipboard,
         request_clipboard_files,
     )?;
+    validate_server_file_limit(&hello, clipboard_file_limit)?;
     negotiation_deadline.cancel();
     reader.set_max_payload_len(MAX_PAYLOAD_LEN);
     reader
@@ -477,6 +509,16 @@ fn refusal_reason_for_display(payload: &[u8]) -> String {
 }
 
 /// A peer can grant only capabilities the local user requested.
+fn validate_server_file_limit(hello: &ServerHello, clipboard_file_limit: u64) -> RemoteResult<()> {
+    if hello.stream.clipboard_file_limit > clipboard_file_limit
+        || (hello.clipboard_files_enabled && hello.stream.clipboard_file_limit == 0)
+        || (!hello.clipboard_files_enabled && hello.stream.clipboard_file_limit != 0)
+    {
+        return Err(invalid_data("host acknowledged an invalid clipboard file limit").into());
+    }
+    Ok(())
+}
+
 fn validate_server_capabilities(
     hello: &ServerHello,
     request_input: bool,
@@ -500,11 +542,13 @@ fn validate_server_capabilities(
 fn read_initial_frame(
     reader: &mut SessionReader<TcpStream>,
     clipboard_enabled: bool,
+    cursor_enabled: bool,
     timeout: Duration,
     deliver_clipboard: impl FnMut(MessageKind, &[u8]) -> RemoteResult<()>,
 ) -> RemoteResult<Vec<u8>> {
     let mut deadline = TcpStreamDeadline::arm(reader.get_ref(), timeout)?;
-    let payload = read_initial_frame_records(reader, clipboard_enabled, deliver_clipboard)?;
+    let payload =
+        read_initial_frame_records(reader, clipboard_enabled, cursor_enabled, deliver_clipboard)?;
     deadline.cancel();
     Ok(payload)
 }
@@ -512,6 +556,7 @@ fn read_initial_frame(
 fn read_initial_frame_records<R: io::Read>(
     reader: &mut SessionReader<R>,
     clipboard_enabled: bool,
+    cursor_enabled: bool,
     mut deliver_clipboard: impl FnMut(MessageKind, &[u8]) -> RemoteResult<()>,
 ) -> RemoteResult<Vec<u8>> {
     let mut payload = Vec::new();
@@ -521,6 +566,9 @@ fn read_initial_frame_records<R: io::Read>(
             kind @ (MessageKind::Clipboard | MessageKind::ClipboardTransfer)
                 if clipboard_enabled =>
             {
+                deliver_clipboard(kind, &payload)?;
+            }
+            kind @ (MessageKind::CursorShape | MessageKind::CursorPosition) if cursor_enabled => {
                 deliver_clipboard(kind, &payload)?;
             }
             MessageKind::Close => {
@@ -545,6 +593,7 @@ fn viewer_loop(
     wake: &mut WakeReceiver,
     clipboard: Option<&ClipboardOutbox>,
     clipboard_status: Option<&SyncStatus>,
+    pending_presentations: &mut std::collections::VecDeque<PendingFrameTiming>,
 ) -> RemoteResult<ViewerLoopExit> {
     let mut clipboard_status_seen = 0;
     let mut next_heartbeat = Instant::now() + HEARTBEAT_INTERVAL;
@@ -606,12 +655,16 @@ fn viewer_loop(
             });
         }
 
-        if let Some(frame) = take_latest(state) {
-            draw_and_ack(writer, frame, &state.telemetry, |frame| {
-                viewer.draw_recyclable(frame)
-            })?;
-        } else {
-            viewer.refresh_pending_redraw()?;
+        apply_pending_cursor(viewer, state)?;
+        for sequence in viewer.take_presented_sequences()? {
+            acknowledge_presentation(writer, sequence, pending_presentations, &state.telemetry)?;
+        }
+        if viewer.can_submit_frame() {
+            if let Some(frame) = take_latest(state) {
+                submit_frame(viewer, frame, pending_presentations)?;
+            } else {
+                viewer.refresh_pending_redraw()?;
+            }
         }
 
         if !state.alive.load(Ordering::Acquire) && state.latest.lock().unwrap().is_none() {
@@ -765,6 +818,55 @@ fn write_input_batch(
     Ok(())
 }
 
+struct PendingFrameTiming {
+    sequence: u64,
+    ready_at: Instant,
+    draw_started: Instant,
+}
+
+fn submit_frame(
+    viewer: &mut Viewer,
+    queued: QueuedFrame,
+    pending: &mut std::collections::VecDeque<PendingFrameTiming>,
+) -> RemoteResult<bool> {
+    let timing = PendingFrameTiming {
+        sequence: queued.frame.sequence(),
+        ready_at: queued.ready_at,
+        draw_started: Instant::now(),
+    };
+    if !viewer.draw_recyclable(queued.frame)? {
+        return Ok(false);
+    }
+    pending.push_back(timing);
+    Ok(true)
+}
+
+fn acknowledge_presentation(
+    writer: &mut impl RecordWriter,
+    sequence: u64,
+    pending: &mut std::collections::VecDeque<PendingFrameTiming>,
+    telemetry: &ClientTelemetry,
+) -> RemoteResult<()> {
+    let position = pending
+        .iter()
+        .position(|timing| timing.sequence == sequence)
+        .ok_or_else(|| invalid_data("unexpected X11 frame completion"))?;
+    // Accelerator recovery redraws the latest retained canvas. Earlier queued
+    // frames are superseded, never reported as drawn or acknowledged separately.
+    for _ in 0..position {
+        pending.pop_front();
+    }
+    let timing = pending.pop_front().unwrap();
+    telemetry.record_drawn_at(timing.ready_at, timing.draw_started, Instant::now());
+    writer.write_message(MessageKind::FrameAck, &encode_frame_ack(sequence))?;
+    writer.flush()?;
+    if !writer.queued() {
+        telemetry.record_acked();
+    }
+    Ok(())
+}
+
+#[cfg(test)]
 fn draw_and_ack(
     writer: &mut impl RecordWriter,
     queued: QueuedFrame,
@@ -1215,6 +1317,8 @@ fn average_millis(duration: Duration, count: u64) -> f64 {
 }
 
 struct ReceiveState {
+    cursor_enabled: AtomicBool,
+    cursor: Mutex<super::cursor::CursorInbox>,
     latest: Mutex<Option<QueuedFrame>>,
     error: Mutex<Option<String>>,
     alive: AtomicBool,
@@ -1226,6 +1330,8 @@ struct ReceiveState {
 impl ReceiveState {
     fn new() -> Self {
         Self {
+            cursor_enabled: AtomicBool::new(false),
+            cursor: Mutex::new(super::cursor::CursorInbox::default()),
             latest: Mutex::new(None),
             error: Mutex::new(None),
             alive: AtomicBool::new(true),
@@ -1234,6 +1340,28 @@ impl ReceiveState {
             decode_pool: new_decode_buffer_pool(),
         }
     }
+}
+
+fn receive_cursor(state: &ReceiveState, kind: MessageKind, payload: &[u8]) -> RemoteResult<()> {
+    if !state.cursor_enabled.load(Ordering::Acquire) {
+        return Err(invalid_data("independent cursor was not negotiated").into());
+    }
+    let mut inbox = state.cursor.lock().unwrap();
+    match kind {
+        MessageKind::CursorShape => inbox.shape(super::cursor::CursorShape::decode(payload)?),
+        MessageKind::CursorPosition => {
+            inbox.position(super::cursor::CursorPosition::decode(payload)?)
+        }
+        _ => Err(invalid_data("unexpected cursor record").into()),
+    }
+}
+
+fn apply_pending_cursor(viewer: &mut Viewer, state: &ReceiveState) -> RemoteResult<()> {
+    let update = state.cursor.lock().unwrap().take();
+    if let Some((shape, position)) = update {
+        viewer.set_cursor_update(shape, position)?;
+    }
+    Ok(())
 }
 
 fn take_latest(state: &ReceiveState) -> Option<QueuedFrame> {
@@ -1325,7 +1453,16 @@ fn receive_frames(
 ) {
     let mut completion = ReceiveCompletion::new(Arc::clone(&state), wake);
     let mut payload_retention = PayloadBufferRetention::default();
+    let mut last_video_at = Instant::now();
     let result: RemoteResult<()> = (|| loop {
+        // Independent cursor/clipboard activity must not keep dead video alive.
+        let remaining = VIDEO_FRAME_IDLE_TIMEOUT
+            .checked_sub(last_video_at.elapsed())
+            .filter(|remaining| !remaining.is_zero())
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::TimedOut, "host stopped sending video frames")
+            })?;
+        reader.get_ref().set_read_timeout(Some(remaining))?;
         let kind = reader.read_message_into(&mut payload)?;
         match kind {
             MessageKind::Frame => {
@@ -1350,6 +1487,7 @@ fn receive_frames(
                     .into());
                 }
                 last_sequence = queued.frame.sequence();
+                last_video_at = Instant::now();
                 let replaced = replace_latest(&state.latest, queued);
                 if replaced.is_some() {
                     state.telemetry.record_replaced();
@@ -1371,6 +1509,10 @@ fn receive_frames(
                     format!("host closed the session: {reason}"),
                 )
                 .into());
+            }
+            MessageKind::CursorShape | MessageKind::CursorPosition => {
+                receive_cursor(&state, kind, &payload)?;
+                completion.signal()?;
             }
             MessageKind::FrameAck => {
                 return Err(invalid_data("host sent an unexpected frame acknowledgement").into());
@@ -1454,6 +1596,32 @@ mod tests {
     use std::net::TcpListener;
 
     const TEST_PSK: [u8; PSK_LEN] = [0x5a; PSK_LEN];
+
+    #[test]
+    fn host_file_limit_cannot_enlarge_or_enable_a_disabled_budget() {
+        for (enabled, selected, offered, valid) in [
+            (false, 0, 0, true),
+            (false, 0, 100, true),
+            (false, 1, 100, false),
+            (true, 0, 100, false),
+            (true, 1, 0, false),
+            (true, 100, 50, false),
+            (true, 50, 100, true),
+            (true, 100, 100, true),
+        ] {
+            let hello = ServerHello {
+                stream: super::super::messages::StreamCapabilities {
+                    clipboard_file_limit: selected,
+                    ..Default::default()
+                },
+                pointer_enabled: false,
+                keyboard_enabled: false,
+                clipboard_enabled: enabled,
+                clipboard_files_enabled: enabled,
+            };
+            assert_eq!(validate_server_file_limit(&hello, offered).is_ok(), valid);
+        }
+    }
 
     #[test]
     fn error_reports_keep_display_and_refusal_stages_distinct() {
@@ -1656,8 +1824,55 @@ mod tests {
     }
 
     #[test]
+    fn cursor_before_first_frame_is_bounded_and_requires_negotiation() {
+        let shape = super::super::cursor::CursorShape {
+            id: 1,
+            width: 1,
+            height: 1,
+            hotspot_x: 0,
+            hotspot_y: 0,
+            rgba: vec![255; 4],
+        };
+        let position = super::super::cursor::CursorPosition {
+            sequence: 0,
+            geometry_epoch: 1,
+            shape_id: 1,
+            source_width: 640,
+            source_height: 480,
+            x: 10,
+            y: 20,
+            visible: true,
+        };
+        let state = ReceiveState::new();
+        assert!(
+            receive_cursor(&state, MessageKind::CursorShape, &shape.encode().unwrap()).is_err()
+        );
+        state.cursor_enabled.store(true, Ordering::Release);
+        let key = [0x5b; 32];
+        let mut writer = SessionWriter::new(Vec::new(), key);
+        writer
+            .write_message(MessageKind::CursorShape, &shape.encode().unwrap())
+            .unwrap();
+        writer
+            .write_message(MessageKind::CursorPosition, &position.encode().unwrap())
+            .unwrap();
+        writer.write_message(MessageKind::Frame, b"first").unwrap();
+        let wire = writer.into_inner();
+        let mut reader = SessionReader::new(std::io::Cursor::new(wire.clone()), key);
+        let payload = read_initial_frame_records(&mut reader, false, true, |kind, payload| {
+            receive_cursor(&state, kind, payload)
+        })
+        .unwrap();
+        assert_eq!(payload, b"first");
+        assert_eq!(state.cursor.lock().unwrap().take().unwrap().1, position);
+        let mut reader = SessionReader::new(std::io::Cursor::new(wire), key);
+        assert!(read_initial_frame_records(&mut reader, false, false, |_, _| Ok(())).is_err());
+    }
+
+    #[test]
     fn hello_ack_cannot_enable_unrequested_clipboard_or_input() {
         let mut hello = ServerHello {
+            stream: Default::default(),
             pointer_enabled: false,
             keyboard_enabled: false,
             clipboard_enabled: true,
@@ -1690,7 +1905,7 @@ mod tests {
         let bytes = writer.into_inner();
         let mut reader = SessionReader::new(Cursor::new(bytes.clone()), TEST_PSK);
         let mut copied = Vec::new();
-        let frame = read_initial_frame_records(&mut reader, true, |kind, payload| {
+        let frame = read_initial_frame_records(&mut reader, true, false, |kind, payload| {
             copied.push((kind, payload.to_vec()));
             Ok(())
         })
@@ -1705,7 +1920,7 @@ mod tests {
         assert_eq!(frame, b"synthetic frame header");
         let mut reader = SessionReader::new(Cursor::new(bytes), TEST_PSK);
         assert!(
-            read_initial_frame_records(&mut reader, false, |_, _| {
+            read_initial_frame_records(&mut reader, false, false, |_, _| {
                 panic!("unnegotiated clipboard must never reach the setter")
             })
             .is_err()
@@ -1735,8 +1950,14 @@ mod tests {
         let mut reader = SessionReader::new(receiver, TEST_PSK);
         let started = Instant::now();
         assert!(
-            read_initial_frame(&mut reader, true, Duration::from_millis(40), |_, _| Ok(()))
-                .is_err()
+            read_initial_frame(
+                &mut reader,
+                true,
+                false,
+                Duration::from_millis(40),
+                |_, _| Ok(())
+            )
+            .is_err()
         );
         assert!(started.elapsed() < Duration::from_millis(500));
         sender.join().unwrap();
@@ -2181,6 +2402,46 @@ mod tests {
     }
 
     #[test]
+    fn recovered_latest_frame_supersedes_failed_pending_frames_without_acking_them() {
+        let telemetry = ClientTelemetry::default();
+        let now = Instant::now();
+        let mut pending = (40..=42)
+            .map(|sequence| PendingFrameTiming {
+                sequence,
+                ready_at: now,
+                draw_started: now,
+            })
+            .collect();
+        let key = [0x31; 32];
+        let mut writer = SessionWriter::new(Vec::new(), key);
+        acknowledge_presentation(&mut writer, 42, &mut pending, &telemetry).unwrap();
+        assert!(pending.is_empty());
+        let window = telemetry.take_window();
+        assert_eq!((window.drawn, window.acked), (1, 1));
+        let mut reader = SessionReader::new(Cursor::new(writer.into_inner()), key);
+        let (kind, payload) = reader.read_message().unwrap();
+        assert_eq!(kind, MessageKind::FrameAck);
+        assert_eq!(decode_frame_ack(&payload).unwrap(), 42);
+        assert!(reader.read_message().is_err());
+    }
+
+    #[test]
+    fn asynchronous_completion_acks_only_the_expected_submitted_frame() {
+        let telemetry = ClientTelemetry::default();
+        let now = Instant::now();
+        let mut pending = std::collections::VecDeque::from([PendingFrameTiming {
+            sequence: 42,
+            ready_at: now,
+            draw_started: now,
+        }]);
+        let mut writer = SessionWriter::new(Vec::new(), [0x31; 32]);
+        acknowledge_presentation(&mut writer, 42, &mut pending, &telemetry).unwrap();
+        assert!(pending.is_empty());
+        assert_eq!(telemetry.window.lock().unwrap().drawn, 1);
+        assert!(acknowledge_presentation(&mut writer, 42, &mut pending, &telemetry).is_err());
+    }
+
+    #[test]
     fn frame_is_acknowledged_only_after_a_successful_draw() {
         let key = [0x31; 32];
         let telemetry = ClientTelemetry::default();
@@ -2333,7 +2594,7 @@ mod tests {
     }
 
     #[test]
-    fn receiver_sequence_error_recycles_frame_without_publishing_latest() {
+    fn receiver_sequence_error_drops_tiles_without_materializing_or_publishing() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let sender = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
         let (receiver, _) = listener.accept().unwrap();
@@ -2341,6 +2602,7 @@ mod tests {
         let payload = tile_keyframe_payload(
             2,
             &CapturedFrame {
+                geometry_epoch: 0,
                 image: RgbImage::from_pixel(32, 18, Rgb([20, 40, 80])),
                 source_width: 32,
                 source_height: 18,
@@ -2372,7 +2634,8 @@ mod tests {
                 .as_deref()
                 .is_some_and(|error| error.contains("expected 1, got 2"))
         );
-        assert_eq!(decode_pool_snapshot(&state.decode_pool).0, 1);
+        // Rejected tile snapshots never materialize a full RGB frame.
+        assert_eq!(decode_pool_snapshot(&state.decode_pool).0, 0);
     }
 
     #[test]
@@ -2384,6 +2647,7 @@ mod tests {
         let payload = tile_keyframe_payload(
             1,
             &CapturedFrame {
+                geometry_epoch: 0,
                 image: RgbImage::from_pixel(32, 18, Rgb([20, 40, 80])),
                 source_width: 32,
                 source_height: 18,
@@ -2604,8 +2868,10 @@ mod tests {
             &TEST_PSK,
             false,
             false,
-            false,
+            0,
             &KeymapTable::empty(),
+            None,
+            false,
             Duration::from_millis(80),
         );
         assert!(result.is_err());
@@ -2632,6 +2898,7 @@ mod tests {
                 .write_message(
                     MessageKind::HelloAck,
                     &ServerHello {
+                        stream: Default::default(),
                         pointer_enabled: false,
                         keyboard_enabled: false,
                         clipboard_enabled: false,
@@ -2655,8 +2922,10 @@ mod tests {
             &TEST_PSK,
             false,
             false,
-            false,
+            0,
             &KeymapTable::empty(),
+            None,
+            false,
             Duration::from_millis(100),
         );
         assert!(result.is_err());
@@ -2702,8 +2971,10 @@ mod tests {
             &TEST_PSK,
             false,
             false,
-            false,
+            0,
             &KeymapTable::empty(),
+            None,
+            false,
             Duration::from_secs(5),
         );
         server.join().unwrap();
@@ -2737,6 +3008,7 @@ mod tests {
                     .write_message(
                         MessageKind::HelloAck,
                         &ServerHello {
+                            stream: Default::default(),
                             pointer_enabled: false,
                             keyboard_enabled: false,
                             clipboard_enabled: true,
@@ -2753,8 +3025,10 @@ mod tests {
                 &TEST_PSK,
                 false,
                 request_clipboard,
-                false,
+                0,
                 &KeymapTable::empty(),
+                None,
+                false,
                 Duration::from_secs(5),
             );
             server.join().unwrap();
@@ -2787,11 +3061,17 @@ mod tests {
             let mut writer = SessionWriter::new(stream, send_key);
             let (kind, payload) = reader.read_message().unwrap();
             assert_eq!(kind, MessageKind::Hello);
-            ClientHello::decode(&payload).unwrap();
+            let requested = ClientHello::decode(&payload).unwrap();
+            assert_eq!(requested.initial_viewport, Some((1280, 720)));
+            assert_eq!(
+                requested.stream.cursor,
+                super::super::messages::CursorMode::Independent
+            );
             writer
                 .write_message(
                     MessageKind::HelloAck,
                     &ServerHello {
+                        stream: Default::default(),
                         pointer_enabled: false,
                         keyboard_enabled: false,
                         clipboard_enabled: false,
@@ -2812,8 +3092,10 @@ mod tests {
             &TEST_PSK,
             false,
             false,
-            false,
+            0,
             &KeymapTable::empty(),
+            Some((1280, 720)),
+            true,
             Duration::from_millis(80),
         )
         .unwrap();

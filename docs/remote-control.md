@@ -341,9 +341,43 @@ gives each complete authenticated video record, including its final flush, one
 budget; a partial or timed-out record closes the whole session so its wire
 sequence can never be retried out of sync.
 
-The current application protocol is version 6. Versions 2 to 5 are
+The current application protocol is version 9. Versions 2 to 8 are
 deliberately incompatible, so update `jwm-remote` on both machines together;
 negotiation rejects an older peer before screen or input data is exchanged.
+Version 7 introduced initial viewport and explicit stream selectors. Version 8
+adds an independently negotiated cursor plane and a video geometry epoch;
+it does not silently reinterpret v7 video or cursor selector semantics.
+
+The v9 hello prefix is the existing 8-byte magic, big-endian `u16` version,
+and capability flags. Both hellos append three one-byte selectors in order:
+codec `1` (JPEG tiles), cursor `1` (composited) or `2` (independent), input `1`
+(X11 keycodes). A viewer advertises independent cursor only after verifying local XRender
+ARGB32 support and also accepts composited fallback. A host with XFixes and exactly one X screen/root selects independent when
+requested; otherwise it
+acknowledges composited video. Cursor is independent of input permission, so
+view-only viewers also see host-local cursor movement.
+Version 9 appends a big-endian `u64` aggregate clipboard file-byte limit after
+the selectors in both hellos. The viewer offers its limit; the host acknowledges
+the smaller of its own and the viewer's limits. Zero disables files. The host
+acknowledges zero if file sharing is not enabled, including if clipboard startup
+fails. The viewer rejects an enlarged limit, a nonzero limit with files disabled,
+or a zero limit with files enabled before starting clipboard workers. Both peers
+apply the selected limit to outgoing manifests and incoming transfers. Text and
+images retain their existing fixed bounds; decoded frame dimension and pixel
+ceilings remain fixed safety limits, not negotiated budgets.
+
+The client then appends big-endian `u16` viewport width and height, followed
+by the existing bounded keymap table. `(0, 0)` means no initial size; exactly
+one zero dimension is invalid. The server hello is exactly 22 bytes. Unknown
+selectors, trailing bytes and incomplete keymaps are rejected. Input and
+clipboard permission flags remain independent of the stream profile.
+
+Compatibility: v9 viewer/v9 host works; v6/v7/v8 with v9 in either direction is
+rejected during negotiation. There is no automatic legacy-version fallback.
+Keep both binaries on the same release; this change does not alter transport
+crypto. Within v9, unsupported independent-cursor capability falls back to
+composited video explicitly in HelloAck.
+
 A version-5 or later host tells an older viewer which version it speaks instead
 of hanging up on it, and a version-5 or later viewer reports an older host's
 hang-up as "accepted the key but closed before acknowledging". Version 6 adds
@@ -643,7 +677,7 @@ performs the same post-readback check with `GetGeometry`.
 When the Composite overlay and XDamage are available, the host also avoids a
 full drawable readback on a completely unchanged tick. It captures the first
 frame and then whenever the active overlay reports Damage, the compositor owner
-or root geometry changes, the cursor shape or pointer position changes, or a
+or root geometry changes, the composited cursor shape or pointer position changes, or a
 two-second forced-refresh deadline expires. A Damage subtract request is queued
 only after a tick commits to capture and before the synchronous drawable
 readback on the same connection. That reply is the ordering barrier; an
@@ -998,9 +1032,62 @@ broader grant than screen sharing alone, so it stays opt-in on both ends rather
 than following from `--allow-input`. Use `--clipboard-file-limit 0` to share
 text and images but not files.
 
+### Independent cursor plane
+
+When negotiated, cursor movement and shape changes travel outside video in
+bounded authenticated records. `CursorShape` (kind 15) contains shape ID `u64`,
+width/height/hotspot coordinates as four `u16`s, then premultiplied RGBA bytes.
+Shapes are at most 256x256, with an in-bounds hotspot; IDs must be nonzero.
+`CursorPosition` (kind 16) contains sequence, geometry epoch and shape ID as
+three `u64`s, source width/height as two `u16`s, signed `i32` x/y, and a strict
+0/1 visibility byte. All integers are big-endian. Shape precedes the first
+position that references it. Unknown shape references, replayed positions,
+backwards epochs and malformed payloads close the session. Motion uses a
+single latest-value slot rather than an unbounded queue.
+
+The tile-frame header appends geometry epoch `u64` after the dirty-tile count,
+before its bitmap (32-byte header total). A source/bounds epoch change forces
+a keyframe even if dimensions and pixels are identical. Decoder snapshots,
+viewer RGB reuse and cursor placement cannot cross epochs. A future cursor is
+retained but hidden until matching video geometry arrives; old cursor state
+cannot overlay a new same-size source. Source monitor changes that previously
+required reconnect still require reconnect; epochs do not expand input scope.
+
+The host polls authoritative XFixes shape and pointer position on a separate
+16 ms deadline before video-FPS pacing and credit checks. Video readback can
+still delay a cursor poll; this is not a separate capture connection/thread.
+Cursor messages do not renew the receiver’s video idle budget. Cursor-only
+changes no longer invalidate video Damage gating or composite pixels into
+captured frames. The viewer caches an ARGB32 XRender Picture and queues OVER
+onto its window
+after restoring the clean backing. Same-shape motion performs no GetImage,
+full-frame upload or synchronous reply wait. Shape changes perform a bounded
+upload. The old cursor rectangle is restored and Expose/resize repaints it.
+Host-local motion and view-only sessions use the same path.
+An oversized/unavailable cursor or recoverable XFixes failure sends a bounded
+transparent hidden sentinel, removing an earlier visible cursor safely. A cursor
+outside the selected sharing region also uses that sentinel and coordinates
+(0,0); private off-region cursor shapes, serials and positions are not sent.
+Composited fallback keeps the previous cursor-in-video behavior.
+Multi-X-screen servers explicitly negotiate composited fallback: XFixes cursor
+images have no root identity, so a pointer crossing roots between replies
+cannot be safely admitted. Ordinary multiple monitors on one RandR root
+remain supported by the independent plane.
+
+Live X11 behavior and end-to-end latency still require validation on a real
+server: this cloud environment cannot create the Unix socket Xvfb needs.
+
 ### Viewport negotiation
 
-The viewer reports its window size, and the host stops encoding pixels that
+Before negotiation the viewer queries the monitor under the pointer (falling
+back to the primary monitor or root dimensions) and includes its bounds in the
+authenticated hello. The host applies these bounds before its first capture,
+subject to the same operator ceiling and minimum dimensions as later updates.
+A missing initial viewport requests host defaults; a half-empty viewport is
+invalid. Window-manager resizing and monitor changes after negotiation are
+handled by the normal viewport updates.
+
+The viewer then reports its actual window size, and the host stops encoding pixels that
 window cannot show. A 640-wide viewer previously received a 1280-wide image and
 threw half of it away on arrival; the request is re-sent whenever the window
 resizes, coalesced so an interactive drag produces one request rather than one
@@ -1092,8 +1179,12 @@ in the window (zero dimensions mean no captured frame in that window).
 - `mailbox_age_ms`: capture completion to sender dequeue; excludes capture cost.
 - `credit_wait_ms`: sender wait for display credit before taking the mailbox.
 - `dirty_scan_ms`: tile planning, including dirty detection/refinement selection.
-- `atlas_pack_and_jpeg_ms`: combined tile atlas packing and JPEG encode; these
-  costs are not yet separated.
+- `atlas_pack_and_jpeg_ms`: complete encode call, retaining the combined metric
+  including wire-header preparation for comparison with older measurements.
+- `atlas_pack_ms`: atlas allocation/reuse, tile copying and edge padding.
+- `jpeg_ms`: JPEG encoder creation and encoding into the bounded payload writer.
+  These two stage samples include only frames carrying an atlas; keepalives
+  perform neither stage and do not dilute their means or quantiles.
 - `writer_wait_ms`: waiting to acquire the shared authenticated-record writer.
 - `socket_write_ms`: record encryption, socket writes and flush after acquiring
   the writer; it is not pure kernel/network time.
@@ -1156,7 +1247,7 @@ XRender for anyone who prefers that speed and does not see the artifacts;
   told so, and disconnected immediately rather than left waiting;
 - one region, one RandR monitor, or the combined X root (the default), with
   the host XFixes cursor
-  included in video; the viewer cursor is transparent during ordinary input
+  shown through the negotiated independent plane or composited-video fallback; the viewer cursor is transparent during ordinary input
   forwarding and an active grab, while view-only and released-grab windows keep
   a visible local cursor; the rest of the client desktop is never affected;
 - JPEG tile video plus clipboard text, images and files: no audio, drag and
@@ -1240,3 +1331,62 @@ Epoch changes reset that history; congestion thresholds and multiplicative
 quality reduction remain unchanged. These are controller/scheduling bounds,
 not measured two-machine LAN results. Actual latency, text clarity and bandwidth
 still require separate acceptance evidence.
+
+## Saved connection profiles
+
+Profiles save connection settings, not a running session. Nothing reconnects at
+startup. Create a dedicated private directory first (use `$XDG_CONFIG_HOME/jwm`
+instead of `$HOME/.config/jwm` when configured):
+
+```sh
+jwm-remote profile init
+jwm-remote profile save office -- ssh user@office --monitor DP-0 --view-only
+jwm-remote profile save lan -- connect 192.0.2.10 --key-file /absolute/private/remote.key --view-only
+jwm-remote profile list
+jwm-remote profile show office
+jwm-remote profile run office
+jwm-remote profile remove office
+```
+
+`profile --directory /absolute/private/directory ...` selects a different existing
+directory. Saving never connects, reads a key, starts a host, or changes existing
+permissions. Replacing a name needs `profile save NAME --replace -- ssh ...`.
+`show` prints the complete settings so input/clipboard permissions can be reviewed
+before `run`. The saved `connect`/`ssh` defaults match those commands: input is
+permitted unless `--view-only` is present; clipboard is off unless `--clipboard`
+was explicitly saved. Use `--view-only` when saving a viewing-only profile.
+
+Supported settings include the address/SSH alias, monitor selection for SSH,
+local display, input mode, grab-release keysym, clipboard consent and file limit.
+SSH also accepts `--fps`, `--jpeg-quality`, and `--max-width`, with the same ranges
+as the host command, and persists these host quality settings. For example:
+
+```sh
+jwm-remote profile save office --replace -- ssh user@office --monitor DP-0 --fps 24 --jpeg-quality 70 --max-width 1280 --clipboard --clipboard-file-limit 512M
+jwm-remote profile run office --view-only --no-clipboard
+```
+
+Run-time profile overrides can only reduce permissions. Direct connections cannot
+change a separately running host's monitor or quality. Profiles do not restore
+window position/size, switch sources within a session, or reconnect automatically.
+Only supported viewer settings are saved; the window is created normally.
+
+The version-1 JSON schema rejects unknown fields and missing permission booleans.
+Names are 1–64 ASCII letters, digits, hyphens or underscores. The dedicated directory
+has a maximum of 128 profiles (256 total entries including crash leftovers), each
+profile at most 16 KiB. Writes use a mode-0600
+temporary file, sync and atomic rename under a directory lock. Existing directories
+must be owned by the current user with no group/other permissions; files must be
+owned, private regular files with one link. Symbolic links in the directory path
+or profile filenames are rejected. The Linux implementation uses pinned directory
+descriptors through `/proc/self/fd` and requires procfs. Busy stores fail rather
+than wait indefinitely. No chmod or permission repair happens implicitly.
+
+Key paths must be absolute; key contents, passwords, arbitrary SSH options and
+remote executable commands cannot be stored. Use a trusted SSH config alias for
+advanced SSH configuration. A saved profile is local configuration, not an import
+format for untrusted third parties. A crash before atomic rename can leave a
+`.write-*` temporary file: bounded, private, owned regular files with the exact
+temporary filename format are ignored under the directory lock, not deleted.
+Other unexpected or unsafe entries fail closed. `profile init` explicitly creates
+missing directories privately and never changes existing directory permissions.

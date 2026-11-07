@@ -10,6 +10,7 @@ use std::fs::File;
 use std::io;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
 use std::ptr::{self, NonNull};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use image::RgbImage;
@@ -31,6 +32,7 @@ use x11rb::rust_connection::RustConnection;
 use x11rb::wrapper::ConnectionExt as _;
 use x11rb::x11_utils::{TryParseFd, X11Error};
 
+use super::cursor::{CursorPosition, CursorShape};
 use super::frame::{DecodedFrame, FrameDamage, RecyclableDecodedFrame};
 use super::pacing::EventPollBudget;
 use super::usability::viewer_title;
@@ -40,6 +42,9 @@ const WM_CLASS: &[u8] = b"jwm-remote\0JwmRemote\0";
 /// Default base key of the Ctrl+Super grab-release shortcut.
 pub const DEFAULT_ESCAPE_KEY: &str = "F12";
 const KEY_RELEASE_DEFER: Duration = Duration::from_millis(8);
+const MAX_PENDING_PRESENTATIONS: usize = 3;
+const SHM_UPLOAD_SLOTS: usize = 3;
+const PRESENTATION_TIMEOUT: Duration = Duration::from_secs(5);
 const SHM_FD_VERSION: (u16, u16) = (1, 2);
 const RENDER_CLIENT_VERSION: (u32, u32) = (0, 11);
 const RENDER_MIN_VERSION: (u32, u32) = (0, 10);
@@ -93,6 +98,7 @@ impl ForwardedButtons {
 #[derive(Debug)]
 struct StoredFrame {
     sequence: u64,
+    geometry_epoch: u64,
     source_width: u16,
     source_height: u16,
     image: StoredImage,
@@ -108,6 +114,7 @@ impl StoredFrame {
     fn from_decoded(frame: DecodedFrame) -> Self {
         Self {
             sequence: frame.sequence,
+            geometry_epoch: 0,
             source_width: frame.source_width,
             source_height: frame.source_height,
             image: StoredImage::Owned(frame.image),
@@ -117,9 +124,17 @@ impl StoredFrame {
     fn from_recyclable(frame: RecyclableDecodedFrame) -> Self {
         Self {
             sequence: frame.sequence(),
+            geometry_epoch: frame.geometry_epoch(),
             source_width: frame.source_width(),
             source_height: frame.source_height(),
             image: StoredImage::Recyclable(frame),
+        }
+    }
+
+    fn dimensions(&self) -> (u32, u32) {
+        match &self.image {
+            StoredImage::Owned(image) => image.dimensions(),
+            StoredImage::Recyclable(frame) => frame.dimensions(),
         }
     }
 
@@ -240,6 +255,290 @@ enum BackingWork {
     CopyOnly,
 }
 
+/// Only two shapes are retained: the current position's shape and the newest
+/// arrival. Unknown shape references hide rather than displaying stale pixels.
+#[derive(Default)]
+struct CursorPlane {
+    enabled: bool,
+    render: Option<CursorRender>,
+    shapes: VecDeque<Arc<CursorShape>>,
+    position: Option<CursorPosition>,
+    drawn: Option<Letterbox>,
+}
+
+struct CursorRender {
+    format: Pictformat,
+    target: Picture,
+    source: Option<CursorRenderSource>,
+}
+
+struct CursorRenderSource {
+    id: u64,
+    pixmap: Pixmap,
+    picture: Picture,
+}
+
+/// Capability probing happens before advertising cursor separation to the host.
+/// An unavailable Render implementation keeps the composited-video fallback.
+pub(crate) fn supports_cursor_plane(display: Option<&str>) -> RemoteResult<bool> {
+    let (conn, screen) = xbar_core::x11_connection::connect(display)?;
+    Ok(cursor_formats(&conn, screen)?.is_some())
+}
+
+fn cursor_formats(
+    conn: &RustConnection,
+    screen: usize,
+) -> RemoteResult<Option<(Pictformat, Pictformat)>> {
+    if conn
+        .extension_information(render::X11_EXTENSION_NAME)?
+        .is_none()
+    {
+        return Ok(None);
+    }
+    let version = match render::query_version(conn, 0, 11)?.reply() {
+        Ok(version) => version,
+        Err(ReplyError::X11Error(_)) => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    if !supports_render_version(version.major_version, version.minor_version) {
+        return Ok(None);
+    }
+    let formats = match render::query_pict_formats(conn)?.reply() {
+        Ok(formats) => formats,
+        Err(ReplyError::X11Error(_)) => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let root = &conn.setup().roots[screen];
+    let target = formats.screens.get(screen).and_then(|screen| {
+        screen
+            .depths
+            .iter()
+            .flat_map(|depth| depth.visuals.iter())
+            .find(|visual| visual.visual == root.root_visual)
+            .map(|visual| visual.format)
+    });
+    let argb = formats
+        .formats
+        .iter()
+        .find(|format| {
+            let d = &format.direct;
+            format.type_ == render::PictType::DIRECT
+                && format.depth == 32
+                && d.red_shift == 16
+                && d.red_mask == 255
+                && d.green_shift == 8
+                && d.green_mask == 255
+                && d.blue_shift == 0
+                && d.blue_mask == 255
+                && d.alpha_shift == 24
+                && d.alpha_mask == 255
+        })
+        .map(|format| format.id);
+    if !root.allowed_depths.iter().any(|depth| depth.depth == 32)
+        || !conn
+            .setup()
+            .pixmap_formats
+            .iter()
+            .any(|format| format.depth == 32 && format.bits_per_pixel == 32)
+    {
+        return Ok(None);
+    }
+    Ok(argb.zip(target))
+}
+
+fn cursor_source_needs_upload(current: Option<u64>, incoming: u64) -> bool {
+    current != Some(incoming)
+}
+
+impl CursorRender {
+    fn prepare_shape(
+        &mut self,
+        conn: &RustConnection,
+        window: Window,
+        shape: &CursorShape,
+    ) -> RemoteResult<()> {
+        if !cursor_source_needs_upload(self.source.as_ref().map(|source| source.id), shape.id) {
+            return Ok(());
+        }
+        let pixmap = conn.generate_id()?;
+        conn.create_pixmap(32, pixmap, window, shape.width, shape.height)?
+            .check()?;
+        let picture = conn.generate_id()?;
+        let gc = conn.generate_id()?;
+        let setup: RemoteResult<()> = (|| {
+            conn.create_gc(gc, pixmap, &CreateGCAux::new())?.check()?;
+            let mut image = XImage::allocate_native(shape.width, shape.height, 32, conn.setup())?;
+            for y in 0..shape.height {
+                for x in 0..shape.width {
+                    let i = (usize::from(y) * usize::from(shape.width) + usize::from(x)) * 4;
+                    let p = &shape.rgba[i..i + 4];
+                    image.put_pixel(
+                        x,
+                        y,
+                        u32::from(p[3]) << 24
+                            | u32::from(p[0]) << 16
+                            | u32::from(p[1]) << 8
+                            | u32::from(p[2]),
+                    );
+                }
+            }
+            for cookie in image.put(conn, pixmap, gc, 0, 0)? {
+                cookie.check()?;
+            }
+            render::create_picture(conn, picture, pixmap, self.format, &CreatePictureAux::new())?
+                .check()?;
+            Ok(())
+        })();
+        let _ = conn.free_gc(gc);
+        if let Err(error) = setup {
+            let _ = conn.free_pixmap(pixmap);
+            return Err(error);
+        }
+        if let Some(old) = self.source.replace(CursorRenderSource {
+            id: shape.id,
+            pixmap,
+            picture,
+        }) {
+            free_render_picture_unchecked(conn, old.picture);
+            free_render_pixmap_unchecked(conn, old.pixmap);
+        }
+        Ok(())
+    }
+
+    fn release(&mut self, conn: &RustConnection) {
+        if let Some(source) = self.source.take() {
+            free_render_picture_unchecked(conn, source.picture);
+            free_render_pixmap_unchecked(conn, source.pixmap);
+        }
+        free_render_picture_unchecked(conn, self.target);
+    }
+}
+
+impl CursorPlane {
+    fn insert_shape(&mut self, shape: Arc<CursorShape>) {
+        self.shapes.retain(|old| old.id != shape.id);
+        while self.shapes.len() >= 2 {
+            let current = self.position.as_ref().map(|p| p.shape_id);
+            let index = self
+                .shapes
+                .iter()
+                .position(|s| Some(s.id) != current)
+                .unwrap_or(0);
+            self.shapes.remove(index);
+        }
+        self.shapes.push_back(shape);
+    }
+
+    fn accept_position(&mut self, position: CursorPosition) -> bool {
+        if self
+            .position
+            .as_ref()
+            .is_some_and(|old| old.sequence >= position.sequence)
+        {
+            return false;
+        }
+        self.position = Some(position);
+        true
+    }
+}
+
+#[derive(Debug)]
+struct CursorPlacement {
+    left: i64,
+    top: i64,
+    scale_x: i64,
+    scale_y: i64,
+    offset_x: i64,
+    offset_y: i64,
+    clip: Letterbox,
+}
+
+fn cursor_placement(
+    position: &CursorPosition,
+    shape: &CursorShape,
+    epoch: u64,
+    source: (u16, u16),
+    geometry: Letterbox,
+) -> Option<CursorPlacement> {
+    if !position.visible
+        || position.geometry_epoch != epoch
+        || (position.source_width, position.source_height) != source
+        || source.0 == 0
+        || source.1 == 0
+        || geometry.width == 0
+        || geometry.height == 0
+        || shape.width == 0
+        || shape.height == 0
+    {
+        return None;
+    }
+    let left = i64::from(geometry.x)
+        + ((i64::from(position.x) - i64::from(shape.hotspot_x)) * i64::from(geometry.width))
+            .div_euclid(i64::from(source.0));
+    let top = i64::from(geometry.y)
+        + ((i64::from(position.y) - i64::from(shape.hotspot_y)) * i64::from(geometry.height))
+            .div_euclid(i64::from(source.1));
+    let source_left = i64::from(position.x) - i64::from(shape.hotspot_x);
+    let source_top = i64::from(position.y) - i64::from(shape.hotspot_y);
+    let ceil_div = |n: i64, d: i64| -(-n).div_euclid(d);
+    let right = (i64::from(geometry.x)
+        + ceil_div(
+            (source_left + i64::from(shape.width)) * i64::from(geometry.width),
+            i64::from(source.0),
+        ))
+    .min(i64::from(geometry.x) + i64::from(geometry.width));
+    let bottom = (i64::from(geometry.y)
+        + ceil_div(
+            (source_top + i64::from(shape.height)) * i64::from(geometry.height),
+            i64::from(source.1),
+        ))
+    .min(i64::from(geometry.y) + i64::from(geometry.height));
+    let x = left.max(i64::from(geometry.x));
+    let y = top.max(i64::from(geometry.y));
+    // X11 destination coordinates are signed 16-bit.
+    if right <= x || bottom <= y || x > i64::from(i16::MAX) || y > i64::from(i16::MAX) {
+        return None;
+    }
+    Some(CursorPlacement {
+        left,
+        top,
+        scale_x: i64::from(source.0) * i64::from(XFIXED_ONE) / i64::from(geometry.width),
+        scale_y: i64::from(source.1) * i64::from(XFIXED_ONE) / i64::from(geometry.height),
+        offset_x: (x - i64::from(geometry.x)) * i64::from(source.0) * i64::from(XFIXED_ONE)
+            / i64::from(geometry.width)
+            - source_left * i64::from(XFIXED_ONE),
+        offset_y: (y - i64::from(geometry.y)) * i64::from(source.1) * i64::from(XFIXED_ONE)
+            / i64::from(geometry.height)
+            - source_top * i64::from(XFIXED_ONE),
+        clip: Letterbox {
+            x: x as u16,
+            y: y as u16,
+            width: (right - x) as u16,
+            height: (bottom - y) as u16,
+        },
+    })
+}
+
+fn cursor_transform(placement: &CursorPlacement) -> RemoteResult<Transform> {
+    debug_assert!(placement.left <= i64::from(placement.clip.x));
+    debug_assert!(placement.top <= i64::from(placement.clip.y));
+    let fixed = |value: i64| {
+        i32::try_from(value)
+            .map_err(|_| invalid_data("cursor transform exceeds XRender fixed-point range"))
+    };
+    Ok(Transform {
+        matrix11: fixed(placement.scale_x)?,
+        matrix12: 0,
+        matrix13: fixed(placement.offset_x)?,
+        matrix21: 0,
+        matrix22: fixed(placement.scale_y)?,
+        matrix23: fixed(placement.offset_y)?,
+        matrix31: 0,
+        matrix32: 0,
+        matrix33: XFIXED_ONE,
+    })
+}
+
 /// Plain X11 window that displays decoded remote frames and collects input.
 pub struct Viewer {
     conn: RustConnection,
@@ -247,6 +546,8 @@ pub struct Viewer {
     gc: Gcontext,
     backing: Pixmap,
     blank_cursor: Cursor,
+    cursor_plane: CursorPlane,
+    cursor_screen: usize,
     wm_protocols: Atom,
     wm_delete_window: Atom,
     net_wm_name: Atom,
@@ -260,6 +561,10 @@ pub struct Viewer {
     native_image: Option<XImage<'static>>,
     native_patch: Option<XImage<'static>>,
     shm_upload: ShmUpload,
+    presentation_atom: Atom,
+    presentations: VecDeque<PendingPresentation>,
+    recovery: Option<AccelerationRecovery>,
+    presentation_serial: u64,
     render_upscale: RenderUpscale,
     width: u16,
     height: u16,
@@ -374,6 +679,27 @@ fn placement_monitor(
         .unwrap_or(whole_screen)
 }
 
+/// Query the prospective viewer bounds before requesting the first video frame.
+/// Uses the same monitor selection as window creation; a later ConfigureNotify
+/// remains authoritative if the WM tiles or resizes the window differently.
+pub(crate) fn initial_viewport(display: Option<&str>) -> RemoteResult<(u16, u16)> {
+    let (conn, screen_num) = xbar_core::x11_connection::connect(display)?;
+    let screen = conn
+        .setup()
+        .roots
+        .get(screen_num)
+        .ok_or_else(|| invalid_data("X11 selected an unavailable screen"))?;
+    let monitor = placement_monitor(
+        &conn,
+        screen.root,
+        (screen.width_in_pixels, screen.height_in_pixels),
+    );
+    if monitor.2 == 0 || monitor.3 == 0 {
+        return Err(invalid_data("local monitor has an empty dimension").into());
+    }
+    Ok((monitor.2, monitor.3))
+}
+
 impl Viewer {
     /// Open an X11 window on `display`, or on `$DISPLAY` when it is `None`.
     pub fn connect(
@@ -433,8 +759,8 @@ impl Viewer {
                 (screen.width_in_pixels, screen.height_in_pixels),
             )
         };
-        // The first frame arrives at the host's native size, before this
-        // window has reported one. A 5120x1440 desk opened 5120 pixels wide on
+        // The first frame is bounded by the initial monitor request.
+        // Recheck placement because the local topology may have changed. A 5120x1440 desk opened 5120 pixels wide on
         // a 2560 laptop, mostly off-screen wherever the window manager did
         // not tile it. Ask for a window that fits the local monitor instead;
         // the viewport report that follows narrows the stream to match.
@@ -453,6 +779,7 @@ impl Viewer {
         let mut render_upscale =
             RenderUpscale::connect(&conn, screen_num, root, root_depth, root_visual)?;
 
+        let presentation_atom = intern_atom(&conn, b"_JWM_REMOTE_PRESENTED")?;
         let wm_protocols = intern_atom(&conn, b"WM_PROTOCOLS")?;
         let wm_delete_window = intern_atom(&conn, b"WM_DELETE_WINDOW")?;
         let net_wm_name = intern_atom(&conn, b"_NET_WM_NAME")?;
@@ -564,6 +891,8 @@ impl Viewer {
             gc,
             backing,
             blank_cursor,
+            cursor_plane: CursorPlane::default(),
+            cursor_screen: screen_num,
             wm_protocols,
             wm_delete_window,
             net_wm_name,
@@ -576,6 +905,10 @@ impl Viewer {
             native_image: None,
             native_patch: None,
             shm_upload,
+            presentation_atom,
+            presentations: VecDeque::new(),
+            recovery: None,
+            presentation_serial: 0,
             render_upscale,
             width: initial_width,
             height: initial_height,
@@ -627,6 +960,9 @@ impl Viewer {
             } else {
                 break;
             };
+            if self.consume_presentation_event(&event)? {
+                continue;
+            }
             if let Event::KeyPress(key) = &event
                 && self.keyboard.consume_repeat(key.detail, key.time)
             {
@@ -823,9 +1159,13 @@ impl Viewer {
     /// Service Expose/resize only after the client flushes collected input.
     /// A new frame instead folds this work into its own draw.
     pub(crate) fn refresh_pending_redraw(&mut self) -> RemoteResult<()> {
+        if !self.can_submit_frame() {
+            return Ok(());
+        }
         self.apply_pending_resize()?;
         if self.pending_redraw && !self.closed {
             self.redraw()?;
+            self.queue_presentation(None)?;
             self.pending_redraw = false;
         }
         Ok(())
@@ -869,21 +1209,223 @@ impl Viewer {
     /// the X server has no new event (currently the autorepeat release filter).
     #[must_use]
     pub fn next_event_deadline(&self) -> Option<Instant> {
-        self.keyboard
+        let key = self
+            .keyboard
             .pending_release
-            .and_then(|release| release.queued_at.checked_add(KEY_RELEASE_DEFER))
+            .and_then(|release| release.queued_at.checked_add(KEY_RELEASE_DEFER));
+        let presentation = self.presentations.front().map(|pending| pending.deadline);
+        key.into_iter().chain(presentation).min()
     }
 
-    /// Draw and retain a decoded frame. The retained copy is used for Expose
-    /// events and for rescaling after the window is resized. Returns `false`
-    /// when the target window closed before the frame could be presented.
+    pub(crate) fn can_submit_frame(&self) -> bool {
+        self.recovery.is_none() && self.presentations.len() < MAX_PENDING_PRESENTATIONS
+    }
+
+    /// Drain only server-processed copies whose shared source is no longer owned
+    /// by X11. This is an X11 processing fence, not a physical scanout timestamp.
+    pub(crate) fn take_presented_sequences(&mut self) -> RemoteResult<Vec<u64>> {
+        let mut completed = Vec::new();
+        if self.recovery.is_some() {
+            if self
+                .presentations
+                .iter()
+                .any(|pending| !pending.ready(&self.shm_upload))
+            {
+                self.check_presentation_deadline()?;
+                return Ok(completed);
+            }
+            // All old copies have crossed the server fence and all successful
+            // SHM requests have completed. Rejected requests relinquished only
+            // their own slot. No accelerator-owned mapping is detached early.
+            let sequence = self
+                .presentations
+                .iter()
+                .rev()
+                .find_map(|pending| pending.sequence);
+            let recovery = self.recovery.take().unwrap();
+            self.presentations.clear();
+            if recovery.shm {
+                self.shm_upload.disable(&self.conn);
+            }
+            if recovery.render {
+                self.render_upscale.disable(
+                    &self.conn,
+                    &invalid_data("asynchronous XRender composite rejected").into(),
+                );
+            }
+            self.backing_valid = false;
+            self.backing_letterbox = None;
+            self.redraw()?;
+            self.queue_presentation(sequence)?;
+            return Ok(completed);
+        }
+        while let Some(pending) = self.presentations.front() {
+            if pending.ready(&self.shm_upload) {
+                if let Some(sequence) = self.presentations.pop_front().unwrap().sequence {
+                    completed.push(sequence);
+                }
+            } else {
+                self.check_presentation_deadline()?;
+                break;
+            }
+        }
+        Ok(completed)
+    }
+
+    fn check_presentation_deadline(&self) -> RemoteResult<()> {
+        if self
+            .presentations
+            .front()
+            .is_some_and(|pending| Instant::now() >= pending.deadline)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "X11 frame presentation did not complete",
+            )
+            .into());
+        }
+        Ok(())
+    }
+
+    fn consume_presentation_event(&mut self, event: &Event) -> RemoteResult<bool> {
+        match event {
+            Event::ShmCompletion(event) => {
+                self.shm_upload.complete(event);
+                Ok(true)
+            }
+            Event::ClientMessage(event)
+                if event.window == self.window
+                    && event.type_ == self.presentation_atom
+                    && event.format == 32 =>
+            {
+                let data = event.data.as_data32();
+                let serial = u64::from(data[0]) | (u64::from(data[1]) << 32);
+                if let Some(pending) = self.presentations.iter_mut().find(|pending| {
+                    pending.serial == serial && pending.request_sequence == event.sequence
+                }) {
+                    pending.copied = true;
+                }
+                Ok(true)
+            }
+            Event::Error(error) => {
+                let shm = self.shm_upload.reject(error);
+                let render = self.presentations.iter().any(|pending| {
+                    pending
+                        .render_request
+                        .is_some_and(|request| request.matches(error))
+                });
+                if shm || render {
+                    let recovery = self.recovery.get_or_insert(AccelerationRecovery::default());
+                    recovery.shm |= shm;
+                    // A rejected SHM source upload also invalidates Render's
+                    // cached sequence. CPU/core recovery must not composite it.
+                    recovery.render |= render || shm;
+                    eprintln!(
+                        "jwm-remote: asynchronous accelerator request rejected; retrying retained frame: {error:?}"
+                    );
+                    Ok(true)
+                } else {
+                    Ok(false)
+                }
+            }
+            _ => Ok(false),
+        }
+    }
+
+    fn queue_presentation(&mut self, sequence: Option<u64>) -> RemoteResult<()> {
+        self.presentation_serial = self.presentation_serial.wrapping_add(1);
+        let serial = self.presentation_serial;
+        let event = ClientMessageEvent::new(
+            32,
+            self.window,
+            self.presentation_atom,
+            [serial as u32, (serial >> 32) as u32, 0, 0, 0],
+        );
+        let cookie = self
+            .conn
+            .send_event(false, self.window, EventMask::NO_EVENT, event)?;
+        let request_sequence = cookie.sequence_number() as u16;
+        drop(cookie);
+        self.presentations.push_back(PendingPresentation {
+            sequence,
+            serial,
+            request_sequence,
+            copied: false,
+            uploads: self.shm_upload.pending_keys(),
+            render_request: self.render_upscale.take_request(),
+            deadline: Instant::now() + PRESENTATION_TIMEOUT,
+        });
+        self.conn.flush()?;
+        Ok(())
+    }
+
+    /// Draw and retain a decoded frame, waiting for server processing as before.
+    /// Input/window events remain queued for the next poll_events call. The
+    /// internal client uses draw_recyclable for nonblocking presentation instead.
     pub fn draw(&mut self, frame: DecodedFrame) -> RemoteResult<bool> {
-        self.draw_stored(StoredFrame::from_decoded(frame))
+        if !self.draw_stored(StoredFrame::from_decoded(frame))? {
+            return Ok(false);
+        }
+        let deadline = Instant::now() + PRESENTATION_TIMEOUT;
+        let mut deferred = VecDeque::new();
+        let result = (|| {
+            loop {
+                if let Some(event) = if let Some(event) = self.deferred_events.pop_front() {
+                    Some(event)
+                } else {
+                    self.conn.poll_for_event()?
+                } {
+                    if !self.consume_presentation_event(&event)? {
+                        if let Event::Error(error) = &event {
+                            if is_closed_window_error(error, self.window) {
+                                self.closed = true;
+                                return Ok(false);
+                            }
+                            return Err(ReplyError::X11Error(error.clone()).into());
+                        }
+                        // Bound public synchronous-call event buffering even if
+                        // another client floods input while the server stalls.
+                        if deferred.len() >= 4096 {
+                            return Err(
+                                invalid_data("X11 event flood during synchronous draw").into()
+                            );
+                        }
+                        deferred.push_back(event);
+                    }
+                } else {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                self.take_presented_sequences()?;
+                if self.presentations.is_empty() {
+                    return Ok(!self.closed);
+                }
+                if Instant::now() >= deadline {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "X11 synchronous draw did not complete",
+                    )
+                    .into());
+                }
+            }
+        })();
+        deferred.append(&mut self.deferred_events);
+        self.deferred_events = deferred;
+        result
     }
 
     /// Internal client path that keeps the decoded RGB allocation leased while
     /// the frame remains the viewer's Expose/resize source.
-    pub(crate) fn draw_recyclable(&mut self, frame: RecyclableDecodedFrame) -> RemoteResult<bool> {
+    pub(crate) fn draw_recyclable(
+        &mut self,
+        mut frame: RecyclableDecodedFrame,
+    ) -> RemoteResult<bool> {
+        if let Some(StoredFrame {
+            image: StoredImage::Recyclable(previous),
+            ..
+        }) = self.last_frame.as_mut()
+        {
+            frame.reuse_canvas_from(previous);
+        }
         self.draw_stored(StoredFrame::from_recyclable(frame))
     }
 
@@ -892,6 +1434,10 @@ impl Viewer {
             clear_stored_frame(&mut self.last_frame);
             return Ok(false);
         }
+        if !self.can_submit_frame() {
+            return Err(invalid_data("X11 presentation queue is full").into());
+        }
+        let sequence = frame.sequence;
         self.apply_pending_resize()?;
         validate_frame(&frame)?;
         // A mailbox can skip decoded snapshots. Only apply damage when its
@@ -910,12 +1456,15 @@ impl Viewer {
         if self.closed {
             clear_stored_frame(&mut self.last_frame);
         }
+        if !self.closed {
+            self.queue_presentation(Some(sequence))?;
+        }
         Ok(!self.closed)
     }
 
-    /// Update a retained native-size pixmap without converting/uploading the
-    /// unchanged pixels. Scaled or invalidated backing always uses the existing
-    /// full path. SHM completion still precedes presentation and frame ACK.
+    /// Patch retained backing (or the XRender source) only when its exact
+    /// predecessor and geometry match. SHM ownership and copy fences remain
+    /// unchanged: every patch is ordered before the composite/copy and ACK.
     fn try_incremental_frame(&mut self, frame: &StoredFrame) -> RemoteResult<bool> {
         let Some(previous) = self.last_frame.as_ref() else {
             return Ok(false);
@@ -926,16 +1475,60 @@ impl Viewer {
         if !self.backing_valid || !damage_base_matches(previous, frame, damage) {
             return Ok(false);
         }
-        let (w, h) = frame.image().dimensions();
+        let (w, h) = frame.dimensions();
         let Some(geometry) = letterbox(self.width, self.height, w as u16, h as u16) else {
             return Ok(false);
         };
-        if (u32::from(geometry.width), u32::from(geometry.height)) != (w, h)
-            || self.backing_letterbox != Some(geometry)
+        if self.backing_letterbox != Some(geometry) {
+            return Ok(false);
+        }
+        // An accelerator source is a separate cache from the clean backing.
+        // Never patch it using damage based on a different source sequence.
+        let render_enabled = matches!(self.render_upscale, RenderUpscale::Enabled(_));
+        let render_source = match &mut self.render_upscale {
+            RenderUpscale::Enabled(render)
+                if should_use_render_upscale(geometry, w as u16, h as u16) =>
+            {
+                render.source.as_mut().filter(|source| {
+                    render_source_accepts_damage(source.key, damage, (w as u16, h as u16))
+                })
+            }
+            _ => None,
+        };
+        if should_use_render_upscale(geometry, w as u16, h as u16)
+            && render_enabled
+            && render_source.is_none()
         {
             return Ok(false);
         }
-        if let Some((x, y, width, height)) = damage.rect {
+        let source_patch = render_source.is_some();
+        let rect = if source_patch {
+            damage.rect
+        } else {
+            damage.rect.map(|rect| {
+                scaled_damage_rect(
+                    rect,
+                    (w as u16, h as u16),
+                    (geometry.width, geometry.height),
+                )
+            })
+        };
+        if let Some((x, y, width, height)) = rect {
+            // Keep the full-image Triangle sampling grid and rounding. Cropping
+            // the input before resizing changes filter phase and edge weights.
+            // This bounds conversion and upload, not CPU resampling work.
+            let rgb = if source_patch
+                || (w, h) == (u32::from(geometry.width), u32::from(geometry.height))
+            {
+                Cow::Borrowed(frame.image())
+            } else {
+                Cow::Owned(image::imageops::resize(
+                    frame.image(),
+                    u32::from(geometry.width),
+                    u32::from(geometry.height),
+                    image::imageops::FilterType::Triangle,
+                ))
+            };
             let image = ensure_native_image(
                 &mut self.native_patch,
                 width,
@@ -945,25 +1538,35 @@ impl Viewer {
             )?;
             write_native_region(
                 image,
-                frame.image(),
+                &rgb,
                 x,
                 y,
                 self.pixel_layout,
                 self.native_pixel_writer,
             )?;
-            let dst_x = i16::try_from(u32::from(geometry.x) + u32::from(x))
+            let (drawable, offset_x, offset_y) = match render_source.as_ref() {
+                Some(source) => (source.pixmap, 0, 0),
+                None => (self.backing, geometry.x, geometry.y),
+            };
+            let dst_x = i16::try_from(u32::from(offset_x) + u32::from(x))
                 .map_err(|_| invalid_data("damage X offset exceeds X11 range"))?;
-            let dst_y = i16::try_from(u32::from(geometry.y) + u32::from(y))
+            let dst_y = i16::try_from(u32::from(offset_y) + u32::from(y))
                 .map_err(|_| invalid_data("damage Y offset exceeds X11 range"))?;
             self.shm_upload.upload_or_core(
                 &self.conn,
                 image,
-                self.backing,
+                drawable,
                 self.gc,
                 dst_x,
                 dst_y,
                 &mut self.deferred_events,
             )?;
+        }
+        if let Some(source) = render_source {
+            source.key.sequence = frame.sequence;
+            // Let populate_backing recomposite the now-current cached source.
+            // This also preserves the existing same-frame Render fallback.
+            return Ok(false);
         }
         Ok(true)
     }
@@ -1335,11 +1938,160 @@ impl Viewer {
             fill_backing(&self.conn, self.backing, self.gc, self.width, self.height)?;
             self.backing_letterbox = None;
         }
-        // Populate the retained pixmap completely before presenting it. If any
-        // fill/upload fails, no CopyArea has been queued and the previous
-        // window contents remain visible rather than a partially uploaded frame.
+        // Upload and CopyArea requests share one ordered connection. Errors
+        // are handled before the presentation fence, so failed frames cannot ACK.
         self.conn.flush()?;
         self.backing_valid = true;
+        Ok(())
+    }
+
+    /// Enable an authoritative remote cursor, including in view-only sessions.
+    pub(crate) fn enable_cursor_plane(&mut self) -> RemoteResult<()> {
+        if self.cursor_plane.enabled {
+            return Ok(());
+        }
+        let (format, target_format) =
+            cursor_formats(&self.conn, self.cursor_screen)?.ok_or_else(|| {
+                invalid_data("negotiated cursor plane requires XRender ARGB32 support")
+            })?;
+        let target = self.conn.generate_id()?;
+        render::create_picture(
+            &self.conn,
+            target,
+            self.window,
+            target_format,
+            &CreatePictureAux::new(),
+        )?
+        .check()?;
+        self.cursor_plane.render = Some(CursorRender {
+            format,
+            target,
+            source: None,
+        });
+        self.conn
+            .change_window_attributes(
+                self.window,
+                &x11rb::protocol::xproto::ChangeWindowAttributesAux::new()
+                    .cursor(self.blank_cursor),
+            )?
+            .check()?;
+        self.cursor_plane.enabled = true;
+        self.refresh_cursor()
+    }
+
+    pub(crate) fn set_cursor_update(
+        &mut self,
+        shape: Arc<CursorShape>,
+        position: CursorPosition,
+    ) -> RemoteResult<()> {
+        if shape.width == 0
+            || shape.height == 0
+            || shape.width > 256
+            || shape.height > 256
+            || shape.hotspot_x >= shape.width
+            || shape.hotspot_y >= shape.height
+            || shape.rgba.len() != usize::from(shape.width) * usize::from(shape.height) * 4
+            || position.shape_id != shape.id
+        {
+            return Err(invalid_data("invalid remote cursor shape").into());
+        }
+        if self.cursor_plane.accept_position(position) {
+            self.cursor_plane.insert_shape(shape);
+            self.refresh_cursor()?;
+        }
+        Ok(())
+    }
+
+    fn refresh_cursor(&mut self) -> RemoteResult<()> {
+        if self.closed
+            || !self.cursor_plane.enabled
+            || !self.backing_valid
+            || self.pending_resize
+            || self.recovery.is_some()
+        {
+            return Ok(());
+        }
+        if let Some(rect) = self.cursor_plane.drawn.take() {
+            drop(self.conn.copy_area(
+                self.backing,
+                self.window,
+                self.gc,
+                rect.x as i16,
+                rect.y as i16,
+                rect.x as i16,
+                rect.y as i16,
+                rect.width,
+                rect.height,
+            )?);
+        }
+        self.paint_cursor()?;
+        self.conn.flush()?;
+        Ok(())
+    }
+
+    /// Queue an independent OVER operation after the clean backing copy. Cursor
+    /// motion never reads back pixels, uploads a frame, or waits for a reply.
+    /// The server processes source upload, transform and composite in order.
+    fn paint_cursor(&mut self) -> RemoteResult<()> {
+        if !self.cursor_plane.enabled || self.recovery.is_some() {
+            return Ok(());
+        }
+        let Some(frame) = self.last_frame.as_ref() else {
+            return Ok(());
+        };
+        let Some(position) = self.cursor_plane.position.as_ref() else {
+            return Ok(());
+        };
+        let Some(shape) = self
+            .cursor_plane
+            .shapes
+            .iter()
+            .find(|s| s.id == position.shape_id)
+        else {
+            return Ok(());
+        };
+        let Some(geometry) = self.backing_letterbox else {
+            return Ok(());
+        };
+        let Some(placement) = cursor_placement(
+            position,
+            shape,
+            frame.geometry_epoch,
+            (frame.source_width, frame.source_height),
+            geometry,
+        ) else {
+            return Ok(());
+        };
+        let renderer = self
+            .cursor_plane
+            .render
+            .as_mut()
+            .ok_or_else(|| invalid_data("negotiated cursor renderer is missing"))?;
+        renderer.prepare_shape(&self.conn, self.window, shape)?;
+        let source = renderer.source.as_ref().unwrap();
+        let transform = cursor_transform(&placement)?;
+        drop(render::set_picture_transform(
+            &self.conn,
+            source.picture,
+            transform,
+        )?);
+        let rect = placement.clip;
+        drop(render::composite(
+            &self.conn,
+            PictOp::OVER,
+            source.picture,
+            x11rb::NONE,
+            renderer.target,
+            0,
+            0,
+            0,
+            0,
+            rect.x as i16,
+            rect.y as i16,
+            rect.width,
+            rect.height,
+        )?);
+        self.cursor_plane.drawn = Some(rect);
         Ok(())
     }
 
@@ -1355,7 +2107,9 @@ impl Viewer {
             self.width,
             self.height,
         )?;
-        self.finish_window_request(copy.check())?;
+        drop(copy); // Keep input polling live; asynchronous errors precede the presentation fence.
+        self.cursor_plane.drawn = None;
+        self.paint_cursor()?;
         if self.closed {
             return Ok(());
         }
@@ -1390,6 +2144,9 @@ impl Viewer {
 
 impl Drop for Viewer {
     fn drop(&mut self) {
+        if let Some(renderer) = self.cursor_plane.render.as_mut() {
+            renderer.release(&self.conn);
+        }
         self.render_upscale.release(&self.conn);
         self.shm_upload.release(&self.conn);
         if self.grabbed {
@@ -1416,6 +2173,8 @@ struct RenderSource {
 }
 
 struct EnabledRenderUpscale {
+    major_opcode: u8,
+    pending_request: Option<AcceleratorRequest>,
     root: Window,
     depth: u8,
     format: Pictformat,
@@ -1479,6 +2238,12 @@ impl RenderFailure {
 }
 
 impl RenderUpscale {
+    fn take_request(&mut self) -> Option<AcceleratorRequest> {
+        match self {
+            Self::Disabled => None,
+            Self::Enabled(upscale) => upscale.pending_request.take(),
+        }
+    }
     fn connect(
         conn: &RustConnection,
         screen_num: usize,
@@ -1486,13 +2251,10 @@ impl RenderUpscale {
         depth: u8,
         root_visual: u32,
     ) -> RemoteResult<Self> {
-        if conn
-            .extension_information(render::X11_EXTENSION_NAME)?
-            .is_none()
-        {
+        let Some(extension) = conn.extension_information(render::X11_EXTENSION_NAME)? else {
             eprintln!("jwm-remote: XRender unavailable for viewer upscaling; using CPU scaling");
             return Ok(Self::Disabled);
-        }
+        };
 
         let version =
             match render::query_version(conn, RENDER_CLIENT_VERSION.0, RENDER_CLIENT_VERSION.1)?
@@ -1539,6 +2301,8 @@ impl RenderUpscale {
         };
 
         Ok(Self::Enabled(EnabledRenderUpscale {
+            major_opcode: extension.major_opcode,
+            pending_request: None,
             root,
             depth,
             format,
@@ -1732,8 +2496,8 @@ impl EnabledRenderUpscale {
             upload
                 .upload_or_core(conn, image, source.pixmap, gc, 0, 0, deferred_events)
                 .map_err(RenderFailure::from_remote)?;
-            // Commit the sequence only after the complete SHM/core upload.
-            // A failed partial core upload is retried on the next redraw.
+            // Requests on this connection are ordered; subsequent composites
+            // consume this upload. Async protocol failures terminate before ACK.
             source.key = key;
             return Ok(());
         }
@@ -1813,7 +2577,7 @@ impl EnabledRenderUpscale {
                 .map_err(RenderFailure::from_reply)?;
             source.transform = Some(transform_key);
         }
-        render::composite(
+        let cookie = render::composite(
             conn,
             PictOp::SRC,
             source.picture,
@@ -1836,9 +2600,13 @@ impl EnabledRenderUpscale {
             geometry.width,
             geometry.height,
         )
-        .map_err(RenderFailure::from_connection)?
-        .check()
-        .map_err(RenderFailure::from_reply)?;
+        .map_err(RenderFailure::from_connection)?;
+        self.pending_request = Some(AcceleratorRequest {
+            sequence: cookie.sequence_number() as u16,
+            major: self.major_opcode,
+            minor: u16::from(render::COMPOSITE_REQUEST),
+        });
+        drop(cookie);
         if !self.reported_active {
             eprintln!(
                 "jwm-remote: XRender viewer upscale {}x{} -> {}x{} active",
@@ -1875,13 +2643,13 @@ fn free_render_source(conn: &RustConnection, source: RenderSource) -> Result<(),
 
 fn free_render_picture_unchecked(conn: &RustConnection, picture: Picture) {
     if let Ok(cookie) = render::free_picture(conn, picture) {
-        let _ = cookie.check();
+        cookie.ignore_error();
     }
 }
 
 fn free_render_pixmap_unchecked(conn: &RustConnection, pixmap: Pixmap) {
     if let Ok(cookie) = conn.free_pixmap(pixmap) {
-        let _ = cookie.check();
+        cookie.ignore_error();
     }
 }
 
@@ -1951,12 +2719,99 @@ fn scale_transform(
     })
 }
 
+fn presentation_ready(
+    copied: bool,
+    uploads: &[ShmCompletionKey],
+    mut pending: impl FnMut(ShmCompletionKey) -> bool,
+) -> bool {
+    copied && uploads.iter().all(|key| !pending(*key))
+}
+
+#[derive(Default)]
+struct AccelerationRecovery {
+    shm: bool,
+    render: bool,
+}
+
+#[derive(Clone, Copy)]
+struct AcceleratorRequest {
+    sequence: u16,
+    major: u8,
+    minor: u16,
+}
+
+impl AcceleratorRequest {
+    fn matches(self, error: &X11Error) -> bool {
+        self.sequence == error.sequence
+            && self.major == error.major_opcode
+            && self.minor == error.minor_opcode
+    }
+}
+
+struct PendingPresentation {
+    sequence: Option<u64>,
+    serial: u64,
+    render_request: Option<AcceleratorRequest>,
+    request_sequence: u16,
+    copied: bool,
+    uploads: Vec<ShmCompletionKey>,
+    deadline: Instant,
+}
+
+impl PendingPresentation {
+    fn ready(&self, upload: &ShmUpload) -> bool {
+        presentation_ready(self.copied, &self.uploads, |key| upload.pending(key))
+    }
+}
+
 enum ShmUpload {
     Disabled,
     Enabled(EnabledShmUpload),
 }
 
 impl ShmUpload {
+    fn reject(&mut self, error: &X11Error) -> bool {
+        if let Self::Enabled(upload) = self {
+            for slot in &mut upload.slots {
+                if reject_upload_key(&mut slot.completion, error) {
+                    // A protocol rejection does not read the shared pixels and
+                    // produces no completion. Other slots remain server-owned.
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    fn complete(&mut self, event: &shm::CompletionEvent) {
+        if let Self::Enabled(upload) = self {
+            for slot in &mut upload.slots {
+                if slot
+                    .completion
+                    .is_some_and(|key| is_matching_shm_completion(event, key))
+                {
+                    slot.completion = None;
+                    break;
+                }
+            }
+        }
+    }
+
+    fn pending(&self, key: ShmCompletionKey) -> bool {
+        matches!(self, Self::Enabled(upload) if upload.slots.iter().any(|slot| slot.completion == Some(key)))
+    }
+
+    fn pending_keys(&self) -> Vec<ShmCompletionKey> {
+        match self {
+            Self::Disabled => Vec::new(),
+            Self::Enabled(upload) => upload
+                .slots
+                .iter()
+                .filter_map(|slot| slot.completion)
+                .collect(),
+        }
+    }
+
     fn connect(conn: &RustConnection, depth: u8) -> Self {
         match Self::try_connect(conn, depth) {
             Ok(Some(upload)) => Self::Enabled(upload),
@@ -2001,7 +2856,7 @@ impl ShmUpload {
             image_byte_order,
             version: (version.major_version, version.minor_version),
             major_opcode: extension.major_opcode,
-            segment: None,
+            slots: Vec::new(),
             reported_active: false,
         }))
     }
@@ -2054,8 +2909,13 @@ struct EnabledShmUpload {
     image_byte_order: ImageOrder,
     version: (u16, u16),
     major_opcode: u8,
-    segment: Option<ShmSegment>,
+    slots: Vec<ShmSlot>,
     reported_active: bool,
+}
+
+struct ShmSlot {
+    segment: ShmSegment,
+    completion: Option<ShmCompletionKey>,
 }
 
 impl EnabledShmUpload {
@@ -2068,27 +2928,30 @@ impl EnabledShmUpload {
         gc: Gcontext,
         dst_x: i16,
         dst_y: i16,
-        deferred_events: &mut VecDeque<Event>,
+        _deferred_events: &mut VecDeque<Event>,
     ) -> ShmUploadAttempt<RemoteError> {
         let image_size = match validate_native_upload(image, self.format, self.image_byte_order) {
             Ok(size) => size,
             Err(error) => return ShmUploadAttempt::Recoverable(error),
         };
-        if let Err(error) = self.ensure_capacity(conn, image_size) {
-            return ShmUploadAttempt::Recoverable(error);
-        }
-
-        let (segment_id, capacity) = {
-            let Some(segment) = self.segment.as_mut() else {
-                return ShmUploadAttempt::Recoverable(
-                    invalid_data("MIT-SHM upload segment was not created").into(),
-                );
-            };
-            if let Err(error) = segment.mapping.copy_from(image.data()) {
-                return ShmUploadAttempt::Recoverable(error.into());
+        let slot = match self.available_slot(conn, image_size) {
+            Ok(Some(slot)) => slot,
+            // All mappings remain owned by the server. Core upload is safe and
+            // bounded and must not disable or detach the outstanding SHM pool.
+            Ok(None) => {
+                return match core_upload(conn, image, drawable, gc, dst_x, dst_y) {
+                    Ok(()) => ShmUploadAttempt::Uploaded,
+                    Err(error) => ShmUploadAttempt::Fatal(error),
+                };
             }
-            (segment.id, segment.mapping.len())
+            Err(error) => return ShmUploadAttempt::Recoverable(error),
         };
+        let segment = &mut self.slots[slot].segment;
+        if let Err(error) = segment.mapping.copy_from(image.data()) {
+            return ShmUploadAttempt::Recoverable(error.into());
+        }
+        let segment_id = segment.id;
+        let capacity = segment.mapping.len();
 
         let cookie = match shm::put_image(
             conn,
@@ -2122,22 +2985,10 @@ impl EnabledShmUpload {
             segment: segment_id,
             offset: 0,
         };
-        match cookie.check() {
-            Ok(()) => {}
-            // A server rejection means it never consumed the shared pixels,
-            // so core PutImage may safely retry this frame.
-            Err(ReplyError::X11Error(error)) => {
-                return ShmUploadAttempt::Recoverable(ReplyError::X11Error(error).into());
-            }
-            // Connection failure leaves completion/consumption unknowable.
-            Err(ReplyError::ConnectionError(error)) => {
-                return ShmUploadAttempt::Fatal(error.into());
-            }
-        }
-        if let Err(error) = wait_for_shm_completion(conn, completion, deferred_events) {
-            return ShmUploadAttempt::Fatal(error.into());
-        }
-
+        self.slots[slot].completion = Some(completion);
+        // Dropping (not ignore_error) sends protocol failures to the event loop.
+        // Never overwrite this slot until its exact completion is consumed.
+        drop(cookie);
         if !self.reported_active {
             eprintln!(
                 "jwm-remote: MIT-SHM {}.{} FD upload active ({capacity} bytes)",
@@ -2148,25 +2999,35 @@ impl EnabledShmUpload {
         ShmUploadAttempt::Uploaded
     }
 
-    fn ensure_capacity(&mut self, conn: &RustConnection, required: usize) -> RemoteResult<()> {
-        let current_capacity = self.segment.as_ref().map(|segment| segment.mapping.len());
-        if !shm_needs_growth(current_capacity, required) {
-            return Ok(());
+    fn available_slot(
+        &mut self,
+        conn: &RustConnection,
+        required: usize,
+    ) -> RemoteResult<Option<usize>> {
+        if let Some(index) = self.slots.iter().position(|slot| slot.completion.is_none()) {
+            if shm_needs_growth(Some(self.slots[index].segment.mapping.len()), required) {
+                let replacement = ShmSegment::create(conn, required)?;
+                let old = std::mem::replace(&mut self.slots[index].segment, replacement);
+                old.release(conn);
+            }
+            return Ok(Some(index));
         }
-
-        // Construct and map the replacement before releasing the old segment.
-        // Every previous PutImage completion was consumed before this point.
-        let replacement = ShmSegment::create(conn, required)?;
-        let old = self.segment.replace(replacement);
-        if let Some(old) = old {
-            old.release(conn);
+        if self.slots.len() == SHM_UPLOAD_SLOTS {
+            return Ok(None);
         }
-        Ok(())
+        let segment = ShmSegment::create(conn, required)?;
+        self.slots.push(ShmSlot {
+            segment,
+            completion: None,
+        });
+        Ok(Some(self.slots.len() - 1))
     }
 
     fn release(&mut self, conn: &RustConnection) {
-        if let Some(segment) = self.segment.take() {
-            segment.release(conn);
+        for slot in self.slots.drain(..) {
+            // Detach is ordered after every outstanding PutImage on this connection.
+            // The server owns its FD-backed mapping independently of this mapping.
+            slot.segment.release(conn);
         }
     }
 }
@@ -2181,6 +3042,22 @@ struct ShmCompletionKey {
     offset: u32,
 }
 
+fn reject_upload_key(completion: &mut Option<ShmCompletionKey>, error: &X11Error) -> bool {
+    if completion.is_some_and(|key| {
+        AcceleratorRequest {
+            sequence: key.sequence,
+            major: key.major_event,
+            minor: key.minor_event,
+        }
+        .matches(error)
+    }) {
+        *completion = None;
+        true
+    } else {
+        false
+    }
+}
+
 fn is_matching_shm_completion(event: &shm::CompletionEvent, key: ShmCompletionKey) -> bool {
     event.sequence == key.sequence
         && event.drawable == key.drawable
@@ -2188,25 +3065,6 @@ fn is_matching_shm_completion(event: &shm::CompletionEvent, key: ShmCompletionKe
         && event.major_event == key.major_event
         && event.shmseg == key.segment
         && event.offset == key.offset
-}
-
-fn wait_for_shm_completion(
-    conn: &RustConnection,
-    key: ShmCompletionKey,
-    deferred_events: &mut VecDeque<Event>,
-) -> Result<(), x11rb::errors::ConnectionError> {
-    loop {
-        let event = conn.wait_for_event()?;
-        if let Event::ShmCompletion(completion) = &event
-            && is_matching_shm_completion(completion, key)
-        {
-            return Ok(());
-        }
-        // Drawing is synchronous from the caller's perspective, but window,
-        // input, and close events can arrive while the server finishes reading
-        // the mapping. Preserve their original order for the next poll_events.
-        deferred_events.push_back(event);
-    }
 }
 
 struct ShmSegment {
@@ -2270,8 +3128,9 @@ impl ShmSegment {
     }
 
     fn release(self, conn: &RustConnection) {
-        // Every successful PutImage waits for its matching completion before
-        // returning. Check Detach before unmapping and closing the descriptor.
+        // Detach is ordered after all PutImage requests. The server owns its
+        // separate FD-backed mapping, so unmapping this client view is safe even
+        // during error teardown. Never wait on a stalled server during Drop.
         detach_shm_segment(conn, self.id);
         drop(self);
     }
@@ -2279,7 +3138,7 @@ impl ShmSegment {
 
 fn detach_shm_segment(conn: &RustConnection, segment: shm::Seg) {
     if let Ok(cookie) = shm::detach(conn, segment) {
-        let _ = cookie.check();
+        cookie.ignore_error();
     }
 }
 
@@ -2391,9 +3250,7 @@ fn core_upload(
     dst_y: i16,
 ) -> RemoteResult<()> {
     let cookies = image.put(conn, drawable, gc, dst_x, dst_y)?;
-    for cookie in cookies {
-        cookie.check()?;
-    }
+    drop(cookies); // Errors flow through poll_events before presentation acknowledgment.
     Ok(())
 }
 
@@ -2528,10 +3385,7 @@ fn fill_backing(
             height,
         }],
     )?;
-    // Consume the fill's checked result before waiting for an SHM Completion.
-    // Otherwise wait_for_event could dequeue this request's X11 error and turn
-    // it into an unrelated deferred event.
-    fill.check()?;
+    drop(fill); // Ordered before uploads; failures surface before the presentation fence.
     Ok(())
 }
 
@@ -2582,10 +3436,45 @@ fn ensure_native_image<'a>(
 }
 
 fn damage_base_matches(previous: &StoredFrame, frame: &StoredFrame, damage: FrameDamage) -> bool {
-    previous.sequence == damage.base_sequence
-        && previous.image().dimensions() == frame.image().dimensions()
+    previous.geometry_epoch == frame.geometry_epoch
+        && previous.sequence == damage.base_sequence
+        && previous.dimensions() == frame.dimensions()
         && (previous.source_width, previous.source_height)
             == (frame.source_width, frame.source_height)
+}
+
+fn render_source_accepts_damage(
+    key: RenderSourceKey,
+    damage: FrameDamage,
+    dimensions: (u16, u16),
+) -> bool {
+    key.sequence == damage.base_sequence && (key.width, key.height) == dimensions
+}
+
+/// Conservative destination coverage for image's separable Triangle filter.
+/// The source support is max(source/destination, 1), including antialiasing
+/// when shrinking. An extra destination pixel protects floating-point boundary
+/// rounding. Identity scaling needs no halo. A single rectangle bounds work.
+fn scaled_damage_rect(
+    rect: (u16, u16, u16, u16),
+    source: (u16, u16),
+    destination: (u16, u16),
+) -> (u16, u16, u16, u16) {
+    fn axis(start: u16, length: u16, source: u16, destination: u16) -> (u16, u16) {
+        if source == destination {
+            return (start, length);
+        }
+        let ratio = f64::from(source) / f64::from(destination);
+        let support = ratio.max(1.0);
+        let left = ((f64::from(start) - support) / ratio).floor() - 1.0;
+        let right = ((f64::from(start) + f64::from(length) + support) / ratio).ceil() + 1.0;
+        let left = left.clamp(0.0, f64::from(destination)) as u16;
+        let right = right.clamp(f64::from(left), f64::from(destination)) as u16;
+        (left, right - left)
+    }
+    let (x, width) = axis(rect.0, rect.2, source.0, destination.0);
+    let (y, height) = axis(rect.1, rect.3, source.1, destination.1);
+    (x, y, width, height)
 }
 
 /// Convert only a bounded source rectangle into a compact upload image.
@@ -3055,6 +3944,186 @@ mod tests {
             bits_per_pixel: 32,
             scanline_pad: 32,
         }
+    }
+
+    fn test_cursor_shape(id: u64) -> Arc<CursorShape> {
+        Arc::new(CursorShape {
+            id,
+            width: 4,
+            height: 4,
+            hotspot_x: 1,
+            hotspot_y: 1,
+            rgba: [255, 0, 0, 255].repeat(16),
+        })
+    }
+
+    fn test_cursor_position(sequence: u64) -> CursorPosition {
+        CursorPosition {
+            sequence,
+            geometry_epoch: 7,
+            shape_id: 1,
+            source_width: 100,
+            source_height: 100,
+            x: 0,
+            y: 0,
+            visible: true,
+        }
+    }
+
+    #[test]
+    fn cursor_placement_scales_hotspot_clips_and_rejects_stale_geometry() {
+        let shape = test_cursor_shape(1);
+        let mut position = test_cursor_position(1);
+        let geometry = Letterbox {
+            x: 20,
+            y: 10,
+            width: 200,
+            height: 200,
+        };
+        let placement = cursor_placement(&position, &shape, 7, (100, 100), geometry).unwrap();
+        assert_eq!((placement.left, placement.top), (18, 8));
+        assert_eq!(
+            placement.clip,
+            Letterbox {
+                x: 20,
+                y: 10,
+                width: 6,
+                height: 6
+            }
+        );
+        assert!(cursor_placement(&position, &shape, 8, (100, 100), geometry).is_none());
+        assert!(cursor_placement(&position, &shape, 7, (101, 100), geometry).is_none());
+        position.visible = false;
+        assert!(cursor_placement(&position, &shape, 7, (100, 100), geometry).is_none());
+        position.visible = true;
+        position.x = i32::MIN;
+        assert!(cursor_placement(&position, &shape, 7, (100, 100), geometry).is_none());
+        position.x = i32::MAX;
+        assert!(cursor_placement(&position, &shape, 7, (100, 100), geometry).is_none());
+    }
+
+    #[test]
+    fn cursor_motion_reuses_argb_source_and_queues_without_readback() {
+        assert!(cursor_source_needs_upload(None, 1));
+        assert!(!cursor_source_needs_upload(Some(1), 1));
+        assert!(cursor_source_needs_upload(Some(1), 2));
+        let source = include_str!("x11_viewer.rs");
+        let paint = source
+            .split("fn paint_cursor(&mut self)")
+            .nth(1)
+            .unwrap()
+            .split("fn copy_backing")
+            .next()
+            .unwrap();
+        assert!(!paint.contains("XImage::get"));
+        assert!(!paint.contains(".reply()"));
+        assert!(!paint.contains(".check()"));
+        assert!(paint.contains("PictOp::OVER"));
+    }
+
+    #[test]
+    fn cursor_transform_preserves_clipped_hotspot_at_fractional_scale() {
+        let shape = test_cursor_shape(1);
+        let position = test_cursor_position(1);
+        let geometry = Letterbox {
+            x: 20,
+            y: 10,
+            width: 150,
+            height: 150,
+        };
+        let placement = cursor_placement(&position, &shape, 7, (100, 100), geometry).unwrap();
+        let transform = cursor_transform(&placement).unwrap();
+        assert_eq!(placement.clip.width, 5);
+        assert_eq!(transform.matrix11, 4 * XFIXED_ONE / 6);
+        assert_eq!(transform.matrix13, XFIXED_ONE);
+        assert_eq!(transform.matrix23, transform.matrix13);
+        assert_eq!(transform.matrix33, XFIXED_ONE);
+    }
+
+    #[test]
+    fn cursor_cache_is_bounded_and_positions_never_regress() {
+        let mut plane = CursorPlane::default();
+        assert!(plane.accept_position(test_cursor_position(9)));
+        assert!(!plane.accept_position(test_cursor_position(9)));
+        assert!(!plane.accept_position(test_cursor_position(8)));
+        plane.insert_shape(test_cursor_shape(1));
+        for id in 2..100 {
+            plane.insert_shape(test_cursor_shape(id));
+            assert_eq!(plane.shapes.len(), 2);
+            assert!(plane.shapes.iter().any(|s| s.id == 1));
+            assert!(plane.shapes.iter().any(|s| s.id == id));
+        }
+        assert!(plane.accept_position(test_cursor_position(10)));
+    }
+
+    #[test]
+    #[ignore = "requires an isolated X11 server in JWM_TEST_X11_DISPLAY"]
+    fn independent_cursor_restores_clean_backing_on_x11() {
+        let display = std::env::var("JWM_TEST_X11_DISPLAY").unwrap();
+        let mut viewer = Viewer::connect(
+            Some(&display),
+            100,
+            100,
+            true,
+            false,
+            None,
+            false,
+            "F12",
+            "cursor plane test",
+        )
+        .unwrap();
+        viewer.enable_cursor_plane().unwrap();
+        viewer
+            .draw(DecodedFrame {
+                sequence: 1,
+                source_width: 100,
+                source_height: 100,
+                image: RgbImage::from_pixel(100, 100, image::Rgb([10, 20, 30])),
+            })
+            .unwrap();
+        let mut position = test_cursor_position(1);
+        position.geometry_epoch = 0;
+        position.x = 20;
+        position.y = 20;
+        viewer
+            .set_cursor_update(test_cursor_shape(1), position)
+            .unwrap();
+        let rect = viewer.cursor_plane.drawn.unwrap();
+        let (clean, _) = XImage::get(
+            &viewer.conn,
+            viewer.backing,
+            rect.x as i16,
+            rect.y as i16,
+            1,
+            1,
+        )
+        .unwrap();
+        let (drawn, _) = XImage::get(
+            &viewer.conn,
+            viewer.window,
+            rect.x as i16,
+            rect.y as i16,
+            1,
+            1,
+        )
+        .unwrap();
+        assert_ne!(clean.get_pixel(0, 0), drawn.get_pixel(0, 0));
+        position.sequence = 2;
+        position.visible = false;
+        viewer
+            .set_cursor_update(test_cursor_shape(1), position)
+            .unwrap();
+        let (restored, _) = XImage::get(
+            &viewer.conn,
+            viewer.window,
+            rect.x as i16,
+            rect.y as i16,
+            1,
+            1,
+        )
+        .unwrap();
+        assert_eq!(clean.get_pixel(0, 0), restored.get_pixel(0, 0));
+        assert!(viewer.cursor_plane.drawn.is_none());
     }
 
     #[test]
@@ -3596,6 +4665,89 @@ mod tests {
     }
 
     #[test]
+    fn scaled_source_damage_requires_exact_cached_predecessor() {
+        let key = RenderSourceKey {
+            sequence: 7,
+            width: 640,
+            height: 480,
+        };
+        let damage = FrameDamage {
+            base_sequence: 7,
+            rect: Some((20, 30, 16, 16)),
+        };
+        assert!(render_source_accepts_damage(key, damage, (640, 480)));
+        assert!(!render_source_accepts_damage(
+            RenderSourceKey { sequence: 6, ..key },
+            damage,
+            (640, 480)
+        ));
+        assert!(!render_source_accepts_damage(key, damage, (800, 600)));
+        assert!(render_source_accepts_damage(
+            key,
+            FrameDamage {
+                rect: None,
+                ..damage
+            },
+            (640, 480)
+        ));
+    }
+
+    #[test]
+    fn scaled_damage_covers_every_triangle_changed_pixel() {
+        // Exhaust all single-pixel changes in small odd/even geometries,
+        // including enlargement, shrinking, edges and one-pixel axes.
+        for (sw, sh) in [(1, 1), (1, 7), (9, 1), (7, 9), (8, 6)] {
+            for (dw, dh) in [(1, 1), (1, 5), (6, 1), (3, 4), (11, 13), (8, 6)] {
+                let baseline = RgbImage::from_fn(sw, sh, |x, y| {
+                    image::Rgb([(x * 23) as u8, (y * 19) as u8, 71])
+                });
+                let before = image::imageops::resize(
+                    &baseline,
+                    dw,
+                    dh,
+                    image::imageops::FilterType::Triangle,
+                );
+                for y in 0..sh {
+                    for x in 0..sw {
+                        let mut changed = baseline.clone();
+                        changed.put_pixel(x, y, image::Rgb([255, 255, 255]));
+                        let after = image::imageops::resize(
+                            &changed,
+                            dw,
+                            dh,
+                            image::imageops::FilterType::Triangle,
+                        );
+                        let (rx, ry, rw, rh) = scaled_damage_rect(
+                            (x as u16, y as u16, 1, 1),
+                            (sw as u16, sh as u16),
+                            (dw as u16, dh as u16),
+                        );
+                        let mut patched = before.clone();
+                        for py in u32::from(ry)..u32::from(ry + rh) {
+                            for px in u32::from(rx)..u32::from(rx + rw) {
+                                patched.put_pixel(px, py, *after.get_pixel(px, py));
+                            }
+                        }
+                        assert_eq!(patched, after, "{sw}x{sh} -> {dw}x{dh}, changed ({x},{y})");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn scaled_damage_is_bounded_and_identity_is_exact() {
+        let rect = (100, 200, 16, 16);
+        assert_eq!(scaled_damage_rect(rect, (1920, 1080), (1920, 1080)), rect);
+        let (_, _, w, h) = scaled_damage_rect(rect, (1920, 1080), (1280, 720));
+        assert!(w < 20 && h < 20);
+        assert_eq!(
+            scaled_damage_rect((0, 0, 1920, 1080), (1920, 1080), (1280, 720)),
+            (0, 0, 1280, 720)
+        );
+    }
+
+    #[test]
     fn damage_region_matches_full_conversion_without_extra_pixels() {
         let rgb = RgbImage::from_fn(7, 5, |x, y| image::Rgb([x as u8 * 20, y as u8 * 30, 99]));
         let layout = PixelLayout::from_visual_type(standard_visual()).unwrap();
@@ -3644,6 +4796,16 @@ mod tests {
             FrameDamage {
                 base_sequence: 7,
                 rect: Some((0, 0, 1, 1))
+            }
+        ));
+        let mut moved_source = make(9, 4);
+        moved_source.geometry_epoch = previous.geometry_epoch + 1;
+        assert!(!damage_base_matches(
+            &previous,
+            &moved_source,
+            FrameDamage {
+                base_sequence: 7,
+                rect: Some((0, 0, 1, 1)),
             }
         ));
         assert!(!damage_base_matches(
@@ -3930,6 +5092,228 @@ mod tests {
         )
         .unwrap();
         assert!(validate_native_upload(&oversized, format, ImageOrder::LsbFirst).is_err());
+    }
+
+    #[test]
+    #[ignore = "requires a dedicated JWM_TEST_X11_DISPLAY Xvfb server"]
+    fn asynchronous_shm_frames_complete_in_order_on_x11() {
+        let display = std::env::var("JWM_TEST_X11_DISPLAY")
+            .expect("set JWM_TEST_X11_DISPLAY to an isolated Xvfb server");
+        let mut viewer = Viewer::connect(
+            Some(&display),
+            640,
+            480,
+            true,
+            false,
+            None,
+            false,
+            "F12",
+            "async SHM test",
+        )
+        .unwrap();
+        assert!(
+            matches!(viewer.shm_upload, ShmUpload::Enabled(_)),
+            "this regression requires MIT-SHM FD support"
+        );
+        for sequence in 1..=3 {
+            assert!(viewer.can_submit_frame());
+            assert!(
+                viewer
+                    .draw_stored(StoredFrame::from_decoded(DecodedFrame {
+                        sequence,
+                        source_width: 640,
+                        source_height: 480,
+                        image: RgbImage::from_pixel(640, 480, image::Rgb([sequence as u8, 40, 70])),
+                    }))
+                    .unwrap()
+            );
+        }
+        assert!(!viewer.can_submit_frame());
+        assert_eq!(viewer.shm_upload.pending_keys().len(), SHM_UPLOAD_SLOTS);
+        assert!(viewer.take_presented_sequences().unwrap().is_empty());
+        // Input must still be serviced while all three upload slots are owned
+        // by X11. Put this before completions in the local event FIFO.
+        viewer.deferred_events.push_front(Event::MotionNotify(
+            x11rb::protocol::xproto::MotionNotifyEvent {
+                event: viewer.window,
+                event_x: 100,
+                event_y: 100,
+                ..Default::default()
+            },
+        ));
+        let mut input_seen = false;
+        let mut completed = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while completed.len() < 3 {
+            input_seen |= viewer
+                .poll_events()
+                .unwrap()
+                .iter()
+                .any(|event| matches!(event, ViewerEvent::Pointer { .. }));
+            completed.extend(viewer.take_presented_sequences().unwrap());
+            assert!(
+                Instant::now() < deadline,
+                "presentation completion timed out"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(input_seen);
+        assert_eq!(completed, [1, 2, 3]);
+        assert!(viewer.can_submit_frame());
+        assert!(viewer.shm_upload.pending_keys().is_empty());
+        // Resize invalidates the retained backing but never frees a busy SHM
+        // mapping. A fourth frame exercises reusable pool slots and redraw.
+        viewer.width = 800;
+        viewer.height = 600;
+        viewer.pending_resize = true;
+        assert!(
+            viewer
+                .draw_stored(StoredFrame::from_decoded(DecodedFrame {
+                    sequence: 4,
+                    source_width: 640,
+                    source_height: 480,
+                    image: RgbImage::from_pixel(640, 480, image::Rgb([80, 90, 100])),
+                }))
+                .unwrap()
+        );
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            viewer.poll_events().unwrap();
+            let completed = viewer.take_presented_sequences().unwrap();
+            if !completed.is_empty() {
+                assert_eq!(completed, [4]);
+                break;
+            }
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        // The public API preserves its synchronous contract and is not stuck
+        // after the internal ring's three-slot capacity.
+        for sequence in 5..=8 {
+            assert!(
+                viewer
+                    .draw(DecodedFrame {
+                        sequence,
+                        source_width: 640,
+                        source_height: 480,
+                        image: RgbImage::from_pixel(640, 480, image::Rgb([80, 90, 100])),
+                    })
+                    .unwrap()
+            );
+            assert!(viewer.presentations.is_empty());
+        }
+        // A real server rejection has no SHM completion. It must retire only
+        // that request and repaint through CPU/core, not strand the ring or ACK
+        // an Expose-only repaint as a new network frame.
+        viewer
+            .shm_upload
+            .upload_or_core(
+                &viewer.conn,
+                viewer.native_image.as_ref().unwrap(),
+                viewer.backing,
+                x11rb::NONE,
+                0,
+                0,
+                &mut viewer.deferred_events,
+            )
+            .unwrap();
+        viewer.queue_presentation(None).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !viewer.presentations.is_empty() {
+            viewer.poll_events().unwrap();
+            assert!(viewer.take_presented_sequences().unwrap().is_empty());
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(matches!(viewer.shm_upload, ShmUpload::Disabled));
+        assert!(matches!(viewer.render_upscale, RenderUpscale::Disabled));
+    }
+
+    #[test]
+    fn injected_accelerator_errors_release_only_the_rejected_request() {
+        let key = ShmCompletionKey {
+            sequence: 71,
+            drawable: 10,
+            minor_event: u16::from(shm::PUT_IMAGE_REQUEST),
+            major_event: 130,
+            segment: 20,
+            offset: 0,
+        };
+        let error = X11Error {
+            error_kind: ErrorKind::Match,
+            error_code: 8,
+            sequence: key.sequence,
+            bad_value: 0,
+            minor_opcode: key.minor_event,
+            major_opcode: key.major_event,
+            extension_name: None,
+            request_name: None,
+        };
+        let mut rejected = Some(key);
+        let mut still_owned = Some(ShmCompletionKey {
+            sequence: 72,
+            segment: 21,
+            ..key
+        });
+        assert!(!reject_upload_key(&mut still_owned, &error));
+        assert!(still_owned.is_some());
+        assert!(reject_upload_key(&mut rejected, &error));
+        assert!(rejected.is_none());
+        assert!(!reject_upload_key(&mut rejected, &error));
+        assert!(!presentation_ready(
+            true,
+            &[key, still_owned.unwrap()],
+            |candidate| Some(candidate) == still_owned
+        ));
+        let render = AcceleratorRequest {
+            sequence: 99,
+            major: 131,
+            minor: u16::from(render::COMPOSITE_REQUEST),
+        };
+        let render_error = X11Error {
+            sequence: render.sequence,
+            major_opcode: render.major,
+            minor_opcode: render.minor,
+            ..error.clone()
+        };
+        assert!(render.matches(&render_error));
+        assert!(!render.matches(&error));
+        assert!(!render.matches(&X11Error {
+            sequence: 100,
+            ..render_error.clone()
+        }));
+        assert!(!render.matches(&X11Error {
+            minor_opcode: 0,
+            ..render_error.clone()
+        }));
+        assert!(!render.matches(&X11Error {
+            major_opcode: 132,
+            ..render_error
+        }));
+    }
+
+    #[test]
+    fn presentation_waits_for_both_copy_fence_and_owned_uploads() {
+        let key = ShmCompletionKey {
+            sequence: 71,
+            drawable: 10,
+            minor_event: u16::from(shm::PUT_IMAGE_REQUEST),
+            major_event: 130,
+            segment: 20,
+            offset: 0,
+        };
+        assert!(!presentation_ready(false, &[], |_| false));
+        assert!(presentation_ready(true, &[], |_| false));
+        assert!(!presentation_ready(false, &[key], |_| false));
+        assert!(!presentation_ready(true, &[key], |_| true));
+        assert!(presentation_ready(true, &[key], |_| false));
+        let later = ShmCompletionKey {
+            sequence: 72,
+            ..key
+        };
+        assert!(!presentation_ready(true, &[key, later], |pending| pending == later));
+        // A later frame's unrelated slot must not delay this frame's ACK.
+        assert!(presentation_ready(true, &[key], |pending| pending == later));
     }
 
     #[test]
