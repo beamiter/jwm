@@ -58,7 +58,7 @@ It is not completion of the entire remote-control roadmap.
 
 ## Explicitly deferred
 
-- Partial CPU resampling, session
+- Partial CPU resampling, session state
   restore/source switching, window-geometry restoration, XKB/IME and clipboard
   UX modes, local readback, Wayland and hardware encoding.
 - Variable decode pixel/dimension budgets and broader negotiated capabilities,
@@ -118,7 +118,7 @@ bandwidth/latency and stopped-reader/disconnection fixtures without kernel
 network changes. See `remote-fault-proxy.md`. Its eight deterministic tests run
 with `python3 scripts/test-remote-fault-proxy.py` and are included in CI.
 The remote-only feature profile now runs the remote unit/CLI suite and isolated
-Xvfb SHM/cursor regressions. That CI job has been configured, not executed or verified from
+Xvfb SHM/cursor/clipboard regressions. That CI job has been configured, not executed or verified from
 this cloud workspace; live-X11 results remain pending until it runs.
 
 ## Compatibility note for Rust callers
@@ -138,7 +138,7 @@ backend and build labels must be supplied explicitly. Missing values are null.
 It does not collect hostnames, users, addresses or display content, and it does
 not measure performance. See `remote-benchmark-metadata.md` for the exact fields.
 
-## Reconnect prerequisites, not automatic reconnect
+## Explicit reconnect safety
 
 Receiver failures retain their typed cause, and authenticated host Close remains
 separate from transport loss. Cleanup errors preserve the foreground cause rather
@@ -154,8 +154,12 @@ all workers exited. The existing host input-thread join is still unbounded.
 Actual window-close intent is latched before fallible local input release and
 network flushes, and remains typed when those operations fail.
 
-Automatic reconnect remains disabled. SSH exit 255 cannot distinguish network
-loss from authentication/host verification failure. A retry policy still needs
-explicit opt-in and must refuse user/peer closes, protocol/authentication errors,
-and any incomplete cleanup; timeout alone never authorizes replacement work. The escape shortcut only releases
+Explicit direct-connect retry is bounded to at most five additional sessions
+with a lifetime budget and 1/2/4/8/8-second delays; default remains disabled.
+Only tagged established receiver EOF/reset/abort errors with certified successful
+cleanup qualify. User/peer closes, local escape, protocol/authentication failures,
+timeouts and any incomplete cleanup do not qualify. Pending local intent is
+checked again after cleanup before certification. SSH and saved-profile retries
+remain unsupported; SSH exit 255 cannot reliably distinguish network loss from
+authentication or host verification failure. No session/transfer state resumes. The escape shortcut only releases
 input grab; it does not close the session and is not treated as cancellation.

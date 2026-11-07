@@ -1,7 +1,7 @@
 //! JWM-to-JWM remote desktop helper for trusted X11 LANs.
 
 use clap::{Parser, Subcommand};
-use jwm::remote::client::{ClientOptions, run_client};
+use jwm::remote::client::{ClientOptions, run_client_reconnecting};
 use jwm::remote::clipboard_files::parse_size;
 use jwm::remote::host::{HostOptions, run_host};
 use jwm::remote::key::{KeySource, generate_key_file};
@@ -249,6 +249,11 @@ enum Command {
         #[arg(value_name = "HOST[:PORT]", value_parser = normalize_address)]
         address: String,
 
+        /// Additional attempts after a proven transport drop and clean teardown.
+        /// Direct connect only; no retries on startup, escape/close or host refusal.
+        #[arg(long, default_value_t = 0, value_parser = clap::value_parser!(u8).range(0..=5))]
+        reconnect_attempts: u8,
+
         /// Private key; defaults to the JWM key path shown in top-level help.
         #[arg(long, value_name = "PATH")]
         key_file: Option<PathBuf>,
@@ -336,6 +341,7 @@ fn profile_error(message: &str) -> std::io::Error {
 fn profile_from_command(command: Command) -> RemoteResult<Profile> {
     let (connection, viewer) = match command {
         Command::Connect {
+            reconnect_attempts,
             address,
             key_file,
             display,
@@ -345,6 +351,12 @@ fn profile_from_command(command: Command) -> RemoteResult<Profile> {
             clipboard,
             clipboard_file_limit,
         } => {
+            if reconnect_attempts != 0 {
+                return Err(profile_error(
+                    "reconnect consent cannot be saved in a profile; use connect directly",
+                )
+                .into());
+            }
             if key_file.as_ref().is_some_and(|path| !path.is_absolute()) {
                 return Err(profile_error(
                     "saved key paths must be absolute (contents are never stored)",
@@ -700,6 +712,7 @@ fn run(command: Command) -> RemoteResult<()> {
             escape_key,
         }),
         Command::Connect {
+            reconnect_attempts,
             address,
             key_file,
             display,
@@ -708,17 +721,20 @@ fn run(command: Command) -> RemoteResult<()> {
             clipboard,
             clipboard_file_limit,
             escape_key,
-        } => run_client(ClientOptions {
-            peer_label: address.clone(),
-            address,
-            key: KeySource::File(resolve_key_path(key_file)?),
-            display,
-            view_only,
-            grab_input,
-            clipboard,
-            clipboard_file_limit,
-            escape_key,
-        }),
+        } => run_client_reconnecting(
+            ClientOptions {
+                peer_label: address.clone(),
+                address,
+                key: KeySource::File(resolve_key_path(key_file)?),
+                display,
+                view_only,
+                grab_input,
+                clipboard,
+                clipboard_file_limit,
+                escape_key,
+            },
+            reconnect_attempts,
+        ),
     }
 }
 
@@ -867,6 +883,50 @@ where
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn reconnect_is_explicit_bounded_and_cannot_be_saved_or_used_by_ssh() {
+        let Command::Connect {
+            reconnect_attempts, ..
+        } = Cli::try_parse_from(["jwm-remote", "connect", "host"])
+            .unwrap()
+            .command
+        else {
+            panic!()
+        };
+        assert_eq!(reconnect_attempts, 0);
+        for n in ["0", "1", "5"] {
+            assert!(
+                Cli::try_parse_from(["jwm-remote", "connect", "host", "--reconnect-attempts", n])
+                    .is_ok()
+            );
+        }
+        for n in ["6", "256", "-1"] {
+            assert!(
+                Cli::try_parse_from(["jwm-remote", "connect", "host", "--reconnect-attempts", n])
+                    .is_err()
+            );
+        }
+        let cli =
+            Cli::try_parse_from(["jwm-remote", "connect", "host", "--reconnect-attempts", "1"])
+                .unwrap();
+        assert!(profile_from_command(cli.command).is_err());
+        assert!(
+            Cli::try_parse_from(["jwm-remote", "ssh", "host", "--reconnect-attempts", "1"])
+                .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "jwm-remote",
+                "profile",
+                "run",
+                "host",
+                "--reconnect-attempts",
+                "1"
+            ])
+            .is_err()
+        );
+    }
+
     use super::*;
 
     #[test]

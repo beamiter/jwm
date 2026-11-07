@@ -91,7 +91,19 @@ impl std::fmt::Display for ClientFailure {
 /// buffer`, which reads like a bug in the viewer. A host that stops on purpose
 /// now says goodbye first, so a bare end of stream means it did not get to.
 fn describe_cause(cause: &RemoteError) -> String {
-    let vanished = match cause.downcast_ref::<ProtocolError>() {
+    let protocol = cause
+        .downcast_ref::<ProtocolError>()
+        .or_else(|| {
+            cause
+                .downcast_ref::<ReceiverTransportLoss>()
+                .map(|error| &error.0)
+        })
+        .or_else(|| {
+            cause
+                .downcast_ref::<CleanTransportDisconnect>()
+                .map(|error| &error.0)
+        });
+    let vanished = match protocol {
         Some(ProtocolError::Io(error)) => error.kind() == io::ErrorKind::UnexpectedEof,
         _ => cause
             .downcast_ref::<io::Error>()
@@ -123,6 +135,103 @@ pub fn run_client(options: ClientOptions) -> RemoteResult<()> {
         Err(cause) if cause.is::<ClientFailure>() => Err(cause),
         Err(cause) => Err(Box::new(ClientFailure { stage, cause })),
     }
+}
+
+/// Explicit direct-connection retry. SSH and saved profiles keep using the
+/// single-session entry point. The budget counts additional sessions and never
+/// resets, even when a replacement session runs successfully for a long time.
+pub fn run_client_reconnecting(options: ClientOptions, attempts: u8) -> RemoteResult<()> {
+    if attempts > 5 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "reconnect attempts must be 0..=5",
+        )
+        .into());
+    }
+    reconnect_with(
+        attempts,
+        || run_client(options.clone()),
+        |attempt, delay| {
+            eprintln!(
+                "jwm-remote: transport lost; reconnect attempt {attempt}/{attempts} in {} seconds (Ctrl+C to stop)",
+                delay.as_secs()
+            );
+            thread::sleep(delay);
+        },
+    )
+}
+
+fn reconnect_with(
+    attempts: u8,
+    mut run: impl FnMut() -> RemoteResult<()>,
+    mut wait: impl FnMut(u8, Duration),
+) -> RemoteResult<()> {
+    let mut remaining = attempts;
+    loop {
+        match run() {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                let certified = error
+                    .downcast_ref::<ClientFailure>()
+                    .is_some_and(|failure| failure.cause.is::<CleanTransportDisconnect>());
+                if remaining == 0 || !certified {
+                    return Err(error);
+                }
+                let attempt = attempts - remaining + 1;
+                wait(attempt, Duration::from_secs(1 << (attempt - 1).min(3)));
+                remaining -= 1;
+            }
+        }
+    }
+}
+
+/// Constructed only at the established session's authenticated record reader.
+/// It is not itself retry authorization: all session owners must first stop.
+#[derive(Debug)]
+struct ReceiverTransportLoss(ProtocolError);
+
+/// Constructed only by finish_session after successful explicit teardown.
+#[derive(Debug)]
+struct CleanTransportDisconnect(ProtocolError);
+
+macro_rules! transport_error {
+    ($kind:ty) => {
+        impl std::fmt::Display for $kind {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "{}", self.0)
+            }
+        }
+        impl std::error::Error for $kind {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                Some(&self.0)
+            }
+        }
+    };
+}
+transport_error!(ReceiverTransportLoss);
+transport_error!(CleanTransportDisconnect);
+
+fn receiver_read_error(error: ProtocolError) -> RemoteError {
+    if matches!(&error, ProtocolError::Io(error) if matches!(error.kind(),
+        io::ErrorKind::UnexpectedEof | io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionAborted))
+    {
+        Box::new(ReceiverTransportLoss(error))
+    } else {
+        Box::new(error)
+    }
+}
+
+fn suppress_reconnect(result: RemoteResult<()>, suppress: bool) -> RemoteResult<()> {
+    result.map_err(|error| {
+        if suppress {
+            match error.downcast::<ReceiverTransportLoss>() {
+                Ok(transport) => Box::new(transport.0) as RemoteError,
+                Err(error) => error,
+            }
+        } else {
+            error
+        }
+    })
 }
 
 fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> RemoteResult<()> {
@@ -351,13 +460,39 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
         .as_mut()
         .map_or(Ok(()), |sync| sync.shutdown_timeout(RECEIVER_JOIN_TIMEOUT));
     telemetry_reporter.force_report();
-    finish_session(
-        loop_result.map(|_| ()),
+    let result = finish_session(
+        suppress_reconnect(
+            loop_result.map(|_| ()),
+            viewer.user_close_requested() || viewer.user_released_grab(),
+        ),
         cancel_result,
         receiver_exit,
         sender_result,
         clipboard_result,
-    )
+    );
+    finalize_retry_intent(result, || viewer.reconnect_allowed_after_cleanup())
+}
+
+/// The old window remains visible while workers join. Consume local intent
+/// that arrived during that interval before returning a retry certificate.
+fn finalize_retry_intent(
+    result: RemoteResult<()>,
+    check: impl FnOnce() -> RemoteResult<bool>,
+) -> RemoteResult<()> {
+    match result {
+        Err(error) => match error.downcast::<CleanTransportDisconnect>() {
+            Ok(transport) => match check() {
+                Ok(true) => Err(transport),
+                Ok(false) => Err(Box::new(transport.0)),
+                Err(error) => Err(Box::new(SessionCleanupError {
+                    primary: Some(transport),
+                    failures: vec![error],
+                })),
+            },
+            Err(error) => Err(error),
+        },
+        Ok(()) => Ok(()),
+    }
 }
 
 /// Explicit viewer closure remains terminal even when release cleanup fails.
@@ -455,7 +590,10 @@ fn finish_session(
         failures.push(error);
     }
     if failures.is_empty() {
-        foreground
+        foreground.map_err(|error| match error.downcast::<ReceiverTransportLoss>() {
+            Ok(transport) => Box::new(CleanTransportDisconnect(transport.0)) as RemoteError,
+            Err(error) => error,
+        })
     } else {
         Err(Box::new(SessionCleanupError {
             primary: foreground.err(),
@@ -1584,7 +1722,9 @@ fn receive_frames(
                 io::Error::new(io::ErrorKind::TimedOut, "host stopped sending video frames")
             })?;
         reader.get_ref().set_read_timeout(Some(remaining))?;
-        let kind = reader.read_message_into(&mut payload)?;
+        let kind = reader
+            .read_message_into(&mut payload)
+            .map_err(receiver_read_error)?;
         match kind {
             MessageKind::Frame => {
                 // read_message_into authenticated the complete record before
@@ -3013,6 +3153,247 @@ mod tests {
                 .map(ToString::to_string),
             Some("remote video thread panicked".to_string())
         );
+    }
+
+    fn certified_disconnect() -> RemoteError {
+        let loss = receiver_read_error(ProtocolError::Io(io::ErrorKind::UnexpectedEof.into()));
+        let cause =
+            finish_session(Err(loss), Ok(()), ReceiverExit::Completed, Ok(()), Ok(())).unwrap_err();
+        Box::new(ClientFailure {
+            stage: ClientStage::Session,
+            cause,
+        })
+    }
+
+    #[test]
+    fn late_close_escape_or_pending_events_after_cleanup_cancel_retry() {
+        let loss = || {
+            Err(receiver_read_error(ProtocolError::Io(
+                io::ErrorKind::UnexpectedEof.into(),
+            )))
+        };
+        for late_intent in [
+            Ok(false),
+            Err(io::Error::other("local polling failed").into()),
+        ] {
+            let cleaned = finish_session(loss(), Ok(()), ReceiverExit::Completed, Ok(()), Ok(()))
+                .unwrap_err();
+            assert!(cleaned.is::<CleanTransportDisconnect>());
+            // Close/escape arrives only after workers have joined.
+            let result = finalize_retry_intent(Err(cleaned), || late_intent);
+            let cause = result.unwrap_err();
+            assert!(!cause.is::<CleanTransportDisconnect>());
+            let mut error = Some(Box::new(ClientFailure {
+                stage: ClientStage::Session,
+                cause,
+            }) as RemoteError);
+            reconnect_with(
+                5,
+                || Err(error.take().expect("late close must not retry")),
+                |_, _| panic!("late close must not wait"),
+            )
+            .unwrap_err();
+        }
+        let cleaned = finish_session(loss(), Ok(()), ReceiverExit::Completed, Ok(()), Ok(()));
+        assert!(
+            finalize_retry_intent(cleaned, || Ok(true))
+                .unwrap_err()
+                .is::<CleanTransportDisconnect>()
+        );
+        assert!(
+            finalize_retry_intent(Ok(()), || panic!("normal close must not poll for retry"))
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn reconnect_budget_and_backoff_are_bounded_without_reset() {
+        for budget in 0..=5 {
+            let mut calls = 0;
+            let mut waits = Vec::new();
+            reconnect_with(
+                budget,
+                || {
+                    calls += 1;
+                    Err(certified_disconnect())
+                },
+                |attempt, delay| waits.push((attempt, delay.as_secs())),
+            )
+            .unwrap_err();
+            assert_eq!(calls, budget + 1);
+            assert_eq!(
+                waits,
+                (1..=budget)
+                    .map(|i| (i, [1, 2, 4, 8, 8][usize::from(i - 1)]))
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn reconnect_stops_on_normal_close_or_uncertified_failure() {
+        for terminal in [
+            None,
+            Some(Box::new(UserClosed) as RemoteError),
+            Some(Box::new(PeerClosed("stop".into()))),
+            Some(Box::new(io::Error::from(io::ErrorKind::BrokenPipe))),
+        ] {
+            let mut terminal = Some(terminal);
+            let mut calls = 0;
+            let mut waits = 0;
+            let result = reconnect_with(
+                5,
+                || {
+                    calls += 1;
+                    if calls == 1 {
+                        return Err(certified_disconnect());
+                    }
+                    match terminal.take().unwrap() {
+                        None => Ok(()),
+                        Some(cause) => Err(Box::new(ClientFailure {
+                            stage: ClientStage::Session,
+                            cause,
+                        })),
+                    }
+                },
+                |_, _| waits += 1,
+            );
+            assert_eq!(calls, 2);
+            assert_eq!(waits, 1);
+            let _ = result;
+        }
+    }
+
+    #[test]
+    fn only_reader_originated_allowlisted_errors_can_be_certified() {
+        for kind in [
+            io::ErrorKind::UnexpectedEof,
+            io::ErrorKind::ConnectionReset,
+            io::ErrorKind::ConnectionAborted,
+            io::ErrorKind::BrokenPipe,
+            io::ErrorKind::TimedOut,
+            io::ErrorKind::PermissionDenied,
+            io::ErrorKind::InvalidData,
+            io::ErrorKind::Other,
+        ] {
+            let allowed = matches!(
+                kind,
+                io::ErrorKind::UnexpectedEof
+                    | io::ErrorKind::ConnectionReset
+                    | io::ErrorKind::ConnectionAborted
+            );
+            let marked = receiver_read_error(ProtocolError::Io(kind.into()));
+            assert_eq!(marked.is::<ReceiverTransportLoss>(), allowed);
+            let result =
+                finish_session(Err(marked), Ok(()), ReceiverExit::Completed, Ok(()), Ok(()))
+                    .unwrap_err();
+            assert_eq!(result.is::<CleanTransportDisconnect>(), allowed);
+            // An identical error from setup, decode, X11 or sender is not marked.
+            let result = finish_session(
+                Err(Box::new(ProtocolError::Io(kind.into()))),
+                Ok(()),
+                ReceiverExit::Completed,
+                Ok(()),
+                Ok(()),
+            )
+            .unwrap_err();
+            assert!(!result.is::<CleanTransportDisconnect>());
+        }
+        assert!(
+            !receiver_read_error(ProtocolError::AuthenticationFailed).is::<ReceiverTransportLoss>()
+        );
+        // Even a reader-origin marker alone is not authorization to retry.
+        let mut calls = 0;
+        reconnect_with(
+            5,
+            || {
+                calls += 1;
+                Err(Box::new(ClientFailure {
+                    stage: ClientStage::Session,
+                    cause: receiver_read_error(ProtocolError::Io(
+                        io::ErrorKind::UnexpectedEof.into(),
+                    )),
+                }))
+            },
+            |_, _| panic!("uncertified loss cannot retry"),
+        )
+        .unwrap_err();
+        assert_eq!(calls, 1);
+    }
+
+    #[test]
+    fn user_escape_close_and_each_cleanup_failure_block_certification() {
+        let loss = || {
+            Err(receiver_read_error(ProtocolError::Io(
+                io::ErrorKind::UnexpectedEof.into(),
+            )))
+        };
+        let failed = || Err(io::Error::other("incomplete").into());
+        let suppressed = suppress_reconnect(loss(), true);
+        let error = finish_session(suppressed, Ok(()), ReceiverExit::Completed, Ok(()), Ok(()))
+            .unwrap_err();
+        assert!(error.is::<ProtocolError>());
+        assert!(suppress_reconnect(Ok(()), true).is_ok());
+        for index in 0..4 {
+            let error = finish_session(
+                loss(),
+                if index == 0 { failed() } else { Ok(()) },
+                if index == 1 {
+                    ReceiverExit::TimedOut
+                } else {
+                    ReceiverExit::Completed
+                },
+                if index == 2 { failed() } else { Ok(()) },
+                if index == 3 { failed() } else { Ok(()) },
+            )
+            .unwrap_err();
+            assert!(error.is::<SessionCleanupError>());
+            assert!(!error.is::<CleanTransportDisconnect>());
+        }
+    }
+
+    #[test]
+    fn receiver_eof_with_idle_sender_has_clean_teardown() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let socket = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (peer, _) = listener.accept().unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let control = socket.try_clone().unwrap();
+        let mut reader = SessionReader::new(socket.try_clone().unwrap(), TEST_PSK);
+        let mut sender =
+            Sender::spawn(SessionWriter::new(socket, TEST_PSK), false, |_| {}).unwrap();
+        let peer = thread::spawn(move || {
+            let mut writer = SessionWriter::new(peer, TEST_PSK);
+            writer.write_message(MessageKind::Heartbeat, &[]).unwrap();
+            writer.flush().unwrap();
+        });
+        // A successfully authenticated record precedes the unexpected EOF.
+        assert_eq!(reader.read_message().unwrap().0, MessageKind::Heartbeat);
+        peer.join().unwrap();
+        let (error_tx, error_rx) = mpsc::channel();
+        let receiver = ReceiverThread::spawn(move || {
+            error_tx.send(reader.read_message().unwrap_err()).unwrap();
+        })
+        .unwrap();
+        let error = error_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(matches!(&error, ProtocolError::Io(e) if e.kind() == io::ErrorKind::UnexpectedEof));
+        let state = Arc::new(ReceiveState::new());
+        let mut cancel = SessionCancel::new(control, state);
+        let cancelled = cancel.cancel(&mut sender, false);
+        let receiver = receiver.join_timeout(Duration::from_secs(2));
+        let sender = sender.shutdown_timeout(Duration::from_secs(2));
+        let result = finish_session(
+            Err(receiver_read_error(error)),
+            cancelled,
+            receiver,
+            sender,
+            Ok(()),
+        );
+        let error = result.unwrap_err();
+        assert!(error.is::<CleanTransportDisconnect>());
+        assert!(!error.is::<SessionCleanupError>());
     }
 
     #[test]

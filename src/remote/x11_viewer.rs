@@ -596,6 +596,7 @@ pub struct Viewer {
     last_frame: Option<StoredFrame>,
     closed: bool,
     user_close_requested: bool,
+    user_released_grab: bool,
     close_reported: bool,
 }
 
@@ -933,6 +934,7 @@ impl Viewer {
             last_frame: None,
             closed: false,
             user_close_requested: false,
+            user_released_grab: false,
             close_reported: false,
         })
     }
@@ -940,6 +942,27 @@ impl Viewer {
     /// Explicit window closure, latched before fallible local input release.
     pub fn user_close_requested(&self) -> bool {
         self.user_close_requested
+    }
+
+    /// Sticky escape intent; releasing a grab is not session cancellation.
+    pub fn user_released_grab(&self) -> bool {
+        self.user_released_grab
+    }
+
+    /// Final local-only event pass after transport workers stop. Never forward
+    /// these events to a replacement session. A backlog is ambiguous, so it
+    /// disables retry instead of draining unboundedly through a close/escape.
+    pub(crate) fn reconnect_allowed_after_cleanup(&mut self) -> RemoteResult<bool> {
+        let events = self.poll_events();
+        // Always try to release even when polling failed. Drop remains the
+        // fallback on connection errors; such errors never authorize retry.
+        let released = self.release_local_grab();
+        let events = events?;
+        released?;
+        Ok(!events.contains(&ViewerEvent::Close)
+            && !self.user_close_requested
+            && !self.user_released_grab
+            && !self.has_pending_events()?)
     }
 
     /// Drain a bounded batch of X11 events without blocking.
@@ -1074,6 +1097,7 @@ impl Viewer {
                         .press(event.detail, escape, self.forward_keyboard)
                     {
                         KeyPressAction::ReleaseGrab => {
+                            self.user_released_grab = true;
                             self.release_local_grab()?;
                             self.release_all_input(&mut result);
                         }

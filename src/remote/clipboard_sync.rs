@@ -1605,6 +1605,98 @@ mod tests {
         bytes
     }
 
+    #[test]
+    #[ignore = "requires an isolated X11 server in JWM_TEST_X11_DISPLAY"]
+    fn remote_clipboard_shutdown_and_clones_on_x11() {
+        // Never fall back to DISPLAY: this test owns and changes the clipboard.
+        let display = std::env::var("JWM_TEST_X11_DISPLAY")
+            .expect("set JWM_TEST_X11_DISPLAY to an isolated Xvfb server");
+        assert!(
+            !display.trim().is_empty(),
+            "an explicit isolated display is required"
+        );
+        let timeout = Duration::from_secs(2);
+
+        // Exercise the public session path repeatedly, including actual backend
+        // join ownership, not only the synthetic thread fixtures.
+        for _ in 0..3 {
+            let (mut sync, inbox, outbox) = ClipboardSync::start(
+                Some(&display),
+                SyncOptions {
+                    files: false,
+                    file_limit: 0,
+                    share_existing: false,
+                },
+                None,
+            )
+            .unwrap();
+            assert!(sync.backend.worker.is_some());
+            inbox
+                .deliver(MessageKind::Clipboard, b"isolated clipboard shutdown test")
+                .unwrap();
+            sync.shutdown_timeout(timeout).unwrap();
+            for worker in [&sync.worker, &sync.forwarder, &sync.backend] {
+                assert!(worker.worker.is_none(), "join ownership must be consumed");
+                assert!(
+                    worker.joining.is_none(),
+                    "shutdown must finish the actual join"
+                );
+                assert!(worker.failure.is_none());
+            }
+            assert!(
+                inbox
+                    .deliver(MessageKind::Clipboard, b"after shutdown")
+                    .is_err()
+            );
+            assert!(outbox.try_next().is_err());
+            sync.shutdown_timeout(Duration::ZERO).unwrap();
+        }
+
+        for retain_clone_until_join in [true, false] {
+            let (captures, setter) = RemoteClipboard::start(
+                Some(&display),
+                RemoteClipboardOptions {
+                    files: false,
+                    image_bytes: MAX_SHARED_IMAGE_BYTES,
+                    capture_existing: false,
+                },
+            )
+            .unwrap();
+            let retained = setter.clone();
+            let (stop, worker) = setter.take_shutdown();
+            let mut backend = ClipboardThread::new(worker);
+            drop(setter);
+            drop(captures);
+            assert!(
+                retained.send(RemoteServe::Text("isolated cloned setter".into())),
+                "dropping other handles must not stop a retained setter"
+            );
+            if retain_clone_until_join {
+                // Explicit shutdown must finish even while a setter clone keeps
+                // the shared lifetime alive. A clone cannot resurrect the worker.
+                stop.stop();
+                backend
+                    .join_until(Instant::now() + timeout, "clipboard X11 worker")
+                    .unwrap();
+                assert!(!retained.send(RemoteServe::Text("after joined shutdown".into())));
+                drop(retained);
+            } else {
+                // The final lifetime drop signals shutdown but no longer owns
+                // the join. The transferred handle must still observe full exit.
+                drop(retained);
+                backend
+                    .join_until(Instant::now() + timeout, "clipboard X11 worker")
+                    .unwrap();
+            }
+            assert!(backend.worker.is_none());
+            assert!(backend.joining.is_none());
+            backend
+                .join_until(Instant::now(), "clipboard X11 worker")
+                .unwrap();
+            drop(stop);
+        }
+    }
+
     fn sync_for_test(worker: thread::JoinHandle<()>) -> ClipboardSync {
         ClipboardSync {
             commands: Arc::new(BoundedQueue::new(

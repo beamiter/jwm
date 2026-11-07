@@ -291,12 +291,41 @@ happened, instead of quoting Rust's `failed to fill whole buffer`:
 | `host closed the session: the host stopped sharing its desktop` | The host was stopped (Ctrl+C or SIGTERM) and said goodbye. |
 | `the connection closed without a goodbye from the host` | The host process was killed or the network dropped. |
 
-There is no automatic reconnect. After a disconnect, inspect both terminals,
+Reconnect is off by default. After a disconnect, inspect both terminals,
 verify the intended host/key and the selected monitor or region, then rerun the
-same `connect` command from shell history. Layout/selection changes and identity
-or authentication failures never silently retry, downgrade or broaden sharing.
-A new connection authenticates and negotiates permissions again. Do not put key
-contents into a shell command or a reconnect script.
+same `connect` command from shell history. A new connection authenticates and
+negotiates permissions again. Do not put key contents into a shell command or a
+reconnect script.
+
+Direct connections can explicitly opt into a small retry budget:
+
+```sh
+jwm-remote connect HOST --view-only --reconnect-attempts 3
+```
+
+`--reconnect-attempts` accepts 0–5 additional sessions (default 0). It retries
+only an unexpected EOF/reset/abort observed by the authenticated session's
+network reader, after the old receiver, sender and clipboard workers have
+successfully stopped. Each retry opens a new window and repeats normal key
+loading, authentication and permission negotiation. The original command's
+permission flags remain unchanged. Delays are 1, 2, 4, 8 and 8 seconds; the
+budget never resets during the command. Ctrl+C stops the command, including
+while waiting between attempts.
+
+Startup/connect failures, authentication/protocol/decode failures, frame-idle
+and socket timeouts, explicit host Close, local X11/clipboard errors, and any
+incomplete cleanup never retry. Sender-side failures also stop conservatively,
+even when the underlying cause might be network loss. Closing the viewer never
+retries. Using Ctrl+Super+F12 (or the configured escape shortcut) still only
+releases the grab; it also disables reconnect for that session so a later drop
+cannot unexpectedly reopen a grabbed viewer. Layout/selection changes and
+identity or authentication failures never silently retry, downgrade or broaden
+sharing. A fresh connection does not restore window geometry or clipboard
+transfer progress. SSH and saved profile runs never reconnect automatically;
+nonzero reconnect consent cannot be saved in a profile.
+
+Offline tests cover classification, budgets, cleanup and a loopback EOF path.
+Live X11 reconnection and two-machine network-loss acceptance remain unverified.
 
 ### Short real-machine acceptance checklist (not run by offline tests)
 
@@ -314,7 +343,9 @@ contents into a shell command or a reconnect script.
    including with Caps Lock/Num Lock on or a mouse button held. Pointer-only
    keys stay local.
 4. Close the viewer normally, then reconnect deliberately. Interrupt the host
-   or network and confirm a clear session-stage reason; no automatic reconnect.
+   or network and confirm a clear session-stage reason; no reconnect by default.
+   Separately test an explicit direct retry budget: close/escape must suppress
+   retries, a clean transport loss may retry, and failed cleanup must stop.
 5. Select a monitor/region, change its position/size, and verify fail-closed
    disconnect. Recheck the area before rerunning the connection command.
 6. Verify a wrong key, older peer and occupied host fail safely. Enable clipboard
