@@ -1,10 +1,11 @@
 //! JWM-to-JWM remote desktop helper for trusted X11 LANs.
 
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use jwm::remote::client::{ClientOptions, run_client_reconnecting};
 use jwm::remote::clipboard_files::parse_size;
 use jwm::remote::host::{HostOptions, run_host};
 use jwm::remote::key::{KeySource, generate_key_file};
+use jwm::remote::messages::FrameLimits;
 use jwm::remote::profiles::{Connection, Profile, Store, Viewer};
 use jwm::remote::session_env;
 use jwm::remote::ssh::{SshOptions, run_ssh};
@@ -19,6 +20,32 @@ use std::path::PathBuf;
 const DEFAULT_JPEG_QUALITY_FLOOR: u8 = 40;
 /// Default `--clipboard-file-limit`; matches `clipboard_sync::DEFAULT_FILE_LIMIT`.
 const DEFAULT_CLIPBOARD_FILE_LIMIT: &str = "2G";
+
+/// Decoded-frame safety limits, independent of the viewport width policy.
+#[derive(Debug, Clone, Args)]
+struct FrameLimitArgs {
+    /// Maximum decoded frame width (1..=16384; default 16384).
+    #[arg(long, value_parser = clap::value_parser!(u16).range(1..=16384))]
+    frame_max_width: Option<u16>,
+    /// Maximum decoded frame height (1..=16384; default 16384).
+    #[arg(long, value_parser = clap::value_parser!(u16).range(1..=16384))]
+    frame_max_height: Option<u16>,
+    /// Maximum decoded frame pixels (1..=67108864; default 67108864).
+    /// SSH applies these limits to both the viewer and remote host.
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..=67108864))]
+    frame_max_pixels: Option<u64>,
+}
+
+impl FrameLimitArgs {
+    fn limits(&self) -> FrameLimits {
+        let defaults = FrameLimits::default();
+        FrameLimits {
+            max_width: self.frame_max_width.unwrap_or(defaults.max_width),
+            max_height: self.frame_max_height.unwrap_or(defaults.max_height),
+            max_pixels: self.frame_max_pixels.unwrap_or(defaults.max_pixels),
+        }
+    }
+}
 
 #[derive(Debug, Parser)]
 #[command(
@@ -175,6 +202,9 @@ enum Command {
         #[arg(long, default_value = DEFAULT_CLIPBOARD_FILE_LIMIT, value_name = "SIZE", value_parser = parse_size)]
         clipboard_file_limit: u64,
 
+        #[command(flatten)]
+        frame_limits: FrameLimitArgs,
+
         /// Exit after the first connection ends (useful for tests/scripts).
         #[arg(long)]
         once: bool,
@@ -229,6 +259,9 @@ enum Command {
         /// 10G; 0 shares text and images only.
         #[arg(long, default_value = DEFAULT_CLIPBOARD_FILE_LIMIT, value_name = "SIZE", value_parser = parse_size)]
         clipboard_file_limit: u64,
+
+        #[command(flatten)]
+        frame_limits: FrameLimitArgs,
 
         /// Local X11 display for the viewer window (defaults to DISPLAY).
         #[arg(long, value_name = "DISPLAY")]
@@ -287,6 +320,9 @@ enum Command {
         /// 10G; 0 shares text and images only.
         #[arg(long, default_value = DEFAULT_CLIPBOARD_FILE_LIMIT, value_name = "SIZE", value_parser = parse_size)]
         clipboard_file_limit: u64,
+
+        #[command(flatten)]
+        frame_limits: FrameLimitArgs,
     },
 }
 
@@ -350,6 +386,7 @@ fn profile_from_command(command: Command) -> RemoteResult<Profile> {
             escape_key,
             clipboard,
             clipboard_file_limit,
+            frame_limits,
         } => {
             if reconnect_attempts != 0 {
                 return Err(profile_error(
@@ -372,6 +409,9 @@ fn profile_from_command(command: Command) -> RemoteResult<Profile> {
                     escape_key,
                     clipboard,
                     clipboard_file_limit,
+                    frame_max_width: frame_limits.frame_max_width,
+                    frame_max_height: frame_limits.frame_max_height,
+                    frame_max_pixels: frame_limits.frame_max_pixels,
                 },
             )
         }
@@ -387,6 +427,7 @@ fn profile_from_command(command: Command) -> RemoteResult<Profile> {
             escape_key,
             clipboard,
             clipboard_file_limit,
+            frame_limits,
             remote_command,
             ssh_options,
         } => {
@@ -409,6 +450,9 @@ fn profile_from_command(command: Command) -> RemoteResult<Profile> {
                     escape_key,
                     clipboard,
                     clipboard_file_limit,
+                    frame_max_width: frame_limits.frame_max_width,
+                    frame_max_height: frame_limits.frame_max_height,
+                    frame_max_pixels: frame_limits.frame_max_pixels,
                 },
             )
         }
@@ -479,6 +523,16 @@ fn command_from_profile(profile: &Profile) -> RemoteResult<Command> {
         }
     }
     let viewer = &profile.viewer;
+    for (flag, value) in [
+        ("--frame-max-width", viewer.frame_max_width.map(u64::from)),
+        ("--frame-max-height", viewer.frame_max_height.map(u64::from)),
+        ("--frame-max-pixels", viewer.frame_max_pixels),
+    ] {
+        if let Some(value) = value {
+            args.extend([flag.to_owned(), value.to_string()]);
+        }
+    }
+
     if let Some(display) = &viewer.display {
         args.extend(["--display".to_owned(), display.clone()]);
     }
@@ -647,6 +701,7 @@ fn run(command: Command) -> RemoteResult<()> {
             allow_input,
             allow_clipboard,
             clipboard_file_limit,
+            frame_limits,
             once,
             stats_json,
         } => {
@@ -678,6 +733,7 @@ fn run(command: Command) -> RemoteResult<()> {
                 allow_input,
                 allow_clipboard,
                 clipboard_file_limit,
+                frame_limits: frame_limits.limits(),
                 once,
                 stats_json,
             })
@@ -693,6 +749,7 @@ fn run(command: Command) -> RemoteResult<()> {
             escape_key,
             clipboard,
             clipboard_file_limit,
+            frame_limits,
             display,
             remote_command,
             ssh_options,
@@ -709,6 +766,7 @@ fn run(command: Command) -> RemoteResult<()> {
             grab_input,
             clipboard,
             clipboard_file_limit,
+            frame_limits: frame_limits.limits(),
             escape_key,
         }),
         Command::Connect {
@@ -720,6 +778,7 @@ fn run(command: Command) -> RemoteResult<()> {
             grab_input,
             clipboard,
             clipboard_file_limit,
+            frame_limits,
             escape_key,
         } => run_client_reconnecting(
             ClientOptions {
@@ -731,6 +790,7 @@ fn run(command: Command) -> RemoteResult<()> {
                 grab_input,
                 clipboard,
                 clipboard_file_limit,
+                frame_limits: frame_limits.limits(),
                 escape_key,
             },
             reconnect_attempts,
@@ -883,6 +943,111 @@ where
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn decoded_frame_limits_are_bounded_and_independent_of_viewport() {
+        for command in ["host", "connect", "ssh"] {
+            let base = if command == "host" {
+                vec!["jwm-remote", command]
+            } else {
+                vec!["jwm-remote", command, "desk"]
+            };
+            for (flag, maximum) in [
+                ("--frame-max-width", "16384"),
+                ("--frame-max-height", "16384"),
+                ("--frame-max-pixels", "67108864"),
+            ] {
+                for good in ["1", maximum] {
+                    let mut args = base.clone();
+                    args.extend([flag, good]);
+                    assert!(Cli::try_parse_from(args).is_ok());
+                }
+                for bad in ["0", "-1", "18446744073709551616", "67108865"] {
+                    let mut args = base.clone();
+                    args.extend([flag, bad]);
+                    assert!(Cli::try_parse_from(args).is_err());
+                }
+            }
+            let mut args = base.clone();
+            args.push("--help");
+            let help = Cli::try_parse_from(args).unwrap_err().to_string();
+            assert!(help.contains("--frame-max-width"));
+            assert!(help.contains("--frame-max-height"));
+            assert!(help.contains("--frame-max-pixels"));
+        }
+        let Command::Host {
+            frame_limits,
+            max_width,
+            ..
+        } = Cli::try_parse_from([
+            "jwm-remote",
+            "host",
+            "--max-width",
+            "1280",
+            "--frame-max-width",
+            "800",
+            "--frame-max-height",
+            "600",
+            "--frame-max-pixels",
+            "300000",
+        ])
+        .unwrap()
+        .command
+        else {
+            panic!()
+        };
+        assert_eq!(max_width, 1280);
+        assert_eq!(
+            frame_limits.limits(),
+            FrameLimits {
+                max_width: 800,
+                max_height: 600,
+                max_pixels: 300000
+            }
+        );
+    }
+
+    #[test]
+    fn profile_frame_limits_roundtrip_and_legacy_defaults_are_safe() {
+        for transport in ["connect", "ssh"] {
+            let profile = profile_from_command(
+                Cli::try_parse_from([
+                    "jwm-remote",
+                    transport,
+                    "desk",
+                    "--frame-max-width",
+                    "800",
+                    "--frame-max-height",
+                    "600",
+                    "--frame-max-pixels",
+                    "300000",
+                ])
+                .unwrap()
+                .command,
+            )
+            .unwrap();
+            assert_eq!(validated_profile(profile.clone()).unwrap(), profile);
+            let mut value = serde_json::to_value(&profile).unwrap();
+            for field in ["frame_max_width", "frame_max_height", "frame_max_pixels"] {
+                value["viewer"].as_object_mut().unwrap().remove(field);
+            }
+            let legacy = Profile::decode(&serde_json::to_vec(&value).unwrap()).unwrap();
+            let command = command_from_profile(&legacy).unwrap();
+            let limits = match command {
+                Command::Connect { frame_limits, .. } | Command::Ssh { frame_limits, .. } => {
+                    frame_limits.limits()
+                }
+                _ => panic!(),
+            };
+            assert_eq!(limits, FrameLimits::default());
+            for field in ["frame_max_width", "frame_max_height", "frame_max_pixels"] {
+                let mut bad = value.clone();
+                bad["viewer"][field] = 0.into();
+                let bad = Profile::decode(&serde_json::to_vec(&bad).unwrap()).unwrap();
+                assert!(validated_profile(bad).is_err());
+            }
+        }
+    }
+
     #[test]
     fn reconnect_is_explicit_bounded_and_cannot_be_saved_or_used_by_ssh() {
         let Command::Connect {

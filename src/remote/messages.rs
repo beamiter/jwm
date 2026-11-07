@@ -8,9 +8,9 @@ use super::x11_keymap::{KeymapTable, MAX_ENCODED_KEYMAP_LEN};
 use std::io;
 
 const APPLICATION_MAGIC: &[u8; 8] = b"JWMREM01";
-pub const APPLICATION_VERSION: u16 = 9;
+pub const APPLICATION_VERSION: u16 = 10;
 const HELLO_PREFIX_LEN: usize = 11;
-const STREAM_CAPABILITIES_LEN: usize = 11;
+const STREAM_CAPABILITIES_LEN: usize = 23;
 const SERVER_HELLO_LEN: usize = HELLO_PREFIX_LEN + STREAM_CAPABILITIES_LEN;
 const CLIENT_HELLO_HEADER_LEN: usize = SERVER_HELLO_LEN + 4;
 /// Largest client hello: the shared prefix plus a full keymap table.
@@ -38,10 +38,67 @@ pub const MAX_INPUT_BATCH_EVENTS: usize = 128;
 /// one count byte followed by 128 five-byte operations.
 pub const MAX_INPUT_BATCH_PAYLOAD_LEN: usize = 1 + MAX_INPUT_BATCH_EVENTS * POINTER_INPUT_LEN;
 
+/// Hard decoded-canvas ceilings, independent of the desired viewport.
+/// Source geometry and padded JPEG atlases retain their separate protocol bounds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FrameLimits {
+    pub max_width: u16,
+    pub max_height: u16,
+    pub max_pixels: u64,
+}
+
+impl Default for FrameLimits {
+    fn default() -> Self {
+        Self {
+            max_width: super::frame::MAX_DIMENSION,
+            max_height: super::frame::MAX_DIMENSION,
+            max_pixels: super::frame::MAX_PIXELS,
+        }
+    }
+}
+
+impl FrameLimits {
+    pub fn validate(self) -> RemoteResult<()> {
+        if self.max_width == 0
+            || self.max_height == 0
+            || self.max_pixels == 0
+            || self.max_width > super::frame::MAX_DIMENSION
+            || self.max_height > super::frame::MAX_DIMENSION
+            || self.max_pixels > super::frame::MAX_PIXELS
+        {
+            return Err(invalid_data("invalid decoded frame limits").into());
+        }
+        Ok(())
+    }
+
+    #[must_use]
+    pub fn intersect(self, other: Self) -> Self {
+        Self {
+            max_width: self.max_width.min(other.max_width),
+            max_height: self.max_height.min(other.max_height),
+            max_pixels: self.max_pixels.min(other.max_pixels),
+        }
+    }
+
+    pub fn validate_dimensions(self, width: u16, height: u16) -> RemoteResult<()> {
+        self.validate()?;
+        if width == 0
+            || height == 0
+            || width > self.max_width
+            || height > self.max_height
+            || u64::from(width) * u64::from(height) > self.max_pixels
+        {
+            return Err(invalid_data("frame exceeds negotiated decoded frame limits").into());
+        }
+        Ok(())
+    }
+}
+
 /// The implemented stream profile. Selectors are explicit so a peer cannot
 /// silently interpret a future codec, cursor plane or input coordinate space.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct StreamCapabilities {
+    pub frame_limits: FrameLimits,
     pub codec: FrameCodec,
     pub cursor: CursorMode,
     pub input: InputMode,
@@ -90,6 +147,9 @@ impl StreamCapabilities {
         let mut payload = [0; STREAM_CAPABILITIES_LEN];
         payload[..3].copy_from_slice(&[self.codec as u8, self.cursor as u8, self.input as u8]);
         payload[3..11].copy_from_slice(&self.clipboard_file_limit.to_be_bytes());
+        payload[11..13].copy_from_slice(&self.frame_limits.max_width.to_be_bytes());
+        payload[13..15].copy_from_slice(&self.frame_limits.max_height.to_be_bytes());
+        payload[15..23].copy_from_slice(&self.frame_limits.max_pixels.to_be_bytes());
         payload
     }
 
@@ -102,7 +162,14 @@ impl StreamCapabilities {
             [1, 2, 1] => CursorMode::Independent,
             _ => return Err(invalid_data("unsupported remote codec, cursor or input mode").into()),
         };
+        let frame_limits = FrameLimits {
+            max_width: u16::from_be_bytes(payload[11..13].try_into().unwrap()),
+            max_height: u16::from_be_bytes(payload[13..15].try_into().unwrap()),
+            max_pixels: u64::from_be_bytes(payload[15..23].try_into().unwrap()),
+        };
+        frame_limits.validate()?;
         Ok(Self {
+            frame_limits,
             cursor,
             clipboard_file_limit: u64::from_be_bytes(payload[3..11].try_into().unwrap()),
             ..Self::default()
@@ -559,6 +626,92 @@ mod tests {
     use super::*;
 
     #[test]
+    fn frame_limits_validate_intersect_and_reject_malformed_wire_values() {
+        let viewer = FrameLimits {
+            max_width: 1920,
+            max_height: 1080,
+            max_pixels: 1_000_000,
+        };
+        let host = FrameLimits {
+            max_width: 1280,
+            max_height: 2160,
+            max_pixels: 2_000_000,
+        };
+        let selected = viewer.intersect(host);
+        assert_eq!(
+            selected,
+            FrameLimits {
+                max_width: 1280,
+                max_height: 1080,
+                max_pixels: 1_000_000
+            }
+        );
+        assert!(selected.validate_dimensions(1000, 1000).is_ok());
+        for dims in [
+            (1001, 1000),
+            (1281, 1),
+            (1, 1081),
+            (0, 1),
+            (1, 0),
+            (u16::MAX, u16::MAX),
+        ] {
+            assert!(selected.validate_dimensions(dims.0, dims.1).is_err());
+        }
+        for limits in [
+            FrameLimits {
+                max_width: 0,
+                ..viewer
+            },
+            FrameLimits {
+                max_height: 0,
+                ..viewer
+            },
+            FrameLimits {
+                max_pixels: 0,
+                ..viewer
+            },
+            FrameLimits {
+                max_width: u16::MAX,
+                ..viewer
+            },
+            FrameLimits {
+                max_height: u16::MAX,
+                ..viewer
+            },
+            FrameLimits {
+                max_pixels: u64::MAX,
+                ..viewer
+            },
+        ] {
+            assert!(limits.validate().is_err());
+            let stream = StreamCapabilities {
+                frame_limits: limits,
+                ..Default::default()
+            };
+            assert!(StreamCapabilities::decode(&stream.encode()).is_err());
+        }
+        for limits in [
+            viewer,
+            selected,
+            FrameLimits {
+                max_width: 1,
+                max_height: 1,
+                max_pixels: 1,
+            },
+            FrameLimits::default(),
+        ] {
+            let stream = StreamCapabilities {
+                frame_limits: limits,
+                ..Default::default()
+            };
+            assert_eq!(
+                StreamCapabilities::decode(&stream.encode()).unwrap(),
+                stream
+            );
+        }
+    }
+
+    #[test]
     fn bounded_profile_round_trips_and_rejects_truncation() {
         let stream = StreamCapabilities {
             clipboard_file_limit: u64::MAX,
@@ -675,7 +828,7 @@ mod tests {
             ClientHello::decode(&legacy).unwrap_err(),
             ServerHello::decode(&legacy).unwrap_err(),
         ] {
-            assert!(error.to_string().contains("version 6; expected 9"));
+            assert!(error.to_string().contains("version 6; expected 10"));
         }
     }
 
@@ -775,7 +928,7 @@ mod tests {
     }
 
     #[test]
-    fn hello_uses_version_nine_and_rejects_neighbouring_versions() {
+    fn hello_uses_version_ten_and_rejects_neighbouring_versions() {
         let payload = ServerHello {
             stream: Default::default(),
             pointer_enabled: false,
@@ -784,24 +937,24 @@ mod tests {
             clipboard_files_enabled: false,
         }
         .encode();
-        assert_eq!(&payload[8..10], &9_u16.to_be_bytes());
+        assert_eq!(&payload[8..10], &10_u16.to_be_bytes());
 
         // Version 5 had no clipboard transfer records: a version-5 peer
         // would end the session on the first copied image or file. It must
         // fail on its version instead. Version 4 sent one digest of the whole
         // keymap where later versions send a per-keycode table.
-        for older in [4_u16, 5, 6, 7, 8] {
+        for older in [4_u16, 5, 6, 7, 8, 9] {
             let mut previous = payload;
             previous[8..10].copy_from_slice(&older.to_be_bytes());
             let error = ServerHello::decode(&previous).unwrap_err();
             assert!(
                 error
                     .to_string()
-                    .contains(&format!("application version {older}; expected 9"))
+                    .contains(&format!("application version {older}; expected 10"))
             );
         }
 
-        for rejected in [0_u16, 2, 3, 10, u16::MAX] {
+        for rejected in [0_u16, 2, 3, 11, u16::MAX] {
             let mut other = payload;
             other[8..10].copy_from_slice(&rejected.to_be_bytes());
             assert!(

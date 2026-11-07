@@ -46,6 +46,10 @@ pub struct Viewer {
     pub escape_key: String,
     pub clipboard: bool,
     pub clipboard_file_limit: u64,
+    /// Optional decoded-frame caps; omitted fields retain the hard-cap defaults.
+    pub frame_max_width: Option<u16>,
+    pub frame_max_height: Option<u16>,
+    pub frame_max_pixels: Option<u64>,
 }
 
 fn invalid(message: &str) -> io::Error {
@@ -308,8 +312,33 @@ mod tests {
                 escape_key: "F12".into(),
                 clipboard: false,
                 clipboard_file_limit: 0,
+                frame_max_width: None,
+                frame_max_height: None,
+                frame_max_pixels: None,
             },
         }
+    }
+
+    #[test]
+    fn optional_frame_limits_preserve_legacy_profiles_and_unknown_field_rejection() {
+        let mut value = serde_json::to_value(sample()).unwrap();
+        for field in ["frame_max_width", "frame_max_height", "frame_max_pixels"] {
+            value["viewer"].as_object_mut().unwrap().remove(field);
+        }
+        assert_eq!(
+            Profile::decode(&serde_json::to_vec(&value).unwrap()).unwrap(),
+            sample()
+        );
+        let mut limited = sample();
+        limited.viewer.frame_max_width = Some(1024);
+        limited.viewer.frame_max_height = Some(768);
+        limited.viewer.frame_max_pixels = Some(500000);
+        assert_eq!(
+            Profile::decode(&serde_json::to_vec(&limited).unwrap()).unwrap(),
+            limited
+        );
+        value["viewer"]["frame_limit_typo"] = 100.into();
+        assert!(Profile::decode(&serde_json::to_vec(&value).unwrap()).is_err());
     }
 
     #[test]

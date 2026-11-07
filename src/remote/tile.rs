@@ -673,6 +673,7 @@ impl TileEncoder {
 /// Viewer-side canvas that reassembles dirty tiles into whole frames.
 #[derive(Debug, Default)]
 pub(crate) struct TileDecoder {
+    frame_limits: super::messages::FrameLimits,
     geometry_epoch: u64,
     snapshot: Option<TileSnapshot>,
     last_sequence: Option<u64>,
@@ -682,8 +683,19 @@ pub(crate) struct TileDecoder {
 }
 
 impl TileDecoder {
+    #[cfg(test)]
     pub(crate) fn new() -> Self {
         Self::default()
+    }
+
+    pub(crate) fn with_frame_limits(
+        frame_limits: super::messages::FrameLimits,
+    ) -> RemoteResult<Self> {
+        frame_limits.validate()?;
+        Ok(Self {
+            frame_limits,
+            ..Self::default()
+        })
     }
 
     /// Decode one authenticated tile-frame payload into a complete frame.
@@ -693,6 +705,8 @@ impl TileDecoder {
         pool: SharedDecodeBufferPool,
     ) -> RemoteResult<RecyclableDecodedFrame> {
         let header = TileHeader::parse(payload)?;
+        self.frame_limits
+            .validate_dimensions(header.encoded_width, header.encoded_height)?;
         if header.geometry_epoch < self.geometry_epoch {
             return Err(invalid_data("video geometry epoch moved backwards").into());
         }
@@ -1055,6 +1069,120 @@ mod tests {
     use super::*;
     use crate::remote::frame::{MAX_PIXELS, new_decode_buffer_pool};
     use image::Rgb;
+
+    #[test]
+    fn tiny_canvas_rejects_forged_atlas_before_jpeg_allocation() {
+        use crate::remote::messages::FrameLimits;
+        let limits = FrameLimits {
+            max_width: 1,
+            max_height: 1,
+            max_pixels: 1,
+        };
+        let mut encoder = TileEncoder::new();
+        let source = flat(1, 1, 100);
+        encoder.plan(&source, TileEncodeRequest::Keyframe).unwrap();
+        let mut payload = Vec::new();
+        encoder.encode_into(&mut payload, 1, &source, 85).unwrap();
+        let mut decoder = TileDecoder::with_frame_limits(limits).unwrap();
+        decoder
+            .decode_into(&payload, new_decode_buffer_pool())
+            .unwrap();
+        assert_eq!(decoder.canvas.as_ref().unwrap().dimensions(), (1, 1));
+        // One actual tile plus edge padding is allowed, not an arbitrary atlas.
+        assert_eq!(
+            decoder.atlas.len(),
+            3 * (1 << DEFAULT_TILE_LOG2) * (1 << DEFAULT_TILE_LOG2)
+        );
+        for (range, bytes) in [
+            (18..20, 1024_u16.to_be_bytes().to_vec()),
+            (20..24, 100_u32.to_be_bytes().to_vec()),
+        ] {
+            let mut forged = payload.clone();
+            forged[range].copy_from_slice(&bytes);
+            let mut fresh = TileDecoder::with_frame_limits(limits).unwrap();
+            assert!(
+                fresh
+                    .decode_into(&forged, new_decode_buffer_pool())
+                    .is_err()
+            );
+            assert!(fresh.atlas.is_empty());
+        }
+        // Even a plausible one-tile header cannot smuggle a larger JPEG body.
+        let large = flat(32, 32, 100);
+        encoder.plan(&large, TileEncodeRequest::Keyframe).unwrap();
+        let mut large_payload = Vec::new();
+        encoder
+            .encode_into(&mut large_payload, 2, &large, 85)
+            .unwrap();
+        let mut forged = payload[..TILE_HEADER_LEN + 1].to_vec();
+        forged.extend_from_slice(&large_payload[TILE_HEADER_LEN + 1..]);
+        let mut fresh = TileDecoder::with_frame_limits(limits).unwrap();
+        assert!(
+            fresh
+                .decode_into(&forged, new_decode_buffer_pool())
+                .is_err()
+        );
+        assert!(fresh.atlas.is_empty());
+    }
+
+    #[test]
+    fn negotiated_canvas_limits_precede_allocation_and_geometry_changes() {
+        use crate::remote::messages::FrameLimits;
+        let limits = FrameLimits {
+            max_width: 64,
+            max_height: 64,
+            max_pixels: 1024,
+        };
+        let mut decoder = TileDecoder::with_frame_limits(limits).unwrap();
+        let mut encoder = TileEncoder::new();
+        let mut payload = Vec::new();
+        for (sequence, width, height) in [(1, 65, 1), (2, 1, 65), (3, 33, 32)] {
+            let source = flat(width, height, 100);
+            encoder.plan(&source, TileEncodeRequest::Keyframe).unwrap();
+            encoder
+                .encode_into(&mut payload, sequence, &source, 85)
+                .unwrap();
+            assert!(
+                decoder
+                    .decode_into(&payload, new_decode_buffer_pool())
+                    .unwrap_err()
+                    .to_string()
+                    .contains("negotiated")
+            );
+            assert!(decoder.canvas.is_none());
+            assert!(decoder.atlas.is_empty());
+            assert!(decoder.snapshot.is_none());
+        }
+        let source = flat(32, 32, 100);
+        encoder.plan(&source, TileEncodeRequest::Keyframe).unwrap();
+        encoder.encode_into(&mut payload, 4, &source, 85).unwrap();
+        decoder
+            .decode_into(&payload, new_decode_buffer_pool())
+            .unwrap();
+        let old_epoch = decoder.geometry_epoch;
+        let mut too_large = flat(64, 32, 100);
+        too_large.geometry_epoch = old_epoch + 1;
+        encoder
+            .plan(&too_large, TileEncodeRequest::Keyframe)
+            .unwrap();
+        encoder
+            .encode_into(&mut payload, 5, &too_large, 85)
+            .unwrap();
+        assert!(
+            decoder
+                .decode_into(&payload, new_decode_buffer_pool())
+                .is_err()
+        );
+        assert_eq!(decoder.geometry_epoch, old_epoch);
+        assert_eq!(decoder.canvas.as_ref().unwrap().dimensions(), (32, 32));
+        assert!(
+            TileDecoder::with_frame_limits(FrameLimits {
+                max_pixels: 0,
+                ..limits
+            })
+            .is_err()
+        );
+    }
 
     #[test]
     fn display_damage_bounds_cover_edge_tiles_and_empty_keepalive() {

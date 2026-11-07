@@ -6,6 +6,7 @@
 //! both transports. Root downscaling snapshots children into a pixmap before
 //! XRender; the root Window itself is never used as a Picture.
 
+use super::messages::FrameLimits;
 use super::{RemoteError, RemoteResult};
 use image::{RgbImage, RgbaImage, imageops::FilterType};
 use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
@@ -588,6 +589,20 @@ fn update_encoded_bounds(
     true
 }
 
+/// Like a viewport resize, changing decode limits invalidates static frames.
+fn update_frame_limits(
+    current: &mut FrameLimits,
+    limits: FrameLimits,
+    gate: &mut DamageGateState,
+) -> bool {
+    if *current == limits {
+        return false;
+    }
+    *current = limits;
+    gate.invalidate();
+    true
+}
+
 impl DamageTracker {
     fn connect(conn: &RustConnection) -> RemoteResult<Self> {
         let available = match conn.extension_information(damage::X11_EXTENSION_NAME) {
@@ -1022,6 +1037,8 @@ pub struct X11Capture {
     max_width: u16,
     /// Optional encoded-height bound; zero leaves height unbounded.
     max_height: u16,
+    /// Negotiated decoded-frame ceilings, independent of viewport updates.
+    frame_limits: FrameLimits,
     /// What the operator asked to share.
     area: CaptureArea,
     /// The resolved rectangle, or `None` for the whole root.
@@ -1181,6 +1198,7 @@ impl X11Capture {
             requested_source,
             max_width,
             max_height: 0,
+            frame_limits: FrameLimits::default(),
             area,
             region: None,
             render_scaler,
@@ -1477,8 +1495,16 @@ impl X11Capture {
     ) -> Result<CaptureDrawableOutcome, CaptureFailure> {
         let origin = self.origin();
         let geometry_epoch = self.geometry_epoch();
-        let (output_width, output_height) =
-            scaled_dimensions(source_width, source_height, self.max_width, self.max_height);
+        // Resolve every ceiling before either GPU target creation or CPU
+        // output allocation. Retries after source geometry changes come through
+        // here again, rather than reusing a size computed for an earlier root.
+        let (output_width, output_height) = frame_dimensions(
+            source_width,
+            source_height,
+            self.max_width,
+            self.max_height,
+            self.frame_limits,
+        );
         let render_source = render_capture_source(self.root, drawable);
         let render_allowed_for_source = self
             .render_scaler
@@ -1899,13 +1925,25 @@ impl X11Capture {
             return false;
         }
         self.layout_epoch = self.layout_epoch.saturating_add(1);
-        // A native-width session never built a scaler. Downscaling now needs
-        // one, and the CPU resize fallback would otherwise be permanent.
-        if max_width != 0
-            && self.gpu_scaling
-            && self.render_scaler.is_none()
-            && self.render_failures == 0
-        {
+        self.ensure_render_scaler();
+        true
+    }
+
+    /// Set validated peer decode limits without changing its viewport.
+    /// A later viewport update cannot relax these session ceilings.
+    pub fn set_frame_limits(&mut self, limits: FrameLimits) -> bool {
+        if !update_frame_limits(&mut self.frame_limits, limits, &mut self.damage.gate) {
+            return false;
+        }
+        self.layout_epoch = self.layout_epoch.saturating_add(1);
+        self.ensure_render_scaler();
+        true
+    }
+
+    fn ensure_render_scaler(&mut self) {
+        // Native-width and height-only sessions also need a scaler when a
+        // negotiated dimension or pixel budget requires downscaling.
+        if self.gpu_scaling && self.render_scaler.is_none() && self.render_failures == 0 {
             match self.screen() {
                 Ok(screen) => {
                     let screen = screen.clone();
@@ -1921,7 +1959,6 @@ impl X11Capture {
                 ),
             }
         }
-        true
     }
 
     /// Re-resolve the shared area against the current root geometry.
@@ -4632,6 +4669,60 @@ pub fn scaled_dimensions(width: u16, height: u16, max_width: u16, max_height: u1
     }
 }
 
+/// Apply viewport and decode ceilings together. If the pixel budget binds,
+/// search the original aspect ratio's longer axis with integer arithmetic.
+/// This avoids floating-point rounding above the cap and double-rounding the
+/// aspect ratio after an initial dimension clamp.
+fn frame_dimensions(
+    width: u16,
+    height: u16,
+    viewport_width: u16,
+    viewport_height: u16,
+    limits: FrameLimits,
+) -> (u16, u16) {
+    let max_width = if viewport_width == 0 {
+        limits.max_width
+    } else {
+        viewport_width.min(limits.max_width)
+    };
+    let max_height = if viewport_height == 0 {
+        limits.max_height
+    } else {
+        viewport_height.min(limits.max_height)
+    };
+    let bounded = scaled_dimensions(width, height, max_width, max_height);
+    if u64::from(bounded.0) * u64::from(bounded.1) <= limits.max_pixels {
+        return bounded;
+    }
+    let landscape = width >= height;
+    let (long, short) = if landscape {
+        (width, height)
+    } else {
+        (height, width)
+    };
+    let mut low = 1_u32;
+    let mut high = u32::from(if landscape { bounded.0 } else { bounded.1 });
+    let candidate = |axis: u32| {
+        let other = (u32::from(short) * axis / u32::from(long)).max(1);
+        (axis, other)
+    };
+    while low < high {
+        let mid = low + (high - low).div_ceil(2);
+        let (a, b) = candidate(mid);
+        if u64::from(a) * u64::from(b) <= limits.max_pixels {
+            low = mid;
+        } else {
+            high = mid - 1;
+        }
+    }
+    let (a, b) = candidate(low);
+    if landscape {
+        (a as u16, b as u16)
+    } else {
+        (b as u16, a as u16)
+    }
+}
+
 fn validate_root_geometry(width: u16, height: u16) -> RemoteResult<()> {
     if width == 0 || height == 0 {
         return Err(invalid_data("X11 root has an empty geometry").into());
@@ -4970,6 +5061,89 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    #[test]
+    fn frame_budget_preserves_portrait_and_landscape_aspect() {
+        let limits = FrameLimits {
+            max_width: 1920,
+            max_height: 1920,
+            max_pixels: 230_400,
+        };
+        assert_eq!(frame_dimensions(1920, 1080, 0, 0, limits), (640, 360));
+        assert_eq!(frame_dimensions(1080, 1920, 0, 0, limits), (360, 640));
+        assert_eq!(frame_dimensions(320, 200, 0, 0, limits), (320, 200));
+        assert_eq!(frame_dimensions(1920, 1080, 320, 0, limits), (320, 180));
+        assert_eq!(frame_dimensions(1080, 1920, 0, 320, limits), (180, 320));
+    }
+
+    #[test]
+    fn frame_budget_never_overflows_or_exceeds_any_ceiling() {
+        for (width, height) in [
+            (1, 1),
+            (u16::MAX, 1),
+            (1, u16::MAX),
+            (u16::MAX, u16::MAX),
+            (3440, 1440),
+            (1440, 3440),
+        ] {
+            for max_width in [1, 13, 320, 16_384] {
+                for max_height in [1, 17, 720, 16_384] {
+                    for max_pixels in [1, 2, 17, 511, 230_400, 64 * 1024 * 1024] {
+                        let limits = FrameLimits {
+                            max_width,
+                            max_height,
+                            max_pixels,
+                        };
+                        for (vw, vh) in [(0, 0), (7, 0), (0, 11), (100, 101)] {
+                            let (w, h) = frame_dimensions(width, height, vw, vh, limits);
+                            assert!(w > 0 && h > 0);
+                            assert!(w <= width && h <= height);
+                            assert!(w <= max_width && h <= max_height);
+                            assert!(vw == 0 || w <= vw);
+                            assert!(vh == 0 || h <= vh);
+                            assert!(u64::from(w) * u64::from(h) <= max_pixels);
+                            // Integer rounding can remove less than one pixel
+                            // from the shorter axis (except the 1px floor).
+                            if w > 1 && h > 1 {
+                                let cross = (i64::from(w) * i64::from(height)
+                                    - i64::from(h) * i64::from(width))
+                                .abs();
+                                assert!(cross <= i64::from(width.max(height)));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn frame_budget_survives_viewport_reset_and_source_rotation() {
+        let base = Instant::now();
+        let geometry = (1920, 1080);
+        let cursor = CursorSnapshot::Disabled;
+        let mut gate = clean_damage_gate(base, geometry, cursor);
+        let mut limits = FrameLimits::default();
+        let negotiated = FrameLimits {
+            max_width: 800,
+            max_height: 600,
+            max_pixels: 120_000,
+        };
+        assert!(update_frame_limits(&mut limits, negotiated, &mut gate));
+        assert!(gate.dirty);
+        gate.subtract_queued();
+        gate.capture_succeeded(base, geometry, cursor);
+        assert!(!update_frame_limits(&mut limits, negotiated, &mut gate));
+        assert!(!gate.dirty);
+        let (mut vw, mut vh) = (320, 180);
+        assert!(update_encoded_bounds(&mut vw, &mut vh, 0, 0, &mut gate));
+        assert_eq!(limits, negotiated);
+        for (w, h) in [(1920, 1080), (1080, 1920), (16_384, 4096)] {
+            let (ow, oh) = frame_dimensions(w, h, vw, vh, limits);
+            assert!(ow <= 800 && oh <= 600);
+            assert!(u64::from(ow) * u64::from(oh) <= 120_000);
         }
     }
 

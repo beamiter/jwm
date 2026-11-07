@@ -1484,6 +1484,7 @@ impl FirstStop {
 
 #[derive(Clone, Debug)]
 pub struct HostOptions {
+    pub frame_limits: super::messages::FrameLimits,
     pub listen: String,
     pub key: KeySource,
     pub display: Option<String>,
@@ -1523,6 +1524,7 @@ fn listener_security_notice(address: IpAddr) -> Option<&'static str> {
 }
 
 pub fn run_host(options: HostOptions) -> RemoteResult<()> {
+    options.frame_limits.validate()?;
     JpegQualityController::new_at(
         options.jpeg_quality,
         options.jpeg_quality_floor,
@@ -1880,11 +1882,14 @@ fn serve_authenticated(
             return Err(error);
         }
     };
+    let frame_limits = hello.stream.frame_limits.intersect(options.frame_limits);
+    capture.set_frame_limits(frame_limits);
     if let Some(requested) = hello.initial_viewport {
         let (width, height) = effective_encoded_bounds(options.max_width, requested);
         capture.set_encoded_bounds(width, height);
     }
     let mut negotiated_stream = hello.stream;
+    negotiated_stream.frame_limits = frame_limits;
     let can_separate = hello.stream.cursor == super::messages::CursorMode::Independent
         && capture.enable_cursor_plane();
     negotiated_stream.cursor = hello.stream.cursor.negotiate(can_separate);
@@ -3881,7 +3886,8 @@ mod tests {
             .unwrap();
         let ack = body.find("MessageKind::HelloAck").unwrap();
         let stream = body.find("let stream_result = stream_frames(").unwrap();
-        assert!(initial < bounds && bounds < ack && ack < stream);
+        let limits = body.find("capture.set_frame_limits(frame_limits)").unwrap();
+        assert!(limits < initial && initial < bounds && bounds < ack && ack < stream);
     }
 
     #[test]
@@ -4267,7 +4273,7 @@ mod tests {
             let (kind, reason) = reader.read_message().unwrap();
             assert_eq!(kind, MessageKind::Close);
             let reason = String::from_utf8(reason).unwrap();
-            assert!(reason.contains("version 4; expected 9"), "{reason}");
+            assert!(reason.contains("version 4; expected 10"), "{reason}");
             assert!(
                 reason.contains("update jwm-remote on both machines"),
                 "{reason}"
@@ -4364,6 +4370,7 @@ mod tests {
     #[test]
     fn defaults_must_explicitly_opt_into_lan_and_input() {
         let options = HostOptions {
+            frame_limits: Default::default(),
             listen: "127.0.0.1:48221".into(),
             key: KeySource::File(std::path::PathBuf::from("key")),
             display: None,

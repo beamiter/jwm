@@ -372,14 +372,14 @@ gives each complete authenticated video record, including its final flush, one
 budget; a partial or timed-out record closes the whole session so its wire
 sequence can never be retried out of sync.
 
-The current application protocol is version 9. Versions 2 to 8 are
+The current application protocol is version 10. Versions 2 to 9 are
 deliberately incompatible, so update `jwm-remote` on both machines together;
 negotiation rejects an older peer before screen or input data is exchanged.
 Version 7 introduced initial viewport and explicit stream selectors. Version 8
 adds an independently negotiated cursor plane and a video geometry epoch;
 it does not silently reinterpret v7 video or cursor selector semantics.
 
-The v9 hello prefix is the existing 8-byte magic, big-endian `u16` version,
+The v10 hello prefix is the existing 8-byte magic, big-endian `u16` version,
 and capability flags. Both hellos append three one-byte selectors in order:
 codec `1` (JPEG tiles), cursor `1` (composited) or `2` (independent), input `1`
 (X11 keycodes). A viewer advertises independent cursor only after verifying local XRender
@@ -394,19 +394,40 @@ acknowledges zero if file sharing is not enabled, including if clipboard startup
 fails. The viewer rejects an enlarged limit, a nonzero limit with files disabled,
 or a zero limit with files enabled before starting clipboard workers. Both peers
 apply the selected limit to outgoing manifests and incoming transfers. Text and
-images retain their existing fixed bounds; decoded frame dimension and pixel
-ceilings remain fixed safety limits, not negotiated budgets.
+images retain their existing fixed bounds.
+
+Version 10 then appends decoded-canvas limits: big-endian `u16` maximum width,
+`u16` maximum height and `u64` maximum pixel count. All are nonzero and cannot
+exceed 16,384 per dimension or 67,108,864 pixels. The host acknowledges the
+componentwise minimum of both peers; the viewer rejects any enlarged limit.
+Capture applies the selected bounds before the first frame and on subsequent
+resizes, preserving aspect ratio. Decoder validates each canvas before allocation.
+These limits do not change the shared source region or input authorization.
+
+`host`, `connect` and `ssh` accept `--frame-max-width`, `--frame-max-height` and
+`--frame-max-pixels`; defaults retain the existing hard ceilings. SSH applies them
+to both ends. Saved profiles preserve explicit limits; old profiles lacking the
+fields use the existing hard ceilings. For example:
+
+```sh
+jwm-remote connect HOST --view-only --frame-max-width 1920 --frame-max-height 1080 --frame-max-pixels 2073600
+```
+
+This is a decoded-canvas budget, not a total-memory or source-readback budget.
+JPEG atlases still include bounded tile/last-row padding and decoder scratch.
+Atlas extent is checked against the canvas-derived dirty tile count and tile edge
+before JPEG pixel allocation; the existing independent hard bounds still apply.
 
 The client then appends big-endian `u16` viewport width and height, followed
 by the existing bounded keymap table. `(0, 0)` means no initial size; exactly
-one zero dimension is invalid. The server hello is exactly 22 bytes. Unknown
+one zero dimension is invalid. The server hello is exactly 34 bytes. Unknown
 selectors, trailing bytes and incomplete keymaps are rejected. Input and
 clipboard permission flags remain independent of the stream profile.
 
-Compatibility: v9 viewer/v9 host works; v6/v7/v8 with v9 in either direction is
+Compatibility: v10 viewer/v10 host works; v6/v7/v8/v9 with v10 in either direction is
 rejected during negotiation. There is no automatic legacy-version fallback.
 Keep both binaries on the same release; this change does not alter transport
-crypto. Within v9, unsupported independent-cursor capability falls back to
+crypto. Within v10, unsupported independent-cursor capability falls back to
 composited video explicitly in HelloAck.
 
 A version-5 or later host tells an older viewer which version it speaks instead

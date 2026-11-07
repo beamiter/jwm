@@ -51,6 +51,7 @@ const RECEIVER_JOIN_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Debug)]
 pub struct ClientOptions {
+    pub frame_limits: super::messages::FrameLimits,
     pub address: String,
     /// What to call the host in messages and the window title: the address
     /// as typed, or the SSH destination when the address is a local tunnel.
@@ -260,6 +261,7 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
         &keymap,
         Some(initial_viewport),
         request_cursor_plane,
+        options.frame_limits,
         HANDSHAKE_TIMEOUT,
     )?;
     *stage = ClientStage::FirstFrame;
@@ -352,7 +354,7 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
     state.telemetry.record_received();
     // SessionReader exposes this payload only after its record MAC succeeds;
     // no decoded-image allocation is checked out before authentication.
-    let mut tile_decoder = TileDecoder::new();
+    let mut tile_decoder = TileDecoder::with_frame_limits(hello.stream.frame_limits)?;
     let first_frame = decode_queued_frame(
         &mut tile_decoder,
         &payload,
@@ -611,12 +613,14 @@ fn negotiate_session(
     keymap: &KeymapTable,
     initial_viewport: Option<(u16, u16)>,
     request_cursor_plane: bool,
+    frame_limits: super::messages::FrameLimits,
     negotiation_timeout: Duration,
 ) -> RemoteResult<(
     SessionReader<TcpStream>,
     SessionWriter<TcpStream>,
     ServerHello,
 )> {
+    frame_limits.validate()?;
     let request_clipboard_files = request_clipboard && clipboard_file_limit > 0;
     stream.set_nodelay(true)?;
     stream.set_read_timeout(Some(negotiation_timeout))?;
@@ -637,6 +641,7 @@ fn negotiate_session(
         MessageKind::Hello,
         &ClientHello {
             stream: super::messages::StreamCapabilities {
+                frame_limits,
                 clipboard_file_limit: if request_clipboard_files {
                     clipboard_file_limit
                 } else {
@@ -677,6 +682,7 @@ fn negotiate_session(
         return Err(invalid_data("host did not acknowledge remote session negotiation").into());
     }
     let hello = ServerHello::decode(&payload)?;
+    validate_server_frame_limits(&hello, frame_limits)?;
     if hello.stream.cursor == super::messages::CursorMode::Independent && !request_cursor_plane {
         return Err(invalid_data("host enabled independent cursor without viewer support").into());
     }
@@ -749,6 +755,18 @@ fn refusal_reason_for_display(payload: &[u8]) -> String {
 }
 
 /// A peer can grant only capabilities the local user requested.
+fn validate_server_frame_limits(
+    hello: &ServerHello,
+    offered: super::messages::FrameLimits,
+) -> RemoteResult<()> {
+    let selected = hello.stream.frame_limits;
+    selected.validate()?;
+    if selected.intersect(offered) != selected {
+        return Err(invalid_data("host enlarged the viewer decoded frame limits").into());
+    }
+    Ok(())
+}
+
 fn validate_server_file_limit(hello: &ServerHello, clipboard_file_limit: u64) -> RemoteResult<()> {
     if hello.stream.clipboard_file_limit > clipboard_file_limit
         || (hello.clipboard_files_enabled && hello.stream.clipboard_file_limit == 0)
@@ -1848,6 +1866,55 @@ mod tests {
     use std::net::TcpListener;
 
     const TEST_PSK: [u8; PSK_LEN] = [0x5a; PSK_LEN];
+
+    #[test]
+    fn host_cannot_enlarge_any_offered_frame_limit() {
+        use crate::remote::messages::FrameLimits;
+        let offered = FrameLimits {
+            max_width: 1024,
+            max_height: 768,
+            max_pixels: 500_000,
+        };
+        let mut hello = ServerHello {
+            stream: Default::default(),
+            pointer_enabled: false,
+            keyboard_enabled: false,
+            clipboard_enabled: false,
+            clipboard_files_enabled: false,
+        };
+        for selected in [
+            offered,
+            FrameLimits {
+                max_width: 640,
+                max_height: 480,
+                max_pixels: 100_000,
+            },
+        ] {
+            hello.stream.frame_limits = selected;
+            assert!(validate_server_frame_limits(&hello, offered).is_ok());
+        }
+        for selected in [
+            FrameLimits {
+                max_width: 1025,
+                ..offered
+            },
+            FrameLimits {
+                max_height: 769,
+                ..offered
+            },
+            FrameLimits {
+                max_pixels: 500_001,
+                ..offered
+            },
+            FrameLimits {
+                max_pixels: 0,
+                ..offered
+            },
+        ] {
+            hello.stream.frame_limits = selected;
+            assert!(validate_server_frame_limits(&hello, offered).is_err());
+        }
+    }
 
     #[test]
     fn host_file_limit_cannot_enlarge_or_enable_a_disabled_budget() {
@@ -3527,6 +3594,7 @@ mod tests {
             &KeymapTable::empty(),
             None,
             false,
+            Default::default(),
             Duration::from_millis(80),
         );
         assert!(result.is_err());
@@ -3581,6 +3649,7 @@ mod tests {
             &KeymapTable::empty(),
             None,
             false,
+            Default::default(),
             Duration::from_millis(100),
         );
         assert!(result.is_err());
@@ -3630,6 +3699,7 @@ mod tests {
             &KeymapTable::empty(),
             None,
             false,
+            Default::default(),
             Duration::from_secs(5),
         );
         server.join().unwrap();
@@ -3684,6 +3754,7 @@ mod tests {
                 &KeymapTable::empty(),
                 None,
                 false,
+                Default::default(),
                 Duration::from_secs(5),
             );
             server.join().unwrap();
@@ -3705,6 +3776,16 @@ mod tests {
 
     #[test]
     fn successful_negotiation_cancels_its_absolute_deadline() {
+        let offered = super::super::messages::FrameLimits {
+            max_width: 1920,
+            max_height: 1080,
+            max_pixels: 1_000_000,
+        };
+        let selected = super::super::messages::FrameLimits {
+            max_width: 1280,
+            max_height: 720,
+            max_pixels: 500_000,
+        };
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let server = thread::spawn(move || {
@@ -3717,6 +3798,7 @@ mod tests {
             let (kind, payload) = reader.read_message().unwrap();
             assert_eq!(kind, MessageKind::Hello);
             let requested = ClientHello::decode(&payload).unwrap();
+            assert_eq!(requested.stream.frame_limits, offered);
             assert_eq!(requested.initial_viewport, Some((1280, 720)));
             assert_eq!(
                 requested.stream.cursor,
@@ -3726,7 +3808,10 @@ mod tests {
                 .write_message(
                     MessageKind::HelloAck,
                     &ServerHello {
-                        stream: Default::default(),
+                        stream: super::super::messages::StreamCapabilities {
+                            frame_limits: selected,
+                            ..Default::default()
+                        },
                         pointer_enabled: false,
                         keyboard_enabled: false,
                         clipboard_enabled: false,
@@ -3751,9 +3836,11 @@ mod tests {
             &KeymapTable::empty(),
             Some((1280, 720)),
             true,
+            offered,
             Duration::from_millis(80),
         )
         .unwrap();
+        assert_eq!(hello.stream.frame_limits, selected);
         assert!(!hello.pointer_enabled);
         assert!(!hello.keyboard_enabled);
         let (kind, payload) = reader.read_message().unwrap();

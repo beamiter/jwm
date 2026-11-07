@@ -38,8 +38,8 @@ It is not completion of the entire remote-control roadmap.
   reuse while X11 consumes a segment; input polling continues while completion
   and server-copy fences are pending. Frame ACK follows both conditions, never
   receipt alone. Geometry setup and initial resource allocation may still block.
-- Protocol v9 negotiates an explicit supported stream profile and sends initial
-  viewport before capture. v6/v7/v8/v9 peers must update together; there is no silent
+- Protocol v10 negotiates an explicit supported stream profile and sends initial
+  viewport before capture. v6/v7/v8/v9/v10 peers must update together; there is no silent
   downgrade. Tile video and cursor state carry a geometry epoch.
 - Independent bounded cursor shape/position records are negotiated when host
   XFixes and viewer XRender formats support them. Cursor movement avoids video
@@ -49,8 +49,10 @@ It is not completion of the entire remote-control roadmap.
   admission uses its own sampled coordinates. Capture stalls can still delay
   cursor polling; this is not a dedicated capture connection/thread.
 - Clipboard file limits use the minimum of both peers, with zero disabling files;
-  a host cannot enlarge the viewer request. This does not negotiate variable
-  frame pixel budgets or change existing fixed safety bounds.
+  a host cannot enlarge the viewer request. Decoded-canvas width, height and pixel
+  budgets are also selected as the peer minimum and enforced before capture and
+  canvas allocation, including later resize. Padded atlas/scratch and source
+  readback have separate bounds; this is not a total-memory limit.
 - Saved profiles support explicit init/save/list/show/run/remove, required
   permission booleans, bounded private storage, atomic replacement and locking.
   They store supported connection/SSH quality/clipboard settings, never key
@@ -61,8 +63,7 @@ It is not completion of the entire remote-control roadmap.
 - Partial CPU resampling, session state
   restore/source switching, window-geometry restoration, XKB/IME and clipboard
   UX modes, local readback, Wayland and hardware encoding.
-- Variable decode pixel/dimension budgets and broader negotiated capabilities,
-  session epochs and dynamic source
+- Broader negotiated capabilities, session epochs and dynamic source
   authorization, structured errors and backward-compatible extension framing.
 - Input-to-visible instrumentation and a fixed workload replay harness.
 
@@ -123,8 +124,11 @@ this cloud workspace; live-X11 results remain pending until it runs.
 
 ## Compatibility note for Rust callers
 
-Wire v9 is intentionally incompatible with prior application protocol versions.
+Wire v10 is intentionally incompatible with prior application protocol versions.
 The public `DecodedFrame` and synchronous `Viewer::draw` behavior remain usable.
+`HostOptions`, `ClientOptions` and `SshOptions` now require `frame_limits`;
+`StreamCapabilities` also adds that field. `FrameLimits::default()` retains the
+previous hard ceilings for callers updating struct-literal construction.
 `CapturedFrame` now includes a public `geometry_epoch` field, so external Rust
 struct-literal constructors must initialize it to the source's nonzero epoch.
 The source identity must change when the selected geometry changes; dimensions

@@ -20,6 +20,7 @@
 use super::RemoteResult;
 use super::client::{ClientOptions, run_client};
 use super::key::{KeySource, generate_session_key};
+use super::messages::FrameLimits;
 use super::x11_viewer::{close_existing_viewer, focus_existing_viewer};
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Write};
@@ -55,6 +56,7 @@ pub struct SshOptions {
     pub fps: Option<u16>,
     pub jpeg_quality: Option<u8>,
     pub max_width: Option<u16>,
+    pub frame_limits: FrameLimits,
     /// Local X11 display for the viewer window.
     pub display: Option<String>,
     pub view_only: bool,
@@ -66,6 +68,7 @@ pub struct SshOptions {
 }
 
 pub fn run_ssh(options: SshOptions) -> RemoteResult<()> {
+    options.frame_limits.validate()?;
     validate_destination(&options.destination)?;
     let label = peer_label(&options);
     let Some(_session_lock) = claim_session(&options, &label)? else {
@@ -128,6 +131,7 @@ pub fn run_ssh(options: SshOptions) -> RemoteResult<()> {
                 grab_input: options.grab_input,
                 clipboard: options.clipboard,
                 clipboard_file_limit: options.clipboard_file_limit,
+                frame_limits: options.frame_limits,
                 escape_key: options.escape_key.clone(),
             })
         }),
@@ -488,6 +492,15 @@ fn remote_host_script_with(options: &SshOptions, remote_port: u16, managed: &str
         ("--fps", options.fps.map(u64::from)),
         ("--jpeg-quality", options.jpeg_quality.map(u64::from)),
         ("--max-width", options.max_width.map(u64::from)),
+        (
+            "--frame-max-width",
+            Some(u64::from(options.frame_limits.max_width)),
+        ),
+        (
+            "--frame-max-height",
+            Some(u64::from(options.frame_limits.max_height)),
+        ),
+        ("--frame-max-pixels", Some(options.frame_limits.max_pixels)),
     ] {
         if let Some(value) = value {
             host.push_str(&format!(" {flag} {value}"));
@@ -521,6 +534,7 @@ mod tests {
             fps: None,
             jpeg_quality: None,
             max_width: None,
+            frame_limits: FrameLimits::default(),
             display: None,
             view_only: false,
             grab_input: true,
@@ -570,7 +584,9 @@ mod tests {
         assert_eq!(
             String::from_utf8(output.stdout).unwrap(),
             "[host]\n[--listen]\n[127.0.0.1:50000]\n[--key-stdin]\n[--once]\n\
-             [--display]\n[auto]\n[--allow-input]\n[--monitor]\n[DP-0 'left']\n"
+             [--display]\n[auto]\n[--allow-input]\n[--monitor]\n[DP-0 'left']\n\
+             [--frame-max-width]\n[16384]\n[--frame-max-height]\n[16384]\n\
+             [--frame-max-pixels]\n[67108864]\n"
         );
 
         let mut view = options();
@@ -579,6 +595,11 @@ mod tests {
         view.fps = Some(24);
         view.jpeg_quality = Some(70);
         view.max_width = Some(1280);
+        view.frame_limits = FrameLimits {
+            max_width: 1200,
+            max_height: 900,
+            max_pixels: 800000,
+        };
         let output = run_script(&remote_host_script(&view, 50001), &path);
         let printed = String::from_utf8(output.stdout).unwrap();
         assert!(!printed.contains("--allow-input"), "{printed}");
@@ -587,6 +608,7 @@ mod tests {
             printed.contains("[--fps]\n[24]\n[--jpeg-quality]\n[70]\n[--max-width]\n[1280]\n"),
             "{printed}"
         );
+        assert!(printed.contains("[--frame-max-width]\n[1200]\n[--frame-max-height]\n[900]\n[--frame-max-pixels]\n[800000]\n"), "{printed}");
         // The host enforces the viewer's file limit too.
         assert!(
             printed.contains("[--clipboard-file-limit]\n[2147483648]\n"),
