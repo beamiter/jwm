@@ -441,6 +441,16 @@ impl Drop for ClipboardWorkerLifetime {
     fn drop(&mut self) {
         let _ = self.shutdown.send(());
         self.wake.notify();
+        // Remote sessions take the join handle for explicit bounded shutdown.
+        // Their foreground Drop must not wait again on this lifetime.
+        if self
+            .join
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_none()
+        {
+            return;
+        }
         let finished = match self
             .done
             .lock()
@@ -694,6 +704,28 @@ impl RemoteCaptures {
     }
 }
 
+/// Signal-only ownership of the remote X11 worker's shutdown path.
+#[cfg(feature = "remote-x11")]
+pub(crate) struct RemoteClipboardShutdown {
+    shutdown: std::sync::mpsc::Sender<()>,
+    wake: crate::backend::update_notifier::AsyncUpdateNotifier,
+}
+
+#[cfg(feature = "remote-x11")]
+impl RemoteClipboardShutdown {
+    pub(crate) fn stop(&self) {
+        let _ = self.shutdown.send(());
+        self.wake.notify();
+    }
+}
+
+#[cfg(feature = "remote-x11")]
+impl Drop for RemoteClipboardShutdown {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
 /// Sending half: what to offer to other applications on this display.
 #[cfg(feature = "remote-x11")]
 #[derive(Clone)]
@@ -705,6 +737,24 @@ pub(crate) struct RemoteSetter {
 
 #[cfg(feature = "remote-x11")]
 impl RemoteSetter {
+    /// Move join ownership to the remote session before any handles can drop.
+    pub(crate) fn take_shutdown(&self) -> (RemoteClipboardShutdown, std::thread::JoinHandle<()>) {
+        let join = self
+            .worker
+            .join
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+            .expect("remote clipboard shutdown taken once");
+        (
+            RemoteClipboardShutdown {
+                shutdown: self.worker.shutdown.clone(),
+                wake: self.worker.wake.clone(),
+            },
+            join,
+        )
+    }
+
     /// `false` when the watcher has stopped.
     pub(crate) fn send(&self, request: RemoteServe) -> bool {
         if let RemoteServe::Text(text) = &request

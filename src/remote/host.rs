@@ -1931,7 +1931,7 @@ fn serve_authenticated(
     // current selection owner answers. The host does not push what was
     // already copied here: the viewer's clipboard is the one shared on
     // connect, so the two machines do not swap clipboards.
-    let (clipboard_sync, clipboard_inbox, clipboard_outbox) = if clipboard_enabled {
+    let (mut clipboard_sync, clipboard_inbox, clipboard_outbox) = if clipboard_enabled {
         match ClipboardSync::start(
             options.display.as_deref(),
             SyncOptions {
@@ -2061,34 +2061,82 @@ fn serve_authenticated(
     let _ = control.shutdown(Shutdown::Both);
     let input_result = input_thread.join();
     // Both network halves are done with the clipboard; stop its threads.
-    drop(clipboard_sync);
+    let clipboard_result = clipboard_sync
+        .as_mut()
+        .map_or(Ok(()), |sync| sync.shutdown_timeout(Duration::from_secs(2)));
     report_host_final(&telemetry, &credits, Instant::now());
+    finish_host_session(
+        first_stop.cause(),
+        stream_result,
+        input_result,
+        clipboard_result,
+    )
+}
+
+fn finish_host_session(
+    cause: StopCause,
+    stream_result: RemoteResult<()>,
+    input_result: thread::Result<RemoteResult<()>>,
+    clipboard_result: RemoteResult<()>,
+) -> RemoteResult<()> {
+    let input_panicked = input_result.is_err();
     let input_result = match input_result {
         Ok(result) => result,
-        Err(_) => return Err(io::Error::other("remote input thread panicked").into()),
+        Err(_) => Err(io::Error::other("remote input thread panicked").into()),
     };
-    match first_stop.cause() {
-        StopCause::Input => input_result,
-        StopCause::Graceful => {
-            // Shutting the socket down is what ends the input reader, so the
-            // end of stream it reports is the expected outcome, not news.
-            if let Err(error) = input_result
-                && !is_end_of_stream(&error)
-            {
-                eprintln!("jwm-remote: input receiver stopped during shutdown: {error}");
+    let result = if input_panicked {
+        input_result
+    } else {
+        match cause {
+            StopCause::Input => input_result,
+            StopCause::Graceful => {
+                // Shutting the socket down is what ends the input reader, so the
+                // end of stream it reports is the expected outcome, not news.
+                if let Err(error) = input_result
+                    && !is_end_of_stream(&error)
+                {
+                    eprintln!("jwm-remote: input receiver stopped during shutdown: {error}");
+                }
+                stream_result
             }
-            stream_result
-        }
-        StopCause::Capture
-        | StopCause::Sender
-        | StopCause::Clipboard
-        | StopCause::ThreadPanic
-        | StopCause::None => {
-            if let Err(error) = input_result {
-                eprintln!("jwm-remote: input receiver stopped: {error}");
+            StopCause::Capture
+            | StopCause::Sender
+            | StopCause::Clipboard
+            | StopCause::ThreadPanic
+            | StopCause::None => {
+                if let Err(error) = input_result {
+                    eprintln!("jwm-remote: input receiver stopped: {error}");
+                }
+                stream_result
             }
-            stream_result
         }
+    };
+    match clipboard_result {
+        Ok(()) => result,
+        Err(cleanup) => Err(Box::new(HostClipboardCleanupError {
+            primary: result.err(),
+            cleanup,
+        })),
+    }
+}
+
+#[derive(Debug)]
+struct HostClipboardCleanupError {
+    primary: Option<super::RemoteError>,
+    cleanup: super::RemoteError,
+}
+
+impl std::fmt::Display for HostClipboardCleanupError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Some(primary) = &self.primary {
+            write!(f, "{primary}; ")?;
+        }
+        write!(f, "{}", self.cleanup)
+    }
+}
+impl std::error::Error for HostClipboardCleanupError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.primary.as_deref().map(|error| error as _)
     }
 }
 
@@ -3100,6 +3148,40 @@ fn permission_denied(message: impl Into<String>) -> io::Error {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn clipboard_cleanup_preserves_host_panic_for_every_stop_cause() {
+        for cause in [
+            StopCause::Input,
+            StopCause::Graceful,
+            StopCause::Capture,
+            StopCause::Sender,
+            StopCause::Clipboard,
+            StopCause::ThreadPanic,
+            StopCause::None,
+        ] {
+            let error =
+                finish_host_session(cause, Ok(()), Err(Box::new("panic")), Ok(())).unwrap_err();
+            assert!(error.to_string().contains("input thread panicked"));
+            let error = finish_host_session(
+                cause,
+                Ok(()),
+                Err(Box::new("panic")),
+                Err(io::Error::other("clipboard cleanup incomplete").into()),
+            )
+            .unwrap_err();
+            let cleanup = error.downcast_ref::<HostClipboardCleanupError>().unwrap();
+            assert!(
+                cleanup
+                    .primary
+                    .as_ref()
+                    .unwrap()
+                    .to_string()
+                    .contains("input thread panicked")
+            );
+            assert!(error.to_string().contains("clipboard cleanup incomplete"));
+        }
+    }
+
     use super::*;
     use crate::remote::frame::new_decode_buffer_pool;
     use crate::remote::tile::TileDecoder;

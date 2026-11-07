@@ -595,6 +595,7 @@ pub struct Viewer {
     deferred_events: VecDeque<Event>,
     last_frame: Option<StoredFrame>,
     closed: bool,
+    user_close_requested: bool,
     close_reported: bool,
 }
 
@@ -931,8 +932,14 @@ impl Viewer {
             deferred_events: VecDeque::new(),
             last_frame: None,
             closed: false,
+            user_close_requested: false,
             close_reported: false,
         })
+    }
+
+    /// Explicit window closure, latched before fallible local input release.
+    pub fn user_close_requested(&self) -> bool {
+        self.user_close_requested
     }
 
     /// Drain a bounded batch of X11 events without blocking.
@@ -992,11 +999,13 @@ impl Viewer {
                         && event.type_ == self.wm_protocols
                         && event.data.as_data32()[0] == self.wm_delete_window =>
                 {
+                    self.user_close_requested = true;
                     self.closed = true;
                     self.report_close(&mut result)?;
                     break;
                 }
                 Event::DestroyNotify(event) if event.window == self.window => {
+                    self.user_close_requested = true;
                     self.closed = true;
                     self.report_close(&mut result)?;
                     break;

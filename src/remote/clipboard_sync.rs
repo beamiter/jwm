@@ -40,7 +40,7 @@ use super::messages::{MAX_CLIPBOARD_BYTES, decode_clipboard, encode_clipboard};
 use super::protocol::MessageKind;
 use crate::backend::clipboard_x11::{
     CopiedClipboard, PendingKind, RemoteCaptures, RemoteClipboard, RemoteClipboardOptions,
-    RemoteServe, RemoteSetter,
+    RemoteClipboardShutdown, RemoteServe, RemoteSetter,
 };
 use std::collections::VecDeque;
 use std::io;
@@ -432,13 +432,66 @@ impl BoundedQueue<Outgoing> {
     }
 }
 
-/// Owns the session's clipboard threads; dropping it stops them.
+/// Owns the session clipboard threads. Drop only signals; use explicit shutdown
+/// to establish cleanup, including file work and X11 thread-local destructors.
 pub struct ClipboardSync {
     commands: Arc<BoundedQueue<Command>>,
     stop: Arc<AtomicBool>,
     status: Arc<SyncStatus>,
+    worker: ClipboardThread,
+    forwarder: ClipboardThread,
+    backend: ClipboardThread,
+    backend_stop: Option<RemoteClipboardShutdown>,
+}
+
+#[derive(Default)]
+struct ClipboardThread {
     worker: Option<thread::JoinHandle<()>>,
-    forwarder: Option<thread::JoinHandle<()>>,
+    joining: Option<mpsc::Receiver<bool>>,
+    failure: Option<String>,
+}
+
+impl ClipboardThread {
+    fn new(worker: thread::JoinHandle<()>) -> Self {
+        Self {
+            worker: Some(worker),
+            ..Self::default()
+        }
+    }
+
+    fn join_until(&mut self, deadline: Instant, name: &str) -> Result<(), String> {
+        if let Some(worker) = self.worker.take() {
+            match super::sender::reap_worker(worker) {
+                Ok(joining) => self.joining = Some(joining),
+                Err(error) => {
+                    self.failure = Some(format!("start {name} reaper (worker detached): {error}"))
+                }
+            }
+        }
+        if let Some(error) = &self.failure {
+            return Err(error.clone());
+        }
+        if let Some(joining) = &self.joining {
+            match joining.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+                Ok(true) => self.joining = None,
+                Ok(false) => {
+                    self.joining = None;
+                    self.failure = Some(format!("{name} panicked"));
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    return Err(format!(
+                        "{name} shutdown timed out (worker/reaper may remain detached)"
+                    ));
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    self.joining = None;
+                    self.failure =
+                        Some(format!("{name} reaper disconnected (cleanup unconfirmed)"));
+                }
+            }
+        }
+        self.failure.clone().map_or(Ok(()), Err)
+    }
 }
 
 /// Network-reader half: hands peer clipboard records to the worker.
@@ -548,6 +601,7 @@ impl ClipboardSync {
                 capture_existing: options.share_existing,
             },
         )?;
+        let (backend_stop, backend) = setter.take_shutdown();
         let (commands, worker, inbox, outbox, status) = spawn_worker(setter, options, None, wake)?;
         let stop = Arc::new(AtomicBool::new(false));
         let forward_commands = commands.clone();
@@ -559,7 +613,8 @@ impl ClipboardSync {
             Ok(forwarder) => forwarder,
             Err(error) => {
                 let _ = commands.send(Command::Stop);
-                let _ = worker.join();
+                // Startup failure must not turn into an unbounded file/X11 join.
+                drop(worker);
                 return Err(format!("spawn clipboard watcher: {error}"));
             }
         };
@@ -568,12 +623,53 @@ impl ClipboardSync {
                 commands,
                 stop,
                 status,
-                worker: Some(worker),
-                forwarder: Some(forwarder),
+                worker: ClipboardThread::new(worker),
+                forwarder: ClipboardThread::new(forwarder),
+                backend: ClipboardThread::new(backend),
+                backend_stop: Some(backend_stop),
             },
             inbox,
             outbox,
         ))
+    }
+
+    /// One shared deadline bounds all clipboard joins. Failure means cleanup
+    /// is incomplete, not permission to reconnect or reuse transfer state.
+    /// A later call may observe completion of the same reapers, never new workers.
+    pub fn shutdown_timeout(&mut self, timeout: Duration) -> RemoteResult<()> {
+        self.signal_stop();
+        let deadline = Instant::now() + timeout;
+        let mut failures = Vec::new();
+        for (thread, name) in [
+            (&mut self.worker, "clipboard transfer worker"),
+            (&mut self.forwarder, "clipboard capture forwarder"),
+        ] {
+            if let Err(error) = thread.join_until(deadline, name) {
+                failures.push(error);
+            }
+        }
+        // Allow transfer cleanup/token abandonment before stopping X11 when
+        // possible. On timeout it still owns its state until it actually exits.
+        if let Some(stop) = &self.backend_stop {
+            stop.stop();
+        }
+        if let Err(error) = self.backend.join_until(deadline, "clipboard X11 worker") {
+            failures.push(error);
+        }
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(io::Error::other(format!(
+                "clipboard cleanup incomplete; {}",
+                failures.join("; ")
+            ))
+            .into())
+        }
+    }
+
+    fn signal_stop(&self) {
+        self.stop.store(true, Ordering::Release);
+        let _ = self.commands.send(Command::Stop);
     }
 
     #[must_use]
@@ -584,14 +680,11 @@ impl ClipboardSync {
 
 impl Drop for ClipboardSync {
     fn drop(&mut self) {
-        self.stop.store(true, Ordering::Release);
-        let _ = self.commands.send(Command::Stop);
-        if let Some(forwarder) = self.forwarder.take() {
-            let _ = forwarder.join();
+        self.signal_stop();
+        if let Some(stop) = &self.backend_stop {
+            stop.stop();
         }
-        if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
-        }
+        // Join handles/reapers detach. Never wait in Drop, including unwinding.
     }
 }
 
@@ -1510,6 +1603,167 @@ mod tests {
             )
             .unwrap();
         bytes
+    }
+
+    fn sync_for_test(worker: thread::JoinHandle<()>) -> ClipboardSync {
+        ClipboardSync {
+            commands: Arc::new(BoundedQueue::new(
+                COMMAND_QUEUE_RECORDS,
+                COMMAND_QUEUE_BYTES,
+            )),
+            stop: Arc::new(AtomicBool::new(false)),
+            status: Arc::new(SyncStatus::default()),
+            worker: ClipboardThread::new(worker),
+            forwarder: ClipboardThread::default(),
+            backend: ClipboardThread::default(),
+            backend_stop: None,
+        }
+    }
+
+    #[test]
+    fn clipboard_shutdown_timeout_retains_owned_file_until_worker_exits() {
+        let temp = TempDir::new("shutdown-owned-file");
+        let path = temp.0.join("partial");
+        fs::write(&path, b"partial data").unwrap();
+        let file = fs::File::open(&path).unwrap();
+        let (release, gate) = mpsc::channel();
+        let (entered_tx, entered) = mpsc::channel();
+        let (done_tx, done) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            // A deterministic gate models stalled file work without a pipe,
+            // socket, device, real clipboard or filesystem that can hang.
+            entered_tx.send(()).unwrap();
+            gate.recv().unwrap();
+            use std::io::Read;
+            let mut bytes = Vec::new();
+            let mut file = file;
+            file.read_to_end(&mut bytes).unwrap();
+            done_tx.send(bytes).unwrap();
+        });
+        entered.recv_timeout(Duration::from_secs(2)).unwrap();
+        let mut sync = sync_for_test(worker);
+        let start = Instant::now();
+        let error = sync
+            .shutdown_timeout(Duration::from_millis(10))
+            .unwrap_err();
+        assert!(start.elapsed() < Duration::from_secs(1));
+        assert!(error.to_string().contains("cleanup incomplete"));
+        assert!(sync.worker.worker.is_none());
+        assert!(sync.worker.joining.is_some());
+        assert!(sync.commands.closed());
+        assert!(path.exists());
+        assert!(sync.shutdown_timeout(Duration::ZERO).is_err());
+        release.send(()).unwrap();
+        sync.shutdown_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(done.recv().unwrap(), b"partial data");
+        sync.shutdown_timeout(Duration::ZERO).unwrap();
+    }
+
+    #[test]
+    fn clipboard_shutdown_waits_for_tls_and_reports_panic_persistently() {
+        struct TlsGate(mpsc::Sender<()>, mpsc::Receiver<()>);
+        impl Drop for TlsGate {
+            fn drop(&mut self) {
+                self.0.send(()).unwrap();
+                self.1.recv().unwrap();
+            }
+        }
+        thread_local! {
+            static GATE: std::cell::RefCell<Option<TlsGate>> = const { std::cell::RefCell::new(None) };
+        }
+        let (entered_tx, entered) = mpsc::channel();
+        let (release, gate) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            GATE.with(|slot| {
+                *slot.borrow_mut() = Some(TlsGate(entered_tx, gate));
+            })
+        });
+        entered.recv_timeout(Duration::from_secs(2)).unwrap();
+        let mut sync = sync_for_test(worker);
+        assert!(sync.shutdown_timeout(Duration::from_millis(10)).is_err());
+        release.send(()).unwrap();
+        sync.shutdown_timeout(Duration::from_secs(2)).unwrap();
+
+        let mut sync = sync_for_test(thread::spawn(|| panic!("clipboard worker panic")));
+        let first = sync
+            .shutdown_timeout(Duration::from_secs(2))
+            .unwrap_err()
+            .to_string();
+        assert!(first.contains("panicked"));
+        assert_eq!(
+            sync.shutdown_timeout(Duration::ZERO)
+                .unwrap_err()
+                .to_string(),
+            first
+        );
+    }
+
+    #[test]
+    fn clipboard_shutdown_reports_each_stalled_thread_and_later_reaps_all() {
+        let mut releases = Vec::new();
+        let mut spawn_gated = || {
+            let (release, gate) = mpsc::channel();
+            releases.push(release);
+            ClipboardThread::new(thread::spawn(move || {
+                gate.recv().unwrap();
+            }))
+        };
+        let mut sync = sync_for_test(thread::spawn(|| {}));
+        sync.forwarder = spawn_gated();
+        sync.backend = spawn_gated();
+        let error = sync
+            .shutdown_timeout(Duration::from_millis(10))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("clipboard capture forwarder shutdown timed out"));
+        assert!(error.contains("clipboard X11 worker shutdown timed out"));
+        for release in releases {
+            release.send(()).unwrap();
+        }
+        sync.shutdown_timeout(Duration::from_secs(2)).unwrap();
+    }
+
+    #[test]
+    fn explicit_clipboard_shutdown_abandons_pending_transfer() {
+        let (mut end, inbox, _outbox) = end(options(u64::MAX));
+        inbox
+            .deliver(
+                MessageKind::ClipboardTransfer,
+                &TransferOp::Begin {
+                    id: 1,
+                    kind: TransferKind::Image,
+                    length: 100,
+                    entries: 0,
+                    items: 1,
+                }
+                .encode(),
+            )
+            .unwrap();
+        let RemoteServe::Announce { token, .. } = end.next_served() else {
+            panic!("expected transfer announcement");
+        };
+        let mut sync = sync_for_test(end.join.take().unwrap());
+        sync.commands = Arc::clone(&end.commands);
+        sync.shutdown_timeout(Duration::from_secs(2)).unwrap();
+        assert!(
+            matches!(end.next_served(), RemoteServe::Abandon { token: abandoned } if abandoned == token)
+        );
+        assert!(sync.commands.closed());
+    }
+
+    #[test]
+    fn clipboard_drop_never_waits_for_a_gated_worker() {
+        let (release, gate) = mpsc::channel();
+        let (done_tx, done) = mpsc::channel();
+        let sync = sync_for_test(thread::spawn(move || {
+            gate.recv().unwrap();
+            done_tx.send(()).unwrap();
+        }));
+        let start = Instant::now();
+        drop(sync);
+        assert!(start.elapsed() < Duration::from_secs(1));
+        release.send(()).unwrap();
+        done.recv_timeout(Duration::from_secs(2)).unwrap();
     }
 
     #[test]

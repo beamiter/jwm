@@ -179,7 +179,7 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
         eprintln!("jwm-remote: the host shares clipboard text and images, not files");
     }
     let (mut wake_receiver, wake_sender) = wake_pair()?;
-    let (clipboard_sync, clipboard_inbox, clipboard_outbox) = if hello.clipboard_enabled {
+    let (mut clipboard_sync, clipboard_inbox, clipboard_outbox) = if hello.clipboard_enabled {
         *stage = ClientStage::LocalClipboard;
         let clipboard_wake = wake_sender.try_clone()?;
         match ClipboardSync::start(
@@ -347,16 +347,35 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
     let cancel_result = cancel.cancel(&mut writer, graceful_close);
     let receiver_exit = receiver.join_timeout(RECEIVER_JOIN_TIMEOUT);
     let sender_result = writer.shutdown_timeout(RECEIVER_JOIN_TIMEOUT);
-    // Clipboard owns separate file/X11 work; its Drop is not covered by the
-    // socket-worker deadlines above.
-    drop(clipboard_sync);
+    let clipboard_result = clipboard_sync
+        .as_mut()
+        .map_or(Ok(()), |sync| sync.shutdown_timeout(RECEIVER_JOIN_TIMEOUT));
     telemetry_reporter.force_report();
     finish_session(
         loop_result.map(|_| ()),
         cancel_result,
         receiver_exit,
         sender_result,
+        clipboard_result,
     )
+}
+
+/// Explicit viewer closure remains terminal even when release cleanup fails.
+#[derive(Debug)]
+struct UserClosed;
+
+impl std::fmt::Display for UserClosed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "user closed the remote viewer")
+    }
+}
+impl std::error::Error for UserClosed {}
+
+fn user_close_cleanup_failure(error: RemoteError) -> RemoteError {
+    Box::new(SessionCleanupError {
+        primary: Some(Box::new(UserClosed)),
+        failures: vec![error],
+    })
 }
 
 /// A valid authenticated Close, including an empty reason, is terminal.
@@ -404,6 +423,7 @@ fn finish_session(
     cancel: RemoteResult<()>,
     receiver: ReceiverExit,
     sender: RemoteResult<()>,
+    clipboard: RemoteResult<()>,
 ) -> RemoteResult<()> {
     let mut failures = Vec::new();
     if let Err(error) = cancel {
@@ -429,6 +449,9 @@ fn finish_session(
         ),
     }
     if let Err(error) = sender {
+        failures.push(error);
+    }
+    if let Err(error) = clipboard {
         failures.push(error);
     }
     if failures.is_empty() {
@@ -684,14 +707,26 @@ fn viewer_loop(
     let mut reported_viewport = None;
     loop {
         wake.drain()?;
-        let events = viewer.poll_events()?;
-        let outcome = for_each_input_batch(
+        let events = viewer.poll_events().map_err(|error| {
+            if viewer.user_close_requested() {
+                user_close_cleanup_failure(error)
+            } else {
+                error
+            }
+        })?;
+        let outcome = dispatch_viewer_input(
             events,
             pointer_enabled,
             keyboard_enabled,
             &mut input_batch,
-            |batch| write_input_batch(writer, batch, &mut input_payload),
+            &mut input_payload,
+            writer,
         )?;
+        if outcome.close {
+            return Ok(ViewerLoopExit {
+                close_release_flushed: true,
+            });
+        }
         let mut wrote = outcome.wrote_input;
         // Sent after poll_events, which coalesces an interactive resize burst
         // into its final size, so a drag produces one request rather than one
@@ -720,18 +755,6 @@ fn viewer_loop(
         }
         if wrote {
             writer.flush()?;
-        }
-        if outcome.close {
-            let input_enabled = pointer_enabled || keyboard_enabled;
-            if input_enabled && !outcome.wrote_release_all {
-                return Err(invalid_data(
-                    "viewer closed without flushing the required ReleaseAll edge",
-                )
-                .into());
-            }
-            return Ok(ViewerLoopExit {
-                close_release_flushed: true,
-            });
         }
 
         apply_pending_cursor(viewer, state)?;
@@ -819,6 +842,44 @@ struct InputPollOutcome {
     wrote_input: bool,
     wrote_release_all: bool,
     close: bool,
+}
+
+/// Latch close intent from the whole poll before the first fallible write:
+/// a full batch can fail before iteration reaches the Close event.
+fn dispatch_viewer_input(
+    events: Vec<ViewerEvent>,
+    pointer_enabled: bool,
+    keyboard_enabled: bool,
+    batch: &mut Vec<InputEvent>,
+    payload: &mut Vec<u8>,
+    writer: &mut impl RecordWriter,
+) -> RemoteResult<InputPollOutcome> {
+    let closing = events.contains(&ViewerEvent::Close);
+    let result = (|| {
+        let outcome =
+            for_each_input_batch(events, pointer_enabled, keyboard_enabled, batch, |batch| {
+                write_input_batch(writer, batch, payload)
+            })?;
+        if closing {
+            if (pointer_enabled || keyboard_enabled) && !outcome.wrote_release_all {
+                return Err(invalid_data(
+                    "viewer closed without flushing the required ReleaseAll edge",
+                )
+                .into());
+            }
+            if outcome.wrote_input {
+                writer.flush()?;
+            }
+        }
+        Ok(outcome)
+    })();
+    result.map_err(|error| {
+        if closing {
+            user_close_cleanup_failure(error)
+        } else {
+            error
+        }
+    })
 }
 
 fn for_each_input_batch(
@@ -2310,6 +2371,110 @@ mod tests {
         );
     }
 
+    #[derive(Default)]
+    struct FailingInputWriter {
+        fail_write: bool,
+        writes: usize,
+        flushes: usize,
+    }
+
+    impl RecordWriter for FailingInputWriter {
+        fn write_message(&mut self, _: MessageKind, _: &[u8]) -> RemoteResult<()> {
+            self.writes += 1;
+            if self.fail_write {
+                Err(io::Error::new(io::ErrorKind::BrokenPipe, "input write failed").into())
+            } else {
+                Ok(())
+            }
+        }
+        fn flush(&mut self) -> RemoteResult<()> {
+            self.flushes += 1;
+            Err(io::Error::new(io::ErrorKind::BrokenPipe, "input flush failed").into())
+        }
+    }
+
+    #[test]
+    fn viewer_close_intent_survives_input_write_and_flush_failures() {
+        for (full_batch, fail_write) in [(false, true), (true, true), (false, false)] {
+            let mut events = if full_batch {
+                vec![
+                    ViewerEvent::Key {
+                        keycode: 38,
+                        pressed: true
+                    };
+                    MAX_INPUT_BATCH_EVENTS + 1
+                ]
+            } else {
+                vec![]
+            };
+            events.extend([ViewerEvent::ReleaseAll, ViewerEvent::Close]);
+            let mut writer = FailingInputWriter {
+                fail_write,
+                ..Default::default()
+            };
+            let error = dispatch_viewer_input(
+                events,
+                true,
+                true,
+                &mut Vec::new(),
+                &mut Vec::new(),
+                &mut writer,
+            )
+            .unwrap_err();
+            let cleanup = error.downcast_ref::<SessionCleanupError>().unwrap();
+            assert!(cleanup.primary.as_ref().unwrap().is::<UserClosed>());
+            assert_eq!(cleanup.failures.len(), 1);
+            assert_eq!(
+                cleanup.failures[0]
+                    .downcast_ref::<io::Error>()
+                    .unwrap()
+                    .kind(),
+                io::ErrorKind::BrokenPipe
+            );
+            assert_eq!(writer.writes, 1);
+            assert_eq!(writer.flushes, usize::from(!fail_write));
+        }
+    }
+
+    #[test]
+    fn release_all_without_close_is_not_user_close() {
+        let mut writer = FailingInputWriter {
+            fail_write: true,
+            ..Default::default()
+        };
+        let error = dispatch_viewer_input(
+            vec![ViewerEvent::ReleaseAll],
+            true,
+            true,
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &mut writer,
+        )
+        .unwrap_err();
+        assert!(error.is::<io::Error>());
+        assert!(!error.is::<UserClosed>());
+        assert!(!error.is::<SessionCleanupError>());
+    }
+
+    #[test]
+    fn viewer_close_flushes_release_and_view_only_close_needs_no_write() {
+        for input_enabled in [false, true] {
+            let mut writer = SessionWriter::new(Vec::new(), TEST_PSK);
+            let outcome = dispatch_viewer_input(
+                vec![ViewerEvent::ReleaseAll, ViewerEvent::Close],
+                input_enabled,
+                input_enabled,
+                &mut Vec::new(),
+                &mut Vec::new(),
+                &mut writer,
+            )
+            .unwrap();
+            assert!(outcome.close);
+            assert_eq!(outcome.wrote_release_all, input_enabled);
+            assert_eq!(writer.into_inner().is_empty(), !input_enabled);
+        }
+    }
+
     #[test]
     fn close_preserves_release_all_and_discards_later_events() {
         let (batches, outcome) = collect_input_batches(
@@ -2853,13 +3018,15 @@ mod tests {
     #[test]
     fn terminal_types_and_cleanup_failures_are_preserved() {
         let auth: RemoteError = Box::new(ProtocolError::AuthenticationFailed);
-        let error = finish_session(Err(auth), Ok(()), ReceiverExit::Completed, Ok(())).unwrap_err();
+        let error =
+            finish_session(Err(auth), Ok(()), ReceiverExit::Completed, Ok(()), Ok(())).unwrap_err();
         assert!(matches!(
             error.downcast_ref::<ProtocolError>(),
             Some(ProtocolError::AuthenticationFailed)
         ));
         let peer: RemoteError = Box::new(PeerClosed(String::new()));
-        let error = finish_session(Err(peer), Ok(()), ReceiverExit::Completed, Ok(())).unwrap_err();
+        let error =
+            finish_session(Err(peer), Ok(()), ReceiverExit::Completed, Ok(()), Ok(())).unwrap_err();
         assert!(error.is::<PeerClosed>());
         let transport: RemoteError = Box::new(ProtocolError::Io(io::Error::from(
             io::ErrorKind::UnexpectedEof,
@@ -2869,10 +3036,11 @@ mod tests {
             Err(io::Error::other("cancel failed").into()),
             ReceiverExit::TimedOut,
             Err(io::Error::other("sender failed").into()),
+            Err(io::Error::other("clipboard cleanup incomplete").into()),
         )
         .unwrap_err();
         let cleanup = error.downcast_ref::<SessionCleanupError>().unwrap();
-        assert_eq!(cleanup.failures.len(), 3);
+        assert_eq!(cleanup.failures.len(), 4);
         assert!(matches!(
             cleanup
                 .primary

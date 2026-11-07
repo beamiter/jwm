@@ -147,8 +147,15 @@ bounded wait on one reaper per worker, so a stalled thread-local destructor does
 not block the viewer's join path. Timeout reports incomplete cleanup and may leave
 a detached worker/reaper; it is not permission to start a replacement session.
 
-Automatic reconnect remains disabled. Clipboard shutdown still has unbounded joins;
-user-close intent must be latched before fallible input flushes, and SSH exit 255
-cannot distinguish network loss from authentication/host verification failure.
-These need lifecycle work before safe retry. The escape shortcut only releases
+Clipboard sync, capture-forwarder and X11 worker shutdown share one explicit
+deadline and preserve incomplete cleanup errors. Their Drop paths signal only;
+stalled owned work may continue after a reported timeout, so timeout never proves
+all workers exited. The existing host input-thread join is still unbounded.
+Actual window-close intent is latched before fallible local input release and
+network flushes, and remains typed when those operations fail.
+
+Automatic reconnect remains disabled. SSH exit 255 cannot distinguish network
+loss from authentication/host verification failure. A retry policy still needs
+explicit opt-in and must refuse user/peer closes, protocol/authentication errors,
+and any incomplete cleanup; timeout alone never authorizes replacement work. The escape shortcut only releases
 input grab; it does not close the session and is not treated as cancellation.
