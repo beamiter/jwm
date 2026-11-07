@@ -4,6 +4,7 @@
 //! Extra source grants are deliberately not persisted; the CLI rejects saving
 //! them instead of silently dropping permissions. Unknown fields fail closed.
 //! A pinned, private directory and an advisory lock serialize atomic updates.
+use super::clipboard_policy::{ClipboardDirection, ClipboardMode};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
@@ -49,6 +50,11 @@ pub struct Viewer {
     pub grab_input: bool,
     pub escape_key: String,
     pub clipboard: bool,
+    /// Missing scope retains legacy behavior, but never enables consent.
+    #[serde(default)]
+    pub clipboard_mode: ClipboardMode,
+    #[serde(default)]
+    pub clipboard_direction: ClipboardDirection,
     pub clipboard_file_limit: u64,
     /// Optional decoded-frame caps; omitted fields retain the hard-cap defaults.
     pub frame_max_width: Option<u16>,
@@ -316,6 +322,8 @@ mod tests {
                 grab_input: false,
                 escape_key: "F12".into(),
                 clipboard: false,
+                clipboard_mode: ClipboardMode::All,
+                clipboard_direction: ClipboardDirection::Both,
                 clipboard_file_limit: 0,
                 frame_max_width: None,
                 frame_max_height: None,
@@ -396,6 +404,44 @@ mod tests {
         store.remove("desk").unwrap();
         assert!(store.list().unwrap().is_empty());
         assert!(store.remove("desk").is_err());
+    }
+
+    #[test]
+    fn clipboard_scope_defaults_never_create_consent_and_reject_unknown_values() {
+        let mut value = serde_json::to_value(sample()).unwrap();
+        value["viewer"]
+            .as_object_mut()
+            .unwrap()
+            .remove("clipboard_mode");
+        value["viewer"]
+            .as_object_mut()
+            .unwrap()
+            .remove("clipboard_direction");
+        let decoded = Profile::decode(&serde_json::to_vec(&value).unwrap()).unwrap();
+        assert!(!decoded.viewer.clipboard);
+        assert_eq!(decoded.viewer.clipboard_mode, ClipboardMode::All);
+        assert_eq!(decoded.viewer.clipboard_direction, ClipboardDirection::Both);
+        value["viewer"]["clipboard_mode"] = "text".into();
+        value["viewer"]["clipboard_direction"] = "from-host".into();
+        let decoded = Profile::decode(&serde_json::to_vec(&value).unwrap()).unwrap();
+        assert!(!decoded.viewer.clipboard);
+        assert_eq!(decoded.viewer.clipboard_mode, ClipboardMode::Text);
+        assert_eq!(
+            decoded.viewer.clipboard_direction,
+            ClipboardDirection::FromHost
+        );
+        assert_eq!(
+            Profile::decode(&serde_json::to_vec(&decoded).unwrap()).unwrap(),
+            decoded
+        );
+        value["viewer"]["clipboard_mode"] = "images".into();
+        assert!(Profile::decode(&serde_json::to_vec(&value).unwrap()).is_err());
+        value["viewer"]["clipboard_mode"] = "all".into();
+        value["viewer"]["clipboard_direction"] = "outgoing".into();
+        assert!(Profile::decode(&serde_json::to_vec(&value).unwrap()).is_err());
+        value["viewer"]["clipboard_direction"] = "both".into();
+        value["viewer"].as_object_mut().unwrap().remove("clipboard");
+        assert!(Profile::decode(&serde_json::to_vec(&value).unwrap()).is_err());
     }
 
     #[test]

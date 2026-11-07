@@ -340,6 +340,7 @@ jobs:
           RUSTFLAGS: -D warnings
         run: |
           cargo test --locked --no-default-features --features remote-x11 --lib remote::
+          cargo test --locked --no-default-features --features remote-x11 --lib backend::clipboard_x11::tests::
           cargo test --locked --no-default-features --features remote-x11 --bin jwm-remote
 
       - name: Test remote presentation and capture on isolated X servers

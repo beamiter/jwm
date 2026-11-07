@@ -3,6 +3,7 @@
 use clap::{Args, Parser, Subcommand};
 use jwm::remote::client::{ClientOptions, run_client_reconnecting};
 use jwm::remote::clipboard_files::parse_size;
+use jwm::remote::clipboard_policy::{ClipboardDirection, ClipboardMode};
 use jwm::remote::host::{HostOptions, run_host};
 use jwm::remote::key::{KeySource, generate_key_file};
 use jwm::remote::messages::FrameLimits;
@@ -242,6 +243,14 @@ enum Command {
         #[arg(long)]
         allow_clipboard: bool,
 
+        /// Narrow shared content; requires explicit clipboard consent.
+        #[arg(long, default_value = "all", requires = "allow_clipboard")]
+        clipboard_mode: ClipboardMode,
+
+        /// Permitted direction, relative to the viewer and host.
+        #[arg(long, default_value = "both", requires = "allow_clipboard")]
+        clipboard_direction: ClipboardDirection,
+
         /// Largest file copy shared through the clipboard, such as 512M or
         /// 10G; 0 shares text and images only.
         #[arg(long, default_value = DEFAULT_CLIPBOARD_FILE_LIMIT, value_name = "SIZE", value_parser = parse_size)]
@@ -302,6 +311,14 @@ enum Command {
         /// text, images, and files copied in a file manager.
         #[arg(long)]
         clipboard: bool,
+
+        /// Narrow shared content; requires explicit clipboard consent.
+        #[arg(long, default_value = "all", requires = "clipboard")]
+        clipboard_mode: ClipboardMode,
+
+        /// Permitted direction, relative to the viewer and host.
+        #[arg(long, default_value = "both", requires = "clipboard")]
+        clipboard_direction: ClipboardDirection,
 
         /// Largest file copy shared through the clipboard, such as 512M or
         /// 10G; 0 shares text and images only.
@@ -374,6 +391,14 @@ enum Command {
         #[arg(long)]
         clipboard: bool,
 
+        /// Narrow shared content; requires explicit clipboard consent.
+        #[arg(long, default_value = "all", requires = "clipboard")]
+        clipboard_mode: ClipboardMode,
+
+        /// Permitted direction, relative to the viewer and host.
+        #[arg(long, default_value = "both", requires = "clipboard")]
+        clipboard_direction: ClipboardDirection,
+
         /// Largest file copy shared through the clipboard, such as 512M or
         /// 10G; 0 shares text and images only.
         #[arg(long, default_value = DEFAULT_CLIPBOARD_FILE_LIMIT, value_name = "SIZE", value_parser = parse_size)]
@@ -444,6 +469,8 @@ fn profile_from_command(command: Command) -> RemoteResult<Profile> {
             grab_input,
             escape_key,
             clipboard,
+            clipboard_mode,
+            clipboard_direction,
             clipboard_file_limit,
             frame_limits,
         } => {
@@ -468,6 +495,8 @@ fn profile_from_command(command: Command) -> RemoteResult<Profile> {
                     grab_input,
                     escape_key,
                     clipboard,
+                    clipboard_mode,
+                    clipboard_direction,
                     clipboard_file_limit,
                     frame_max_width: frame_limits.frame_max_width,
                     frame_max_height: frame_limits.frame_max_height,
@@ -488,6 +517,8 @@ fn profile_from_command(command: Command) -> RemoteResult<Profile> {
             grab_input,
             escape_key,
             clipboard,
+            clipboard_mode,
+            clipboard_direction,
             clipboard_file_limit,
             frame_limits,
             remote_command,
@@ -515,6 +546,8 @@ fn profile_from_command(command: Command) -> RemoteResult<Profile> {
                     grab_input,
                     escape_key,
                     clipboard,
+                    clipboard_mode,
+                    clipboard_direction,
                     clipboard_file_limit,
                     frame_max_width: frame_limits.frame_max_width,
                     frame_max_height: frame_limits.frame_max_height,
@@ -615,6 +648,14 @@ fn command_from_profile(profile: &Profile) -> RemoteResult<Command> {
             args.push(flag.to_owned());
         }
     }
+    if viewer.clipboard {
+        args.extend([
+            "--clipboard-mode".to_owned(),
+            viewer.clipboard_mode.to_string(),
+            "--clipboard-direction".to_owned(),
+            viewer.clipboard_direction.to_string(),
+        ]);
+    }
     args.extend([
         "--escape-key".to_owned(),
         viewer.escape_key.clone(),
@@ -628,7 +669,13 @@ fn validated_profile(profile: Profile) -> RemoteResult<Profile> {
     if profile.version != 1 {
         return Err(profile_error("unsupported profile schema version").into());
     }
-    let validated = profile_from_command(command_from_profile(&profile)?)?;
+    let mut validated = profile_from_command(command_from_profile(&profile)?)?;
+    // Disabled consent remains authoritative. Keep dormant narrowing without
+    // synthesizing consent merely to round-trip through command-line parsing.
+    if !profile.viewer.clipboard {
+        validated.viewer.clipboard_mode = profile.viewer.clipboard_mode;
+        validated.viewer.clipboard_direction = profile.viewer.clipboard_direction;
+    }
     if validated.viewer.clipboard_file_limit != profile.viewer.clipboard_file_limit {
         return Err(profile_error(
             "profile clipboard limit cannot round-trip through the CLI size parser",
@@ -771,6 +818,8 @@ fn run(command: Command) -> RemoteResult<()> {
             allow_lan,
             allow_input,
             allow_clipboard,
+            clipboard_mode,
+            clipboard_direction,
             clipboard_file_limit,
             frame_limits,
             once,
@@ -805,6 +854,8 @@ fn run(command: Command) -> RemoteResult<()> {
                 allow_lan,
                 allow_input,
                 allow_clipboard,
+                clipboard_mode,
+                clipboard_direction,
                 clipboard_file_limit,
                 frame_limits: frame_limits.limits(),
                 once,
@@ -822,6 +873,8 @@ fn run(command: Command) -> RemoteResult<()> {
             grab_input,
             escape_key,
             clipboard,
+            clipboard_mode,
+            clipboard_direction,
             clipboard_file_limit,
             frame_limits,
             display,
@@ -847,6 +900,8 @@ fn run(command: Command) -> RemoteResult<()> {
                 view_only,
                 grab_input,
                 clipboard,
+                clipboard_mode,
+                clipboard_direction,
                 clipboard_file_limit,
                 frame_limits: frame_limits.limits(),
                 escape_key,
@@ -861,6 +916,8 @@ fn run(command: Command) -> RemoteResult<()> {
             view_only,
             grab_input,
             clipboard,
+            clipboard_mode,
+            clipboard_direction,
             clipboard_file_limit,
             frame_limits,
             escape_key,
@@ -874,6 +931,8 @@ fn run(command: Command) -> RemoteResult<()> {
                 view_only,
                 grab_input,
                 clipboard,
+                clipboard_mode,
+                clipboard_direction,
                 clipboard_file_limit,
                 frame_limits: frame_limits.limits(),
                 escape_key,
@@ -1243,6 +1302,67 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn clipboard_scope_requires_consent_and_roundtrips_profiles() {
+        for transport in ["connect", "ssh", "host"] {
+            let mut base = vec!["jwm-remote", transport];
+            if transport != "host" {
+                base.push("desk");
+            }
+            assert!(Cli::try_parse_from(base.clone()).is_ok());
+            for (flag, value) in [
+                ("--clipboard-mode", "text"),
+                ("--clipboard-direction", "to-host"),
+                ("--clipboard-mode", "all"),
+                ("--clipboard-direction", "both"),
+            ] {
+                let mut args = base.clone();
+                args.extend([flag, value]);
+                assert!(Cli::try_parse_from(args).is_err());
+            }
+            base.push(if transport == "host" {
+                "--allow-clipboard"
+            } else {
+                "--clipboard"
+            });
+            for mode in ["text", "text-images", "all"] {
+                for direction in ["both", "to-host", "from-host"] {
+                    let mut args = base.clone();
+                    args.extend(["--clipboard-mode", mode, "--clipboard-direction", direction]);
+                    let command = Cli::try_parse_from(args).unwrap().command;
+                    if transport != "host" {
+                        let mut profile = profile_from_command(command).unwrap();
+                        assert!(profile.viewer.clipboard);
+                        assert_eq!(profile.viewer.clipboard_mode.to_string(), mode);
+                        assert_eq!(profile.viewer.clipboard_direction.to_string(), direction);
+                        assert_eq!(validated_profile(profile.clone()).unwrap(), profile);
+                        profile.viewer.clipboard = false;
+                        assert_eq!(validated_profile(profile.clone()).unwrap(), profile);
+                        match command_from_profile(&profile).unwrap() {
+                            Command::Connect { clipboard, .. } | Command::Ssh { clipboard, .. } => {
+                                assert!(!clipboard)
+                            }
+                            _ => unreachable!(),
+                        }
+                    }
+                }
+            }
+            for (flag, value) in [
+                ("--clipboard-mode", "image"),
+                ("--clipboard-direction", "outgoing"),
+            ] {
+                let mut args = base.clone();
+                args.extend([flag, value]);
+                assert!(Cli::try_parse_from(args).is_err());
+            }
+        }
+        for flag in ["--clipboard-mode", "--clipboard-direction"] {
+            assert!(
+                Cli::try_parse_from(["jwm-remote", "profile", "run", "desk", flag, "all"]).is_err()
+            );
+        }
+    }
 
     #[test]
     fn profile_cli_lifecycle_only_uses_an_explicit_temporary_store() {

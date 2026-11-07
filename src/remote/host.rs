@@ -1,6 +1,7 @@
 //! Trusted-LAN remote desktop host.
 
 use super::RemoteResult;
+use super::clipboard_policy::{self, ClipboardDirection, ClipboardMode};
 use super::clipboard_sync::{
     ClipboardInbox, ClipboardOutbox, ClipboardSync, MAX_TRANSFER_RECORD_BYTES, Outgoing,
     SyncOptions,
@@ -1584,6 +1585,8 @@ pub struct HostOptions {
     pub allow_lan: bool,
     pub allow_input: bool,
     pub allow_clipboard: bool,
+    pub clipboard_mode: ClipboardMode,
+    pub clipboard_direction: ClipboardDirection,
     /// Largest file copy shared through the clipboard; 0 shares no files.
     pub clipboard_file_limit: u64,
     pub once: bool,
@@ -2104,11 +2107,23 @@ fn serve_authenticated(
     // Both sides must have opted in: the host's flag is policy, the client's
     // request is consent. Sending clipboard records to a peer that asked for
     // none would be a protocol violation on arrival.
-    let clipboard_enabled = options.allow_clipboard && hello.request_clipboard;
+    let clipboard_policy = clipboard_policy::intersect(
+        (
+            hello.stream.clipboard_content,
+            hello.stream.clipboard_directions,
+        ),
+        clipboard_policy::requested(
+            options.allow_clipboard,
+            options.clipboard_mode,
+            options.clipboard_direction,
+            options.clipboard_file_limit,
+        ),
+    );
+    let clipboard_enabled = clipboard_policy.0 != 0;
     let file_limit = hello
         .stream
         .negotiate_file_limit(options.clipboard_file_limit);
-    let files_enabled = clipboard_enabled && hello.request_clipboard_files && file_limit > 0;
+    let files_enabled = clipboard_policy.0 & 4 != 0 && file_limit > 0;
     let mut capture = match X11Capture::connect(
         options.display.as_deref(),
         options.capture_source,
@@ -2186,6 +2201,9 @@ fn serve_authenticated(
         match ClipboardSync::start(
             options.display.as_deref(),
             SyncOptions {
+                send: clipboard_policy.1 & 2 != 0,
+                receive: clipboard_policy.1 & 1 != 0,
+                images: clipboard_policy.0 & 2 != 0,
                 files: files_enabled,
                 file_limit,
                 share_existing: false,
@@ -2195,11 +2213,7 @@ fn serve_authenticated(
             Ok((sync, inbox, outbox)) => {
                 eprintln!(
                     "jwm-remote: clipboard sharing enabled ({})",
-                    if files_enabled {
-                        "text, images and files"
-                    } else {
-                        "text and images"
-                    }
+                    clipboard_policy::label(clipboard_policy.0, clipboard_policy.1)
                 );
                 (Some(sync), Some(inbox), Some(outbox))
             }
@@ -2216,6 +2230,16 @@ fn serve_authenticated(
     let clipboard_enabled = clipboard_sync.is_some();
     let files_enabled = files_enabled && clipboard_enabled;
     negotiated_stream.clipboard_file_limit = if files_enabled { file_limit } else { 0 };
+    negotiated_stream.clipboard_content = if clipboard_enabled {
+        clipboard_policy.0
+    } else {
+        0
+    };
+    negotiated_stream.clipboard_directions = if clipboard_enabled {
+        clipboard_policy.1
+    } else {
+        0
+    };
     if clipboard_enabled {
         reader.set_max_payload_len(MAX_INBOUND_CLIPBOARD_PAYLOAD_LEN);
     }
@@ -4140,6 +4164,8 @@ mod tests {
             allow_lan: false,
             allow_input: false,
             allow_clipboard: false,
+            clipboard_mode: Default::default(),
+            clipboard_direction: Default::default(),
             clipboard_file_limit: 0,
             once: true,
             stats_json: false,
@@ -5160,7 +5186,7 @@ mod tests {
             let (kind, reason) = reader.read_message().unwrap();
             assert_eq!(kind, MessageKind::Close);
             let reason = String::from_utf8(reason).unwrap();
-            assert!(reason.contains("version 4; expected 11"), "{reason}");
+            assert!(reason.contains("version 4; expected 12"), "{reason}");
             assert!(
                 reason.contains("update jwm-remote on both machines"),
                 "{reason}"
@@ -5273,6 +5299,8 @@ mod tests {
             allow_lan: false,
             allow_input: false,
             allow_clipboard: false,
+            clipboard_mode: Default::default(),
+            clipboard_direction: Default::default(),
             clipboard_file_limit: 0,
             once: false,
             stats_json: false,

@@ -38,8 +38,8 @@ It is not completion of the entire remote-control roadmap.
   reuse while X11 consumes a segment; input polling continues while completion
   and server-copy fences are pending. Frame ACK follows both conditions, never
   receipt alone. Geometry setup and initial resource allocation may still block.
-- Protocol v11 negotiates an explicit supported stream profile and sends initial
-  viewport before capture. v6/v7/v8/v9/v10/v11 peers must update together; there is no silent
+- Protocol v12 negotiates an explicit supported stream profile and sends initial
+  viewport before capture. v6/v7/v8/v9/v10/v11/v12 peers must update together; there is no silent
   downgrade. Tile video and cursor state carry a geometry epoch.
 - Independent bounded cursor shape/position records are negotiated when host
   XFixes and viewer XRender formats support them. Cursor movement avoids video
@@ -66,15 +66,27 @@ It is not completion of the entire remote-control roadmap.
   in view-only mode. A scoped initial selection never implicitly grants root.
   Source changes release input and reset frame/cursor state; unsafe transitions
   fail closed. Extra grants are explicit on host/SSH CLI and cannot be saved in
-  profiles yet. Both peers require a coordinated v11 upgrade.
+  profiles yet. Both peers require a coordinated v12 upgrade.
 - This source-switching work is covered by offline tests only in this checkout;
   no new live-X11, hardware timing, or benchmark result is claimed here.
+
+- Protocol v12 negotiates immutable clipboard content and direction limits.
+  Both peers must consent; explicit CLI/SSH controls and saved profile narrowing
+  preserve legacy all/both defaults without granting clipboard permission.
+  Capture policy is enforced before requesting local payloads, and ingress and
+  transfer workers independently reject unnegotiated content. One-way transfers
+  retain reverse-direction ACK/refusal control traffic. Live-X validation remains
+  pending; offline policy tests do not establish clipboard timing or desktop behavior.
+  Network and transfer-worker queues are bounded; the backend capture/serve
+  channels remain unbounded and serving currently drains without a per-pass
+  budget. Bounding those channels and scheduling is a separate lifecycle change;
+  this is not a claim that the complete clipboard pipeline is bounded.
 
 ## Explicitly deferred
 
 - Partial CPU resampling, observed session state
-  restore, window-position restoration, XKB/IME and clipboard
-  UX modes, local readback, Wayland and hardware encoding.
+  restore, window-position restoration, XKB/IME, runtime clipboard
+  mode changes, local readback, Wayland and hardware encoding.
 - Broader negotiated capabilities, mutable source authorization, structured errors and backward-compatible extension framing.
 - Input-to-visible instrumentation and a fixed workload replay harness.
 
@@ -84,6 +96,7 @@ It is not completion of the entire remote-control roadmap.
 cargo fmt --all -- --check
 cargo check --locked --no-default-features --features remote-x11 --all-targets
 cargo test --locked --no-default-features --features remote-x11 --lib remote::
+cargo test --locked --no-default-features --features remote-x11 --lib backend::clipboard_x11::tests::
 cargo test --locked --no-default-features --features remote-x11 --bin jwm-remote
 cargo clippy --locked --no-default-features --features remote-x11 --lib --bin jwm-remote --no-deps -- -D warnings
 ```
@@ -135,7 +148,7 @@ this cloud workspace; live-X11 results remain pending until it runs.
 
 ## Compatibility note for Rust callers
 
-Wire v11 is intentionally incompatible with prior application protocol versions.
+Wire v12 is intentionally incompatible with prior application protocol versions.
 The public `DecodedFrame` and synchronous `Viewer::draw` behavior remain usable.
 `HostOptions`, `ClientOptions` and `SshOptions` now require `frame_limits`;
 `StreamCapabilities` also adds that field. `FrameLimits::default()` retains the
@@ -182,3 +195,12 @@ checked again after cleanup before certification. SSH and saved-profile retries
 remain unsupported; SSH exit 255 cannot reliably distinguish network loss from
 authentication or host verification failure. No session/transfer state resumes. The escape shortcut only releases
 input grab; it does not close the session and is not treated as cancellation.
+
+Clipboard policy adds `clipboard_mode` and `clipboard_direction` to
+`HostOptions`, `ClientOptions`, `SshOptions` and saved-profile `Viewer` literals.
+Use `ClipboardMode::All` and `ClipboardDirection::Both` for the previous scope;
+the existing consent boolean still controls whether sharing is enabled at all.
+`StreamCapabilities` adds explicit `clipboard_content` and
+`clipboard_directions` masks, which must agree with hello flags and file limits.
+`SyncOptions` adds local `send`, `receive` and `images` gates; callers must derive
+these from negotiated permissions rather than treating them as new defaults.

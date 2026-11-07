@@ -564,6 +564,7 @@ pub struct Viewer {
     net_wm_name: Atom,
     utf8_string: Atom,
     clipboard_enabled: bool,
+    clipboard_policy: String,
     /// Transfer progress or outcome shown after the clipboard state.
     clipboard_activity: Option<String>,
     depth: u8,
@@ -967,6 +968,7 @@ impl Viewer {
             net_wm_name,
             utf8_string,
             clipboard_enabled: false,
+            clipboard_policy: "off".into(),
             clipboard_activity: None,
             depth: root_depth,
             pixel_layout,
@@ -1785,6 +1787,11 @@ impl Viewer {
         self.update_title();
     }
 
+    pub fn set_clipboard_policy(&mut self, policy: String) {
+        self.clipboard_policy = policy;
+        self.update_title();
+    }
+
     /// Show a copy travelling or just arrived, such as `receiving 3 files 40%`.
     pub fn set_clipboard_activity(&mut self, activity: Option<String>) {
         if self.clipboard_activity != activity {
@@ -1812,6 +1819,10 @@ impl Viewer {
             self.clipboard_activity.as_deref(),
             &self.escape_name,
         );
+        if self.clipboard_enabled {
+            title.push_str("; sharing ");
+            title.push_str(&self.clipboard_policy);
+        }
         append_source_title(
             &mut title,
             self.source_label.as_deref(),

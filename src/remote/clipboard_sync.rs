@@ -220,12 +220,46 @@ impl TransferOp {
 /// How this end shares its clipboard.
 #[derive(Debug, Clone, Copy)]
 pub struct SyncOptions {
+    /// This endpoint may capture and send local clipboard content.
+    pub send: bool,
+    /// This endpoint may receive and serve peer clipboard content.
+    pub receive: bool,
+    /// Image sharing was negotiated.
+    pub images: bool,
     /// Copied files were negotiated with the peer.
     pub files: bool,
     /// Largest file copy this end sends or accepts.
     pub file_limit: u64,
     /// Share what is on the clipboard when the session starts.
     pub share_existing: bool,
+}
+
+impl SyncOptions {
+    fn validate_peer_op(self, op: &TransferOp) -> RemoteResult<()> {
+        if !self.images && (!self.files || self.file_limit == 0) {
+            return Err(invalid_data("clipboard transfers were not negotiated").into());
+        }
+        match op {
+            TransferOp::Ack { .. } | TransferOp::Refuse { .. } if !self.send => {
+                Err(invalid_data("clipboard send direction was not negotiated").into())
+            }
+            TransferOp::Ack { .. } | TransferOp::Refuse { .. } => Ok(()),
+            _ if !self.receive => {
+                Err(invalid_data("clipboard receive direction was not negotiated").into())
+            }
+            TransferOp::Begin {
+                kind: TransferKind::Image,
+                ..
+            } if !self.images => Err(invalid_data("image sharing was not negotiated").into()),
+            TransferOp::Begin {
+                kind: TransferKind::Files,
+                ..
+            } if !self.files || self.file_limit == 0 => {
+                Err(invalid_data("file sharing was not negotiated").into())
+            }
+            _ => Ok(()),
+        }
+    }
 }
 
 /// A record for the session writer to send.
@@ -498,7 +532,7 @@ impl ClipboardThread {
 pub struct ClipboardInbox {
     commands: Arc<BoundedQueue<Command>>,
     in_flight: Arc<AtomicU64>,
-    files: bool,
+    options: SyncOptions,
 }
 
 /// Writer half: records the worker wants sent.
@@ -578,7 +612,7 @@ fn spawn_worker<T: ClipboardTarget + Send + 'static>(
         ClipboardInbox {
             commands,
             in_flight,
-            files: options.files,
+            options,
         },
         ClipboardOutbox { records },
         status,
@@ -596,9 +630,11 @@ impl ClipboardSync {
         let (captures, setter) = RemoteClipboard::start(
             display,
             RemoteClipboardOptions {
+                send: options.send,
+                images: options.images,
                 files: options.files,
                 image_bytes: MAX_SHARED_IMAGE_BYTES,
-                capture_existing: options.share_existing,
+                capture_existing: options.send && options.share_existing,
             },
         )?;
         let (backend_stop, backend) = setter.take_shutdown();
@@ -717,30 +753,29 @@ impl ClipboardInbox {
     pub fn deliver(&self, kind: MessageKind, payload: &[u8]) -> RemoteResult<()> {
         let mut data_bytes = 0;
         let command = match kind {
-            MessageKind::Clipboard => Command::PeerText(decode_clipboard(payload)?),
+            MessageKind::Clipboard => {
+                if !self.options.receive {
+                    return Err(
+                        invalid_data("clipboard receive direction was not negotiated").into(),
+                    );
+                }
+                Command::PeerText(decode_clipboard(payload)?)
+            }
             MessageKind::ClipboardTransfer => {
                 let op = TransferOp::decode(payload)?;
-                match &op {
-                    TransferOp::Begin {
-                        kind: TransferKind::Files,
-                        ..
-                    } if !self.files => {
-                        return Err(invalid_data("file sharing was not negotiated").into());
+                self.options.validate_peer_op(&op)?;
+                if let TransferOp::Data { bytes, .. } = &op {
+                    let len = bytes.len() as u64;
+                    let pending = self.in_flight.fetch_add(len, Ordering::AcqRel) + len;
+                    if pending > TRANSFER_WINDOW_BYTES {
+                        self.in_flight.fetch_sub(len, Ordering::AcqRel);
+                        self.commands.close();
+                        return Err(invalid_data(
+                            "peer sent more clipboard data than it was allowed in flight",
+                        )
+                        .into());
                     }
-                    TransferOp::Data { bytes, .. } => {
-                        let len = bytes.len() as u64;
-                        let pending = self.in_flight.fetch_add(len, Ordering::AcqRel) + len;
-                        if pending > TRANSFER_WINDOW_BYTES {
-                            self.in_flight.fetch_sub(len, Ordering::AcqRel);
-                            self.commands.close();
-                            return Err(invalid_data(
-                                "peer sent more clipboard data than it was allowed in flight",
-                            )
-                            .into());
-                        }
-                        data_bytes = len;
-                    }
-                    _ => {}
+                    data_bytes = len;
                 }
                 Command::Peer(op)
             }
@@ -942,6 +977,9 @@ impl<T: ClipboardTarget> Worker<T> {
         match command {
             Command::Local(copied) => self.share_local(copied),
             Command::PeerText(text) => {
+                if !self.options.receive {
+                    return;
+                }
                 self.cancel_sending();
                 self.drop_receiving(false);
                 self.last_received = Some(Fingerprint::Text(text.clone()));
@@ -971,6 +1009,15 @@ impl<T: ClipboardTarget> Worker<T> {
 
     /// Something was copied on this machine.
     fn share_local(&mut self, copied: CopiedClipboard) {
+        if !self.options.send
+            || match &copied {
+                CopiedClipboard::Text(_) => false,
+                CopiedClipboard::Png(_) => !self.options.images,
+                CopiedClipboard::Files(_) => !self.options.files || self.options.file_limit == 0,
+            }
+        {
+            return;
+        }
         if self.last_received.as_ref() == Some(&Fingerprint::of(&copied)) {
             // The peer's own copy, re-offered here: it already has it.
             return;
@@ -1158,6 +1205,9 @@ impl<T: ClipboardTarget> Worker<T> {
     }
 
     fn on_peer(&mut self, op: TransferOp) {
+        if self.options.validate_peer_op(&op).is_err() {
+            return;
+        }
         match op {
             TransferOp::Begin {
                 id,
@@ -1253,8 +1303,14 @@ impl<T: ClipboardTarget> Worker<T> {
     }
 
     fn accept(&mut self, kind: TransferKind, length: u64, entries: u32) -> Result<Sink, String> {
+        if !self.options.receive {
+            return Err("clipboard receive direction was not negotiated".into());
+        }
         match kind {
             TransferKind::Image => {
+                if !self.options.images {
+                    return Err("image sharing was not negotiated".into());
+                }
                 if length == 0 || length > MAX_SHARED_IMAGE_BYTES as u64 {
                     return Err(format!(
                         "the image is larger than {}",
@@ -1264,6 +1320,9 @@ impl<T: ClipboardTarget> Worker<T> {
                 Ok(Sink::Image(Vec::with_capacity(length as usize)))
             }
             TransferKind::Files => {
+                if !self.options.files || self.options.file_limit == 0 {
+                    return Err("file sharing was not negotiated".into());
+                }
                 // The stream carries headers too; its length bounds the
                 // contents from above.
                 if length
@@ -1545,9 +1604,290 @@ mod tests {
 
     fn options(file_limit: u64) -> SyncOptions {
         SyncOptions {
+            send: true,
+            receive: true,
+            images: true,
             files: true,
             file_limit,
             share_existing: false,
+        }
+    }
+
+    fn policy_worker(options: SyncOptions) -> (Worker<Recorder>, mpsc::Receiver<RemoteServe>) {
+        let (served, received) = mpsc::channel();
+        (
+            Worker {
+                target: Recorder(served),
+                out: Arc::new(BoundedQueue::new(
+                    OUTGOING_QUEUE_RECORDS,
+                    OUTGOING_QUEUE_BYTES,
+                )),
+                wake: None,
+                in_flight: Arc::new(AtomicU64::new(0)),
+                status: Arc::new(SyncStatus::default()),
+                options,
+                staging_root: None,
+                staging: None,
+                next_id: 1,
+                next_token: 1,
+                sending: None,
+                receiving: None,
+                sent_total: 0,
+                acked_total: 0,
+                consumed_total: 0,
+                status_expires: None,
+                last_received: None,
+            },
+            received,
+        )
+    }
+
+    #[test]
+    fn ingress_policy_matrix_distinguishes_content_from_responses() {
+        for send in [false, true] {
+            for receive in [false, true] {
+                for images in [false, true] {
+                    for files in [false, true] {
+                        let policy = SyncOptions {
+                            send,
+                            receive,
+                            images,
+                            files,
+                            ..options(1024)
+                        };
+                        let transfer = images || files;
+                        let operations = [
+                            (
+                                TransferOp::Begin {
+                                    id: 1,
+                                    kind: TransferKind::Image,
+                                    length: 1,
+                                    entries: 0,
+                                    items: 1,
+                                },
+                                receive && images,
+                            ),
+                            (
+                                TransferOp::Begin {
+                                    id: 1,
+                                    kind: TransferKind::Files,
+                                    length: 1,
+                                    entries: 1,
+                                    items: 1,
+                                },
+                                receive && files,
+                            ),
+                            (
+                                TransferOp::Data {
+                                    id: 1,
+                                    bytes: vec![1],
+                                },
+                                receive && transfer,
+                            ),
+                            (TransferOp::End { id: 1 }, receive && transfer),
+                            (TransferOp::Cancel { id: 1 }, receive && transfer),
+                            (TransferOp::Ack { id: 1, consumed: 1 }, send && transfer),
+                            (TransferOp::Refuse { id: 1 }, send && transfer),
+                        ];
+                        let commands = Arc::new(BoundedQueue::new(
+                            COMMAND_QUEUE_RECORDS,
+                            COMMAND_QUEUE_BYTES,
+                        ));
+                        let inbox = ClipboardInbox {
+                            commands: commands.clone(),
+                            in_flight: Arc::new(AtomicU64::new(0)),
+                            options: policy,
+                        };
+                        assert_eq!(
+                            inbox.deliver(MessageKind::Clipboard, b"text").is_ok(),
+                            receive
+                        );
+                        if receive {
+                            assert!(matches!(commands.try_recv(), Ok(Command::PeerText(_))));
+                        }
+                        for (op, allowed) in operations {
+                            assert_eq!(
+                                inbox
+                                    .deliver(MessageKind::ClipboardTransfer, &op.encode())
+                                    .is_ok(),
+                                allowed,
+                                "{policy:?}: {op:?}"
+                            );
+                            if allowed {
+                                assert!(matches!(commands.try_recv(), Ok(Command::Peer(_))));
+                            } else {
+                                assert!(matches!(
+                                    commands.try_recv(),
+                                    Err(mpsc::TryRecvError::Empty)
+                                ));
+                            }
+                        }
+                        assert_eq!(
+                            inbox.in_flight.load(Ordering::Acquire),
+                            u64::from(receive && transfer)
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn forbidden_local_values_are_ignored_before_state_changes_or_file_reads() {
+        for policy in [
+            SyncOptions {
+                send: false,
+                ..options(1024)
+            },
+            SyncOptions {
+                images: false,
+                files: false,
+                ..options(1024)
+            },
+        ] {
+            let (mut worker, served) = policy_worker(policy);
+            worker.last_received = Some(Fingerprint::Text("unchanged".into()));
+            worker.share_local(CopiedClipboard::Png(vec![1, 2, 3]));
+            worker.share_local(CopiedClipboard::Files(vec![PathBuf::from(
+                "/must-not-read-clipboard-file",
+            )]));
+            if !policy.send {
+                worker.share_local(CopiedClipboard::Text("private".into()));
+            }
+            assert!(
+                worker.sending.is_none() && worker.receiving.is_none() && worker.staging.is_none()
+            );
+            assert_eq!(
+                worker.last_received,
+                Some(Fingerprint::Text("unchanged".into()))
+            );
+            assert!(matches!(
+                worker.out.try_recv(),
+                Err(mpsc::TryRecvError::Empty)
+            ));
+            assert!(served.try_recv().is_err());
+        }
+    }
+
+    #[test]
+    fn worker_defense_rejects_bypassed_peer_commands_without_serving_or_staging() {
+        let (mut worker, served) = policy_worker(SyncOptions {
+            receive: false,
+            ..options(1024)
+        });
+        worker.apply(Command::PeerText("private".into()));
+        for kind in [TransferKind::Image, TransferKind::Files] {
+            worker.apply(Command::Peer(TransferOp::Begin {
+                id: 1,
+                kind,
+                length: 1,
+                entries: 1,
+                items: 1,
+            }));
+            assert!(worker.accept(kind, 1, 1).is_err());
+        }
+        assert!(worker.receiving.is_none() && worker.staging.is_none());
+        assert!(worker.last_received.is_none());
+        assert!(served.try_recv().is_err());
+        let (mut worker, served) = policy_worker(SyncOptions {
+            images: false,
+            files: false,
+            ..options(1024)
+        });
+        for kind in [TransferKind::Image, TransferKind::Files] {
+            worker.apply(Command::Peer(TransferOp::Begin {
+                id: 1,
+                kind,
+                length: 1,
+                entries: 1,
+                items: 1,
+            }));
+            assert!(worker.accept(kind, 1, 1).is_err());
+        }
+        assert!(worker.receiving.is_none() && worker.staging.is_none());
+        assert!(served.try_recv().is_err());
+    }
+
+    #[test]
+    fn one_way_images_finish_with_reverse_acknowledgments() {
+        for reverse in [false, true] {
+            let sender = SyncOptions {
+                receive: false,
+                ..options(0)
+            };
+            let receiver = SyncOptions {
+                send: false,
+                ..options(0)
+            };
+            let pair = if reverse {
+                pair(receiver, sender, Duration::ZERO)
+            } else {
+                pair(sender, receiver, Duration::ZERO)
+            };
+            let (source, target) = if reverse {
+                (&pair.b, &pair.a)
+            } else {
+                (&pair.a, &pair.b)
+            };
+            let image = png(12);
+            source.copy(CopiedClipboard::Png(image.clone()));
+            assert!(matches!(
+                target.next_served(),
+                RemoteServe::Announce {
+                    kind: PendingKind::Png,
+                    ..
+                }
+            ));
+            assert!(
+                matches!(target.next_served(), RemoteServe::FulfilPng { png, .. } if png == image)
+            );
+            source.copy(CopiedClipboard::Text("after transfer".into()));
+            assert!(
+                matches!(target.next_served(), RemoteServe::Text(text) if text == "after transfer")
+            );
+            assert!(source.served.try_recv().is_err());
+        }
+    }
+
+    #[test]
+    fn one_way_files_cross_flow_window_in_both_directions() {
+        let source_dir = TempDir::new("one-way-source");
+        let source_path = source_dir.0.join("fixture.bin");
+        let contents = vec![42; TRANSFER_WINDOW_BYTES as usize + TRANSFER_CHUNK_BYTES];
+        fs::write(&source_path, &contents).unwrap();
+        for reverse in [false, true] {
+            let sender = SyncOptions {
+                receive: false,
+                ..options(DEFAULT_FILE_LIMIT)
+            };
+            let receiver = SyncOptions {
+                send: false,
+                ..options(DEFAULT_FILE_LIMIT)
+            };
+            let pair = if reverse {
+                pair(receiver, sender, Duration::ZERO)
+            } else {
+                pair(sender, receiver, Duration::ZERO)
+            };
+            let (source, target) = if reverse {
+                (&pair.b, &pair.a)
+            } else {
+                (&pair.a, &pair.b)
+            };
+            source.copy(CopiedClipboard::Files(vec![source_path.clone()]));
+            assert!(matches!(
+                target.next_served(),
+                RemoteServe::Announce {
+                    kind: PendingKind::Files,
+                    ..
+                }
+            ));
+            let RemoteServe::FulfilFiles { paths, .. } = target.next_served() else {
+                panic!("one-way file did not finish");
+            };
+            assert_eq!(paths.len(), 1);
+            assert_eq!(fs::read(&paths[0]).unwrap(), contents);
+            assert!(source.served.try_recv().is_err());
         }
     }
 
@@ -1623,6 +1963,9 @@ mod tests {
             let (mut sync, inbox, outbox) = ClipboardSync::start(
                 Some(&display),
                 SyncOptions {
+                    send: true,
+                    receive: true,
+                    images: true,
                     files: false,
                     file_limit: 0,
                     share_existing: false,
@@ -1656,6 +1999,8 @@ mod tests {
             let (captures, setter) = RemoteClipboard::start(
                 Some(&display),
                 RemoteClipboardOptions {
+                    send: true,
+                    images: true,
                     files: false,
                     image_bytes: MAX_SHARED_IMAGE_BYTES,
                     capture_existing: false,
@@ -2045,7 +2390,7 @@ mod tests {
         let inbox = ClipboardInbox {
             commands,
             in_flight: Arc::new(AtomicU64::new(0)),
-            files: true,
+            options: options(DEFAULT_FILE_LIMIT),
         };
         inbox.deliver(MessageKind::Clipboard, b"text").unwrap();
         let data = TransferOp::Data {
@@ -2156,7 +2501,10 @@ mod tests {
         let inbox = ClipboardInbox {
             commands,
             in_flight: Arc::new(AtomicU64::new(0)),
-            files: false,
+            options: SyncOptions {
+                files: false,
+                ..options(0)
+            },
         };
         let begin = TransferOp::Begin {
             id: 1,

@@ -1,5 +1,6 @@
 //! Remote desktop viewer/client orchestration.
 
+use super::clipboard_policy::{self, ClipboardDirection, ClipboardMode};
 use super::clipboard_sync::{
     ClipboardInbox, ClipboardOutbox, ClipboardSync, Outgoing, SyncOptions, SyncStatus,
 };
@@ -66,6 +67,8 @@ pub struct ClientOptions {
     pub view_only: bool,
     pub grab_input: bool,
     pub clipboard: bool,
+    pub clipboard_mode: ClipboardMode,
+    pub clipboard_direction: ClipboardDirection,
     /// Largest file copy shared through the clipboard; 0 shares no files.
     pub clipboard_file_limit: u64,
     /// Base X keysym of the Ctrl+Super local grab-release shortcut.
@@ -267,6 +270,8 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
         request_input,
         options.clipboard,
         options.clipboard_file_limit,
+        options.clipboard_mode,
+        options.clipboard_direction,
         &keymap,
         Some(initial_viewport),
         request_cursor_plane,
@@ -288,15 +293,16 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
     // desktop can never delay a frame or an input event.
     if options.clipboard && !hello.clipboard_enabled {
         eprintln!(
-            "jwm-remote: host did not enable clipboard sharing; start it with --allow-clipboard"
+            "jwm-remote: clipboard sharing is off; check host consent and matching clipboard directions"
         );
     }
     if options.clipboard
+        && options.clipboard_mode == ClipboardMode::All
         && options.clipboard_file_limit > 0
         && hello.clipboard_enabled
         && !hello.clipboard_files_enabled
     {
-        eprintln!("jwm-remote: the host shares clipboard text and images, not files");
+        eprintln!("jwm-remote: clipboard files are not enabled for this session");
     }
     let (mut wake_receiver, wake_sender) = wake_pair()?;
     let (mut clipboard_sync, clipboard_inbox, clipboard_outbox) = if hello.clipboard_enabled {
@@ -305,11 +311,14 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
         match ClipboardSync::start(
             options.display.as_deref(),
             SyncOptions {
+                send: hello.stream.clipboard_directions & 1 != 0,
+                receive: hello.stream.clipboard_directions & 2 != 0,
+                images: hello.stream.clipboard_content & 2 != 0,
                 files: hello.clipboard_files_enabled,
                 file_limit: hello.stream.clipboard_file_limit,
                 // What you copied just before connecting is what you most
                 // likely mean to paste over there.
-                share_existing: true,
+                share_existing: hello.stream.clipboard_directions & 1 != 0,
             },
             Some(Box::new(move || {
                 let _ = clipboard_wake.signal();
@@ -318,11 +327,10 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
             Ok((sync, inbox, outbox)) => {
                 eprintln!(
                     "jwm-remote: clipboard sharing enabled ({})",
-                    if hello.clipboard_files_enabled {
-                        "text, images and files"
-                    } else {
-                        "text and images"
-                    }
+                    clipboard_policy::label(
+                        hello.stream.clipboard_content,
+                        hello.stream.clipboard_directions
+                    )
                 );
                 (Some(sync), Some(inbox), Some(outbox))
             }
@@ -405,6 +413,10 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
         &options.peer_label,
     )?;
     viewer.set_clipboard_status(hello.clipboard_enabled);
+    viewer.set_clipboard_policy(clipboard_policy::label(
+        hello.stream.clipboard_content,
+        hello.stream.clipboard_directions,
+    ));
     viewer.set_source_label(current_source_label(&state));
     if state.cursor_enabled.load(Ordering::Acquire) {
         viewer.enable_cursor_plane()?;
@@ -433,7 +445,10 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
             hello.pointer_enabled && request_input,
             hello.keyboard_enabled && request_input
         ),
-        if hello.clipboard_enabled { "ON" } else { "off" }
+        clipboard_policy::label(
+            hello.stream.clipboard_content,
+            hello.stream.clipboard_directions
+        )
     );
     if options.grab_input && (hello.pointer_enabled || hello.keyboard_enabled) {
         eprintln!(
@@ -634,6 +649,8 @@ fn negotiate_session(
     request_input: bool,
     request_clipboard: bool,
     clipboard_file_limit: u64,
+    clipboard_mode: ClipboardMode,
+    clipboard_direction: ClipboardDirection,
     keymap: &KeymapTable,
     initial_viewport: Option<(u16, u16)>,
     request_cursor_plane: bool,
@@ -645,7 +662,13 @@ fn negotiate_session(
     ServerHello,
 )> {
     frame_limits.validate()?;
-    let request_clipboard_files = request_clipboard && clipboard_file_limit > 0;
+    let requested_policy = clipboard_policy::requested(
+        request_clipboard,
+        clipboard_mode,
+        clipboard_direction,
+        clipboard_file_limit,
+    );
+    let request_clipboard_files = requested_policy.0 & 4 != 0;
     stream.set_nodelay(true)?;
     stream.set_read_timeout(Some(negotiation_timeout))?;
     stream.set_write_timeout(Some(negotiation_timeout))?;
@@ -666,6 +689,8 @@ fn negotiate_session(
         &ClientHello {
             stream: super::messages::StreamCapabilities {
                 frame_limits,
+                clipboard_content: requested_policy.0,
+                clipboard_directions: requested_policy.1,
                 clipboard_file_limit: if request_clipboard_files {
                     clipboard_file_limit
                 } else {
@@ -717,6 +742,7 @@ fn negotiate_session(
         request_clipboard_files,
     )?;
     validate_server_file_limit(&hello, clipboard_file_limit)?;
+    validate_server_clipboard_policy(&hello, requested_policy)?;
     negotiation_deadline.cancel();
     reader.set_max_payload_len(MAX_PAYLOAD_LEN);
     reader
@@ -787,6 +813,15 @@ fn validate_server_frame_limits(
     selected.validate()?;
     if selected.intersect(offered) != selected {
         return Err(invalid_data("host enlarged the viewer decoded frame limits").into());
+    }
+    Ok(())
+}
+
+fn validate_server_clipboard_policy(hello: &ServerHello, request: (u8, u8)) -> RemoteResult<()> {
+    if hello.stream.clipboard_content & !request.0 != 0
+        || hello.stream.clipboard_directions & !request.1 != 0
+    {
+        return Err(invalid_data("host enlarged clipboard content or direction consent").into());
     }
     Ok(())
 }
@@ -2149,6 +2184,8 @@ mod tests {
             view_only: true,
             grab_input: false,
             clipboard: false,
+            clipboard_mode: Default::default(),
+            clipboard_direction: Default::default(),
             clipboard_file_limit: 0,
             escape_key: "F12".into(),
         };
@@ -2397,6 +2434,38 @@ mod tests {
                 clipboard_files_enabled: enabled,
             };
             assert_eq!(validate_server_file_limit(&hello, offered).is_ok(), valid);
+        }
+    }
+
+    #[test]
+    fn server_clipboard_policy_cannot_expand_request() {
+        for requested_content in [0, 1, 3, 7] {
+            for requested_direction in 0..=3 {
+                for content in [0, 1, 3, 7] {
+                    for direction in 0..=3 {
+                        let hello = ServerHello {
+                            stream: super::super::messages::StreamCapabilities {
+                                clipboard_content: content,
+                                clipboard_directions: direction,
+                                ..Default::default()
+                            },
+                            pointer_enabled: false,
+                            keyboard_enabled: false,
+                            clipboard_enabled: content != 0,
+                            clipboard_files_enabled: content & 4 != 0,
+                        };
+                        assert_eq!(
+                            validate_server_clipboard_policy(
+                                &hello,
+                                (requested_content, requested_direction)
+                            )
+                            .is_ok(),
+                            content & !requested_content == 0
+                                && direction & !requested_direction == 0
+                        );
+                    }
+                }
+            }
         }
     }
 
@@ -4081,6 +4150,8 @@ mod tests {
             false,
             false,
             0,
+            ClipboardMode::All,
+            ClipboardDirection::Both,
             &KeymapTable::empty(),
             None,
             false,
@@ -4136,6 +4207,8 @@ mod tests {
             false,
             false,
             0,
+            ClipboardMode::All,
+            ClipboardDirection::Both,
             &KeymapTable::empty(),
             None,
             false,
@@ -4186,6 +4259,8 @@ mod tests {
             false,
             false,
             0,
+            ClipboardMode::All,
+            ClipboardDirection::Both,
             &KeymapTable::empty(),
             None,
             false,
@@ -4223,7 +4298,11 @@ mod tests {
                     .write_message(
                         MessageKind::HelloAck,
                         &ServerHello {
-                            stream: Default::default(),
+                            stream: super::super::messages::StreamCapabilities {
+                                clipboard_content: 3,
+                                clipboard_directions: 3,
+                                ..Default::default()
+                            },
                             pointer_enabled: false,
                             keyboard_enabled: false,
                             clipboard_enabled: true,
@@ -4241,6 +4320,8 @@ mod tests {
                 false,
                 request_clipboard,
                 0,
+                ClipboardMode::All,
+                ClipboardDirection::Both,
                 &KeymapTable::empty(),
                 None,
                 false,
@@ -4323,6 +4404,8 @@ mod tests {
             false,
             false,
             0,
+            ClipboardMode::All,
+            ClipboardDirection::Both,
             &KeymapTable::empty(),
             Some((1280, 720)),
             true,

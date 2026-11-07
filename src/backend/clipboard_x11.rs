@@ -110,6 +110,10 @@ struct Atoms {
 /// rather than keeping fifty.
 #[derive(Debug, Clone, Copy)]
 struct CaptureProfile {
+    /// Whether local clipboard content may be read at all. Serving stays independent.
+    capture_enabled: bool,
+    /// Whether image targets may be requested and decoded.
+    images: bool,
     /// Prefer a copied file list over its plain-text form.
     #[cfg(feature = "remote-x11")]
     files: bool,
@@ -122,11 +126,70 @@ struct CaptureProfile {
 impl CaptureProfile {
     #[cfg_attr(not(feature = "backend-x11rb"), allow(dead_code))]
     const HISTORY: Self = Self {
+        capture_enabled: true,
+        images: true,
         #[cfg(feature = "remote-x11")]
         files: false,
         image_bytes: MAX_IMAGE_HISTORY_BYTES,
         capture_existing: true,
     };
+}
+
+impl CaptureProfile {
+    fn capture_existing(self) -> bool {
+        self.capture_enabled && self.capture_existing
+    }
+
+    fn allows_conversion(self, conversion: Conversion) -> bool {
+        self.capture_enabled
+            && match conversion {
+                Conversion::TargetList | Conversion::Text => true,
+                Conversion::Png => self.images,
+                #[cfg(feature = "remote-x11")]
+                Conversion::Files => self.files,
+            }
+    }
+
+    /// Forms worth asking for, best first.
+    ///
+    /// Text wins over images, matching the history. With the remote file
+    /// profile a file manager's list wins over both, since its text form is
+    /// only the paths; a list that names no local file falls through.
+    fn capture_candidates(self, atoms: &Atoms, targets: &[Atom]) -> Vec<(Conversion, Atom)> {
+        if !self.capture_enabled {
+            return Vec::new();
+        }
+        let mut wanted = Vec::with_capacity(8);
+        #[cfg(feature = "remote-x11")]
+        if self.files {
+            wanted.push((Conversion::Files, atoms.gnome_copied_files));
+            wanted.push((Conversion::Files, atoms.uri_list));
+        }
+        // Only the richest advertised text form is asked for, and one image.
+        if let Some(text) = [atoms.text_plain_utf8, atoms.utf8_string, atoms.text_plain]
+            .into_iter()
+            .find(|wanted| targets.contains(wanted))
+        {
+            wanted.push((Conversion::Text, text));
+        }
+        if self.images
+            && let Some(image) = [atoms.image_png, atoms.image_jpeg, atoms.image_bmp]
+                .into_iter()
+                .find(|wanted| targets.contains(wanted))
+        {
+            wanted.push((Conversion::Png, image));
+        }
+        wanted.retain(|(_, target)| targets.contains(target));
+        // Text first, then an image: once text exists the image is never
+        // reached, exactly as before. Files are only ever ahead of both.
+        let first_text = wanted
+            .iter()
+            .position(|(conversion, _)| *conversion == Conversion::Text);
+        if let Some(index) = first_text {
+            wanted.truncate(index + 1);
+        }
+        wanted
+    }
 }
 
 /// One copy as a watcher captured it, before any consumer's filtering.
@@ -630,6 +693,10 @@ impl Clipboard {
 #[cfg(feature = "remote-x11")]
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct RemoteClipboardOptions {
+    /// Capture local clipboard content for the peer. False is receive-only.
+    pub(crate) send: bool,
+    /// Request image targets only when image sharing was negotiated.
+    pub(crate) images: bool,
     /// Share a file manager's copy as files rather than as its path text.
     pub(crate) files: bool,
     /// Encoded-byte ceiling for a shared image.
@@ -656,6 +723,8 @@ impl RemoteClipboard {
         let (wake, worker) = spawn_watcher(
             display,
             CaptureProfile {
+                capture_enabled: options.send,
+                images: options.images,
                 files: options.files,
                 image_bytes: options.image_bytes,
                 capture_existing: options.capture_existing,
@@ -879,15 +948,18 @@ impl Watcher {
             outgoing_incr: std::collections::HashMap::new(),
             shutting_down: false,
         };
-        let existing_owner = watcher
-            .conn
-            .get_selection_owner(watcher.atoms.clipboard)
-            .ok()
-            .and_then(|cookie| cookie.reply().ok())
-            .map(|reply| reply.owner)
-            .unwrap_or(x11rb::NONE);
-        if profile.capture_existing && existing_owner != x11rb::NONE {
-            watcher.begin_capture(existing_owner, x11rb::CURRENT_TIME);
+        // Do not even inspect the preexisting selection in receive-only mode.
+        if profile.capture_existing() {
+            let existing_owner = watcher
+                .conn
+                .get_selection_owner(watcher.atoms.clipboard)
+                .ok()
+                .and_then(|cookie| cookie.reply().ok())
+                .map(|reply| reply.owner)
+                .unwrap_or(x11rb::NONE);
+            if existing_owner != x11rb::NONE {
+                watcher.begin_capture(existing_owner, x11rb::CURRENT_TIME);
+            }
         }
         Ok(watcher)
     }
@@ -1490,6 +1562,9 @@ impl Watcher {
     }
 
     fn begin_capture(&mut self, owner: Window, request_time: u32) {
+        if !self.profile.capture_enabled {
+            return;
+        }
         self.cancel_capture();
         let window = match self.conn.generate_id() {
             Ok(window) => window,
@@ -1733,6 +1808,10 @@ impl Watcher {
     /// and worth it to keep one definition of "this is a secret". Text
     /// wins over PNG when both are advertised.
     fn request_payload_if_allowed(&mut self, targets: &[Atom]) {
+        if !self.profile.capture_enabled {
+            self.cancel_capture();
+            return;
+        }
         let mut unique = std::collections::HashSet::with_capacity(targets.len());
         let targets: Vec<Atom> = targets
             .iter()
@@ -1770,7 +1849,10 @@ impl Watcher {
             self.cancel_capture();
             return;
         }
-        let mut candidates = self.capture_candidates(&targets).into_iter();
+        let mut candidates = self
+            .profile
+            .capture_candidates(&self.atoms, &targets)
+            .into_iter();
         let Some(first) = candidates.next() else {
             self.cancel_capture();
             return;
@@ -1781,52 +1863,11 @@ impl Watcher {
         self.request_candidate(first);
     }
 
-    /// Forms worth asking for, best first.
-    ///
-    /// Text wins over images, matching the history. With the remote file
-    /// profile a file manager's list wins over both, since its text form is
-    /// only the paths; a list that names no local file falls through.
-    fn capture_candidates(&self, targets: &[Atom]) -> Vec<(Conversion, Atom)> {
-        let mut wanted = Vec::with_capacity(8);
-        #[cfg(feature = "remote-x11")]
-        if self.profile.files {
-            wanted.push((Conversion::Files, self.atoms.gnome_copied_files));
-            wanted.push((Conversion::Files, self.atoms.uri_list));
-        }
-        // Only the richest advertised text form is asked for, and one image.
-        if let Some(text) = [
-            self.atoms.text_plain_utf8,
-            self.atoms.utf8_string,
-            self.atoms.text_plain,
-        ]
-        .into_iter()
-        .find(|wanted| targets.contains(wanted))
-        {
-            wanted.push((Conversion::Text, text));
-        }
-        if let Some(image) = [
-            self.atoms.image_png,
-            self.atoms.image_jpeg,
-            self.atoms.image_bmp,
-        ]
-        .into_iter()
-        .find(|wanted| targets.contains(wanted))
-        {
-            wanted.push((Conversion::Png, image));
-        }
-        wanted.retain(|(_, target)| targets.contains(target));
-        // Text first, then an image: once text exists the image is never
-        // reached, exactly as before. Files are only ever ahead of both.
-        let first_text = wanted
-            .iter()
-            .position(|(conversion, _)| *conversion == Conversion::Text);
-        if let Some(index) = first_text {
-            wanted.truncate(index + 1);
-        }
-        wanted
-    }
-
     fn request_candidate(&mut self, (conversion, target): (Conversion, Atom)) {
+        if !self.profile.allows_conversion(conversion) {
+            self.cancel_capture();
+            return;
+        }
         let Some(capture) = self.capture.as_ref() else {
             return;
         };
@@ -2414,6 +2455,10 @@ impl Watcher {
     }
 
     fn retry_unanswered_conversion(&mut self, now: std::time::Instant) {
+        if !self.profile.capture_enabled {
+            self.cancel_capture();
+            return;
+        }
         let Some(capture) = self.capture.as_mut() else {
             return;
         };
@@ -2491,6 +2536,129 @@ fn publish_capture(
 
 #[cfg(test)]
 mod tests {
+    // Synthetic atoms keep candidate-policy tests independent of X11 and the
+    // user's real clipboard. Only identity matters to candidate selection.
+    fn policy_atoms() -> Atoms {
+        Atoms {
+            clipboard: 1,
+            targets: 2,
+            multiple: 3,
+            timestamp: 4,
+            atom_pair: 5,
+            timestamp_probe: 6,
+            clipboard_manager: 7,
+            save_targets: 8,
+            null: 9,
+            handoff_property: 10,
+            handoff_timestamp_probe: 11,
+            utf8_string: 12,
+            text_plain_utf8: 13,
+            text_plain: 14,
+            image_png: 15,
+            image_jpeg: 16,
+            image_bmp: 17,
+            #[cfg(feature = "remote-x11")]
+            gnome_copied_files: 18,
+            #[cfg(feature = "remote-x11")]
+            uri_list: 19,
+            incr: 20,
+            transfer: 21,
+        }
+    }
+
+    #[test]
+    fn receive_only_never_selects_or_starts_capture() {
+        let atoms = policy_atoms();
+        let profile = CaptureProfile {
+            capture_enabled: false,
+            ..CaptureProfile::HISTORY
+        };
+        assert!(!profile.capture_existing());
+        for conversion in [Conversion::TargetList, Conversion::Text, Conversion::Png] {
+            assert!(!profile.allows_conversion(conversion));
+        }
+        assert!(
+            profile
+                .capture_candidates(&atoms, &[atoms.text_plain_utf8, atoms.image_png])
+                .is_empty()
+        );
+        #[cfg(feature = "remote-x11")]
+        {
+            let profile = CaptureProfile {
+                files: true,
+                ..profile
+            };
+            assert!(!profile.allows_conversion(Conversion::Files));
+            assert!(
+                profile
+                    .capture_candidates(&atoms, &[atoms.gnome_copied_files, atoms.uri_list])
+                    .is_empty()
+            );
+        }
+    }
+
+    #[test]
+    fn text_only_never_requests_image_targets_or_conversions() {
+        let atoms = policy_atoms();
+        let profile = CaptureProfile {
+            images: false,
+            ..CaptureProfile::HISTORY
+        };
+        assert!(profile.allows_conversion(Conversion::Text));
+        assert!(!profile.allows_conversion(Conversion::Png));
+        assert!(
+            profile
+                .capture_candidates(
+                    &atoms,
+                    &[atoms.image_png, atoms.image_jpeg, atoms.image_bmp]
+                )
+                .is_empty()
+        );
+        assert_eq!(
+            profile.capture_candidates(&atoms, &[atoms.image_png, atoms.text_plain_utf8]),
+            vec![(Conversion::Text, atoms.text_plain_utf8)]
+        );
+        #[cfg(feature = "remote-x11")]
+        {
+            assert!(!profile.allows_conversion(Conversion::Files));
+            assert!(
+                profile
+                    .capture_candidates(&atoms, &[atoms.gnome_copied_files, atoms.uri_list])
+                    .is_empty()
+            );
+            assert_eq!(
+                profile.capture_candidates(&atoms, &[atoms.uri_list, atoms.text_plain_utf8]),
+                vec![(Conversion::Text, atoms.text_plain_utf8)]
+            );
+        }
+    }
+
+    #[test]
+    fn enabled_capture_preserves_text_preference_and_image_fallback() {
+        let atoms = policy_atoms();
+        let profile = CaptureProfile::HISTORY;
+        assert!(profile.capture_existing());
+        assert!(profile.allows_conversion(Conversion::Png));
+        assert_eq!(
+            profile.capture_candidates(&atoms, &[atoms.image_png, atoms.image_jpeg]),
+            vec![(Conversion::Png, atoms.image_png)]
+        );
+        assert_eq!(
+            profile.capture_candidates(
+                &atoms,
+                &[atoms.text_plain, atoms.text_plain_utf8, atoms.image_png]
+            ),
+            vec![(Conversion::Text, atoms.text_plain_utf8)]
+        );
+        assert!(
+            !CaptureProfile {
+                capture_existing: false,
+                ..profile
+            }
+            .capture_existing()
+        );
+    }
+
     use super::*;
 
     #[cfg(feature = "backend-x11rb")]
@@ -3236,6 +3404,8 @@ mod tests {
     #[cfg(all(feature = "backend-x11rb", feature = "remote-x11"))]
     fn remote_test_options() -> RemoteClipboardOptions {
         RemoteClipboardOptions {
+            send: true,
+            images: true,
             files: true,
             image_bytes: 32 * 1024 * 1024,
             capture_existing: false,

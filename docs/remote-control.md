@@ -372,14 +372,14 @@ gives each complete authenticated video record, including its final flush, one
 budget; a partial or timed-out record closes the whole session so its wire
 sequence can never be retried out of sync.
 
-The current application protocol is version 11. Versions 2 to 10 are
+The current application protocol is version 12. Versions 2 to 11 are
 deliberately incompatible, so update `jwm-remote` on both machines together;
 negotiation rejects an older peer before screen or input data is exchanged.
 Version 7 introduced initial viewport and explicit stream selectors. Version 8
 adds an independently negotiated cursor plane and a video geometry epoch;
 it does not silently reinterpret v7 video or cursor selector semantics.
 
-The v11 hello prefix is the existing 8-byte magic, big-endian `u16` version,
+The v12 hello prefix is the existing 8-byte magic, big-endian `u16` version,
 and capability flags. Both hellos append three one-byte selectors in order:
 codec `1` (JPEG tiles), cursor `1` (composited) or `2` (independent), input `1`
 (X11 keycodes). A viewer advertises independent cursor only after verifying local XRender
@@ -404,6 +404,14 @@ Capture applies the selected bounds before the first frame and on subsequent
 resizes, preserving aspect ratio. Decoder validates each canvas before allocation.
 These limits do not change the shared source region or input authorization.
 
+Version 12 appends two one-byte clipboard selectors after the canvas limits:
+content `0` (off), `1` (text), `3` (text and images), or `7` (text, images and
+files), followed by direction `0` (off), `1` (viewer to host), `2` (host to
+viewer), or `3` (both). The host selects the intersection of the viewer's
+request and host policy. Empty intersection disables clipboard entirely.
+Flags, selectors and file limit must agree; unknown selectors and enlarged
+acknowledgments fail before viewer clipboard startup. Transport crypto is unchanged.
+
 `host`, `connect` and `ssh` accept `--frame-max-width`, `--frame-max-height` and
 `--frame-max-pixels`; defaults retain the existing hard ceilings. SSH applies them
 to both ends. Saved profiles preserve explicit limits; old profiles lacking the
@@ -420,14 +428,14 @@ before JPEG pixel allocation; the existing independent hard bounds still apply.
 
 The client then appends big-endian `u16` viewport width and height, followed
 by the existing bounded keymap table. `(0, 0)` means no initial size; exactly
-one zero dimension is invalid. The server hello is exactly 34 bytes. Unknown
+one zero dimension is invalid. The server hello is exactly 36 bytes. Unknown
 selectors, trailing bytes and incomplete keymaps are rejected. Input and
 clipboard permission flags remain independent of the stream profile.
 
-Compatibility: v11 viewer/v11 host works; v6/v7/v8/v9/v10 with v11 in either direction is
+Compatibility: v12 viewer/v12 host works; v6/v7/v8/v9/v10/v11 with v12 in either direction is
 rejected during negotiation. There is no automatic legacy-version fallback.
 Keep both binaries on the same release; this change does not alter transport
-crypto. Within v11, unsupported independent-cursor capability falls back to
+crypto. Within v12, unsupported independent-cursor capability falls back to
 composited video explicitly in HelloAck.
 
 A version-5 or later host tells an older viewer which version it speaks instead
@@ -1053,7 +1061,39 @@ jwm-remote host ... --allow-clipboard
 jwm-remote connect ... --clipboard
 ```
 
-Whatever you copy on either desktop is what you paste on the other:
+**Narrowing what is shared.** `host`, `connect` and `ssh` accept:
+
+- `--clipboard-mode text|text-images|all` (default `all`).
+- `--clipboard-direction both|to-host|from-host` (default `both`). Directions
+  always name the viewer and host, even on the host command line.
+
+These flags require the existing explicit consent flag (`--allow-clipboard`
+on host, `--clipboard` on connect/SSH); they never enable sharing alone. Each
+end may narrow policy. The effective policy is their intersection, never a
+broader grant. `--clipboard-file-limit 0` still disables files. For example:
+
+```sh
+jwm-remote host --allow-clipboard --clipboard-mode text --clipboard-direction to-host
+jwm-remote connect HOST --clipboard --clipboard-mode text --clipboard-direction to-host
+jwm-remote ssh user@desktop --clipboard --clipboard-mode text-images --clipboard-direction from-host
+```
+
+SSH session reuse includes clipboard consent, effective content/direction and
+file limit, input permission, source grants and frame limits. A different
+immutable policy is never applied to or used to focus a broader existing
+session. Close that session explicitly, then start the new one; a policy change
+does not silently close it. Switching monitors with identical policy retains
+the existing monitor-switch behavior. Local window size does not change identity.
+
+Text-only does not request image/file payloads or read copied file contents.
+A file manager may still offer its paths as ordinary text, which text-only can
+share. Receive-only endpoints do not capture local clipboard contents. Policy
+is immutable for the session; reconnect explicitly to change it. Saved profiles
+preserve narrowing, and missing scope fields retain legacy all/both semantics
+only when the required clipboard consent boolean is already true.
+
+With the default all/both settings, whatever you copy on either desktop is what
+you paste on the other:
 
 - **Text** in any application, as UTF-8, up to 256 KiB.
 - **Images** — a screenshot, an image copied in a browser or an image
@@ -1107,7 +1147,7 @@ acknowledges a chunk only once it is written, and the sender keeps at most
 sender, and a frame or an input batch never waits behind more than a megabyte
 of copied data. A peer that overruns that window ends the session.
 
-**On connect,** the viewer shares what is already on its clipboard — what you
+**On connect,** if its outgoing direction is enabled, the viewer shares what is already on its clipboard — what you
 copied just before connecting is usually what you mean to paste — and the host
 does not, so the two machines never swap clipboards.
 
@@ -1117,7 +1157,7 @@ its variants — is never shared. And payloads are validated before they are
 handed to the local X server: text must be valid UTF-8 within its cap, and an
 image must decode as a PNG within 16 megapixels.
 
-**Understand what this shares.** With clipboard sharing on, everything you copy
+**Understand what this shares.** With default all/both clipboard sharing on, everything you copy
 on either machine crosses the network to the other, for as long as the session
 lasts — including files you copy in a file manager, which are sent whether or
 not you paste them there. That is the point of the feature, but it is a much

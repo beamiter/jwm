@@ -19,6 +19,7 @@
 
 use super::RemoteResult;
 use super::client::{ClientOptions, run_client};
+use super::clipboard_policy::{ClipboardDirection, ClipboardMode};
 use super::key::{KeySource, generate_session_key};
 use super::messages::FrameLimits;
 use super::x11_capture::CaptureArea;
@@ -67,6 +68,8 @@ pub struct SshOptions {
     pub view_only: bool,
     pub grab_input: bool,
     pub clipboard: bool,
+    pub clipboard_mode: ClipboardMode,
+    pub clipboard_direction: ClipboardDirection,
     /// Largest file copy shared through the clipboard; 0 shares no files.
     pub clipboard_file_limit: u64,
     pub escape_key: String,
@@ -139,6 +142,8 @@ pub fn run_ssh(options: SshOptions) -> RemoteResult<()> {
                 view_only: options.view_only,
                 grab_input: options.grab_input,
                 clipboard: options.clipboard,
+                clipboard_mode: options.clipboard_mode,
+                clipboard_direction: options.clipboard_direction,
                 clipboard_file_limit: options.clipboard_file_limit,
                 frame_limits: options.frame_limits,
                 escape_key: options.escape_key.clone(),
@@ -274,27 +279,50 @@ const SWITCH_TIMEOUT: Duration = Duration::from_secs(10);
 /// Take the machine's session slot, or settle the request without one.
 ///
 /// One host captures a screen at a time, so a machine has one session. The
-/// same monitor again means "take me back there"; another monitor of that
-/// machine means "switch", which closes the open viewer first. `None` means
+/// same monitor and policy means "take me back there"; another monitor with
+/// identical policy means "switch", which closes the open viewer first. A
+/// different immutable policy is rejected until the prior session is closed. `None` means
 /// the request was settled without starting a session.
 fn claim_session(options: &SshOptions, label: &str) -> RemoteResult<Option<SessionLock>> {
     let mut lock = match SessionLock::acquire(&options.destination)? {
         Ok(lock) => lock,
-        Err(holder) if holder == label => {
-            if focus_existing_viewer(options.display.as_deref(), label)? {
-                eprintln!("jwm-remote: {label} is already open; brought it to the front");
-            } else {
-                eprintln!("jwm-remote: a connection to {label} is already starting");
-            }
-            return Ok(None);
-        }
-        Err(holder) => match switch_from(options, &holder, label)? {
+        Err(holder) => match dispatch_held_session(
+            &holder,
+            label,
+            || focus_existing_viewer(options.display.as_deref(), label),
+            || switch_from(options, &holder, label),
+        )? {
             Some(lock) => lock,
             None => return Ok(None),
         },
     };
     lock.record(label)?;
     Ok(Some(lock))
+}
+
+/// Validate immutable policy before either callback can touch an X window.
+fn dispatch_held_session<T>(
+    holder: &str,
+    label: &str,
+    focus: impl FnOnce() -> RemoteResult<bool>,
+    switch: impl FnOnce() -> RemoteResult<Option<T>>,
+) -> RemoteResult<Option<T>> {
+    if !same_session_policy(holder, label) {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "the existing SSH session has a different or legacy permission policy; close it explicitly before starting this session",
+        ).into());
+    }
+    if holder == label {
+        if focus()? {
+            eprintln!("jwm-remote: {label} is already open; brought it to the front");
+        } else {
+            eprintln!("jwm-remote: a connection to {label} is already starting");
+        }
+        Ok(None)
+    } else {
+        switch()
+    }
 }
 
 /// Close the session showing `holder` and take its slot once it has gone.
@@ -407,15 +435,41 @@ fn peer_label(options: &SshOptions) -> String {
         Some(monitor) => format!("{} ({monitor})", options.destination),
         None => options.destination.clone(),
     };
-    if options.shared_sources.is_empty() {
-        return initial;
-    }
-    // A request with different grants must restart, not focus an older session
-    // with broader (or narrower) permission. Keep the title/lock key bounded.
+    // Never focus an older session with a different permission scope. Always
+    // include the policy fingerprint, including disabled clipboard, so legacy
+    // labels without a policy cannot accidentally reuse a broader session.
+    let (content, direction) = super::clipboard_policy::requested(
+        options.clipboard,
+        options.clipboard_mode,
+        options.clipboard_direction,
+        options.clipboard_file_limit,
+    );
+    let file_limit = if content & 4 != 0 {
+        options.clipboard_file_limit
+    } else {
+        0
+    };
     use sha2::{Digest, Sha256};
-    let digest = Sha256::digest(format!("{:?}", options.shared_sources).as_bytes());
+    let digest = Sha256::digest(
+        format!(
+            "{:?};clipboard={content},{direction},{file_limit};view_only={};frames={:?}",
+            options.shared_sources, options.view_only, options.frame_limits
+        )
+        .as_bytes(),
+    );
     let fingerprint: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
-    format!("{initial} [sources {fingerprint}]")
+    format!("{initial} [policy {fingerprint}]")
+}
+
+// A monitor change can reuse the machine slot only after checking identical
+// immutable policy. Legacy labels have no policy and fail closed.
+fn same_session_policy(left: &str, right: &str) -> bool {
+    fn fingerprint(label: &str) -> Option<&str> {
+        let (_, suffix) = label.rsplit_once(" [policy ")?;
+        let hash = suffix.strip_suffix(']')?;
+        (hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())).then_some(hash)
+    }
+    matches!((fingerprint(left), fingerprint(right)), (Some(a), Some(b)) if a == b)
 }
 
 /// An SSH destination as accepted here: no option-like or multi-word values,
@@ -496,6 +550,10 @@ fn remote_host_script_with(options: &SshOptions, remote_port: u16, managed: &str
     }
     if options.clipboard {
         host.push_str(" --allow-clipboard");
+        host.push_str(&format!(
+            " --clipboard-mode {} --clipboard-direction {}",
+            options.clipboard_mode, options.clipboard_direction
+        ));
         // Both ends enforce their own limit; give the host the same one.
         host.push_str(&format!(
             " --clipboard-file-limit {}",
@@ -575,6 +633,8 @@ mod tests {
             view_only: false,
             grab_input: true,
             clipboard: false,
+            clipboard_mode: ClipboardMode::All,
+            clipboard_direction: ClipboardDirection::Both,
             clipboard_file_limit: 2 << 30,
             escape_key: "F12".into(),
         }
@@ -626,6 +686,113 @@ mod tests {
                 .to_string()
                 .contains("window size")
         );
+    }
+
+    #[test]
+    fn held_session_policy_mismatch_never_focuses_or_closes_a_viewer() {
+        let mut broad = options();
+        broad.clipboard = true;
+        let held = peer_label(&broad);
+        let mut narrow = broad.clone();
+        narrow.clipboard_mode = ClipboardMode::Text;
+        narrow.clipboard_direction = ClipboardDirection::FromHost;
+        let mut disabled = broad.clone();
+        disabled.clipboard = false;
+        for (holder, requested) in [
+            (held.clone(), peer_label(&narrow)),
+            (held.clone(), peer_label(&disabled)),
+            ("legacy".into(), peer_label(&disabled)),
+            ("legacy".into(), "legacy".into()),
+        ] {
+            let error = dispatch_held_session::<()>(
+                &holder,
+                &requested,
+                || panic!("policy mismatch must not focus a viewer"),
+                || panic!("policy mismatch must not switch or close a viewer"),
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains("close it explicitly"));
+        }
+        assert!(
+            dispatch_held_session::<()>(
+                &held,
+                &held,
+                || Ok(true),
+                || panic!("same session must not close")
+            )
+            .unwrap()
+            .is_none()
+        );
+        let mut other_monitor = broad;
+        other_monitor.monitor = Some("DP-2".into());
+        assert_eq!(
+            dispatch_held_session(
+                &held,
+                &peer_label(&other_monitor),
+                || panic!("monitor switch must not focus old viewer"),
+                || Ok(Some(123))
+            )
+            .unwrap(),
+            Some(123)
+        );
+    }
+
+    #[test]
+    fn clipboard_scope_changes_session_identity_without_dormant_grants() {
+        let mut broad = options();
+        broad.clipboard = true;
+        let broad_label = peer_label(&broad);
+        let mut narrow = broad.clone();
+        narrow.clipboard_mode = ClipboardMode::Text;
+        narrow.clipboard_direction = ClipboardDirection::FromHost;
+        assert_ne!(broad_label, peer_label(&narrow));
+        assert!(!same_session_policy(&broad_label, &peer_label(&narrow)));
+        let mut disabled = broad.clone();
+        disabled.clipboard = false;
+        assert_ne!(broad_label, peer_label(&disabled));
+        assert!(!same_session_policy(&broad_label, &peer_label(&disabled)));
+        let disabled_label = peer_label(&disabled);
+        disabled.clipboard_mode = ClipboardMode::Text;
+        disabled.clipboard_direction = ClipboardDirection::ToHost;
+        disabled.clipboard_file_limit = 123;
+        assert_eq!(disabled_label, peer_label(&disabled));
+
+        let mut reduced_limit = broad.clone();
+        reduced_limit.clipboard_file_limit /= 2;
+        assert_ne!(broad_label, peer_label(&reduced_limit));
+        narrow.clipboard_file_limit = 0;
+        let text_label = peer_label(&narrow);
+        narrow.clipboard_file_limit = u64::MAX;
+        assert_eq!(text_label, peer_label(&narrow));
+        broad.clipboard_file_limit = 0;
+        let no_files_label = peer_label(&broad);
+        broad.clipboard_mode = ClipboardMode::TextImages;
+        broad.clipboard_file_limit = 123;
+        assert_eq!(no_files_label, peer_label(&broad));
+        let mut view_only = options();
+        view_only.view_only = true;
+        assert_ne!(peer_label(&options()), peer_label(&view_only));
+        assert!(!same_session_policy(
+            &peer_label(&options()),
+            &peer_label(&view_only)
+        ));
+        let mut smaller = options();
+        smaller.frame_limits.max_pixels /= 2;
+        assert_ne!(peer_label(&options()), peer_label(&smaller));
+        assert!(!same_session_policy(
+            &peer_label(&options()),
+            &peer_label(&smaller)
+        ));
+        let mut other_monitor = options();
+        other_monitor.monitor = Some("DP-2".into());
+        assert!(same_session_policy(
+            &peer_label(&options()),
+            &peer_label(&other_monitor)
+        ));
+        assert!(!same_session_policy("legacy", &peer_label(&options())));
+        assert!(!same_session_policy("legacy", "legacy"));
+        // Legacy labels never contained an explicit clipboard policy.
+        assert_ne!(peer_label(&disabled), disabled.destination);
     }
 
     #[test]
@@ -689,6 +856,8 @@ mod tests {
         let mut view = options();
         view.view_only = true;
         view.clipboard = true;
+        view.clipboard_mode = ClipboardMode::Text;
+        view.clipboard_direction = ClipboardDirection::FromHost;
         view.fps = Some(24);
         view.jpeg_quality = Some(70);
         view.max_width = Some(1280);
@@ -701,6 +870,10 @@ mod tests {
         let printed = String::from_utf8(output.stdout).unwrap();
         assert!(!printed.contains("--allow-input"), "{printed}");
         assert!(printed.contains("[--allow-clipboard]"), "{printed}");
+        assert!(
+            printed.contains("[--clipboard-mode]\n[text]\n[--clipboard-direction]\n[from-host]\n"),
+            "{printed}"
+        );
         assert!(
             printed.contains("[--fps]\n[24]\n[--jpeg-quality]\n[70]\n[--max-width]\n[1280]\n"),
             "{printed}"

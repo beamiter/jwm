@@ -18,6 +18,7 @@ pub type RemoteResult<T> = Result<T, RemoteError>;
 
 pub mod client;
 pub mod clipboard_files;
+pub mod clipboard_policy;
 pub mod clipboard_sync;
 pub mod cursor;
 mod deadline;
