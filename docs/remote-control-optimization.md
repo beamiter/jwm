@@ -281,3 +281,22 @@ The explicit fallback case times rejected preflight plus full resize.
 These are smoke measurements, not a statistically controlled benchmark. They
 exclude X11 conversion/upload, encoding, transport, presentation, and interactive
 latency. They do not justify a general speedup or desktop performance claim.
+
+### Viewer allocation ceilings
+
+The viewer validates startup geometry and local X11 resize notifications before
+changing its viewport or requesting replacement pixmaps. Direct decoded-frame
+callers and reusable native images also enforce the existing hard limits: 16384
+pixels per axis and 64 MiPixels total. These limits preserve normal 8K fullscreen;
+the smaller explicit startup-size budget remains unchanged. Transient zero-sized
+ConfigureNotify dimensions retain their previous normalization to one pixel,
+while zero-sized direct inputs are rejected. Oversized events fail explicitly
+rather than silently clamping the viewport and changing input coordinates.
+
+This bounds resources requested in response to trusted local X11 events; it is
+not a remote-exploit claim or a low-memory guarantee. Full Triangle resizing,
+retained frames, native images, server pixmaps and in-flight SHM buffers can still
+consume substantial memory within the hard cap. Partial Triangle scratch keeps
+its separate 16 MiB cap. Pure tests cover boundaries and guard ordering without
+large allocations. Live-X11 behavior and memory/latency measurements remain
+unverified for this guard.

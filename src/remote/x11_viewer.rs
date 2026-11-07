@@ -619,6 +619,30 @@ pub struct Viewer {
     close_reported: bool,
 }
 
+/// Bound viewer resources independently of negotiated capture/startup budgets.
+/// This is a hard ceiling, not a guarantee that large images fit available RAM.
+fn validate_viewer_dimensions(width: u32, height: u32) -> RemoteResult<()> {
+    if width == 0
+        || height == 0
+        || width > u32::from(super::frame::MAX_DIMENSION)
+        || height > u32::from(super::frame::MAX_DIMENSION)
+        || u64::from(width) * u64::from(height) > super::frame::MAX_PIXELS
+    {
+        return Err(invalid_data(
+            "viewer dimensions must be nonzero, at most 16384 per axis and 67108864 pixels",
+        )
+        .into());
+    }
+    Ok(())
+}
+
+fn configured_viewer_dimensions(width: u16, height: u16) -> RemoteResult<(u16, u16)> {
+    // Preserve the existing normalization for transient zero-sized X events.
+    let dimensions = (width.max(1), height.max(1));
+    validate_viewer_dimensions(u32::from(dimensions.0), u32::from(dimensions.1))?;
+    Ok(dimensions)
+}
+
 /// Share of the local monitor a new viewer window may ask for, per axis.
 const INITIAL_WINDOW_PERCENT: u32 = 90;
 
@@ -880,9 +904,7 @@ impl Viewer {
             size.validate()?;
         }
         let forward_input = pointer_enabled || forward_keyboard;
-        if initial_width == 0 || initial_height == 0 {
-            return Err(invalid_input("remote viewer dimensions must be nonzero").into());
-        }
+        validate_viewer_dimensions(u32::from(initial_width), u32::from(initial_height))?;
 
         let (conn, screen_num) = xbar_core::x11_connection::connect(display)?;
         if forward_keyboard {
@@ -941,6 +963,7 @@ impl Viewer {
             (monitor.2, monitor.3),
             window_size,
         );
+        validate_viewer_dimensions(u32::from(initial_width), u32::from(initial_height))?;
         let ((window_x, window_y), accepted_position) = match (window_position, target) {
             (Some(position), Some(target)) => {
                 let placement = super::window_position::place(
@@ -1209,8 +1232,8 @@ impl Viewer {
                     redraw |= event.count == 0;
                 }
                 Event::ConfigureNotify(event) if event.window == self.window => {
-                    let new_width = event.width.max(1);
-                    let new_height = event.height.max(1);
+                    let (new_width, new_height) =
+                        configured_viewer_dimensions(event.width, event.height)?;
                     if (new_width, new_height) != (self.width, self.height) {
                         self.width = new_width;
                         self.height = new_height;
@@ -1763,8 +1786,8 @@ impl Viewer {
             return Err(invalid_data("X11 presentation queue is full").into());
         }
         let sequence = frame.sequence;
-        self.apply_pending_resize()?;
         validate_frame(&frame)?;
+        self.apply_pending_resize()?;
         // A mailbox can skip decoded snapshots. Only apply damage when its
         // exact predecessor is already displayed; otherwise the full image
         // includes every missed delta and safely restores convergence.
@@ -2135,6 +2158,7 @@ impl Viewer {
     }
 
     fn resize_backing(&mut self) -> RemoteResult<()> {
+        validate_viewer_dimensions(u32::from(self.width), u32::from(self.height))?;
         let replacement = self.conn.generate_id()?;
         let create_result = self
             .conn
@@ -3796,6 +3820,7 @@ fn ensure_native_image<'a>(
     depth: u8,
     setup: &Setup,
 ) -> RemoteResult<&'a mut XImage<'static>> {
+    validate_viewer_dimensions(u32::from(width), u32::from(height))?;
     let needs_replacement = image.as_ref().is_none_or(|image| {
         (image.width(), image.height(), image.depth()) != (width, height, depth)
     });
@@ -4273,17 +4298,11 @@ fn load_escape_keycodes(conn: &RustConnection, keysym: u32) -> RemoteResult<Vec<
 }
 
 fn validate_frame(frame: &StoredFrame) -> RemoteResult<()> {
-    if frame.source_width == 0 || frame.source_height == 0 {
-        return Err(invalid_data("remote frame has an empty source geometry").into());
-    }
-    if frame.image().width() == 0 || frame.image().height() == 0 {
-        return Err(invalid_data("remote frame has an empty image").into());
-    }
-    u16::try_from(frame.image().width())
-        .map_err(|_| invalid_data("decoded frame width exceeds the X11 protocol range"))?;
-    u16::try_from(frame.image().height())
-        .map_err(|_| invalid_data("decoded frame height exceeds the X11 protocol range"))?;
-    Ok(())
+    validate_viewer_dimensions(
+        u32::from(frame.source_width),
+        u32::from(frame.source_height),
+    )?;
+    validate_viewer_dimensions(frame.image().width(), frame.image().height())
 }
 
 fn replace_stored_frame(slot: &mut Option<StoredFrame>, next: StoredFrame) {
@@ -4313,6 +4332,101 @@ mod tests {
     };
     use std::cell::Cell;
     use std::sync::Arc;
+
+    #[test]
+    fn viewer_resource_bounds_preserve_8k_and_reject_oversized_geometry() {
+        for (w, h) in [
+            (1, 1),
+            (7680, 4320),
+            (8192, 8192),
+            (16384, 4096),
+            (4096, 16384),
+        ] {
+            assert!(validate_viewer_dimensions(w, h).is_ok(), "{w}x{h}");
+        }
+        for (w, h) in [
+            (0, 1),
+            (1, 0),
+            (16385, 1),
+            (1, 16385),
+            (16384, 4097),
+            (4097, 16384),
+            (65535, 65535),
+            (u32::MAX, u32::MAX),
+        ] {
+            assert!(validate_viewer_dimensions(w, h).is_err(), "{w}x{h}");
+        }
+        assert_eq!(configured_viewer_dimensions(0, 0).unwrap(), (1, 1));
+        assert_eq!(configured_viewer_dimensions(0, 4320).unwrap(), (1, 4320));
+        assert!(configured_viewer_dimensions(65535, 0).is_err());
+    }
+
+    #[test]
+    fn viewer_frame_bounds_cover_direct_source_and_decoded_callers() {
+        let mut frame = StoredFrame::from_decoded(DecodedFrame {
+            sequence: 1,
+            source_width: 7680,
+            source_height: 4320,
+            image: RgbImage::new(1, 1),
+        });
+        assert!(validate_frame(&frame).is_ok());
+        frame.source_width = 16385;
+        assert!(validate_frame(&frame).is_err());
+        frame.source_width = 16384;
+        frame.source_height = 4097;
+        assert!(validate_frame(&frame).is_err());
+        frame.source_width = 1;
+        frame.source_height = 1;
+        // Only about 48 KiB: no boundary test allocates a huge frame.
+        frame.image = StoredImage::Owned(RgbImage::new(16385, 1));
+        assert!(validate_frame(&frame).is_err());
+        frame.image = StoredImage::Owned(RgbImage::new(0, 1));
+        assert!(validate_frame(&frame).is_err());
+    }
+
+    #[test]
+    fn viewer_resource_checks_precede_mutation_and_allocation() {
+        let source = include_str!("x11_viewer.rs");
+        let configure = source
+            .split("Event::ConfigureNotify(event) if")
+            .nth(1)
+            .unwrap();
+        assert!(
+            configure.find("configured_viewer_dimensions(").unwrap()
+                < configure.find("self.width =").unwrap()
+        );
+        let connect = source
+            .split("pub(crate) fn connect_with_window_geometry(")
+            .nth(1)
+            .unwrap();
+        assert!(
+            connect.find("validate_viewer_dimensions(").unwrap()
+                < connect.find("xbar_core::x11_connection::connect(").unwrap()
+        );
+        let startup = connect
+            .split("let (initial_width, initial_height) = startup_window_size(")
+            .nth(1)
+            .unwrap();
+        assert!(
+            startup.find("validate_viewer_dimensions(").unwrap()
+                < startup.find("conn.create_window(").unwrap()
+        );
+        let resize = source.split("fn resize_backing(&mut self)").nth(1).unwrap();
+        assert!(
+            resize.find("validate_viewer_dimensions(").unwrap()
+                < resize.find("self.conn.generate_id()").unwrap()
+        );
+        let native = source.split("fn ensure_native_image<'a>(").nth(1).unwrap();
+        assert!(
+            native.find("validate_viewer_dimensions(").unwrap()
+                < native.find("XImage::allocate_native(").unwrap()
+        );
+        let draw = source.split("fn draw_stored(&mut self").nth(1).unwrap();
+        assert!(
+            draw.find("validate_frame(&frame)").unwrap()
+                < draw.find("self.apply_pending_resize()").unwrap()
+        );
+    }
 
     fn standard_visual() -> Visualtype {
         Visualtype {
