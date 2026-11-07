@@ -320,8 +320,8 @@ retries. Using Ctrl+Super+F12 (or the configured escape shortcut) still only
 releases the grab; it also disables reconnect for that session so a later drop
 cannot unexpectedly reopen a grabbed viewer. Layout/selection changes and
 identity or authentication failures never silently retry, downgrade or broaden
-sharing. A fresh connection does not restore window geometry or clipboard
-transfer progress. SSH and saved profile runs never reconnect automatically;
+sharing. A fresh connection reapplies an explicit `--window-size`, if supplied, but does
+not restore observed window geometry or clipboard transfer progress. SSH and saved profile runs never reconnect automatically;
 nonzero reconnect consent cannot be saved in a profile.
 
 Offline tests cover classification, budgets, cleanup and a loopback EOF path.
@@ -1461,12 +1461,39 @@ jwm-remote profile run office --view-only --no-clipboard
 ```
 
 Run-time profile overrides can only reduce permissions. Direct connections cannot
-change a separately running host's monitor or quality. Profiles do not restore
-window position/size or reconnect automatically. Extra source grants are not
+change a separately running host's monitor or quality. Profiles can reapply an
+explicitly saved startup size; they do not restore window position or reconnect
+automatically. Extra source grants are not
 stored: saving an SSH command with any `--share-monitor`, `--share-region`, or
 `--share-root` flag fails rather than silently dropping it. Use `ssh` directly
 for a session with extra grants. Existing profiles retain their original scope.
-Only supported viewer settings are saved; the window is created normally.
+To request and explicitly save a local viewer client size:
+
+```sh
+jwm-remote connect desk --window-size 1280x720 --view-only
+jwm-remote profile save office --replace -- ssh user@office --view-only --window-size 1280x720
+jwm-remote profile run office
+```
+
+`--window-size WIDTHxHEIGHT` accepts ASCII decimal dimensions from 1 through
+8192, with at most 16,777,216 pixels. This requests the local client area, not
+window borders or source geometry. The window manager may tile or resize the
+window differently; its actual size is then reported normally. Explicit sizes
+are centered using the existing placement policy and are not reduced to fit a
+smaller monitor. Without this option, the existing centered, aspect-preserving
+90%-monitor fit remains unchanged.
+
+The requested size also supplies the initial viewport before the first capture.
+It remains independent of decoded-frame safety budgets: those limits still cap
+video allocation and never enlarge to accommodate a requested window. The
+viewer can scale or letterbox a smaller decoded frame into the requested area.
+SSH uses the size only in its local viewer, never in the remote host command.
+Only an explicit `profile save` stores the supplied size. No desktop geometry is
+observed for persistence, and no last-selected source, extra grant, credential,
+or clipboard-transfer state is saved. Old profiles without a size keep the
+original default. Position restoration remains deferred. Size parsing, profile
+round trips and startup selection have deterministic tests; actual window-manager
+placement and presentation have not been live-X11 validated in this checkout.
 
 The version-1 JSON schema rejects unknown fields and missing permission booleans.
 Names are 1–64 ASCII letters, digits, hyphens or underscores. The dedicated directory

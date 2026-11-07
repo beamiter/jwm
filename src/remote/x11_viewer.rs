@@ -645,6 +645,18 @@ fn fit_initial_window(frame: (u16, u16), monitor: (u16, u16)) -> (u16, u16) {
     )
 }
 
+/// Explicit size is independent of the first decoded frame and its budget.
+fn startup_window_size(
+    frame: (u16, u16),
+    monitor: (u16, u16),
+    size: Option<super::window_size::WindowSize>,
+) -> (u16, u16) {
+    size.map_or_else(
+        || fit_initial_window(frame, monitor),
+        |size| size.dimensions(),
+    )
+}
+
 /// Origin that centres a `size` window on `monitor` (`x, y, width, height`).
 fn centered_origin(monitor: (i16, i16, u16, u16), size: (u16, u16)) -> (i16, i16) {
     let offset = |origin: i16, extent: u16, length: u16| {
@@ -700,7 +712,14 @@ fn placement_monitor(
 /// Query the prospective viewer bounds before requesting the first video frame.
 /// Uses the same monitor selection as window creation; a later ConfigureNotify
 /// remains authoritative if the WM tiles or resizes the window differently.
-pub(crate) fn initial_viewport(display: Option<&str>) -> RemoteResult<(u16, u16)> {
+pub(crate) fn initial_viewport(
+    display: Option<&str>,
+    size: Option<super::window_size::WindowSize>,
+) -> RemoteResult<(u16, u16)> {
+    if let Some(size) = size {
+        size.validate()?;
+        return Ok(size.dimensions());
+    }
     let (conn, screen_num) = xbar_core::x11_connection::connect(display)?;
     let screen = conn
         .setup()
@@ -731,6 +750,36 @@ impl Viewer {
         escape_key: &str,
         peer_label: &str,
     ) -> RemoteResult<Self> {
+        Self::connect_with_window_size(
+            display,
+            initial_width,
+            initial_height,
+            None,
+            pointer_enabled,
+            forward_keyboard,
+            verified_keymap,
+            grab_input,
+            escape_key,
+            peer_label,
+        )
+    }
+
+    /// Internal startup with an explicit, validated local client-size request.
+    pub(crate) fn connect_with_window_size(
+        display: Option<&str>,
+        initial_width: u16,
+        initial_height: u16,
+        window_size: Option<super::window_size::WindowSize>,
+        pointer_enabled: bool,
+        forward_keyboard: bool,
+        verified_keymap: Option<super::x11_keymap::KeymapTable>,
+        grab_input: bool,
+        escape_key: &str,
+        peer_label: &str,
+    ) -> RemoteResult<Self> {
+        if let Some(size) = window_size {
+            size.validate()?;
+        }
         let forward_input = pointer_enabled || forward_keyboard;
         if initial_width == 0 || initial_height == 0 {
             return Err(invalid_input("remote viewer dimensions must be nonzero").into());
@@ -777,14 +826,16 @@ impl Viewer {
                 (screen.width_in_pixels, screen.height_in_pixels),
             )
         };
-        // The first frame is bounded by the initial monitor request.
-        // Recheck placement because the local topology may have changed. A 5120x1440 desk opened 5120 pixels wide on
-        // a 2560 laptop, mostly off-screen wherever the window manager did
-        // not tile it. Ask for a window that fits the local monitor instead;
-        // the viewport report that follows narrows the stream to match.
+        // Recheck placement because the local topology may have changed.
+        // Without an explicit size, fit the first frame to the local monitor
+        // as before. Explicit size is independent of decoded-frame dimensions;
+        // the actual viewport report follows if the WM overrides our request.
         let monitor = placement_monitor(&conn, root, screen_size);
-        let (initial_width, initial_height) =
-            fit_initial_window((initial_width, initial_height), (monitor.2, monitor.3));
+        let (initial_width, initial_height) = startup_window_size(
+            (initial_width, initial_height),
+            (monitor.2, monitor.3),
+            window_size,
+        );
         let (window_x, window_y) = centered_origin(monitor, (initial_width, initial_height));
         // MIT-SHM requires QueryVersion to complete before any other request
         // from the extension. Segment allocation remains lazy until a frame is
@@ -4147,6 +4198,38 @@ mod tests {
             y: 0,
             visible: true,
         }
+    }
+
+    #[test]
+    fn explicit_startup_size_is_independent_of_frame_and_default_is_unchanged() {
+        let size = Some(super::super::window_size::WindowSize {
+            width: 1280,
+            height: 720,
+        });
+        for frame in [(1, 1), (640, 480), (8192, 8192)] {
+            for monitor in [(1920, 1080), (800, 600)] {
+                assert_eq!(startup_window_size(frame, monitor, size), (1280, 720));
+                assert_eq!(
+                    startup_window_size(frame, monitor, None),
+                    fit_initial_window(frame, monitor)
+                );
+            }
+        }
+        // Explicit viewport needs no display inspection; invalid values fail first.
+        assert_eq!(
+            initial_viewport(Some("invalid display"), size).unwrap(),
+            (1280, 720)
+        );
+        assert!(
+            initial_viewport(
+                Some("invalid display"),
+                Some(super::super::window_size::WindowSize {
+                    width: 0,
+                    height: 1
+                })
+            )
+            .is_err()
+        );
     }
 
     #[test]

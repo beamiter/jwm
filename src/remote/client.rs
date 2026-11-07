@@ -54,6 +54,8 @@ const RECEIVER_JOIN_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Debug)]
 pub struct ClientOptions {
+    /// Explicit local client-area startup size; None preserves automatic sizing.
+    pub window_size: Option<super::window_size::WindowSize>,
     pub frame_limits: super::messages::FrameLimits,
     pub address: String,
     /// What to call the host in messages and the window title: the address
@@ -239,6 +241,9 @@ fn suppress_reconnect(result: RemoteResult<()>, suppress: bool) -> RemoteResult<
 }
 
 fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> RemoteResult<()> {
+    if let Some(size) = options.window_size {
+        size.validate()?;
+    }
     validate_escape_key(&options.escape_key)?;
     let key = options.key.load()?;
     let request_input = !options.view_only;
@@ -247,7 +252,8 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
     } else {
         KeymapTable::empty()
     };
-    let initial_viewport = super::x11_viewer::initial_viewport(options.display.as_deref())?;
+    let initial_viewport =
+        super::x11_viewer::initial_viewport(options.display.as_deref(), options.window_size)?;
     let request_cursor_plane =
         super::x11_viewer::supports_cursor_plane(options.display.as_deref())?;
     *stage = ClientStage::Connect;
@@ -386,10 +392,11 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
         .map_err(|_| invalid_data("initial frame is taller than an X11 window"))?;
     let last_sequence = first_frame.frame.sequence();
     *stage = ClientStage::Display;
-    let mut viewer = Viewer::connect(
+    let mut viewer = Viewer::connect_with_window_size(
         options.display.as_deref(),
         initial_width,
         initial_height,
+        options.window_size,
         hello.pointer_enabled,
         hello.keyboard_enabled,
         hello.keyboard_enabled.then_some(keymap),
@@ -2124,6 +2131,34 @@ mod tests {
     use std::net::TcpListener;
 
     const TEST_PSK: [u8; PSK_LEN] = [0x5a; PSK_LEN];
+
+    #[test]
+    fn invalid_startup_size_fails_before_reading_key_or_display() {
+        let options = ClientOptions {
+            window_size: Some(super::super::window_size::WindowSize {
+                width: 0,
+                height: 1,
+            }),
+            frame_limits: super::super::messages::FrameLimits::default(),
+            address: "invalid address".into(),
+            peer_label: "test".into(),
+            key: KeySource::File(std::path::PathBuf::from(
+                "/nonexistent/window-size-test.key",
+            )),
+            display: Some("invalid display".into()),
+            view_only: true,
+            grab_input: false,
+            clipboard: false,
+            clipboard_file_limit: 0,
+            escape_key: "F12".into(),
+        };
+        assert!(
+            run_client(options)
+                .unwrap_err()
+                .to_string()
+                .contains("window size")
+        );
+    }
 
     #[test]
     fn raced_source_barrier_retains_first_future_frame_and_cursor() {

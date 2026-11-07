@@ -12,6 +12,7 @@ use jwm::remote::ssh::{SshOptions, run_ssh};
 use jwm::remote::usability::{
     default_key_path, key_metadata, normalize_address, normalize_listen_address,
 };
+use jwm::remote::window_size::WindowSize;
 use jwm::remote::x11_capture::{CaptureArea, CaptureRegion, CaptureSource, ScalingPolicy};
 use jwm::remote::x11_viewer::DEFAULT_ESCAPE_KEY;
 use jwm::remote::{RemoteResult, messages::APPLICATION_VERSION, protocol::TRANSPORT_VERSION};
@@ -310,6 +311,11 @@ enum Command {
         #[command(flatten)]
         frame_limits: FrameLimitArgs,
 
+        /// Explicit local client size (max 8192 per axis, 16777216 pixels).
+        /// The window manager may override this startup request.
+        #[arg(long, value_name = "WIDTHxHEIGHT")]
+        window_size: Option<WindowSize>,
+
         /// Local X11 display for the viewer window (defaults to DISPLAY).
         #[arg(long, value_name = "DISPLAY")]
         display: Option<String>,
@@ -337,6 +343,11 @@ enum Command {
         /// Private key; defaults to the JWM key path shown in top-level help.
         #[arg(long, value_name = "PATH")]
         key_file: Option<PathBuf>,
+
+        /// Explicit local client size (max 8192 per axis, 16777216 pixels).
+        /// The window manager may override this startup request.
+        #[arg(long, value_name = "WIDTHxHEIGHT")]
+        window_size: Option<WindowSize>,
 
         /// Local X11 display for the viewer window (defaults to DISPLAY).
         #[arg(long, value_name = "DISPLAY")]
@@ -428,6 +439,7 @@ fn profile_from_command(command: Command) -> RemoteResult<Profile> {
             address,
             key_file,
             display,
+            window_size,
             view_only,
             grab_input,
             escape_key,
@@ -451,6 +463,7 @@ fn profile_from_command(command: Command) -> RemoteResult<Profile> {
                 Connection::Connect { address, key_file },
                 Viewer {
                     display,
+                    window_size,
                     view_only,
                     grab_input,
                     escape_key,
@@ -470,6 +483,7 @@ fn profile_from_command(command: Command) -> RemoteResult<Profile> {
             jpeg_quality,
             max_width,
             display,
+            window_size,
             view_only,
             grab_input,
             escape_key,
@@ -496,6 +510,7 @@ fn profile_from_command(command: Command) -> RemoteResult<Profile> {
                 },
                 Viewer {
                     display,
+                    window_size,
                     view_only,
                     grab_input,
                     escape_key,
@@ -574,6 +589,10 @@ fn command_from_profile(profile: &Profile) -> RemoteResult<Command> {
         }
     }
     let viewer = &profile.viewer;
+    if let Some(size) = viewer.window_size {
+        size.validate()?;
+        args.extend(["--window-size".to_owned(), size.to_string()]);
+    }
     for (flag, value) in [
         ("--frame-max-width", viewer.frame_max_width.map(u64::from)),
         ("--frame-max-height", viewer.frame_max_height.map(u64::from)),
@@ -806,6 +825,7 @@ fn run(command: Command) -> RemoteResult<()> {
             clipboard_file_limit,
             frame_limits,
             display,
+            window_size,
             remote_command,
             ssh_options,
         } => {
@@ -823,6 +843,7 @@ fn run(command: Command) -> RemoteResult<()> {
                 monitor,
                 shared_sources,
                 display,
+                window_size,
                 view_only,
                 grab_input,
                 clipboard,
@@ -836,6 +857,7 @@ fn run(command: Command) -> RemoteResult<()> {
             address,
             key_file,
             display,
+            window_size,
             view_only,
             grab_input,
             clipboard,
@@ -848,6 +870,7 @@ fn run(command: Command) -> RemoteResult<()> {
                 address,
                 key: KeySource::File(resolve_key_path(key_file)?),
                 display,
+                window_size,
                 view_only,
                 grab_input,
                 clipboard,
@@ -1365,6 +1388,58 @@ mod tests {
         assert!(
             Cli::try_parse_from(["jwm-remote", "profile", "run", "desk", "--clipboard"]).is_err()
         );
+    }
+
+    #[test]
+    fn window_size_cli_and_profiles_roundtrip_without_changing_permissions() {
+        for transport in ["connect", "ssh"] {
+            let command = Cli::try_parse_from([
+                "jwm-remote",
+                transport,
+                "desk",
+                "--view-only",
+                "--window-size",
+                "1280x720",
+                "--frame-max-pixels",
+                "10000",
+            ])
+            .unwrap()
+            .command;
+            let profile = profile_from_command(command).unwrap();
+            assert_eq!(
+                profile.viewer.window_size.unwrap().dimensions(),
+                (1280, 720)
+            );
+            assert_eq!(profile.viewer.frame_max_pixels, Some(10000));
+            assert!(profile.viewer.view_only);
+            assert!(!profile.viewer.clipboard);
+            assert_eq!(validated_profile(profile.clone()).unwrap(), profile);
+            let mut legacy = serde_json::to_value(&profile).unwrap();
+            legacy["viewer"]
+                .as_object_mut()
+                .unwrap()
+                .remove("window_size");
+            let legacy =
+                validated_profile(Profile::decode(&serde_json::to_vec(&legacy).unwrap()).unwrap())
+                    .unwrap();
+            assert_eq!(legacy.viewer.window_size, None);
+            for size in ["0x720", "8193x1", "8192x2049", "1280X720", "1x1x1"] {
+                assert!(
+                    Cli::try_parse_from(["jwm-remote", transport, "desk", "--window-size", size])
+                        .is_err()
+                );
+            }
+            let mut invalid = profile.clone();
+            invalid.viewer.window_size = Some(WindowSize {
+                width: 8192,
+                height: 2049,
+            });
+            assert!(validated_profile(invalid).is_err());
+            let mut edited = serde_json::to_value(&profile).unwrap();
+            edited["viewer"]["window_size"]["position"] = 1.into();
+            assert!(Profile::decode(&serde_json::to_vec(&edited).unwrap()).is_err());
+        }
+        assert!(Cli::try_parse_from(["jwm-remote", "host", "--window-size", "1280x720"]).is_err());
     }
 
     #[test]

@@ -41,6 +41,8 @@ pub enum Connection {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Viewer {
+    /// Explicit local startup size only; no observed geometry is persisted.
+    pub window_size: Option<super::window_size::WindowSize>,
     pub display: Option<String>,
     // Required booleans: a missing permission is an error, never a new grant.
     pub view_only: bool,
@@ -308,6 +310,7 @@ mod tests {
                 max_width: Some(0),
             },
             viewer: Viewer {
+                window_size: None,
                 display: None,
                 view_only: true,
                 grab_input: false,

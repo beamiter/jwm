@@ -36,6 +36,7 @@ pub mod source_wire;
 pub mod ssh;
 mod tile;
 pub mod usability;
+pub mod window_size;
 pub mod x11_capture;
 pub mod x11_input;
 pub mod x11_keymap;

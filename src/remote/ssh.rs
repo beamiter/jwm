@@ -46,6 +46,8 @@ const REMOTE_PORT_SPAN: u16 = 16000;
 
 #[derive(Clone, Debug)]
 pub struct SshOptions {
+    /// Explicit local client-area startup size; None preserves automatic sizing.
+    pub window_size: Option<super::window_size::WindowSize>,
     /// `[USER@]HOST` or an alias from the SSH configuration.
     pub destination: String,
     /// Extra `ssh -o` options, passed through unchanged.
@@ -71,6 +73,9 @@ pub struct SshOptions {
 }
 
 pub fn run_ssh(options: SshOptions) -> RemoteResult<()> {
+    if let Some(size) = options.window_size {
+        size.validate()?;
+    }
     options.frame_limits.validate()?;
     validate_destination(&options.destination)?;
     let label = peer_label(&options);
@@ -126,6 +131,7 @@ pub fn run_ssh(options: SshOptions) -> RemoteResult<()> {
         )
         .and_then(|()| {
             run_client(ClientOptions {
+                window_size: options.window_size,
                 address: format!("127.0.0.1:{local_port}"),
                 peer_label: label.clone(),
                 key: KeySource::Bytes(key),
@@ -555,6 +561,7 @@ mod tests {
 
     fn options() -> SshOptions {
         SshOptions {
+            window_size: None,
             destination: "ubuntu@desk".into(),
             ssh_options: Vec::new(),
             remote_command: None,
@@ -594,6 +601,31 @@ mod tests {
         )
         .unwrap();
         std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[test]
+    fn local_window_size_does_not_change_remote_script_or_session_identity() {
+        let base = options();
+        let mut sized = base.clone();
+        sized.window_size = Some(super::super::window_size::WindowSize {
+            width: 1280,
+            height: 720,
+        });
+        assert_eq!(
+            remote_host_script(&base, 50000),
+            remote_host_script(&sized, 50000)
+        );
+        assert_eq!(peer_label(&base), peer_label(&sized));
+        sized.window_size = Some(super::super::window_size::WindowSize {
+            width: 0,
+            height: 720,
+        });
+        assert!(
+            run_ssh(sized)
+                .unwrap_err()
+                .to_string()
+                .contains("window size")
+        );
     }
 
     #[test]

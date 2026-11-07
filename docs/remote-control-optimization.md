@@ -57,6 +57,9 @@ It is not completion of the entire remote-control roadmap.
   permission booleans, bounded private storage, atomic replacement and locking.
   They store supported connection/SSH quality/clipboard settings, never key
   contents or arbitrary SSH commands. Running a profile is always explicit.
+  Explicit `--window-size WIDTHxHEIGHT` can be saved and reapplied locally, with
+  bounded dimensions/pixels and unchanged defaults. It is an initial client-size
+  request, not observed-state restoration; the window manager remains authoritative.
 
 - Protocol v11 adds immutable host-authored source grants (maximum 32) and
   local viewer cycling with Ctrl+Super+Shift+the configured escape key, also
@@ -69,8 +72,8 @@ It is not completion of the entire remote-control roadmap.
 
 ## Explicitly deferred
 
-- Partial CPU resampling, session state
-  restore, window-geometry restoration, XKB/IME and clipboard
+- Partial CPU resampling, observed session state
+  restore, window-position restoration, XKB/IME and clipboard
   UX modes, local readback, Wayland and hardware encoding.
 - Broader negotiated capabilities, mutable source authorization, structured errors and backward-compatible extension framing.
 - Input-to-visible instrumentation and a fixed workload replay harness.
@@ -139,6 +142,10 @@ The public `DecodedFrame` and synchronous `Viewer::draw` behavior remain usable.
 previous hard ceilings for callers updating struct-literal construction.
 `CapturedFrame` now includes a public `geometry_epoch` field, so external Rust
 struct-literal constructors must initialize it to the source's nonzero epoch.
+External Rust users constructing `ClientOptions`, `SshOptions`, or profile
+`Viewer` literals must now supply `window_size: None` to retain the default.
+The public `x11_viewer::Viewer::connect` signature is unchanged.
+
 The source identity must change when the selected geometry changes; dimensions
 alone are not sufficient to authorize a different shared source.
 
