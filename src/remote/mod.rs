@@ -30,6 +30,7 @@ pub mod messages;
 mod pacing;
 pub mod profiles;
 pub mod protocol;
+pub mod replay_benchmark;
 mod sender;
 pub mod session_env;
 pub mod source_session;

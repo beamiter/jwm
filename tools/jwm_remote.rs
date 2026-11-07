@@ -110,6 +110,23 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Developer-only offline synthetic tile codec replay; emits JSON, opens no display.
+    ReplayBenchmark {
+        #[arg(long, default_value_t = 320, value_parser = clap::value_parser!(u16).range(1..=1920))]
+        width: u16,
+        #[arg(long, default_value_t = 180, value_parser = clap::value_parser!(u16).range(1..=1080))]
+        height: u16,
+        /// Measured frames per scene; total generated pixels are also bounded.
+        #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u32).range(1..=300))]
+        frames: u32,
+        /// Separate warmup frames per scene; measured codec state starts fresh.
+        #[arg(long, default_value_t = 3, value_parser = clap::value_parser!(u32).range(0..=30))]
+        warmup: u32,
+        #[arg(long, default_value_t = 1)]
+        seed: u64,
+        #[arg(long, default_value_t = 75, value_parser = clap::value_parser!(u8).range(1..=100))]
+        quality: u8,
+    },
     /// Save, inspect and explicitly run named connection settings (no credentials).
     Profile {
         /// Existing private directory. Default: JWM config directory/remote-profiles.
@@ -786,6 +803,27 @@ fn resolve_key_path(explicit: Option<PathBuf>) -> std::io::Result<PathBuf> {
 
 fn run(command: Command) -> RemoteResult<()> {
     match command {
+        Command::ReplayBenchmark {
+            width,
+            height,
+            frames,
+            warmup,
+            seed,
+            quality,
+        } => {
+            let report =
+                jwm::remote::replay_benchmark::run(jwm::remote::replay_benchmark::ReplayConfig {
+                    width,
+                    height,
+                    frames,
+                    warmup,
+                    seed,
+                    quality,
+                })?;
+            serde_json::to_writer_pretty(std::io::stdout().lock(), &report)?;
+            println!();
+            Ok(())
+        }
         Command::Profile { directory, action } => run_profile(directory, action),
         Command::Keygen { output } => {
             let output = resolve_key_path(output)?;
@@ -1094,6 +1132,53 @@ where
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn replay_cli_is_offline_bounded_and_not_a_profile() {
+        let command = Cli::try_parse_from([
+            "jwm-remote",
+            "replay-benchmark",
+            "--width",
+            "17",
+            "--height",
+            "9",
+            "--frames",
+            "2",
+            "--warmup",
+            "0",
+        ])
+        .unwrap()
+        .command;
+        run(command).unwrap();
+        let command = Cli::try_parse_from(["jwm-remote", "replay-benchmark"])
+            .unwrap()
+            .command;
+        assert!(profile_from_command(command).is_err());
+        for args in [
+            ["--width", "0"],
+            ["--height", "1081"],
+            ["--frames", "301"],
+            ["--warmup", "31"],
+            ["--quality", "101"],
+        ] {
+            assert!(
+                Cli::try_parse_from(["jwm-remote", "replay-benchmark", args[0], args[1]]).is_err()
+            );
+        }
+        let command = Cli::try_parse_from([
+            "jwm-remote",
+            "replay-benchmark",
+            "--width",
+            "1920",
+            "--height",
+            "1080",
+            "--frames",
+            "300",
+        ])
+        .unwrap()
+        .command;
+        assert!(run(command).is_err());
+    }
+
     #[test]
     fn source_grants_are_explicit_bounded_and_deduplicated() {
         let Command::Host {

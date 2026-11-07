@@ -107,7 +107,10 @@ It is not completion of the entire remote-control roadmap.
   restore, window-position restoration, XKB/IME, runtime clipboard
   mode changes, local readback, Wayland and hardware encoding.
 - Broader negotiated capabilities, mutable source authorization, structured errors and backward-compatible extension framing.
-- Input-to-visible instrumentation and a fixed workload replay harness.
+- Input-to-visible instrumentation and live desktop workload replay.
+  The offline synthetic tile-codec baseline is documented in
+  [remote-replay-benchmark.md](remote-replay-benchmark.md); it measures neither
+  capture/presentation nor end-to-end latency.
 
 ## Verification commands
 
