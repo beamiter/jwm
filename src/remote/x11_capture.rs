@@ -1961,6 +1961,25 @@ impl X11Capture {
         }
     }
 
+    /// Install an explicitly host-authorized source after input/publication
+    /// have been fenced. Resolution is transactional and never falls back to
+    /// root capture. Ordinary topology refreshes still fail closed.
+    pub(crate) fn switch_area(&mut self, area: CaptureArea) -> RemoteResult<()> {
+        let (width, height) = self.root_geometry.dimensions(&self.conn, self.root)?;
+        let region = resolve_capture_area(&self.conn, self.root, &area, width, height)?;
+        let epoch = self
+            .layout_epoch
+            .checked_add(1)
+            .ok_or_else(|| invalid_data("capture geometry epoch exhausted"))?;
+        self.area = area;
+        self.region = region;
+        self.layout_epoch = epoch;
+        self.last_cursor_sample = None;
+        self.cursor_shape_epoch = None;
+        self.damage.invalidate();
+        Ok(())
+    }
+
     /// Re-resolve the shared area against the current root geometry.
     fn refresh_region(&mut self) -> RemoteResult<()> {
         let (root_width, root_height) = self.root_geometry.dimensions(&self.conn, self.root)?;
@@ -4796,6 +4815,141 @@ mod tests {
         let (conn, screen) = open_display(Some(x11.name())).unwrap();
         assert!(conn.setup().roots.len() > screen);
         validate_capture_area(Some(x11.name()), &CaptureArea::Root).unwrap();
+    }
+
+    /// Run only against a disposable, otherwise idle Xvfb server. This never
+    /// falls back to DISPLAY and never paints or reconfigures the root itself.
+    #[test]
+    #[ignore = "requires a dedicated JWM_TEST_X11_DISPLAY Xvfb server"]
+    fn source_switch_captures_only_the_new_region_and_rejects_missing_sources() {
+        let display = std::env::var("JWM_TEST_X11_DISPLAY")
+            .expect("set JWM_TEST_X11_DISPLAY to an isolated Xvfb server");
+        assert!(
+            !display.trim().is_empty(),
+            "an explicit test display is required"
+        );
+        assert_ne!(
+            std::env::var("DISPLAY").ok().as_deref(),
+            Some(display.as_str()),
+            "do not run this destructive fixture on the session display"
+        );
+        // All fixture windows belong to this connection. Dropping it destroys
+        // them even if an assertion panics; no root background, cursor position,
+        // monitor configuration, or existing client resources are changed.
+        let (fixture, screen_num) = open_display(Some(&display)).unwrap();
+        let screen = &fixture.setup().roots[screen_num];
+        assert!(screen.width_in_pixels >= 168 && screen.height_in_pixels >= 64);
+        let visual = screen
+            .allowed_depths
+            .iter()
+            .flat_map(|depth| &depth.visuals)
+            .find(|visual| visual.visual_id == screen.root_visual)
+            .unwrap();
+        assert_eq!(visual.class, VisualClass::TRUE_COLOR);
+        let backing = fixture.generate_id().unwrap();
+        fixture
+            .create_window(
+                screen.root_depth,
+                backing,
+                screen.root,
+                0,
+                0,
+                168,
+                64,
+                0,
+                WindowClass::INPUT_OUTPUT,
+                screen.root_visual,
+                &CreateWindowAux::new()
+                    .override_redirect(1)
+                    .background_pixel(visual.red_mask),
+            )
+            .unwrap()
+            .check()
+            .unwrap();
+        let first = CaptureRegion {
+            x: 8,
+            y: 8,
+            width: 64,
+            height: 48,
+        };
+        let second = CaptureRegion { x: 88, ..first };
+        for (region, pixel) in [(first, screen.white_pixel), (second, screen.black_pixel)] {
+            let window = fixture.generate_id().unwrap();
+            fixture
+                .create_window(
+                    screen.root_depth,
+                    window,
+                    backing,
+                    region.x,
+                    region.y,
+                    region.width,
+                    region.height,
+                    0,
+                    WindowClass::INPUT_OUTPUT,
+                    screen.root_visual,
+                    &CreateWindowAux::new().background_pixel(pixel),
+                )
+                .unwrap()
+                .check()
+                .unwrap();
+            fixture.map_window(window).unwrap().check().unwrap();
+        }
+        fixture.map_window(backing).unwrap().check().unwrap();
+        // A checked round trip completes painting before the capture client
+        // connects. Both regions then remain static across the switch.
+        fixture.get_input_focus().unwrap().reply().unwrap();
+        let mut capture = X11Capture::connect(
+            Some(&display),
+            CaptureSource::Root,
+            0,
+            CaptureArea::Region(first),
+            ScalingPolicy::Cpu,
+        )
+        .unwrap();
+        capture.cursor.disable();
+        fn selected_frame(capture: &mut X11Capture, color: [u8; 3]) -> CapturedFrame {
+            let CaptureOutcome::Frame(frame) = capture.frame().unwrap() else {
+                panic!("an authorized source switch must force a fresh frame");
+            };
+            assert_eq!((frame.source_width, frame.source_height), (64, 48));
+            assert_eq!(frame.image.dimensions(), (64, 48));
+            assert!(
+                frame.image.pixels().all(|pixel| pixel.0 == color),
+                "capture leaked pixels from the old region or red surroundings"
+            );
+            frame
+        }
+        let before = selected_frame(&mut capture, [255, 255, 255]);
+        let old_epoch = capture.geometry_epoch();
+        capture.switch_area(CaptureArea::Region(second)).unwrap();
+        assert!(capture.geometry_epoch() > old_epoch);
+        assert_eq!(capture.origin(), (second.x, second.y));
+        let after = selected_frame(&mut capture, [0, 0, 0]);
+        assert!(after.geometry_epoch > before.geometry_epoch);
+        assert_eq!(after.geometry_epoch, capture.geometry_epoch());
+
+        let committed_epoch = capture.geometry_epoch();
+        for unavailable in [
+            CaptureArea::Monitor("__JWM_TEST_MISSING_MONITOR__".to_owned()),
+            CaptureArea::Region(CaptureRegion {
+                x: -100,
+                y: -100,
+                ..first
+            }),
+        ] {
+            assert!(capture.switch_area(unavailable).is_err());
+            assert_eq!(capture.area, CaptureArea::Region(second));
+            assert_eq!(capture.region, Some(second));
+            assert_eq!(capture.geometry_epoch(), committed_epoch);
+            assert_eq!(capture.origin(), (second.x, second.y));
+            // Force readback after rejection to verify the retained selection,
+            // rather than allowing NoChange to conceal a root fallback.
+            capture.damage.invalidate();
+            let retained = selected_frame(&mut capture, [0, 0, 0]);
+            assert_eq!(retained.geometry_epoch, committed_epoch);
+        }
+        drop(capture);
+        fixture.destroy_window(backing).unwrap().check().unwrap();
     }
 
     #[test]

@@ -21,6 +21,7 @@ use super::RemoteResult;
 use super::client::{ClientOptions, run_client};
 use super::key::{KeySource, generate_session_key};
 use super::messages::FrameLimits;
+use super::x11_capture::CaptureArea;
 use super::x11_viewer::{close_existing_viewer, focus_existing_viewer};
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Write};
@@ -53,6 +54,8 @@ pub struct SshOptions {
     pub remote_command: Option<String>,
     /// Share one RandR monitor of the other machine.
     pub monitor: Option<String>,
+    /// Explicit additional host grants, fixed for the session.
+    pub shared_sources: Vec<CaptureArea>,
     pub fps: Option<u16>,
     pub jpeg_quality: Option<u8>,
     pub max_width: Option<u16>,
@@ -394,10 +397,19 @@ fn session_lock_path(destination: &str) -> PathBuf {
 }
 
 fn peer_label(options: &SshOptions) -> String {
-    match &options.monitor {
+    let initial = match &options.monitor {
         Some(monitor) => format!("{} ({monitor})", options.destination),
         None => options.destination.clone(),
+    };
+    if options.shared_sources.is_empty() {
+        return initial;
     }
+    // A request with different grants must restart, not focus an older session
+    // with broader (or narrower) permission. Keep the title/lock key bounded.
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(format!("{:?}", options.shared_sources).as_bytes());
+    let fingerprint: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
+    format!("{initial} [sources {fingerprint}]")
 }
 
 /// An SSH destination as accepted here: no option-like or multi-word values,
@@ -488,6 +500,22 @@ fn remote_host_script_with(options: &SshOptions, remote_port: u16, managed: &str
         host.push_str(" --monitor ");
         host.push_str(&shell_quote(monitor));
     }
+    for area in &options.shared_sources {
+        match area {
+            CaptureArea::Root => host.push_str(" --share-root"),
+            CaptureArea::Monitor(name) => {
+                host.push_str(" --share-monitor ");
+                host.push_str(&shell_quote(name));
+            }
+            CaptureArea::Region(region) => {
+                host.push_str(" --share-region ");
+                host.push_str(&shell_quote(&format!(
+                    "{}x{}+{}+{}",
+                    region.width, region.height, region.x, region.y
+                )));
+            }
+        }
+    }
     for (flag, value) in [
         ("--fps", options.fps.map(u64::from)),
         ("--jpeg-quality", options.jpeg_quality.map(u64::from)),
@@ -531,6 +559,7 @@ mod tests {
             ssh_options: Vec::new(),
             remote_command: None,
             monitor: None,
+            shared_sources: Vec::new(),
             fps: None,
             jpeg_quality: None,
             max_width: None,
@@ -565,6 +594,42 @@ mod tests {
         )
         .unwrap();
         std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[test]
+    fn source_grants_change_session_identity() {
+        let mut opts = options();
+        let original = peer_label(&opts);
+        opts.shared_sources
+            .push(CaptureArea::Monitor("DP-1".into()));
+        let limited = peer_label(&opts);
+        assert_ne!(original, limited);
+        opts.shared_sources.push(CaptureArea::Root);
+        assert_ne!(limited, peer_label(&opts));
+        assert_eq!(peer_label(&opts), peer_label(&opts.clone()));
+    }
+
+    #[test]
+    fn extra_source_grants_are_explicit_and_shell_quoted() {
+        let mut opts = options();
+        assert!(!remote_host_script(&opts, 50000).contains("--share-"));
+        opts.shared_sources = vec![
+            CaptureArea::Monitor("DP-1 'right'; echo bad".into()),
+            CaptureArea::Region(super::super::x11_capture::CaptureRegion {
+                x: -10,
+                y: 2,
+                width: 100,
+                height: 80,
+            }),
+            CaptureArea::Root,
+        ];
+        let script = remote_host_script(&opts, 50000);
+        assert!(script.contains(&format!(
+            "--share-monitor {}",
+            shell_quote("DP-1 'right'; echo bad")
+        )));
+        assert!(script.contains("--share-region '100x80+-10+2'"));
+        assert!(script.contains("--share-root"));
     }
 
     #[test]

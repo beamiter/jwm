@@ -8,7 +8,7 @@ use super::x11_keymap::{KeymapTable, MAX_ENCODED_KEYMAP_LEN};
 use std::io;
 
 const APPLICATION_MAGIC: &[u8; 8] = b"JWMREM01";
-pub const APPLICATION_VERSION: u16 = 10;
+pub const APPLICATION_VERSION: u16 = 11;
 const HELLO_PREFIX_LEN: usize = 11;
 const STREAM_CAPABILITIES_LEN: usize = 23;
 const SERVER_HELLO_LEN: usize = HELLO_PREFIX_LEN + STREAM_CAPABILITIES_LEN;
@@ -452,6 +452,74 @@ pub fn decode_input(kind: MessageKind, payload: &[u8]) -> RemoteResult<InputEven
     }
 }
 
+/// Source and geometry fences precede the unchanged atomic input codec.
+pub const MAX_SOURCE_INPUT_PAYLOAD_LEN: usize = 16 + MAX_INPUT_BATCH_PAYLOAD_LEN;
+
+pub fn encode_source_input(
+    source_epoch: u64,
+    geometry_epoch: u64,
+    events: &[InputEvent],
+) -> RemoteResult<Vec<u8>> {
+    let mut output = Vec::new();
+    encode_source_input_into(source_epoch, geometry_epoch, events, &mut output)?;
+    Ok(output)
+}
+
+pub fn encode_source_input_into(
+    source_epoch: u64,
+    geometry_epoch: u64,
+    events: &[InputEvent],
+    output: &mut Vec<u8>,
+) -> RemoteResult<()> {
+    output.clear();
+    if source_epoch == 0 || geometry_epoch == 0 {
+        return Err(invalid_data("zero input source or geometry epoch").into());
+    }
+    encode_input_batch_into(events, output)?;
+    let inner_len = output.len();
+    output.resize(inner_len + 16, 0);
+    output.copy_within(..inner_len, 16);
+    output[..8].copy_from_slice(&source_epoch.to_be_bytes());
+    output[8..16].copy_from_slice(&geometry_epoch.to_be_bytes());
+    Ok(())
+}
+
+pub fn decode_source_input(payload: &[u8]) -> RemoteResult<(u64, u64, Vec<InputEvent>)> {
+    if payload.len() < 17 || payload.len() > MAX_SOURCE_INPUT_PAYLOAD_LEN {
+        return Err(invalid_data("invalid source input payload length").into());
+    }
+    let source_epoch = u64::from_be_bytes(payload[..8].try_into().unwrap());
+    let geometry_epoch = u64::from_be_bytes(payload[8..16].try_into().unwrap());
+    if source_epoch == 0 || geometry_epoch == 0 {
+        return Err(invalid_data("zero input source or geometry epoch").into());
+    }
+    Ok((
+        source_epoch,
+        geometry_epoch,
+        decode_input_batch(&payload[16..])?,
+    ))
+}
+
+pub fn encode_source_frame_ack(source_epoch: u64, sequence: u64) -> RemoteResult<[u8; 16]> {
+    if source_epoch == 0 {
+        return Err(invalid_data("zero source epoch").into());
+    }
+    let mut payload = [0; 16];
+    payload[..8].copy_from_slice(&source_epoch.to_be_bytes());
+    payload[8..].copy_from_slice(&sequence.to_be_bytes());
+    Ok(payload)
+}
+
+pub fn decode_source_frame_ack(payload: &[u8]) -> RemoteResult<(u64, u64)> {
+    if payload.len() != 16 {
+        return Err(invalid_data("invalid source frame acknowledgement length").into());
+    }
+    let epoch = u64::from_be_bytes(payload[..8].try_into().unwrap());
+    let sequence = u64::from_be_bytes(payload[8..].try_into().unwrap());
+    encode_source_frame_ack(epoch, sequence)?;
+    Ok((epoch, sequence))
+}
+
 /// Encode input operations as one version-3 atomic input batch.
 ///
 /// Every operation is validated before any output allocation is exposed. An
@@ -624,6 +692,43 @@ fn invalid_data(message: impl Into<String>) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_input_and_ack_are_scoped_and_bounded() {
+        let events = vec![InputEvent::Pointer { x: 1, y: 2 }; MAX_INPUT_BATCH_EVENTS];
+        let payload = encode_source_input(4, 7, &events).unwrap();
+        assert_eq!(payload.len(), MAX_SOURCE_INPUT_PAYLOAD_LEN);
+        let (source, geometry, decoded) = decode_source_input(&payload).unwrap();
+        assert_eq!((source, geometry), (4, 7));
+        assert_eq!(decoded, events);
+        for len in 0..payload.len() {
+            assert!(decode_source_input(&payload[..len]).is_err());
+        }
+        let mut trailing = payload.clone();
+        trailing.push(0);
+        assert!(decode_source_input(&trailing).is_err());
+        for offset in [0, 8] {
+            let mut bad = payload.clone();
+            bad[offset..offset + 8].fill(0);
+            assert!(decode_source_input(&bad).is_err());
+        }
+        let mut output = vec![9];
+        assert!(encode_source_input_into(0, 1, &events, &mut output).is_err());
+        assert!(output.is_empty());
+        assert!(encode_source_input_into(1, 1, &[], &mut output).is_err());
+        assert!(output.is_empty());
+        let ack = encode_source_frame_ack(4, 8).unwrap();
+        assert_eq!(decode_source_frame_ack(&ack).unwrap(), (4, 8));
+        for len in 0..16 {
+            assert!(decode_source_frame_ack(&ack[..len]).is_err());
+        }
+        assert!(decode_source_frame_ack(&[0; 17]).is_err());
+        assert!(encode_source_frame_ack(0, 8).is_err());
+        assert_eq!(
+            decode_source_frame_ack(&encode_source_frame_ack(4, 0).unwrap()).unwrap(),
+            (4, 0)
+        );
+    }
 
     #[test]
     fn frame_limits_validate_intersect_and_reject_malformed_wire_values() {
@@ -828,7 +933,7 @@ mod tests {
             ClientHello::decode(&legacy).unwrap_err(),
             ServerHello::decode(&legacy).unwrap_err(),
         ] {
-            assert!(error.to_string().contains("version 6; expected 10"));
+            assert!(error.to_string().contains("version 6; expected 11"));
         }
     }
 
@@ -928,7 +1033,7 @@ mod tests {
     }
 
     #[test]
-    fn hello_uses_version_ten_and_rejects_neighbouring_versions() {
+    fn hello_uses_version_eleven_and_rejects_neighbouring_versions() {
         let payload = ServerHello {
             stream: Default::default(),
             pointer_enabled: false,
@@ -937,24 +1042,24 @@ mod tests {
             clipboard_files_enabled: false,
         }
         .encode();
-        assert_eq!(&payload[8..10], &10_u16.to_be_bytes());
+        assert_eq!(&payload[8..10], &11_u16.to_be_bytes());
 
         // Version 5 had no clipboard transfer records: a version-5 peer
         // would end the session on the first copied image or file. It must
         // fail on its version instead. Version 4 sent one digest of the whole
         // keymap where later versions send a per-keycode table.
-        for older in [4_u16, 5, 6, 7, 8, 9] {
+        for older in [4_u16, 5, 6, 7, 8, 9, 10] {
             let mut previous = payload;
             previous[8..10].copy_from_slice(&older.to_be_bytes());
             let error = ServerHello::decode(&previous).unwrap_err();
             assert!(
                 error
                     .to_string()
-                    .contains(&format!("application version {older}; expected 10"))
+                    .contains(&format!("application version {older}; expected 11"))
             );
         }
 
-        for rejected in [0_u16, 2, 3, 11, u16::MAX] {
+        for rejected in [0_u16, 2, 3, 12, u16::MAX] {
             let mut other = payload;
             other[8..10].copy_from_slice(&rejected.to_be_bytes());
             assert!(

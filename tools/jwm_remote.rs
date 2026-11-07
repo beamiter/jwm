@@ -47,6 +47,47 @@ impl FrameLimitArgs {
     }
 }
 
+/// Additional immutable source grants; never inferred from viewer requests.
+#[derive(Debug, Clone, Default, Args)]
+struct ShareArgs {
+    /// Also grant this RandR monitor (repeatable; max 32 sources total).
+    #[arg(long, value_name = "NAME", value_parser = parse_monitor)]
+    share_monitor: Vec<String>,
+    /// Also grant this fixed root rectangle (repeatable).
+    #[arg(long, value_name = "WxH+X+Y", value_parser = parse_region)]
+    share_region: Vec<CaptureRegion>,
+    /// Also grant the entire root, including every monitor.
+    #[arg(long)]
+    share_root: bool,
+}
+
+impl ShareArgs {
+    fn is_empty(&self) -> bool {
+        self.share_monitor.is_empty() && self.share_region.is_empty() && !self.share_root
+    }
+
+    fn areas(&self, initial: &CaptureArea) -> RemoteResult<Vec<CaptureArea>> {
+        // Bound raw repetitions too, before building the unique catalog.
+        if self.share_monitor.len() + self.share_region.len() + usize::from(self.share_root) > 31 {
+            return Err(profile_error("at most 31 additional source grants are allowed").into());
+        }
+        let mut result = Vec::new();
+        for area in self
+            .share_monitor
+            .iter()
+            .cloned()
+            .map(CaptureArea::Monitor)
+            .chain(self.share_region.iter().copied().map(CaptureArea::Region))
+            .chain(self.share_root.then_some(CaptureArea::Root))
+        {
+            if &area != initial && !result.contains(&area) {
+                result.push(area);
+            }
+        }
+        Ok(result)
+    }
+}
+
 #[derive(Debug, Parser)]
 #[command(
     name = "jwm-remote",
@@ -172,8 +213,11 @@ enum Command {
         /// The root spans every monitor, so on a dual 1920x1080 desk it is
         /// 3840x1080 and each display arrives at less than half the requested
         /// width. Re-resolved by name when the layout changes.
-        #[arg(long, value_name = "NAME", conflicts_with = "region")]
+        #[arg(long, value_name = "NAME", conflicts_with = "region", value_parser = parse_monitor)]
         monitor: Option<String>,
+
+        #[command(flatten)]
+        shares: ShareArgs,
 
         /// Share a fixed rectangle of the root, as WxH+X+Y.
         #[arg(long, value_name = "WxH+X+Y", value_parser = parse_region)]
@@ -235,8 +279,11 @@ enum Command {
 
         /// Share one monitor of the other machine by RandR name (see
         /// `xrandr --listmonitors` there), instead of all of them.
-        #[arg(long, value_name = "NAME")]
+        #[arg(long, value_name = "NAME", value_parser = parse_monitor)]
         monitor: Option<String>,
+
+        #[command(flatten)]
+        shares: ShareArgs,
 
         /// Watch only: the host is started without input control.
         #[arg(long)]
@@ -418,6 +465,7 @@ fn profile_from_command(command: Command) -> RemoteResult<Profile> {
         Command::Ssh {
             destination,
             monitor,
+            shares,
             fps,
             jpeg_quality,
             max_width,
@@ -432,6 +480,9 @@ fn profile_from_command(command: Command) -> RemoteResult<Profile> {
             ssh_options,
         } => {
             jwm::remote::ssh::validate_destination(&destination)?;
+            if !shares.is_empty() {
+                return Err(profile_error("profiles do not store extra source grants; use ssh directly with --share-monitor/--share-region/--share-root").into());
+            }
             if remote_command.is_some() || !ssh_options.is_empty() {
                 return Err(profile_error("profiles do not store SSH commands or arbitrary options; use an SSH config alias").into());
             }
@@ -696,6 +747,7 @@ fn run(command: Command) -> RemoteResult<()> {
             capture_source,
             scaling,
             monitor,
+            shares,
             region,
             allow_lan,
             allow_input,
@@ -717,6 +769,7 @@ fn run(command: Command) -> RemoteResult<()> {
                 (None, Some(region)) => CaptureArea::Region(region),
                 (None, None) => CaptureArea::Root,
             };
+            let shared_sources = shares.areas(&capture_area)?;
             run_host(HostOptions {
                 listen,
                 key,
@@ -728,6 +781,7 @@ fn run(command: Command) -> RemoteResult<()> {
                 max_width,
                 capture_source,
                 capture_area,
+                shared_sources,
                 scaling,
                 allow_lan,
                 allow_input,
@@ -744,6 +798,7 @@ fn run(command: Command) -> RemoteResult<()> {
             jpeg_quality,
             max_width,
             monitor,
+            shares,
             view_only,
             grab_input,
             escape_key,
@@ -753,22 +808,29 @@ fn run(command: Command) -> RemoteResult<()> {
             display,
             remote_command,
             ssh_options,
-        } => run_ssh(SshOptions {
-            destination,
-            fps,
-            jpeg_quality,
-            max_width,
-            ssh_options,
-            remote_command,
-            monitor,
-            display,
-            view_only,
-            grab_input,
-            clipboard,
-            clipboard_file_limit,
-            frame_limits: frame_limits.limits(),
-            escape_key,
-        }),
+        } => {
+            let initial = monitor
+                .clone()
+                .map_or(CaptureArea::Root, CaptureArea::Monitor);
+            let shared_sources = shares.areas(&initial)?;
+            run_ssh(SshOptions {
+                destination,
+                fps,
+                jpeg_quality,
+                max_width,
+                ssh_options,
+                remote_command,
+                monitor,
+                shared_sources,
+                display,
+                view_only,
+                grab_input,
+                clipboard,
+                clipboard_file_limit,
+                frame_limits: frame_limits.limits(),
+                escape_key,
+            })
+        }
         Command::Connect {
             reconnect_attempts,
             address,
@@ -923,6 +985,13 @@ fn parse_scaling(value: &str) -> Result<ScalingPolicy, String> {
     value.parse()
 }
 
+fn parse_monitor(value: &str) -> Result<String, String> {
+    if value.is_empty() || value.len() > 256 || value.chars().any(char::is_control) {
+        return Err("monitor name must be 1..256 bytes without control characters".into());
+    }
+    Ok(value.to_owned())
+}
+
 fn parse_region(value: &str) -> Result<CaptureRegion, String> {
     value.parse()
 }
@@ -943,6 +1012,64 @@ where
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn source_grants_are_explicit_bounded_and_deduplicated() {
+        let Command::Host {
+            monitor, shares, ..
+        } = Cli::try_parse_from([
+            "jwm-remote",
+            "host",
+            "--monitor",
+            "DP-0",
+            "--share-monitor",
+            "DP-1",
+            "--share-monitor",
+            "DP-0",
+            "--share-monitor",
+            "DP-1",
+            "--share-region",
+            "100x80+0+0",
+        ])
+        .unwrap()
+        .command
+        else {
+            panic!("host expected")
+        };
+        let initial = CaptureArea::Monitor(monitor.unwrap());
+        let areas = shares.areas(&initial).unwrap();
+        assert_eq!(areas.len(), 2);
+        assert_eq!(areas[0], CaptureArea::Monitor("DP-1".into()));
+        assert!(!areas.contains(&CaptureArea::Root));
+        assert!(ShareArgs::default().areas(&initial).unwrap().is_empty());
+        let root = ShareArgs {
+            share_root: true,
+            ..ShareArgs::default()
+        };
+        assert_eq!(root.areas(&initial).unwrap(), vec![CaptureArea::Root]);
+        assert!(root.areas(&CaptureArea::Root).unwrap().is_empty());
+        let too_many = ShareArgs {
+            share_monitor: vec!["DP-1".into(); 32],
+            ..ShareArgs::default()
+        };
+        assert!(too_many.areas(&initial).is_err());
+        for name in ["".to_owned(), "a".repeat(257), "bad\nname".into()] {
+            assert!(parse_monitor(&name).is_err());
+        }
+    }
+
+    #[test]
+    fn profiles_reject_extra_source_grants_instead_of_losing_them() {
+        for flag in [
+            vec!["--share-root"],
+            vec!["--share-monitor", "DP-1"],
+            vec!["--share-region", "10x10+0+0"],
+        ] {
+            let mut args = vec!["jwm-remote", "ssh", "desk", "--view-only"];
+            args.extend(flag);
+            assert!(profile_from_command(Cli::try_parse_from(args).unwrap().command).is_err());
+        }
+    }
+
     #[test]
     fn decoded_frame_limits_are_bounded_and_independent_of_viewport() {
         for command in ["host", "connect", "ssh"] {
@@ -1242,6 +1369,11 @@ mod tests {
 
     #[test]
     fn saved_profiles_reject_commands_secrets_and_invalid_semantics() {
+        // Invalid monitor names are rejected at the CLI boundary, before a
+        // profile can be constructed or a host connection can be attempted.
+        assert!(
+            Cli::try_parse_from(["jwm-remote", "ssh", "desk", "--monitor", "bad\nname",]).is_err()
+        );
         for args in [
             vec!["jwm-remote", "host"],
             vec!["jwm-remote", "ssh", "desk", "--remote-command", "custom"],
@@ -1260,7 +1392,6 @@ mod tests {
                 "relative.key",
             ],
             vec!["jwm-remote", "ssh", "bad host"],
-            vec!["jwm-remote", "ssh", "desk", "--monitor", "bad\nname"],
             vec!["jwm-remote", "ssh", "desk", "--escape-key", "not_a_keysym"],
         ] {
             assert!(profile_from_command(Cli::try_parse_from(args).unwrap().command).is_err());

@@ -3,7 +3,7 @@
 //! losing an input edge or silently corrupting a clipboard transfer.
 
 use super::RemoteResult;
-use super::messages::{MAX_CLIPBOARD_BYTES, decode_input_batch, encode_input_batch_into};
+use super::messages::{MAX_CLIPBOARD_BYTES, decode_source_input, encode_source_input_into};
 use super::protocol::{MessageKind, SessionWriter};
 use super::x11_input::InputEvent;
 use std::collections::VecDeque;
@@ -61,6 +61,7 @@ struct Queue {
     cancelling: bool,
     error: Option<String>,
     writing_since: Option<Instant>,
+    input_scope: Option<(u64, u64)>,
 }
 
 impl Queue {
@@ -78,7 +79,7 @@ impl Queue {
         self.check()?;
         let expected = match kind {
             MessageKind::Heartbeat => Some(0),
-            MessageKind::FrameAck => Some(8),
+            MessageKind::FrameAck => Some(16),
             MessageKind::Viewport => Some(4),
             _ => None,
         };
@@ -92,11 +93,12 @@ impl Queue {
         // being written finishes before this fence on the single writer.
         let mut fenced_payload = Vec::new();
         let payload = if kind == MessageKind::InputBatch {
-            let events = decode_input_batch(payload)?;
+            let (source, geometry, events) = decode_source_input(payload)?;
+            self.input_scope = Some((source, geometry));
             if let Some(index) = events.iter().rposition(|e| *e == InputEvent::ReleaseAll) {
                 self.control.retain(|r| r.kind != MessageKind::InputBatch);
                 self.control_bytes = self.control.iter().map(|r| r.payload.len()).sum();
-                encode_input_batch_into(&events[index..], &mut fenced_payload)?;
+                encode_source_input_into(source, geometry, &events[index..], &mut fenced_payload)?;
                 &fenced_payload
             } else {
                 payload
@@ -154,8 +156,13 @@ impl Queue {
         self.bulk_bytes = 0;
         if input_enabled {
             let mut release = Vec::new();
-            encode_input_batch_into(&[InputEvent::ReleaseAll], &mut release)
-                .expect("a single release is a valid input batch");
+            encode_source_input_into(
+                self.input_scope.unwrap_or((1, 1)).0,
+                self.input_scope.unwrap_or((1, 1)).1,
+                &[InputEvent::ReleaseAll],
+                &mut release,
+            )
+            .expect("a single release is a valid input batch");
             self.control_bytes = release.len();
             self.control.push_back(Record {
                 kind: MessageKind::InputBatch,
@@ -460,10 +467,56 @@ impl Drop for Sender {
 mod tests {
     use super::*;
 
+    fn test_encode_input(events: &[InputEvent], bytes: &mut Vec<u8>) -> RemoteResult<()> {
+        encode_source_input_into(1, 1, events, bytes)
+    }
+    fn test_decode_input(bytes: &[u8]) -> RemoteResult<Vec<InputEvent>> {
+        Ok(decode_source_input(bytes)?.2)
+    }
     fn input(queue: &mut Queue, events: &[InputEvent]) {
         let mut bytes = Vec::new();
-        encode_input_batch_into(events, &mut bytes).unwrap();
+        test_encode_input(events, &mut bytes).unwrap();
         queue.push(MessageKind::InputBatch, &bytes).unwrap();
+    }
+
+    #[test]
+    fn release_and_shutdown_fences_preserve_source_and_geometry() {
+        let mut q = Queue::default();
+        q.push(
+            MessageKind::InputBatch,
+            &super::super::messages::encode_source_input(
+                2,
+                5,
+                &[InputEvent::Key {
+                    keycode: 42,
+                    pressed: true,
+                }],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        q.push(
+            MessageKind::InputBatch,
+            &super::super::messages::encode_source_input(2, 5, &[InputEvent::ReleaseAll]).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(q.control.len(), 1);
+        assert_eq!(
+            decode_source_input(&q.pop().unwrap().payload).unwrap(),
+            (2, 5, vec![InputEvent::ReleaseAll])
+        );
+        q.close(true);
+        assert_eq!(
+            decode_source_input(&q.pop().unwrap().payload).unwrap(),
+            (2, 5, vec![InputEvent::ReleaseAll])
+        );
+    }
+
+    #[test]
+    fn unscoped_ack_and_input_are_rejected() {
+        let mut q = Queue::default();
+        assert!(q.push(MessageKind::FrameAck, &1_u64.to_be_bytes()).is_err());
+        assert!(q.push(MessageKind::InputBatch, &[1, 4]).is_err());
     }
 
     #[test]
@@ -485,14 +538,14 @@ mod tests {
             }],
         );
         assert_eq!(
-            decode_input_batch(&q.pop().unwrap().payload).unwrap(),
+            test_decode_input(&q.pop().unwrap().payload).unwrap(),
             [InputEvent::Key {
                 keycode: 42,
                 pressed: true
             }]
         );
         assert_eq!(
-            decode_input_batch(&q.pop().unwrap().payload).unwrap(),
+            test_decode_input(&q.pop().unwrap().payload).unwrap(),
             [InputEvent::Key {
                 keycode: 42,
                 pressed: false
@@ -523,7 +576,7 @@ mod tests {
             &mut q,
             &[InputEvent::Pointer { x: 1, y: 2 }, tail[0], tail[1]],
         );
-        assert_eq!(decode_input_batch(&q.pop().unwrap().payload).unwrap(), tail);
+        assert_eq!(test_decode_input(&q.pop().unwrap().payload).unwrap(), tail);
         assert!(q.pop().is_none());
     }
 
@@ -548,7 +601,7 @@ mod tests {
         let release = q.pop().unwrap();
         assert_eq!(release.kind, MessageKind::InputBatch);
         assert_eq!(
-            decode_input_batch(&release.payload).unwrap(),
+            test_decode_input(&release.payload).unwrap(),
             [InputEvent::ReleaseAll]
         );
         assert_eq!(q.pop().unwrap().kind, MessageKind::Close);
@@ -564,11 +617,18 @@ mod tests {
                 .is_err()
         );
         for n in 0_u64..1000 {
-            q.push(MessageKind::FrameAck, &n.to_be_bytes()).unwrap();
+            q.push(
+                MessageKind::FrameAck,
+                &super::super::messages::encode_source_frame_ack(1, n).unwrap(),
+            )
+            .unwrap();
         }
         assert_eq!(q.control.len(), 1);
-        assert_eq!(q.control_bytes, 8);
-        assert_eq!(q.pop().unwrap().payload, 999_u64.to_be_bytes());
+        assert_eq!(q.control_bytes, 16);
+        assert_eq!(
+            q.pop().unwrap().payload,
+            super::super::messages::encode_source_frame_ack(1, 999).unwrap()
+        );
     }
     #[test]
     fn view_only_close_never_injects_input() {
@@ -605,7 +665,7 @@ mod tests {
             .write_message(MessageKind::Clipboard, b"bulk")
             .unwrap();
         let mut payload = Vec::new();
-        encode_input_batch_into(
+        test_encode_input(
             &[InputEvent::Key {
                 keycode: 42,
                 pressed: true,
@@ -629,7 +689,7 @@ mod tests {
         let (kind, payload) = reader.read_message().unwrap();
         assert_eq!(kind, MessageKind::InputBatch);
         assert_eq!(
-            decode_input_batch(&payload).unwrap(),
+            test_decode_input(&payload).unwrap(),
             [InputEvent::ReleaseAll]
         );
         assert_eq!(reader.read_message().unwrap().0, MessageKind::Close);

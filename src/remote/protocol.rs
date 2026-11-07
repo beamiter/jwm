@@ -162,6 +162,12 @@ pub enum MessageKind {
     CursorShape = 15,
     /// Latest cursor position tied to a video geometry epoch.
     CursorPosition = 16,
+    /// Immutable host-approved source choices.
+    SourceCatalog = 17,
+    /// Request to select an already granted source.
+    SourceRequest = 18,
+    /// Committed source identity and new epoch.
+    SourceChanged = 19,
 }
 
 impl TryFrom<u8> for MessageKind {
@@ -185,6 +191,9 @@ impl TryFrom<u8> for MessageKind {
             14 => Ok(Self::ClipboardTransfer),
             15 => Ok(Self::CursorShape),
             16 => Ok(Self::CursorPosition),
+            17 => Ok(Self::SourceCatalog),
+            18 => Ok(Self::SourceRequest),
+            19 => Ok(Self::SourceChanged),
             other => Err(ProtocolError::UnknownMessageKind(other)),
         }
     }
@@ -825,6 +834,21 @@ mod tests {
         writer.next_sequence = sequence;
         writer.write_message(kind, payload).unwrap();
         writer.into_inner()
+    }
+
+    #[test]
+    fn source_message_kinds_remain_a_closed_set() {
+        for (tag, kind) in [
+            (17, MessageKind::SourceCatalog),
+            (18, MessageKind::SourceRequest),
+            (19, MessageKind::SourceChanged),
+        ] {
+            assert_eq!(MessageKind::try_from(tag).unwrap(), kind);
+            assert_eq!(u8::from(kind), tag);
+        }
+        for tag in [0, 20, 255] {
+            assert!(MessageKind::try_from(tag).is_err());
+        }
     }
 
     #[test]

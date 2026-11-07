@@ -57,6 +57,7 @@ const RENDER_FILTER_BILINEAR: &[u8] = b"bilinear";
 /// source/root coordinate space, even when the viewer window is letterboxed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ViewerEvent {
+    CycleSource,
     Close,
     Pointer {
         x: u16,
@@ -221,6 +222,16 @@ impl ViewerKeyboardState {
             });
         }
     }
+}
+
+fn reset_input_geometry(
+    keyboard: &mut ViewerKeyboardState,
+    buttons: &mut ForwardedButtons,
+    presented: &mut Option<u64>,
+) {
+    *keyboard = ViewerKeyboardState::default();
+    buttons.clear();
+    *presented = None;
 }
 
 // An external keyboard grab diverts releases even though the ordinary focus
@@ -581,6 +592,11 @@ pub struct Viewer {
     backing_letterbox: Option<Letterbox>,
     grab_input: bool,
     forward_input: bool,
+    source_switching: bool,
+    source_cycle_enabled: bool,
+    switching_label: Option<String>,
+    source_label: Option<String>,
+    presented_geometry: Option<u64>,
     pointer_enabled: bool,
     forward_keyboard: bool,
     verified_keymap: Option<super::x11_keymap::KeymapTable>,
@@ -920,6 +936,11 @@ impl Viewer {
             backing_letterbox: None,
             grab_input,
             forward_input,
+            source_switching: false,
+            source_cycle_enabled: false,
+            switching_label: None,
+            source_label: None,
+            presented_geometry: None,
             pointer_enabled,
             forward_keyboard,
             verified_keymap,
@@ -1056,7 +1077,9 @@ impl Viewer {
                     if !inside_image {
                         continue;
                     }
-                    if self.grab_input && !self.grabbed && !self.acquire_local_grab()? {
+                    if self.source_switching
+                        || (self.grab_input && !self.grabbed && !self.acquire_local_grab()?)
+                    {
                         continue;
                     }
                     if self.forwarding_input() {
@@ -1084,6 +1107,19 @@ impl Viewer {
                         button: event.detail,
                         pressed: false,
                     });
+                }
+                Event::KeyPress(event)
+                    if event.event == self.window
+                        && self.source_cycle_enabled
+                        && self.is_escape(event.detail)
+                        && source_cycle_modifiers_match(event.state) =>
+                {
+                    if !self.source_switching {
+                        self.release_local_grab()?;
+                        self.release_all_input(&mut result);
+                        self.source_switching = true;
+                        result.push(ViewerEvent::CycleSource);
+                    }
                 }
                 Event::KeyPress(event) if event.event == self.window && self.forwarding_input() => {
                     // Local escape tracking is independent of permission to
@@ -1250,6 +1286,77 @@ impl Viewer {
         key.into_iter().chain(presentation).min()
     }
 
+    pub(crate) fn enable_source_cycle(&mut self, enabled: bool) {
+        self.source_cycle_enabled = enabled;
+    }
+
+    pub(crate) fn set_source_label(&mut self, label: String) {
+        self.source_label = Some(label);
+        self.update_title();
+    }
+
+    pub(crate) fn begin_source_switch(&mut self, label: String) {
+        self.source_switching = true;
+        self.switching_label = Some(label);
+        self.update_title();
+    }
+
+    pub(crate) fn source_presented(&mut self, geometry_epoch: u64) {
+        self.presented_geometry = Some(geometry_epoch);
+        let title_changed = self.source_switching || self.switching_label.is_some();
+        self.source_switching = false;
+        if let Some(label) = self.switching_label.take() {
+            self.source_label = Some(label);
+        }
+        if title_changed {
+            self.update_title();
+        }
+    }
+
+    /// A native resize ends the old coordinate/input lifetime even before the
+    /// replacement frame finishes its asynchronous X11 presentation.
+    pub(crate) fn prepare_frame_geometry(&mut self, geometry_epoch: u64) -> RemoteResult<bool> {
+        if !self
+            .last_frame
+            .as_ref()
+            .is_some_and(|frame| frame.geometry_epoch != geometry_epoch)
+        {
+            return Ok(false);
+        }
+        self.release_local_grab()?;
+        reset_input_geometry(
+            &mut self.keyboard,
+            &mut self.held_buttons,
+            &mut self.presented_geometry,
+        );
+        Ok(true)
+    }
+
+    pub(crate) fn invalidate_source(&mut self, label: String) -> RemoteResult<()> {
+        self.release_local_grab()?;
+        self.keyboard = ViewerKeyboardState::default();
+        self.held_buttons.clear();
+        self.begin_source_switch(label);
+        self.presented_geometry = None;
+        // Never drop ownership of SHM slots or fences here. Obsolete copies
+        // still drain through their real completion events, but earn no ACK.
+        invalidate_presentations(&mut self.presentations);
+        clear_stored_frame(&mut self.last_frame);
+        self.pending_redraw = false;
+        self.backing_valid = false;
+        self.backing_letterbox = None;
+        self.cursor_plane.shapes.clear();
+        self.cursor_plane.position = None;
+        self.cursor_plane.drawn = None;
+        if let Some(render) = &mut self.cursor_plane.render
+            && let Some(source) = render.source.take()
+        {
+            render::free_picture(&self.conn, source.picture)?;
+            self.conn.free_pixmap(source.pixmap)?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn can_submit_frame(&self) -> bool {
         self.recovery.is_none() && self.presentations.len() < MAX_PENDING_PRESENTATIONS
     }
@@ -1288,8 +1395,10 @@ impl Viewer {
             }
             self.backing_valid = false;
             self.backing_letterbox = None;
-            self.redraw()?;
-            self.queue_presentation(sequence)?;
+            if self.last_frame.is_some() {
+                self.redraw()?;
+                self.queue_presentation(sequence)?;
+            }
             return Ok(completed);
         }
         while let Some(pending) = self.presentations.front() {
@@ -1430,6 +1539,9 @@ impl Viewer {
                 }
                 self.take_presented_sequences()?;
                 if self.presentations.is_empty() {
+                    if let Some(frame) = self.last_frame.as_ref() {
+                        self.presented_geometry = Some(frame.geometry_epoch);
+                    }
                     return Ok(!self.closed);
                 }
                 if Instant::now() >= deadline {
@@ -1639,7 +1751,7 @@ impl Viewer {
     }
 
     fn try_update_title(&self) -> RemoteResult<()> {
-        let title = viewer_title(
+        let mut title = viewer_title(
             &self.peer_label,
             self.pointer_enabled,
             self.forward_keyboard,
@@ -1648,6 +1760,11 @@ impl Viewer {
             self.clipboard_enabled,
             self.clipboard_activity.as_deref(),
             &self.escape_name,
+        );
+        append_source_title(
+            &mut title,
+            self.source_label.as_deref(),
+            self.switching_label.as_deref(),
         );
         self.conn
             .change_property8(
@@ -1678,7 +1795,13 @@ impl Viewer {
     }
 
     fn forwarding_input(&self) -> bool {
-        self.forward_input && (!self.grab_input || self.grabbed)
+        self.forward_input
+            && !self.source_switching
+            && self
+                .last_frame
+                .as_ref()
+                .is_some_and(|frame| self.presented_geometry == Some(frame.geometry_epoch))
+            && (!self.grab_input || self.grabbed)
     }
 
     fn acquire_local_grab(&mut self) -> RemoteResult<bool> {
@@ -2795,6 +2918,12 @@ struct PendingPresentation {
     deadline: Instant,
 }
 
+fn invalidate_presentations(presentations: &mut VecDeque<PendingPresentation>) {
+    for pending in presentations {
+        pending.sequence = None;
+    }
+}
+
 impl PendingPresentation {
     fn ready(&self, upload: &ShmUpload) -> bool {
         presentation_ready(self.copied, &self.uploads, |key| upload.pending(key))
@@ -3874,6 +4003,19 @@ fn find_visual(screen: &Screen, visual_id: u32) -> Option<(u8, Visualtype)> {
 }
 
 /// Match JWM's Ctrl+Super shortcut, ignoring locks and held mouse buttons.
+fn append_source_title(title: &mut String, current: Option<&str>, switching: Option<&str>) {
+    if let Some(label) = switching {
+        title.push_str(&format!(" | switching to {label}"));
+    } else if let Some(label) = current {
+        title.push_str(&format!(" | source {label}"));
+    }
+}
+
+fn source_cycle_modifiers_match(state: KeyButMask) -> bool {
+    let modifiers = KeyButMask::SHIFT | KeyButMask::CONTROL | KeyButMask::MOD1 | KeyButMask::MOD4;
+    state & modifiers == KeyButMask::SHIFT | KeyButMask::CONTROL | KeyButMask::MOD4
+}
+
 fn escape_modifiers_match(state: KeyButMask) -> bool {
     let modifiers = KeyButMask::SHIFT | KeyButMask::CONTROL | KeyButMask::MOD1 | KeyButMask::MOD4;
     state & modifiers == KeyButMask::CONTROL | KeyButMask::MOD4
@@ -4005,6 +4147,89 @@ mod tests {
             y: 0,
             visible: true,
         }
+    }
+
+    #[test]
+    fn source_title_shows_initial_current_and_pending_target() {
+        let mut title = "Peer".to_string();
+        append_source_title(&mut title, Some("Main"), None);
+        assert_eq!(title, "Peer | source Main");
+        let mut title = "Peer".to_string();
+        append_source_title(&mut title, Some("Main"), Some("Side"));
+        assert_eq!(title, "Peer | switching to Side");
+        let mut title = "Peer".to_string();
+        append_source_title(&mut title, Some("Side"), None);
+        assert_eq!(title, "Peer | source Side");
+    }
+
+    #[test]
+    fn geometry_transition_clears_held_and_deferred_input_until_presentation() {
+        let mut keyboard = ViewerKeyboardState::default();
+        assert_eq!(keyboard.press(42, false, true), KeyPressAction::Forward);
+        keyboard.defer_release(42, 9, Instant::now());
+        let mut buttons = ForwardedButtons::default();
+        buttons.press(1, true);
+        let mut presented = Some(3);
+        reset_input_geometry(&mut keyboard, &mut buttons, &mut presented);
+        assert!(keyboard.held.is_empty());
+        assert!(keyboard.pending_release.is_none());
+        assert!(buttons.0.is_empty());
+        assert!(presented.is_none());
+    }
+
+    #[test]
+    fn source_cycle_shortcut_is_distinct_from_release_and_ignores_locks() {
+        let cycle = KeyButMask::CONTROL | KeyButMask::MOD4 | KeyButMask::SHIFT;
+        assert!(source_cycle_modifiers_match(cycle));
+        assert!(source_cycle_modifiers_match(
+            cycle | KeyButMask::LOCK | KeyButMask::BUTTON1
+        ));
+        assert!(!escape_modifiers_match(cycle));
+        assert!(!source_cycle_modifiers_match(
+            KeyButMask::CONTROL | KeyButMask::MOD4
+        ));
+        assert!(!source_cycle_modifiers_match(cycle | KeyButMask::MOD1));
+    }
+
+    #[test]
+    fn source_invalidation_retains_async_fences_and_upload_ownership() {
+        let key = ShmCompletionKey {
+            sequence: 71,
+            drawable: 10,
+            minor_event: u16::from(shm::PUT_IMAGE_REQUEST),
+            major_event: 130,
+            segment: 20,
+            offset: 0,
+        };
+        let deadline = Instant::now() + PRESENTATION_TIMEOUT;
+        let mut queue = VecDeque::from([PendingPresentation {
+            sequence: Some(42),
+            serial: 7,
+            render_request: None,
+            request_sequence: 9,
+            copied: false,
+            uploads: vec![key],
+            deadline,
+        }]);
+        invalidate_presentations(&mut queue);
+        assert_eq!(queue.len(), 1);
+        let pending = queue.front().unwrap();
+        assert_eq!(pending.sequence, None);
+        assert_eq!(pending.serial, 7);
+        assert_eq!(pending.request_sequence, 9);
+        assert_eq!(pending.deadline, deadline);
+        assert_eq!(pending.uploads, [key]);
+        assert!(!pending.ready(&ShmUpload::Disabled));
+        queue.front_mut().unwrap().copied = true;
+        let pending = queue.front().unwrap();
+        assert!(!presentation_ready(
+            pending.copied,
+            &pending.uploads,
+            |_| true
+        ));
+        assert!(presentation_ready(pending.copied, &pending.uploads, |_| {
+            false
+        }));
     }
 
     #[test]
@@ -5166,6 +5391,135 @@ mod tests {
 
     #[test]
     #[ignore = "requires a dedicated JWM_TEST_X11_DISPLAY Xvfb server"]
+    fn source_switch_preserves_pending_shm_ownership_on_x11() {
+        let display = std::env::var("JWM_TEST_X11_DISPLAY")
+            .expect("set JWM_TEST_X11_DISPLAY to an isolated Xvfb server");
+        let mut viewer = Viewer::connect(
+            Some(&display),
+            640,
+            480,
+            true,
+            false,
+            None,
+            false,
+            "F12",
+            "source switch SHM test",
+        )
+        .unwrap();
+        assert!(
+            matches!(viewer.shm_upload, ShmUpload::Enabled(_)),
+            "this regression requires MIT-SHM FD support"
+        );
+        viewer.set_source_label("Old".into());
+        let pool = super::super::frame::new_decode_buffer_pool();
+        let frame = |sequence, source_epoch| {
+            RecyclableDecodedFrame::new(
+                sequence,
+                640,
+                480,
+                RgbImage::from_pixel(640, 480, image::Rgb([source_epoch as u8, 40, 70])),
+                Arc::clone(&pool),
+            )
+            .with_source_epoch(source_epoch)
+            .with_geometry_epoch(1)
+        };
+        for sequence in 1..=3 {
+            assert!(viewer.draw_recyclable(frame(sequence, 1)).unwrap());
+        }
+        let owned = viewer.shm_upload.pending_keys();
+        assert_eq!(owned.len(), SHM_UPLOAD_SLOTS);
+        let segments = match &viewer.shm_upload {
+            ShmUpload::Enabled(upload) => upload
+                .slots
+                .iter()
+                .map(|slot| (slot.segment.id, slot.segment.mapping.len()))
+                .collect::<Vec<_>>(),
+            ShmUpload::Disabled => unreachable!(),
+        };
+        let serials = viewer
+            .presentations
+            .iter()
+            .map(|pending| pending.serial)
+            .collect::<Vec<_>>();
+        assert!(viewer.take_presented_sequences().unwrap().is_empty());
+
+        // No completion event has been consumed. Invalidating the source must
+        // suppress old ACKs without detaching, freeing, or recycling X-owned slots.
+        viewer.invalidate_source("New".into()).unwrap();
+        assert_eq!(viewer.shm_upload.pending_keys(), owned);
+        assert_eq!(
+            viewer
+                .presentations
+                .iter()
+                .map(|pending| pending.serial)
+                .collect::<Vec<_>>(),
+            serials
+        );
+        assert!(
+            viewer
+                .presentations
+                .iter()
+                .all(|pending| pending.sequence.is_none())
+        );
+        assert!(viewer.last_frame.is_none());
+        assert!(!viewer.can_submit_frame());
+        assert!(viewer.source_switching);
+        assert!(!viewer.forwarding_input());
+        assert!(!viewer.grabbed);
+        match &viewer.shm_upload {
+            ShmUpload::Enabled(upload) => assert_eq!(
+                upload
+                    .slots
+                    .iter()
+                    .map(|slot| (slot.segment.id, slot.segment.mapping.len()))
+                    .collect::<Vec<_>>(),
+                segments
+            ),
+            ShmUpload::Disabled => panic!("source invalidation disabled live SHM slots"),
+        }
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !viewer.presentations.is_empty() {
+            viewer.poll_events().unwrap();
+            assert!(
+                viewer.take_presented_sequences().unwrap().is_empty(),
+                "an obsolete source frame must never produce an ACK candidate"
+            );
+            assert!(Instant::now() < deadline, "old source completion timed out");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(viewer.shm_upload.pending_keys().is_empty());
+        assert!(viewer.can_submit_frame());
+        assert!(viewer.draw_recyclable(frame(4, 2)).unwrap());
+        assert!(!viewer.forwarding_input());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            viewer.poll_events().unwrap();
+            let completed = viewer.take_presented_sequences().unwrap();
+            if !completed.is_empty() {
+                assert_eq!(completed, [4]);
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "new source presentation timed out"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        match &viewer.last_frame.as_ref().unwrap().image {
+            StoredImage::Recyclable(frame) => assert_eq!(frame.source_epoch(), 2),
+            StoredImage::Owned(_) => panic!("new source lost its scoped frame"),
+        }
+        // Mirror the client's ACK-after-completion step, not mere decode/submit.
+        viewer.source_presented(1);
+        assert!(!viewer.source_switching);
+        assert_eq!(viewer.source_label.as_deref(), Some("New"));
+        assert!(viewer.forwarding_input());
+        assert!(!viewer.grabbed);
+        assert!(viewer.shm_upload.pending_keys().is_empty());
+    }
+
+    #[test]
+    #[ignore = "requires a dedicated JWM_TEST_X11_DISPLAY Xvfb server"]
     fn asynchronous_shm_frames_complete_in_order_on_x11() {
         let display = std::env::var("JWM_TEST_X11_DISPLAY")
             .expect("set JWM_TEST_X11_DISPLAY to an isolated Xvfb server");
@@ -5184,6 +5538,18 @@ mod tests {
         assert!(
             matches!(viewer.shm_upload, ShmUpload::Enabled(_)),
             "this regression requires MIT-SHM FD support"
+        );
+        // Establish a presented geometry before testing forwarded input while
+        // later frames occupy the asynchronous ring.
+        assert!(
+            viewer
+                .draw(DecodedFrame {
+                    sequence: 0,
+                    source_width: 640,
+                    source_height: 480,
+                    image: RgbImage::from_pixel(640, 480, image::Rgb([0, 40, 70])),
+                })
+                .unwrap()
         );
         for sequence in 1..=3 {
             assert!(viewer.can_submit_frame());

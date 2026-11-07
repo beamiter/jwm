@@ -7,14 +7,17 @@ use super::deadline::TcpStreamDeadline;
 use super::frame::{RecyclableDecodedFrame, SharedDecodeBufferPool, new_decode_buffer_pool};
 use super::key::KeySource;
 use super::messages::{
-    ClientHello, MAX_INPUT_BATCH_EVENTS, ServerHello, encode_frame_ack, encode_input_batch_into,
-    encode_viewport,
+    ClientHello, MAX_INPUT_BATCH_EVENTS, ServerHello, encode_input_batch_into,
+    encode_source_frame_ack, encode_viewport,
 };
 use super::protocol::{
     MAX_PAYLOAD_LEN, MessageKind, PayloadBufferRetention, ProtocolError, SessionReader,
     SessionWriter, client_handshake,
 };
 use super::sender::{RecordWriter, Sender, reap_worker};
+use super::source_wire::{
+    SourceCatalog, SourceRequest, decode_source_changed, decode_source_payload,
+};
 use super::tile::TileDecoder;
 use super::usability::{ClientStage, failure_hint, session_mode};
 use super::x11_input::InputEvent;
@@ -28,7 +31,7 @@ use std::io::{self, Read as _};
 use std::net::{Shutdown, TcpStream, ToSocketAddrs};
 use std::os::fd::{AsFd, BorrowedFd};
 use std::os::unix::net::UnixStream;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 #[cfg(test)]
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
@@ -330,7 +333,9 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
     let clipboard_status = clipboard_sync.as_ref().map(ClipboardSync::status);
 
     *stage = ClientStage::FirstFrame;
-    let state = Arc::new(ReceiveState::new());
+    let mut initial_state = ReceiveState::new();
+    initial_state.frame_limits = hello.stream.frame_limits;
+    let state = Arc::new(initial_state);
     state.cursor_enabled.store(
         hello.stream.cursor == super::messages::CursorMode::Independent,
         Ordering::Release,
@@ -342,6 +347,12 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
         state.cursor_enabled.load(Ordering::Acquire),
         FIRST_FRAME_TIMEOUT,
         |kind, payload| {
+            if kind == MessageKind::SourceCatalog {
+                return receive_catalog(&state, payload);
+            }
+            if state.catalog.lock().unwrap().is_none() {
+                return Err(invalid_data("host record precedes source catalog").into());
+            }
             if matches!(kind, MessageKind::CursorShape | MessageKind::CursorPosition) {
                 return receive_cursor(&state, kind, payload);
             }
@@ -355,12 +366,17 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
     // SessionReader exposes this payload only after its record MAC succeeds;
     // no decoded-image allocation is checked out before authentication.
     let mut tile_decoder = TileDecoder::with_frame_limits(hello.stream.frame_limits)?;
-    let first_frame = decode_queued_frame(
+    let (initial_epoch, initial_payload) = decode_source_payload(&payload)?;
+    if initial_epoch != 1 || state.catalog.lock().unwrap().is_none() {
+        return Err(invalid_data("initial frame missing source catalog or initial epoch").into());
+    }
+    let mut first_frame = decode_queued_frame(
         &mut tile_decoder,
-        &payload,
+        initial_payload,
         &state.telemetry,
         &state.decode_pool,
     )?;
+    first_frame.frame = first_frame.frame.with_source_epoch(initial_epoch);
     reader
         .get_ref()
         .set_read_timeout(Some(VIDEO_FRAME_IDLE_TIMEOUT))?;
@@ -382,9 +398,10 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
         &options.peer_label,
     )?;
     viewer.set_clipboard_status(hello.clipboard_enabled);
+    viewer.set_source_label(current_source_label(&state));
     if state.cursor_enabled.load(Ordering::Acquire) {
         viewer.enable_cursor_plane()?;
-        apply_pending_cursor(&mut viewer, &state)?;
+        apply_pending_cursor(&mut viewer, &state, 1)?;
     }
     let control = writer.get_ref().try_clone()?;
     let sender_state = Arc::clone(&state);
@@ -821,6 +838,7 @@ fn read_initial_frame_records<R: io::Read>(
     loop {
         match reader.read_message_into(&mut payload)? {
             MessageKind::Frame => return Ok(payload),
+            MessageKind::SourceCatalog => deliver_clipboard(MessageKind::SourceCatalog, &payload)?,
             kind @ (MessageKind::Clipboard | MessageKind::ClipboardTransfer)
                 if clipboard_enabled =>
             {
@@ -861,22 +879,74 @@ fn viewer_loop(
     // host encodes to a fixed width forever, so a small window receives detail
     // it immediately throws away.
     let mut reported_viewport = None;
+    let mut source_epoch = 1;
+    let mut presented_scope = (1, 1);
+    let mut switching = false;
+    let mut requested_epoch = None;
+    let source_cycle_available = state
+        .catalog
+        .lock()
+        .unwrap()
+        .as_ref()
+        .is_some_and(|catalog| catalog.entries.len() > 1);
     loop {
         wake.drain()?;
-        let events = viewer.poll_events().map_err(|error| {
+        let received_epoch = state.source_epoch.load(Ordering::Acquire);
+        if received_epoch != source_epoch {
+            source_epoch = received_epoch;
+            requested_epoch = None;
+            switching = true;
+            pending_presentations.clear();
+            viewer.invalidate_source(current_source_label(state))?;
+            write_source_release(writer, presented_scope, pointer_enabled || keyboard_enabled)?;
+        }
+        let mut events = viewer.poll_events().map_err(|error| {
             if viewer.user_close_requested() {
                 user_close_cleanup_failure(error)
             } else {
                 error
             }
         })?;
+        if events.contains(&ViewerEvent::CycleSource)
+            && !events.contains(&ViewerEvent::Close)
+            && !switching
+        {
+            let next = state
+                .catalog
+                .lock()
+                .unwrap()
+                .as_ref()
+                .and_then(|catalog| next_source(catalog, source_epoch));
+            if let Some((target, label)) = next {
+                write_source_release(writer, presented_scope, pointer_enabled || keyboard_enabled)?;
+                writer.write_message(
+                    MessageKind::SourceRequest,
+                    &SourceRequest {
+                        expected_epoch: source_epoch,
+                        target,
+                    }
+                    .encode()?,
+                )?;
+                pending_presentations.clear();
+                viewer.invalidate_source(label)?;
+                requested_epoch = Some(source_epoch);
+                switching = true;
+            }
+        }
+        if switching {
+            events.retain(|event| *event == ViewerEvent::Close);
+        }
+        let mut scoped_writer = ScopedInputWriter {
+            writer,
+            scope: presented_scope,
+        };
         let outcome = dispatch_viewer_input(
             events,
-            pointer_enabled,
-            keyboard_enabled,
+            pointer_enabled && !switching,
+            keyboard_enabled && !switching,
             &mut input_batch,
             &mut input_payload,
-            writer,
+            &mut scoped_writer,
         )?;
         if outcome.close {
             return Ok(ViewerLoopExit {
@@ -913,18 +983,46 @@ fn viewer_loop(
             writer.flush()?;
         }
 
-        apply_pending_cursor(viewer, state)?;
+        apply_pending_cursor(viewer, state, source_epoch)?;
         for sequence in viewer.take_presented_sequences()? {
+            if let Some(timing) = pending_presentations
+                .iter()
+                .find(|timing| timing.sequence == sequence)
+            {
+                if timing.source_epoch != source_epoch {
+                    continue;
+                }
+                presented_scope = (timing.source_epoch, timing.geometry_epoch);
+            }
             acknowledge_presentation(writer, sequence, pending_presentations, &state.telemetry)?;
+            viewer.source_presented(presented_scope.1);
+            viewer.enable_source_cycle(source_cycle_available);
+            switching = false;
         }
         if viewer.can_submit_frame() {
-            if let Some(frame) = take_latest(state) {
-                submit_frame(viewer, frame, pending_presentations)?;
+            if let Some(frame) = take_latest(state, source_epoch) {
+                if frame.frame.source_epoch() == source_epoch
+                    && requested_epoch != Some(source_epoch)
+                {
+                    if viewer.prepare_frame_geometry(frame.frame.geometry_epoch())? {
+                        write_source_release(
+                            writer,
+                            presented_scope,
+                            pointer_enabled || keyboard_enabled,
+                        )?;
+                    }
+                    submit_frame(viewer, frame, pending_presentations)?;
+                }
             } else {
                 viewer.refresh_pending_redraw()?;
             }
         }
 
+        // A source barrier may race the loop-top epoch snapshot. Never wait
+        // after leaving its first keyframe/cursor queued for the next pass.
+        if state.source_epoch.load(Ordering::Acquire) != source_epoch {
+            continue;
+        }
         if !state.alive.load(Ordering::Acquire) && state.latest.lock().unwrap().is_none() {
             let error = state
                 .error
@@ -1075,6 +1173,7 @@ fn for_each_input_batch(
                 continue;
             }
             ViewerEvent::Pointer { .. } => continue,
+            ViewerEvent::CycleSource => continue,
             ViewerEvent::Close => unreachable!(),
         };
 
@@ -1114,7 +1213,56 @@ fn write_input_batch(
     Ok(())
 }
 
+fn next_source(
+    catalog: &SourceCatalog,
+    epoch: u64,
+) -> Option<(super::source_session::SourceId, String)> {
+    if catalog.entries.len() <= 1 || catalog.current.epoch != epoch {
+        return None;
+    }
+    let index = catalog
+        .entries
+        .iter()
+        .position(|entry| entry.id == catalog.current.source)?;
+    let next = &catalog.entries[(index + 1) % catalog.entries.len()];
+    Some((next.id, next.label.clone()))
+}
+
+fn write_source_release(
+    writer: &mut impl RecordWriter,
+    scope: (u64, u64),
+    input_enabled: bool,
+) -> RemoteResult<()> {
+    if input_enabled {
+        let payload =
+            super::messages::encode_source_input(scope.0, scope.1, &[InputEvent::ReleaseAll])?;
+        writer.write_message(MessageKind::InputBatch, &payload)?;
+    }
+    Ok(())
+}
+
+struct ScopedInputWriter<'a, W> {
+    writer: &'a mut W,
+    scope: (u64, u64),
+}
+impl<W: RecordWriter> RecordWriter for ScopedInputWriter<'_, W> {
+    fn write_message(&mut self, kind: MessageKind, payload: &[u8]) -> RemoteResult<()> {
+        if kind == MessageKind::InputBatch {
+            let events = super::messages::decode_input_batch(payload)?;
+            let bytes = super::messages::encode_source_input(self.scope.0, self.scope.1, &events)?;
+            self.writer.write_message(kind, &bytes)
+        } else {
+            self.writer.write_message(kind, payload)
+        }
+    }
+    fn flush(&mut self) -> RemoteResult<()> {
+        self.writer.flush()
+    }
+}
+
 struct PendingFrameTiming {
+    source_epoch: u64,
+    geometry_epoch: u64,
     sequence: u64,
     ready_at: Instant,
     draw_started: Instant,
@@ -1126,6 +1274,8 @@ fn submit_frame(
     pending: &mut std::collections::VecDeque<PendingFrameTiming>,
 ) -> RemoteResult<bool> {
     let timing = PendingFrameTiming {
+        source_epoch: queued.frame.source_epoch(),
+        geometry_epoch: queued.frame.geometry_epoch(),
         sequence: queued.frame.sequence(),
         ready_at: queued.ready_at,
         draw_started: Instant::now(),
@@ -1154,7 +1304,10 @@ fn acknowledge_presentation(
     }
     let timing = pending.pop_front().unwrap();
     telemetry.record_drawn_at(timing.ready_at, timing.draw_started, Instant::now());
-    writer.write_message(MessageKind::FrameAck, &encode_frame_ack(sequence))?;
+    writer.write_message(
+        MessageKind::FrameAck,
+        &encode_source_frame_ack(timing.source_epoch, sequence)?,
+    )?;
     writer.flush()?;
     if !writer.queued() {
         telemetry.record_acked();
@@ -1170,6 +1323,7 @@ fn draw_and_ack(
     draw: impl FnOnce(RecyclableDecodedFrame) -> RemoteResult<bool>,
 ) -> RemoteResult<()> {
     let sequence = queued.frame.sequence();
+    let source_epoch = queued.frame.source_epoch();
     let draw_started = Instant::now();
     let draw_result = draw(queued.frame);
     let draw_finished = Instant::now();
@@ -1177,7 +1331,10 @@ fn draw_and_ack(
         return Ok(());
     }
     telemetry.record_drawn_at(queued.ready_at, draw_started, draw_finished);
-    writer.write_message(MessageKind::FrameAck, &encode_frame_ack(sequence))?;
+    writer.write_message(
+        MessageKind::FrameAck,
+        &encode_source_frame_ack(source_epoch, sequence)?,
+    )?;
     writer.flush()?;
     if !writer.queued() {
         telemetry.record_acked();
@@ -1592,6 +1749,9 @@ fn average_millis(duration: Duration, count: u64) -> f64 {
 }
 
 struct ReceiveState {
+    catalog: Mutex<Option<SourceCatalog>>,
+    source_epoch: AtomicU64,
+    frame_limits: super::messages::FrameLimits,
     cursor_enabled: AtomicBool,
     cursor: Mutex<super::cursor::CursorInbox>,
     latest: Mutex<Option<QueuedFrame>>,
@@ -1605,6 +1765,9 @@ struct ReceiveState {
 impl ReceiveState {
     fn new() -> Self {
         Self {
+            catalog: Mutex::new(None),
+            source_epoch: AtomicU64::new(1),
+            frame_limits: super::messages::FrameLimits::default(),
             cursor_enabled: AtomicBool::new(false),
             cursor: Mutex::new(super::cursor::CursorInbox::default()),
             latest: Mutex::new(None),
@@ -1617,9 +1780,46 @@ impl ReceiveState {
     }
 }
 
+fn accept_source_epoch(received: u64, current: u64) -> RemoteResult<bool> {
+    if received > current {
+        return Err(invalid_data("source payload precedes SourceChanged").into());
+    }
+    Ok(received == current)
+}
+
+fn receive_catalog(state: &ReceiveState, payload: &[u8]) -> RemoteResult<()> {
+    let catalog = SourceCatalog::decode(payload)?;
+    let mut slot = state.catalog.lock().unwrap();
+    if slot.is_some() || catalog.current.epoch != 1 {
+        return Err(invalid_data("unexpected source catalog").into());
+    }
+    *slot = Some(catalog);
+    Ok(())
+}
+
+fn current_source_label(state: &ReceiveState) -> String {
+    state
+        .catalog
+        .lock()
+        .unwrap()
+        .as_ref()
+        .and_then(|catalog| {
+            catalog
+                .entries
+                .iter()
+                .find(|entry| entry.id == catalog.current.source)
+                .map(|entry| entry.label.clone())
+        })
+        .unwrap_or_else(|| "source".into())
+}
+
 fn receive_cursor(state: &ReceiveState, kind: MessageKind, payload: &[u8]) -> RemoteResult<()> {
     if !state.cursor_enabled.load(Ordering::Acquire) {
         return Err(invalid_data("independent cursor was not negotiated").into());
+    }
+    let (epoch, payload) = decode_source_payload(payload)?;
+    if !accept_source_epoch(epoch, state.source_epoch.load(Ordering::Acquire))? {
+        return Ok(());
     }
     let mut inbox = state.cursor.lock().unwrap();
     match kind {
@@ -1631,16 +1831,39 @@ fn receive_cursor(state: &ReceiveState, kind: MessageKind, payload: &[u8]) -> Re
     }
 }
 
-fn apply_pending_cursor(viewer: &mut Viewer, state: &ReceiveState) -> RemoteResult<()> {
-    let update = state.cursor.lock().unwrap().take();
+fn take_cursor_for_epoch(
+    state: &ReceiveState,
+    epoch: u64,
+) -> Option<(
+    Arc<super::cursor::CursorShape>,
+    super::cursor::CursorPosition,
+)> {
+    let mut cursor = state.cursor.lock().unwrap();
+    if state.source_epoch.load(Ordering::Acquire) != epoch {
+        return None;
+    }
+    cursor.take()
+}
+
+fn apply_pending_cursor(viewer: &mut Viewer, state: &ReceiveState, epoch: u64) -> RemoteResult<()> {
+    let update = take_cursor_for_epoch(state, epoch);
     if let Some((shape, position)) = update {
         viewer.set_cursor_update(shape, position)?;
     }
     Ok(())
 }
 
-fn take_latest(state: &ReceiveState) -> Option<QueuedFrame> {
-    state.latest.lock().unwrap().take()
+fn take_latest(state: &ReceiveState, epoch: u64) -> Option<QueuedFrame> {
+    let mut latest = state.latest.lock().unwrap();
+    if latest
+        .as_ref()
+        .is_some_and(|queued| queued.frame.source_epoch() > epoch)
+    {
+        return None;
+    }
+    latest
+        .take()
+        .filter(|queued| queued.frame.source_epoch() == epoch)
 }
 
 fn replace_latest<T>(latest: &Mutex<Option<T>>, next: T) -> Option<T> {
@@ -1744,17 +1967,50 @@ fn receive_frames(
             .read_message_into(&mut payload)
             .map_err(receiver_read_error)?;
         match kind {
+            MessageKind::SourceChanged => {
+                let changed = decode_source_changed(&payload)?;
+                {
+                    let mut catalog = state.catalog.lock().unwrap();
+                    let catalog = catalog
+                        .as_mut()
+                        .ok_or_else(|| invalid_data("source change before catalog"))?;
+                    if changed.epoch
+                        != catalog
+                            .current
+                            .epoch
+                            .checked_add(1)
+                            .ok_or_else(|| invalid_data("source epoch exhausted"))?
+                        || !catalog
+                            .entries
+                            .iter()
+                            .any(|entry| entry.id == changed.source)
+                    {
+                        return Err(invalid_data("invalid source change").into());
+                    }
+                    catalog.current = changed;
+                }
+                tile_decoder = TileDecoder::with_frame_limits(state.frame_limits)?;
+                *state.latest.lock().unwrap() = None;
+                *state.cursor.lock().unwrap() = super::cursor::CursorInbox::default();
+                state.source_epoch.store(changed.epoch, Ordering::Release);
+                completion.signal()?;
+            }
             MessageKind::Frame => {
+                let (epoch, inner) = decode_source_payload(&payload)?;
+                if !accept_source_epoch(epoch, state.source_epoch.load(Ordering::Acquire))? {
+                    continue;
+                }
                 // read_message_into authenticated the complete record before
                 // returning Frame, so pool checkout starts only on trusted
                 // header/JPEG bytes.
                 state.telemetry.record_received();
-                let queued = decode_queued_frame(
+                let mut queued = decode_queued_frame(
                     &mut tile_decoder,
-                    &payload,
+                    inner,
                     &state.telemetry,
                     &state.decode_pool,
                 )?;
+                queued.frame = queued.frame.with_source_epoch(epoch);
                 let expected = last_sequence
                     .checked_add(1)
                     .ok_or_else(|| invalid_data("video frame sequence exhausted"))?;
@@ -1794,7 +2050,9 @@ fn receive_frames(
             | MessageKind::Button
             | MessageKind::ReleaseAll
             | MessageKind::InputBatch
-            | MessageKind::Viewport => {
+            | MessageKind::Viewport
+            | MessageKind::SourceCatalog
+            | MessageKind::SourceRequest => {
                 return Err(invalid_data(format!("unexpected host message: {kind:?}")).into());
             }
             MessageKind::Clipboard | MessageKind::ClipboardTransfer => match clipboard.as_ref() {
@@ -1854,7 +2112,7 @@ fn invalid_data(message: impl Into<String>) -> io::Error {
 mod tests {
     use super::*;
     use crate::remote::frame::{DecodedFrame, decode_pool_snapshot};
-    use crate::remote::messages::decode_frame_ack;
+    use crate::remote::messages::decode_source_frame_ack;
     use crate::remote::protocol::{PSK_LEN, server_handshake};
     use crate::remote::tile::{TileEncodeRequest, TileEncoder};
     use crate::remote::x11_capture::CapturedFrame;
@@ -1866,6 +2124,171 @@ mod tests {
     use std::net::TcpListener;
 
     const TEST_PSK: [u8; PSK_LEN] = [0x5a; PSK_LEN];
+
+    #[test]
+    fn raced_source_barrier_retains_first_future_frame_and_cursor() {
+        let state = ReceiveState::new();
+        // The viewer sampled epoch 1, then the receiver processed Changed(2)
+        // and published the one keyframe whose ACK the host now waits for.
+        state.source_epoch.store(2, Ordering::Release);
+        let mut queued = queued_test_frame(41);
+        queued.frame = queued.frame.with_source_epoch(2);
+        *state.latest.lock().unwrap() = Some(queued);
+        assert!(take_latest(&state, 1).is_none());
+        assert!(state.latest.lock().unwrap().is_some());
+        assert_eq!(take_latest(&state, 2).unwrap().frame.sequence(), 41);
+        state.cursor_enabled.store(true, Ordering::Release);
+        let shape = crate::remote::cursor::CursorShape {
+            id: 1,
+            width: 1,
+            height: 1,
+            hotspot_x: 0,
+            hotspot_y: 0,
+            rgba: vec![255; 4],
+        };
+        let position = crate::remote::cursor::CursorPosition {
+            sequence: 0,
+            geometry_epoch: 1,
+            shape_id: 1,
+            source_width: 640,
+            source_height: 480,
+            x: 1,
+            y: 2,
+            visible: true,
+        };
+        receive_cursor(
+            &state,
+            MessageKind::CursorShape,
+            &crate::remote::source_wire::encode_source_payload(2, &shape.encode().unwrap())
+                .unwrap(),
+        )
+        .unwrap();
+        receive_cursor(
+            &state,
+            MessageKind::CursorPosition,
+            &crate::remote::source_wire::encode_source_payload(2, &position.encode().unwrap())
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(take_cursor_for_epoch(&state, 1).is_none());
+        assert_eq!(take_cursor_for_epoch(&state, 2).unwrap().1, position);
+    }
+
+    #[test]
+    fn geometry_transition_release_keeps_last_presented_scope() {
+        let key = [0x53; 32];
+        let mut writer = SessionWriter::new(Vec::new(), key);
+        write_source_release(&mut writer, (8, 3), true).unwrap();
+        let mut reader = SessionReader::new(Cursor::new(writer.into_inner()), key);
+        let (_, bytes) = reader.read_message().unwrap();
+        assert_eq!(
+            crate::remote::messages::decode_source_input(&bytes).unwrap(),
+            (8, 3, vec![InputEvent::ReleaseAll])
+        );
+    }
+
+    #[test]
+    fn view_only_source_switch_has_no_input_fence_on_wire() {
+        let key = [0x53; 32];
+        let mut writer = SessionWriter::new(Vec::new(), key);
+        write_source_release(&mut writer, (1, 1), false).unwrap();
+        writer
+            .write_message(
+                MessageKind::SourceRequest,
+                &SourceRequest {
+                    expected_epoch: 1,
+                    target: crate::remote::source_session::SourceId(2),
+                }
+                .encode()
+                .unwrap(),
+            )
+            .unwrap();
+        write_source_release(&mut writer, (1, 1), false).unwrap();
+        let mut reader = SessionReader::new(Cursor::new(writer.into_inner()), key);
+        assert_eq!(reader.read_message().unwrap().0, MessageKind::SourceRequest);
+        assert!(reader.read_message().is_err());
+    }
+
+    #[test]
+    fn source_cycle_uses_only_catalog_ids_and_current_epoch() {
+        use crate::remote::source_session::{SourceId, SourceVersion};
+        use crate::remote::source_wire::SourceEntry;
+        let mut catalog = SourceCatalog {
+            current: SourceVersion {
+                source: SourceId(9),
+                epoch: 3,
+            },
+            entries: vec![
+                SourceEntry {
+                    id: SourceId(9),
+                    label: "One".into(),
+                },
+                SourceEntry {
+                    id: SourceId(42),
+                    label: "Two".into(),
+                },
+            ],
+        };
+        assert_eq!(next_source(&catalog, 3), Some((SourceId(42), "Two".into())));
+        assert_eq!(next_source(&catalog, 2), None);
+        catalog.current.source = SourceId(42);
+        assert_eq!(next_source(&catalog, 3), Some((SourceId(9), "One".into())));
+        catalog.entries.truncate(1);
+        assert_eq!(next_source(&catalog, 3), None);
+    }
+
+    #[test]
+    fn source_epochs_reject_future_and_drop_stale_before_decode() {
+        assert!(accept_source_epoch(3, 3).unwrap());
+        assert!(!accept_source_epoch(2, 3).unwrap());
+        assert!(accept_source_epoch(4, 3).is_err());
+        let state = ReceiveState::new();
+        state.cursor_enabled.store(true, Ordering::Release);
+        state.source_epoch.store(3, Ordering::Release);
+        // Invalid inner bytes must not enter the cursor codec/cache when stale.
+        let stale = crate::remote::source_wire::encode_source_payload(2, b"invalid").unwrap();
+        receive_cursor(&state, MessageKind::CursorShape, &stale).unwrap();
+        receive_cursor(&state, MessageKind::CursorPosition, &stale).unwrap();
+        assert!(state.cursor.lock().unwrap().take().is_none());
+    }
+
+    #[test]
+    fn source_catalog_is_immutable_after_initial_acceptance() {
+        use crate::remote::source_session::{SourceId, SourceVersion};
+        use crate::remote::source_wire::SourceEntry;
+        let state = ReceiveState::new();
+        let catalog = SourceCatalog {
+            current: SourceVersion {
+                source: SourceId(1),
+                epoch: 1,
+            },
+            entries: vec![SourceEntry {
+                id: SourceId(1),
+                label: "Desktop".into(),
+            }],
+        };
+        let bytes = catalog.encode().unwrap();
+        receive_catalog(&state, &bytes).unwrap();
+        assert!(receive_catalog(&state, &bytes).is_err());
+    }
+
+    #[test]
+    fn input_scope_tracks_presented_epoch_without_changing_inner_batch() {
+        let key = [0x44; 32];
+        let mut wire = SessionWriter::new(Vec::new(), key);
+        let mut scoped = ScopedInputWriter {
+            writer: &mut wire,
+            scope: (7, 9),
+        };
+        write_input_batch(&mut scoped, &[InputEvent::ReleaseAll], &mut Vec::new()).unwrap();
+        let mut reader = SessionReader::new(Cursor::new(wire.into_inner()), key);
+        let (kind, bytes) = reader.read_message().unwrap();
+        assert_eq!(kind, MessageKind::InputBatch);
+        assert_eq!(
+            crate::remote::messages::decode_source_input(&bytes).unwrap(),
+            (7, 9, vec![InputEvent::ReleaseAll])
+        );
+    }
 
     #[test]
     fn host_cannot_enlarge_any_offered_frame_limit() {
@@ -2164,16 +2587,30 @@ mod tests {
         };
         let state = ReceiveState::new();
         assert!(
-            receive_cursor(&state, MessageKind::CursorShape, &shape.encode().unwrap()).is_err()
+            receive_cursor(
+                &state,
+                MessageKind::CursorShape,
+                &crate::remote::source_wire::encode_source_payload(1, &shape.encode().unwrap())
+                    .unwrap()
+            )
+            .is_err()
         );
         state.cursor_enabled.store(true, Ordering::Release);
         let key = [0x5b; 32];
         let mut writer = SessionWriter::new(Vec::new(), key);
         writer
-            .write_message(MessageKind::CursorShape, &shape.encode().unwrap())
+            .write_message(
+                MessageKind::CursorShape,
+                &crate::remote::source_wire::encode_source_payload(1, &shape.encode().unwrap())
+                    .unwrap(),
+            )
             .unwrap();
         writer
-            .write_message(MessageKind::CursorPosition, &position.encode().unwrap())
+            .write_message(
+                MessageKind::CursorPosition,
+                &crate::remote::source_wire::encode_source_payload(1, &position.encode().unwrap())
+                    .unwrap(),
+            )
             .unwrap();
         writer.write_message(MessageKind::Frame, b"first").unwrap();
         let wire = writer.into_inner();
@@ -2830,6 +3267,8 @@ mod tests {
         let now = Instant::now();
         let mut pending = (40..=42)
             .map(|sequence| PendingFrameTiming {
+                source_epoch: 1,
+                geometry_epoch: 0,
                 sequence,
                 ready_at: now,
                 draw_started: now,
@@ -2844,7 +3283,7 @@ mod tests {
         let mut reader = SessionReader::new(Cursor::new(writer.into_inner()), key);
         let (kind, payload) = reader.read_message().unwrap();
         assert_eq!(kind, MessageKind::FrameAck);
-        assert_eq!(decode_frame_ack(&payload).unwrap(), 42);
+        assert_eq!(decode_source_frame_ack(&payload).unwrap().1, 42);
         assert!(reader.read_message().is_err());
     }
 
@@ -2853,6 +3292,8 @@ mod tests {
         let telemetry = ClientTelemetry::default();
         let now = Instant::now();
         let mut pending = std::collections::VecDeque::from([PendingFrameTiming {
+            source_epoch: 7,
+            geometry_epoch: 0,
             sequence: 42,
             ready_at: now,
             draw_started: now,
@@ -2862,6 +3303,10 @@ mod tests {
         assert!(pending.is_empty());
         assert_eq!(telemetry.window.lock().unwrap().drawn, 1);
         assert!(acknowledge_presentation(&mut writer, 42, &mut pending, &telemetry).is_err());
+        let mut reader = SessionReader::new(Cursor::new(writer.into_inner()), [0x31; 32]);
+        let (kind, payload) = reader.read_message().unwrap();
+        assert_eq!(kind, MessageKind::FrameAck);
+        assert_eq!(decode_source_frame_ack(&payload).unwrap(), (7, 42));
     }
 
     #[test]
@@ -2873,7 +3318,7 @@ mod tests {
         let mut reader = SessionReader::new(Cursor::new(writer.into_inner()), key);
         let (kind, payload) = reader.read_message().unwrap();
         assert_eq!(kind, MessageKind::FrameAck);
-        assert_eq!(decode_frame_ack(&payload).unwrap(), 9);
+        assert_eq!(decode_source_frame_ack(&payload).unwrap().1, 9);
         let window = telemetry.take_window();
         assert_eq!((window.drawn, window.acked), (1, 1));
 
@@ -3032,7 +3477,12 @@ mod tests {
             },
             80,
         );
-        writer.write_message(MessageKind::Frame, &payload).unwrap();
+        writer
+            .write_message(
+                MessageKind::Frame,
+                &crate::remote::source_wire::encode_source_payload(1, &payload).unwrap(),
+            )
+            .unwrap();
         writer.flush().unwrap();
 
         let state = Arc::new(ReceiveState::new());
@@ -3077,7 +3527,12 @@ mod tests {
             },
             80,
         );
-        writer.write_message(MessageKind::Frame, &payload).unwrap();
+        writer
+            .write_message(
+                MessageKind::Frame,
+                &crate::remote::source_wire::encode_source_payload(1, &payload).unwrap(),
+            )
+            .unwrap();
         writer.flush().unwrap();
 
         let state = Arc::new(ReceiveState::new());

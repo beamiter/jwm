@@ -31,6 +31,8 @@ pub mod profiles;
 pub mod protocol;
 mod sender;
 pub mod session_env;
+pub mod source_session;
+pub mod source_wire;
 pub mod ssh;
 mod tile;
 pub mod usability;

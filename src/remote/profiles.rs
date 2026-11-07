@@ -1,6 +1,8 @@
 //! Explicitly saved connection settings, never credentials or automatic reconnects.
 //!
 //! Storage is versioned and bounded. The caller owns CLI semantic validation.
+//! Extra source grants are deliberately not persisted; the CLI rejects saving
+//! them instead of silently dropping permissions. Unknown fields fail closed.
 //! A pinned, private directory and an advisory lock serialize atomic updates.
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File, OpenOptions};

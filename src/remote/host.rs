@@ -9,12 +9,16 @@ use super::deadline::TcpStreamDeadline;
 use super::key::KeySource;
 use super::messages::{
     ClientHello, MAX_CLIPBOARD_BYTES, MIN_VIEWPORT_HEIGHT, MIN_VIEWPORT_WIDTH, ServerHello,
-    decode_frame_ack, decode_input_batch, decode_viewport,
+    decode_source_frame_ack, decode_source_input, decode_viewport,
 };
 use super::pacing::capture_rate_limit_wait;
 use super::protocol::{
     MessageKind, PayloadBufferRetention, ProtocolError, SessionReader, SessionWriter,
     server_handshake,
+};
+use super::source_session::{MAX_GRANTED_SOURCES, SourceId, SourceSession, SourceVersion};
+use super::source_wire::{
+    SourceCatalog, SourceEntry, SourceRequest, encode_source_changed, encode_source_payload,
 };
 use super::tile::{TileEncodeRequest, TileEncoder, TilePlan};
 use super::usability::listener_bind_error;
@@ -352,6 +356,7 @@ fn poisoned_writer() -> io::Error {
 }
 
 struct PendingFrame {
+    source_version: SourceVersion,
     frame: CapturedFrame,
     captured_at: Instant,
     capture_completed_at: Instant,
@@ -879,6 +884,14 @@ impl<T> LatestMailbox<T> {
         }
     }
 
+    fn clear(&self) {
+        let mut state = self.state.lock().unwrap();
+        let pending = state.latest.take();
+        state.queued_at = None;
+        drop(state);
+        drop(pending);
+    }
+
     fn close(&self) {
         let mut state = match self.state.lock() {
             Ok(state) => state,
@@ -895,6 +908,8 @@ impl<T> LatestMailbox<T> {
 
 #[derive(Clone, Copy, Debug)]
 struct InFlightFrame {
+    source_epoch: u64,
+    geometry_epoch: u64,
     sequence: u64,
     captured_at: Instant,
     sent_at: Instant,
@@ -905,6 +920,8 @@ struct InFlightFrame {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct AckObservation {
+    source_epoch: u64,
+    geometry_epoch: u64,
     retired: u64,
     bytes: u64,
     same_epoch_retired: u64,
@@ -1193,6 +1210,7 @@ fn jpeg_quality_decrease(current: u8, floor: u8) -> u8 {
 struct FrameCreditState {
     last_sent: Option<u64>,
     last_acked: Option<u64>,
+    last_acked_epoch: Option<u64>,
     in_flight: VecDeque<InFlightFrame>,
     closed: bool,
 }
@@ -1210,6 +1228,7 @@ impl FrameCredits {
             state: Mutex::new(FrameCreditState {
                 last_sent: None,
                 last_acked: None,
+                last_acked_epoch: None,
                 in_flight: VecDeque::with_capacity(MAX_OUTSTANDING_FRAMES as usize),
                 closed: false,
             }),
@@ -1259,6 +1278,7 @@ impl FrameCredits {
         }
     }
 
+    #[cfg(test)]
     fn mark_sent(
         &self,
         sequence: u64,
@@ -1267,6 +1287,30 @@ impl FrameCredits {
         bytes: usize,
         jpeg_quality: u8,
         quality_epoch: u64,
+    ) -> io::Result<u64> {
+        self.mark_sent_scoped(
+            sequence,
+            captured_at,
+            sent_at,
+            bytes,
+            jpeg_quality,
+            quality_epoch,
+            1,
+            0,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn mark_sent_scoped(
+        &self,
+        sequence: u64,
+        captured_at: Instant,
+        sent_at: Instant,
+        bytes: usize,
+        jpeg_quality: u8,
+        quality_epoch: u64,
+        source_epoch: u64,
+        geometry_epoch: u64,
     ) -> io::Result<u64> {
         let mut state = self
             .state
@@ -1294,6 +1338,8 @@ impl FrameCredits {
         }
         state.last_sent = Some(sequence);
         state.in_flight.push_back(InFlightFrame {
+            source_epoch,
+            geometry_epoch,
             sequence,
             captured_at,
             sent_at,
@@ -1318,9 +1364,20 @@ impl FrameCredits {
         self.acknowledge_at_with_observer(sequence, acknowledged_at, |_| {})
     }
 
+    #[cfg(test)]
     fn acknowledge_at_with_observer(
         &self,
         sequence: u64,
+        acknowledged_at: Instant,
+        observer: impl FnOnce(AckObservation),
+    ) -> io::Result<Option<AckObservation>> {
+        self.acknowledge_scoped_at(sequence, None, acknowledged_at, observer)
+    }
+
+    fn acknowledge_scoped_at(
+        &self,
+        sequence: u64,
+        source_epoch: Option<u64>,
         acknowledged_at: Instant,
         observer: impl FnOnce(AckObservation),
     ) -> io::Result<Option<AckObservation>> {
@@ -1337,6 +1394,9 @@ impl FrameCredits {
             )));
         }
         if state.last_acked.is_some_and(|last| sequence <= last) {
+            if source_epoch.is_some_and(|epoch| Some(epoch) != state.last_acked_epoch) {
+                return Err(invalid_data("frame acknowledgement source epoch mismatch"));
+            }
             return Ok(None);
         }
         let target_index = state
@@ -1349,6 +1409,9 @@ impl FrameCredits {
                 ))
             })?;
         let target = state.in_flight[target_index];
+        if source_epoch.is_some_and(|epoch| epoch != target.source_epoch) {
+            return Err(invalid_data("frame acknowledgement source epoch mismatch"));
+        }
         let retired = u64::try_from(target_index + 1).unwrap_or(u64::MAX);
         let same_epoch_retired = u64::try_from(
             state
@@ -1371,7 +1434,10 @@ impl FrameCredits {
             let _ = state.in_flight.pop_front();
         }
         state.last_acked = Some(sequence);
+        state.last_acked_epoch = Some(target.source_epoch);
         let observation = AckObservation {
+            source_epoch: target.source_epoch,
+            geometry_epoch: target.geometry_epoch,
             retired,
             bytes: target.bytes,
             same_epoch_retired,
@@ -1388,6 +1454,21 @@ impl FrameCredits {
         observer(observation);
         self.available.notify_all();
         Ok(Some(observation))
+    }
+
+    /// A source barrier invalidates viewer presentations without claiming
+    /// they were drawn. Retire their credit so suppressed stale ACKs cannot
+    /// deadlock the first new-source keyframe; sequence numbers never reset.
+    fn abandon_source(&self) {
+        let mut state = self.state.lock().unwrap();
+        state.last_acked_epoch = state
+            .in_flight
+            .back()
+            .map(|frame| frame.source_epoch)
+            .or(state.last_acked_epoch);
+        state.last_acked = state.last_sent;
+        state.in_flight.clear();
+        self.available.notify_all();
     }
 
     fn outstanding(&self) -> u64 {
@@ -1496,6 +1577,8 @@ pub struct HostOptions {
     pub capture_source: CaptureSource,
     /// Which part of the root to share; the whole root by default.
     pub capture_area: CaptureArea,
+    /// Explicit additional host grants, never inferred from viewer requests.
+    pub shared_sources: Vec<CaptureArea>,
     /// Where frames are shrunk to the viewer's size.
     pub scaling: ScalingPolicy,
     pub allow_lan: bool,
@@ -1506,6 +1589,166 @@ pub struct HostOptions {
     pub once: bool,
     /// Emit machine-readable host telemetry as JSON lines on stderr.
     pub stats_json: bool,
+}
+
+/// Build an immutable host-only grant set. Initial selection is always first;
+/// nothing implicitly adds the whole root when a scoped source was selected.
+fn host_source_grants(options: &HostOptions) -> RemoteResult<Vec<(SourceId, CaptureArea)>> {
+    if options.shared_sources.len() >= MAX_GRANTED_SOURCES {
+        return Err(invalid_data("too many explicit source grants").into());
+    }
+    let mut areas = vec![options.capture_area.clone()];
+    for area in &options.shared_sources {
+        if !areas.contains(area) {
+            areas.push(area.clone());
+        }
+    }
+    let grants: Vec<_> = areas
+        .into_iter()
+        .enumerate()
+        .map(|(index, area)| (SourceId(index as u32 + 1), area))
+        .collect();
+    let _ = SourceSession::new(grants.clone(), SourceId(1))?;
+    Ok(grants)
+}
+
+fn source_label(area: &CaptureArea) -> String {
+    match area {
+        CaptureArea::Root => "Whole desktop".into(),
+        CaptureArea::Monitor(name) => name.clone(),
+        CaptureArea::Region(region) => format!(
+            "{}x{}{:+}{:+}",
+            region.width, region.height, region.x, region.y
+        ),
+    }
+}
+
+struct HostSourceState {
+    policy: SourceSession,
+    pending: Option<(SourceVersion, CaptureArea)>,
+    input_area: InputArea,
+    geometry_epoch: u64,
+    presented_geometry: Option<u64>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum SourceInputAdmission {
+    Stale,
+    ReleaseOnly,
+    Inject(InputArea),
+}
+
+fn source_input_admission(
+    state: &HostSourceState,
+    source_epoch: u64,
+    geometry_epoch: u64,
+    events: &[super::x11_input::InputEvent],
+) -> SourceInputAdmission {
+    let version = state.policy.current();
+    if source_epoch != version.epoch {
+        return SourceInputAdmission::Stale;
+    }
+    if events == [super::x11_input::InputEvent::ReleaseAll] {
+        // A safety fence cannot inject a coordinate or press, so it remains
+        // meaningful when only geometry has changed. Never cross sources.
+        return SourceInputAdmission::ReleaseOnly;
+    }
+    if !state.policy.accepts_input(version)
+        || geometry_epoch != state.geometry_epoch
+        || state.presented_geometry != Some(geometry_epoch)
+    {
+        return SourceInputAdmission::Stale;
+    }
+    SourceInputAdmission::Inject(state.input_area)
+}
+
+fn refresh_input_geometry<E>(
+    previous: &mut u64,
+    current: u64,
+    release: impl FnOnce() -> Result<(), E>,
+) -> Result<(), E> {
+    if *previous != current {
+        release()?;
+        *previous = current;
+    }
+    Ok(())
+}
+
+struct SourceControl {
+    state: Mutex<HostSourceState>,
+    changed: Condvar,
+}
+
+impl SourceControl {
+    fn new(
+        grants: Vec<(SourceId, CaptureArea)>,
+        area: InputArea,
+        geometry_epoch: u64,
+    ) -> RemoteResult<Self> {
+        Ok(Self {
+            state: Mutex::new(HostSourceState {
+                policy: SourceSession::new(grants, SourceId(1))?,
+                pending: None,
+                input_area: area,
+                geometry_epoch,
+                presented_geometry: None,
+            }),
+            changed: Condvar::new(),
+        })
+    }
+
+    /// Keep geometry release, admission and native injection in one critical
+    /// section. Capture cannot replace the input transform after validation
+    /// but before XTEST submission. This lock never acquires the wire writer.
+    fn apply_input(
+        &self,
+        previous_geometry: &mut u64,
+        source_epoch: u64,
+        geometry_epoch: u64,
+        events: &[super::x11_input::InputEvent],
+        mut apply: impl FnMut(SourceInputAdmission) -> RemoteResult<()>,
+    ) -> RemoteResult<()> {
+        let state = self.state.lock().unwrap();
+        refresh_input_geometry(previous_geometry, state.geometry_epoch, || {
+            apply(SourceInputAdmission::ReleaseOnly)
+        })?;
+        let admission = source_input_admission(&state, source_epoch, geometry_epoch, events);
+        let result = if admission == SourceInputAdmission::Stale {
+            Ok(())
+        } else {
+            apply(admission)
+        };
+        drop(state);
+        result
+    }
+
+    /// No writer/credit lock is held while waiting for presentation. A new
+    /// source request or shutdown is observed within one short bounded slice.
+    fn sender_ready(&self, version: SourceVersion, running: &AtomicBool) -> RemoteResult<bool> {
+        let deadline = Instant::now() + FRAME_ACK_TIMEOUT;
+        let mut state = self.state.lock().unwrap();
+        loop {
+            if !running.load(Ordering::Acquire) || !state.policy.accepts_capture(version) {
+                return Ok(false);
+            }
+            if !state.policy.awaiting_presentation() {
+                return Ok(true);
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "source keyframe was not presented",
+                )
+                .into());
+            }
+            state = self
+                .changed
+                .wait_timeout(state, remaining.min(Duration::from_millis(100)))
+                .unwrap()
+                .0;
+        }
+    }
 }
 
 /// Startup notice for a listener reachable beyond loopback.
@@ -1533,7 +1776,10 @@ pub fn run_host(options: HostOptions) -> RemoteResult<()> {
         Instant::now(),
     )?;
     let key = options.key.load()?;
-    validate_capture_area(options.display.as_deref(), &options.capture_area)?;
+    let grants = host_source_grants(&options)?;
+    for (_, area) in &grants {
+        validate_capture_area(options.display.as_deref(), area)?;
+    }
     let listener = TcpListener::bind(&options.listen)
         .map_err(|error| listener_bind_error(&options.listen, error))?;
     listener.set_nonblocking(true)?;
@@ -1973,6 +2219,25 @@ fn serve_authenticated(
     if clipboard_enabled {
         reader.set_max_payload_len(MAX_INBOUND_CLIPBOARD_PAYLOAD_LEN);
     }
+    let grants = host_source_grants(options)?;
+    let catalog = SourceCatalog {
+        current: SourceVersion {
+            source: SourceId(1),
+            epoch: 1,
+        },
+        entries: grants
+            .iter()
+            .map(|(id, area)| SourceEntry {
+                id: *id,
+                label: source_label(area),
+            })
+            .collect(),
+    };
+    let sources = Arc::new(SourceControl::new(
+        grants,
+        input_area,
+        capture.geometry_epoch(),
+    )?);
     writer.write_message(
         MessageKind::HelloAck,
         &ServerHello {
@@ -1984,6 +2249,7 @@ fn serve_authenticated(
         }
         .encode(),
     )?;
+    writer.write_message(MessageKind::SourceCatalog, &catalog.encode()?)?;
     writer.flush()?;
     eprintln!(
         "jwm-remote: authenticated session started ({})",
@@ -2026,11 +2292,12 @@ fn serve_authenticated(
     let input_jpeg_quality = Arc::clone(&jpeg_quality);
     let viewport = Arc::new(ViewportRequest::new());
     let input_viewport = Arc::clone(&viewport);
+    let input_sources = Arc::clone(&sources);
     let input_thread = thread::Builder::new()
         .name("jwm-remote-input".into())
         .spawn(move || {
             let _stop_on_exit = StopSessionOnDrop(Arc::clone(&input_running));
-            receive_input(
+            receive_input_scoped(
                 reader,
                 injector,
                 input_area,
@@ -2045,10 +2312,12 @@ fn serve_authenticated(
                 &input_jpeg_quality,
                 &input_viewport,
                 clipboard_inbox.as_ref(),
+                Some(&input_sources),
             )
         })?;
 
     let stream_result = stream_frames(
+        &sources,
         &viewport,
         clipboard_outbox,
         &mut capture,
@@ -2191,6 +2460,7 @@ fn decline_session<W: std::io::Write>(writer: &mut SessionWriter<W>, reason: &st
 type SharedWriter = Arc<Mutex<SessionWriter<DeadlineWriter<TcpStream>>>>;
 
 fn stream_frames(
+    sources: &Arc<SourceControl>,
     viewport: &ViewportRequest,
     clipboard_outbox: Option<ClipboardOutbox>,
     capture: &mut X11Capture,
@@ -2205,6 +2475,7 @@ fn stream_frames(
     options: &HostOptions,
 ) -> RemoteResult<()> {
     let writer: SharedWriter = Arc::new(Mutex::new(writer));
+    let sender_sources = Arc::clone(sources);
     let sender_writer = Arc::clone(&writer);
     let mailbox = Arc::new(LatestMailbox::new());
     let sender_mailbox = Arc::clone(&mailbox);
@@ -2224,13 +2495,14 @@ fn stream_frames(
         .name("jwm-remote-video".into())
         .spawn(move || {
             let _stop_on_exit = StopSessionOnDrop(Arc::clone(&sender_running));
-            let result = send_frames(
+            let result = send_frames_scoped(
                 sender_mailbox,
                 sender_writer,
                 &sender_running,
                 &sender_credits,
                 &sender_telemetry,
                 &sender_jpeg_quality,
+                Some(&sender_sources),
             );
             if result.is_err() {
                 sender_stop.record(StopCause::Sender);
@@ -2295,6 +2567,32 @@ fn stream_frames(
             // Announce every capture-path transition, not just the first. Each
             // of these degradations is large and was previously visible only
             // as a single line that had long since scrolled away.
+            let switch = sources.state.lock().unwrap().pending.take();
+            if let Some((version, area)) = switch {
+                // Input was released before this request became visible.
+                // A failed install closes the session, never restores old pixels.
+                capture.switch_area(area)?;
+                let mut writer = lock_writer(&writer);
+                mailbox.clear();
+                credits.abandon_source();
+                cursor_sender = CursorSender::default();
+                {
+                    let mut state = sources.state.lock().unwrap();
+                    state.input_area = capture.input_area();
+                    state.geometry_epoch = capture.geometry_epoch();
+                    state.presented_geometry = None;
+                    state
+                        .policy
+                        .finish_switch(version, |_| Ok::<(), io::Error>(()))??;
+                }
+                write_session_record(
+                    &mut writer,
+                    MessageKind::SourceChanged,
+                    &encode_source_changed(version)?,
+                    FRAME_WRITE_DEADLINE,
+                )?;
+                sources.changed.notify_all();
+            }
             if let Some(requested) = viewport.take() {
                 let (width, height) = effective_encoded_bounds(options.max_width, requested);
                 if capture.set_encoded_bounds(width, height) {
@@ -2318,7 +2616,12 @@ fn stream_frames(
             if capture.cursor_plane_enabled() && Instant::now() >= next_cursor_poll {
                 if let Some(sample) = capture.poll_cursor_plane()? {
                     let mut writer = writer.lock().unwrap();
-                    cursor_sender.send(&mut writer, sample)?;
+                    let state = sources.state.lock().unwrap();
+                    let version = state.policy.current();
+                    if state.policy.accepts_capture(version) {
+                        drop(state);
+                        cursor_sender.send_scoped(&mut writer, sample, Some(version.epoch))?;
+                    }
                 }
                 next_cursor_poll = Instant::now() + cursor_interval;
             }
@@ -2353,6 +2656,14 @@ fn stream_frames(
                 }
                 CaptureDecision::Closed => break,
             }
+            let source_version = {
+                let state = sources.state.lock().unwrap();
+                let version = state.policy.current();
+                if !state.policy.accepts_capture(version) {
+                    continue;
+                }
+                version
+            };
             let capture_started = Instant::now();
             let Some(frame) = captured_frame_from_outcome(capture.frame()?) else {
                 telemetry.record_damage_skipped();
@@ -2361,7 +2672,16 @@ fn stream_frames(
             let capture_completed_at = Instant::now();
             telemetry.record_captured(capture_completed_at.duration_since(capture_started));
             telemetry.record_dimensions(&frame);
+            {
+                let mut state = sources.state.lock().unwrap();
+                if !state.policy.accepts_capture(source_version) {
+                    continue;
+                }
+                state.geometry_epoch = frame.geometry_epoch;
+                state.input_area = capture.input_area();
+            }
             let pending = PendingFrame {
+                source_version,
                 frame,
                 captured_at: capture_started,
                 capture_completed_at,
@@ -2452,6 +2772,7 @@ fn target_frame_interval(fps: u16) -> Duration {
     Duration::from_secs_f64(1.0 / f64::from(fps.clamp(1, 60)))
 }
 
+#[cfg(test)]
 fn send_frames<W: std::io::Write + SetWriteTimeout>(
     mailbox: Arc<LatestMailbox<PendingFrame>>,
     writer: Arc<Mutex<SessionWriter<DeadlineWriter<W>>>>,
@@ -2460,18 +2781,18 @@ fn send_frames<W: std::io::Write + SetWriteTimeout>(
     telemetry: &HostTelemetry,
     jpeg_quality: &JpegQualityController,
 ) -> RemoteResult<()> {
-    let mut sender = FrameSender::new();
-    send_frames_with_encoder(
+    send_frames_scoped(
         mailbox,
         writer,
         running,
         credits,
         telemetry,
         jpeg_quality,
-        &mut sender,
+        None,
     )
 }
 
+#[cfg(test)]
 fn send_frames_with_encoder<W: std::io::Write + SetWriteTimeout>(
     mailbox: Arc<LatestMailbox<PendingFrame>>,
     writer: Arc<Mutex<SessionWriter<DeadlineWriter<W>>>>,
@@ -2481,6 +2802,51 @@ fn send_frames_with_encoder<W: std::io::Write + SetWriteTimeout>(
     jpeg_quality: &JpegQualityController,
     sender: &mut FrameSender,
 ) -> RemoteResult<()> {
+    send_frames_with_encoder_scoped(
+        mailbox,
+        writer,
+        running,
+        credits,
+        telemetry,
+        jpeg_quality,
+        sender,
+        None,
+    )
+}
+
+fn send_frames_scoped<W: std::io::Write + SetWriteTimeout>(
+    mailbox: Arc<LatestMailbox<PendingFrame>>,
+    writer: Arc<Mutex<SessionWriter<DeadlineWriter<W>>>>,
+    running: &AtomicBool,
+    credits: &FrameCredits,
+    telemetry: &HostTelemetry,
+    jpeg_quality: &JpegQualityController,
+    sources: Option<&SourceControl>,
+) -> RemoteResult<()> {
+    let mut sender = FrameSender::new();
+    send_frames_with_encoder_scoped(
+        mailbox,
+        writer,
+        running,
+        credits,
+        telemetry,
+        jpeg_quality,
+        &mut sender,
+        sources,
+    )
+}
+
+fn send_frames_with_encoder_scoped<W: std::io::Write + SetWriteTimeout>(
+    mailbox: Arc<LatestMailbox<PendingFrame>>,
+    writer: Arc<Mutex<SessionWriter<DeadlineWriter<W>>>>,
+    running: &AtomicBool,
+    credits: &FrameCredits,
+    telemetry: &HostTelemetry,
+    jpeg_quality: &JpegQualityController,
+    sender: &mut FrameSender,
+    sources: Option<&SourceControl>,
+) -> RemoteResult<()> {
+    let mut source_epoch = None;
     let mut sequence = 0_u64;
     let mut payload = Vec::new();
     let mut payload_retention = PayloadBufferRetention::default();
@@ -2495,6 +2861,15 @@ fn send_frames_with_encoder<W: std::io::Write + SetWriteTimeout>(
         telemetry.record_dequeued(pending.capture_completed_at.elapsed(), ack_wait);
         if !running.load(Ordering::Acquire) {
             break;
+        }
+        if let Some(sources) = sources {
+            if !sources.sender_ready(pending.source_version, running)? {
+                continue;
+            }
+            if source_epoch != Some(pending.source_version.epoch) {
+                *sender = FrameSender::new();
+                source_epoch = Some(pending.source_version.epoch);
+            }
         }
         let planned_at = Instant::now();
         let mut plan = sender.plan_at(&pending.frame, planned_at)?;
@@ -2546,25 +2921,54 @@ fn send_frames_with_encoder<W: std::io::Write + SetWriteTimeout>(
         if let Some(stages) = sender.encoder.encode_timings() {
             telemetry.record_encode_stages(stages);
         }
-        // Publish the application sequence before the bytes reach the peer so
-        // an immediate cumulative ACK can never race ahead of host state.
-        let sent_at = Instant::now();
-        let outstanding = credits.mark_sent(
-            sequence,
-            pending.captured_at,
-            sent_at,
-            payload.len(),
-            quality.quality,
-            quality.epoch,
-        )?;
-        telemetry.record_outstanding(outstanding);
+        if sources.is_some() {
+            if payload.len() > super::source_wire::MAX_SOURCE_INNER_PAYLOAD_LEN {
+                return Err(invalid_data("source frame exceeds record budget").into());
+            }
+            // Reuse the encoded payload allocation instead of allocating and
+            // copying a second frame-sized envelope on every frame.
+            payload.splice(..0, pending.source_version.epoch.to_be_bytes());
+        }
+        let wire_payload = payload.as_slice();
         let write_started = Instant::now();
-        // Held for exactly one record: interleaving would desynchronise the
-        // authenticated stream, and clipboard traffic shares this writer.
         let write_result = {
             let mut writer = lock_writer(&writer);
+            // The writer is the source publication barrier. A sender already
+            // encoding old pixels must recheck before reserving credit or
+            // writing, and can never appear after SourceChanged.
+            let mut source_state = sources.map(|sources| sources.state.lock().unwrap());
+            if source_state
+                .as_ref()
+                .is_some_and(|state| !state.policy.accepts_capture(pending.source_version))
+            {
+                sender.discard();
+                continue;
+            }
+            let sent_at = Instant::now();
+            let outstanding = credits.mark_sent_scoped(
+                sequence,
+                pending.captured_at,
+                sent_at,
+                wire_payload.len(),
+                quality.quality,
+                quality.epoch,
+                pending.source_version.epoch,
+                pending.frame.geometry_epoch,
+            )?;
+            if let Some(state) = source_state.as_mut() {
+                if state.policy.needs_keyframe() {
+                    if !plan.keyframe {
+                        return Err(invalid_data("new source requires a full keyframe").into());
+                    }
+                    state
+                        .policy
+                        .publish_keyframe(pending.source_version, sequence)?;
+                }
+            }
+            drop(source_state);
+            telemetry.record_outstanding(outstanding);
             let socket_started = Instant::now();
-            let result = write_frame_record(&mut writer, &payload, FRAME_WRITE_DEADLINE);
+            let result = write_frame_record(&mut writer, wire_payload, FRAME_WRITE_DEADLINE);
             if result.is_ok() {
                 telemetry.record_write_stages(
                     socket_started.duration_since(write_started),
@@ -2579,7 +2983,7 @@ fn send_frames_with_encoder<W: std::io::Write + SetWriteTimeout>(
             sender.discard();
             return Err(error.into());
         }
-        telemetry.record_sent(payload.len(), write_started.elapsed());
+        telemetry.record_sent(wire_payload.len(), write_started.elapsed());
         if unchanged_keepalive {
             telemetry.record_unchanged_keepalive();
         }
@@ -2734,10 +3138,20 @@ struct CursorSender {
 }
 
 impl CursorSender {
+    #[cfg(test)]
     fn send<W: std::io::Write + SetWriteTimeout>(
         &mut self,
         writer: &mut SessionWriter<DeadlineWriter<W>>,
         sample: super::x11_capture::CursorSample,
+    ) -> RemoteResult<()> {
+        self.send_scoped(writer, sample, None)
+    }
+
+    fn send_scoped<W: std::io::Write + SetWriteTimeout>(
+        &mut self,
+        writer: &mut SessionWriter<DeadlineWriter<W>>,
+        sample: super::x11_capture::CursorSample,
+        source_epoch: Option<u64>,
     ) -> RemoteResult<()> {
         let shape = sample
             .shape
@@ -2760,11 +3174,20 @@ impl CursorSender {
             visible: sample.visible,
         }
         .encode()?;
+        let position = match source_epoch {
+            Some(epoch) => encode_source_payload(epoch, &position)?,
+            None => position.to_vec(),
+        };
         if self.shape_id != Some(shape.id) {
+            let encoded = shape.encode()?;
+            let encoded = match source_epoch {
+                Some(epoch) => encode_source_payload(epoch, &encoded)?,
+                None => encoded,
+            };
             write_session_record(
                 writer,
                 MessageKind::CursorShape,
-                &shape.encode()?,
+                &encoded,
                 FRAME_WRITE_DEADLINE,
             )?;
         }
@@ -2922,7 +3345,7 @@ fn print_host_telemetry(snapshot: HostTelemetrySnapshot, outstanding: u64, stats
     );
 }
 
-fn receive_input(
+fn receive_input_scoped(
     mut reader: SessionReader<TcpStream>,
     mut injector: Option<InputInjector>,
     input_area: InputArea,
@@ -2937,8 +3360,11 @@ fn receive_input(
     jpeg_quality: &JpegQualityController,
     viewport: &ViewportRequest,
     clipboard: Option<&ClipboardInbox>,
+    sources: Option<&SourceControl>,
 ) -> RemoteResult<()> {
     let mut payload = Vec::new();
+    let mut input_geometry =
+        sources.map_or(0, |sources| sources.state.lock().unwrap().geometry_epoch);
     let session_result = (|| -> RemoteResult<()> {
         reader
             .get_ref()
@@ -2973,29 +3399,57 @@ fn receive_input(
                     .set_read_timeout(Some(session_idle_timeout))?;
                 awaiting_first_activity = false;
             }
+            if let Some(sources) = sources {
+                let geometry = sources.state.lock().unwrap().geometry_epoch;
+                refresh_input_geometry(&mut input_geometry, geometry, || {
+                    injector.as_mut().map_or(Ok(()), InputInjector::release_all)
+                })?;
+            }
             match kind {
                 MessageKind::InputBatch => {
-                    let events = decode_input_batch(&payload)?;
+                    let (source_epoch, geometry_epoch, events) = decode_source_input(&payload)?;
                     let Some(injector) = injector.as_mut() else {
                         return Err(
                             invalid_data("input was not negotiated for this session").into()
                         );
                     };
-                    let contains_keyboard = events
-                        .iter()
-                        .any(|event| matches!(event, super::x11_input::InputEvent::Key { .. }));
-                    if contains_keyboard && !keyboard_enabled {
-                        return Err(invalid_data("keyboard input was not negotiated").into());
-                    }
-                    // Pointer mappings can change in pointer-only sessions
-                    // too. Drain their notices before the next button edge,
-                    // without ever granting a disabled keyboard capability.
-                    if keyboard_enabled {
-                        verify_injector_keymap(injector, verified_keymap.as_ref())?;
+                    let mut apply = |admission| -> RemoteResult<()> {
+                        match admission {
+                            SourceInputAdmission::Stale => Ok(()),
+                            SourceInputAdmission::ReleaseOnly => {
+                                injector.release_all()?;
+                                Ok(())
+                            }
+                            SourceInputAdmission::Inject(area) => {
+                                let contains_keyboard = events.iter().any(|event| {
+                                    matches!(event, super::x11_input::InputEvent::Key { .. })
+                                });
+                                if contains_keyboard && !keyboard_enabled {
+                                    return Err(
+                                        invalid_data("keyboard input was not negotiated").into()
+                                    );
+                                }
+                                if keyboard_enabled {
+                                    verify_injector_keymap(injector, verified_keymap.as_ref())?;
+                                } else {
+                                    let _ = injector.take_keymap_change()?;
+                                }
+                                injector.inject_batch(&events, area)?;
+                                Ok(())
+                            }
+                        }
+                    };
+                    if let Some(sources) = sources {
+                        sources.apply_input(
+                            &mut input_geometry,
+                            source_epoch,
+                            geometry_epoch,
+                            &events,
+                            apply,
+                        )?;
                     } else {
-                        let _ = injector.take_keymap_change()?;
+                        apply(SourceInputAdmission::Inject(input_area))?;
                     }
-                    injector.inject_batch(&events, input_area)?;
                 }
                 MessageKind::Pointer
                 | MessageKind::Key
@@ -3030,13 +3484,58 @@ fn receive_input(
                     let (width, height) = decode_viewport(&payload)?;
                     viewport.request(width, height);
                 }
+                MessageKind::SourceRequest => {
+                    let request = SourceRequest::decode(&payload)?;
+                    let sources =
+                        sources.ok_or_else(|| invalid_data("source switching unavailable"))?;
+                    let (version, area) = {
+                        let mut state = sources.state.lock().unwrap();
+                        let version = state
+                            .policy
+                            .begin_switch(request.expected_epoch, request.target)?;
+                        (version, state.policy.selected_area().clone())
+                    };
+                    // This thread owns every injection, so no input edge can
+                    // race this release or enter the new mapping before ACK.
+                    if let Some(injector) = injector.as_mut() {
+                        injector.release_all()?;
+                    }
+                    let mut state = sources.state.lock().unwrap();
+                    state.presented_geometry = None;
+                    state.pending = Some((version, area));
+                    sources.changed.notify_all();
+                }
                 MessageKind::FrameAck => {
+                    let (epoch, sequence) = decode_source_frame_ack(&payload)?;
+                    if let Some(sources) = sources {
+                        let state = sources.state.lock().unwrap();
+                        let current = state.policy.current();
+                        if epoch < current.epoch {
+                            continue;
+                        }
+                        if epoch != current.epoch {
+                            return Err(invalid_data("future source ACK").into());
+                        }
+                    }
                     let acknowledged_at = Instant::now();
-                    if let Some(ack) = credits.acknowledge_at_with_observer(
-                        decode_frame_ack(&payload)?,
+                    if let Some(ack) = credits.acknowledge_scoped_at(
+                        sequence,
+                        Some(epoch),
                         acknowledged_at,
                         |ack| jpeg_quality.observe_ack_at(ack, acknowledged_at),
                     )? {
+                        if let Some(sources) = sources {
+                            let mut state = sources.state.lock().unwrap();
+                            let version = state.policy.current();
+                            if ack.source_epoch != version.epoch {
+                                return Err(invalid_data("stale source ACK metadata").into());
+                            }
+                            if state.policy.awaiting_presentation() {
+                                state.policy.acknowledge_presentation(version, sequence)?;
+                            }
+                            state.presented_geometry = Some(ack.geometry_epoch);
+                            sources.changed.notify_all();
+                        }
                         telemetry.record_ack(ack);
                     }
                 }
@@ -3044,7 +3543,9 @@ fn receive_input(
                 | MessageKind::HelloAck
                 | MessageKind::Frame
                 | MessageKind::CursorShape
-                | MessageKind::CursorPosition => {
+                | MessageKind::CursorPosition
+                | MessageKind::SourceCatalog
+                | MessageKind::SourceChanged => {
                     return Err(invalid_data(format!("unexpected client message: {kind:?}")).into());
                 }
             }
@@ -3260,6 +3761,388 @@ mod tests {
             self.flushes += 1;
             thread::sleep(self.flush_delay);
             Ok(())
+        }
+    }
+
+    #[test]
+    fn scoped_sender_switches_same_size_with_fresh_keyframe_and_no_old_credit_deadlock() {
+        let mailbox = Arc::new(LatestMailbox::new());
+        let gate = Arc::new((
+            Mutex::new(GateState {
+                open: true,
+                ..GateState::default()
+            }),
+            Condvar::new(),
+        ));
+        let writer = Arc::new(Mutex::new(SessionWriter::new(
+            DeadlineWriter::new(GateWriter(Arc::clone(&gate)), WRITE_TIMEOUT),
+            [0xa7; 32],
+        )));
+        let running = Arc::new(AtomicBool::new(true));
+        let credits = Arc::new(FrameCredits::new());
+        let sources = Arc::new(test_source_control());
+        let sender_mailbox = Arc::clone(&mailbox);
+        let sender_writer = Arc::clone(&writer);
+        let sender_running = Arc::clone(&running);
+        let sender_credits = Arc::clone(&credits);
+        let sender_sources = Arc::clone(&sources);
+        let sender = thread::spawn(move || {
+            let quality = JpegQualityController::new_at(
+                70,
+                40,
+                false,
+                Duration::from_millis(100),
+                Instant::now(),
+            )
+            .unwrap();
+            send_frames_scoped(
+                sender_mailbox,
+                sender_writer,
+                &sender_running,
+                &sender_credits,
+                &HostTelemetry::new(),
+                &quality,
+                Some(&sender_sources),
+            )
+        });
+        let wait_flushes = |count| {
+            let state = gate.0.lock().unwrap();
+            let (state, timeout) = gate
+                .1
+                .wait_timeout_while(state, Duration::from_secs(2), |state| state.flushes < count)
+                .unwrap();
+            assert!(
+                !timeout.timed_out(),
+                "source sender did not reach flush {count}"
+            );
+            drop(state);
+        };
+        mailbox.publish(test_pending_frame(10)).unwrap();
+        wait_flushes(1);
+        mailbox.publish(test_pending_frame(20)).unwrap();
+        {
+            let state = gate.0.lock().unwrap();
+            let (state, timeout) = gate
+                .1
+                .wait_timeout_while(state, Duration::from_millis(30), |state| state.flushes < 2)
+                .unwrap();
+            assert!(
+                timeout.timed_out(),
+                "second frame bypassed first-presentation barrier"
+            );
+            assert_eq!(state.flushes, 1);
+        }
+        credits
+            .acknowledge_scoped_at(0, Some(1), Instant::now(), |_| {})
+            .unwrap();
+        {
+            let mut state = sources.state.lock().unwrap();
+            let version = state.policy.current();
+            state.policy.acknowledge_presentation(version, 0).unwrap();
+        }
+        sources.changed.notify_all();
+        wait_flushes(2);
+        // Do not ACK frame1: client invalidation suppresses its old completion.
+        let next = sources
+            .state
+            .lock()
+            .unwrap()
+            .policy
+            .begin_switch(1, SourceId(2))
+            .unwrap();
+        {
+            let mut writer = lock_writer(&writer);
+            mailbox.clear();
+            credits.abandon_source();
+            sources
+                .state
+                .lock()
+                .unwrap()
+                .policy
+                .finish_switch(next, |_| Ok::<(), ()>(()))
+                .unwrap()
+                .unwrap();
+            write_session_record(
+                &mut writer,
+                MessageKind::SourceChanged,
+                &encode_source_changed(next).unwrap(),
+                FRAME_WRITE_DEADLINE,
+            )
+            .unwrap();
+        }
+        let mut pending = test_pending_frame(90);
+        pending.source_version = next;
+        mailbox.publish(pending).unwrap();
+        sources.changed.notify_all();
+        wait_flushes(4);
+        running.store(false, Ordering::Release);
+        mailbox.close();
+        credits.close();
+        sources.changed.notify_all();
+        sender.join().unwrap().unwrap();
+        let mut reader = SessionReader::new(
+            Cursor::new(gate.0.lock().unwrap().bytes.clone()),
+            [0xa7; 32],
+        );
+        let mut decoder = TileDecoder::new();
+        for sequence in [0, 1] {
+            let (kind, payload) = reader.read_message().unwrap();
+            assert_eq!(kind, MessageKind::Frame);
+            let (epoch, inner) =
+                super::super::source_wire::decode_source_payload(&payload).unwrap();
+            assert_eq!(epoch, 1);
+            assert_eq!(decode_wire(&mut decoder, inner).0, sequence);
+        }
+        let (kind, payload) = reader.read_message().unwrap();
+        assert_eq!(kind, MessageKind::SourceChanged);
+        assert_eq!(
+            super::super::source_wire::decode_source_changed(&payload).unwrap(),
+            next
+        );
+        let (kind, payload) = reader.read_message().unwrap();
+        assert_eq!(kind, MessageKind::Frame);
+        let (epoch, inner) = super::super::source_wire::decode_source_payload(&payload).unwrap();
+        assert_eq!(epoch, 2);
+        let (sequence, image) = decode_wire(&mut TileDecoder::new(), inner);
+        assert_eq!(sequence, 2);
+        assert!(image.get_pixel(0, 0).0[0].abs_diff(90) <= 2);
+        assert!(reader.read_message().is_err());
+    }
+
+    fn test_source_control() -> SourceControl {
+        SourceControl::new(
+            vec![
+                (SourceId(1), CaptureArea::Monitor("DP-1".into())),
+                (SourceId(2), CaptureArea::Monitor("DP-2".into())),
+            ],
+            InputArea {
+                origin: (100, 20),
+                size: Some((640, 480)),
+            },
+            7,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn source_input_fences_geometry_and_source_but_preserves_safe_release() {
+        use super::super::x11_input::InputEvent;
+        let control = test_source_control();
+        let mut state = control.state.lock().unwrap();
+        let first = state.policy.current();
+        let press = [InputEvent::Button {
+            button: 1,
+            pressed: true,
+        }];
+        assert_eq!(
+            source_input_admission(&state, 1, 7, &press),
+            SourceInputAdmission::Stale
+        );
+        state.policy.publish_keyframe(first, 0).unwrap();
+        state.policy.acknowledge_presentation(first, 0).unwrap();
+        state.presented_geometry = Some(7);
+        assert_eq!(
+            source_input_admission(&state, 1, 7, &press),
+            SourceInputAdmission::Inject(state.input_area)
+        );
+        state.geometry_epoch = 8;
+        assert_eq!(
+            source_input_admission(&state, 1, 7, &press),
+            SourceInputAdmission::Stale
+        );
+        assert_eq!(
+            source_input_admission(&state, 1, 7, &[InputEvent::ReleaseAll]),
+            SourceInputAdmission::ReleaseOnly
+        );
+        state.policy.begin_switch(1, SourceId(2)).unwrap();
+        assert_eq!(
+            source_input_admission(&state, 1, 7, &[InputEvent::ReleaseAll]),
+            SourceInputAdmission::Stale
+        );
+        assert_eq!(
+            source_input_admission(&state, 2, 8, &press),
+            SourceInputAdmission::Stale
+        );
+    }
+
+    #[test]
+    fn geometry_release_is_serialized_and_failed_release_does_not_advance() {
+        let mut geometry = 7;
+        let mut released = 0;
+        refresh_input_geometry(&mut geometry, 7, || {
+            released += 1;
+            Ok::<(), ()>(())
+        })
+        .unwrap();
+        assert_eq!(released, 0);
+        assert_eq!(
+            refresh_input_geometry(&mut geometry, 8, || Err("release failed")),
+            Err("release failed")
+        );
+        assert_eq!(geometry, 7);
+        refresh_input_geometry(&mut geometry, 8, || {
+            released += 1;
+            Ok::<(), ()>(())
+        })
+        .unwrap();
+        assert_eq!((geometry, released), (8, 1));
+    }
+
+    #[test]
+    fn input_geometry_guard_remains_owned_through_release_and_injection() {
+        use super::super::x11_input::InputEvent;
+        let control = test_source_control();
+        {
+            let mut state = control.state.lock().unwrap();
+            let version = state.policy.current();
+            state.policy.publish_keyframe(version, 0).unwrap();
+            state.policy.acknowledge_presentation(version, 0).unwrap();
+            state.presented_geometry = Some(7);
+        }
+        let mut geometry = 6;
+        let mut actions = Vec::new();
+        control
+            .apply_input(
+                &mut geometry,
+                1,
+                7,
+                &[InputEvent::Pointer { x: 1, y: 2 }],
+                |admission| {
+                    assert!(
+                        control.state.try_lock().is_err(),
+                        "capture must not replace geometry while injecting"
+                    );
+                    actions.push(admission);
+                    Ok(())
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            actions,
+            vec![
+                SourceInputAdmission::ReleaseOnly,
+                SourceInputAdmission::Inject(InputArea {
+                    origin: (100, 20),
+                    size: Some((640, 480))
+                })
+            ]
+        );
+        assert_eq!(geometry, 7);
+        assert!(control.state.try_lock().is_ok());
+    }
+
+    #[test]
+    fn source_credit_barrier_retires_without_ack_and_rejects_wrong_epoch() {
+        let credits = FrameCredits::new();
+        let now = Instant::now();
+        credits
+            .mark_sent_scoped(0, now, now, 100, 70, 0, 1, 7)
+            .unwrap();
+        credits
+            .mark_sent_scoped(1, now, now, 100, 70, 0, 1, 7)
+            .unwrap();
+        assert!(
+            credits
+                .acknowledge_scoped_at(1, Some(2), now, |_| {})
+                .is_err()
+        );
+        assert_eq!(credits.outstanding(), 2);
+        credits.abandon_source();
+        assert_eq!(credits.outstanding(), 0);
+        credits
+            .mark_sent_scoped(2, now, now, 100, 70, 0, 2, 9)
+            .unwrap();
+        assert!(
+            credits
+                .acknowledge_scoped_at(2, Some(1), now, |_| {})
+                .is_err()
+        );
+        assert_eq!(credits.outstanding(), 1);
+        let ack = credits
+            .acknowledge_scoped_at(2, Some(2), now, |_| {})
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (ack.source_epoch, ack.geometry_epoch, ack.retired),
+            (2, 9, 1)
+        );
+        assert_eq!(credits.outstanding(), 0);
+    }
+
+    #[test]
+    fn pending_source_and_same_sized_switch_keep_input_closed_until_exact_ack() {
+        let control = test_source_control();
+        let running = AtomicBool::new(true);
+        let first = control.state.lock().unwrap().policy.current();
+        assert!(control.sender_ready(first, &running).unwrap());
+        {
+            let mut state = control.state.lock().unwrap();
+            state.policy.publish_keyframe(first, 0).unwrap();
+            state.policy.acknowledge_presentation(first, 0).unwrap();
+            let second = state.policy.begin_switch(1, SourceId(2)).unwrap();
+            assert!(!state.policy.accepts_capture(second));
+            state
+                .policy
+                .finish_switch(second, |_| Ok::<(), ()>(()))
+                .unwrap()
+                .unwrap();
+            state.policy.publish_keyframe(second, 1).unwrap();
+            assert!(state.policy.acknowledge_presentation(first, 0).is_err());
+            assert!(state.policy.acknowledge_presentation(second, 0).is_err());
+            assert!(!state.policy.accepts_input(second));
+            state.policy.acknowledge_presentation(second, 1).unwrap();
+            assert!(state.policy.accepts_input(second));
+        }
+        assert!(!control.sender_ready(first, &running).unwrap());
+    }
+
+    #[test]
+    fn source_grants_never_add_root_to_scoped_startup() {
+        let mut options = test_host_source_options();
+        let grants = host_source_grants(&options).unwrap();
+        assert_eq!(
+            grants,
+            vec![(SourceId(1), CaptureArea::Monitor("DP-1".into()))]
+        );
+        options.shared_sources = vec![
+            CaptureArea::Monitor("DP-1".into()),
+            CaptureArea::Monitor("DP-2".into()),
+        ];
+        let grants = host_source_grants(&options).unwrap();
+        assert_eq!(grants.len(), 2);
+        assert!(!grants.iter().any(|(_, area)| *area == CaptureArea::Root));
+        options.shared_sources.push(CaptureArea::Root);
+        assert_eq!(
+            host_source_grants(&options).unwrap()[2],
+            (SourceId(3), CaptureArea::Root)
+        );
+        options.shared_sources = vec![CaptureArea::Root; MAX_GRANTED_SOURCES];
+        assert!(host_source_grants(&options).is_err());
+        options.shared_sources = vec![CaptureArea::Monitor("bad\nlabel".into())];
+        assert!(host_source_grants(&options).is_err());
+    }
+
+    fn test_host_source_options() -> HostOptions {
+        HostOptions {
+            frame_limits: super::super::messages::FrameLimits::default(),
+            listen: "127.0.0.1:0".into(),
+            key: KeySource::File("/unused".into()),
+            display: None,
+            fps: 12,
+            jpeg_quality: 70,
+            jpeg_quality_floor: 30,
+            fixed_jpeg_quality: true,
+            max_width: 1280,
+            capture_source: CaptureSource::Auto,
+            capture_area: CaptureArea::Monitor("DP-1".into()),
+            shared_sources: Vec::new(),
+            scaling: ScalingPolicy::Auto,
+            allow_lan: false,
+            allow_input: false,
+            allow_clipboard: false,
+            clipboard_file_limit: 0,
+            once: true,
+            stats_json: false,
         }
     }
 
@@ -4025,6 +4908,10 @@ mod tests {
 
     fn test_pending_frame(red: u8) -> PendingFrame {
         PendingFrame {
+            source_version: SourceVersion {
+                source: SourceId(1),
+                epoch: 1,
+            },
             frame: test_captured_frame(red),
             captured_at: Instant::now(),
             capture_completed_at: Instant::now(),
@@ -4273,7 +5160,7 @@ mod tests {
             let (kind, reason) = reader.read_message().unwrap();
             assert_eq!(kind, MessageKind::Close);
             let reason = String::from_utf8(reason).unwrap();
-            assert!(reason.contains("version 4; expected 10"), "{reason}");
+            assert!(reason.contains("version 4; expected 11"), "{reason}");
             assert!(
                 reason.contains("update jwm-remote on both machines"),
                 "{reason}"
@@ -4381,6 +5268,7 @@ mod tests {
             max_width: 0,
             capture_source: CaptureSource::Auto,
             capture_area: CaptureArea::Root,
+            shared_sources: Vec::new(),
             scaling: ScalingPolicy::Auto,
             allow_lan: false,
             allow_input: false,
@@ -4789,6 +5677,8 @@ mod tests {
         quality_epoch: u64,
     ) -> AckObservation {
         AckObservation {
+            source_epoch: 1,
+            geometry_epoch: 0,
             retired,
             bytes,
             same_epoch_retired: retired,
@@ -5227,6 +6117,10 @@ mod tests {
     fn capture_start_ack_latency_includes_readback_but_queue_age_does_not() {
         let base = Instant::now();
         let pending = PendingFrame {
+            source_version: SourceVersion {
+                source: SourceId(1),
+                epoch: 1,
+            },
             frame: test_captured_frame(0),
             captured_at: base,
             capture_completed_at: base + Duration::from_millis(30),
@@ -5890,7 +6784,7 @@ mod tests {
         );
         let receiver_jpeg_quality = Arc::clone(&jpeg_quality);
         let receiver = thread::spawn(move || {
-            receive_input(
+            receive_input_scoped(
                 reader,
                 None,
                 (0, 0).into(),
@@ -5904,6 +6798,7 @@ mod tests {
                 &receiver_telemetry,
                 &receiver_jpeg_quality,
                 &ViewportRequest::new(),
+                None,
                 None,
             )
         });

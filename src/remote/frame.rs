@@ -96,13 +96,15 @@ const MAX_DAMAGE_REGIONS: usize = 8;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct DamageRegions {
     rects: [DamageRect; MAX_DAMAGE_REGIONS],
-    len: usize,
+    // There are at most eight rectangles. A byte keeps frame metadata inline
+    // without adding a heap allocation to every viewer presentation.
+    len: u8,
     collapsed: bool,
 }
 
 impl DamageRegions {
     pub(crate) fn as_slice(&self) -> &[DamageRect] {
-        &self.rects[..self.len]
+        &self.rects[..usize::from(self.len)]
     }
 
     #[cfg(test)]
@@ -135,7 +137,7 @@ impl DamageRegions {
         } else {
             // Restart after each union: it can touch an earlier region too.
             let mut index = 0;
-            while index < self.len {
+            while index < usize::from(self.len) {
                 let other = self.rects[index];
                 if rect.0 <= other.0 + other.2
                     && other.0 <= rect.0 + rect.2
@@ -144,13 +146,13 @@ impl DamageRegions {
                 {
                     rect = union(rect, other);
                     self.len -= 1;
-                    self.rects[index] = self.rects[self.len];
+                    self.rects[index] = self.rects[usize::from(self.len)];
                     index = 0;
                 } else {
                     index += 1;
                 }
             }
-            if self.len == MAX_DAMAGE_REGIONS {
+            if usize::from(self.len) == MAX_DAMAGE_REGIONS {
                 for other in self.as_slice() {
                     rect = union(rect, *other);
                 }
@@ -158,7 +160,7 @@ impl DamageRegions {
                 self.collapsed = true;
             }
         }
-        self.rects[self.len] = rect;
+        self.rects[usize::from(self.len)] = rect;
         self.len += 1;
         let area: u64 = self
             .as_slice()
@@ -171,7 +173,7 @@ impl DamageRegions {
             self.collapsed = true;
         }
         // Canonical unused storage makes equality independent of merge history.
-        self.rects[self.len..].fill((0, 0, 0, 0));
+        self.rects[usize::from(self.len)..].fill((0, 0, 0, 0));
     }
 }
 
@@ -265,6 +267,7 @@ impl TileSnapshot {
 
 #[derive(Debug)]
 pub(crate) struct RecyclableDecodedFrame {
+    source_epoch: u64,
     geometry_epoch: u64,
     sequence: u64,
     source_width: u16,
@@ -286,6 +289,7 @@ impl RecyclableDecodedFrame {
         pool: SharedDecodeBufferPool,
     ) -> Self {
         Self {
+            source_epoch: 1,
             geometry_epoch: 0,
             sequence,
             source_width,
@@ -307,6 +311,7 @@ impl RecyclableDecodedFrame {
         pool: SharedDecodeBufferPool,
     ) -> Self {
         Self {
+            source_epoch: 1,
             geometry_epoch: 0,
             sequence,
             source_width,
@@ -318,6 +323,15 @@ impl RecyclableDecodedFrame {
             tiles: Some(tiles),
             materialized: OnceLock::new(),
         }
+    }
+
+    pub(crate) fn with_source_epoch(mut self, epoch: u64) -> Self {
+        self.source_epoch = epoch;
+        self
+    }
+
+    pub(crate) fn source_epoch(&self) -> u64 {
+        self.source_epoch
     }
 
     pub(crate) fn with_geometry_epoch(mut self, epoch: u64) -> Self {
@@ -339,7 +353,8 @@ impl RecyclableDecodedFrame {
         let Some(tiles) = self.tiles.as_ref() else {
             return;
         };
-        if self.geometry_epoch != previous.geometry_epoch
+        if self.source_epoch != previous.source_epoch
+            || self.geometry_epoch != previous.geometry_epoch
             || self.dimensions() != previous.dimensions()
             || (self.source_width, self.source_height)
                 != (previous.source_width, previous.source_height)
@@ -715,6 +730,31 @@ pub(crate) fn invalid_data(message: impl Into<String>) -> io::Error {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn bounded_damage_metadata_keeps_recyclable_frames_inline() {
+        assert!(std::mem::size_of::<DamageRegions>() <= 68);
+        assert!(std::mem::size_of::<RecyclableDecodedFrame>() <= 240);
+    }
+
+    #[test]
+    fn source_change_never_reuses_previous_canvas_even_with_same_geometry() {
+        let canvas = RgbImage::from_pixel(4, 4, image::Rgb([1, 2, 3]));
+        let snapshot = TileSnapshot::update(&canvas, None, &[15], 2);
+        let pool = new_decode_buffer_pool();
+        let mut previous =
+            RecyclableDecodedFrame::from_tiles(1, 4, 4, snapshot.clone(), pool.clone())
+                .with_geometry_epoch(1)
+                .with_source_epoch(1);
+        let _ = previous.image();
+        let mut next = RecyclableDecodedFrame::from_tiles(2, 4, 4, snapshot, pool)
+            .with_geometry_epoch(1)
+            .with_source_epoch(2);
+        next.reuse_canvas_from(&mut previous);
+        assert!(previous.materialized.get().is_some());
+        assert!(next.materialized.get().is_none());
+        assert!(next.damage().is_none());
+    }
+
     #[test]
     fn damage_merges_bridges_and_caps_fragmentation_and_area() {
         let mut regions = DamageRegions::default();

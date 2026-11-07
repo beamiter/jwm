@@ -372,14 +372,14 @@ gives each complete authenticated video record, including its final flush, one
 budget; a partial or timed-out record closes the whole session so its wire
 sequence can never be retried out of sync.
 
-The current application protocol is version 10. Versions 2 to 9 are
+The current application protocol is version 11. Versions 2 to 10 are
 deliberately incompatible, so update `jwm-remote` on both machines together;
 negotiation rejects an older peer before screen or input data is exchanged.
 Version 7 introduced initial viewport and explicit stream selectors. Version 8
 adds an independently negotiated cursor plane and a video geometry epoch;
 it does not silently reinterpret v7 video or cursor selector semantics.
 
-The v10 hello prefix is the existing 8-byte magic, big-endian `u16` version,
+The v11 hello prefix is the existing 8-byte magic, big-endian `u16` version,
 and capability flags. Both hellos append three one-byte selectors in order:
 codec `1` (JPEG tiles), cursor `1` (composited) or `2` (independent), input `1`
 (X11 keycodes). A viewer advertises independent cursor only after verifying local XRender
@@ -424,10 +424,10 @@ one zero dimension is invalid. The server hello is exactly 34 bytes. Unknown
 selectors, trailing bytes and incomplete keymaps are rejected. Input and
 clipboard permission flags remain independent of the stream profile.
 
-Compatibility: v10 viewer/v10 host works; v6/v7/v8/v9 with v10 in either direction is
+Compatibility: v11 viewer/v11 host works; v6/v7/v8/v9/v10 with v11 in either direction is
 rejected during negotiation. There is no automatic legacy-version fallback.
 Keep both binaries on the same release; this change does not alter transport
-crypto. Within v10, unsupported independent-cursor capability falls back to
+crypto. Within v11, unsupported independent-cursor capability falls back to
 composited video explicitly in HelloAck.
 
 A version-5 or later host tells an older viewer which version it speaks instead
@@ -962,6 +962,47 @@ belonging to no extension this connection selected cannot have cost a
 notification it depends on, so those are tolerated in a run of eight before the
 session distrusts its caches wholesale.
 
+### Switching among explicitly granted sources
+
+Application protocol v11 adds a host-authored source catalog and in-session
+source selection. Upgrade both helpers together; v10 and earlier peers are
+rejected, with no legacy fallback. This does not change transport encryption.
+
+The default catalog contains **only** the initial `--monitor`, `--region`, or
+root selection. Selecting a monitor or rectangle does not also grant the root.
+Add grants explicitly when starting the host:
+
+```sh
+jwm-remote host --monitor DP-0 --share-monitor DP-1 --share-region 800x600+0+0
+jwm-remote ssh user@desktop --monitor DP-0 --share-monitor DP-1 --view-only
+# Include the whole desktop only when that is intended:
+jwm-remote host --monitor DP-0 --share-root
+```
+
+`--share-monitor NAME` and `--share-region WxH+X+Y` are repeatable; `--share-root`
+is explicit whole-root permission. Monitor names are bounded to 256 bytes and
+cannot contain control characters. At most 31 extra flag values are accepted,
+with at most 32 unique sources including the initial selection. Exact duplicate
+grants are collapsed. IDs are deterministic within a session: the initial source
+is 1, followed by unique monitors, regions, then root. Names and rectangles are
+host configuration, never accepted as arbitrary viewer requests. Every grant
+is validated at startup; a missing source is an error, never a root fallback.
+
+In the viewer, **Ctrl+Super+Shift+F12** cycles the granted sources, including in
+view-only mode. With `--escape-key Pause`, use Ctrl+Super+Shift+Pause instead.
+The shortcut stays local, releases input grabs, and holds input until the new
+source's frame arrives. Ordinary Ctrl+Super+F12 still releases control.
+
+Grants are immutable for the session. Switching selects only an existing ID;
+it cannot broaden sharing, clipboard permission, or input permission. Source
+changes reset frame/cursor state and release held remote input so old coordinates
+cannot act on the new picture. Invalid requests, unavailable sources, and unsafe
+geometry transitions close the session rather than silently changing scope.
+Changing the source list requires starting a new host session. Existing per-monitor
+SSH launch shortcuts remain a separate close-and-reopen workflow. A changed
+extra-grant list gets a distinct session identity, so SSH does not silently
+reuse a running session with a different grant list.
+
 ### Sharing one monitor
 
 The X root spans every monitor, so a dual 1920x1080 desk is one 3840x1080
@@ -985,8 +1026,8 @@ Either way the shared area is clipped to the root. During an existing
 connection, a change to the resolved area's position or dimensions ends the
 connection rather than silently reinterpreting the frame and input mapping.
 This also applies when root clipping changes a fixed `--region`. Reconnect
-after verifying the selected area; live monitor/region changes do not move the
-shared area in place. A missing selected monitor or an area entirely outside
+after verifying the selected area; layout changes do not move the shared area in place. Explicit selection
+of another already granted source uses the v11 switch flow above. A missing selected monitor or an area entirely outside
 the root is an error rather than a black rectangle.
 
 Input follows the picture. The viewer maps its window onto the shared area, so
@@ -1297,7 +1338,8 @@ XRender for anyone who prefers that speed and does not see the artifacts;
 
 - one connected controller at a time: a second viewer is authenticated,
   told so, and disconnected immediately rather than left waiting;
-- one region, one RandR monitor, or the combined X root (the default), with
+- one active region, RandR monitor, or combined X root (the default), selected
+  from at most 32 explicitly granted sources, with
   the host XFixes cursor
   shown through the negotiated independent plane or composited-video fallback; the viewer cursor is transparent during ordinary input
   forwarding and an active grab, while view-only and released-grab windows keep
@@ -1420,7 +1462,10 @@ jwm-remote profile run office --view-only --no-clipboard
 
 Run-time profile overrides can only reduce permissions. Direct connections cannot
 change a separately running host's monitor or quality. Profiles do not restore
-window position/size, switch sources within a session, or reconnect automatically.
+window position/size or reconnect automatically. Extra source grants are not
+stored: saving an SSH command with any `--share-monitor`, `--share-region`, or
+`--share-root` flag fails rather than silently dropping it. Use `ssh` directly
+for a session with extra grants. Existing profiles retain their original scope.
 Only supported viewer settings are saved; the window is created normally.
 
 The version-1 JSON schema rejects unknown fields and missing permission booleans.

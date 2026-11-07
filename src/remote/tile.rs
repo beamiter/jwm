@@ -38,7 +38,7 @@ use super::frame::{
     BoundedPayloadWriter, DamageRegions, FrameDamage, MAX_DIMENSION, RecyclableDecodedFrame,
     SharedDecodeBufferPool, TileSnapshot, invalid_data, validate_dimensions,
 };
-use super::protocol::MAX_PAYLOAD_LEN;
+use super::source_wire::MAX_SOURCE_INNER_PAYLOAD_LEN;
 use super::x11_capture::CapturedFrame;
 use image::codecs::jpeg::{JpegDecoder, JpegEncoder};
 use image::{ColorType, DynamicImage, ExtendedColorType, ImageDecoder, Limits, RgbImage};
@@ -472,7 +472,7 @@ impl TileEncoder {
             self.pack_atlas(&frame.image, planned.columns, rows);
             let jpeg_started = now();
             JpegEncoder::new_with_quality(
-                BoundedPayloadWriter::new(payload, MAX_PAYLOAD_LEN),
+                BoundedPayloadWriter::new(payload, MAX_SOURCE_INNER_PAYLOAD_LEN),
                 quality.clamp(1, 100),
             )
             .encode(
@@ -1069,6 +1069,21 @@ mod tests {
     use super::*;
     use crate::remote::frame::{MAX_PIXELS, new_decode_buffer_pool};
     use image::Rgb;
+
+    #[test]
+    fn jpeg_payload_cap_reserves_source_epoch_and_padding() {
+        use std::io::Write;
+        assert_eq!(
+            MAX_SOURCE_INNER_PAYLOAD_LEN + 8 + 1,
+            super::super::protocol::MAX_PAYLOAD_LEN
+        );
+        let mut payload = vec![0; MAX_SOURCE_INNER_PAYLOAD_LEN - 1];
+        let mut writer = BoundedPayloadWriter::new(&mut payload, MAX_SOURCE_INNER_PAYLOAD_LEN);
+        assert!(writer.write_all(&[1]).is_ok());
+        assert!(writer.write_all(&[2]).is_err());
+        assert_eq!(payload.len(), MAX_SOURCE_INNER_PAYLOAD_LEN);
+        assert_eq!(payload.last(), Some(&1));
+    }
 
     #[test]
     fn tiny_canvas_rejects_forged_atlas_before_jpeg_allocation() {
