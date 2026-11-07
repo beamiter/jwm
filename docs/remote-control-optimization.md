@@ -94,11 +94,14 @@ It is not completion of the entire remote-control roadmap.
 - Transfer-worker ingress and outbox accounting charges retained capacities.
   Rejected or panicking target calls close the session; an independent pending
   token permits refusal even while fulfil consumes the incoming sink. Received
-  files become completed staging only after serve-queue admission. The status
+  files are paired with their staging receipt before submission, so ambiguous
+  callback outcomes remain retained. Only proven unpublished rejection reclaims
+  a completed transfer. The status
   says `clipboard update queued`: admission is not proof that X11 applied it.
-  Backend failure observed before transfer-worker cleanup also removes completed
-  staging. A later backend failure after that worker exits can leave the bounded
-  newest completed directory per session under the existing sweep policy.
+  Per-transfer receipts reclaim only files explicitly rejected before entering
+  a clipboard offer. Backend failure alone does not prove previously advertised
+  paths are unused, so accepted or uncertain copies retain the existing bounded
+  newest-directory policy rather than being eagerly deleted.
   This is not a global staging-disk bound: the sweep skips live PIDs, so multiple
   sessions in one process can retain multiple completed directories.
   This bounds the application queues, not total process/X-server memory or
@@ -352,3 +355,25 @@ external program to retry. Cleanup failure always clears it. A write failure
 never changes the command's result. Parse errors, help/version exits, signals,
 process aborts and hung commands do not promise a terminal record. This adds no
 wire protocol or capability changes.
+
+### Unpublished file-transfer receipts
+
+Each incoming file fulfilment carries one small atomic disposition receipt tied
+to its exact owned staging directory. A stale token that never enters a pending
+or current offer, or a command rejected/removed before backend application, can
+be marked explicitly unpublished. The transfer worker reclaims only that
+directory; the X11 event loop performs no filesystem deletion. A reused numeric
+token or another session cannot redirect the receipt to a newer directory.
+
+Acceptance is marked before a deferred paste can publish paths. Accepted,
+dropped, panicked or otherwise uncertain outcomes conservatively retain files
+under the existing newest-three active / newest-one shutdown retention policy.
+Backend failure or clipboard ownership loss is not proof that a file manager
+or clipboard manager has finished using advertised paths. A receipt resolved
+after the transfer worker exits does not trigger a new cleanup worker.
+
+This improves reclamation of proven unpublished transfers, not global disk
+bounding or indefinite paste retention. The existing PID-based sweep and retention
+policy still apply. Pure queue, staging and mock-target tests establish receipt
+ownership transitions; real clipboard-manager handoff and ownership races
+remain unverified without an isolated X11 session.

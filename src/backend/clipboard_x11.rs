@@ -268,6 +268,30 @@ impl Drop for WatcherEndpoints {
     }
 }
 
+/// One transfer's disposition, not a token-to-path lookup. Dropping this receipt
+/// does not imply rejection: unwinding or shutdown may follow publication.
+#[cfg(feature = "remote-x11")]
+#[derive(Clone, Debug, Default)]
+pub(crate) struct FileFulfilReceipt(std::sync::Arc<std::sync::atomic::AtomicU8>);
+
+#[cfg(feature = "remote-x11")]
+impl FileFulfilReceipt {
+    pub(crate) fn reject_unpublished(&self) {
+        let _ = self.0.compare_exchange(
+            0,
+            1,
+            std::sync::atomic::Ordering::AcqRel,
+            std::sync::atomic::Ordering::Acquire,
+        );
+    }
+    pub(crate) fn accepted_or_may_publish(&self) {
+        self.0.store(2, std::sync::atomic::Ordering::Release);
+    }
+    pub(crate) fn rejected_unpublished(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::Acquire) == 1
+    }
+}
+
 /// What the remote helper asks its watcher to serve.
 ///
 /// A copy received from the other machine is announced as soon as it starts
@@ -289,6 +313,7 @@ pub(crate) enum RemoteServe {
     FulfilFiles {
         token: u64,
         paths: Vec<std::path::PathBuf>,
+        receipt: FileFulfilReceipt,
     },
     /// The announced data will never arrive; refuse waiting pastes.
     Abandon {
@@ -298,6 +323,12 @@ pub(crate) enum RemoteServe {
 
 #[cfg(feature = "remote-x11")]
 impl RemoteServe {
+    pub(crate) fn reject_unpublished(&self) {
+        if let Self::FulfilFiles { receipt, .. } = self {
+            receipt.reject_unpublished();
+        }
+    }
+
     pub(crate) fn retained_bytes(&self) -> Option<usize> {
         remote_mailbox::request_bytes(self)
     }
@@ -308,6 +339,38 @@ impl RemoteServe {
 pub(crate) enum PendingKind {
     Png,
     Files,
+}
+
+/// Pure offer installation decision. Some(true) means answer current waiting
+/// pastes; Some(false) means a timestamp-pending offer; None proves rejection.
+#[cfg(feature = "remote-x11")]
+fn install_remote_fulfil(
+    token: u64,
+    data: OfferedData,
+    pending: Option<&mut OfferedData>,
+    offered: &mut Option<OfferedData>,
+    receipt: Option<&FileFulfilReceipt>,
+) -> Option<bool> {
+    if let Some(pending) = pending
+        && pending.pending_token() == Some(token)
+    {
+        *pending = data;
+        if let Some(receipt) = receipt {
+            receipt.accepted_or_may_publish();
+        }
+        return Some(false);
+    }
+    if offered.as_ref().and_then(OfferedData::pending_token) != Some(token) {
+        if let Some(receipt) = receipt {
+            receipt.reject_unpublished();
+        }
+        return None;
+    }
+    *offered = Some(data);
+    if let Some(receipt) = receipt {
+        receipt.accepted_or_may_publish();
+    }
+    Some(true)
 }
 
 /// What a finished conversion carries.
@@ -865,7 +928,7 @@ impl RemoteSetter {
     }
 
     pub(crate) fn is_healthy(&self) -> bool {
-        self.wake.is_healthy() && !self.serve.queue.aborted()
+        self.wake.is_healthy() && !self.is_failed()
     }
 
     /// Move join ownership to the remote session before any handles can drop.
@@ -891,6 +954,7 @@ impl RemoteSetter {
     pub(crate) fn send(&self, request: RemoteServe) -> bool {
         let _keep_worker_alive = &self.worker;
         if !self.is_healthy() {
+            request.reject_unpublished();
             self.serve.queue.abort();
             self.wake.notify();
             return false;
@@ -1193,10 +1257,14 @@ impl Watcher {
                 receipt: None,
             }),
             RemoteServe::FulfilPng { token, png } => {
-                self.fulfil(token, OfferedData::Png(png.into()));
+                self.fulfil(token, OfferedData::Png(png.into()), None);
             }
-            RemoteServe::FulfilFiles { token, paths } => {
-                self.fulfil(token, OfferedData::files(&paths));
+            RemoteServe::FulfilFiles {
+                token,
+                paths,
+                receipt,
+            } => {
+                self.fulfil(token, OfferedData::files(&paths), Some(&receipt));
             }
             RemoteServe::Abandon { token } => self.abandon(token),
         }
@@ -1207,18 +1275,17 @@ impl Watcher {
     /// user copied something else meanwhile — is ignored: the late data must
     /// not take the clipboard back.
     #[cfg(feature = "remote-x11")]
-    fn fulfil(&mut self, token: u64, data: OfferedData) {
-        if let Some(pending) = self.pending_offer.as_mut()
-            && pending.data.pending_token() == Some(token)
-        {
-            pending.data = data;
-            return;
+    fn fulfil(&mut self, token: u64, data: OfferedData, receipt: Option<&FileFulfilReceipt>) {
+        let installed = install_remote_fulfil(
+            token,
+            data,
+            self.pending_offer.as_mut().map(|p| &mut p.data),
+            &mut self.offered,
+            receipt,
+        );
+        if installed == Some(true) {
+            self.answer_deferred(true);
         }
-        if self.offered.as_ref().and_then(OfferedData::pending_token) != Some(token) {
-            return;
-        }
-        self.offered = Some(data);
-        self.answer_deferred(true);
     }
 
     #[cfg(feature = "remote-x11")]
@@ -2696,6 +2763,51 @@ fn publish_capture(
 mod tests {
     #[cfg(feature = "remote-x11")]
     #[test]
+    fn file_fulfil_receipt_tracks_pending_current_and_stale_installation() {
+        use super::*;
+        for pending in [false, true] {
+            let receipt = FileFulfilReceipt::default();
+            let announcement = OfferedData::Pending {
+                token: 7,
+                kind: PendingKind::Files,
+            };
+            let mut pending_offer = pending.then_some(announcement);
+            let mut offered = (!pending).then_some(OfferedData::Pending {
+                token: 7,
+                kind: PendingKind::Files,
+            });
+            let stale = FileFulfilReceipt::default();
+            assert_eq!(
+                install_remote_fulfil(
+                    6,
+                    OfferedData::files(&[]),
+                    pending_offer.as_mut(),
+                    &mut offered,
+                    Some(&stale)
+                ),
+                None
+            );
+            assert!(stale.rejected_unpublished());
+            assert_eq!(
+                install_remote_fulfil(
+                    7,
+                    OfferedData::files(&[]),
+                    pending_offer.as_mut(),
+                    &mut offered,
+                    Some(&receipt)
+                ),
+                Some(!pending)
+            );
+            receipt.reject_unpublished();
+            assert!(
+                !receipt.rejected_unpublished(),
+                "accepted receipt cannot regress to rejected"
+            );
+        }
+    }
+
+    #[cfg(feature = "remote-x11")]
+    #[test]
     fn remote_repeated_shutdown_signals_are_coalesced() {
         let (sender, receiver) = std::sync::mpsc::sync_channel(1);
         let shutdown = super::RemoteClipboardShutdown {
@@ -4145,10 +4257,15 @@ mod tests {
         assert!(setter.send(RemoteServe::FulfilFiles {
             token: 6,
             paths: vec!["/stale".into()],
+            receipt: FileFulfilReceipt::default(),
         }));
         assert!(selection_notify_within(&conn, requestor, gnome, wait).is_none());
         let paths = vec![std::path::PathBuf::from("/home/u/.cache/jwm/x/report.pdf")];
-        assert!(setter.send(RemoteServe::FulfilFiles { token: 7, paths }));
+        assert!(setter.send(RemoteServe::FulfilFiles {
+            token: 7,
+            paths,
+            receipt: FileFulfilReceipt::default()
+        }));
         let notify =
             selection_notify_within(&conn, requestor, gnome, std::time::Duration::from_secs(3))
                 .expect("the waiting paste is answered");

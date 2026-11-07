@@ -137,12 +137,14 @@ impl ServeQueue {
         let bytes = request_bytes(&value);
         let mut state = lock(&self.0);
         if state.closed || state.aborted {
+            value.reject_unpublished();
             return false;
         }
         let Some(bytes) = bytes.filter(|bytes| {
             state.queue.len() < MAX_COMMANDS && *bytes <= MAX_RETAINED_BYTES - state.bytes
         }) else {
             Self::abort_locked(&mut state);
+            value.reject_unpublished();
             return false;
         };
         state.bytes += bytes;
@@ -151,7 +153,9 @@ impl ServeQueue {
     }
     fn abort_locked(state: &mut QueueState) {
         state.aborted = true;
-        state.queue.clear();
+        for (request, _) in state.queue.drain(..) {
+            request.reject_unpublished();
+        }
         state.bytes = 0;
     }
     pub(super) fn abort(&self) {
@@ -181,7 +185,9 @@ impl ServeQueue {
     }
     pub(super) fn close_normally(&self) -> bool {
         let mut state = lock(&self.0);
-        state.queue.clear();
+        for (request, _) in state.queue.drain(..) {
+            request.reject_unpublished();
+        }
         state.bytes = 0;
         state.closed = true;
         state.finished = !state.aborted;
@@ -211,6 +217,39 @@ impl Drop for ServeProducer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn file_receipts_reject_only_never_dequeued_commands_and_balance_bytes() {
+        use super::super::FileFulfilReceipt;
+        let queue = ServeQueue::default();
+        let first = FileFulfilReceipt::default();
+        let queued = FileFulfilReceipt::default();
+        let command = |receipt| RemoteServe::FulfilFiles {
+            token: 1,
+            paths: vec!["/test".into()],
+            receipt,
+        };
+        assert!(queue.send(command(first.clone())));
+        assert!(queue.send(command(queued.clone())));
+        let applied = queue.pop().unwrap();
+        first.accepted_or_may_publish();
+        queue.abort();
+        assert!(queued.rejected_unpublished());
+        assert!(!first.rejected_unpublished());
+        assert_eq!(lock(&queue.0).bytes, 0);
+        assert!(queue.pop().is_none());
+        let rejected = FileFulfilReceipt::default();
+        assert!(!queue.send(command(rejected.clone())));
+        assert!(rejected.rejected_unpublished());
+        drop(applied);
+        assert!(!first.rejected_unpublished());
+        let normal = ServeQueue::default();
+        let undrained = FileFulfilReceipt::default();
+        assert!(normal.send(command(undrained.clone())));
+        assert!(normal.close_normally());
+        assert!(undrained.rejected_unpublished());
+        assert_eq!(lock(&normal.0).bytes, 0);
+    }
+
     #[test]
     fn latest_replaces_and_closes_after_last_value() {
         let (sender, receiver) = capture_channel();

@@ -22,6 +22,7 @@
 //! copied symlink itself is followed), devices, sockets and FIFOs, owners, and
 //! set-id bits. Only the executable bits of a mode survive.
 
+use crate::backend::clipboard_x11::FileFulfilReceipt;
 use std::collections::VecDeque;
 use std::ffi::OsStr;
 use std::fs::{self, File};
@@ -484,7 +485,7 @@ const KEPT_TRANSFERS: usize = 3;
 pub struct Staging {
     session: PathBuf,
     next: u32,
-    completed: VecDeque<PathBuf>,
+    completed: VecDeque<(PathBuf, FileFulfilReceipt)>,
     in_progress: Option<PathBuf>,
 }
 
@@ -539,12 +540,18 @@ impl Staging {
     }
 
     /// The in-progress copy is complete; forget the oldest beyond the few kept.
+    #[cfg(test)]
     pub fn complete(&mut self) {
+        self.complete_with_receipt(FileFulfilReceipt::default());
+    }
+
+    pub(crate) fn complete_with_receipt(&mut self, receipt: FileFulfilReceipt) {
+        self.reclaim_rejected();
         if let Some(directory) = self.in_progress.take() {
-            self.completed.push_back(directory);
+            self.completed.push_back((directory, receipt));
         }
         while self.completed.len() > KEPT_TRANSFERS {
-            if let Some(oldest) = self.completed.pop_front() {
+            if let Some((oldest, _)) = self.completed.pop_front() {
                 let _ = fs::remove_dir_all(oldest);
             }
         }
@@ -556,13 +563,19 @@ impl Staging {
         }
     }
 
-    /// Terminal backend failure released the clipboard, so no completed copy
-    /// remains owned for post-session paste. Also remove admitted-but-unapplied copies.
-    pub(crate) fn discard_all(&mut self) {
-        self.discard_in_progress();
-        for directory in self.completed.drain(..) {
-            let _ = fs::remove_dir_all(directory);
-        }
+    /// Only the transfer worker performs filesystem cleanup. A receipt is
+    /// attached to our own directory at completion, never to a backend path or
+    /// reused wire token. Unknown and potentially published copies stay under
+    /// the existing retention policy, including on backend failure.
+    pub(crate) fn reclaim_rejected(&mut self) {
+        self.completed.retain(|(directory, receipt)| {
+            if receipt.rejected_unpublished() {
+                let _ = fs::remove_dir_all(directory);
+                false
+            } else {
+                true
+            }
+        });
     }
 
     /// Bytes an unprivileged writer may still use on the staging filesystem.
@@ -575,11 +588,12 @@ impl Staging {
 
 impl Drop for Staging {
     fn drop(&mut self) {
+        self.reclaim_rejected();
         self.discard_in_progress();
         // The newest copy may still be on the clipboard; keep it for a paste
         // after the session, until the next session sweeps it away.
         while self.completed.len() > 1 {
-            if let Some(oldest) = self.completed.pop_front() {
+            if let Some((oldest, _)) = self.completed.pop_front() {
                 let _ = fs::remove_dir_all(oldest);
             }
         }
@@ -902,6 +916,64 @@ mod tests {
         assert!(receiver.feed(&entry(9, b"a", 0)).is_err());
         let mut receiver = ArchiveReceiver::new(destination.0.clone(), 1);
         assert!(receiver.feed(&entry(KIND_DIR, b"d", 5)).is_err());
+    }
+
+    #[test]
+    fn unpublished_receipt_reclaims_only_its_exact_session_directory() {
+        let cache = TempDir::new("receipts");
+        let root = cache.0.join("staging");
+        let mut first = Staging::create_in(&root).unwrap();
+        let mut second = Staging::create_in(&root).unwrap();
+        let old_receipt = FileFulfilReceipt::default();
+        let old = first.begin().unwrap();
+        first.complete_with_receipt(old_receipt.clone());
+        let newer_receipt = FileFulfilReceipt::default();
+        let newer = first.begin().unwrap();
+        first.complete_with_receipt(newer_receipt);
+        let other = second.begin().unwrap();
+        second.complete();
+        old_receipt.reject_unpublished();
+        first.reclaim_rejected();
+        second.reclaim_rejected();
+        assert!(!old.exists());
+        assert!(newer.exists() && other.exists());
+        // Late/repeated completion cannot address a newer copy, even if the
+        // protocol reused the same token, or another session used directory 1.
+        old_receipt.reject_unpublished();
+        first.reclaim_rejected();
+        assert!(newer.exists() && other.exists());
+    }
+
+    #[test]
+    fn accepted_unknown_and_late_receipts_preserve_newest_copy() {
+        let cache = TempDir::new("retain-receipts");
+        let root = cache.0.join("staging");
+        for accepted in [false, true] {
+            let mut staging = Staging::create_in(&root).unwrap();
+            let receipt = FileFulfilReceipt::default();
+            let copy = staging.begin().unwrap();
+            staging.complete_with_receipt(receipt.clone());
+            if accepted {
+                receipt.accepted_or_may_publish();
+            }
+            drop(receipt);
+            staging.reclaim_rejected();
+            drop(staging);
+            assert!(
+                copy.exists(),
+                "dropping an unknown or accepted receipt is not rejection"
+            );
+        }
+        let mut staging = Staging::create_in(&root).unwrap();
+        let late = FileFulfilReceipt::default();
+        let copy = staging.begin().unwrap();
+        staging.complete_with_receipt(late.clone());
+        drop(staging);
+        late.reject_unpublished();
+        assert!(
+            copy.exists(),
+            "no filesystem work runs on backend receipt resolution"
+        );
     }
 
     #[test]

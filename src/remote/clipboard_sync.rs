@@ -39,8 +39,8 @@ use super::clipboard_files::{ArchiveReceiver, Manifest, ManifestReader, Staging,
 use super::messages::{MAX_CLIPBOARD_BYTES, decode_clipboard, encode_clipboard};
 use super::protocol::MessageKind;
 use crate::backend::clipboard_x11::{
-    CopiedClipboard, PendingKind, RemoteCaptures, RemoteClipboard, RemoteClipboardOptions,
-    RemoteClipboardShutdown, RemoteServe, RemoteSetter,
+    CopiedClipboard, FileFulfilReceipt, PendingKind, RemoteCaptures, RemoteClipboard,
+    RemoteClipboardOptions, RemoteClipboardShutdown, RemoteServe, RemoteSetter,
 };
 use std::collections::VecDeque;
 use std::io;
@@ -544,17 +544,11 @@ type Wake = Box<dyn Fn() + Send>;
 trait ClipboardTarget {
     /// `false` when the target can no longer accept requests.
     fn serve(&self, request: RemoteServe) -> bool;
-    fn is_failed(&self) -> bool {
-        false
-    }
 }
 
 impl ClipboardTarget for RemoteSetter {
     fn serve(&self, request: RemoteServe) -> bool {
         self.send(request)
-    }
-    fn is_failed(&self) -> bool {
-        self.is_failed()
     }
 }
 
@@ -970,11 +964,8 @@ impl<T: ClipboardTarget> Worker<T> {
     fn cleanup(&mut self) {
         self.sending = None;
         if let Some(staging) = self.staging.as_mut() {
-            if self.target.is_failed() {
-                staging.discard_all();
-            } else {
-                staging.discard_in_progress();
-            }
+            staging.reclaim_rejected();
+            staging.discard_in_progress();
         }
         self.receiving = None;
         if let Some(token) = self.pending_token.take() {
@@ -985,10 +976,12 @@ impl<T: ClipboardTarget> Worker<T> {
     // A rejected command is terminal: continuing would lose ownership ordering
     // or leave a paste waiting for data that can never arrive.
     fn serve(&self, request: RemoteServe) -> bool {
-        if self.out.closed() {
-            return false;
-        }
-        if request.retained_bytes().is_some() && self.target.serve(request) {
+        if self.out.closed() || request.retained_bytes().is_none() {
+            request.reject_unpublished();
+            if self.out.closed() {
+                return false;
+            }
+        } else if self.target.serve(request) {
             return true;
         }
         self.out.close();
@@ -1141,6 +1134,9 @@ impl<T: ClipboardTarget> Worker<T> {
 
     /// Send as much of the outgoing transfer as the window allows.
     fn pump(&mut self) {
+        if let Some(staging) = self.staging.as_mut() {
+            staging.reclaim_rejected();
+        }
         let Some(sending) = self.sending.as_mut() else {
             return;
         };
@@ -1440,7 +1436,11 @@ impl<T: ClipboardTarget> Worker<T> {
             }
             Sink::Files(archive) if complete => match archive.finish() {
                 Ok(paths) => {
-                    let request = RemoteServe::FulfilFiles { token, paths };
+                    let request = RemoteServe::FulfilFiles {
+                        token,
+                        paths,
+                        receipt: FileFulfilReceipt::default(),
+                    };
                     if request.retained_bytes().is_none() {
                         Err("the received file list is too large".to_owned())
                     } else {
@@ -1456,12 +1456,15 @@ impl<T: ClipboardTarget> Worker<T> {
         };
         match served {
             Ok(request) => {
-                let files = matches!(request, RemoteServe::FulfilFiles { .. });
+                // Transfer ownership of the exact staging directory before the
+                // callback: a panic or uncertain outcome must retain the files.
+                if let RemoteServe::FulfilFiles { receipt, .. } = &request
+                    && let Some(staging) = self.staging.as_mut()
+                {
+                    staging.complete_with_receipt(receipt.clone());
+                }
                 if !self.serve(request) {
                     return;
-                }
-                if files && let Some(staging) = self.staging.as_mut() {
-                    staging.complete();
                 }
                 self.pending_token = None;
                 eprintln!(
@@ -2404,6 +2407,9 @@ mod tests {
                     )
                     | (RemoteServe::Abandon { .. }, RejectedServe::Abandon)
             );
+            if reject && !self.panic {
+                request.reject_unpublished();
+            }
             self.calls.lock().unwrap().push(request);
             assert!(!(reject && self.panic), "injected target panic");
             !reject
@@ -2498,7 +2504,10 @@ mod tests {
                     for session in fs::read_dir(&staging_root).unwrap() {
                         let path = session.unwrap().path();
                         if path.is_dir() {
-                            assert_eq!(fs::read_dir(path).unwrap().count(), 0);
+                            assert_eq!(
+                                fs::read_dir(path).unwrap().count(),
+                                usize::from(panic && matches!(rejected, RejectedServe::Fulfil))
+                            );
                         }
                     }
                 }
@@ -2507,17 +2516,14 @@ mod tests {
     }
 
     #[test]
-    fn admitted_file_fulfil_is_removed_on_later_backend_abort_only() {
+    fn admitted_file_fulfil_survives_later_backend_failure() {
         struct LaterAbort {
             calls: mpsc::Sender<RemoteServe>,
             failed: Arc<AtomicBool>,
         }
         impl ClipboardTarget for LaterAbort {
             fn serve(&self, request: RemoteServe) -> bool {
-                self.calls.send(request).is_ok()
-            }
-            fn is_failed(&self) -> bool {
-                self.failed.load(Ordering::Acquire)
+                !self.failed.load(Ordering::Acquire) && self.calls.send(request).is_ok()
             }
         }
         for abort in [false, true] {
@@ -2551,14 +2557,19 @@ mod tests {
             ));
             worker.receive_chunk(1, &bytes).unwrap();
             worker.finish_receiving(1);
-            let RemoteServe::FulfilFiles { paths, .. } = received.try_recv().unwrap() else {
+            let RemoteServe::FulfilFiles { paths, receipt, .. } = received.try_recv().unwrap()
+            else {
                 panic!("expected fulfil admission")
             };
+            receipt.accepted_or_may_publish();
             assert!(paths[0].exists());
             failed.store(abort, Ordering::Release);
             worker.cleanup();
             drop(worker);
-            assert_eq!(paths[0].exists(), !abort);
+            assert!(
+                paths[0].exists(),
+                "backend failure does not prove paths unpublished"
+            );
         }
     }
 
@@ -2581,7 +2592,8 @@ mod tests {
         worker.staging = Some(staging);
         assert!(!worker.serve(RemoteServe::FulfilFiles {
             token: 2,
-            paths: vec![incomplete.clone()]
+            paths: vec![incomplete.clone()],
+            receipt: FileFulfilReceipt::default()
         }));
         worker.cleanup();
         drop(worker);
@@ -2879,6 +2891,7 @@ mod tests {
         let RemoteServe::FulfilFiles {
             token: fulfilled,
             paths,
+            ..
         } = pair.b.next_served()
         else {
             panic!("then fulfilled");
