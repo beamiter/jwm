@@ -37,6 +37,7 @@ pub mod source_session;
 pub mod source_wire;
 pub mod ssh;
 mod tile;
+mod triangle_patch;
 pub mod usability;
 pub mod window_position;
 pub mod window_size;

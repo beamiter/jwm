@@ -235,3 +235,49 @@ the existing consent boolean still controls whether sharing is enabled at all.
 `clipboard_directions` masks, which must agree with hello flags and file limits.
 `SyncOptions` adds local `send`, `receive` and `images` gates; callers must derive
 these from negotiated permissions rather than treating them as new defaults.
+
+## Partial CPU Triangle resampling
+
+Scaled incremental CPU updates now sample only their dirty destination rectangles,
+using the full destination grid. The private RGB sampler follows image 0.25.10's
+Triangle arithmetic: full-source edge normalization, vertical then horizontal f32
+accumulation, and only final u8 rounding. This is not a resize of a cropped source.
+The compatibility reference is `image/src/imageops/sample.rs` from
+[image 0.25.10](https://github.com/image-rs/image/tree/v0.25.10);
+its MIT license is retained in `licenses/image-MIT.txt`.
+
+The viewer preflights every rectangle and fallibly reserves reusable scratch before
+uploading any patch. Scratch requests are capped at 16 MiB, including RGB output,
+one intermediate float row and weights. Full-frame damage or an unsuitable plan
+retains the existing single full resize. Source/XRender patches and identity-size
+updates keep their previous paths. No transport, presentation, input, ownership,
+or ACK fence changes are involved.
+
+Pure CPU tests compare patch bytes directly against the dependency's full resize,
+including exhaustive small dimensions and rectangles, random RGB fixtures, edge
+and one-axis cases, rounding-sensitive patterns, reconstruction, invalid bounds,
+budget rejection, and buffer reuse. These tests do not establish live-X11 latency,
+frame rate, memory bandwidth, or end-to-end performance improvements.
+
+A bounded CPU-only smoke comparison used Rust `-O`, the release image 0.25.10
+library, deterministic RGB pixels `[(71*x+23*y) mod 256,
+(13*x+97*y) mod 256, (31*x+11*y) mod 256]`, and 40 iterations per case, alternating full/partial timing order after one
+warmup of each. The reproducible harness is `scripts/remote-triangle-microbench.rs`.
+Partial timings include each iteration's preflight and all patch renders; full
+resize timings include allocation. Each patch was checked byte-for-byte first.
+Tiny damage was a central 8×8 destination patch; scattered damage was four 8×8
+corner patches; near-full damage omitted only the last destination column.
+One local, non-isolated run recorded these aggregate microseconds (full / partial):
+
+- 320×180 → 640×360: tiny 187308 / 68; scattered 174956 / 190;
+  near-full 183417 / 138658. Full-region fallback: 204422.
+- 640×360 → 320×180: tiny 115587 / 138; scattered 108491 / 474;
+  near-full 74146 / 57048. Full-region fallback: 92375.
+
+The near-full case exercises the raw sampler, not the production viewer, whose
+`DamageRegions` collapses coverage of at least 60% to the full-region fallback.
+The explicit fallback case times rejected preflight plus full resize.
+
+These are smoke measurements, not a statistically controlled benchmark. They
+exclude X11 conversion/upload, encoding, transport, presentation, and interactive
+latency. They do not justify a general speedup or desktop performance claim.

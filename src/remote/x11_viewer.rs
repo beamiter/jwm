@@ -35,6 +35,7 @@ use x11rb::x11_utils::{TryParseFd, X11Error};
 use super::cursor::{CursorPosition, CursorShape};
 use super::frame::{DamageRegions, DecodedFrame, FrameDamage, RecyclableDecodedFrame};
 use super::pacing::EventPollBudget;
+use super::triangle_patch::TrianglePatch;
 use super::usability::viewer_title;
 use super::{RemoteError, RemoteResult};
 
@@ -572,6 +573,7 @@ pub struct Viewer {
     native_pixel_writer: NativePixelWriter,
     native_image: Option<XImage<'static>>,
     native_patch: Option<XImage<'static>>,
+    triangle_patch: TrianglePatch,
     shm_upload: ShmUpload,
     presentation_atom: Atom,
     presentations: VecDeque<PendingPresentation>,
@@ -1099,6 +1101,7 @@ impl Viewer {
             native_pixel_writer,
             native_image: None,
             native_patch: None,
+            triangle_patch: TrianglePatch::default(),
             shm_upload,
             presentation_atom,
             presentations: VecDeque::new(),
@@ -1840,8 +1843,14 @@ impl Viewer {
                 dimensions,
             );
         }
-        // Resize once on the full Triangle grid, then convert/upload regions.
-        let rgb = if regions.as_slice().is_empty() {
+        // Preflight all CPU patches before uploading anything. Full-region or
+        // over-budget damage retains the existing one-shot full resize.
+        let partial_triangle = !source_patch
+            && (w, h) != (u32::from(geometry.width), u32::from(geometry.height))
+            && self
+                .triangle_patch
+                .prepare((w, h), dimensions, regions.as_slice());
+        let rgb = if regions.as_slice().is_empty() || partial_triangle {
             None
         } else if source_patch || (w, h) == (u32::from(geometry.width), u32::from(geometry.height))
         {
@@ -1862,11 +1871,25 @@ impl Viewer {
                 self.depth,
                 self.conn.setup(),
             )?;
+            let (pixels, source_x, source_y) = if partial_triangle {
+                (
+                    self.triangle_patch
+                        .render(frame.image(), dimensions, (x, y, width, height)),
+                    0,
+                    0,
+                )
+            } else {
+                (
+                    rgb.as_ref().expect("nonempty damage has pixels").as_ref(),
+                    x,
+                    y,
+                )
+            };
             write_native_region(
                 image,
-                rgb.as_ref().expect("nonempty damage has pixels"),
-                x,
-                y,
+                pixels,
+                source_x,
+                source_y,
                 self.pixel_layout,
                 self.native_pixel_writer,
             )?;
@@ -5378,10 +5401,18 @@ mod tests {
                     (dw as u16, dh as u16),
                 );
             }
-            for &(x, y, w, h) in regions.as_slice() {
-                for py in u32::from(y)..u32::from(y + h) {
-                    for px in u32::from(x)..u32::from(x + w) {
-                        patched.put_pixel(px, py, *after.get_pixel(px, py));
+            let mut sampler = TrianglePatch::default();
+            let destination = (dw as u16, dh as u16);
+            let partial = sampler.prepare(changed.dimensions(), destination, regions.as_slice());
+            for &rect @ (x, y, w, h) in regions.as_slice() {
+                let patch = partial.then(|| sampler.render(&changed, destination, rect));
+                for py in 0..u32::from(h) {
+                    for px in 0..u32::from(w) {
+                        let pixel = match patch {
+                            Some(image) => *image.get_pixel(px, py),
+                            None => *after.get_pixel(u32::from(x) + px, u32::from(y) + py),
+                        };
+                        patched.put_pixel(u32::from(x) + px, u32::from(y) + py, pixel);
                     }
                 }
             }
