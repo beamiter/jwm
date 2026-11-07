@@ -44,6 +44,8 @@ pub enum Connection {
 pub struct Viewer {
     /// Explicit local startup size only; no observed geometry is persisted.
     pub window_size: Option<super::window_size::WindowSize>,
+    /// Explicit local best-effort startup position; coordinates are bounded by i16.
+    pub window_position: Option<super::window_position::WindowPosition>,
     pub display: Option<String>,
     // Required booleans: a missing permission is an error, never a new grant.
     pub view_only: bool,
@@ -316,6 +318,7 @@ mod tests {
                 max_width: Some(0),
             },
             viewer: Viewer {
+                window_position: None,
                 window_size: None,
                 display: None,
                 view_only: true,

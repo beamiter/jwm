@@ -60,6 +60,9 @@ It is not completion of the entire remote-control roadmap.
   Explicit `--window-size WIDTHxHEIGHT` can be saved and reapplied locally, with
   bounded dimensions/pixels and unchanged defaults. It is an initial client-size
   request, not observed-state restoration; the window manager remains authoritative.
+  Explicit `--window-position X,Y` saves a bounded local best-effort position.
+  Current-monitor visibility checks reject off-screen placement with a warning
+  and fallback; accepted positions use a WM hint, never forced placement.
 
 - Protocol v11 adds immutable host-authored source grants (maximum 32) and
   local viewer cycling with Ctrl+Super+Shift+the configured escape key, also
@@ -104,7 +107,7 @@ It is not completion of the entire remote-control roadmap.
 ## Explicitly deferred
 
 - Partial CPU resampling, observed session state
-  restore, window-position restoration, XKB/IME, runtime clipboard
+  restore, exact window-manager placement, XKB/IME, runtime clipboard
   mode changes, local readback, Wayland and hardware encoding.
 - Broader negotiated capabilities, mutable source authorization, structured errors and backward-compatible extension framing.
 - Input-to-visible instrumentation and live desktop workload replay.
@@ -140,6 +143,11 @@ four-worker pooled times were 7.77/3.57 ms (1080p to 720p), 16.25/7.17 ms
 These measurements isolate CPU scaling; they are not end-to-end remote latency.
 
 ## Live X11 validation limit
+
+An ignored isolated-X11 position test checks requested client coordinates/size
+and accepted-only user-position hints, plus off-screen fallback with no hint.
+It requires `JWM_TEST_X11_DISPLAY` without a window manager and has not run here;
+even a pass would establish X-server requests, not WM placement compliance.
 
 A task-local official Debian Xvfb and its dependencies were prepared, but this
 runtime rejects creation of AF_UNIX sockets with EPERM, including a narrowly
@@ -178,7 +186,8 @@ previous hard ceilings for callers updating struct-literal construction.
 `CapturedFrame` now includes a public `geometry_epoch` field, so external Rust
 struct-literal constructors must initialize it to the source's nonzero epoch.
 External Rust users constructing `ClientOptions`, `SshOptions`, or profile
-`Viewer` literals must now supply `window_size: None` to retain the default.
+`Viewer` literals must now supply `window_size: None` and
+`window_position: None` to retain the defaults.
 The public `x11_viewer::Viewer::connect` signature is unchanged.
 
 The source identity must change when the selected geometry changes; dimensions

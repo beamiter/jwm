@@ -738,6 +738,73 @@ pub(crate) fn initial_viewport(
     Ok((monitor.2, monitor.3))
 }
 
+/// Select only currently visible monitor bounds for an explicit position.
+fn position_target(
+    conn: &RustConnection,
+    root: Window,
+    screen_size: (u16, u16),
+    position: super::window_position::WindowPosition,
+) -> RemoteResult<super::window_position::PlacementTarget> {
+    use x11rb::protocol::randr::ConnectionExt as _;
+    let monitors = conn
+        .randr_get_monitors(root, true)
+        .ok()
+        .and_then(|cookie| cookie.reply().ok())
+        .map(|reply| {
+            reply
+                .monitors
+                .iter()
+                .map(|m| (m.x, m.y, m.width, m.height))
+                .collect::<Vec<_>>()
+        });
+    let fallback = placement_monitor(conn, root, screen_size);
+    Ok(super::window_position::select_target(
+        monitors.as_deref(),
+        fallback,
+        screen_size,
+        position,
+    )?)
+}
+
+pub(crate) fn initial_viewport_with_position(
+    display: Option<&str>,
+    size: Option<super::window_size::WindowSize>,
+    position: Option<super::window_position::WindowPosition>,
+) -> RemoteResult<(u16, u16)> {
+    let Some(position) = position else {
+        return initial_viewport(display, size);
+    };
+    if let Some(size) = size {
+        size.validate()?;
+        return Ok(size.dimensions());
+    }
+    let (conn, screen_num) = xbar_core::x11_connection::connect(display)?;
+    let screen = conn
+        .setup()
+        .roots
+        .get(screen_num)
+        .ok_or_else(|| invalid_data("X11 selected an unavailable screen"))?;
+    let target = position_target(
+        &conn,
+        screen.root,
+        (screen.width_in_pixels, screen.height_in_pixels),
+        position,
+    )?;
+    Ok((target.bounds.2, target.bounds.3))
+}
+
+fn position_hints(origin: (i16, i16), accepted: bool) -> Option<x11rb::properties::WmSizeHints> {
+    accepted.then(|| {
+        let mut hints = x11rb::properties::WmSizeHints::new();
+        hints.position = Some((
+            x11rb::properties::WmSizeHintsSpecification::UserSpecified,
+            i32::from(origin.0),
+            i32::from(origin.1),
+        ));
+        hints
+    })
+}
+
 impl Viewer {
     /// Open an X11 window on `display`, or on `$DISPLAY` when it is `None`.
     pub fn connect(
@@ -771,6 +838,35 @@ impl Viewer {
         initial_width: u16,
         initial_height: u16,
         window_size: Option<super::window_size::WindowSize>,
+        pointer_enabled: bool,
+        forward_keyboard: bool,
+        verified_keymap: Option<super::x11_keymap::KeymapTable>,
+        grab_input: bool,
+        escape_key: &str,
+        peer_label: &str,
+    ) -> RemoteResult<Self> {
+        Self::connect_with_window_geometry(
+            display,
+            initial_width,
+            initial_height,
+            window_size,
+            None,
+            pointer_enabled,
+            forward_keyboard,
+            verified_keymap,
+            grab_input,
+            escape_key,
+            peer_label,
+        )
+    }
+
+    /// Explicit startup geometry is advisory; the window manager remains authoritative.
+    pub(crate) fn connect_with_window_geometry(
+        display: Option<&str>,
+        initial_width: u16,
+        initial_height: u16,
+        window_size: Option<super::window_size::WindowSize>,
+        window_position: Option<super::window_position::WindowPosition>,
         pointer_enabled: bool,
         forward_keyboard: bool,
         verified_keymap: Option<super::x11_keymap::KeymapTable>,
@@ -831,13 +927,38 @@ impl Viewer {
         // Without an explicit size, fit the first frame to the local monitor
         // as before. Explicit size is independent of decoded-frame dimensions;
         // the actual viewport report follows if the WM overrides our request.
-        let monitor = placement_monitor(&conn, root, screen_size);
+        let target = window_position
+            .map(|position| position_target(&conn, root, screen_size, position))
+            .transpose()?;
+        let monitor = target.map_or_else(
+            || placement_monitor(&conn, root, screen_size),
+            |target| target.bounds,
+        );
         let (initial_width, initial_height) = startup_window_size(
             (initial_width, initial_height),
             (monitor.2, monitor.3),
             window_size,
         );
-        let (window_x, window_y) = centered_origin(monitor, (initial_width, initial_height));
+        let ((window_x, window_y), accepted_position) = match (window_position, target) {
+            (Some(position), Some(target)) => {
+                let placement = super::window_position::place(
+                    target,
+                    (initial_width, initial_height),
+                    position,
+                );
+                if !placement.1 {
+                    eprintln!(
+                        "jwm-remote: requested window position {position} is not fully visible or cannot be verified; using local fallback {},{}",
+                        placement.0.0, placement.0.1
+                    );
+                }
+                placement
+            }
+            _ => (
+                centered_origin(monitor, (initial_width, initial_height)),
+                false,
+            ),
+        };
         // MIT-SHM requires QueryVersion to complete before any other request
         // from the extension. Segment allocation remains lazy until a frame is
         // actually uploaded.
@@ -943,6 +1064,9 @@ impl Viewer {
             &[wm_delete_window],
         )?
         .check()?;
+        if let Some(hints) = position_hints((window_x, window_y), accepted_position) {
+            hints.set_normal_hints(&conn, window)?.check()?;
+        }
         conn.map_window(window)?.check()?;
         conn.flush()?;
 
@@ -4209,6 +4333,147 @@ mod tests {
             y: 0,
             visible: true,
         }
+    }
+
+    #[test]
+    #[ignore = "requires an isolated X11 server without a WM in JWM_TEST_X11_DISPLAY"]
+    fn explicit_position_and_fallback_hints_on_x11() {
+        use super::super::{window_position::WindowPosition, window_size::WindowSize};
+        use x11rb::properties::{WmSizeHints, WmSizeHintsSpecification};
+        let display = std::env::var("JWM_TEST_X11_DISPLAY").unwrap();
+        let (conn, screen_num) = xbar_core::x11_connection::connect(Some(&display)).unwrap();
+        let screen = &conn.setup().roots[screen_num];
+        let bounds = placement_monitor(
+            &conn,
+            screen.root,
+            (screen.width_in_pixels, screen.height_in_pixels),
+        );
+        let position = WindowPosition {
+            x: bounds.0.max(0),
+            y: bounds.1.max(0),
+        };
+        let target = position_target(
+            &conn,
+            screen.root,
+            (screen.width_in_pixels, screen.height_in_pixels),
+            position,
+        )
+        .unwrap();
+        assert!(
+            target.position_visible,
+            "isolated server must advertise a visible RandR monitor"
+        );
+        let size = WindowSize {
+            width: target.bounds.2.min(64),
+            height: target.bounds.3.min(48),
+        };
+        let viewer = Viewer::connect_with_window_geometry(
+            Some(&display),
+            1,
+            1,
+            Some(size),
+            Some(position),
+            false,
+            false,
+            None,
+            false,
+            "F12",
+            "position test",
+        )
+        .unwrap();
+        let geometry = viewer
+            .conn
+            .get_geometry(viewer.window)
+            .unwrap()
+            .reply()
+            .unwrap();
+        assert_eq!((geometry.x, geometry.y), (position.x, position.y));
+        assert_eq!((geometry.width, geometry.height), size.dimensions());
+        let hints = WmSizeHints::get_normal_hints(&viewer.conn, viewer.window)
+            .unwrap()
+            .reply()
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            hints.position,
+            Some((WmSizeHintsSpecification::UserSpecified, _, _))
+        ));
+        drop(viewer);
+        let outside = WindowPosition {
+            x: -32768,
+            y: -32768,
+        };
+        let target = position_target(
+            &conn,
+            screen.root,
+            (screen.width_in_pixels, screen.height_in_pixels),
+            outside,
+        )
+        .unwrap();
+        let expected = super::super::window_position::place(target, size.dimensions(), outside);
+        assert!(!expected.1);
+        let viewer = Viewer::connect_with_window_geometry(
+            Some(&display),
+            1,
+            1,
+            Some(size),
+            Some(outside),
+            false,
+            false,
+            None,
+            false,
+            "F12",
+            "fallback test",
+        )
+        .unwrap();
+        let geometry = viewer
+            .conn
+            .get_geometry(viewer.window)
+            .unwrap()
+            .reply()
+            .unwrap();
+        assert_eq!((geometry.x, geometry.y), expected.0);
+        assert_eq!((geometry.width, geometry.height), size.dimensions());
+        assert!(
+            WmSizeHints::get_normal_hints(&viewer.conn, viewer.window)
+                .unwrap()
+                .reply()
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn explicit_position_only_sets_user_hint_when_visible() {
+        assert!(position_hints((0, 0), false).is_none());
+        let hints = position_hints((120, 80), true).unwrap();
+        assert!(matches!(
+            hints.position,
+            Some((
+                x11rb::properties::WmSizeHintsSpecification::UserSpecified,
+                120,
+                80
+            ))
+        ));
+        assert!(hints.size.is_none());
+        assert!(hints.min_size.is_none());
+        assert!(hints.max_size.is_none());
+        let size = Some(super::super::window_size::WindowSize {
+            width: 1280,
+            height: 720,
+        });
+        let position = Some(super::super::window_position::WindowPosition {
+            x: -32768,
+            y: 32767,
+        });
+        assert_eq!(
+            initial_viewport_with_position(Some("invalid display"), size, position).unwrap(),
+            (1280, 720)
+        );
+        assert_eq!(
+            initial_viewport_with_position(Some("invalid display"), size, None).unwrap(),
+            (1280, 720)
+        );
     }
 
     #[test]

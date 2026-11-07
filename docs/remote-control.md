@@ -1502,7 +1502,7 @@ jwm-remote profile run office --view-only --no-clipboard
 
 Run-time profile overrides can only reduce permissions. Direct connections cannot
 change a separately running host's monitor or quality. Profiles can reapply an
-explicitly saved startup size; they do not restore window position or reconnect
+explicitly saved startup size and best-effort position; they do not reconnect
 automatically. Extra source grants are not
 stored: saving an SSH command with any `--share-monitor`, `--share-region`, or
 `--share-root` flag fails rather than silently dropping it. Use `ssh` directly
@@ -1531,9 +1531,37 @@ SSH uses the size only in its local viewer, never in the remote host command.
 Only an explicit `profile save` stores the supplied size. No desktop geometry is
 observed for persistence, and no last-selected source, extra grant, credential,
 or clipboard-transfer state is saved. Old profiles without a size keep the
-original default. Position restoration remains deferred. Size parsing, profile
-round trips and startup selection have deterministic tests; actual window-manager
-placement and presentation have not been live-X11 validated in this checkout.
+original default. Parsing, profile round trips and startup selection have
+deterministic tests; actual window-manager placement and presentation have not
+been live-X11 validated in this checkout.
+
+An optional `--window-position X,Y` requests the local client area's root-relative
+origin, using signed ASCII decimal coordinates from -32768 through 32767. For
+example:
+
+```sh
+jwm-remote profile save office --replace -- ssh user@office --view-only --window-size 1280x720 --window-position 100,80
+```
+
+The saved position is advisory. Before mapping, the viewer checks current RandR
+monitor rectangles clipped to the root screen. It applies the position only if
+the entire client rectangle fits on the monitor containing that origin. An
+origin in a monitor gap or outside the current layout, a partially off-screen
+client rectangle, or unavailable monitor information produces one terminal
+warning and uses local fallback placement. A requested origin on a known monitor
+selects that monitor even when the rectangle must be centered instead. Otherwise
+normal pointer/primary selection is preferred. An explicit oversized size is
+not reduced; fallback keeps its origin visible. This does not guarantee visible
+window decorations or prevent the WM from moving or tiling the window afterward.
+
+With position alone, the initial viewport and automatic sizing use the selected
+monitor rather than the pointer's monitor. Explicit size still controls the
+initial viewport independently. Monitor layout is checked again when the window
+is created. Only an accepted position receives a user-position WM hint; fallback
+does not force a saved position. No-position behavior and the existing size-only
+behavior remain unchanged. Position is saved only by explicit `profile save`,
+never observed or updated when the user moves a window. It is never sent to the
+SSH host. Last-source and automatic session-state restoration remain deferred.
 
 The version-1 JSON schema rejects unknown fields and missing permission booleans.
 Names are 1–64 ASCII letters, digits, hyphens or underscores. The dedicated directory

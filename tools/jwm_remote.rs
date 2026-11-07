@@ -13,6 +13,7 @@ use jwm::remote::ssh::{SshOptions, run_ssh};
 use jwm::remote::usability::{
     default_key_path, key_metadata, normalize_address, normalize_listen_address,
 };
+use jwm::remote::window_position::WindowPosition;
 use jwm::remote::window_size::WindowSize;
 use jwm::remote::x11_capture::{CaptureArea, CaptureRegion, CaptureSource, ScalingPolicy};
 use jwm::remote::x11_viewer::DEFAULT_ESCAPE_KEY;
@@ -350,6 +351,10 @@ enum Command {
         #[arg(long, value_name = "WIDTHxHEIGHT")]
         window_size: Option<WindowSize>,
 
+        /// Best-effort local client origin X,Y; off-screen positions fall back.
+        #[arg(long, value_name = "X,Y", allow_hyphen_values = true)]
+        window_position: Option<WindowPosition>,
+
         /// Local X11 display for the viewer window (defaults to DISPLAY).
         #[arg(long, value_name = "DISPLAY")]
         display: Option<String>,
@@ -382,6 +387,10 @@ enum Command {
         /// The window manager may override this startup request.
         #[arg(long, value_name = "WIDTHxHEIGHT")]
         window_size: Option<WindowSize>,
+
+        /// Best-effort local client origin X,Y; off-screen positions fall back.
+        #[arg(long, value_name = "X,Y", allow_hyphen_values = true)]
+        window_position: Option<WindowPosition>,
 
         /// Local X11 display for the viewer window (defaults to DISPLAY).
         #[arg(long, value_name = "DISPLAY")]
@@ -482,6 +491,7 @@ fn profile_from_command(command: Command) -> RemoteResult<Profile> {
             key_file,
             display,
             window_size,
+            window_position,
             view_only,
             grab_input,
             escape_key,
@@ -508,6 +518,7 @@ fn profile_from_command(command: Command) -> RemoteResult<Profile> {
                 Viewer {
                     display,
                     window_size,
+                    window_position,
                     view_only,
                     grab_input,
                     escape_key,
@@ -530,6 +541,7 @@ fn profile_from_command(command: Command) -> RemoteResult<Profile> {
             max_width,
             display,
             window_size,
+            window_position,
             view_only,
             grab_input,
             escape_key,
@@ -559,6 +571,7 @@ fn profile_from_command(command: Command) -> RemoteResult<Profile> {
                 Viewer {
                     display,
                     window_size,
+                    window_position,
                     view_only,
                     grab_input,
                     escape_key,
@@ -639,6 +652,9 @@ fn command_from_profile(profile: &Profile) -> RemoteResult<Command> {
         }
     }
     let viewer = &profile.viewer;
+    if let Some(position) = viewer.window_position {
+        args.extend(["--window-position".to_owned(), position.to_string()]);
+    }
     if let Some(size) = viewer.window_size {
         size.validate()?;
         args.extend(["--window-size".to_owned(), size.to_string()]);
@@ -917,6 +933,7 @@ fn run(command: Command) -> RemoteResult<()> {
             frame_limits,
             display,
             window_size,
+            window_position,
             remote_command,
             ssh_options,
         } => {
@@ -935,6 +952,7 @@ fn run(command: Command) -> RemoteResult<()> {
                 shared_sources,
                 display,
                 window_size,
+                window_position,
                 view_only,
                 grab_input,
                 clipboard,
@@ -951,6 +969,7 @@ fn run(command: Command) -> RemoteResult<()> {
             key_file,
             display,
             window_size,
+            window_position,
             view_only,
             grab_input,
             clipboard,
@@ -966,6 +985,7 @@ fn run(command: Command) -> RemoteResult<()> {
                 key: KeySource::File(resolve_key_path(key_file)?),
                 display,
                 window_size,
+                window_position,
                 view_only,
                 grab_input,
                 clipboard,
@@ -1593,6 +1613,59 @@ mod tests {
         assert!(
             Cli::try_parse_from(["jwm-remote", "profile", "run", "desk", "--clipboard"]).is_err()
         );
+    }
+
+    #[test]
+    fn window_position_profiles_and_signed_cli_are_explicit_and_compatible() {
+        for transport in ["connect", "ssh"] {
+            let command = Cli::try_parse_from([
+                "jwm-remote",
+                transport,
+                "desk",
+                "--view-only",
+                "--window-position",
+                "-32768,32767",
+            ])
+            .unwrap()
+            .command;
+            let profile = profile_from_command(command).unwrap();
+            assert_eq!(
+                profile.viewer.window_position,
+                Some(WindowPosition {
+                    x: -32768,
+                    y: 32767
+                })
+            );
+            assert_eq!(validated_profile(profile.clone()).unwrap(), profile);
+            assert!(profile.viewer.view_only);
+            assert!(!profile.viewer.clipboard);
+            let mut encoded = serde_json::to_value(&profile).unwrap();
+            encoded["viewer"]
+                .as_object_mut()
+                .unwrap()
+                .remove("window_position");
+            let legacy =
+                validated_profile(Profile::decode(&serde_json::to_vec(&encoded).unwrap()).unwrap())
+                    .unwrap();
+            assert_eq!(legacy.viewer.window_position, None);
+            encoded["viewer"]["window_position"] = serde_json::json!({"x":32768,"y":0});
+            assert!(Profile::decode(&serde_json::to_vec(&encoded).unwrap()).is_err());
+            encoded["viewer"]["window_position"] = serde_json::json!({"x":0,"y":0,"source":1});
+            assert!(Profile::decode(&serde_json::to_vec(&encoded).unwrap()).is_err());
+            for value in ["32768,0", "0,-32769", "1,2,3", " 1,2"] {
+                assert!(
+                    Cli::try_parse_from([
+                        "jwm-remote",
+                        transport,
+                        "desk",
+                        "--window-position",
+                        value
+                    ])
+                    .is_err()
+                );
+            }
+        }
+        assert!(Cli::try_parse_from(["jwm-remote", "host", "--window-position", "1,2"]).is_err());
     }
 
     #[test]

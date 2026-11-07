@@ -57,6 +57,8 @@ const RECEIVER_JOIN_TIMEOUT: Duration = Duration::from_secs(2);
 pub struct ClientOptions {
     /// Explicit local client-area startup size; None preserves automatic sizing.
     pub window_size: Option<super::window_size::WindowSize>,
+    /// Explicit local best-effort startup position; coordinates are bounded by i16.
+    pub window_position: Option<super::window_position::WindowPosition>,
     pub frame_limits: super::messages::FrameLimits,
     pub address: String,
     /// What to call the host in messages and the window title: the address
@@ -255,8 +257,11 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
     } else {
         KeymapTable::empty()
     };
-    let initial_viewport =
-        super::x11_viewer::initial_viewport(options.display.as_deref(), options.window_size)?;
+    let initial_viewport = super::x11_viewer::initial_viewport_with_position(
+        options.display.as_deref(),
+        options.window_size,
+        options.window_position,
+    )?;
     let request_cursor_plane =
         super::x11_viewer::supports_cursor_plane(options.display.as_deref())?;
     *stage = ClientStage::Connect;
@@ -400,11 +405,12 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
         .map_err(|_| invalid_data("initial frame is taller than an X11 window"))?;
     let last_sequence = first_frame.frame.sequence();
     *stage = ClientStage::Display;
-    let mut viewer = Viewer::connect_with_window_size(
+    let mut viewer = Viewer::connect_with_window_geometry(
         options.display.as_deref(),
         initial_width,
         initial_height,
         options.window_size,
+        options.window_position,
         hello.pointer_enabled,
         hello.keyboard_enabled,
         hello.keyboard_enabled.then_some(keymap),
@@ -2170,6 +2176,7 @@ mod tests {
     #[test]
     fn invalid_startup_size_fails_before_reading_key_or_display() {
         let options = ClientOptions {
+            window_position: None,
             window_size: Some(super::super::window_size::WindowSize {
                 width: 0,
                 height: 1,

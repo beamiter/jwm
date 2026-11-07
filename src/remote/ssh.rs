@@ -49,6 +49,8 @@ const REMOTE_PORT_SPAN: u16 = 16000;
 pub struct SshOptions {
     /// Explicit local client-area startup size; None preserves automatic sizing.
     pub window_size: Option<super::window_size::WindowSize>,
+    /// Explicit local best-effort startup position; coordinates are bounded by i16.
+    pub window_position: Option<super::window_position::WindowPosition>,
     /// `[USER@]HOST` or an alias from the SSH configuration.
     pub destination: String,
     /// Extra `ssh -o` options, passed through unchanged.
@@ -135,6 +137,7 @@ pub fn run_ssh(options: SshOptions) -> RemoteResult<()> {
         .and_then(|()| {
             run_client(ClientOptions {
                 window_size: options.window_size,
+                window_position: options.window_position,
                 address: format!("127.0.0.1:{local_port}"),
                 peer_label: label.clone(),
                 key: KeySource::Bytes(key),
@@ -619,6 +622,7 @@ mod tests {
 
     fn options() -> SshOptions {
         SshOptions {
+            window_position: None,
             window_size: None,
             destination: "ubuntu@desk".into(),
             ssh_options: Vec::new(),
@@ -667,6 +671,10 @@ mod tests {
     fn local_window_size_does_not_change_remote_script_or_session_identity() {
         let base = options();
         let mut sized = base.clone();
+        sized.window_position = Some(super::super::window_position::WindowPosition {
+            x: -32768,
+            y: 32767,
+        });
         sized.window_size = Some(super::super::window_size::WindowSize {
             width: 1280,
             height: 720,
