@@ -107,6 +107,10 @@ struct Cli {
     /// For launching from a keyboard shortcut, where nobody sees the terminal.
     #[arg(long, global = true)]
     notify: bool,
+
+    /// Emit one content-free terminal JSON record to stderr (human errors are unchanged).
+    #[arg(long, global = true)]
+    diagnostics_json: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -467,7 +471,13 @@ enum ProfileAction {
 
 fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
-    match run(cli.command) {
+    let command = diagnostic_command(&cli.command);
+    let result = run(cli.command);
+    if cli.diagnostics_json {
+        // Best effort only: diagnostics must never change the command outcome.
+        let _ = emit_diagnostic(&mut std::io::stderr().lock(), command, &result);
+    }
+    match result {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("jwm-remote: {error}");
@@ -477,6 +487,62 @@ fn main() -> std::process::ExitCode {
             std::process::ExitCode::FAILURE
         }
     }
+}
+
+fn diagnostic_command(command: &Command) -> &'static str {
+    match command {
+        Command::Host { .. } => "host",
+        Command::Connect { .. } => "connect",
+        Command::Ssh { .. } => "ssh",
+        Command::Keygen { .. } => "keygen",
+        Command::Doctor { .. } => "doctor",
+        Command::ReplayBenchmark { .. } => "replay_benchmark",
+        Command::Profile { action, .. } => match action {
+            ProfileAction::Init => "profile_init",
+            ProfileAction::Save { .. } => "profile_save",
+            ProfileAction::List => "profile_list",
+            ProfileAction::Show { .. } => "profile_show",
+            ProfileAction::Run { .. } => "profile_run",
+            ProfileAction::Remove { .. } => "profile_remove",
+        },
+    }
+}
+
+fn emit_diagnostic(
+    writer: &mut impl std::io::Write,
+    command: &'static str,
+    result: &RemoteResult<()>,
+) -> std::io::Result<()> {
+    #[derive(serde::Serialize)]
+    struct Record {
+        #[serde(rename = "type")]
+        record_type: &'static str,
+        schema_version: u8,
+        command: &'static str,
+        outcome: &'static str,
+        #[serde(flatten)]
+        failure: jwm::remote::client::FailureDiagnostic,
+    }
+    let failure = match result {
+        Err(error) => jwm::remote::client::classify_failure(error.as_ref()),
+        Ok(()) => jwm::remote::client::FailureDiagnostic {
+            stage: None,
+            category: "success",
+            io_kind: None,
+            cleanup: "unknown",
+            reconnect_certified: false,
+        },
+    };
+    let record = Record {
+        record_type: "jwm_remote_command_result",
+        schema_version: 1,
+        command,
+        outcome: if result.is_ok() { "success" } else { "error" },
+        failure,
+    };
+    let mut bytes = serde_json::to_vec(&record).map_err(std::io::Error::other)?;
+    bytes.push(b'\n');
+    writer.write_all(&bytes)
 }
 
 fn profile_error(message: &str) -> std::io::Error {
@@ -2038,5 +2104,90 @@ mod tests {
             ])
             .is_err()
         );
+    }
+    #[test]
+    fn diagnostics_global_flag_and_defaults() {
+        for args in [
+            vec!["jwm-remote", "--diagnostics-json", "doctor"],
+            vec!["jwm-remote", "doctor", "--diagnostics-json"],
+            vec!["jwm-remote", "profile", "--diagnostics-json", "list"],
+            vec!["jwm-remote", "profile", "list", "--diagnostics-json"],
+        ] {
+            assert!(Cli::try_parse_from(args).unwrap().diagnostics_json);
+        }
+        let cli = Cli::try_parse_from(["jwm-remote", "doctor"]).unwrap();
+        assert!(!cli.diagnostics_json);
+        assert!(!cli.notify);
+    }
+
+    #[test]
+    fn diagnostics_schema_is_fixed_and_private_text_is_absent() {
+        let mut output = Vec::new();
+        emit_diagnostic(&mut output, "doctor", &Ok(())).unwrap();
+        assert_eq!(output.iter().filter(|&&b| b == b'\n').count(), 1);
+        let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "type": "jwm_remote_command_result", "schema_version": 1,
+                "command": "doctor", "outcome": "success", "stage": null,
+                "category": "success", "io_kind": null, "cleanup": "unknown",
+                "reconnect_certified": false
+            })
+        );
+        let error = Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "PRIVATE /home/alice/key host:48221 profile-secret \n\u{1b}[31m",
+        )
+        .into());
+        output.clear();
+        emit_diagnostic(&mut output, "profile_run", &error).unwrap();
+        let text = String::from_utf8(output).unwrap();
+        assert!(!text.contains("PRIVATE"));
+        assert!(!text.contains("alice"));
+        assert!(!text.contains("host:48221"));
+        assert!(!text.contains("profile-secret"));
+        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(value["category"], "io");
+        assert_eq!(value["io_kind"], "permission_denied");
+        assert_eq!(value["cleanup"], "unknown");
+    }
+
+    #[test]
+    fn diagnostic_writer_failure_is_returned_without_changing_result() {
+        struct BrokenWriter;
+        impl std::io::Write for BrokenWriter {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::ErrorKind::BrokenPipe.into())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let result = Ok(());
+        assert!(emit_diagnostic(&mut BrokenWriter, "doctor", &result).is_err());
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn terminal_emitter_has_one_main_call_site() {
+        let source = include_str!("jwm_remote.rs");
+        let main = source
+            .split("fn main() ")
+            .nth(1)
+            .unwrap()
+            .split("fn diagnostic_command")
+            .next()
+            .unwrap();
+        assert_eq!(main.matches("emit_diagnostic(").count(), 1);
+        assert_eq!(main.matches("run(cli.command)").count(), 1);
+        let run = source
+            .split("fn run(command:")
+            .nth(1)
+            .unwrap()
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        assert!(!run.contains("emit_diagnostic("));
     }
 }

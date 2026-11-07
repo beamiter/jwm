@@ -42,6 +42,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+const HOST_CLEANUP_TIMEOUT: Duration = Duration::from_secs(2);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 const FRAME_WRITE_DEADLINE: Duration = Duration::from_secs(10);
 // The client cannot enter its heartbeat loop until the first frame is received,
@@ -1846,13 +1847,22 @@ fn stop_when_stdin_closes(shutdown: Arc<AtomicBool>) -> io::Result<()> {
 
 /// Releases the single viewer slot when the session that claimed it ends,
 /// including by panic.
-struct ViewerSlot(Arc<AtomicBool>);
+const VIEWER_IDLE: u8 = 0;
+const VIEWER_ACTIVE: u8 = 1;
+const VIEWER_POISONED: u8 = 2;
+
+struct ViewerSlot(Arc<AtomicU8>);
 
 impl ViewerSlot {
     /// Claim the slot, or `None` while another authenticated viewer holds it.
-    fn claim(active: &Arc<AtomicBool>) -> Option<Self> {
+    fn claim(active: &Arc<AtomicU8>) -> Option<Self> {
         active
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .compare_exchange(
+                VIEWER_IDLE,
+                VIEWER_ACTIVE,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
             .is_ok()
             .then(|| Self(Arc::clone(active)))
     }
@@ -1860,8 +1870,39 @@ impl ViewerSlot {
 
 impl Drop for ViewerSlot {
     fn drop(&mut self) {
-        self.0.store(false, Ordering::Release);
+        // A poisoned listener never becomes available again, even when the
+        // detached worker eventually exits. Restart the host to recover.
+        let _ = self.0.compare_exchange(
+            VIEWER_ACTIVE,
+            VIEWER_IDLE,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
     }
+}
+
+/// Poison admission while still holding the slot. Unwinding or unconfirmed
+/// cleanup can leave an injector alive; it must never overlap a new session.
+fn run_admitted_session(
+    slot: ViewerSlot,
+    serve: impl FnOnce() -> RemoteResult<()>,
+) -> RemoteResult<()> {
+    let outcome = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(serve)) {
+        Ok(outcome) => outcome,
+        Err(_) => {
+            slot.0.store(VIEWER_POISONED, Ordering::Release);
+            Err(io::Error::other("remote session thread panicked; host admission disabled").into())
+        }
+    };
+    if outcome
+        .as_ref()
+        .err()
+        .is_some_and(|error| error.is::<HostCleanupError>())
+    {
+        slot.0.store(VIEWER_POISONED, Ordering::Release);
+    }
+    drop(slot);
+    outcome
 }
 
 /// Counts one in-flight connection thread against `MAX_PENDING_HANDSHAKES`
@@ -1918,13 +1959,15 @@ where
     S: Fn(AuthenticatedPeer) -> RemoteResult<()> + Send + Sync + 'static,
 {
     let serve = Arc::new(serve);
-    let session_active = Arc::new(AtomicBool::new(false));
+    let session_active = Arc::new(AtomicU8::new(VIEWER_IDLE));
     let pending = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let (finished_tx, finished_rx) = std::sync::mpsc::channel::<RemoteResult<()>>();
     let mut workers: Vec<thread::JoinHandle<()>> = Vec::new();
+    let mut stopped_by_shutdown = false;
 
     let result = loop {
         if shutdown.load(Ordering::Acquire) {
+            stopped_by_shutdown = true;
             break Ok(());
         }
         if once && let Ok(outcome) = finished_rx.try_recv() {
@@ -1985,23 +2028,24 @@ where
                     }
                 };
                 let Some(slot) = ViewerSlot::claim(&worker_slot) else {
+                    let reason = if worker_slot.load(Ordering::Acquire) == VIEWER_POISONED {
+                        "host cleanup is incomplete; restart the host before reconnecting"
+                    } else {
+                        BUSY_REASON
+                    };
                     let refused = peer_session
                         .writer
-                        .write_message(MessageKind::Close, BUSY_REASON.as_bytes())
+                        .write_message(MessageKind::Close, reason.as_bytes())
                         .and_then(|()| peer_session.writer.flush());
                     match refused {
                         Ok(()) => {
-                            eprintln!("jwm-remote: refused {peer}: a viewer is already connected")
+                            eprintln!("jwm-remote: refused {peer}: {reason}")
                         }
                         Err(error) => eprintln!("jwm-remote: refused {peer}: {error}"),
                     }
                     return;
                 };
-                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    worker_serve(peer_session)
-                }))
-                .unwrap_or_else(|_| Err(io::Error::other("remote session thread panicked").into()));
-                drop(slot);
+                let outcome = run_admitted_session(slot, || worker_serve(peer_session));
                 if let Err(error) = &outcome {
                     eprintln!("jwm-remote: session with {peer} ended: {error}");
                 }
@@ -2023,7 +2067,12 @@ where
             eprintln!("jwm-remote: connection thread panicked");
         }
     }
-    result
+    // A simultaneous shutdown must not hide a failed admitted --once session.
+    if once && stopped_by_shutdown {
+        finished_rx.try_recv().unwrap_or(result)
+    } else {
+        result
+    }
 }
 
 /// Accept errors that concern one connection rather than the listener.
@@ -2218,157 +2267,236 @@ fn serve_authenticated(
                 (Some(sync), Some(inbox), Some(outbox))
             }
             Err(error) => {
-                eprintln!(
-                    "jwm-remote: clipboard sharing unavailable ({error}); continuing without it"
+                // Startup currently returns an opaque error after potentially
+                // spawning threads. It cannot certify that no ownership remains,
+                // even when the failure was simply an unavailable X11 backend.
+                decline_session(
+                    &mut writer,
+                    "host clipboard startup failed; restart the host before reconnecting",
                 );
-                (None, None, None)
+                return Err(host_clipboard_start_failed(error));
             }
         }
     } else {
         (None, None, None)
     };
-    let clipboard_enabled = clipboard_sync.is_some();
-    let files_enabled = files_enabled && clipboard_enabled;
-    negotiated_stream.clipboard_file_limit = if files_enabled { file_limit } else { 0 };
-    negotiated_stream.clipboard_content = if clipboard_enabled {
-        clipboard_policy.0
-    } else {
-        0
-    };
-    negotiated_stream.clipboard_directions = if clipboard_enabled {
-        clipboard_policy.1
-    } else {
-        0
-    };
-    if clipboard_enabled {
-        reader.set_max_payload_len(MAX_INBOUND_CLIPBOARD_PAYLOAD_LEN);
-    }
-    let grants = host_source_grants(options)?;
-    let catalog = SourceCatalog {
-        current: SourceVersion {
-            source: SourceId(1),
-            epoch: 1,
-        },
-        entries: grants
-            .iter()
-            .map(|(id, area)| SourceEntry {
-                id: *id,
-                label: source_label(area),
-            })
-            .collect(),
-    };
-    let sources = Arc::new(SourceControl::new(
-        grants,
-        input_area,
-        capture.geometry_epoch(),
-    )?);
-    writer.write_message(
-        MessageKind::HelloAck,
-        &ServerHello {
-            stream: negotiated_stream,
-            pointer_enabled,
-            keyboard_enabled,
-            clipboard_enabled,
-            clipboard_files_enabled: files_enabled,
-        }
-        .encode(),
-    )?;
-    writer.write_message(MessageKind::SourceCatalog, &catalog.encode()?)?;
-    writer.flush()?;
-    eprintln!(
-        "jwm-remote: authenticated session started ({})",
-        if keyboard_enabled {
-            "screen + pointer + keyboard"
-        } else if pointer_enabled {
-            "screen + pointer"
+    let result = (|| -> RemoteResult<()> {
+        let clipboard_enabled = clipboard_sync.is_some();
+        let files_enabled = files_enabled && clipboard_enabled;
+        negotiated_stream.clipboard_file_limit = if files_enabled { file_limit } else { 0 };
+        negotiated_stream.clipboard_content = if clipboard_enabled {
+            clipboard_policy.0
         } else {
-            "view only"
+            0
+        };
+        negotiated_stream.clipboard_directions = if clipboard_enabled {
+            clipboard_policy.1
+        } else {
+            0
+        };
+        if clipboard_enabled {
+            reader.set_max_payload_len(MAX_INBOUND_CLIPBOARD_PAYLOAD_LEN);
         }
-    );
-
-    let control = writer.get_ref().get_ref().try_clone()?;
-    let running = Arc::new(AtomicBool::new(true));
-    let first_stop = Arc::new(FirstStop::new());
-    let credits = Arc::new(FrameCredits::new());
-    let mut telemetry = HostTelemetry::new();
-    telemetry.stats_json = options.stats_json;
-    let telemetry = Arc::new(telemetry);
-    let jpeg_quality = Arc::new(JpegQualityController::new_at(
-        options.jpeg_quality,
-        options.jpeg_quality_floor,
-        !options.fixed_jpeg_quality,
-        target_frame_interval(options.fps),
-        Instant::now(),
-    )?);
-    if options.fixed_jpeg_quality {
-        eprintln!("jwm-remote: JPEG quality fixed at {}", options.jpeg_quality);
-    } else {
-        eprintln!(
-            "jwm-remote: adaptive JPEG quality active ({}..={})",
-            options.jpeg_quality_floor, options.jpeg_quality
-        );
-    }
-
-    let input_running = Arc::clone(&running);
-    let input_stop = Arc::clone(&first_stop);
-    let input_credits = Arc::clone(&credits);
-    let input_telemetry = Arc::clone(&telemetry);
-    let input_jpeg_quality = Arc::clone(&jpeg_quality);
-    let viewport = Arc::new(ViewportRequest::new());
-    let input_viewport = Arc::clone(&viewport);
-    let input_sources = Arc::clone(&sources);
-    let input_thread = thread::Builder::new()
-        .name("jwm-remote-input".into())
-        .spawn(move || {
-            let _stop_on_exit = StopSessionOnDrop(Arc::clone(&input_running));
-            receive_input_scoped(
-                reader,
-                injector,
-                input_area,
+        let grants = host_source_grants(options)?;
+        let catalog = SourceCatalog {
+            current: SourceVersion {
+                source: SourceId(1),
+                epoch: 1,
+            },
+            entries: grants
+                .iter()
+                .map(|(id, area)| SourceEntry {
+                    id: *id,
+                    label: source_label(area),
+                })
+                .collect(),
+        };
+        let sources = Arc::new(SourceControl::new(
+            grants,
+            input_area,
+            capture.geometry_epoch(),
+        )?);
+        writer.write_message(
+            MessageKind::HelloAck,
+            &ServerHello {
+                stream: negotiated_stream,
+                pointer_enabled,
                 keyboard_enabled,
-                verified_keymap,
-                INITIAL_ACTIVITY_TIMEOUT,
-                SESSION_IDLE_TIMEOUT,
-                &input_running,
-                &input_stop,
-                &input_credits,
-                &input_telemetry,
-                &input_jpeg_quality,
-                &input_viewport,
-                clipboard_inbox.as_ref(),
-                Some(&input_sources),
-            )
-        })?;
+                clipboard_enabled,
+                clipboard_files_enabled: files_enabled,
+            }
+            .encode(),
+        )?;
+        writer.write_message(MessageKind::SourceCatalog, &catalog.encode()?)?;
+        writer.flush()?;
+        eprintln!(
+            "jwm-remote: authenticated session started ({})",
+            if keyboard_enabled {
+                "screen + pointer + keyboard"
+            } else if pointer_enabled {
+                "screen + pointer"
+            } else {
+                "view only"
+            }
+        );
 
-    let stream_result = stream_frames(
-        &sources,
-        &viewport,
-        clipboard_outbox,
-        &mut capture,
-        writer,
-        &control,
-        &running,
-        &first_stop,
-        &credits,
-        &telemetry,
-        &jpeg_quality,
-        shutdown,
-        options,
-    );
-    running.store(false, Ordering::Release);
-    let _ = control.shutdown(Shutdown::Both);
-    let input_result = input_thread.join();
-    // Both network halves are done with the clipboard; stop its threads.
-    let clipboard_result = clipboard_sync
+        let control = writer.get_ref().get_ref().try_clone()?;
+        let running = Arc::new(AtomicBool::new(true));
+        let first_stop = Arc::new(FirstStop::new());
+        let credits = Arc::new(FrameCredits::new());
+        let mut telemetry = HostTelemetry::new();
+        telemetry.stats_json = options.stats_json;
+        let telemetry = Arc::new(telemetry);
+        let jpeg_quality = Arc::new(JpegQualityController::new_at(
+            options.jpeg_quality,
+            options.jpeg_quality_floor,
+            !options.fixed_jpeg_quality,
+            target_frame_interval(options.fps),
+            Instant::now(),
+        )?);
+        if options.fixed_jpeg_quality {
+            eprintln!("jwm-remote: JPEG quality fixed at {}", options.jpeg_quality);
+        } else {
+            eprintln!(
+                "jwm-remote: adaptive JPEG quality active ({}..={})",
+                options.jpeg_quality_floor, options.jpeg_quality
+            );
+        }
+
+        let input_running = Arc::clone(&running);
+        let input_stop = Arc::clone(&first_stop);
+        let input_credits = Arc::clone(&credits);
+        let input_telemetry = Arc::clone(&telemetry);
+        let input_jpeg_quality = Arc::clone(&jpeg_quality);
+        let viewport = Arc::new(ViewportRequest::new());
+        let input_viewport = Arc::clone(&viewport);
+        let input_sources = Arc::clone(&sources);
+        let input_thread = thread::Builder::new()
+            .name("jwm-remote-input".into())
+            .spawn(move || {
+                let _stop_on_exit = StopSessionOnDrop(Arc::clone(&input_running));
+                receive_input_scoped(
+                    reader,
+                    injector,
+                    input_area,
+                    keyboard_enabled,
+                    verified_keymap,
+                    INITIAL_ACTIVITY_TIMEOUT,
+                    SESSION_IDLE_TIMEOUT,
+                    &input_running,
+                    &input_stop,
+                    &input_credits,
+                    &input_telemetry,
+                    &input_jpeg_quality,
+                    &input_viewport,
+                    clipboard_inbox.as_ref(),
+                    Some(&input_sources),
+                )
+            })?;
+
+        let stream_result = stream_frames(
+            &sources,
+            &viewport,
+            clipboard_outbox,
+            &mut capture,
+            writer,
+            &control,
+            &running,
+            &first_stop,
+            &credits,
+            &telemetry,
+            &jpeg_quality,
+            shutdown,
+            options,
+        );
+        running.store(false, Ordering::Release);
+        let _ = control.shutdown(Shutdown::Both);
+        // This bounds post-stream cleanup only. Synchronous capture and the
+        // sender/outer connection joins have separate, potentially unbounded work.
+        let result = cleanup_host_session(
+            Instant::now() + HOST_CLEANUP_TIMEOUT,
+            first_stop.cause(),
+            stream_result,
+            input_thread,
+            |remaining| {
+                clipboard_sync
+                    .take()
+                    .map_or(Ok(()), |mut sync| sync.shutdown_timeout(remaining))
+            },
+        );
+        report_host_final(&telemetry, &credits, Instant::now());
+        result
+    })();
+    // Setup errors after clipboard startup must also confirm its shutdown.
+    // The normal post-stream path takes the sync, so it is never joined twice.
+    let cleanup = clipboard_sync
         .as_mut()
-        .map_or(Ok(()), |sync| sync.shutdown_timeout(Duration::from_secs(2)));
-    report_host_final(&telemetry, &credits, Instant::now());
-    finish_host_session(
-        first_stop.cause(),
-        stream_result,
-        input_result,
-        clipboard_result,
-    )
+        .map_or(Ok(()), |sync| sync.shutdown_timeout(HOST_CLEANUP_TIMEOUT));
+    combine_host_cleanup(result, cleanup)
+}
+
+fn host_clipboard_start_failed(error: String) -> super::RemoteError {
+    Box::new(HostCleanupError {
+        primary: Some(io::Error::other(format!("clipboard startup failed: {error}")).into()),
+        cleanup: io::Error::other("clipboard startup cleanup unconfirmed; host admission disabled")
+            .into(),
+    })
+}
+
+/// A reaper acknowledges *join*, not just return from the worker body: thread
+/// local destructors may still own input resources or block indefinitely.
+fn join_host_input_until(
+    worker: thread::JoinHandle<RemoteResult<()>>,
+    deadline: Instant,
+) -> RemoteResult<thread::Result<RemoteResult<()>>> {
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    thread::Builder::new()
+        .name("jwm-remote-input-reaper".into())
+        .spawn(move || {
+            let _ = tx.send(worker.join());
+        })
+        .map_err(|error| {
+            io::Error::other(format!("start input reaper (worker detached): {error}"))
+        })?;
+    rx.recv_timeout(deadline.saturating_duration_since(Instant::now()))
+        .map_err(|error| io::Error::other(format!(
+            "input cleanup unconfirmed ({error}); worker/reaper may remain detached; input release is not confirmed"
+        )).into())
+}
+
+fn cleanup_host_session(
+    deadline: Instant,
+    cause: StopCause,
+    stream_result: RemoteResult<()>,
+    input: thread::JoinHandle<RemoteResult<()>>,
+    clipboard_cleanup: impl FnOnce(Duration) -> RemoteResult<()>,
+) -> RemoteResult<()> {
+    let input_result = join_host_input_until(input, deadline);
+    // Always signal and attempt clipboard shutdown, even after the input
+    // consumed the whole budget. Never grant a fresh timeout to later work.
+    let clipboard_result = clipboard_cleanup(deadline.saturating_duration_since(Instant::now()));
+    match input_result {
+        Ok(input_result) => {
+            finish_host_session(cause, stream_result, input_result, clipboard_result)
+        }
+        Err(cleanup) => {
+            let result = Err(Box::new(HostCleanupError {
+                primary: stream_result.err(),
+                cleanup,
+            }) as super::RemoteError);
+            combine_host_cleanup(result, clipboard_result)
+        }
+    }
+}
+
+fn combine_host_cleanup(result: RemoteResult<()>, cleanup: RemoteResult<()>) -> RemoteResult<()> {
+    match cleanup {
+        Ok(()) => result,
+        Err(cleanup) => Err(Box::new(HostCleanupError {
+            primary: result.err(),
+            cleanup,
+        })),
+    }
 }
 
 fn finish_host_session(
@@ -2383,7 +2511,20 @@ fn finish_host_session(
         Err(_) => Err(io::Error::other("remote input thread panicked").into()),
     };
     let result = if input_panicked {
-        input_result
+        // A panic can interrupt input release. Preserve an earlier stream
+        // failure while marking this listener unsafe for replacement sessions.
+        Err(Box::new(HostCleanupError {
+            primary: stream_result.err(),
+            cleanup: input_result.unwrap_err(),
+        }) as super::RemoteError)
+    } else if input_result
+        .as_ref()
+        .err()
+        .is_some_and(|error| error.is::<HostCleanupError>())
+    {
+        // Even a joined input worker may report an unconfirmed X11 release.
+        // Do not hide that failure behind graceful/capture/sender termination.
+        combine_host_cleanup(stream_result, input_result)
     } else {
         match cause {
             StopCause::Input => input_result,
@@ -2409,22 +2550,23 @@ fn finish_host_session(
             }
         }
     };
-    match clipboard_result {
-        Ok(()) => result,
-        Err(cleanup) => Err(Box::new(HostClipboardCleanupError {
-            primary: result.err(),
-            cleanup,
-        })),
-    }
+    combine_host_cleanup(result, clipboard_result)
+}
+
+/// Whether this error is the host's typed unconfirmed-cleanup result.
+/// This does not infer cleanup state from arbitrary error text.
+#[must_use]
+pub fn cleanup_incomplete(error: &(dyn std::error::Error + 'static)) -> bool {
+    error.is::<HostCleanupError>()
 }
 
 #[derive(Debug)]
-struct HostClipboardCleanupError {
+struct HostCleanupError {
     primary: Option<super::RemoteError>,
     cleanup: super::RemoteError,
 }
 
-impl std::fmt::Display for HostClipboardCleanupError {
+impl std::fmt::Display for HostCleanupError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if let Some(primary) = &self.primary {
             write!(f, "{primary}; ")?;
@@ -2432,7 +2574,7 @@ impl std::fmt::Display for HostClipboardCleanupError {
         write!(f, "{}", self.cleanup)
     }
 }
-impl std::error::Error for HostClipboardCleanupError {
+impl std::error::Error for HostCleanupError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         self.primary.as_deref().map(|error| error as _)
     }
@@ -3593,18 +3735,7 @@ fn receive_input_scoped(
     if !session_failed && release_result.is_err() {
         first_stop.promote_graceful_to_input_error();
     }
-    let outcome = match (session_result, release_result) {
-        (Ok(()), Ok(())) => Ok(()),
-        (Ok(()), Err(error)) => Err(error.into()),
-        (Err(error), Ok(())) => Err(error),
-        (Err(error), Err(release_error)) => {
-            eprintln!(
-                "jwm-remote: failed to release remote input after session error: {release_error}"
-            );
-            Err(error)
-        }
-    };
-    outcome
+    combine_host_cleanup(session_result, release_result.map_err(Into::into))
 }
 
 /// A partial record cannot be resynchronized, so expiry closes the session;
@@ -3679,6 +3810,206 @@ fn permission_denied(message: impl Into<String>) -> io::Error {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn host_cleanup_clipboard_startup_failure_preserves_error_and_disables_admission() {
+        let admission = Arc::new(AtomicU8::new(VIEWER_IDLE));
+        let slot = ViewerSlot::claim(&admission).unwrap();
+        let error = run_admitted_session(slot, || {
+            Err(host_clipboard_start_failed("backend unavailable".into()))
+        })
+        .unwrap_err();
+        assert!(cleanup_incomplete(error.as_ref()));
+        assert!(error.to_string().contains("backend unavailable"));
+        assert!(error.to_string().contains("startup cleanup unconfirmed"));
+        assert!(ViewerSlot::claim(&admission).is_none());
+    }
+
+    #[test]
+    fn host_cleanup_classification_requires_typed_evidence() {
+        let plain = io::Error::other("input cleanup unconfirmed");
+        assert!(!cleanup_incomplete(&plain));
+        let typed = combine_host_cleanup(Ok(()), Err(plain.into())).unwrap_err();
+        assert!(cleanup_incomplete(typed.as_ref()));
+        let diagnostic = crate::remote::client::classify_failure(typed.as_ref());
+        assert_eq!(diagnostic.category, "cleanup_failed");
+        assert_eq!(diagnostic.cleanup, "incomplete");
+        assert!(!diagnostic.reconnect_certified);
+    }
+
+    #[test]
+    fn host_cleanup_completed_worker_allows_replacement() {
+        let admission = Arc::new(AtomicU8::new(VIEWER_IDLE));
+        let slot = ViewerSlot::claim(&admission).unwrap();
+        let mut clipboard_called = false;
+        run_admitted_session(slot, || {
+            cleanup_host_session(
+                Instant::now() + Duration::from_secs(2),
+                StopCause::Graceful,
+                Ok(()),
+                thread::spawn(|| Ok(())),
+                |remaining| {
+                    clipboard_called = true;
+                    assert!(remaining <= Duration::from_secs(2));
+                    Ok(())
+                },
+            )
+        })
+        .unwrap();
+        assert!(clipboard_called);
+        assert!(ViewerSlot::claim(&admission).is_some());
+    }
+
+    #[test]
+    fn host_cleanup_blocked_input_shares_deadline_preserves_errors_and_poison() {
+        let admission = Arc::new(AtomicU8::new(VIEWER_IDLE));
+        let slot = ViewerSlot::claim(&admission).unwrap();
+        let (release, blocked) = std::sync::mpsc::channel();
+        let (exited, exit) = std::sync::mpsc::channel();
+        let worker = thread::spawn(move || {
+            blocked.recv().unwrap();
+            exited.send(()).unwrap();
+            Ok(())
+        });
+        let mut clipboard_called = false;
+        let error = run_admitted_session(slot, || {
+            cleanup_host_session(
+                Instant::now(),
+                StopCause::Capture,
+                Err(io::Error::other("primary capture failure").into()),
+                worker,
+                |remaining| {
+                    clipboard_called = true;
+                    assert!(
+                        remaining.is_zero(),
+                        "clipboard cannot receive a fresh budget"
+                    );
+                    Err(io::Error::other("clipboard failed too").into())
+                },
+            )
+        })
+        .unwrap_err();
+        assert!(clipboard_called);
+        let message = error.to_string();
+        assert!(message.contains("primary capture failure"));
+        assert!(message.contains("input cleanup unconfirmed"));
+        assert!(message.contains("input release is not confirmed"));
+        assert!(message.contains("clipboard failed too"));
+        assert!(ViewerSlot::claim(&admission).is_none());
+        release.send(()).unwrap();
+        exit.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(admission.load(Ordering::Acquire), VIEWER_POISONED);
+        assert!(ViewerSlot::claim(&admission).is_none());
+    }
+
+    #[test]
+    fn host_cleanup_waits_for_thread_local_destructors() {
+        struct BlockOnDrop(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>);
+        impl Drop for BlockOnDrop {
+            fn drop(&mut self) {
+                self.0.send(()).unwrap();
+                self.1.recv().unwrap();
+            }
+        }
+        thread_local! {
+            static BLOCK: std::cell::RefCell<Option<BlockOnDrop>> = const { std::cell::RefCell::new(None) };
+        }
+        let (entered, entering) = std::sync::mpsc::channel();
+        let (release, blocked) = std::sync::mpsc::channel();
+        let worker = thread::spawn(move || {
+            BLOCK.with(|value| *value.borrow_mut() = Some(BlockOnDrop(entered, blocked)));
+            Ok(())
+        });
+        entering.recv_timeout(Duration::from_secs(2)).unwrap();
+        let outcome = join_host_input_until(worker, Instant::now());
+        release.send(()).unwrap();
+        assert!(
+            outcome
+                .unwrap_err()
+                .to_string()
+                .contains("input cleanup unconfirmed")
+        );
+    }
+
+    #[test]
+    fn host_cleanup_input_panic_preserves_primary_and_disables_admission() {
+        let admission = Arc::new(AtomicU8::new(VIEWER_IDLE));
+        let slot = ViewerSlot::claim(&admission).unwrap();
+        let error = run_admitted_session(slot, || {
+            cleanup_host_session(
+                Instant::now() + Duration::from_secs(2),
+                StopCause::Capture,
+                Err(io::Error::other("capture failed first").into()),
+                thread::spawn(|| panic!("input panic")),
+                |_| Ok(()),
+            )
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("capture failed first"));
+        assert!(error.to_string().contains("input thread panicked"));
+        assert!(ViewerSlot::claim(&admission).is_none());
+    }
+
+    #[test]
+    fn host_cleanup_release_failure_is_never_hidden_by_stop_cause() {
+        for cause in [
+            StopCause::Input,
+            StopCause::Graceful,
+            StopCause::Capture,
+            StopCause::Sender,
+            StopCause::Clipboard,
+            StopCause::ThreadPanic,
+            StopCause::None,
+        ] {
+            let input = combine_host_cleanup(
+                Err(io::Error::other("input protocol failure").into()),
+                Err(io::Error::other("X11 release unconfirmed").into()),
+            );
+            let error = finish_host_session(
+                cause,
+                Err(io::Error::other("stream failure").into()),
+                Ok(input),
+                Ok(()),
+            )
+            .unwrap_err();
+            assert!(error.is::<HostCleanupError>());
+            for message in [
+                "input protocol failure",
+                "X11 release unconfirmed",
+                "stream failure",
+            ] {
+                assert!(error.to_string().contains(message));
+            }
+        }
+    }
+
+    #[test]
+    fn host_cleanup_once_outcome_is_failure_after_clean_stream() {
+        // Exercise the exact admitted outcome sent to the --once listener.
+        let admission = Arc::new(AtomicU8::new(VIEWER_IDLE));
+        let slot = ViewerSlot::claim(&admission).unwrap();
+        let outcome = run_admitted_session(slot, || {
+            cleanup_host_session(
+                Instant::now() + Duration::from_secs(2),
+                StopCause::Graceful,
+                Ok(()),
+                thread::spawn(|| Ok(())),
+                |_| Err(io::Error::other("clipboard incomplete").into()),
+            )
+        });
+        assert!(outcome.is_err());
+        assert!(ViewerSlot::claim(&admission).is_none());
+    }
+
+    #[test]
+    fn host_cleanup_session_unwind_disables_admission_but_ordinary_error_does_not() {
+        let admission = Arc::new(AtomicU8::new(VIEWER_IDLE));
+        let slot = ViewerSlot::claim(&admission).unwrap();
+        assert!(run_admitted_session(slot, || Err(io::Error::other("bad peer").into())).is_err());
+        let slot = ViewerSlot::claim(&admission).unwrap();
+        assert!(run_admitted_session(slot, || panic!("session panic")).is_err());
+        assert!(ViewerSlot::claim(&admission).is_none());
+    }
+
+    #[test]
     fn clipboard_cleanup_preserves_host_panic_for_every_stop_cause() {
         for cause in [
             StopCause::Input,
@@ -3699,7 +4030,7 @@ mod tests {
                 Err(io::Error::other("clipboard cleanup incomplete").into()),
             )
             .unwrap_err();
-            let cleanup = error.downcast_ref::<HostClipboardCleanupError>().unwrap();
+            let cleanup = error.downcast_ref::<HostCleanupError>().unwrap();
             assert!(
                 cleanup
                     .primary

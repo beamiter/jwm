@@ -135,6 +135,122 @@ impl std::error::Error for ClientFailure {
     }
 }
 
+/// Content-free terminal classification. Every string is a fixed vocabulary;
+/// neither error formatting nor peer-supplied text participates in this record.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct FailureDiagnostic {
+    pub stage: Option<&'static str>,
+    pub category: &'static str,
+    pub io_kind: Option<&'static str>,
+    pub cleanup: &'static str,
+    pub reconnect_certified: bool,
+}
+
+/// Classify without changing retry policy or making teardown claims from an
+/// ordinary I/O error. Traversal is bounded even for a cyclic custom source.
+pub fn classify_failure(error: &(dyn std::error::Error + 'static)) -> FailureDiagnostic {
+    let certified = error
+        .downcast_ref::<ClientFailure>()
+        .is_some_and(|failure| failure.cause.is::<CleanTransportDisconnect>());
+    let mut result = FailureDiagnostic {
+        stage: None,
+        category: "unknown",
+        io_kind: None,
+        cleanup: if certified { "complete" } else { "unknown" },
+        reconnect_certified: certified,
+    };
+    let mut current = Some(error);
+    for _ in 0..32 {
+        let Some(error) = current else { break };
+        if let Some(failure) = error.downcast_ref::<ClientFailure>() {
+            result.stage.get_or_insert(match failure.stage {
+                ClientStage::Setup => "setup",
+                ClientStage::Connect => "connect",
+                ClientStage::Negotiate => "negotiate",
+                ClientStage::FirstFrame => "first_frame",
+                ClientStage::LocalClipboard => "local_clipboard",
+                ClientStage::Display => "display",
+                ClientStage::FirstFrameAck => "first_frame_ack",
+                ClientStage::Session => "session",
+            });
+        } else if error.is::<SessionCleanupError>() || super::host::cleanup_incomplete(error) {
+            result.cleanup = "incomplete";
+            result.reconnect_certified = false;
+            result.category = "cleanup_failed";
+        } else if error.is::<CleanTransportDisconnect>() || error.is::<ReceiverTransportLoss>() {
+            if result.category == "unknown" {
+                result.category = "transport_loss";
+            }
+        } else if error.is::<PeerClosed>() {
+            if result.category == "unknown" {
+                result.category = "peer_closed";
+            }
+        } else if error.is::<UserClosed>() {
+            if result.category == "unknown" {
+                result.category = "user_closed";
+            }
+        } else if let Some(protocol) = error.downcast_ref::<ProtocolError>() {
+            let category = match protocol {
+                ProtocolError::Io(error) => {
+                    result.io_kind = Some(diagnostic_io_kind(error.kind()));
+                    "protocol_io"
+                }
+                ProtocolError::InvalidPskLength { .. } => "invalid_psk_length",
+                ProtocolError::AuthenticationFailed => "authentication_failed",
+                ProtocolError::UnknownMessageKind(_) => "unknown_message_kind",
+                ProtocolError::PayloadTooLarge { .. } => "payload_too_large",
+                ProtocolError::SequenceMismatch { .. } => "sequence_mismatch",
+                ProtocolError::SequenceExhausted => "sequence_exhausted",
+                ProtocolError::MalformedPadding => "malformed_padding",
+                ProtocolError::UnsupportedTransportVersion { .. } => {
+                    "unsupported_transport_version"
+                }
+                ProtocolError::BadTransportMagic => "bad_transport_magic",
+            };
+            if result.category == "unknown" {
+                result.category = category;
+            }
+        } else if let Some(io) = error.downcast_ref::<io::Error>() {
+            if result.category == "unknown" {
+                result.category = "io";
+            }
+            result.io_kind.get_or_insert(diagnostic_io_kind(io.kind()));
+            // io::Error's source may skip the contained wrapper itself.
+            current = io
+                .get_ref()
+                .map(|inner| inner as &(dyn std::error::Error + 'static));
+            continue;
+        }
+        current = error.source();
+    }
+    result
+}
+
+fn diagnostic_io_kind(kind: io::ErrorKind) -> &'static str {
+    match kind {
+        io::ErrorKind::NotFound => "not_found",
+        io::ErrorKind::PermissionDenied => "permission_denied",
+        io::ErrorKind::ConnectionRefused => "connection_refused",
+        io::ErrorKind::ConnectionReset => "connection_reset",
+        io::ErrorKind::ConnectionAborted => "connection_aborted",
+        io::ErrorKind::NotConnected => "not_connected",
+        io::ErrorKind::AddrInUse => "addr_in_use",
+        io::ErrorKind::AddrNotAvailable => "addr_not_available",
+        io::ErrorKind::BrokenPipe => "broken_pipe",
+        io::ErrorKind::AlreadyExists => "already_exists",
+        io::ErrorKind::WouldBlock => "would_block",
+        io::ErrorKind::InvalidInput => "invalid_input",
+        io::ErrorKind::InvalidData => "invalid_data",
+        io::ErrorKind::TimedOut => "timed_out",
+        io::ErrorKind::WriteZero => "write_zero",
+        io::ErrorKind::Interrupted => "interrupted",
+        io::ErrorKind::UnexpectedEof => "unexpected_eof",
+        io::ErrorKind::Unsupported => "unsupported",
+        io::ErrorKind::OutOfMemory => "out_of_memory",
+        _ => "other",
+    }
+}
+
 pub fn run_client(options: ClientOptions) -> RemoteResult<()> {
     let mut stage = ClientStage::Setup;
     let result = run_client_session(options, &mut stage);
@@ -4427,5 +4543,144 @@ mod tests {
         assert_eq!(kind, MessageKind::Close);
         assert!(payload.is_empty());
         server.join().unwrap();
+    }
+}
+
+#[cfg(test)]
+mod diagnostic_tests {
+    use super::*;
+
+    fn certificate() -> RemoteError {
+        Box::new(CleanTransportDisconnect(ProtocolError::Io(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "private peer",
+        ))))
+    }
+    fn session(cause: RemoteError) -> RemoteError {
+        Box::new(ClientFailure {
+            stage: ClientStage::Session,
+            cause,
+        })
+    }
+
+    #[test]
+    fn certificate_requires_exact_retry_shape() {
+        let direct = session(certificate());
+        let summary = classify_failure(direct.as_ref());
+        assert_eq!(summary.stage, Some("session"));
+        assert_eq!(summary.category, "transport_loss");
+        assert_eq!(summary.io_kind, Some("unexpected_eof"));
+        assert_eq!(summary.cleanup, "complete");
+        assert!(summary.reconnect_certified);
+        for error in [
+            certificate(),
+            session(session(certificate())),
+            Box::new(io::Error::other(session(certificate()))) as RemoteError,
+        ] {
+            let summary = classify_failure(error.as_ref());
+            assert!(!summary.reconnect_certified);
+            assert_eq!(summary.cleanup, "unknown");
+        }
+    }
+
+    #[test]
+    fn cleanup_failure_overrides_nested_certificate() {
+        let error = session(Box::new(SessionCleanupError {
+            primary: Some(session(certificate())),
+            failures: vec![io::Error::other("private cleanup path").into()],
+        }));
+        let summary = classify_failure(error.as_ref());
+        assert_eq!(summary.cleanup, "incomplete");
+        assert_eq!(summary.category, "cleanup_failed");
+        assert!(!summary.reconnect_certified);
+        let wrapped = io::Error::other(error);
+        assert_eq!(classify_failure(&wrapped).cleanup, "incomplete");
+    }
+
+    #[test]
+    fn markers_and_ordinary_io_are_distinct() {
+        let receiver =
+            ReceiverTransportLoss(ProtocolError::Io(io::ErrorKind::UnexpectedEof.into()));
+        let summary = classify_failure(&receiver);
+        assert_eq!(summary.category, "transport_loss");
+        assert_eq!(summary.cleanup, "unknown");
+        assert!(!summary.reconnect_certified);
+        assert_eq!(
+            classify_failure(&io::Error::from(io::ErrorKind::UnexpectedEof)).category,
+            "io"
+        );
+        assert_eq!(
+            classify_failure(&PeerClosed("PRIVATE\npeer".into())).category,
+            "peer_closed"
+        );
+        assert_eq!(classify_failure(&UserClosed).category, "user_closed");
+        assert_eq!(
+            classify_failure(&ProtocolError::AuthenticationFailed).category,
+            "authentication_failed"
+        );
+    }
+
+    #[test]
+    fn classifier_never_formats_unknown_errors_and_bounds_cycles() {
+        #[derive(Debug)]
+        struct Unformattable;
+        impl std::fmt::Display for Unformattable {
+            fn fmt(&self, _: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                panic!("diagnostics must not format errors");
+            }
+        }
+        impl std::error::Error for Unformattable {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                Some(self)
+            }
+        }
+        let summary = classify_failure(&Unformattable);
+        assert_eq!(summary.category, "unknown");
+        assert_eq!(summary.cleanup, "unknown");
+    }
+    #[test]
+    fn protocol_variants_have_precise_static_categories() {
+        for (error, category) in [
+            (
+                ProtocolError::InvalidPskLength {
+                    expected: 32,
+                    actual: 999,
+                },
+                "invalid_psk_length",
+            ),
+            (ProtocolError::AuthenticationFailed, "authentication_failed"),
+            (
+                ProtocolError::UnknownMessageKind(255),
+                "unknown_message_kind",
+            ),
+            (
+                ProtocolError::PayloadTooLarge { len: 999, max: 1 },
+                "payload_too_large",
+            ),
+            (
+                ProtocolError::SequenceMismatch {
+                    expected: 1,
+                    received: 999,
+                },
+                "sequence_mismatch",
+            ),
+            (ProtocolError::SequenceExhausted, "sequence_exhausted"),
+            (ProtocolError::MalformedPadding, "malformed_padding"),
+            (
+                ProtocolError::UnsupportedTransportVersion {
+                    received: 999,
+                    expected: 2,
+                },
+                "unsupported_transport_version",
+            ),
+            (ProtocolError::BadTransportMagic, "bad_transport_magic"),
+        ] {
+            let summary = classify_failure(&error);
+            assert_eq!(summary.category, category);
+            assert_eq!(summary.io_kind, None);
+            assert_eq!(summary.cleanup, "unknown");
+            assert!(!summary.reconnect_certified);
+            assert!(!serde_json::to_string(&summary).unwrap().contains("999"));
+        }
     }
 }

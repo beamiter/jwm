@@ -30,8 +30,10 @@ It is not completion of the entire remote-control roadmap.
   tile data, including changes from skipped mailbox snapshots. Keepalives share
   all tiles and do not copy pixels. Native-size display converts/uploads only
   the changed bounding rectangle. Scaled CPU presentation uploads conservative
-  Triangle-filter-expanded damage while retaining full-image resampling; XRender
-  patches its retained source and still composites the complete destination.
+  Triangle-filter-expanded damage using exact partial resampling when bounded
+  scratch preflight succeeds; full-region or unsupported cases use full-image
+  resampling. XRender patches its retained source and still composites the complete
+  destination.
   At most eight merged rectangles bound request count; fragmented damage falls
   back to a bounding rectangle, and 60% covered area uses the complete image.
 - SHM uploads use a bounded three-slot pool. Exact completion ownership prevents
@@ -106,9 +108,10 @@ It is not completion of the entire remote-control roadmap.
 
 ## Explicitly deferred
 
-- Partial CPU resampling, observed session state
-  restore, exact window-manager placement, XKB/IME, runtime clipboard
-  mode changes, local readback, Wayland and hardware encoding.
+- Observed session-state restoration, exact window-manager placement, XKB/IME,
+  runtime clipboard mode changes, partial host readback, Wayland and hardware
+  encoding. Explicit saved viewer size and best-effort requested position are
+  implemented; they do not observe or automatically restore window-manager state.
 - Broader negotiated capabilities, mutable source authorization, structured errors and backward-compatible extension framing.
 - Input-to-visible instrumentation and live desktop workload replay.
   The offline synthetic tile-codec baseline is documented in
@@ -300,3 +303,52 @@ consume substantial memory within the hard cap. Partial Triangle scratch keeps
 its separate 16 MiB cap. Pure tests cover boundaries and guard ordering without
 large allocations. Live-X11 behavior and memory/latency measurements remain
 unverified for this guard.
+
+### Bounded post-stream host cleanup
+
+After frame streaming returns, input and clipboard workers share a two-second
+cleanup budget. The input reaper confirms a completed thread join, including
+thread-local destructors, rather than merely observing the worker body return.
+Clipboard shutdown is still attempted with the remaining budget, including zero
+when input cleanup consumed it. An earlier stream failure remains visible when
+cleanup also fails.
+
+Unconfirmed cleanup or a session/input panic permanently closes that listener's
+session admission before releasing the viewer slot. Restart the host to admit a
+new controller. This prevents a detached old input worker from overlapping a new
+controller; a timeout does not mean held input was released. Ordinary session or
+protocol failures with confirmed cleanup do not poison admission. A one-session
+host reports incomplete cleanup as failure. Requested clipboard startup failure
+also fails the session and poisons admission instead of silently continuing
+without clipboard: the current startup error cannot prove that no background
+worker started, even when the reported failure is simple backend unavailability.
+
+This deadline applies only after streaming returns. Synchronous capture,
+frame-sender shutdown and outer connection-thread joins can still block, so it
+is not a bounded whole-host termination guarantee. The regression tests use
+synthetic workers and do not establish live X11 release behavior.
+
+### Content-free command diagnostics
+
+The global opt-in `--diagnostics-json` flag emits one best-effort JSON line on
+stderr after a successfully parsed command returns. Its type is
+`jwm_remote_command_result` and schema version is 1. Fixed-vocabulary fields
+identify the command, success/error outcome, known client stage, error category,
+I/O kind, cleanup status and existing reconnect certificate. Nested profile runs,
+reconnect attempts and SSH helpers do not emit additional records. The flag is
+not forwarded to the remote host or stored in profiles.
+
+The JSON contains no formatted error, peer-supplied close reason, endpoint,
+profile name, key, clipboard contents or input data. Existing human stderr is
+unchanged and may contain contextual details; this privacy guarantee applies
+only to the JSON record. Consumers should select records by type, not assume
+stderr is a JSON-only stream.
+
+Cleanup is `unknown` unless typed evidence establishes `complete` or
+`incomplete`; even successful commands can report unknown, since SSH may only
+focus an existing viewer. `reconnect_certified` describes the existing direct
+client retry certificate, not remaining retry budget or permission for an
+external program to retry. Cleanup failure always clears it. A write failure
+never changes the command's result. Parse errors, help/version exits, signals,
+process aborts and hung commands do not promise a terminal record. This adds no
+wire protocol or capability changes.
