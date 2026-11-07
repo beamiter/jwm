@@ -556,6 +556,15 @@ impl Staging {
         }
     }
 
+    /// Terminal backend failure released the clipboard, so no completed copy
+    /// remains owned for post-session paste. Also remove admitted-but-unapplied copies.
+    pub(crate) fn discard_all(&mut self) {
+        self.discard_in_progress();
+        for directory in self.completed.drain(..) {
+            let _ = fs::remove_dir_all(directory);
+        }
+    }
+
     /// Bytes an unprivileged writer may still use on the staging filesystem.
     pub fn available_bytes(&self) -> io::Result<u64> {
         let stats = nix::sys::statvfs::statvfs(&self.session).map_err(io::Error::from)?;

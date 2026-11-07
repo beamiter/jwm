@@ -77,10 +77,29 @@ It is not completion of the entire remote-control roadmap.
   transfer workers independently reject unnegotiated content. One-way transfers
   retain reverse-direction ACK/refusal control traffic. Live-X validation remains
   pending; offline policy tests do not establish clipboard timing or desktop behavior.
-  Network and transfer-worker queues are bounded; the backend capture/serve
-  channels remain unbounded and serving currently drains without a per-pass
-  budget. Bounding those channels and scheduling is a separate lifecycle change;
-  this is not a claim that the complete clipboard pipeline is bounded.
+- The remote X11 clipboard boundary now has a one-value latest-capture mailbox
+  and an ordered serve queue capped at 32 records / 33 MiB retained payload
+  allocation. Image capacity is capped at 32 MiB, text at 256 KiB; file lists
+  have at most 4096 entries and 256 KiB retained path allocation, with a
+  conservative 256 KiB preflight bound for all three encoded offers. Queue
+  admission never waits for space. Each normal pass serves at most eight
+  requests before X events and expiry processing. Overload uses a reserved
+  sticky abort path, refuses pending pastes, releases only this watcher's
+  ownership, closes captures, and propagates failure to the remote session.
+- Transfer-worker ingress and outbox accounting charges retained capacities.
+  Rejected or panicking target calls close the session; an independent pending
+  token permits refusal even while fulfil consumes the incoming sink. Received
+  files become completed staging only after serve-queue admission. The status
+  says `clipboard update queued`: admission is not proof that X11 applied it.
+  Backend failure observed before transfer-worker cleanup also removes completed
+  staging. A later backend failure after that worker exits can leave the bounded
+  newest completed directory per session under the existing sweep policy.
+  This is not a global staging-disk bound: the sweep skips live PIDs, so multiple
+  sessions in one process can retain multiple completed directories.
+  This bounds the application queues, not total process/X-server memory or
+  synchronous X11/disk call duration. Generic native clipboard history retains
+  its existing channel semantics. Live overload/paste tests remain ignored here
+  and are configured for isolated-Xvfb CI, not claimed as locally verified.
 
 ## Explicitly deferred
 

@@ -233,7 +233,7 @@ contract, not a guarantee that a physical display has completed scanout.
 The title shows actual negotiated permissions: view-only, pointer-only when
 keymaps differ, or keyboard + pointer. It also shows clipboard ON/off — with a
 copy in flight, its progress (`clipboard ON - receiving 3 files 40%`) and then
-`3 files ready to paste` — and, with `--grab-input`, whether input is released
+`3 files clipboard update queued` — and, with `--grab-input`, whether input is released
 or grabbed and how to release it.
 An authenticated connection waiting on capture is not reported as a connected
 desktop. View-only and host input denial remain view-only; there is no fallback

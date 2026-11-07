@@ -42,6 +42,10 @@ use crate::backend::clipboard_offer::{
     X11_MAX_MULTIPLE_CONVERSIONS, next_x11_incr_chunk_with_limit, x11_selection_time_is_valid,
 };
 
+#[cfg(feature = "remote-x11")]
+#[path = "clipboard_remote_mailbox.rs"]
+mod remote_mailbox;
+
 /// A requester that never deletes the INCR property must not retain transfer
 /// state forever, and many hostile requesters must not grow it without bound.
 const MAX_OUTGOING_INCR_TRANSFERS: usize = 32;
@@ -202,6 +206,13 @@ pub(crate) enum CopiedClipboard {
     Files(Vec<std::path::PathBuf>),
 }
 
+#[cfg(feature = "remote-x11")]
+impl CopiedClipboard {
+    pub(crate) fn retained_bytes(&self) -> Option<usize> {
+        remote_mailbox::copied_bytes(self)
+    }
+}
+
 /// Where captured copies go.
 enum CaptureSink {
     /// JWM's clipboard history: text and PNG only.
@@ -209,7 +220,7 @@ enum CaptureSink {
     History(std::sync::mpsc::Sender<CapturedClipboard>),
     /// The remote helper: everything its profile captured.
     #[cfg(feature = "remote-x11")]
-    Remote(std::sync::mpsc::Sender<CopiedClipboard>),
+    Remote(remote_mailbox::CaptureSender),
 }
 
 impl CaptureSink {
@@ -226,7 +237,7 @@ impl CaptureSink {
                 sender.send(captured).is_ok()
             }
             #[cfg(feature = "remote-x11")]
-            Self::Remote(sender) => sender.send(copied).is_ok(),
+            Self::Remote(sender) => sender.send(copied),
         }
     }
 }
@@ -236,7 +247,25 @@ enum ServeSource {
     #[cfg_attr(not(feature = "backend-x11rb"), allow(dead_code))]
     History(std::sync::mpsc::Receiver<ClipboardOffer>),
     #[cfg(feature = "remote-x11")]
-    Remote(std::sync::mpsc::Receiver<RemoteServe>),
+    Remote(remote_mailbox::ServeReceiver),
+}
+
+/// Own both endpoints together, including before the worker starts. Rust
+/// drops fields in declaration order: receiver teardown latches backend
+/// failure before the capture sender wakes a forwarder on close. This also
+/// holds on startup errors, spawn failure, and panic unwinding.
+struct WatcherEndpoints {
+    source: ServeSource,
+    sink: CaptureSink,
+}
+
+impl Drop for WatcherEndpoints {
+    fn drop(&mut self) {
+        #[cfg(feature = "remote-x11")]
+        if let ServeSource::Remote(source) = &self.source {
+            source.0.close();
+        }
+    }
 }
 
 /// What the remote helper asks its watcher to serve.
@@ -265,6 +294,13 @@ pub(crate) enum RemoteServe {
     Abandon {
         token: u64,
     },
+}
+
+#[cfg(feature = "remote-x11")]
+impl RemoteServe {
+    pub(crate) fn retained_bytes(&self) -> Option<usize> {
+        remote_mailbox::request_bytes(self)
+    }
 }
 
 #[cfg(feature = "remote-x11")]
@@ -494,7 +530,8 @@ pub(crate) struct Clipboard {
 }
 
 struct ClipboardWorkerLifetime {
-    shutdown: std::sync::mpsc::Sender<()>,
+    signal_only: bool,
+    shutdown: std::sync::mpsc::SyncSender<()>,
     wake: crate::backend::update_notifier::AsyncUpdateNotifier,
     done: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
     join: std::sync::Mutex<Option<std::thread::JoinHandle<()>>>,
@@ -502,8 +539,11 @@ struct ClipboardWorkerLifetime {
 
 impl Drop for ClipboardWorkerLifetime {
     fn drop(&mut self) {
-        let _ = self.shutdown.send(());
+        let _ = self.shutdown.try_send(());
         self.wake.notify();
+        if self.signal_only {
+            return;
+        }
         // Remote sessions take the join handle for explicit bounded shutdown.
         // Their foreground Drop must not wait again on this lifetime.
         if self
@@ -556,20 +596,32 @@ fn spawn_watcher(
     ),
     String,
 > {
+    let signal_only = match &source {
+        ServeSource::History(_) => false,
+        #[cfg(feature = "remote-x11")]
+        ServeSource::Remote(_) => true,
+    };
     let display = display.map(str::to_string);
-    let (shutdown, shutdown_rx) = std::sync::mpsc::channel();
+    let (shutdown, shutdown_rx) = std::sync::mpsc::sync_channel(1);
     let (done_tx, done) = std::sync::mpsc::channel();
     let worker_wake = crate::backend::update_notifier::AsyncUpdateNotifier::new()
         .map_err(|error| format!("create clipboard worker wake fd: {error}"))?;
     let thread_wake = worker_wake.clone();
     let (ready_tx, ready) = std::sync::mpsc::channel();
+    let endpoints = WatcherEndpoints { source, sink };
     let join = std::thread::Builder::new()
         .name("jwm-clipboard".to_string())
         .spawn(move || {
             match Watcher::new(display.as_deref(), profile) {
                 Ok(mut watcher) => {
                     let _ = ready_tx.send(Ok(()));
-                    watcher.run(&sink, &source, &notifier, &thread_wake, &shutdown_rx);
+                    watcher.run(
+                        &endpoints.sink,
+                        &endpoints.source,
+                        &notifier,
+                        &thread_wake,
+                        &shutdown_rx,
+                    );
                 }
                 Err(error) => {
                     let _ = ready_tx.send(Err(error));
@@ -584,6 +636,7 @@ fn spawn_watcher(
         .recv()
         .map_err(|_| "clipboard thread died during startup".to_string())??;
     let worker = std::sync::Arc::new(ClipboardWorkerLifetime {
+        signal_only,
         shutdown,
         wake: worker_wake.clone(),
         done: std::sync::Mutex::new(done),
@@ -718,15 +771,16 @@ impl RemoteClipboard {
         display: Option<&str>,
         options: RemoteClipboardOptions,
     ) -> Result<(RemoteCaptures, RemoteSetter), String> {
-        let (captured_tx, captured) = std::sync::mpsc::channel();
-        let (serve, serve_rx) = std::sync::mpsc::channel();
+        let (captured_tx, captured) = remote_mailbox::capture_channel();
+        let serve = std::sync::Arc::new(remote_mailbox::ServeQueue::default());
+        let serve_rx = remote_mailbox::ServeReceiver(serve.clone());
         let (wake, worker) = spawn_watcher(
             display,
             CaptureProfile {
                 capture_enabled: options.send,
                 images: options.images,
                 files: options.files,
-                image_bytes: options.image_bytes,
+                image_bytes: options.image_bytes.min(remote_mailbox::MAX_IMAGE_BYTES),
                 capture_existing: options.capture_existing,
             },
             CaptureSink::Remote(captured_tx),
@@ -739,7 +793,10 @@ impl RemoteClipboard {
                 worker: std::sync::Arc::clone(&worker),
             },
             RemoteSetter {
-                serve,
+                serve: std::sync::Arc::new(remote_mailbox::ServeProducer {
+                    queue: serve,
+                    wake: wake.clone(),
+                }),
                 wake,
                 worker,
             },
@@ -750,7 +807,7 @@ impl RemoteClipboard {
 /// Receiving half: copies made on this display.
 #[cfg(feature = "remote-x11")]
 pub(crate) struct RemoteCaptures {
-    captured: std::sync::mpsc::Receiver<CopiedClipboard>,
+    captured: remote_mailbox::CaptureReceiver,
     worker: std::sync::Arc<ClipboardWorkerLifetime>,
 }
 
@@ -765,25 +822,21 @@ impl RemoteCaptures {
         timeout: std::time::Duration,
     ) -> Result<Option<CopiedClipboard>, std::sync::mpsc::RecvError> {
         let _keep_worker_alive = &self.worker;
-        match self.captured.recv_timeout(timeout) {
-            Ok(copied) => Ok(Some(copied)),
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Ok(None),
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(std::sync::mpsc::RecvError),
-        }
+        self.captured.recv_timeout(timeout)
     }
 }
 
 /// Signal-only ownership of the remote X11 worker's shutdown path.
 #[cfg(feature = "remote-x11")]
 pub(crate) struct RemoteClipboardShutdown {
-    shutdown: std::sync::mpsc::Sender<()>,
+    shutdown: std::sync::mpsc::SyncSender<()>,
     wake: crate::backend::update_notifier::AsyncUpdateNotifier,
 }
 
 #[cfg(feature = "remote-x11")]
 impl RemoteClipboardShutdown {
     pub(crate) fn stop(&self) {
-        let _ = self.shutdown.send(());
+        let _ = self.shutdown.try_send(());
         self.wake.notify();
     }
 }
@@ -799,13 +852,22 @@ impl Drop for RemoteClipboardShutdown {
 #[cfg(feature = "remote-x11")]
 #[derive(Clone)]
 pub(crate) struct RemoteSetter {
-    serve: std::sync::mpsc::Sender<RemoteServe>,
+    serve: std::sync::Arc<remote_mailbox::ServeProducer>,
     wake: crate::backend::update_notifier::AsyncUpdateNotifier,
     worker: std::sync::Arc<ClipboardWorkerLifetime>,
 }
 
 #[cfg(feature = "remote-x11")]
 impl RemoteSetter {
+    /// Sticky abnormal termination, excluding successful manager handoff.
+    pub(crate) fn is_failed(&self) -> bool {
+        self.serve.queue.aborted()
+    }
+
+    pub(crate) fn is_healthy(&self) -> bool {
+        self.wake.is_healthy() && !self.serve.queue.aborted()
+    }
+
     /// Move join ownership to the remote session before any handles can drop.
     pub(crate) fn take_shutdown(&self) -> (RemoteClipboardShutdown, std::thread::JoinHandle<()>) {
         let join = self
@@ -824,18 +886,21 @@ impl RemoteSetter {
         )
     }
 
-    /// `false` when the watcher has stopped.
+    /// Nonblocking admission. Invalid/oversized payloads or a full queue
+    /// fail the entire remote endpoint and refuse pending pastes.
     pub(crate) fn send(&self, request: RemoteServe) -> bool {
-        if let RemoteServe::Text(text) = &request
-            && text.len() > crate::backend::clipboard_offer::MAX_TEXT_BYTES
-        {
-            return false;
-        }
         let _keep_worker_alive = &self.worker;
-        if !self.wake.is_healthy() {
+        if !self.is_healthy() {
+            self.serve.queue.abort();
+            self.wake.notify();
             return false;
         }
-        self.serve.send(request).is_ok() && self.wake.notify()
+        let accepted = self.serve.queue.send(request);
+        let notified = self.wake.notify();
+        if !notified {
+            self.serve.queue.abort();
+        }
+        accepted && notified
     }
 }
 
@@ -983,14 +1048,45 @@ impl Watcher {
                 Err(std::sync::mpsc::TryRecvError::Empty)
             );
 
-            if serve_connected {
+            // Keep history's final queued offer/receipt handoff behavior.
+            if serve_connected && matches!(serve, ServeSource::History(_)) {
                 serve_connected = self.take_queued_offers(serve);
             }
             if shutdown_requested {
-                self.handoff_to_clipboard_manager(wake);
+                #[cfg(feature = "remote-x11")]
+                if let ServeSource::Remote(source) = serve {
+                    // No new admission after stop. At most MAX_COMMANDS
+                    // remain, so this final drain cannot be producer-starved.
+                    source.0.close_sender();
+                    while source.0.has_backlog() && !source.0.aborted() {
+                        if !self.take_queued_offers(serve) {
+                            return;
+                        }
+                    }
+                    if source.0.aborted() {
+                        self.abort_remote();
+                        return;
+                    }
+                    self.answer_deferred(false);
+                }
+                self.handoff_to_clipboard_manager(wake, serve);
+                #[cfg(feature = "remote-x11")]
+                if let ServeSource::Remote(source) = serve
+                    && !source.0.close_normally()
+                {
+                    self.abort_remote();
+                }
                 return;
             }
 
+            #[cfg(feature = "remote-x11")]
+            if serve_connected && matches!(serve, ServeSource::Remote(_)) {
+                serve_connected = self.take_queued_offers(serve);
+            }
+            #[cfg(feature = "remote-x11")]
+            if !serve_connected && matches!(serve, ServeSource::Remote(_)) {
+                return;
+            }
             self.expire_outgoing_incr();
             #[cfg(feature = "remote-x11")]
             self.expire_deferred();
@@ -1013,6 +1109,12 @@ impl Watcher {
                         return;
                     }
                 }
+            }
+            #[cfg(feature = "remote-x11")]
+            if let ServeSource::Remote(source) = serve
+                && (source.0.has_backlog() || (serve_connected && source.0.aborted()))
+            {
+                continue;
             }
             if handled_event {
                 continue;
@@ -1049,14 +1151,34 @@ impl Watcher {
             // Remote requests are applied in order: an announcement and the
             // data that fulfils it must not be coalesced into one.
             #[cfg(feature = "remote-x11")]
-            ServeSource::Remote(serve) => loop {
-                match serve.try_recv() {
-                    Ok(request) => self.apply_remote(request),
-                    Err(std::sync::mpsc::TryRecvError::Disconnected) => return false,
-                    Err(std::sync::mpsc::TryRecvError::Empty) => return true,
+            ServeSource::Remote(serve) => {
+                for _ in 0..remote_mailbox::SERVE_BUDGET {
+                    if serve.0.aborted() {
+                        self.abort_remote();
+                        return false;
+                    }
+                    let Some(request) = serve.0.pop() else { break };
+                    self.apply_remote(request);
                 }
-            },
+                true
+            }
         }
+    }
+
+    /// Terminal overflow/disconnection path, independent of queue capacity.
+    #[cfg(feature = "remote-x11")]
+    fn abort_remote(&mut self) {
+        self.answer_deferred(false);
+        self.pending_offer = None;
+        self.cancel_capture();
+        // Destroying our owner window releases only our selection. A
+        // get-owner/set-NONE pair could race with another application's copy.
+        // This is terminal, so no later timestamp probe may reclaim it.
+        let _ = self.conn.destroy_window(self.window);
+        self.offered = None;
+        self.ownership_time = None;
+        self.outgoing_incr.clear();
+        let _ = self.conn.flush();
     }
 
     #[cfg(feature = "remote-x11")]
@@ -1274,10 +1396,24 @@ impl Watcher {
             })
     }
 
+    /// Observe a sticky failure throughout the bounded manager handoff,
+    /// including between X events so an abort cannot be starved by traffic.
+    fn abort_failed_handoff(&mut self, _source: &ServeSource) -> bool {
+        #[cfg(feature = "remote-x11")]
+        if let ServeSource::Remote(source) = _source
+            && source.0.aborted()
+        {
+            self.abort_remote();
+            return true;
+        }
+        false
+    }
+
     fn fresh_handoff_timestamp(
         &mut self,
         wake: &crate::backend::update_notifier::AsyncUpdateNotifier,
         deadline: std::time::Instant,
+        source: &ServeSource,
     ) -> Option<u32> {
         self.conn
             .change_property8(
@@ -1293,11 +1429,17 @@ impl Watcher {
         self.conn.flush().ok()?;
 
         loop {
+            if self.abort_failed_handoff(source) {
+                return None;
+            }
             if std::time::Instant::now() >= deadline {
                 return None;
             }
             let mut handled = false;
             for _ in 0..256 {
+                if self.abort_failed_handoff(source) {
+                    return None;
+                }
                 let event = match self.conn.poll_for_event() {
                     Ok(Some(event)) => event,
                     Ok(None) => break,
@@ -1325,7 +1467,11 @@ impl Watcher {
     fn handoff_to_clipboard_manager(
         &mut self,
         wake: &crate::backend::update_notifier::AsyncUpdateNotifier,
+        source: &ServeSource,
     ) {
+        if self.abort_failed_handoff(source) {
+            return;
+        }
         self.shutting_down = true;
         self.cancel_capture();
         if self.pending_offer.is_none()
@@ -1344,9 +1490,12 @@ impl Watcher {
             return;
         }
         let deadline = std::time::Instant::now() + CLIPBOARD_HANDOFF_TIMEOUT;
-        let Some(timestamp) = self.fresh_handoff_timestamp(wake, deadline) else {
+        let Some(timestamp) = self.fresh_handoff_timestamp(wake, deadline, source) else {
             return;
         };
+        if self.abort_failed_handoff(source) {
+            return;
+        }
         if self.pending_offer.is_some() {
             self.pending_probe_events = 0;
             let _ = self
@@ -1380,6 +1529,9 @@ impl Watcher {
             .ok()
             .and_then(|cookie| cookie.check().ok())
             .is_some();
+        if self.abort_failed_handoff(source) {
+            return;
+        }
         if !stored
             || self
                 .conn
@@ -1400,6 +1552,9 @@ impl Watcher {
         let mut protocol_activity = false;
         let mut provisional_failure = None;
         loop {
+            if self.abort_failed_handoff(source) {
+                return;
+            }
             if std::time::Instant::now() >= deadline {
                 log::warn!("clipboard: SAVE_TARGETS handoff timed out");
                 return;
@@ -1407,6 +1562,9 @@ impl Watcher {
             self.expire_outgoing_incr();
             let mut handled = false;
             for _ in 0..256 {
+                if self.abort_failed_handoff(source) {
+                    return;
+                }
                 let event = match self.conn.poll_for_event() {
                     Ok(Some(event)) => event,
                     Ok(None) => break,
@@ -2536,6 +2694,66 @@ fn publish_capture(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "remote-x11")]
+    #[test]
+    fn remote_repeated_shutdown_signals_are_coalesced() {
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        let shutdown = super::RemoteClipboardShutdown {
+            shutdown: sender,
+            wake: crate::backend::update_notifier::AsyncUpdateNotifier::new().unwrap(),
+        };
+        for _ in 0..10_000 {
+            shutdown.stop();
+        }
+        assert_eq!(receiver.try_recv(), Ok(()));
+        assert_eq!(
+            receiver.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        );
+    }
+
+    #[cfg(feature = "remote-x11")]
+    #[test]
+    fn remote_watcher_failure_is_latched_before_capture_close_wakes_consumer() {
+        for panic in [false, true] {
+            let queue = std::sync::Arc::new(remote_mailbox::ServeQueue::default());
+            let (sender, receiver) = remote_mailbox::capture_channel();
+            let endpoints = WatcherEndpoints {
+                source: ServeSource::Remote(remote_mailbox::ServeReceiver(queue.clone())),
+                sink: CaptureSink::Remote(sender),
+            };
+            let worker = std::thread::spawn(move || {
+                let _endpoints = endpoints;
+                assert!(!panic, "simulated abnormal watcher unwind");
+                // An ordinary early/error return has the same close ordering.
+            });
+            assert!(
+                receiver
+                    .recv_timeout(std::time::Duration::from_secs(2))
+                    .is_err()
+            );
+            // Check before joining: observing capture closure must itself
+            // guarantee failure is already visible to staging cleanup.
+            assert!(queue.aborted());
+            assert_eq!(worker.join().is_err(), panic);
+        }
+    }
+
+    #[cfg(feature = "remote-x11")]
+    #[test]
+    fn remote_clean_handoff_closes_capture_without_latching_failure() {
+        let queue = std::sync::Arc::new(remote_mailbox::ServeQueue::default());
+        let (sender, receiver) = remote_mailbox::capture_channel();
+        let endpoints = WatcherEndpoints {
+            source: ServeSource::Remote(remote_mailbox::ServeReceiver(queue.clone())),
+            sink: CaptureSink::Remote(sender),
+        };
+        assert!(queue.close_normally());
+        drop(endpoints);
+        assert!(receiver.recv_timeout(std::time::Duration::ZERO).is_err());
+        assert!(!queue.aborted());
+    }
+
     // Synthetic atoms keep candidate-policy tests independent of X11 and the
     // user's real clipboard. Only identity matters to candidate selection.
     fn policy_atoms() -> Atoms {
@@ -2661,7 +2879,7 @@ mod tests {
 
     use super::*;
 
-    #[cfg(feature = "backend-x11rb")]
+    #[cfg(any(feature = "backend-x11rb", feature = "remote-x11"))]
     fn wait_for_selection_owner(conn: &RustConnection, selection: Atom) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         loop {
@@ -3401,7 +3619,7 @@ mod tests {
         drop(setter);
     }
 
-    #[cfg(all(feature = "backend-x11rb", feature = "remote-x11"))]
+    #[cfg(feature = "remote-x11")]
     fn remote_test_options() -> RemoteClipboardOptions {
         RemoteClipboardOptions {
             send: true,
@@ -3412,7 +3630,7 @@ mod tests {
         }
     }
 
-    #[cfg(all(feature = "backend-x11rb", feature = "remote-x11"))]
+    #[cfg(feature = "remote-x11")]
     fn input_only_window(conn: &RustConnection, root: Window) -> Window {
         let window = conn.generate_id().unwrap();
         conn.create_window(
@@ -3506,7 +3724,7 @@ mod tests {
     }
 
     /// The SelectionNotify for `target`, if one arrives within `wait`.
-    #[cfg(all(feature = "backend-x11rb", feature = "remote-x11"))]
+    #[cfg(feature = "remote-x11")]
     fn selection_notify_within(
         conn: &RustConnection,
         requestor: Window,
@@ -3999,5 +4217,64 @@ mod tests {
             );
             std::thread::sleep(std::time::Duration::from_millis(2));
         }
+    }
+    #[cfg(feature = "remote-x11")]
+    #[test]
+    #[ignore = "requires isolated X server in JWM_TEST_X11_DISPLAY; never use ambient DISPLAY"]
+    fn remote_overload_refuses_waiting_pastes_and_closes_capture() {
+        let isolated_display = std::env::var("JWM_TEST_X11_DISPLAY")
+            .expect("set JWM_TEST_X11_DISPLAY to an isolated test X server");
+        assert!(
+            !isolated_display.is_empty(),
+            "test X display must be explicit"
+        );
+        let display = isolated_display.as_str();
+        let (captures, setter) =
+            RemoteClipboard::start(Some(display), remote_test_options()).unwrap();
+        let (conn, screen_num) = x11rb::connect(Some(display)).unwrap();
+        let root = conn.setup().roots[screen_num].root;
+        let selection = intern(&conn, "CLIPBOARD").unwrap();
+        let png = intern(&conn, "image/png").unwrap();
+        let property = intern(&conn, "JWM_TEST_ABANDON").unwrap();
+        let requestor = input_only_window(&conn, root);
+
+        assert!(setter.send(RemoteServe::Announce {
+            token: 1,
+            kind: PendingKind::Png,
+        }));
+        wait_for_selection_owner(&conn, selection);
+        conn.convert_selection(requestor, selection, png, property, x11rb::CURRENT_TIME)
+            .unwrap();
+        conn.flush().unwrap();
+        let wait = std::time::Duration::from_millis(150);
+        assert!(selection_notify_within(&conn, requestor, png, wait).is_none());
+        assert!(!setter.send(RemoteServe::Text(String::with_capacity(
+            crate::backend::clipboard_offer::MAX_TEXT_BYTES + 1,
+        ))));
+        assert!(setter.is_failed());
+        let notify =
+            selection_notify_within(&conn, requestor, png, std::time::Duration::from_secs(3))
+                .expect("the waiting paste is refused");
+        assert_eq!(notify.property, x11rb::NONE);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while conn
+            .get_selection_owner(selection)
+            .unwrap()
+            .reply()
+            .unwrap()
+            .owner
+            != x11rb::NONE
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "clipboard still owned after overload"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        assert!(
+            captures
+                .recv_timeout(std::time::Duration::from_secs(3))
+                .is_err()
+        );
     }
 }

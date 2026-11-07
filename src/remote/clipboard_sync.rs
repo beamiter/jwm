@@ -427,12 +427,9 @@ impl BoundedQueue<Command> {
             return Ok(());
         }
         let bytes = match &command {
-            Command::Local(CopiedClipboard::Text(text)) | Command::PeerText(text) => text.len(),
-            Command::Local(CopiedClipboard::Png(png)) => png.len(),
-            Command::Local(CopiedClipboard::Files(paths)) => {
-                paths.iter().map(|p| p.as_os_str().len()).sum()
-            }
-            Command::Peer(TransferOp::Data { bytes, .. }) => bytes.len(),
+            Command::Local(copied) => copied.retained_bytes().unwrap_or(usize::MAX),
+            Command::PeerText(text) => text.capacity(),
+            Command::Peer(TransferOp::Data { bytes, .. }) => bytes.capacity(),
             _ => 32,
         };
         let local = matches!(command, Command::Local(_));
@@ -446,7 +443,7 @@ impl BoundedQueue<Command> {
 
 impl BoundedQueue<Outgoing> {
     fn send(&self, record: Outgoing) -> Result<(), ()> {
-        let bytes = record.payload.len();
+        let bytes = record.payload.capacity();
         let ack = record.kind == MessageKind::ClipboardTransfer
             && record.payload.first() == Some(&OP_ACK);
         let ack_id: Option<[u8; 4]> = ack
@@ -547,11 +544,17 @@ type Wake = Box<dyn Fn() + Send>;
 trait ClipboardTarget {
     /// `false` when the target can no longer accept requests.
     fn serve(&self, request: RemoteServe) -> bool;
+    fn is_failed(&self) -> bool {
+        false
+    }
 }
 
 impl ClipboardTarget for RemoteSetter {
     fn serve(&self, request: RemoteServe) -> bool {
         self.send(request)
+    }
+    fn is_failed(&self) -> bool {
+        self.is_failed()
     }
 }
 
@@ -596,6 +599,7 @@ fn spawn_worker<T: ClipboardTarget + Send + 'static>(
         next_token: 1,
         sending: None,
         receiving: None,
+        pending_token: None,
         sent_total: 0,
         acked_total: 0,
         consumed_total: 0,
@@ -866,6 +870,8 @@ struct Worker<T> {
     next_token: u64,
     sending: Option<Sending>,
     receiving: Option<Receiving>,
+    // Kept independently while finish consumes the sink, including callback unwind.
+    pending_token: Option<u64>,
     /// `Data` bytes sent this session, and how many the peer has consumed.
     sent_total: u64,
     acked_total: u64,
@@ -905,7 +911,7 @@ fn png_hash(png: &[u8]) -> u64 {
     hasher.finish()
 }
 
-/// How long "ready to paste" and similar outcomes stay in the title.
+/// How long "clipboard update queued" and similar outcomes stay in the title.
 const OUTCOME_SHOWN_FOR: Duration = Duration::from_secs(10);
 
 impl<T: ClipboardTarget> Worker<T> {
@@ -964,13 +970,32 @@ impl<T: ClipboardTarget> Worker<T> {
     fn cleanup(&mut self) {
         self.sending = None;
         if let Some(staging) = self.staging.as_mut() {
-            staging.discard_in_progress();
+            if self.target.is_failed() {
+                staging.discard_all();
+            } else {
+                staging.discard_in_progress();
+            }
         }
-        if let Some(receiving) = self.receiving.take() {
-            self.target.serve(RemoteServe::Abandon {
-                token: receiving.token,
-            });
+        self.receiving = None;
+        if let Some(token) = self.pending_token.take() {
+            self.target.serve(RemoteServe::Abandon { token });
         }
+    }
+
+    // A rejected command is terminal: continuing would lose ownership ordering
+    // or leave a paste waiting for data that can never arrive.
+    fn serve(&self, request: RemoteServe) -> bool {
+        if self.out.closed() {
+            return false;
+        }
+        if request.retained_bytes().is_some() && self.target.serve(request) {
+            return true;
+        }
+        self.out.close();
+        if let Some(wake) = &self.wake {
+            wake();
+        }
+        false
     }
 
     fn apply(&mut self, command: Command) {
@@ -983,10 +1008,8 @@ impl<T: ClipboardTarget> Worker<T> {
                 self.cancel_sending();
                 self.drop_receiving(false);
                 self.last_received = Some(Fingerprint::Text(text.clone()));
-                if !self.target.serve(RemoteServe::Text(text)) {
-                    eprintln!(
-                        "jwm-remote: could not put the other machine's text on the clipboard"
-                    );
+                if !self.serve(RemoteServe::Text(text)) {
+                    return;
                 }
                 self.status.set(None);
             }
@@ -1026,6 +1049,9 @@ impl<T: ClipboardTarget> Worker<T> {
         // is now stale.
         self.cancel_sending();
         self.drop_receiving(true);
+        if self.out.closed() {
+            return;
+        }
         match copied {
             CopiedClipboard::Text(text) => match encode_clipboard(&text) {
                 Ok(payload) => {
@@ -1196,9 +1222,11 @@ impl<T: ClipboardTarget> Worker<T> {
         }
         // Keep the token available to boundary cleanup if queueing's wake panics.
         let receiving = self.receiving.take().expect("receiving was present");
-        self.target.serve(RemoteServe::Abandon {
+        if self.serve(RemoteServe::Abandon {
             token: receiving.token,
-        });
+        }) {
+            self.pending_token = None;
+        }
         if let Some(staging) = self.staging.as_mut() {
             staging.discard_in_progress();
         }
@@ -1218,6 +1246,9 @@ impl<T: ClipboardTarget> Worker<T> {
             } => {
                 self.cancel_sending();
                 self.drop_receiving(false);
+                if self.out.closed() {
+                    return;
+                }
                 // The peer has moved on, whether or not this copy is taken.
                 self.last_received = None;
                 match self.accept(kind, length, entries) {
@@ -1235,13 +1266,16 @@ impl<T: ClipboardTarget> Worker<T> {
                         });
                         // Record the pending token before invoking the target:
                         // even a panic after announcement can then abandon it.
-                        self.target.serve(RemoteServe::Announce {
+                        self.pending_token = Some(token);
+                        if !self.serve(RemoteServe::Announce {
                             token,
                             kind: match kind {
                                 TransferKind::Image => PendingKind::Png,
                                 TransferKind::Files => PendingKind::Files,
                             },
-                        });
+                        }) {
+                            return;
+                        }
                         self.publish_progress();
                     }
                     Err(reason) => {
@@ -1406,11 +1440,15 @@ impl<T: ClipboardTarget> Worker<T> {
             }
             Sink::Files(archive) if complete => match archive.finish() {
                 Ok(paths) => {
-                    if let Some(staging) = self.staging.as_mut() {
-                        staging.complete();
+                    let request = RemoteServe::FulfilFiles { token, paths };
+                    if request.retained_bytes().is_none() {
+                        Err("the received file list is too large".to_owned())
+                    } else {
+                        if let RemoteServe::FulfilFiles { paths, .. } = &request {
+                            self.last_received = Some(Fingerprint::Files(paths.clone()));
+                        }
+                        Ok(request)
                     }
-                    self.last_received = Some(Fingerprint::Files(paths.clone()));
-                    Ok(RemoteServe::FulfilFiles { token, paths })
                 }
                 Err(error) => Err(error.to_string()),
             },
@@ -1418,17 +1456,26 @@ impl<T: ClipboardTarget> Worker<T> {
         };
         match served {
             Ok(request) => {
-                self.target.serve(request);
+                let files = matches!(request, RemoteServe::FulfilFiles { .. });
+                if !self.serve(request) {
+                    return;
+                }
+                if files && let Some(staging) = self.staging.as_mut() {
+                    staging.complete();
+                }
+                self.pending_token = None;
                 eprintln!(
-                    "jwm-remote: received {} ({}) in {elapsed:.1} s; ready to paste",
+                    "jwm-remote: received {} ({}) in {elapsed:.1} s; clipboard update queued",
                     receiving.label,
                     human_bytes(receiving.length)
                 );
-                self.show_outcome(format!("{} ready to paste", receiving.label));
+                self.show_outcome(format!("{} clipboard update queued", receiving.label));
             }
             Err(reason) => {
                 eprintln!("jwm-remote: the other machine's copy was not usable: {reason}");
-                self.target.serve(RemoteServe::Abandon { token });
+                if self.serve(RemoteServe::Abandon { token }) {
+                    self.pending_token = None;
+                }
                 if let Some(staging) = self.staging.as_mut() {
                     staging.discard_in_progress();
                 }
@@ -1613,33 +1660,35 @@ mod tests {
         }
     }
 
+    fn worker_for_target<T: ClipboardTarget>(target: T, options: SyncOptions) -> Worker<T> {
+        Worker {
+            target,
+            out: Arc::new(BoundedQueue::new(
+                OUTGOING_QUEUE_RECORDS,
+                OUTGOING_QUEUE_BYTES,
+            )),
+            wake: None,
+            in_flight: Arc::new(AtomicU64::new(0)),
+            status: Arc::new(SyncStatus::default()),
+            options,
+            staging_root: None,
+            staging: None,
+            next_id: 1,
+            next_token: 1,
+            sending: None,
+            receiving: None,
+            pending_token: None,
+            sent_total: 0,
+            acked_total: 0,
+            consumed_total: 0,
+            status_expires: None,
+            last_received: None,
+        }
+    }
+
     fn policy_worker(options: SyncOptions) -> (Worker<Recorder>, mpsc::Receiver<RemoteServe>) {
         let (served, received) = mpsc::channel();
-        (
-            Worker {
-                target: Recorder(served),
-                out: Arc::new(BoundedQueue::new(
-                    OUTGOING_QUEUE_RECORDS,
-                    OUTGOING_QUEUE_BYTES,
-                )),
-                wake: None,
-                in_flight: Arc::new(AtomicU64::new(0)),
-                status: Arc::new(SyncStatus::default()),
-                options,
-                staging_root: None,
-                staging: None,
-                next_id: 1,
-                next_token: 1,
-                sending: None,
-                receiving: None,
-                sent_total: 0,
-                acked_total: 0,
-                consumed_total: 0,
-                status_expires: None,
-                last_received: None,
-            },
-            received,
-        )
+        (worker_for_target(Recorder(served), options), received)
     }
 
     #[test]
@@ -2329,6 +2378,279 @@ mod tests {
         assert!(outbox.try_next().is_err());
     }
 
+    #[derive(Clone, Copy, Debug)]
+    enum RejectedServe {
+        Text,
+        Announce,
+        Fulfil,
+        Abandon,
+    }
+
+    struct RejectingTarget {
+        rejected: RejectedServe,
+        panic: bool,
+        calls: Arc<Mutex<Vec<RemoteServe>>>,
+    }
+
+    impl ClipboardTarget for RejectingTarget {
+        fn serve(&self, request: RemoteServe) -> bool {
+            let reject = matches!(
+                (&request, self.rejected),
+                (RemoteServe::Text(_), RejectedServe::Text)
+                    | (RemoteServe::Announce { .. }, RejectedServe::Announce)
+                    | (
+                        RemoteServe::FulfilFiles { .. } | RemoteServe::FulfilPng { .. },
+                        RejectedServe::Fulfil
+                    )
+                    | (RemoteServe::Abandon { .. }, RejectedServe::Abandon)
+            );
+            self.calls.lock().unwrap().push(request);
+            assert!(!(reject && self.panic), "injected target panic");
+            !reject
+        }
+    }
+
+    #[test]
+    fn rejected_or_panicking_serve_closes_session_and_cleans_uncommitted_files() {
+        for rejected in [
+            RejectedServe::Text,
+            RejectedServe::Announce,
+            RejectedServe::Fulfil,
+            RejectedServe::Abandon,
+        ] {
+            for panic in [false, true] {
+                let temp = TempDir::new("rejected-target");
+                let source = temp.0.join("fixture.txt");
+                fs::write(&source, b"fixture").unwrap();
+                let manifest = Manifest::build(&[source], 100).unwrap();
+                let entries = manifest.entry_count();
+                let length = manifest.stream_bytes;
+                let bytes = ManifestReader::new(manifest).next_chunk(1024).unwrap();
+                let calls = Arc::new(Mutex::new(Vec::new()));
+                let wake_count = Arc::new(AtomicU64::new(0));
+                let count = wake_count.clone();
+                let mut worker = worker_for_target(
+                    RejectingTarget {
+                        rejected,
+                        panic,
+                        calls: calls.clone(),
+                    },
+                    options(100),
+                );
+                let staging_root = temp.0.join("staging");
+                worker.staging_root = Some(staging_root.clone());
+                worker.wake = Some(Box::new(move || {
+                    count.fetch_add(1, Ordering::Relaxed);
+                }));
+                let commands = BoundedQueue::<Command>::new(10, 4096);
+                if matches!(rejected, RejectedServe::Text) {
+                    commands.send(Command::PeerText("text".into())).unwrap();
+                } else {
+                    commands
+                        .send(Command::Peer(TransferOp::Begin {
+                            id: 1,
+                            kind: TransferKind::Files,
+                            length,
+                            entries,
+                            items: 1,
+                        }))
+                        .unwrap();
+                    if matches!(rejected, RejectedServe::Abandon) {
+                        commands
+                            .send(Command::Peer(TransferOp::Cancel { id: 1 }))
+                            .unwrap();
+                    } else {
+                        worker
+                            .in_flight
+                            .store(bytes.len() as u64, Ordering::Release);
+                        commands
+                            .send(Command::Peer(TransferOp::Data { id: 1, bytes }))
+                            .unwrap();
+                        commands
+                            .send(Command::Peer(TransferOp::End { id: 1 }))
+                            .unwrap();
+                    }
+                }
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    worker.run_guarded(&commands)
+                }));
+                assert_eq!(result.is_err(), panic, "{rejected:?}");
+                assert!(commands.closed() && worker.out.closed());
+                assert!(worker.pending_token.is_none());
+                assert!(wake_count.load(Ordering::Relaxed) > 0);
+                assert!(
+                    !worker
+                        .status
+                        .line
+                        .lock()
+                        .unwrap()
+                        .as_ref()
+                        .is_some_and(|line| line.contains("clipboard update queued"))
+                );
+                if !matches!(rejected, RejectedServe::Text) {
+                    assert!(
+                        calls
+                            .lock()
+                            .unwrap()
+                            .iter()
+                            .any(|r| matches!(r, RemoteServe::Abandon { token: 1 }))
+                    );
+                    for session in fs::read_dir(&staging_root).unwrap() {
+                        let path = session.unwrap().path();
+                        if path.is_dir() {
+                            assert_eq!(fs::read_dir(path).unwrap().count(), 0);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn admitted_file_fulfil_is_removed_on_later_backend_abort_only() {
+        struct LaterAbort {
+            calls: mpsc::Sender<RemoteServe>,
+            failed: Arc<AtomicBool>,
+        }
+        impl ClipboardTarget for LaterAbort {
+            fn serve(&self, request: RemoteServe) -> bool {
+                self.calls.send(request).is_ok()
+            }
+            fn is_failed(&self) -> bool {
+                self.failed.load(Ordering::Acquire)
+            }
+        }
+        for abort in [false, true] {
+            let temp = TempDir::new("admitted-fulfil");
+            let source = temp.0.join("fixture.txt");
+            fs::write(&source, b"fixture").unwrap();
+            let manifest = Manifest::build(&[source], 100).unwrap();
+            let entries = manifest.entry_count();
+            let length = manifest.stream_bytes;
+            let bytes = ManifestReader::new(manifest).next_chunk(1024).unwrap();
+            let failed = Arc::new(AtomicBool::new(false));
+            let (calls, received) = mpsc::channel();
+            let mut worker = worker_for_target(
+                LaterAbort {
+                    calls,
+                    failed: failed.clone(),
+                },
+                options(100),
+            );
+            worker.staging_root = Some(temp.0.join("staging"));
+            worker.on_peer(TransferOp::Begin {
+                id: 1,
+                kind: TransferKind::Files,
+                length,
+                entries,
+                items: 1,
+            });
+            assert!(matches!(
+                received.try_recv().unwrap(),
+                RemoteServe::Announce { .. }
+            ));
+            worker.receive_chunk(1, &bytes).unwrap();
+            worker.finish_receiving(1);
+            let RemoteServe::FulfilFiles { paths, .. } = received.try_recv().unwrap() else {
+                panic!("expected fulfil admission")
+            };
+            assert!(paths[0].exists());
+            failed.store(abort, Ordering::Release);
+            worker.cleanup();
+            drop(worker);
+            assert_eq!(paths[0].exists(), !abort);
+        }
+    }
+
+    #[test]
+    fn normal_shutdown_rejection_preserves_completed_handoff_files() {
+        struct ClosedNormally;
+        impl ClipboardTarget for ClosedNormally {
+            fn serve(&self, _: RemoteServe) -> bool {
+                false
+            }
+        }
+        let temp = TempDir::new("normal-close-staging");
+        let mut staging = Staging::create_in(&temp.0.join("staging")).unwrap();
+        let completed = staging.begin().unwrap().join("complete.txt");
+        fs::write(&completed, b"complete").unwrap();
+        staging.complete();
+        let incomplete = staging.begin().unwrap().join("incomplete.txt");
+        fs::write(&incomplete, b"incomplete").unwrap();
+        let mut worker = worker_for_target(ClosedNormally, options(100));
+        worker.staging = Some(staging);
+        assert!(!worker.serve(RemoteServe::FulfilFiles {
+            token: 2,
+            paths: vec![incomplete.clone()]
+        }));
+        worker.cleanup();
+        drop(worker);
+        assert!(
+            completed.exists(),
+            "normal handoff may still serve completed paths"
+        );
+        assert!(!incomplete.exists());
+    }
+
+    #[test]
+    fn full_outbox_cancel_fails_session_instead_of_losing_control_record() {
+        let (mut worker, _) = policy_worker(options(100));
+        worker.out = Arc::new(BoundedQueue::new(1, 32));
+        worker
+            .out
+            .send(Outgoing {
+                kind: MessageKind::Clipboard,
+                payload: vec![],
+            })
+            .unwrap();
+        worker.sending = Some(Sending {
+            id: 7,
+            source: Source::Image(vec![1]),
+            length: 1,
+            start: 0,
+            sent: 0,
+            ended: false,
+            label: "image".into(),
+            started: Instant::now(),
+        });
+        let wakes = Arc::new(AtomicU64::new(0));
+        let count = wakes.clone();
+        worker.wake = Some(Box::new(move || {
+            count.fetch_add(1, Ordering::Relaxed);
+        }));
+        worker.cancel_sending();
+        assert!(worker.sending.is_none());
+        assert!(worker.out.closed());
+        let commands = BoundedQueue::new(1, 32);
+        worker.run_guarded(&commands);
+        assert!(commands.closed());
+        assert_eq!(wakes.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn command_and_outgoing_limits_charge_retained_capacity() {
+        let queue = BoundedQueue::<Command>::new(4, 32);
+        let mut text = String::with_capacity(128);
+        text.push('x');
+        assert!(queue.send(Command::PeerText(text)).is_err());
+        let queue = BoundedQueue::<Command>::new(4, 32);
+        let paths = Vec::<PathBuf>::with_capacity(100);
+        assert!(
+            queue
+                .send(Command::Local(CopiedClipboard::Files(paths)))
+                .is_err()
+        );
+        let queue = BoundedQueue::<Outgoing>::new(4, 32);
+        assert!(
+            queue
+                .send(Outgoing {
+                    kind: MessageKind::Clipboard,
+                    payload: Vec::with_capacity(128)
+                })
+                .is_err()
+        );
+    }
+
     #[test]
     fn queues_bound_bytes_and_records_and_fail_closed() {
         let queue = BoundedQueue::new(2, 5);
@@ -2574,7 +2896,7 @@ mod tests {
         );
         assert_eq!(fs::read(&paths[1]).unwrap(), b"%PDF-1.7");
         let (_, line) = pair.b.status.changed_since(0).unwrap();
-        assert_eq!(line.as_deref(), Some("2 files ready to paste"));
+        assert_eq!(line.as_deref(), Some("2 files clipboard update queued"));
 
         let image = png(40);
         pair.b.copy(CopiedClipboard::Png(image.clone()));
