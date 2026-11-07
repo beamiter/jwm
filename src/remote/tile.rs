@@ -35,7 +35,7 @@
 
 use super::RemoteResult;
 use super::frame::{
-    BoundedPayloadWriter, FrameDamage, MAX_DIMENSION, RecyclableDecodedFrame,
+    BoundedPayloadWriter, DamageRegions, FrameDamage, MAX_DIMENSION, RecyclableDecodedFrame,
     SharedDecodeBufferPool, TileSnapshot, invalid_data, validate_dimensions,
 };
 use super::protocol::MAX_PAYLOAD_LEN;
@@ -799,7 +799,7 @@ impl TileDecoder {
         } else {
             self.last_sequence.map(|base_sequence| FrameDamage {
                 base_sequence,
-                rect: dirty_bounds(
+                regions: dirty_regions(
                     bitmap,
                     header.encoded_width,
                     header.encoded_height,
@@ -984,30 +984,24 @@ fn scatter_atlas(
     }
 }
 
-/// One bounded upload rectangle; disconnected damage may over-cover pixels,
-/// but never omits any update. Full snapshots remain the mailbox fallback.
-fn dirty_bounds(
-    bitmap: &[u8],
-    width: u16,
-    height: u16,
-    tile_log2: u8,
-) -> Option<(u16, u16, u16, u16)> {
+/// Bounded merged upload regions; full snapshots remain the mailbox fallback.
+fn dirty_regions(bitmap: &[u8], width: u16, height: u16, tile_log2: u8) -> DamageRegions {
     let tile = 1usize << tile_log2;
     let grid_w = usize::from(width).div_ceil(tile);
     let total = grid_w * usize::from(height).div_ceil(tile);
-    let mut bounds: Option<(usize, usize, usize, usize)> = None;
+    let mut regions = DamageRegions::default();
     for index in 0..total {
         if bitmap[index / 8] & (1 << (index % 8)) == 0 {
             continue;
         }
         let (x0, y0, x1, y1) =
             tile_bounds(index, grid_w, tile, usize::from(width), usize::from(height));
-        bounds = Some(match bounds {
-            None => (x0, y0, x1, y1),
-            Some((a, b, c, d)) => (a.min(x0), b.min(y0), c.max(x1), d.max(y1)),
-        });
+        regions.add(
+            (x0 as u16, y0 as u16, (x1 - x0) as u16, (y1 - y0) as u16),
+            (width, height),
+        );
     }
-    bounds.map(|(x0, y0, x1, y1)| (x0 as u16, y0 as u16, (x1 - x0) as u16, (y1 - y0) as u16))
+    regions
 }
 
 fn tile_bounds(
@@ -1064,10 +1058,16 @@ mod tests {
 
     #[test]
     fn display_damage_bounds_cover_edge_tiles_and_empty_keepalive() {
-        assert_eq!(dirty_bounds(&[0], 33, 17, 4), None);
-        assert_eq!(dirty_bounds(&[1], 33, 17, 4), Some((0, 0, 16, 16)));
-        assert_eq!(dirty_bounds(&[32], 33, 17, 4), Some((32, 16, 1, 1)));
-        assert_eq!(dirty_bounds(&[33], 33, 17, 4), Some((0, 0, 33, 17)));
+        assert!(dirty_regions(&[0], 33, 17, 4).as_slice().is_empty());
+        assert_eq!(dirty_regions(&[1], 33, 17, 4).as_slice(), &[(0, 0, 16, 16)]);
+        assert_eq!(
+            dirty_regions(&[32], 33, 17, 4).as_slice(),
+            &[(32, 16, 1, 1)]
+        );
+        assert_eq!(
+            dirty_regions(&[33], 33, 17, 4).as_slice(),
+            &[(0, 0, 16, 16), (32, 16, 1, 1)]
+        );
     }
 
     fn frame(width: u32, height: u32, fill: impl Fn(u32, u32) -> Rgb<u8>) -> CapturedFrame {
@@ -1272,7 +1272,7 @@ mod tests {
             decoded.damage(),
             Some(FrameDamage {
                 base_sequence: 7,
-                rect: None
+                regions: DamageRegions::from_rect(None)
             })
         );
     }

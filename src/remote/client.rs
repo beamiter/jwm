@@ -14,7 +14,7 @@ use super::protocol::{
     MAX_PAYLOAD_LEN, MessageKind, PayloadBufferRetention, ProtocolError, SessionReader,
     SessionWriter, client_handshake,
 };
-use super::sender::{RecordWriter, Sender};
+use super::sender::{RecordWriter, Sender, reap_worker};
 use super::tile::TileDecoder;
 use super::usability::{ClientStage, failure_hint, session_mode};
 use super::x11_input::InputEvent;
@@ -29,7 +29,9 @@ use std::net::{Shutdown, TcpStream, ToSocketAddrs};
 use std::os::fd::{AsFd, BorrowedFd};
 use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, mpsc};
+#[cfg(test)]
+use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -344,22 +346,99 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
     );
     let cancel_result = cancel.cancel(&mut writer, graceful_close);
     let receiver_exit = receiver.join_timeout(RECEIVER_JOIN_TIMEOUT);
+    let sender_result = writer.shutdown_timeout(RECEIVER_JOIN_TIMEOUT);
+    // Clipboard owns separate file/X11 work; its Drop is not covered by the
+    // socket-worker deadlines above.
     drop(clipboard_sync);
     telemetry_reporter.force_report();
-    // Preserve the foreground/X11 first cause. Receiver cleanup failures only
-    // replace a successful viewer-close result, matching the old precedence.
-    loop_result?;
-    if receiver_exit == ReceiverExit::Panicked {
-        return Err(io::Error::other("remote video thread panicked").into());
+    finish_session(
+        loop_result.map(|_| ()),
+        cancel_result,
+        receiver_exit,
+        sender_result,
+    )
+}
+
+/// A valid authenticated Close, including an empty reason, is terminal.
+#[derive(Debug)]
+struct PeerClosed(String);
+
+impl std::fmt::Display for PeerClosed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "host closed the remote session")?;
+        if !self.0.trim().is_empty() {
+            write!(f, ": {}", self.0)?;
+        }
+        Ok(())
     }
-    if receiver_exit == ReceiverExit::TimedOut {
-        return Err(io::Error::new(
-            io::ErrorKind::TimedOut,
-            "remote video thread did not stop after session cancellation",
-        )
-        .into());
+}
+impl std::error::Error for PeerClosed {}
+
+/// Preserve the first cause and every cleanup failure. In particular, a
+/// timeout must not be hidden by a transport error that a caller might retry.
+#[derive(Debug)]
+struct SessionCleanupError {
+    primary: Option<RemoteError>,
+    failures: Vec<RemoteError>,
+}
+impl std::fmt::Display for SessionCleanupError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Some(primary) = &self.primary {
+            write!(f, "{}; ", describe_cause(primary))?;
+        }
+        write!(f, "session cleanup incomplete")?;
+        for failure in &self.failures {
+            write!(f, "; {failure}")?;
+        }
+        Ok(())
     }
-    cancel_result
+}
+impl std::error::Error for SessionCleanupError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.primary.as_deref().map(|error| error as _)
+    }
+}
+
+fn finish_session(
+    foreground: RemoteResult<()>,
+    cancel: RemoteResult<()>,
+    receiver: ReceiverExit,
+    sender: RemoteResult<()>,
+) -> RemoteResult<()> {
+    let mut failures = Vec::new();
+    if let Err(error) = cancel {
+        failures.push(error);
+    }
+    match receiver {
+        ReceiverExit::Completed => {}
+        ReceiverExit::ReaperFailed(error) => failures.push(
+            io::Error::other(format!(
+                "receiver join failed (worker may remain detached): {error}"
+            ))
+            .into(),
+        ),
+        ReceiverExit::Panicked => {
+            failures.push(io::Error::other("remote video thread panicked").into())
+        }
+        ReceiverExit::TimedOut => failures.push(
+            io::Error::new(
+                io::ErrorKind::TimedOut,
+                "remote video thread did not stop after session cancellation (detached)",
+            )
+            .into(),
+        ),
+    }
+    if let Err(error) = sender {
+        failures.push(error);
+    }
+    if failures.is_empty() {
+        foreground
+    } else {
+        Err(Box::new(SessionCleanupError {
+            primary: foreground.err(),
+            failures,
+        }))
+    }
 }
 
 fn negotiate_session(
@@ -668,13 +747,13 @@ fn viewer_loop(
         }
 
         if !state.alive.load(Ordering::Acquire) && state.latest.lock().unwrap().is_none() {
-            let message = state
+            let error = state
                 .error
                 .lock()
                 .unwrap()
                 .take()
-                .unwrap_or_else(|| "host closed the remote session".to_string());
-            return Err(io::Error::new(io::ErrorKind::ConnectionAborted, message).into());
+                .unwrap_or_else(|| Box::new(PeerClosed(String::new())));
+            return Err(error);
         }
         telemetry_reporter.maybe_report();
         viewer.prepare_wait()?;
@@ -1240,62 +1319,41 @@ impl Drop for SessionCancel {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 enum ReceiverExit {
     Completed,
     Panicked,
     TimedOut,
+    ReaperFailed(String),
 }
 
 struct ReceiverThread {
     handle: Option<thread::JoinHandle<()>>,
-    done: mpsc::Receiver<()>,
 }
 
 impl ReceiverThread {
     fn spawn(task: impl FnOnce() + Send + 'static) -> io::Result<Self> {
-        let (done_tx, done) = mpsc::channel();
         let handle = thread::Builder::new()
             .name("jwm-remote-video".into())
-            .spawn(move || {
-                let _done = ThreadDone(Some(done_tx));
-                task();
-            })?;
+            .spawn(task)?;
         Ok(Self {
             handle: Some(handle),
-            done,
         })
     }
 
     fn join_timeout(mut self, timeout: Duration) -> ReceiverExit {
-        match self.done.recv_timeout(timeout) {
-            Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => {
-                if self
-                    .handle
-                    .take()
-                    .is_some_and(|handle| handle.join().is_err())
-                {
-                    ReceiverExit::Panicked
-                } else {
-                    ReceiverExit::Completed
-                }
+        let handle = self.handle.take().expect("receiver handle");
+        let joined = match reap_worker(handle) {
+            Ok(joined) => joined,
+            Err(error) => return ReceiverExit::ReaperFailed(error.to_string()),
+        };
+        match joined.recv_timeout(timeout) {
+            Ok(true) => ReceiverExit::Completed,
+            Ok(false) => ReceiverExit::Panicked,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => ReceiverExit::TimedOut,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                ReceiverExit::ReaperFailed("receiver reaper disconnected".into())
             }
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                // Dropping JoinHandle detaches the thread; the session socket
-                // was already shut down, so a well-behaved receiver exits.
-                self.handle.take();
-                ReceiverExit::TimedOut
-            }
-        }
-    }
-}
-
-struct ThreadDone(Option<mpsc::Sender<()>>);
-
-impl Drop for ThreadDone {
-    fn drop(&mut self) {
-        if let Some(sender) = self.0.take() {
-            let _ = sender.send(());
         }
     }
 }
@@ -1320,7 +1378,7 @@ struct ReceiveState {
     cursor_enabled: AtomicBool,
     cursor: Mutex<super::cursor::CursorInbox>,
     latest: Mutex<Option<QueuedFrame>>,
-    error: Mutex<Option<String>>,
+    error: Mutex<Option<RemoteError>>,
     alive: AtomicBool,
     stopping: AtomicBool,
     telemetry: ClientTelemetry,
@@ -1409,11 +1467,11 @@ impl ReceiveCompletion {
     }
 
     fn finish(&mut self, result: RemoteResult<()>) {
-        let error = result.err().map(|error| describe_cause(&error));
+        let error = result.err();
         self.publish_terminal(error);
     }
 
-    fn publish_terminal(&mut self, error: Option<String>) {
+    fn publish_terminal(&mut self, error: Option<RemoteError>) {
         if self.finished {
             return;
         }
@@ -1437,7 +1495,9 @@ impl ReceiveCompletion {
 impl Drop for ReceiveCompletion {
     fn drop(&mut self) {
         if !self.finished {
-            self.publish_terminal(Some("remote video thread panicked".to_string()));
+            self.publish_terminal(Some(
+                io::Error::other("remote video thread panicked").into(),
+            ));
         }
     }
 }
@@ -1498,17 +1558,8 @@ fn receive_frames(
                 drop(replaced);
             }
             MessageKind::Close => {
-                // A host that stops deliberately says so. Its reason becomes
-                // the session's closing message, instead of a generic one.
-                let reason = refusal_reason_for_display(&payload);
-                if reason.trim().is_empty() {
-                    break Ok(());
-                }
-                break Err(io::Error::new(
-                    io::ErrorKind::ConnectionAborted,
-                    format!("host closed the session: {reason}"),
-                )
-                .into());
+                // Authenticated Close is deliberate, never a transport failure.
+                break Err(PeerClosed(refusal_reason_for_display(&payload)).into());
             }
             MessageKind::CursorShape | MessageKind::CursorPosition => {
                 receive_cursor(&state, kind, &payload)?;
@@ -1787,7 +1838,7 @@ mod tests {
         assert!(
             body.find("let receiver_exit = receiver.join_timeout(")
                 .unwrap()
-                < body.find("loop_result?;").unwrap()
+                < body.find("finish_session(").unwrap()
         );
     }
 
@@ -2632,7 +2683,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .as_deref()
-                .is_some_and(|error| error.contains("expected 1, got 2"))
+                .is_some_and(|error| error.to_string().contains("expected 1, got 2"))
         );
         // Rejected tile snapshots never materialize a full RGB frame.
         assert_eq!(decode_pool_snapshot(&state.decode_pool).0, 0);
@@ -2673,6 +2724,16 @@ mod tests {
         assert!(state.latest.lock().unwrap().is_none());
         assert_eq!(decode_pool_snapshot(&state.decode_pool).0, 0);
         assert_eq!(state.telemetry.take_window().received, 0);
+        assert!(matches!(
+            state
+                .error
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .downcast_ref::<ProtocolError>(),
+            Some(ProtocolError::AuthenticationFailed)
+        ));
     }
 
     #[test]
@@ -2779,9 +2840,54 @@ mod tests {
         wake_receiver.drain().unwrap();
         assert!(!state.alive.load(Ordering::Acquire));
         assert_eq!(
-            state.error.lock().unwrap().as_deref(),
-            Some("remote video thread panicked")
+            state
+                .error
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(ToString::to_string),
+            Some("remote video thread panicked".to_string())
         );
+    }
+
+    #[test]
+    fn terminal_types_and_cleanup_failures_are_preserved() {
+        let auth: RemoteError = Box::new(ProtocolError::AuthenticationFailed);
+        let error = finish_session(Err(auth), Ok(()), ReceiverExit::Completed, Ok(())).unwrap_err();
+        assert!(matches!(
+            error.downcast_ref::<ProtocolError>(),
+            Some(ProtocolError::AuthenticationFailed)
+        ));
+        let peer: RemoteError = Box::new(PeerClosed(String::new()));
+        let error = finish_session(Err(peer), Ok(()), ReceiverExit::Completed, Ok(())).unwrap_err();
+        assert!(error.is::<PeerClosed>());
+        let transport: RemoteError = Box::new(ProtocolError::Io(io::Error::from(
+            io::ErrorKind::UnexpectedEof,
+        )));
+        let error = finish_session(
+            Err(transport),
+            Err(io::Error::other("cancel failed").into()),
+            ReceiverExit::TimedOut,
+            Err(io::Error::other("sender failed").into()),
+        )
+        .unwrap_err();
+        let cleanup = error.downcast_ref::<SessionCleanupError>().unwrap();
+        assert_eq!(cleanup.failures.len(), 3);
+        assert!(matches!(
+            cleanup
+                .primary
+                .as_ref()
+                .unwrap()
+                .downcast_ref::<ProtocolError>(),
+            Some(ProtocolError::Io(_))
+        ));
+        assert!(
+            cleanup.failures[1]
+                .downcast_ref::<io::Error>()
+                .is_some_and(|error| error.kind() == io::ErrorKind::TimedOut)
+        );
+        assert!(error.to_string().contains("without a goodbye"));
+        assert!(error.to_string().contains("detached"));
     }
 
     #[test]

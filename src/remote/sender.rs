@@ -58,6 +58,7 @@ struct Queue {
     bulk_bytes: usize,
     closing: bool,
     stopped: bool,
+    cancelling: bool,
     error: Option<String>,
     writing_since: Option<Instant>,
 }
@@ -184,12 +185,91 @@ impl Queue {
 pub(super) struct Sender {
     shared: Arc<(Mutex<Queue>, Condvar)>,
     control: TcpStream,
+    #[cfg(test)]
     done: mpsc::Receiver<()>,
     worker: Option<thread::JoinHandle<()>>,
+    joining: Option<mpsc::Receiver<bool>>,
+    join_failure: Option<String>,
     input_enabled: bool,
 }
 
+/// Join off the foreground thread: even thread-local destructors may block.
+/// The one reaper per worker remains detached on timeout; no retry is implied.
+pub(super) fn reap_worker(worker: thread::JoinHandle<()>) -> io::Result<mpsc::Receiver<bool>> {
+    let (tx, rx) = mpsc::sync_channel(1);
+    thread::Builder::new()
+        .name("jwm-remote-reaper".into())
+        .spawn(move || {
+            let _ = tx.send(worker.join().is_ok());
+        })?;
+    Ok(rx)
+}
+
 impl Sender {
+    pub(super) fn shutdown_timeout(&mut self, timeout: Duration) -> RemoteResult<()> {
+        {
+            let mut queue = self.shared.0.lock().unwrap_or_else(|p| p.into_inner());
+            queue.cancelling = true;
+            queue.stopped = true;
+        }
+        self.shared.1.notify_all();
+        let shutdown = self.control.shutdown(Shutdown::Both);
+        self.join_timeout(timeout)?;
+        if let Some(error) = &self
+            .shared
+            .0
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .error
+        {
+            return Err(io::Error::other(error.clone()).into());
+        }
+        match shutdown {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotConnected => Ok(()),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    fn join_timeout(&mut self, timeout: Duration) -> RemoteResult<()> {
+        if let Some(error) = &self.join_failure {
+            return Err(io::Error::other(error.clone()).into());
+        }
+        if let Some(worker) = self.worker.take() {
+            match reap_worker(worker) {
+                Ok(joining) => self.joining = Some(joining),
+                Err(error) => {
+                    let message = format!("start sender reaper (worker detached): {error}");
+                    self.join_failure = Some(message.clone());
+                    return Err(io::Error::other(message).into());
+                }
+            }
+        }
+        if let Some(joining) = self.joining.as_ref() {
+            match joining.recv_timeout(timeout) {
+                Ok(true) => {
+                    self.joining = None;
+                }
+                Ok(false) => {
+                    self.joining = None;
+                    self.join_failure = Some("remote sender panicked".into());
+                    return Err(io::Error::other("remote sender panicked").into());
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "remote sender join timed out (reaper may remain detached)",
+                    )
+                    .into());
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err(io::Error::other("remote sender reaper disconnected").into());
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub(super) fn spawn(
         mut writer: SessionWriter<TcpStream>,
         input_enabled: bool,
@@ -198,7 +278,7 @@ impl Sender {
         let control = writer.get_ref().try_clone()?;
         let shared = Arc::new((Mutex::new(Queue::default()), Condvar::new()));
         let worker_shared = Arc::clone(&shared);
-        let (done_tx, done) = mpsc::sync_channel(1);
+        let (done_tx, _done) = mpsc::sync_channel(1);
         let worker = thread::Builder::new()
             .name("jwm-remote-send".into())
             .spawn(move || {
@@ -278,7 +358,27 @@ impl Sender {
                 let mut queue = worker_shared.0.lock().unwrap_or_else(|p| p.into_inner());
                 queue.stopped = true;
                 if let Err(error) = result {
-                    queue.error.get_or_insert_with(|| error.to_string());
+                    // Only an interrupted socket operation after explicit abort
+                    // is expected. Panics/deadlines/protocol failures survive.
+                    let io_error = error.downcast_ref::<io::Error>().or_else(|| {
+                        match error.downcast_ref::<super::protocol::ProtocolError>() {
+                            Some(super::protocol::ProtocolError::Io(error)) => Some(error),
+                            _ => None,
+                        }
+                    });
+                    let cancelled_io = queue.cancelling
+                        && io_error.is_some_and(|error| {
+                            matches!(
+                                error.kind(),
+                                io::ErrorKind::BrokenPipe
+                                    | io::ErrorKind::ConnectionReset
+                                    | io::ErrorKind::ConnectionAborted
+                                    | io::ErrorKind::NotConnected
+                            )
+                        });
+                    if !cancelled_io {
+                        queue.error.get_or_insert_with(|| error.to_string());
+                    }
                 }
                 drop(queue);
                 worker_shared.1.notify_all();
@@ -291,8 +391,11 @@ impl Sender {
         Ok(Self {
             shared,
             control,
-            done,
+            #[cfg(test)]
+            done: _done,
             worker: Some(worker),
+            joining: None,
+            join_failure: None,
             input_enabled,
         })
     }
@@ -327,18 +430,9 @@ impl RecordWriter for Sender {
             queue.close(self.input_enabled);
         }
         self.shared.1.notify_all();
-        if self.done.recv_timeout(CLOSE_TIMEOUT).is_err() {
+        if let Err(error) = self.join_timeout(CLOSE_TIMEOUT) {
             let _ = self.control.shutdown(Shutdown::Both);
-            return Err(
-                io::Error::new(io::ErrorKind::TimedOut, "remote sender close timed out").into(),
-            );
-        }
-        if self
-            .worker
-            .take()
-            .is_some_and(|worker| worker.join().is_err())
-        {
-            return Err(io::Error::other("remote sender panicked").into());
+            return Err(error);
         }
         let queue = self.shared.0.lock().unwrap_or_else(|p| p.into_inner());
         match &queue.error {
@@ -543,6 +637,78 @@ mod tests {
     }
 
     #[test]
+    fn shutdown_deadline_is_explicit_and_later_join_is_possible() {
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let socket = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (_peer, _) = listener.accept().unwrap();
+        let (entered_tx, entered_rx) = mpsc::sync_channel(1);
+        let (release_tx, release_rx) = mpsc::sync_channel(1);
+        let mut sender = Sender::spawn(SessionWriter::new(socket, [42; 32]), false, move |_| {
+            entered_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        })
+        .unwrap();
+        sender.write_message(MessageKind::Heartbeat, &[]).unwrap();
+        entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let error = sender.shutdown_timeout(Duration::ZERO).unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<io::Error>().unwrap().kind(),
+            io::ErrorKind::TimedOut
+        );
+        assert!(sender.joining.is_some());
+        release_tx.send(()).unwrap();
+        sender.shutdown_timeout(Duration::from_secs(2)).unwrap();
+        assert!(sender.worker.is_none());
+        sender.shutdown_timeout(Duration::ZERO).unwrap();
+    }
+
+    #[test]
+    fn completion_notification_does_not_make_a_hung_worker_joinable() {
+        let (done_tx, done_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            done_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        });
+        done_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let joined = reap_worker(worker).unwrap();
+        assert_eq!(
+            joined.recv_timeout(Duration::ZERO),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        );
+        release_tx.send(()).unwrap();
+        assert!(joined.recv_timeout(Duration::from_secs(2)).unwrap());
+    }
+
+    #[test]
+    fn blocking_thread_local_destructor_cannot_block_foreground_join() {
+        struct Gate(mpsc::Sender<()>, mpsc::Receiver<()>);
+        impl Drop for Gate {
+            fn drop(&mut self) {
+                let _ = self.0.send(());
+                let _ = self.1.recv();
+            }
+        }
+        thread_local! {
+            static GATE: std::cell::RefCell<Option<Gate>> = const { std::cell::RefCell::new(None) };
+        }
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            GATE.with(|gate| *gate.borrow_mut() = Some(Gate(entered_tx, release_rx)));
+        });
+        entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let joined = reap_worker(worker).unwrap();
+        assert_eq!(
+            joined.recv_timeout(Duration::ZERO),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        );
+        release_tx.send(()).unwrap();
+        assert!(joined.recv_timeout(Duration::from_secs(2)).unwrap());
+    }
+
+    #[test]
     fn worker_panic_is_reported_and_shutdown_is_observable() {
         use std::net::TcpListener;
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -555,6 +721,13 @@ mod tests {
         sender.write_message(MessageKind::Heartbeat, &[]).unwrap();
         sender.done.recv_timeout(Duration::from_secs(2)).unwrap();
         assert!(sender.flush().unwrap_err().to_string().contains("panicked"));
-        sender.worker.take().unwrap().join().unwrap();
+        assert!(
+            sender
+                .shutdown_timeout(Duration::from_secs(2))
+                .unwrap_err()
+                .to_string()
+                .contains("panicked")
+        );
+        assert!(sender.worker.is_none());
     }
 }

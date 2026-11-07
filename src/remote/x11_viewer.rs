@@ -33,7 +33,7 @@ use x11rb::wrapper::ConnectionExt as _;
 use x11rb::x11_utils::{TryParseFd, X11Error};
 
 use super::cursor::{CursorPosition, CursorShape};
-use super::frame::{DecodedFrame, FrameDamage, RecyclableDecodedFrame};
+use super::frame::{DamageRegions, DecodedFrame, FrameDamage, RecyclableDecodedFrame};
 use super::pacing::EventPollBudget;
 use super::usability::viewer_title;
 use super::{RemoteError, RemoteResult};
@@ -1502,33 +1502,37 @@ impl Viewer {
             return Ok(false);
         }
         let source_patch = render_source.is_some();
-        let rect = if source_patch {
-            damage.rect
+        let mut regions = DamageRegions::default();
+        let dimensions = if source_patch {
+            (w as u16, h as u16)
         } else {
-            damage.rect.map(|rect| {
-                scaled_damage_rect(
-                    rect,
-                    (w as u16, h as u16),
-                    (geometry.width, geometry.height),
-                )
-            })
+            (geometry.width, geometry.height)
         };
-        if let Some((x, y, width, height)) = rect {
-            // Keep the full-image Triangle sampling grid and rounding. Cropping
-            // the input before resizing changes filter phase and edge weights.
-            // This bounds conversion and upload, not CPU resampling work.
-            let rgb = if source_patch
-                || (w, h) == (u32::from(geometry.width), u32::from(geometry.height))
-            {
-                Cow::Borrowed(frame.image())
-            } else {
-                Cow::Owned(image::imageops::resize(
-                    frame.image(),
-                    u32::from(geometry.width),
-                    u32::from(geometry.height),
-                    image::imageops::FilterType::Triangle,
-                ))
-            };
+        for &rect in damage.regions.as_slice() {
+            regions.add(
+                if source_patch {
+                    rect
+                } else {
+                    scaled_damage_rect(rect, (w as u16, h as u16), dimensions)
+                },
+                dimensions,
+            );
+        }
+        // Resize once on the full Triangle grid, then convert/upload regions.
+        let rgb = if regions.as_slice().is_empty() {
+            None
+        } else if source_patch || (w, h) == (u32::from(geometry.width), u32::from(geometry.height))
+        {
+            Some(Cow::Borrowed(frame.image()))
+        } else {
+            Some(Cow::Owned(image::imageops::resize(
+                frame.image(),
+                u32::from(geometry.width),
+                u32::from(geometry.height),
+                image::imageops::FilterType::Triangle,
+            )))
+        };
+        for &(x, y, width, height) in regions.as_slice() {
             let image = ensure_native_image(
                 &mut self.native_patch,
                 width,
@@ -1538,7 +1542,7 @@ impl Viewer {
             )?;
             write_native_region(
                 image,
-                &rgb,
+                rgb.as_ref().expect("nonempty damage has pixels"),
                 x,
                 y,
                 self.pixel_layout,
@@ -4673,7 +4677,7 @@ mod tests {
         };
         let damage = FrameDamage {
             base_sequence: 7,
-            rect: Some((20, 30, 16, 16)),
+            regions: DamageRegions::from_rect(Some((20, 30, 16, 16))),
         };
         assert!(render_source_accepts_damage(key, damage, (640, 480)));
         assert!(!render_source_accepts_damage(
@@ -4685,7 +4689,7 @@ mod tests {
         assert!(render_source_accepts_damage(
             key,
             FrameDamage {
-                rect: None,
+                regions: DamageRegions::from_rect(None),
                 ..damage
             },
             (640, 480)
@@ -4732,6 +4736,39 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    #[test]
+    fn multiple_scaled_regions_reconstruct_full_triangle_output() {
+        let baseline = RgbImage::from_pixel(101, 73, image::Rgb([17, 29, 43]));
+        let mut changed = baseline.clone();
+        let mut source = DamageRegions::default();
+        for (x, y) in [(0, 0), (20, 30), (24, 30), (100, 72)] {
+            changed.put_pixel(x, y, image::Rgb([255, 191, 0]));
+            source.add((x as u16, y as u16, 1, 1), (101, 73));
+        }
+        assert_eq!(source.as_slice().len(), 4);
+        for (dw, dh) in [(101, 73), (49, 35), (203, 147), (1, 1)] {
+            let mut patched =
+                image::imageops::resize(&baseline, dw, dh, image::imageops::FilterType::Triangle);
+            let after =
+                image::imageops::resize(&changed, dw, dh, image::imageops::FilterType::Triangle);
+            let mut regions = DamageRegions::default();
+            for &rect in source.as_slice() {
+                regions.add(
+                    scaled_damage_rect(rect, (101, 73), (dw as u16, dh as u16)),
+                    (dw as u16, dh as u16),
+                );
+            }
+            for &(x, y, w, h) in regions.as_slice() {
+                for py in u32::from(y)..u32::from(y + h) {
+                    for px in u32::from(x)..u32::from(x + w) {
+                        patched.put_pixel(px, py, *after.get_pixel(px, py));
+                    }
+                }
+            }
+            assert_eq!(patched, after);
         }
     }
 
@@ -4787,7 +4824,7 @@ mod tests {
             &next,
             FrameDamage {
                 base_sequence: 8,
-                rect: None
+                regions: DamageRegions::from_rect(None)
             }
         ));
         assert!(damage_base_matches(
@@ -4795,7 +4832,7 @@ mod tests {
             &next,
             FrameDamage {
                 base_sequence: 7,
-                rect: Some((0, 0, 1, 1))
+                regions: DamageRegions::from_rect(Some((0, 0, 1, 1)))
             }
         ));
         let mut moved_source = make(9, 4);
@@ -4805,7 +4842,7 @@ mod tests {
             &moved_source,
             FrameDamage {
                 base_sequence: 7,
-                rect: Some((0, 0, 1, 1)),
+                regions: DamageRegions::from_rect(Some((0, 0, 1, 1))),
             }
         ));
         assert!(!damage_base_matches(
@@ -4813,7 +4850,7 @@ mod tests {
             &make(9, 8),
             FrameDamage {
                 base_sequence: 7,
-                rect: None
+                regions: DamageRegions::from_rect(None)
             }
         ));
     }

@@ -32,7 +32,8 @@ It is not completion of the entire remote-control roadmap.
   the changed bounding rectangle. Scaled CPU presentation uploads conservative
   Triangle-filter-expanded damage while retaining full-image resampling; XRender
   patches its retained source and still composites the complete destination.
-  One bounding rectangle bounds request count; multi-rectangle merging is deferred.
+  At most eight merged rectangles bound request count; fragmented damage falls
+  back to a bounding rectangle, and 60% covered area uses the complete image.
 - SHM uploads use a bounded three-slot pool. Exact completion ownership prevents
   reuse while X11 consumes a segment; input polling continues while completion
   and server-copy fences are pending. Frame ACK follows both conditions, never
@@ -57,7 +58,7 @@ It is not completion of the entire remote-control roadmap.
 
 ## Explicitly deferred
 
-- Multiple merged damage rectangles, partial CPU resampling, session
+- Partial CPU resampling, session
   restore/source switching, window-geometry restoration, XKB/IME and clipboard
   UX modes, local readback, Wayland and hardware encoding.
 - Variable decode pixel/dimension budgets and broader negotiated capabilities,
@@ -136,3 +137,18 @@ requests or desktop access. GPU PCI identifiers are opt-in; display dimensions,
 backend and build labels must be supplied explicitly. Missing values are null.
 It does not collect hostnames, users, addresses or display content, and it does
 not measure performance. See `remote-benchmark-metadata.md` for the exact fields.
+
+## Reconnect prerequisites, not automatic reconnect
+
+Receiver failures retain their typed cause, and authenticated host Close remains
+separate from transport loss. Cleanup errors preserve the foreground cause rather
+than hiding sender/receiver failure. Explicit sender and receiver joins use a
+bounded wait on one reaper per worker, so a stalled thread-local destructor does
+not block the viewer's join path. Timeout reports incomplete cleanup and may leave
+a detached worker/reaper; it is not permission to start a replacement session.
+
+Automatic reconnect remains disabled. Clipboard shutdown still has unbounded joins;
+user-close intent must be latched before fallible input flushes, and SSH exit 255
+cannot distinguish network loss from authentication/host verification failure.
+These need lifecycle work before safe retry. The escape shortcut only releases
+input grab; it does not close the session and is not treated as cancellation.

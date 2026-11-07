@@ -84,8 +84,95 @@ pub struct DecodedFrame {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct FrameDamage {
     pub base_sequence: u64,
-    /// None means no changed pixels (a validated keepalive).
-    pub rect: Option<(u16, u16, u16, u16)>,
+    /// Empty regions mean no changed pixels (a validated keepalive).
+    pub regions: DamageRegions,
+}
+
+type DamageRect = (u16, u16, u16, u16);
+const MAX_DAMAGE_REGIONS: usize = 8;
+
+/// Fixed storage and bounded request count, even for adversarial checkerboards.
+/// Once fragmented damage collapses, subsequent additions stay collapsed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct DamageRegions {
+    rects: [DamageRect; MAX_DAMAGE_REGIONS],
+    len: usize,
+    collapsed: bool,
+}
+
+impl DamageRegions {
+    pub(crate) fn as_slice(&self) -> &[DamageRect] {
+        &self.rects[..self.len]
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_rect(rect: Option<DamageRect>) -> Self {
+        let mut regions = Self::default();
+        if let Some(rect) = rect {
+            regions.rects[0] = rect;
+            regions.len = 1;
+        }
+        regions
+    }
+
+    pub(crate) fn add(&mut self, mut rect: DamageRect, dimensions: (u16, u16)) {
+        if rect.2 == 0 || rect.3 == 0 {
+            return;
+        }
+        let union = |a: DamageRect, b: DamageRect| {
+            let x = a.0.min(b.0);
+            let y = a.1.min(b.1);
+            (
+                x,
+                y,
+                (a.0 + a.2).max(b.0 + b.2) - x,
+                (a.1 + a.3).max(b.1 + b.3) - y,
+            )
+        };
+        if self.collapsed {
+            rect = union(self.rects[0], rect);
+            self.len = 0;
+        } else {
+            // Restart after each union: it can touch an earlier region too.
+            let mut index = 0;
+            while index < self.len {
+                let other = self.rects[index];
+                if rect.0 <= other.0 + other.2
+                    && other.0 <= rect.0 + rect.2
+                    && rect.1 <= other.1 + other.3
+                    && other.1 <= rect.1 + rect.3
+                {
+                    rect = union(rect, other);
+                    self.len -= 1;
+                    self.rects[index] = self.rects[self.len];
+                    index = 0;
+                } else {
+                    index += 1;
+                }
+            }
+            if self.len == MAX_DAMAGE_REGIONS {
+                for other in self.as_slice() {
+                    rect = union(rect, *other);
+                }
+                self.len = 0;
+                self.collapsed = true;
+            }
+        }
+        self.rects[self.len] = rect;
+        self.len += 1;
+        let area: u64 = self
+            .as_slice()
+            .iter()
+            .map(|r| u64::from(r.2) * u64::from(r.3))
+            .sum();
+        if area * 5 >= u64::from(dimensions.0) * u64::from(dimensions.1) * 3 {
+            self.rects[0] = (0, 0, dimensions.0, dimensions.1);
+            self.len = 1;
+            self.collapsed = true;
+        }
+        // Canonical unused storage makes equality independent of merge history.
+        self.rects[self.len..].fill((0, 0, 0, 0));
+    }
 }
 
 /// Immutable, complete tile state. Cloning a frame shares unchanged pixels;
@@ -147,13 +234,13 @@ impl TileSnapshot {
     }
 
     /// Apply differences against the actual viewer predecessor, not the last
-    /// received frame. Returns the bounding rectangle of copied pixels.
-    fn apply(&self, image: &mut RgbImage, previous: Option<&Self>) -> Option<(u16, u16, u16, u16)> {
+    /// received frame. Returns bounded regions of copied pixels.
+    fn apply(&self, image: &mut RgbImage, previous: Option<&Self>) -> DamageRegions {
         assert_eq!(image.dimensions(), (self.width, self.height));
         let previous = previous
             .filter(|p| (p.width, p.height, p.tile) == (self.width, self.height, self.tile));
         let columns = (self.width as usize).div_ceil(self.tile);
-        let mut bounds: Option<(usize, usize, usize, usize)> = None;
+        let mut regions = DamageRegions::default();
         for (index, bytes) in self.pixels.iter().enumerate() {
             if previous.is_some_and(|p| Arc::ptr_eq(&p.pixels[index], bytes)) {
                 continue;
@@ -167,12 +254,12 @@ impl TileSnapshot {
                 image.as_mut()[start..start + w * 3]
                     .copy_from_slice(&bytes[row * w * 3..(row + 1) * w * 3]);
             }
-            bounds = Some(match bounds {
-                None => (x, y, x + w, y + h),
-                Some((a, b, c, d)) => (a.min(x), b.min(y), c.max(x + w), d.max(y + h)),
-            });
+            regions.add(
+                (x as u16, y as u16, w as u16, h as u16),
+                (self.width as u16, self.height as u16),
+            );
         }
-        bounds.map(|(x, y, r, b)| (x as u16, y as u16, (r - x) as u16, (b - y) as u16))
+        regions
     }
 }
 
@@ -266,11 +353,11 @@ impl RecyclableDecodedFrame {
         else {
             return;
         };
-        let rect = tiles.apply(&mut image, previous.tiles.as_ref());
+        let regions = tiles.apply(&mut image, previous.tiles.as_ref());
         self.image = Some(image);
         self.damage = Some(FrameDamage {
             base_sequence: previous.sequence,
-            rect,
+            regions,
         });
     }
 
@@ -629,6 +716,45 @@ pub(crate) fn invalid_data(message: impl Into<String>) -> io::Error {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn damage_merges_bridges_and_caps_fragmentation_and_area() {
+        let mut regions = DamageRegions::default();
+        regions.add((0, 0, 2, 2), (100, 100));
+        regions.add((4, 0, 2, 2), (100, 100));
+        regions.add((2, 0, 2, 2), (100, 100));
+        assert_eq!(regions.as_slice(), &[(0, 0, 6, 2)]);
+        let mut fragmented = DamageRegions::default();
+        for i in 0..100 {
+            fragmented.add((i * 2, 0, 1, 1), (200, 100));
+            assert!(fragmented.as_slice().len() <= MAX_DAMAGE_REGIONS);
+        }
+        assert_eq!(fragmented.as_slice(), &[(0, 0, 199, 1)]);
+        regions.add((0, 0, 100, 60), (100, 100));
+        assert_eq!(regions.as_slice(), &[(0, 0, 100, 100)]);
+    }
+
+    #[test]
+    fn bounded_damage_always_covers_every_added_pixel() {
+        let mut regions = DamageRegions::default();
+        let mut dirty = vec![false; 32 * 32];
+        for i in 0..200usize {
+            let (x, y) = ((i * 17) % 32, (i * 11 + i / 32) % 32);
+            dirty[y * 32 + x] = true;
+            regions.add((x as u16, y as u16, 1, 1), (32, 32));
+            for (pixel, changed) in dirty.iter().enumerate() {
+                if *changed {
+                    let (x, y) = ((pixel % 32) as u16, (pixel / 32) as u16);
+                    assert!(
+                        regions
+                            .as_slice()
+                            .iter()
+                            .any(|&(rx, ry, w, h)| x >= rx && x < rx + w && y >= ry && y < ry + h)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn tile_snapshots_share_pixels_and_reuse_viewer_canvas_across_skips() {
         let mut canvas = RgbImage::from_pixel(5, 3, image::Rgb([10, 20, 30]));
         let original = TileSnapshot::update(&canvas, None, &[0b11_1111], 2);
@@ -649,12 +775,10 @@ mod tests {
         next.reuse_canvas_from(&mut displayed);
         assert_eq!(next.image().as_raw().as_ptr(), pointer);
         assert_eq!(next.image(), &canvas);
+        assert_eq!(next.damage().unwrap().base_sequence, 1);
         assert_eq!(
-            next.damage(),
-            Some(FrameDamage {
-                base_sequence: 1,
-                rect: Some((0, 0, 5, 3))
-            })
+            next.damage().unwrap().regions.as_slice(),
+            &[(0, 0, 2, 2), (4, 2, 1, 1)]
         );
         assert!(displayed.materialized.get().is_none());
         assert_eq!(displayed.dimensions(), (5, 3));
@@ -697,7 +821,7 @@ mod tests {
             current.damage(),
             Some(FrameDamage {
                 base_sequence: 4,
-                rect: None
+                regions: DamageRegions::from_rect(None)
             })
         );
     }
