@@ -6,15 +6,13 @@
 //! about 90 ms for a 2560x1440 monitor, which capped the whole session near
 //! ten frames a second. Averaging each output pixel's exact source area is
 //! the right filter for a pure reduction, needs no floating point, and splits
-//! cleanly across threads.
+//! into two passes. The reusable scaler uses a serial path, avoiding thread
+//! creation and per-frame scratch allocations.
 
 use image::RgbImage;
 
 /// Fixed-point unity for coverage weights.
 const ONE: u32 = 1 << 16;
-/// Rows per thread below which splitting costs more than it saves.
-const MIN_ROWS_PER_THREAD: usize = 64;
-const MAX_THREADS: usize = 8;
 
 /// The source samples one output sample averages, with their coverage.
 struct Spans {
@@ -76,73 +74,72 @@ impl Spans {
     }
 }
 
-/// Shrink `image` to `width` x `height`, averaging each output pixel's
-/// source area. Neither dimension may grow.
-pub(crate) fn area_downscale(image: &RgbImage, width: u32, height: u32) -> RgbImage {
-    let (source_width, source_height) = (image.width() as usize, image.height() as usize);
-    let (width, height) = (width as usize, height as usize);
-    assert!(
-        width > 0 && height > 0 && width <= source_width && height <= source_height,
-        "area_downscale only shrinks"
-    );
-    let columns = Spans::new(source_width, width);
-    let rows = Spans::new(source_height, height);
-    let source = image.as_raw();
-    let threads = std::thread::available_parallelism()
-        .map_or(1, usize::from)
-        .clamp(1, MAX_THREADS);
+/// Reusable two-pass CPU scaler. The cache is bounded to one geometry, so
+/// repeated monitor/quality changes cannot accumulate weight tables.
+#[derive(Default)]
+pub(crate) struct CpuScaler {
+    dimensions: Option<(u32, u32, u32, u32)>,
+    spans: Option<(Spans, Spans)>,
+    narrow: Vec<u8>,
+    accumulator: Vec<u32>,
+}
 
-    // Pass 1: shrink every source row horizontally.
-    let mut narrow = vec![0_u8; source_height * width * 3];
-    let narrow_rows_per_thread = source_height.div_ceil(threads).max(MIN_ROWS_PER_THREAD);
-    std::thread::scope(|scope| {
-        for (chunk_index, chunk) in narrow
-            .chunks_mut(narrow_rows_per_thread * width * 3)
-            .enumerate()
-        {
-            let columns = &columns;
-            scope.spawn(move || {
-                let first_row = chunk_index * narrow_rows_per_thread;
-                for (offset, out_row) in chunk.chunks_exact_mut(width * 3).enumerate() {
-                    let row =
-                        &source[(first_row + offset) * source_width * 3..][..source_width * 3];
-                    shrink_row(row, out_row, columns);
-                }
-            });
+impl CpuScaler {
+    /// Shrink into caller-owned storage. The returned image owns its pixels;
+    /// callers may recycle its allocation only after all readers release it.
+    pub(crate) fn scale_into(
+        &mut self,
+        image: &RgbImage,
+        width: u32,
+        height: u32,
+        mut output: Vec<u8>,
+    ) -> RgbImage {
+        let dimensions = (image.width(), image.height(), width, height);
+        let (source_width, source_height) = (image.width() as usize, image.height() as usize);
+        let (width, height) = (width as usize, height as usize);
+        assert!(
+            width > 0 && height > 0 && width <= source_width && height <= source_height,
+            "area_downscale only shrinks"
+        );
+        if self.dimensions != Some(dimensions) {
+            self.spans = Some((
+                Spans::new(source_width, width),
+                Spans::new(source_height, height),
+            ));
+            self.narrow.resize(source_height * width * 3, 0);
+            self.accumulator.resize(width * 3, 0);
+            self.dimensions = Some(dimensions);
         }
-    });
-
-    // Pass 2: combine the narrowed rows vertically.
-    let mut output = vec![0_u8; height * width * 3];
-    let output_rows_per_thread = height.div_ceil(threads).max(MIN_ROWS_PER_THREAD);
-    std::thread::scope(|scope| {
-        for (chunk_index, chunk) in output
-            .chunks_mut(output_rows_per_thread * width * 3)
-            .enumerate()
+        let (columns, rows) = self.spans.as_ref().expect("scaler geometry initialized");
+        for (row, out_row) in image
+            .as_raw()
+            .chunks_exact(source_width * 3)
+            .zip(self.narrow.chunks_exact_mut(width * 3))
         {
-            let (rows, narrow) = (&rows, &narrow);
-            scope.spawn(move || {
-                let mut accumulator = vec![0_u32; width * 3];
-                let first_row = chunk_index * output_rows_per_thread;
-                for (offset, out_row) in chunk.chunks_exact_mut(width * 3).enumerate() {
-                    let (start, weights) = rows.of(first_row + offset);
-                    accumulator.fill(ONE / 2);
-                    for (k, &weight) in weights.iter().enumerate() {
-                        let row = &narrow[(start + k) * width * 3..][..width * 3];
-                        for (sum, &value) in accumulator.iter_mut().zip(row) {
-                            *sum += weight * u32::from(value);
-                        }
-                    }
-                    for (pixel, &sum) in out_row.iter_mut().zip(&accumulator) {
-                        *pixel = (sum >> 16) as u8;
-                    }
-                }
-            });
+            shrink_row(row, out_row, columns);
         }
-    });
+        output.resize(height * width * 3, 0);
+        for (index, out_row) in output.chunks_exact_mut(width * 3).enumerate() {
+            let (start, weights) = rows.of(index);
+            self.accumulator.fill(ONE / 2);
+            for (k, &weight) in weights.iter().enumerate() {
+                let row = &self.narrow[(start + k) * width * 3..][..width * 3];
+                for (sum, &value) in self.accumulator.iter_mut().zip(row) {
+                    *sum += weight * u32::from(value);
+                }
+            }
+            for (pixel, &sum) in out_row.iter_mut().zip(&self.accumulator) {
+                *pixel = (sum >> 16) as u8;
+            }
+        }
+        RgbImage::from_raw(width as u32, height as u32, output)
+            .expect("output buffer matches its dimensions")
+    }
+}
 
-    RgbImage::from_raw(width as u32, height as u32, output)
-        .expect("output buffer matches its dimensions")
+#[cfg(test)]
+fn area_downscale(image: &RgbImage, width: u32, height: u32) -> RgbImage {
+    CpuScaler::default().scale_into(image, width, height, Vec::new())
 }
 
 fn shrink_row(row: &[u8], out_row: &mut [u8], columns: &Spans) {
@@ -165,6 +162,53 @@ fn shrink_row(row: &[u8], out_row: &mut [u8], columns: &Spans) {
 mod tests {
     use super::*;
     use image::Rgb;
+
+    #[test]
+    fn scaler_reuses_storage_and_invalidates_weights_on_geometry_changes() {
+        let mut scaler = CpuScaler::default();
+        let image = RgbImage::from_pixel(7, 5, Rgb([15, 80, 240]));
+        let first = scaler.scale_into(&image, 3, 2, Vec::new());
+        let output_ptr = first.as_raw().as_ptr();
+        let narrow_ptr = scaler.narrow.as_ptr();
+        let accumulator_ptr = scaler.accumulator.as_ptr();
+        let weights_ptr = scaler.spans.as_ref().unwrap().0.weights.as_ptr();
+        let second = scaler.scale_into(&image, 3, 2, first.into_raw());
+        assert_eq!(second.as_raw().as_ptr(), output_ptr);
+        assert_eq!(scaler.narrow.as_ptr(), narrow_ptr);
+        assert_eq!(scaler.accumulator.as_ptr(), accumulator_ptr);
+        assert_eq!(
+            scaler.spans.as_ref().unwrap().0.weights.as_ptr(),
+            weights_ptr
+        );
+        let changed = RgbImage::from_fn(9, 6, |x, y| Rgb([(x * 20) as u8, (y * 30) as u8, 7]));
+        let third = scaler.scale_into(&changed, 3, 2, second.into_raw());
+        assert_eq!(scaler.dimensions, Some((9, 6, 3, 2)));
+        assert_eq!(third, area_downscale(&changed, 3, 2));
+        // Shrinking the scratch buffers must not leave stale trailing rows.
+        assert_eq!(
+            scaler.scale_into(&image, 2, 1, third.into_raw()),
+            area_downscale(&image, 2, 1)
+        );
+    }
+
+    #[test]
+    fn retained_output_is_not_modified_by_the_next_frame() {
+        let mut scaler = CpuScaler::default();
+        let first = scaler.scale_into(
+            &RgbImage::from_pixel(4, 4, Rgb([1, 2, 3])),
+            2,
+            2,
+            Vec::new(),
+        );
+        let second = scaler.scale_into(
+            &RgbImage::from_pixel(4, 4, Rgb([7, 8, 9])),
+            2,
+            2,
+            Vec::new(),
+        );
+        assert!(first.pixels().all(|pixel| *pixel == Rgb([1, 2, 3])));
+        assert!(second.pixels().all(|pixel| *pixel == Rgb([7, 8, 9])));
+    }
 
     #[test]
     fn coverage_weights_sum_to_unity_for_every_ratio() {

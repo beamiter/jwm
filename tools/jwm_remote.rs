@@ -169,6 +169,10 @@ enum Command {
         /// Exit after the first connection ends (useful for tests/scripts).
         #[arg(long)]
         once: bool,
+
+        /// Emit host pipeline statistics as JSON lines on stderr.
+        #[arg(long)]
+        stats_json: bool,
     },
     /// Control another JWM desktop through SSH, with nothing set up there.
     ///
@@ -346,6 +350,7 @@ fn run(command: Command) -> RemoteResult<()> {
             allow_clipboard,
             clipboard_file_limit,
             once,
+            stats_json,
         } => {
             let key = if key_stdin {
                 KeySource::Stdin
@@ -376,6 +381,7 @@ fn run(command: Command) -> RemoteResult<()> {
                 allow_clipboard,
                 clipboard_file_limit,
                 once,
+                stats_json,
             })
         }
         Command::Ssh {

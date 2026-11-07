@@ -42,10 +42,11 @@ use crate::backend::clipboard_x11::{
     CopiedClipboard, PendingKind, RemoteCaptures, RemoteClipboard, RemoteClipboardOptions,
     RemoteServe, RemoteSetter,
 };
+use std::collections::VecDeque;
 use std::io;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -275,9 +276,165 @@ enum Command {
     Stop,
 }
 
+// A slow disk or writer must not turn clipboard traffic into an unbounded
+// allocation, nor block the network reader behind clipboard work. Queue limits
+// include both payload bytes and record count (including zero-data controls).
+const COMMAND_QUEUE_RECORDS: usize = 64;
+const COMMAND_QUEUE_BYTES: usize = MAX_SHARED_IMAGE_BYTES + TRANSFER_WINDOW_BYTES as usize;
+const OUTGOING_QUEUE_RECORDS: usize = 64;
+const OUTGOING_QUEUE_BYTES: usize = 2 * TRANSFER_WINDOW_BYTES as usize;
+
+struct QueueState<T> {
+    entries: VecDeque<(T, usize)>,
+    bytes: usize,
+    closed: bool,
+}
+
+struct BoundedQueue<T> {
+    state: Mutex<QueueState<T>>,
+    ready: Condvar,
+    max_records: usize,
+    max_bytes: usize,
+}
+
+impl<T> BoundedQueue<T> {
+    fn new(max_records: usize, max_bytes: usize) -> Self {
+        Self {
+            state: Mutex::new(QueueState {
+                entries: VecDeque::new(),
+                bytes: 0,
+                closed: false,
+            }),
+            ready: Condvar::new(),
+            max_records,
+            max_bytes,
+        }
+    }
+
+    // Replacement is restricted to records with explicit superseding semantics.
+    fn push(&self, value: T, bytes: usize, replace: impl Fn(&T) -> bool) -> Result<(), ()> {
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        if state.closed {
+            return Err(());
+        }
+        let mut removed = 0;
+        state.entries.retain(|(entry, size)| {
+            if replace(entry) {
+                removed += size;
+                false
+            } else {
+                true
+            }
+        });
+        state.bytes -= removed;
+        if state.entries.len() >= self.max_records
+            || bytes > self.max_bytes.saturating_sub(state.bytes)
+        {
+            // Fail closed: dropping a transfer record and continuing would corrupt
+            // the stream or its cumulative flow-control accounting.
+            state.closed = true;
+            state.entries.clear();
+            state.bytes = 0;
+            self.ready.notify_all();
+            return Err(());
+        }
+        state.entries.push_back((value, bytes));
+        state.bytes += bytes;
+        self.ready.notify_one();
+        Ok(())
+    }
+
+    fn close(&self) {
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        state.closed = true;
+        state.entries.clear();
+        state.bytes = 0;
+        self.ready.notify_all();
+    }
+
+    fn closed(&self) -> bool {
+        self.state.lock().unwrap_or_else(|p| p.into_inner()).closed
+    }
+
+    fn recv_timeout(&self, timeout: Duration) -> Result<T, mpsc::RecvTimeoutError> {
+        let state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        let (mut state, _) = self
+            .ready
+            .wait_timeout_while(state, timeout, |s| s.entries.is_empty() && !s.closed)
+            .unwrap_or_else(|p| p.into_inner());
+        if let Some((value, bytes)) = state.entries.pop_front() {
+            state.bytes -= bytes;
+            Ok(value)
+        } else if state.closed {
+            Err(mpsc::RecvTimeoutError::Disconnected)
+        } else {
+            Err(mpsc::RecvTimeoutError::Timeout)
+        }
+    }
+
+    fn try_recv(&self) -> Result<T, mpsc::TryRecvError> {
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some((value, bytes)) = state.entries.pop_front() {
+            state.bytes -= bytes;
+            Ok(value)
+        } else if state.closed {
+            Err(mpsc::TryRecvError::Disconnected)
+        } else {
+            Err(mpsc::TryRecvError::Empty)
+        }
+    }
+}
+
+impl BoundedQueue<Command> {
+    fn send(&self, command: Command) -> Result<(), ()> {
+        if matches!(command, Command::Stop | Command::LocalClosed) {
+            // Shutdown has a reserved path even when the data queue is full.
+            self.close();
+            return Ok(());
+        }
+        let bytes = match &command {
+            Command::Local(CopiedClipboard::Text(text)) | Command::PeerText(text) => text.len(),
+            Command::Local(CopiedClipboard::Png(png)) => png.len(),
+            Command::Local(CopiedClipboard::Files(paths)) => {
+                paths.iter().map(|p| p.as_os_str().len()).sum()
+            }
+            Command::Peer(TransferOp::Data { bytes, .. }) => bytes.len(),
+            _ => 32,
+        };
+        let local = matches!(command, Command::Local(_));
+        // Local copies are generations: only the latest pending value matters.
+        // Peer records retain wire order, including ACKs with transfer IDs.
+        self.push(command, bytes, |old| {
+            local && matches!(old, Command::Local(_))
+        })
+    }
+}
+
+impl BoundedQueue<Outgoing> {
+    fn send(&self, record: Outgoing) -> Result<(), ()> {
+        let bytes = record.payload.len();
+        let ack = record.kind == MessageKind::ClipboardTransfer
+            && record.payload.first() == Some(&OP_ACK);
+        let ack_id: Option<[u8; 4]> = ack
+            .then(|| record.payload.get(1..5))
+            .flatten()
+            .and_then(|id| id.try_into().ok());
+        self.push(record, bytes, |old| {
+            // Offsets are cumulative, but preserve ACKs for other transfer IDs:
+            // peers also use the ID to finish their current transfer's status.
+            // Append the replacement to preserve ordering with other records.
+            ack_id.is_some_and(|id| {
+                old.kind == MessageKind::ClipboardTransfer
+                    && old.payload.first() == Some(&OP_ACK)
+                    && old.payload.get(1..5) == Some(id.as_slice())
+            })
+        })
+    }
+}
+
 /// Owns the session's clipboard threads; dropping it stops them.
 pub struct ClipboardSync {
-    commands: mpsc::Sender<Command>,
+    commands: Arc<BoundedQueue<Command>>,
     stop: Arc<AtomicBool>,
     status: Arc<SyncStatus>,
     worker: Option<thread::JoinHandle<()>>,
@@ -286,14 +443,14 @@ pub struct ClipboardSync {
 
 /// Network-reader half: hands peer clipboard records to the worker.
 pub struct ClipboardInbox {
-    commands: mpsc::Sender<Command>,
+    commands: Arc<BoundedQueue<Command>>,
     in_flight: Arc<AtomicU64>,
     files: bool,
 }
 
 /// Writer half: records the worker wants sent.
 pub struct ClipboardOutbox {
-    records: mpsc::Receiver<Outgoing>,
+    records: Arc<BoundedQueue<Outgoing>>,
 }
 
 type Wake = Box<dyn Fn() + Send>;
@@ -319,7 +476,7 @@ fn spawn_worker<T: ClipboardTarget + Send + 'static>(
     wake: Option<Wake>,
 ) -> Result<
     (
-        mpsc::Sender<Command>,
+        Arc<BoundedQueue<Command>>,
         thread::JoinHandle<()>,
         ClipboardInbox,
         ClipboardOutbox,
@@ -327,8 +484,16 @@ fn spawn_worker<T: ClipboardTarget + Send + 'static>(
     ),
     String,
 > {
-    let (commands, command_rx) = mpsc::channel();
-    let (records_tx, records) = mpsc::channel();
+    let commands = Arc::new(BoundedQueue::new(
+        COMMAND_QUEUE_RECORDS,
+        COMMAND_QUEUE_BYTES,
+    ));
+    let command_rx = Arc::clone(&commands);
+    let records = Arc::new(BoundedQueue::new(
+        OUTGOING_QUEUE_RECORDS,
+        OUTGOING_QUEUE_BYTES,
+    ));
+    let records_tx = Arc::clone(&records);
     let status = Arc::new(SyncStatus::default());
     let in_flight = Arc::new(AtomicU64::new(0));
     let mut worker = Worker {
@@ -352,7 +517,7 @@ fn spawn_worker<T: ClipboardTarget + Send + 'static>(
     };
     let join = thread::Builder::new()
         .name("jwm-remote-clipsync".into())
-        .spawn(move || worker.run(&command_rx))
+        .spawn(move || worker.run_guarded(&command_rx))
         .map_err(|error| format!("spawn clipboard worker: {error}"))?;
     Ok((
         commands.clone(),
@@ -432,7 +597,7 @@ impl Drop for ClipboardSync {
 
 fn forward_captures(
     captures: &RemoteCaptures,
-    commands: &mpsc::Sender<Command>,
+    commands: &Arc<BoundedQueue<Command>>,
     stop: &AtomicBool,
 ) {
     while !stop.load(Ordering::Acquire) {
@@ -454,9 +619,10 @@ fn forward_captures(
 impl ClipboardInbox {
     /// Hand one authenticated peer record to the worker.
     ///
-    /// Only the record's shape and the flow-control promise are checked
-    /// here; an error is a protocol violation that ends the session.
+    /// Checks record shape, flow control and bounded queue admission without
+    /// waiting for disk work. An error (including overload) ends the session.
     pub fn deliver(&self, kind: MessageKind, payload: &[u8]) -> RemoteResult<()> {
+        let mut data_bytes = 0;
         let command = match kind {
             MessageKind::Clipboard => Command::PeerText(decode_clipboard(payload)?),
             MessageKind::ClipboardTransfer => {
@@ -472,11 +638,14 @@ impl ClipboardInbox {
                         let len = bytes.len() as u64;
                         let pending = self.in_flight.fetch_add(len, Ordering::AcqRel) + len;
                         if pending > TRANSFER_WINDOW_BYTES {
+                            self.in_flight.fetch_sub(len, Ordering::AcqRel);
+                            self.commands.close();
                             return Err(invalid_data(
                                 "peer sent more clipboard data than it was allowed in flight",
                             )
                             .into());
                         }
+                        data_bytes = len;
                     }
                     _ => {}
                 }
@@ -487,8 +656,19 @@ impl ClipboardInbox {
             }
         };
         self.commands.send(command).map_err(|_| {
-            io::Error::new(io::ErrorKind::BrokenPipe, "local clipboard worker stopped").into()
+            self.in_flight.fetch_sub(data_bytes, Ordering::AcqRel);
+            io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "clipboard queue closed or overloaded",
+            )
+            .into()
         })
+    }
+}
+
+impl Drop for ClipboardOutbox {
+    fn drop(&mut self) {
+        self.records.close();
     }
 }
 
@@ -546,7 +726,7 @@ struct Receiving {
 
 struct Worker<T> {
     target: T,
-    out: mpsc::Sender<Outgoing>,
+    out: Arc<BoundedQueue<Outgoing>>,
     wake: Option<Wake>,
     in_flight: Arc<AtomicU64>,
     status: Arc<SyncStatus>,
@@ -601,10 +781,33 @@ fn png_hash(png: &[u8]) -> u64 {
 const OUTCOME_SHOWN_FOR: Duration = Duration::from_secs(10);
 
 impl<T: ClipboardTarget> Worker<T> {
-    fn run(&mut self, commands: &mpsc::Receiver<Command>) {
+    /// A callback panic must disconnect both halves just like dropping the old
+    /// channel senders did. Close first, then independently attempt cleanup and
+    /// notification so a second panicking callback cannot leave the writer asleep
+    /// or abort the process during unwinding. Preserve the original join error.
+    fn run_guarded(&mut self, commands: &BoundedQueue<Command>) {
+        use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
+        let run = catch_unwind(AssertUnwindSafe(|| self.run(commands)));
+        commands.close();
+        self.out.close();
+        let cleanup = catch_unwind(AssertUnwindSafe(|| self.cleanup()));
+        let wake = catch_unwind(AssertUnwindSafe(|| {
+            if let Some(wake) = &self.wake {
+                wake();
+            }
+        }));
+        if let Err(panic) = run.and(cleanup).and(wake) {
+            resume_unwind(panic);
+        }
+    }
+
+    fn run(&mut self, commands: &BoundedQueue<Command>) {
         let mut last_status = Instant::now();
-        loop {
+        while !commands.closed() && !self.out.closed() {
             self.pump();
+            if self.out.closed() {
+                break;
+            }
             match commands.recv_timeout(WORKER_IDLE_WAIT) {
                 Ok(Command::Stop) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
                 Ok(Command::LocalClosed) => {
@@ -627,6 +830,13 @@ impl<T: ClipboardTarget> Worker<T> {
                 self.status_expires = None;
                 self.status.set(None);
             }
+        }
+    }
+
+    fn cleanup(&mut self) {
+        self.sending = None;
+        if let Some(staging) = self.staging.as_mut() {
+            staging.discard_in_progress();
         }
         if let Some(receiving) = self.receiving.take() {
             self.target.serve(RemoteServe::Abandon {
@@ -838,12 +1048,14 @@ impl<T: ClipboardTarget> Worker<T> {
 
     /// Stop receiving; `refuse` tells the sender to stop too.
     fn drop_receiving(&mut self, refuse: bool) {
-        let Some(receiving) = self.receiving.take() else {
+        let Some(receiving) = self.receiving.as_ref() else {
             return;
         };
         if refuse {
             self.queue_op(&TransferOp::Refuse { id: receiving.id });
         }
+        // Keep the token available to boundary cleanup if queueing's wake panics.
+        let receiving = self.receiving.take().expect("receiving was present");
         self.target.serve(RemoteServe::Abandon {
             token: receiving.token,
         });
@@ -869,13 +1081,6 @@ impl<T: ClipboardTarget> Worker<T> {
                     Ok(sink) => {
                         let token = self.next_token;
                         self.next_token += 1;
-                        self.target.serve(RemoteServe::Announce {
-                            token,
-                            kind: match kind {
-                                TransferKind::Image => PendingKind::Png,
-                                TransferKind::Files => PendingKind::Files,
-                            },
-                        });
                         self.receiving = Some(Receiving {
                             id,
                             token,
@@ -884,6 +1089,15 @@ impl<T: ClipboardTarget> Worker<T> {
                             received: 0,
                             label: item_label(kind, items),
                             started: Instant::now(),
+                        });
+                        // Record the pending token before invoking the target:
+                        // even a panic after announcement can then abandon it.
+                        self.target.serve(RemoteServe::Announce {
+                            token,
+                            kind: match kind {
+                                TransferKind::Image => PendingKind::Png,
+                                TransferKind::Files => PendingKind::Files,
+                            },
                         });
                         self.publish_progress();
                     }
@@ -1164,7 +1378,7 @@ mod tests {
     }
 
     struct End {
-        commands: mpsc::Sender<Command>,
+        commands: Arc<BoundedQueue<Command>>,
         join: Option<thread::JoinHandle<()>>,
         served: mpsc::Receiver<RemoteServe>,
         status: Arc<SyncStatus>,
@@ -1299,6 +1513,235 @@ mod tests {
     }
 
     #[test]
+    fn panicking_target_closes_queues_and_wakes_even_if_abandon_panics() {
+        struct PanickingTarget(mpsc::Sender<RemoteServe>);
+        impl ClipboardTarget for PanickingTarget {
+            fn serve(&self, request: RemoteServe) -> bool {
+                self.0.send(request).unwrap();
+                panic!("target callback failed");
+            }
+        }
+        let (served_tx, served) = mpsc::channel();
+        let (woken_tx, woken) = mpsc::channel();
+        let (commands, join, inbox, outbox, _) = spawn_worker(
+            PanickingTarget(served_tx),
+            options(u64::MAX),
+            None,
+            Some(Box::new(move || {
+                woken_tx.send(()).unwrap();
+            })),
+        )
+        .unwrap();
+        inbox
+            .deliver(
+                MessageKind::ClipboardTransfer,
+                &TransferOp::Begin {
+                    id: 1,
+                    kind: TransferKind::Image,
+                    length: 1,
+                    entries: 0,
+                    items: 1,
+                }
+                .encode(),
+            )
+            .unwrap();
+        woken
+            .recv_timeout(Duration::from_secs(2))
+            .expect("panic exit must wake writer");
+        assert!(join.join().is_err());
+        assert!(commands.closed());
+        assert!(outbox.next_timeout(Duration::from_secs(2)).is_err());
+        assert!(
+            inbox
+                .deliver(MessageKind::Clipboard, b"after panic")
+                .is_err()
+        );
+        let RemoteServe::Announce { token, .. } = served.try_recv().unwrap() else {
+            panic!("expected announcement");
+        };
+        assert!(
+            matches!(served.try_recv().unwrap(), RemoteServe::Abandon { token: abandoned } if abandoned == token)
+        );
+    }
+
+    #[test]
+    fn panicking_wake_disconnects_and_abandons_pending_receive() {
+        let (served_tx, served) = mpsc::channel();
+        let (woken_tx, woken) = mpsc::channel();
+        let (commands, join, inbox, outbox, _) = spawn_worker(
+            Recorder(served_tx),
+            options(u64::MAX),
+            None,
+            Some(Box::new(move || {
+                woken_tx.send(()).unwrap();
+                panic!("wake callback failed");
+            })),
+        )
+        .unwrap();
+        inbox
+            .deliver(
+                MessageKind::ClipboardTransfer,
+                &TransferOp::Begin {
+                    id: 1,
+                    kind: TransferKind::Image,
+                    length: 2,
+                    entries: 0,
+                    items: 1,
+                }
+                .encode(),
+            )
+            .unwrap();
+        let RemoteServe::Announce { token, .. } =
+            served.recv_timeout(Duration::from_secs(2)).unwrap()
+        else {
+            panic!("expected announcement");
+        };
+        inbox
+            .deliver(
+                MessageKind::ClipboardTransfer,
+                &TransferOp::Data {
+                    id: 1,
+                    bytes: vec![0],
+                }
+                .encode(),
+            )
+            .unwrap();
+        // First wake panics while queueing the ACK. The exit wake also panics,
+        // but both queue closure and pending-paste abandonment must still happen.
+        for _ in 0..2 {
+            woken.recv_timeout(Duration::from_secs(2)).unwrap();
+        }
+        assert!(join.join().is_err());
+        assert!(commands.closed());
+        assert!(outbox.try_next().is_err());
+        assert!(
+            matches!(served.try_recv().unwrap(), RemoteServe::Abandon { token: abandoned } if abandoned == token)
+        );
+    }
+
+    #[test]
+    fn normal_worker_stop_also_wakes_the_writer() {
+        let (served_tx, _served) = mpsc::channel();
+        let (woken_tx, woken) = mpsc::channel();
+        let (commands, join, _inbox, outbox, _) = spawn_worker(
+            Recorder(served_tx),
+            options(u64::MAX),
+            None,
+            Some(Box::new(move || {
+                woken_tx.send(()).unwrap();
+            })),
+        )
+        .unwrap();
+        commands.send(Command::Stop).unwrap();
+        woken.recv_timeout(Duration::from_secs(2)).unwrap();
+        join.join().unwrap();
+        assert!(outbox.try_next().is_err());
+    }
+
+    #[test]
+    fn queues_bound_bytes_and_records_and_fail_closed() {
+        let queue = BoundedQueue::new(2, 5);
+        queue.push(1, 3, |_| false).unwrap();
+        queue.push(2, 2, |_| false).unwrap();
+        assert!(queue.push(3, 0, |_| false).is_err());
+        assert_eq!(queue.try_recv(), Err(mpsc::TryRecvError::Disconnected));
+        let queue = BoundedQueue::new(10, 5);
+        queue.push(1, 3, |_| false).unwrap();
+        assert!(queue.push(2, 3, |_| false).is_err());
+        assert!(queue.closed());
+    }
+
+    #[test]
+    fn pending_local_copies_are_latest_only_and_stop_bypasses_capacity() {
+        let queue = BoundedQueue::<Command>::new(1, 10);
+        for n in 0..1000 {
+            queue
+                .send(Command::Local(CopiedClipboard::Text(n.to_string())))
+                .unwrap();
+        }
+        let Command::Local(CopiedClipboard::Text(text)) = queue.try_recv().unwrap() else {
+            panic!("latest copy expected");
+        };
+        assert_eq!(text, "999");
+        queue.send(Command::PeerText("full".into())).unwrap();
+        queue.send(Command::Stop).unwrap();
+        assert!(matches!(
+            queue.try_recv(),
+            Err(mpsc::TryRecvError::Disconnected)
+        ));
+    }
+
+    #[test]
+    fn cumulative_ack_coalescing_preserves_other_record_order() {
+        let queue = BoundedQueue::<Outgoing>::new(3, 100);
+        let ack = |id, consumed| Outgoing {
+            kind: MessageKind::ClipboardTransfer,
+            payload: TransferOp::Ack { id, consumed }.encode(),
+        };
+        queue.send(ack(1, 10)).unwrap();
+        queue
+            .send(Outgoing {
+                kind: MessageKind::Clipboard,
+                payload: b"text".to_vec(),
+            })
+            .unwrap();
+        queue.send(ack(1, 20)).unwrap();
+        queue.send(ack(2, 30)).unwrap();
+        assert_eq!(queue.try_recv().unwrap().kind, MessageKind::Clipboard);
+        assert_eq!(queue.try_recv().unwrap(), ack(1, 20));
+        assert_eq!(queue.try_recv().unwrap(), ack(2, 30));
+        assert!(matches!(queue.try_recv(), Err(mpsc::TryRecvError::Empty)));
+    }
+
+    #[test]
+    fn overloaded_ingress_returns_without_waiting_and_rolls_back_bytes() {
+        let commands = Arc::new(BoundedQueue::new(1, TRANSFER_CHUNK_BYTES));
+        let inbox = ClipboardInbox {
+            commands,
+            in_flight: Arc::new(AtomicU64::new(0)),
+            files: true,
+        };
+        inbox.deliver(MessageKind::Clipboard, b"text").unwrap();
+        let data = TransferOp::Data {
+            id: 1,
+            bytes: vec![1; TRANSFER_CHUNK_BYTES],
+        }
+        .encode();
+        assert!(
+            inbox
+                .deliver(MessageKind::ClipboardTransfer, &data)
+                .is_err()
+        );
+        assert_eq!(inbox.in_flight.load(Ordering::Acquire), 0);
+        assert!(inbox.commands.closed());
+    }
+
+    #[test]
+    fn a_full_outbox_does_not_block_worker_shutdown() {
+        let (mut end, _inbox, outbox) = end(options(u64::MAX));
+        for _ in 0..OUTGOING_QUEUE_RECORDS {
+            outbox
+                .records
+                .send(Outgoing {
+                    kind: MessageKind::Clipboard,
+                    payload: vec![],
+                })
+                .unwrap();
+        }
+        end.copy(CopiedClipboard::Text("overflow".into()));
+        let join = end.join.take().unwrap();
+        let (done, finished) = mpsc::channel();
+        thread::spawn(move || {
+            join.join().unwrap();
+            done.send(()).unwrap();
+        });
+        finished
+            .recv_timeout(Duration::from_secs(2))
+            .expect("worker must not block on a full outbox");
+        assert!(outbox.try_next().is_err());
+    }
+
+    #[test]
     fn transfer_ops_round_trip_and_malformed_records_are_rejected() {
         for op in [
             TransferOp::Begin {
@@ -1360,7 +1803,10 @@ mod tests {
 
     #[test]
     fn the_inbox_holds_a_peer_to_its_promises() {
-        let (commands, _keep) = mpsc::channel();
+        let commands = Arc::new(BoundedQueue::new(
+            COMMAND_QUEUE_RECORDS,
+            COMMAND_QUEUE_BYTES,
+        ));
         let inbox = ClipboardInbox {
             commands,
             in_flight: Arc::new(AtomicU64::new(0)),

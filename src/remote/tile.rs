@@ -34,8 +34,8 @@
 
 use super::RemoteResult;
 use super::frame::{
-    BoundedPayloadWriter, MAX_DIMENSION, RecyclableDecodedFrame, SharedDecodeBufferPool,
-    decode_rgb8_into_pool, invalid_data, validate_dimensions,
+    BoundedPayloadWriter, FrameDamage, MAX_DIMENSION, RecyclableDecodedFrame,
+    SharedDecodeBufferPool, decode_rgb8_into_pool, invalid_data, validate_dimensions,
 };
 use super::protocol::MAX_PAYLOAD_LEN;
 use super::x11_capture::CapturedFrame;
@@ -108,6 +108,16 @@ struct PlannedFrame {
     atlas: Option<(usize, u16, u16)>,
 }
 
+/// One capture's pixel damage, reusable while the quality controller changes epoch.
+#[derive(Debug, Clone, Copy)]
+struct DetectedFrame {
+    keyframe: bool,
+    request: TileEncodeRequest,
+    encoded: (u16, u16),
+    source: (u16, u16),
+    total_tiles: u32,
+}
+
 /// Host-side delta encoder holding the host's model of the viewer's canvas.
 #[derive(Debug)]
 pub(crate) struct TileEncoder {
@@ -128,6 +138,11 @@ pub(crate) struct TileEncoder {
     /// Dirty set of the last successful encode, awaiting commit or discard.
     pending: bool,
     planned: Option<PlannedFrame>,
+    detected: Option<DetectedFrame>,
+    /// Ordinary pixel damage only, never quality repairs.
+    detected_dirty: Vec<u32>,
+    #[cfg(test)]
+    pub(crate) detection_scans: usize,
 }
 
 impl TileEncoder {
@@ -151,6 +166,10 @@ impl TileEncoder {
             atlas: Vec::new(),
             pending: false,
             planned: None,
+            detected: None,
+            detected_dirty: Vec::new(),
+            #[cfg(test)]
+            detection_scans: 0,
         }
     }
 
@@ -177,18 +196,24 @@ impl TileEncoder {
         frame: &CapturedFrame,
         request: TileEncodeRequest,
     ) -> RemoteResult<TilePlan> {
-        self.plan_with_refinement(frame, request, None)
+        self.detect(frame, request)?;
+        self.select_refinement(None)
     }
 
-    /// Add bounded quality debt to a delta, including during local pixel changes.
-    /// This uses the existing wire format and leaves the committed debt intact
-    /// until encode, authenticated write and flush all succeed.
+    /// Test convenience for the complete detect/select operation.
+    #[cfg(test)]
     pub(crate) fn plan_with_refinement(
         &mut self,
         frame: &CapturedFrame,
         request: TileEncodeRequest,
         refinement: Option<(u8, usize)>,
     ) -> RemoteResult<TilePlan> {
+        self.detect(frame, request)?;
+        self.select_refinement(refinement)
+    }
+
+    fn detect(&mut self, frame: &CapturedFrame, request: TileEncodeRequest) -> RemoteResult<()> {
+        self.detected = None;
         self.planned = None;
         self.pending = false;
         self.pending_refinement_cursor = None;
@@ -221,6 +246,10 @@ impl TileEncoder {
                 .reference
                 .as_ref()
                 .expect("a non-keyframe always has a reference image");
+            #[cfg(test)]
+            {
+                self.detection_scans += 1;
+            }
             collect_dirty(
                 &frame.image,
                 reference,
@@ -232,6 +261,45 @@ impl TileEncoder {
             );
         }
 
+        self.detected_dirty.clone_from(&self.dirty);
+        self.detected = Some(DetectedFrame {
+            keyframe,
+            request,
+            encoded: (encoded_width, encoded_height),
+            source: (frame.source_width, frame.source_height),
+            total_tiles,
+        });
+        Ok(())
+    }
+
+    pub(crate) fn detected_dirty_tiles(&self) -> usize {
+        self.detected_dirty.len()
+    }
+
+    /// Replace quality repairs without scanning the capture again. The caller
+    /// must keep using the capture passed to plan until encode or discard.
+    pub(crate) fn select_refinement(
+        &mut self,
+        refinement: Option<(u8, usize)>,
+    ) -> RemoteResult<TilePlan> {
+        let detected = self
+            .detected
+            .ok_or_else(|| invalid_data("tile refinement selected without detection"))?;
+        let DetectedFrame {
+            keyframe,
+            request,
+            encoded: (encoded_width, encoded_height),
+            source,
+            total_tiles,
+        } = detected;
+        self.planned = None;
+        self.dirty.clone_from(&self.detected_dirty);
+        self.bitmap.fill(0);
+        for &index in &self.dirty {
+            self.bitmap[index as usize / 8] |= 1 << (index % 8);
+        }
+        let tile = self.tile();
+        let grid_w = self.grid.0;
         let mut refinement_cursor = keyframe.then_some(0);
         if !keyframe && let Some((quality, limit)) = refinement {
             let (indices, next) =
@@ -289,7 +357,7 @@ impl TileEncoder {
             refinement_cursor,
             dirty_tiles,
             encoded: (encoded_width, encoded_height),
-            source: (frame.source_width, frame.source_height),
+            source,
             columns,
             atlas,
         });
@@ -313,6 +381,7 @@ impl TileEncoder {
         frame: &CapturedFrame,
         quality: u8,
     ) -> RemoteResult<()> {
+        self.detected = None;
         payload.clear();
         let result = self.encode_inner(payload, sequence, frame, quality);
         if result.is_err() {
@@ -423,6 +492,7 @@ impl TileEncoder {
 
     /// Drop an encoded-but-unsent frame without advancing the reference.
     pub(crate) fn discard(&mut self) {
+        self.detected = None;
         self.pending = false;
         self.planned = None;
     }
@@ -556,6 +626,7 @@ impl TileEncoder {
 /// Viewer-side canvas that reassembles dirty tiles into whole frames.
 #[derive(Debug, Default)]
 pub(crate) struct TileDecoder {
+    last_sequence: Option<u64>,
     canvas: Option<RgbImage>,
     source: (u16, u16),
     atlas: Vec<u8>,
@@ -662,16 +733,31 @@ impl TileDecoder {
             );
         }
 
+        let damage = if header.keyframe {
+            None
+        } else {
+            self.last_sequence.map(|base_sequence| FrameDamage {
+                base_sequence,
+                rect: dirty_bounds(
+                    bitmap,
+                    header.encoded_width,
+                    header.encoded_height,
+                    header.tile_log2,
+                ),
+            })
+        };
         let expected_len = (canvas.as_raw().len(), canvas.dimensions());
         let image = clone_into_pool(canvas, &pool)?;
         debug_assert_eq!((image.as_raw().len(), image.dimensions()), expected_len);
+        self.last_sequence = Some(header.sequence);
         Ok(RecyclableDecodedFrame::new(
             header.sequence,
             header.source_width,
             header.source_height,
             image,
             pool,
-        ))
+        )
+        .with_damage(damage))
     }
 
     #[cfg(test)]
@@ -829,6 +915,32 @@ fn scatter_atlas(
     }
 }
 
+/// One bounded upload rectangle; disconnected damage may over-cover pixels,
+/// but never omits any update. Full snapshots remain the mailbox fallback.
+fn dirty_bounds(
+    bitmap: &[u8],
+    width: u16,
+    height: u16,
+    tile_log2: u8,
+) -> Option<(u16, u16, u16, u16)> {
+    let tile = 1usize << tile_log2;
+    let grid_w = usize::from(width).div_ceil(tile);
+    let total = grid_w * usize::from(height).div_ceil(tile);
+    let mut bounds: Option<(usize, usize, usize, usize)> = None;
+    for index in 0..total {
+        if bitmap[index / 8] & (1 << (index % 8)) == 0 {
+            continue;
+        }
+        let (x0, y0, x1, y1) =
+            tile_bounds(index, grid_w, tile, usize::from(width), usize::from(height));
+        bounds = Some(match bounds {
+            None => (x0, y0, x1, y1),
+            Some((a, b, c, d)) => (a.min(x0), b.min(y0), c.max(x1), d.max(y1)),
+        });
+    }
+    bounds.map(|(x0, y0, x1, y1)| (x0 as u16, y0 as u16, (x1 - x0) as u16, (y1 - y0) as u16))
+}
+
 fn clone_into_pool(canvas: &RgbImage, pool: &SharedDecodeBufferPool) -> RemoteResult<RgbImage> {
     let raw = canvas.as_raw();
     decode_rgb8_into_pool(canvas.width(), canvas.height(), raw.len(), pool, |pixels| {
@@ -888,6 +1000,14 @@ mod tests {
     use super::*;
     use crate::remote::frame::{MAX_PIXELS, new_decode_buffer_pool};
     use image::Rgb;
+
+    #[test]
+    fn display_damage_bounds_cover_edge_tiles_and_empty_keepalive() {
+        assert_eq!(dirty_bounds(&[0], 33, 17, 4), None);
+        assert_eq!(dirty_bounds(&[1], 33, 17, 4), Some((0, 0, 16, 16)));
+        assert_eq!(dirty_bounds(&[32], 33, 17, 4), Some((32, 16, 1, 1)));
+        assert_eq!(dirty_bounds(&[33], 33, 17, 4), Some((0, 0, 33, 17)));
+    }
 
     fn frame(width: u32, height: u32, fill: impl Fn(u32, u32) -> Rgb<u8>) -> CapturedFrame {
         let mut image = RgbImage::new(width, height);
@@ -1044,6 +1164,13 @@ mod tests {
             .decode_into(&payload, new_decode_buffer_pool())
             .expect("an empty keepalive decodes to the unchanged canvas");
         assert_eq!(decoded.image().dimensions(), source.image.dimensions());
+        assert_eq!(
+            decoded.damage(),
+            Some(FrameDamage {
+                base_sequence: 7,
+                rect: None
+            })
+        );
     }
 
     #[test]
@@ -1676,6 +1803,65 @@ mod tests {
             "a new plan invalidates an older uncommitted encode"
         );
         assert_eq!(encoder.refinement_cursor, 0);
+    }
+
+    #[test]
+    fn refinement_reselection_reuses_damage_and_drops_stale_repairs() {
+        let source = flat(64, 64, 20);
+        let mut encoder = TileEncoder::new();
+        let mut decoder = TileDecoder::new();
+        roundtrip(
+            &mut encoder,
+            &mut decoder,
+            &source,
+            70,
+            TileEncodeRequest::Keyframe,
+        );
+        let mut changed = flat(64, 64, 20);
+        changed.image.put_pixel(63, 63, Rgb([250; 3]));
+        assert_eq!(
+            encoder
+                .plan(&changed, TileEncodeRequest::Delta)
+                .unwrap()
+                .dirty_tiles,
+            1
+        );
+        assert_eq!(
+            encoder
+                .select_refinement(Some((85, 3)))
+                .unwrap()
+                .dirty_tiles,
+            4
+        );
+        assert_eq!(
+            encoder
+                .select_refinement(Some((60, 3)))
+                .unwrap()
+                .dirty_tiles,
+            1
+        );
+        assert_eq!(encoder.dirty, vec![15]);
+        assert_eq!(encoder.bitmap, vec![0, 128]);
+        assert_eq!(encoder.detection_scans, 1);
+        let mut payload = Vec::new();
+        encoder.encode_into(&mut payload, 1, &changed, 60).unwrap();
+        assert!(
+            encoder.select_refinement(Some((85, 3))).is_err(),
+            "an encoded detection cannot be reused for another capture"
+        );
+        encoder.discard();
+        encoder.commit(&changed);
+        assert_eq!(encoder.reference(), Some(&source.image));
+        assert!(encoder.qualities.iter().all(|q| *q == 70));
+        assert_eq!(encoder.refinement_cursor, 0);
+        assert_eq!(
+            encoder
+                .plan(&changed, TileEncodeRequest::Delta)
+                .unwrap()
+                .dirty_tiles,
+            1
+        );
+        assert_eq!(encoder.detection_scans, 2);
     }
 
     #[test]

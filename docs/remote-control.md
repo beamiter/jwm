@@ -1072,6 +1072,46 @@ only when those caches have stopped following notifications. `cpu-resize` and
 `no-damage` in particular are large, and each of them used to be announced only
 once, by a line that had long since scrolled away.
 
+### Machine-readable pipeline timings
+
+`jwm-remote host --stats-json` replaces the five-second human statistics line
+with a JSON object on stderr (`type: "jwm_remote_host_stats"`, schema version 1).
+Other diagnostics still use stderr, so select JSON objects by their `type`
+rather than treating every stderr line as JSON. The final partial window is
+also emitted on shutdown. Statistics contain no screen pixels, clipboard
+content, keys or input events.
+
+Each stage reports its mean and nearest-rank p50/p95/p99 over the **most recent
+128 observations per stage in that reporting window**. Means include all
+observations; the quantiles are bounded recent samples, not full-session or
+full-window percentiles. Empty quantiles are null. Counters and samples reset
+between windows. Source/encoded dimensions describe the latest captured frame
+in the window (zero dimensions mean no captured frame in that window).
+
+- `capture_ms`: the complete capture call, including readback and resizing.
+- `mailbox_age_ms`: capture completion to sender dequeue; excludes capture cost.
+- `credit_wait_ms`: sender wait for display credit before taking the mailbox.
+- `dirty_scan_ms`: tile planning, including dirty detection/refinement selection.
+- `atlas_pack_and_jpeg_ms`: combined tile atlas packing and JPEG encode; these
+  costs are not yet separated.
+- `writer_wait_ms`: waiting to acquire the shared authenticated-record writer.
+- `socket_write_ms`: record encryption, socket writes and flush after acquiring
+  the writer; it is not pure kernel/network time.
+- `capture_start_to_ack_ms`: capture **start** through the matching drawn ACK.
+  Earlier versions started this timer after capture completed, undercounting
+  the end-to-end host pipeline by the capture cost. Historical measurements
+  above retain that earlier definition and should not be compared directly.
+- `send_to_ack_ms`: publication to the credit ledger through drawn ACK,
+  including writer contention, transport, viewer processing and presentation.
+  This is application feedback latency, **not network RTT**.
+
+The record includes package version and optional compile-time
+`JWM_BUILD_COMMIT` (null when not supplied). For reproducible benchmark builds,
+set `JWM_BUILD_COMMIT=$(git rev-parse HEAD)` in the build environment and record
+whether the checkout is dirty, the backend, driver, monitor topology, refresh
+rate, and full benchmark command alongside the output. No hardware performance
+improvement is implied by these instrumentation changes.
+
 ### Half-drawn frames on NVIDIA
 
 Symptom: the viewer flashes the bare, blurred wallpaper for a frame or a few,

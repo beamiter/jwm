@@ -14,6 +14,7 @@ use super::protocol::{
     MAX_PAYLOAD_LEN, MessageKind, PayloadBufferRetention, ProtocolError, SessionReader,
     SessionWriter, client_handshake,
 };
+use super::sender::{RecordWriter, Sender};
 use super::tile::TileDecoder;
 use super::usability::{ClientStage, failure_hint, session_mode};
 use super::x11_input::InputEvent;
@@ -136,7 +137,7 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
     let stream = connect_with_timeout(&options.address, CONNECT_TIMEOUT)?;
     *stage = ClientStage::Negotiate;
     eprintln!("jwm-remote: connection opened; authenticating and negotiating permissions");
-    let (mut reader, mut writer, hello) = negotiate_session(
+    let (mut reader, writer, hello) = negotiate_session(
         stream,
         &key,
         request_input,
@@ -255,6 +256,17 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
         &options.peer_label,
     )?;
     viewer.set_clipboard_status(hello.clipboard_enabled);
+    let control = writer.get_ref().try_clone()?;
+    let sender_state = Arc::clone(&state);
+    let mut writer = Sender::spawn(
+        writer,
+        hello.pointer_enabled || hello.keyboard_enabled,
+        move |kind| {
+            if kind == MessageKind::FrameAck {
+                sender_state.telemetry.record_acked();
+            }
+        },
+    )?;
     let mut first_frame_presented = false;
     draw_and_ack(&mut writer, first_frame, &state.telemetry, |frame| {
         first_frame_presented = viewer.draw_recyclable(frame)?;
@@ -283,7 +295,6 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
         );
     }
 
-    let control = writer.get_ref().try_clone()?;
     let mut cancel = SessionCancel::new(control, Arc::clone(&state));
     let receive_state = Arc::clone(&state);
     let receiver = ReceiverThread::spawn(move || {
@@ -526,7 +537,7 @@ fn read_initial_frame_records<R: io::Read>(
 
 fn viewer_loop(
     viewer: &mut Viewer,
-    writer: &mut SessionWriter<TcpStream>,
+    writer: &mut Sender,
     state: &ReceiveState,
     pointer_enabled: bool,
     keyboard_enabled: bool,
@@ -633,9 +644,9 @@ fn viewer_loop(
     }
 }
 
-fn forward_viewer_clipboard_from<W: std::io::Write>(
+fn forward_viewer_clipboard_from(
     mut receive: impl FnMut() -> Result<Option<Outgoing>, std::sync::mpsc::RecvError>,
-    writer: &mut SessionWriter<W>,
+    writer: &mut impl RecordWriter,
     closing: bool,
 ) -> RemoteResult<bool> {
     if closing {
@@ -744,8 +755,8 @@ fn for_each_input_batch(
     Ok(outcome)
 }
 
-fn write_input_batch<W: std::io::Write>(
-    writer: &mut SessionWriter<W>,
+fn write_input_batch(
+    writer: &mut impl RecordWriter,
     events: &[InputEvent],
     payload: &mut Vec<u8>,
 ) -> RemoteResult<()> {
@@ -754,8 +765,8 @@ fn write_input_batch<W: std::io::Write>(
     Ok(())
 }
 
-fn draw_and_ack<W: std::io::Write>(
-    writer: &mut SessionWriter<W>,
+fn draw_and_ack(
+    writer: &mut impl RecordWriter,
     queued: QueuedFrame,
     telemetry: &ClientTelemetry,
     draw: impl FnOnce(RecyclableDecodedFrame) -> RemoteResult<bool>,
@@ -770,7 +781,9 @@ fn draw_and_ack<W: std::io::Write>(
     telemetry.record_drawn_at(queued.ready_at, draw_started, draw_finished);
     writer.write_message(MessageKind::FrameAck, &encode_frame_ack(sequence))?;
     writer.flush()?;
-    telemetry.record_acked();
+    if !writer.queued() {
+        telemetry.record_acked();
+    }
     Ok(())
 }
 
@@ -1076,11 +1089,7 @@ impl SessionCancel {
         }
     }
 
-    fn cancel(
-        &mut self,
-        writer: &mut SessionWriter<TcpStream>,
-        graceful_close: bool,
-    ) -> RemoteResult<()> {
+    fn cancel(&mut self, writer: &mut impl RecordWriter, graceful_close: bool) -> RemoteResult<()> {
         if self.cancelled {
             return Ok(());
         }
@@ -1091,8 +1100,7 @@ impl SessionCancel {
         if graceful_close && !self.close_attempted {
             self.close_attempted = true;
             let close_result: RemoteResult<()> = (|| {
-                writer.write_message(MessageKind::Close, &[])?;
-                writer.flush()?;
+                writer.close()?;
                 Ok(())
             })();
             if let Err(error) = close_result {

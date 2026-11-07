@@ -19,8 +19,8 @@ use super::protocol::{
 use super::tile::{TileEncodeRequest, TileEncoder, TilePlan};
 use super::usability::listener_bind_error;
 use super::x11_capture::{
-    CaptureArea, CaptureMode, CaptureOutcome, CaptureSource, CapturedFrame, ScalingPolicy,
-    X11Capture, validate_capture_area,
+    CaptureArea, CaptureImageRecycler, CaptureMode, CaptureOutcome, CaptureSource, CapturedFrame,
+    ScalingPolicy, X11Capture, validate_capture_area,
 };
 use super::x11_input::{InputArea, InputInjector};
 use super::x11_keymap::{KeymapMatch, KeymapTable};
@@ -354,6 +354,19 @@ fn poisoned_writer() -> io::Error {
 struct PendingFrame {
     frame: CapturedFrame,
     captured_at: Instant,
+    capture_completed_at: Instant,
+    recycler: Option<CaptureImageRecycler>,
+}
+
+impl Drop for PendingFrame {
+    fn drop(&mut self) {
+        if let Some(recycler) = &self.recycler {
+            // The encoder borrows frames and copies committed dirty tiles to
+            // its own reference. No sender or mailbox reader can retain this
+            // image when PendingFrame is dropped, including early-error paths.
+            recycler.recycle_image(std::mem::take(&mut self.frame.image));
+        }
+    }
 }
 
 /// Chooses what each captured frame owes the viewer and encodes it.
@@ -408,28 +421,13 @@ impl FrameSender {
         static_refinement_due(self.last_content_change, self.last_refinement, now)
     }
 
-    fn refine_at(
-        &mut self,
-        frame: &CapturedFrame,
-        quality: u8,
-        now: Instant,
-    ) -> RemoteResult<TilePlan> {
-        let request = if self.committed_at.is_some_and(|committed| {
-            now.saturating_duration_since(committed) >= UNCHANGED_FRAME_KEEPALIVE
-        }) {
-            TileEncodeRequest::Keepalive
-        } else {
-            TileEncodeRequest::Delta
-        };
-        let ordinary = self.encoder.plan(frame, request)?;
-        let limit = if ordinary.dirty_tiles == 0 {
+    fn refine_at(&mut self, quality: u8, now: Instant) -> RemoteResult<TilePlan> {
+        let limit = if self.encoder.detected_dirty_tiles() == 0 {
             IDLE_REFINEMENT_TILES
         } else {
             STATIC_REFINEMENT_TILES
         };
-        let plan = self
-            .encoder
-            .plan_with_refinement(frame, request, Some((quality, limit)))?;
+        let plan = self.encoder.select_refinement(Some((quality, limit)))?;
         self.pending_refinement = plan.dirty_tiles > 0;
         self.pending_refinement_at = self.pending_refinement.then_some(now);
         Ok(plan)
@@ -473,6 +471,45 @@ fn static_refinement_due(changed: Option<Instant>, refined: Option<Instant>, now
     now.saturating_duration_since(last) >= STATIC_REFINEMENT_INTERVAL
 }
 
+/// Exact quantiles of the most recent 128 observations in each reporting window.
+/// Fixed storage bounds memory even when a peer runs for a long time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct StageSamples {
+    micros: [u64; 128],
+    count: usize,
+    next: usize,
+}
+
+impl Default for StageSamples {
+    fn default() -> Self {
+        Self {
+            micros: [0; 128],
+            count: 0,
+            next: 0,
+        }
+    }
+}
+
+impl StageSamples {
+    fn record(&mut self, elapsed: Duration) {
+        self.micros[self.next] = elapsed.as_micros().min(u128::from(u64::MAX)) as u64;
+        self.next = (self.next + 1) % self.micros.len();
+        self.count = (self.count + 1).min(self.micros.len());
+    }
+
+    fn json(self) -> serde_json::Value {
+        if self.count == 0 {
+            return serde_json::json!({"samples": 0, "p50_ms": null, "p95_ms": null, "p99_ms": null});
+        }
+        let mut values = self.micros;
+        values[..self.count].sort_unstable();
+        let percentile =
+            |percent: usize| values[(self.count * percent).div_ceil(100) - 1] as f64 / 1000.0;
+        serde_json::json!({"samples": self.count, "p50_ms": percentile(50),
+            "p95_ms": percentile(95), "p99_ms": percentile(99)})
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct HostTelemetryWindow {
     scheduled: u64,
@@ -496,6 +533,21 @@ struct HostTelemetryWindow {
     viewer_superseded: u64,
     capture_mode: CaptureMode,
     capture_elapsed: Duration,
+    dirty_scan_elapsed: Duration,
+    dirty_scans: u64,
+    writer_wait_elapsed: Duration,
+    socket_write_elapsed: Duration,
+    source_dimensions: (u16, u16),
+    encoded_dimensions: (u32, u32),
+    capture_samples: StageSamples,
+    queue_samples: StageSamples,
+    credit_samples: StageSamples,
+    dirty_scan_samples: StageSamples,
+    encode_samples: StageSamples,
+    writer_wait_samples: StageSamples,
+    socket_write_samples: StageSamples,
+    capture_to_ack_samples: StageSamples,
+    send_to_ack_samples: StageSamples,
     queue_elapsed: Duration,
     credit_wait_elapsed: Duration,
     encode_elapsed: Duration,
@@ -535,6 +587,7 @@ struct HostTelemetryState {
 }
 
 struct HostTelemetry {
+    stats_json: bool,
     state: Mutex<HostTelemetryState>,
 }
 
@@ -551,6 +604,7 @@ impl HostTelemetry {
 
     fn new_at(now: Instant) -> Self {
         Self {
+            stats_json: false,
             state: Mutex::new(HostTelemetryState {
                 window_started: now,
                 window: HostTelemetryWindow::default(),
@@ -587,6 +641,7 @@ impl HostTelemetry {
     fn record_captured(&self, elapsed: Duration) {
         self.update(|window| {
             window.captured = window.captured.saturating_add(1);
+            window.capture_samples.record(elapsed);
             window.capture_elapsed = window.capture_elapsed.saturating_add(elapsed);
         });
     }
@@ -603,6 +658,8 @@ impl HostTelemetry {
     fn record_dequeued(&self, queue_age: Duration, credit_wait: Duration) {
         self.update(|window| {
             window.dequeued = window.dequeued.saturating_add(1);
+            window.queue_samples.record(queue_age);
+            window.credit_samples.record(credit_wait);
             window.queue_elapsed = window.queue_elapsed.saturating_add(queue_age);
             window.credit_wait_elapsed = window.credit_wait_elapsed.saturating_add(credit_wait);
             window.max_queue_age = window.max_queue_age.max(queue_age);
@@ -624,6 +681,7 @@ impl HostTelemetry {
     fn record_encoded(&self, elapsed: Duration, plan: TilePlan) {
         self.update(|window| {
             window.encoded = window.encoded.saturating_add(1);
+            window.encode_samples.record(elapsed);
             window.encode_elapsed = window.encode_elapsed.saturating_add(elapsed);
             if plan.keyframe {
                 window.keyframes = window.keyframes.saturating_add(1);
@@ -634,6 +692,30 @@ impl HostTelemetry {
             window.total_tiles = window
                 .total_tiles
                 .saturating_add(u64::from(plan.total_tiles));
+        });
+    }
+
+    fn record_dirty_scan(&self, elapsed: Duration) {
+        self.update(|window| {
+            window.dirty_scans = window.dirty_scans.saturating_add(1);
+            window.dirty_scan_elapsed = window.dirty_scan_elapsed.saturating_add(elapsed);
+            window.dirty_scan_samples.record(elapsed);
+        });
+    }
+
+    fn record_dimensions(&self, frame: &CapturedFrame) {
+        self.update(|window| {
+            window.source_dimensions = (frame.source_width, frame.source_height);
+            window.encoded_dimensions = frame.image.dimensions();
+        });
+    }
+
+    fn record_write_stages(&self, wait: Duration, socket: Duration) {
+        self.update(|window| {
+            window.writer_wait_elapsed = window.writer_wait_elapsed.saturating_add(wait);
+            window.socket_write_elapsed = window.socket_write_elapsed.saturating_add(socket);
+            window.writer_wait_samples.record(wait);
+            window.socket_write_samples.record(socket);
         });
     }
 
@@ -659,6 +741,8 @@ impl HostTelemetry {
             window.viewer_superseded = window
                 .viewer_superseded
                 .saturating_add(ack.retired.saturating_sub(1));
+            window.capture_to_ack_samples.record(ack.capture_to_ack);
+            window.send_to_ack_samples.record(ack.send_to_ack);
             window.capture_to_ack = window.capture_to_ack.saturating_add(ack.capture_to_ack);
             window.send_to_ack = window.send_to_ack.saturating_add(ack.send_to_ack);
         });
@@ -1404,6 +1488,8 @@ pub struct HostOptions {
     /// Largest file copy shared through the clipboard; 0 shares no files.
     pub clipboard_file_limit: u64,
     pub once: bool,
+    /// Emit machine-readable host telemetry as JSON lines on stderr.
+    pub stats_json: bool,
 }
 
 /// Startup notice for a listener reachable beyond loopback.
@@ -1882,7 +1968,9 @@ fn serve_authenticated(
     let running = Arc::new(AtomicBool::new(true));
     let first_stop = Arc::new(FirstStop::new());
     let credits = Arc::new(FrameCredits::new());
-    let telemetry = Arc::new(HostTelemetry::new());
+    let mut telemetry = HostTelemetry::new();
+    telemetry.stats_json = options.stats_json;
+    let telemetry = Arc::new(telemetry);
     let jpeg_quality = Arc::new(JpegQualityController::new_at(
         options.jpeg_quality,
         options.jpeg_quality_floor,
@@ -2172,10 +2260,14 @@ fn stream_frames(
                 telemetry.record_damage_skipped();
                 continue;
             };
-            telemetry.record_captured(capture_started.elapsed());
+            let capture_completed_at = Instant::now();
+            telemetry.record_captured(capture_completed_at.duration_since(capture_started));
+            telemetry.record_dimensions(&frame);
             let pending = PendingFrame {
                 frame,
-                captured_at: Instant::now(),
+                captured_at: capture_started,
+                capture_completed_at,
+                recycler: Some(capture.image_recycler()),
             };
             let Some(replaced) = mailbox.publish(pending) else {
                 if !running.load(Ordering::Acquire) || shutdown.load(Ordering::Acquire) {
@@ -2302,7 +2394,7 @@ fn send_frames_with_encoder<W: std::io::Write + SetWriteTimeout>(
         let Some(pending) = mailbox.receive()? else {
             break;
         };
-        telemetry.record_dequeued(pending.captured_at.elapsed(), ack_wait);
+        telemetry.record_dequeued(pending.capture_completed_at.elapsed(), ack_wait);
         if !running.load(Ordering::Acquire) {
             break;
         }
@@ -2311,9 +2403,10 @@ fn send_frames_with_encoder<W: std::io::Write + SetWriteTimeout>(
         if !plan.keyframe && sender.refinement_due(planned_at) {
             let current = jpeg_quality.current_quality();
             if sender.encoder.has_quality_debt(current) {
-                plan = sender.refine_at(&pending.frame, current, planned_at)?;
+                plan = sender.refine_at(current, planned_at)?;
             }
         }
+        telemetry.record_dirty_scan(planned_at.elapsed());
         if !plan.emit {
             telemetry.record_unchanged_suppressed();
             continue;
@@ -2323,7 +2416,7 @@ fn send_frames_with_encoder<W: std::io::Write + SetWriteTimeout>(
             // Pending ACKs can lower quality after the read-only debt check.
             // Replan at the actual epoch's quality, never upgrading debt using
             // a stale pre-congestion target or overwriting a sharper tile.
-            plan = sender.refine_at(&pending.frame, quality.quality, planned_at)?;
+            plan = sender.refine_at(quality.quality, planned_at)?;
         }
         let unchanged_keepalive = plan.dirty_tiles == 0;
         if let Some(adjustment) = quality.adjustment {
@@ -2369,7 +2462,15 @@ fn send_frames_with_encoder<W: std::io::Write + SetWriteTimeout>(
         // authenticated stream, and clipboard traffic shares this writer.
         let write_result = {
             let mut writer = lock_writer(&writer);
-            write_frame_record(&mut writer, &payload, FRAME_WRITE_DEADLINE)
+            let socket_started = Instant::now();
+            let result = write_frame_record(&mut writer, &payload, FRAME_WRITE_DEADLINE);
+            if result.is_ok() {
+                telemetry.record_write_stages(
+                    socket_started.duration_since(write_started),
+                    socket_started.elapsed(),
+                );
+            }
+            result
         };
         if let Err(error) = write_result {
             // The viewer never applied these tiles, so the encoder's model of
@@ -2569,7 +2670,7 @@ fn report_host_if_due(telemetry: &HostTelemetry, credits: &FrameCredits, now: In
         return;
     };
     let outstanding = credits.outstanding();
-    print_host_telemetry(snapshot, outstanding);
+    print_host_telemetry(snapshot, outstanding, telemetry.stats_json);
 }
 
 fn report_host_final(telemetry: &HostTelemetry, credits: &FrameCredits, now: Instant) {
@@ -2577,10 +2678,42 @@ fn report_host_final(telemetry: &HostTelemetry, credits: &FrameCredits, now: Ins
         return;
     };
     let outstanding = credits.outstanding();
-    print_host_telemetry(snapshot, outstanding);
+    print_host_telemetry(snapshot, outstanding, telemetry.stats_json);
 }
 
-fn print_host_telemetry(snapshot: HostTelemetrySnapshot, outstanding: u64) {
+fn host_telemetry_json(snapshot: HostTelemetrySnapshot, outstanding: u64) -> serde_json::Value {
+    let w = snapshot.window;
+    serde_json::json!({
+        "type": "jwm_remote_host_stats", "schema_version": 1,
+        "version": env!("CARGO_PKG_VERSION"),
+        "commit": option_env!("JWM_BUILD_COMMIT"),
+        "window_seconds": snapshot.elapsed.as_secs_f64(), "mode": w.capture_mode.describe(),
+        "source_dimensions": w.source_dimensions, "encoded_dimensions": w.encoded_dimensions,
+        "scheduled": w.scheduled, "captured": w.captured, "sent": w.sent, "bytes": w.bytes,
+        "replaced": w.replaced, "unchanged_suppressed": w.unchanged_suppressed,
+        "dirty_tiles": w.dirty_tiles, "total_tiles": w.total_tiles,
+        "drawn_acks": w.drawn_acks, "viewer_superseded": w.viewer_superseded,
+        "outstanding": outstanding, "max_outstanding": w.max_outstanding,
+        "quantile_policy": "nearest-rank, most recent 128 observations per stage per window",
+        "stages": {
+            "capture_ms": {"mean": average_millis(w.capture_elapsed, w.captured), "quantiles": w.capture_samples.json()},
+            "mailbox_age_ms": {"mean": average_millis(w.queue_elapsed, w.dequeued), "quantiles": w.queue_samples.json()},
+            "credit_wait_ms": {"mean": average_millis(w.credit_wait_elapsed, w.dequeued), "quantiles": w.credit_samples.json()},
+            "dirty_scan_ms": {"mean": average_millis(w.dirty_scan_elapsed, w.dirty_scans), "quantiles": w.dirty_scan_samples.json()},
+            "atlas_pack_and_jpeg_ms": {"mean": average_millis(w.encode_elapsed, w.encoded), "quantiles": w.encode_samples.json()},
+            "writer_wait_ms": {"mean": average_millis(w.writer_wait_elapsed, w.sent), "quantiles": w.writer_wait_samples.json()},
+            "socket_write_ms": {"mean": average_millis(w.socket_write_elapsed, w.sent), "quantiles": w.socket_write_samples.json()},
+            "capture_start_to_ack_ms": {"mean": average_millis(w.capture_to_ack, w.drawn_acks), "quantiles": w.capture_to_ack_samples.json()},
+            "send_to_ack_ms": {"mean": average_millis(w.send_to_ack, w.drawn_acks), "quantiles": w.send_to_ack_samples.json()}
+        }
+    })
+}
+
+fn print_host_telemetry(snapshot: HostTelemetrySnapshot, outstanding: u64, stats_json: bool) {
+    if stats_json {
+        eprintln!("{}", host_telemetry_json(snapshot, outstanding));
+        return;
+    }
     let window = snapshot.window;
     let seconds = snapshot.elapsed.as_secs_f64();
     let sent_fps = if seconds == 0.0 {
@@ -2599,7 +2732,7 @@ fn print_host_telemetry(snapshot: HostTelemetrySnapshot, outstanding: u64) {
         window.dirty_tiles as f64 * 100.0 / window.total_tiles as f64
     };
     eprintln!(
-        "jwm-remote: host {:.1}s mode {} scheduled {} captured {} skipped {} damage-skipped {} published {} replaced {} dequeued {} unchanged-suppressed {} unchanged-keepalive {} encoded {} keyframes {} tiles {}/{} ({tile_percent:.1}% dirty) sent {} ({sent_fps:.1} fps, {megabits_per_second:.2} Mbit/s) bytes {} drawn-acks {} retired {} viewer-superseded {} drawn-bytes {}; avg capture/queue/credit-wait/encode/write/capture-to-ACK/send-to-ACK {:.1}/{:.1}/{:.1}/{:.1}/{:.1}/{:.1}/{:.1} ms; outstanding current/max {outstanding}/{}, max-queue {:.1} ms",
+        "jwm-remote: host {:.1}s mode {} scheduled {} captured {} skipped {} damage-skipped {} published {} replaced {} dequeued {} unchanged-suppressed {} unchanged-keepalive {} encoded {} keyframes {} tiles {}/{} ({tile_percent:.1}% dirty) sent {} ({sent_fps:.1} fps, {megabits_per_second:.2} Mbit/s) bytes {} drawn-acks {} retired {} viewer-superseded {} drawn-bytes {}; avg capture/queue/credit-wait/encode/write/capture-start-to-ACK/send-to-ACK {:.1}/{:.1}/{:.1}/{:.1}/{:.1}/{:.1}/{:.1} ms; outstanding current/max {outstanding}/{}, max-queue {:.1} ms",
         seconds,
         window.capture_mode.describe(),
         window.scheduled,
@@ -3615,7 +3748,30 @@ mod tests {
         PendingFrame {
             frame: test_captured_frame(red),
             captured_at: Instant::now(),
+            capture_completed_at: Instant::now(),
+            recycler: None,
         }
+    }
+
+    #[test]
+    fn pending_frame_returns_storage_on_drop_and_mailbox_replacement() {
+        let recycler = CaptureImageRecycler::default();
+        let recycled_frame = || {
+            let mut pending = test_pending_frame(3);
+            pending.recycler = Some(recycler.clone());
+            pending
+        };
+        let mailbox = LatestMailbox::new();
+        assert_eq!(mailbox.publish(recycled_frame()), Some(false));
+        assert_eq!(recycler.cached_images(), 0);
+        assert_eq!(mailbox.publish(recycled_frame()), Some(true));
+        assert_eq!(recycler.cached_images(), 1);
+        drop(mailbox.receive().unwrap().unwrap());
+        assert_eq!(recycler.cached_images(), 2);
+        // Closing/rejecting a late publication also drops its owned frame.
+        mailbox.close();
+        assert_eq!(mailbox.publish(recycled_frame()), None);
+        assert_eq!(recycler.cached_images(), 2, "pool remains bounded");
     }
 
     fn loopback_pair() -> (TcpStream, TcpStream) {
@@ -3944,6 +4100,7 @@ mod tests {
             allow_clipboard: false,
             clipboard_file_limit: 0,
             once: false,
+            stats_json: false,
         };
         assert!(!options.allow_lan);
         assert!(!options.allow_input);
@@ -4728,6 +4885,82 @@ mod tests {
     }
 
     #[test]
+    fn telemetry_quantiles_are_bounded_and_empty_values_are_null() {
+        let mut samples = StageSamples::default();
+        assert_eq!(samples.json()["samples"], 0);
+        assert!(samples.json()["p99_ms"].is_null());
+        for millis in 1..=256 {
+            samples.record(Duration::from_millis(millis));
+        }
+        let json = samples.json();
+        assert_eq!(json["samples"], 128);
+        assert_eq!(json["p50_ms"], 192.0);
+        assert_eq!(json["p95_ms"], 250.0);
+        assert_eq!(json["p99_ms"], 255.0);
+    }
+
+    #[test]
+    fn telemetry_json_reports_distinct_pipeline_stages_and_resets_samples() {
+        let base = Instant::now();
+        let telemetry = HostTelemetry::new_at(base);
+        telemetry.record_dimensions(&test_captured_frame(0));
+        telemetry.record_captured(Duration::from_millis(30));
+        telemetry.record_dequeued(Duration::from_millis(5), Duration::from_millis(7));
+        telemetry.record_dirty_scan(Duration::from_millis(4));
+        telemetry.record_encoded(Duration::from_millis(6), test_tile_plan(1, 4));
+        telemetry.record_write_stages(Duration::from_millis(2), Duration::from_millis(3));
+        telemetry.record_sent(100, Duration::from_millis(5));
+        let snapshot = telemetry.take_due_at(base + TELEMETRY_INTERVAL).unwrap();
+        let json = host_telemetry_json(snapshot, 1);
+        let parsed: serde_json::Value = serde_json::from_str(&json.to_string()).unwrap();
+        assert_eq!(parsed["type"], "jwm_remote_host_stats");
+        assert_eq!(parsed["source_dimensions"], serde_json::json!([2, 2]));
+        assert_eq!(parsed["stages"]["capture_ms"]["mean"], 30.0);
+        assert_eq!(parsed["stages"]["mailbox_age_ms"]["mean"], 5.0);
+        assert_eq!(parsed["stages"]["dirty_scan_ms"]["mean"], 4.0);
+        assert_eq!(parsed["stages"]["writer_wait_ms"]["mean"], 2.0);
+        assert_eq!(parsed["stages"]["socket_write_ms"]["mean"], 3.0);
+        let reset = telemetry
+            .take_due_at(base + TELEMETRY_INTERVAL * 2)
+            .unwrap();
+        assert_eq!(reset.window.capture_samples.count, 0);
+        assert_eq!(reset.window.dirty_scans, 0);
+    }
+
+    #[test]
+    fn capture_start_ack_latency_includes_readback_but_queue_age_does_not() {
+        let base = Instant::now();
+        let pending = PendingFrame {
+            frame: test_captured_frame(0),
+            captured_at: base,
+            capture_completed_at: base + Duration::from_millis(30),
+            recycler: None,
+        };
+        let dequeued = base + Duration::from_millis(35);
+        assert_eq!(
+            dequeued.duration_since(pending.capture_completed_at),
+            Duration::from_millis(5)
+        );
+        let credits = FrameCredits::new();
+        credits
+            .mark_sent(
+                0,
+                pending.captured_at,
+                base + Duration::from_millis(45),
+                100,
+                70,
+                0,
+            )
+            .unwrap();
+        let ack = credits
+            .acknowledge_at(0, base + Duration::from_millis(60))
+            .unwrap()
+            .unwrap();
+        assert_eq!(ack.capture_to_ack, Duration::from_millis(60));
+        assert_eq!(ack.send_to_ack, Duration::from_millis(15));
+    }
+
+    #[test]
     fn telemetry_preserves_stage_counts_and_cross_window_ack_conservation() {
         let base = Instant::now();
         let telemetry = HostTelemetry::new_at(base);
@@ -5439,7 +5672,7 @@ mod tests {
         assert!(sender.refinement_due(base + STATIC_REFINEMENT_INTERVAL));
         let at = base + STATIC_REFINEMENT_INTERVAL;
         assert!(!sender.plan_at(&source, at).unwrap().emit);
-        let plan = sender.refine_at(&source, 85, at).unwrap();
+        let plan = sender.refine_at(85, at).unwrap();
         assert_eq!(plan.dirty_tiles, 1);
         let mut payload = Vec::new();
         sender
@@ -5449,7 +5682,8 @@ mod tests {
         sender.discard();
         assert!(sender.refinement_due(at));
         assert!(sender.encoder.has_quality_debt(85));
-        sender.refine_at(&source, 85, at).unwrap();
+        sender.plan_at(&source, at).unwrap();
+        sender.refine_at(85, at).unwrap();
         sender
             .encoder
             .encode_into(&mut payload, 1, &source, 85)
@@ -5488,13 +5722,20 @@ mod tests {
         let source = test_captured_frame(10);
         accept_frame(&mut sender, &source, base);
         let at = base + STATIC_REFINEMENT_INTERVAL;
-        assert!(sender.refine_at(&source, 85, at).unwrap().emit);
+        sender.plan_at(&source, at).unwrap();
+        assert!(sender.refine_at(85, at).unwrap().emit);
         assert!(sender.pending_refinement);
-        assert!(!sender.refine_at(&source, 60, at).unwrap().emit);
+        assert_eq!(sender.encoder.detection_scans, 1);
+        assert!(!sender.refine_at(60, at).unwrap().emit);
+        assert_eq!(
+            sender.encoder.detection_scans, 1,
+            "quality epoch changes must reuse the capture's dirty detection"
+        );
         assert!(!sender.pending_refinement);
         assert!(sender.encoder.has_quality_debt(85));
         let at = base + UNCHANGED_FRAME_KEEPALIVE;
-        let plan = sender.refine_at(&source, 60, at).unwrap();
+        sender.plan_at(&source, at).unwrap();
+        let plan = sender.refine_at(60, at).unwrap();
         assert!(
             plan.emit && plan.dirty_tiles == 0,
             "cancelled debt must not starve keepalive"
@@ -5584,13 +5825,8 @@ mod tests {
         assert!(sender.encoder.has_quality_debt(85));
         assert!(!sender.pending_refinement);
         assert_eq!(telemetry.state.lock().unwrap().window.sent, 0);
-        assert!(
-            sender
-                .refine_at(&source, 85, Instant::now())
-                .unwrap()
-                .dirty_tiles
-                > 0
-        );
+        sender.plan_at(&source, Instant::now()).unwrap();
+        assert!(sender.refine_at(85, Instant::now()).unwrap().dirty_tiles > 0);
     }
     #[test]
     fn refinement_commit_clock_avoids_double_tick_and_stall_catchup() {

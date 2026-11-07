@@ -31,7 +31,7 @@ use x11rb::rust_connection::RustConnection;
 use x11rb::wrapper::ConnectionExt as _;
 use x11rb::x11_utils::{TryParseFd, X11Error};
 
-use super::frame::{DecodedFrame, RecyclableDecodedFrame};
+use super::frame::{DecodedFrame, FrameDamage, RecyclableDecodedFrame};
 use super::pacing::EventPollBudget;
 use super::usability::viewer_title;
 use super::{RemoteError, RemoteResult};
@@ -120,6 +120,13 @@ impl StoredFrame {
             source_width: frame.source_width(),
             source_height: frame.source_height(),
             image: StoredImage::Recyclable(frame),
+        }
+    }
+
+    fn damage(&self) -> Option<FrameDamage> {
+        match &self.image {
+            StoredImage::Owned(_) => None,
+            StoredImage::Recyclable(frame) => frame.damage(),
         }
     }
 
@@ -251,6 +258,7 @@ pub struct Viewer {
     pixel_layout: PixelLayout,
     native_pixel_writer: NativePixelWriter,
     native_image: Option<XImage<'static>>,
+    native_patch: Option<XImage<'static>>,
     shm_upload: ShmUpload,
     render_upscale: RenderUpscale,
     width: u16,
@@ -566,6 +574,7 @@ impl Viewer {
             pixel_layout,
             native_pixel_writer,
             native_image: None,
+            native_patch: None,
             shm_upload,
             render_upscale,
             width: initial_width,
@@ -885,8 +894,14 @@ impl Viewer {
         }
         self.apply_pending_resize()?;
         validate_frame(&frame)?;
+        // A mailbox can skip decoded snapshots. Only apply damage when its
+        // exact predecessor is already displayed; otherwise the full image
+        // includes every missed delta and safely restores convergence.
+        let incremental = self.try_incremental_frame(&frame)?;
         replace_stored_frame(&mut self.last_frame, frame);
-        self.backing_valid = false;
+        if !incremental {
+            self.backing_valid = false;
+        }
         if let Err(error) = self.redraw() {
             clear_stored_frame(&mut self.last_frame);
             return Err(error);
@@ -896,6 +911,61 @@ impl Viewer {
             clear_stored_frame(&mut self.last_frame);
         }
         Ok(!self.closed)
+    }
+
+    /// Update a retained native-size pixmap without converting/uploading the
+    /// unchanged pixels. Scaled or invalidated backing always uses the existing
+    /// full path. SHM completion still precedes presentation and frame ACK.
+    fn try_incremental_frame(&mut self, frame: &StoredFrame) -> RemoteResult<bool> {
+        let Some(previous) = self.last_frame.as_ref() else {
+            return Ok(false);
+        };
+        let Some(damage) = frame.damage() else {
+            return Ok(false);
+        };
+        if !self.backing_valid || !damage_base_matches(previous, frame, damage) {
+            return Ok(false);
+        }
+        let (w, h) = frame.image().dimensions();
+        let Some(geometry) = letterbox(self.width, self.height, w as u16, h as u16) else {
+            return Ok(false);
+        };
+        if (u32::from(geometry.width), u32::from(geometry.height)) != (w, h)
+            || self.backing_letterbox != Some(geometry)
+        {
+            return Ok(false);
+        }
+        if let Some((x, y, width, height)) = damage.rect {
+            let image = ensure_native_image(
+                &mut self.native_patch,
+                width,
+                height,
+                self.depth,
+                self.conn.setup(),
+            )?;
+            write_native_region(
+                image,
+                frame.image(),
+                x,
+                y,
+                self.pixel_layout,
+                self.native_pixel_writer,
+            )?;
+            let dst_x = i16::try_from(u32::from(geometry.x) + u32::from(x))
+                .map_err(|_| invalid_data("damage X offset exceeds X11 range"))?;
+            let dst_y = i16::try_from(u32::from(geometry.y) + u32::from(y))
+                .map_err(|_| invalid_data("damage Y offset exceeds X11 range"))?;
+            self.shm_upload.upload_or_core(
+                &self.conn,
+                image,
+                self.backing,
+                self.gc,
+                dst_x,
+                dst_y,
+                &mut self.deferred_events,
+            )?;
+        }
+        Ok(true)
     }
 
     /// Current viewable size in pixels.
@@ -2511,6 +2581,67 @@ fn ensure_native_image<'a>(
         .ok_or_else(|| invalid_data("native X11 image buffer was not allocated").into())
 }
 
+fn damage_base_matches(previous: &StoredFrame, frame: &StoredFrame, damage: FrameDamage) -> bool {
+    previous.sequence == damage.base_sequence
+        && previous.image().dimensions() == frame.image().dimensions()
+        && (previous.source_width, previous.source_height)
+            == (frame.source_width, frame.source_height)
+}
+
+/// Convert only a bounded source rectangle into a compact upload image.
+fn write_native_region(
+    image: &mut XImage<'_>,
+    rgb: &RgbImage,
+    x: u16,
+    y: u16,
+    pixel_layout: PixelLayout,
+    writer: NativePixelWriter,
+) -> RemoteResult<()> {
+    let width = image.width();
+    let height = image.height();
+    if u32::from(x) + u32::from(width) > rgb.width()
+        || u32::from(y) + u32::from(height) > rgb.height()
+    {
+        return Err(invalid_data("damage rectangle exceeds decoded image").into());
+    }
+    let fast = writer == NativePixelWriter::Bgrx32
+        && image.depth() == 24
+        && image.bits_per_pixel() == BitsPerPixel::B32
+        && image.scanline_pad() == ScanlinePad::Pad32
+        && image.byte_order() == ImageOrder::LsbFirst;
+    if fast && image.data().len() == usize::from(width) * usize::from(height) * 4 {
+        let source_stride = rgb.width() as usize * 3;
+        let target_stride = usize::from(width) * 4;
+        for row in 0..usize::from(height) {
+            let start = (usize::from(y) + row) * source_stride + usize::from(x) * 3;
+            let source = &rgb.as_raw()[start..start + usize::from(width) * 3];
+            let target = &mut image.data_mut()[row * target_stride..(row + 1) * target_stride];
+            for (rgb, bgrx) in source.chunks_exact(3).zip(target.chunks_exact_mut(4)) {
+                bgrx.copy_from_slice(&[rgb[2], rgb[1], rgb[0], 0]);
+            }
+        }
+    } else {
+        for row in 0..height {
+            for column in 0..width {
+                let rgb = rgb.get_pixel(
+                    u32::from(x) + u32::from(column),
+                    u32::from(y) + u32::from(row),
+                );
+                image.put_pixel(
+                    column,
+                    row,
+                    pixel_layout.encode((
+                        u16::from(rgb[0]) * 257,
+                        u16::from(rgb[1]) * 257,
+                        u16::from(rgb[2]) * 257,
+                    )),
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 fn write_native_pixels(
     image: &mut XImage<'_>,
     rgb: &RgbImage,
@@ -3462,6 +3593,67 @@ mod tests {
             ),
             NativePixelWriter::Generic
         );
+    }
+
+    #[test]
+    fn damage_region_matches_full_conversion_without_extra_pixels() {
+        let rgb = RgbImage::from_fn(7, 5, |x, y| image::Rgb([x as u8 * 20, y as u8 * 30, 99]));
+        let layout = PixelLayout::from_visual_type(standard_visual()).unwrap();
+        let mut fast = XImage::allocate(
+            3,
+            2,
+            ScanlinePad::Pad32,
+            24,
+            BitsPerPixel::B32,
+            ImageOrder::LsbFirst,
+        );
+        let mut generic = fast.clone();
+        write_native_region(&mut fast, &rgb, 2, 1, layout, NativePixelWriter::Bgrx32).unwrap();
+        write_native_region(&mut generic, &rgb, 2, 1, layout, NativePixelWriter::Generic).unwrap();
+        assert_eq!(fast.data(), generic.data());
+        assert_eq!(fast.data().len(), 3 * 2 * 4);
+        assert_eq!(&fast.data()[0..4], &[99, 30, 40, 0]);
+        assert!(
+            write_native_region(&mut fast, &rgb, 6, 1, layout, NativePixelWriter::Bgrx32).is_err()
+        );
+    }
+
+    #[test]
+    fn skipped_snapshot_and_geometry_change_reject_incremental_damage() {
+        let make = |sequence, source_width| {
+            StoredFrame::from_decoded(DecodedFrame {
+                sequence,
+                source_width,
+                source_height: 4,
+                image: RgbImage::new(4, 4),
+            })
+        };
+        let previous = make(7, 4);
+        let next = make(9, 4);
+        assert!(!damage_base_matches(
+            &previous,
+            &next,
+            FrameDamage {
+                base_sequence: 8,
+                rect: None
+            }
+        ));
+        assert!(damage_base_matches(
+            &previous,
+            &next,
+            FrameDamage {
+                base_sequence: 7,
+                rect: Some((0, 0, 1, 1))
+            }
+        ));
+        assert!(!damage_base_matches(
+            &previous,
+            &make(9, 8),
+            FrameDamage {
+                base_sequence: 7,
+                rect: None
+            }
+        ));
     }
 
     #[test]

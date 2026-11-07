@@ -79,6 +79,15 @@ pub struct DecodedFrame {
 /// APIs remain source compatible. The receiver and viewer use this ownership
 /// path internally, including while the most recently presented frame is kept
 /// for Expose and resize redraws.
+/// Damage relative to one fully decoded predecessor. A viewer that skipped
+/// that predecessor must use the complete snapshot, never drop its updates.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct FrameDamage {
+    pub base_sequence: u64,
+    /// None means no changed pixels (a validated keepalive).
+    pub rect: Option<(u16, u16, u16, u16)>,
+}
+
 #[derive(Debug)]
 pub(crate) struct RecyclableDecodedFrame {
     sequence: u64,
@@ -86,6 +95,7 @@ pub(crate) struct RecyclableDecodedFrame {
     source_height: u16,
     image: Option<RgbImage>,
     pool: SharedDecodeBufferPool,
+    damage: Option<FrameDamage>,
 }
 
 impl RecyclableDecodedFrame {
@@ -102,7 +112,17 @@ impl RecyclableDecodedFrame {
             source_height,
             image: Some(image),
             pool,
+            damage: None,
         }
+    }
+
+    pub(crate) fn with_damage(mut self, damage: Option<FrameDamage>) -> Self {
+        self.damage = damage;
+        self
+    }
+
+    pub(crate) fn damage(&self) -> Option<FrameDamage> {
+        self.damage
     }
 
     #[cfg(test)]

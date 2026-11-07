@@ -14,6 +14,7 @@ use std::fs::File;
 use std::io;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
 use std::ptr::{self, NonNull};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use x11rb::connection::{Connection, RequestConnection};
 use x11rb::cookie::Cookie;
@@ -1014,6 +1015,8 @@ pub struct X11Capture {
     gpu_scaling: bool,
     event_attribution: EventAttribution,
     shm_readback: ShmReadback,
+    cpu_scaler: super::downscale::CpuScaler,
+    rgb_buffers: CaptureImageRecycler,
 }
 
 impl X11Capture {
@@ -1163,6 +1166,8 @@ impl X11Capture {
             gpu_scaling,
             event_attribution,
             shm_readback,
+            cpu_scaler: super::downscale::CpuScaler::default(),
+            rgb_buffers: CaptureImageRecycler::default(),
         };
         // Fail fast on an unusable area: a typo in --monitor should be an
         // error at startup, not a black rectangle discovered later.
@@ -1174,6 +1179,11 @@ impl X11Capture {
         let damage_target = capture.damage_target();
         capture.damage.sync_target(&capture.conn, damage_target)?;
         Ok(capture)
+    }
+
+    /// A bounded return path for buffers released by the sender thread.
+    pub(crate) fn image_recycler(&self) -> CaptureImageRecycler {
+        self.rgb_buffers.clone()
     }
 
     /// Capture and optionally downscale a frame.
@@ -1371,6 +1381,7 @@ impl X11Capture {
                 .capture(
                     &self.conn,
                     &mut self.shm_readback,
+                    &mut self.rgb_buffers,
                     render_source,
                     origin,
                     source_width,
@@ -1407,6 +1418,7 @@ impl X11Capture {
                             )
                             .map_err(CaptureFailure::fatal)?
                     {
+                        self.rgb_buffers.recycle_image(image);
                         return Ok(CaptureDrawableOutcome::RootGeometryChanged);
                     }
                     return Ok(CaptureDrawableOutcome::Frame(CapturedDrawable {
@@ -1437,6 +1449,7 @@ impl X11Capture {
                 screen_num: self.screen_num,
                 expected_depth: root_depth,
             },
+            &mut self.rgb_buffers,
         );
         let mut image = match image_result {
             Ok(image) => image,
@@ -1454,11 +1467,18 @@ impl X11Capture {
         let image = if output_width == source_width && output_height == source_height {
             image
         } else if output_width <= source_width && output_height <= source_height {
-            super::downscale::area_downscale(
+            let storage = self
+                .rgb_buffers
+                .take(output_width, output_height)
+                .map_err(CaptureFailure::fatal)?;
+            let scaled = self.cpu_scaler.scale_into(
                 &image,
                 u32::from(output_width),
                 u32::from(output_height),
-            )
+                storage,
+            );
+            self.rgb_buffers.recycle_image(image);
+            scaled
         } else {
             image::imageops::resize(
                 &image,
@@ -2552,15 +2572,16 @@ impl ShmReadback {
         width: u16,
         height: u16,
         layout: ReadbackLayout,
+        buffers: &mut CaptureImageRecycler,
     ) -> RemoteResult<RgbImage> {
         let shm_result = match self {
             Self::Disabled => None,
             Self::Enabled(readback) => {
-                Some(readback.capture_rgb(conn, drawable, origin, width, height, layout))
+                Some(readback.capture_rgb(conn, drawable, origin, width, height, layout, buffers))
             }
         };
         match resolve_readback(shm_result, || {
-            core_capture_rgb(conn, drawable, origin, width, height, layout)
+            core_capture_rgb(conn, drawable, origin, width, height, layout, buffers)
         }) {
             ReadbackOutcome::Image(image) => Ok(image),
             ReadbackOutcome::CoreFallback { image, shm_error } => {
@@ -2601,6 +2622,7 @@ impl EnabledShmReadback {
         width: u16,
         height: u16,
         layout: ReadbackLayout,
+        buffers: &mut CaptureImageRecycler,
     ) -> RemoteResult<RgbImage> {
         let expected_size = shm_buffer_size(width, height, self.format)?;
         self.ensure_capacity(conn, expected_size)?;
@@ -2640,7 +2662,7 @@ impl EnabledShmReadback {
                 Cow::Borrowed(bytes),
             )?;
             (
-                decode_readback_image(conn, &ximage, width, height, reply.visual, layout)?,
+                decode_readback_image(conn, &ximage, width, height, reply.visual, layout, buffers)?,
                 segment.mapping.len(),
             )
         };
@@ -2862,6 +2884,7 @@ fn core_capture_rgb(
     width: u16,
     height: u16,
     layout: ReadbackLayout,
+    buffers: &mut CaptureImageRecycler,
 ) -> RemoteResult<RgbImage> {
     let reply = conn
         .get_image(
@@ -2876,7 +2899,7 @@ fn core_capture_rgb(
         .reply()?;
     let visual = reply.visual;
     let image = XImage::get_from_reply(conn.setup(), width, height, reply)?;
-    decode_readback_image(conn, &image, width, height, visual, layout)
+    decode_readback_image(conn, &image, width, height, visual, layout, buffers)
 }
 
 fn decode_readback_image(
@@ -2886,6 +2909,7 @@ fn decode_readback_image(
     height: u16,
     visual_id: Visualid,
     layout: ReadbackLayout,
+    buffers: &mut CaptureImageRecycler,
 ) -> RemoteResult<RgbImage> {
     if image.depth() != layout.expected_depth() {
         return Err(invalid_data(format!(
@@ -2918,7 +2942,14 @@ fn decode_readback_image(
             ..
         } => (layout, standard_bgrx_visual),
     };
-    decode_ximage(image, width, height, pixel_layout, standard_bgrx_visual)
+    decode_ximage_reusing(
+        image,
+        width,
+        height,
+        pixel_layout,
+        standard_bgrx_visual,
+        buffers,
+    )
 }
 
 fn shm_buffer_size(width: u16, height: u16, format: Format) -> RemoteResult<usize> {
@@ -3178,6 +3209,7 @@ impl RenderScaler {
         &mut self,
         conn: &RustConnection,
         readback: &mut ShmReadback,
+        buffers: &mut CaptureImageRecycler,
         capture_source: RenderCaptureSource,
         origin: (i16, i16),
         source_width: u16,
@@ -3277,6 +3309,7 @@ impl RenderScaler {
                 layout: self.root_layout,
                 standard_bgrx_visual: self.root_standard_bgrx_visual,
             },
+            buffers,
         );
         // The small ShmGetImage/core GetImage reply is an ordering barrier for
         // both queued requests. Consume both VoidCookies afterwards: precise
@@ -3698,12 +3731,113 @@ fn select_readback_decoder(ximage: &XImage<'_>, standard_bgrx_visual: bool) -> R
     }
 }
 
+/// Two spare allocations suffice for full-resolution readback plus scaled
+/// output. Images in flight are never aliased by this pool; recycling consumes
+/// ownership, and old geometry cannot grow the pool without bound.
+#[derive(Clone, Default)]
+pub(crate) struct CaptureImageRecycler {
+    spare: Arc<Mutex<Vec<Vec<u8>>>>,
+}
+
+impl CaptureImageRecycler {
+    fn take(&mut self, width: u16, height: u16) -> RemoteResult<Vec<u8>> {
+        let bytes = usize::from(width)
+            .checked_mul(usize::from(height))
+            .and_then(|pixels| pixels.checked_mul(3))
+            .ok_or_else(|| invalid_data("X11 capture buffer size overflow"))?;
+        // Hold the lock only while moving a Vec, never while allocating or
+        // decoding pixels. A poisoned recycler merely loses the optimization.
+        let mut buffer = if let Ok(mut spare) = self.spare.lock() {
+            match spare.iter().position(|buffer| buffer.len() == bytes) {
+                Some(index) => spare.swap_remove(index),
+                None => spare.pop().unwrap_or_default(),
+            }
+        } else {
+            Vec::new()
+        };
+        if bytes > buffer.len() {
+            buffer
+                .try_reserve_exact(bytes - buffer.len())
+                .map_err(|_| invalid_data("could not allocate the X11 capture buffer"))?;
+        }
+        buffer.resize(bytes, 0);
+        Ok(buffer)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn cached_images(&self) -> usize {
+        self.spare.lock().unwrap().len()
+    }
+
+    /// Only exclusively owned, no-longer-read images may be returned.
+    pub(crate) fn recycle_image(&self, image: RgbImage) {
+        let mut bytes = image.into_raw();
+        if let Ok(mut spare) = self.spare.lock()
+            && spare.len() < 2
+        {
+            spare.push(std::mem::take(&mut bytes));
+        }
+        // Excess storage is freed outside the mutex.
+    }
+}
+
+#[cfg(test)]
 fn decode_ximage(
     ximage: &XImage<'_>,
     width: u16,
     height: u16,
     layout: PixelLayout,
     standard_bgrx_visual: bool,
+) -> RemoteResult<RgbImage> {
+    decode_ximage_reusing(
+        ximage,
+        width,
+        height,
+        layout,
+        standard_bgrx_visual,
+        &mut CaptureImageRecycler::default(),
+    )
+}
+
+#[cfg(test)]
+fn decode_bgrx32_rows(
+    source: &[u8],
+    width: u16,
+    height: u16,
+    stride: usize,
+) -> RemoteResult<RgbImage> {
+    decode_bgrx32_rows_reusing(
+        source,
+        width,
+        height,
+        stride,
+        &mut CaptureImageRecycler::default(),
+    )
+}
+
+#[cfg(test)]
+fn decode_ximage_generic(
+    ximage: &XImage<'_>,
+    width: u16,
+    height: u16,
+    layout: PixelLayout,
+) -> RemoteResult<RgbImage> {
+    decode_ximage_generic_reusing(
+        ximage,
+        width,
+        height,
+        layout,
+        &mut CaptureImageRecycler::default(),
+    )
+}
+
+fn decode_ximage_reusing(
+    ximage: &XImage<'_>,
+    width: u16,
+    height: u16,
+    layout: PixelLayout,
+    standard_bgrx_visual: bool,
+    buffers: &mut CaptureImageRecycler,
 ) -> RemoteResult<RgbImage> {
     if width == 0 || height == 0 {
         return Err(invalid_data("X11 capture dimensions must be nonzero").into());
@@ -3718,9 +3852,9 @@ fn decode_ximage(
     }
     if select_readback_decoder(ximage, standard_bgrx_visual) == ReadbackDecoder::Bgrx32 {
         let stride = native_scanline_stride(width, ximage.bits_per_pixel(), ximage.scanline_pad())?;
-        return decode_bgrx32_rows(ximage.data(), width, height, stride);
+        return decode_bgrx32_rows_reusing(ximage.data(), width, height, stride, buffers);
     }
-    decode_ximage_generic(ximage, width, height, layout)
+    decode_ximage_generic_reusing(ximage, width, height, layout, buffers)
 }
 
 fn native_scanline_stride(
@@ -3743,11 +3877,12 @@ fn native_scanline_stride(
     Ok(padded_bits / 8)
 }
 
-fn decode_bgrx32_rows(
+fn decode_bgrx32_rows_reusing(
     source: &[u8],
     width: u16,
     height: u16,
     stride: usize,
+    buffers: &mut CaptureImageRecycler,
 ) -> RemoteResult<RgbImage> {
     if width == 0 || height == 0 {
         return Err(invalid_data("X11 capture dimensions must be nonzero").into());
@@ -3774,13 +3909,7 @@ fn decode_bgrx32_rows(
     let rgb_row_bytes = usize::from(width)
         .checked_mul(3)
         .ok_or_else(|| invalid_data("X11 RGB scanline size overflow"))?;
-    let rgb_bytes = rgb_row_bytes
-        .checked_mul(usize::from(height))
-        .ok_or_else(|| invalid_data("X11 capture buffer size overflow"))?;
-    let mut rgb = Vec::new();
-    rgb.try_reserve_exact(rgb_bytes)
-        .map_err(|_| invalid_data("could not allocate the X11 capture buffer"))?;
-    rgb.resize(rgb_bytes, 0);
+    let mut rgb = buffers.take(width, height)?;
 
     for row in 0..usize::from(height) {
         let source_start = row * stride;
@@ -3796,21 +3925,15 @@ fn decode_bgrx32_rows(
         .ok_or_else(|| invalid_data("X11 capture returned an invalid pixel buffer").into())
 }
 
-fn decode_ximage_generic(
+fn decode_ximage_generic_reusing(
     ximage: &XImage<'_>,
     width: u16,
     height: u16,
     layout: PixelLayout,
+    buffers: &mut CaptureImageRecycler,
 ) -> RemoteResult<RgbImage> {
-    let pixel_count = usize::from(width)
-        .checked_mul(usize::from(height))
-        .ok_or_else(|| invalid_data("X11 capture dimensions overflow"))?;
-    let rgb_bytes = pixel_count
-        .checked_mul(3)
-        .ok_or_else(|| invalid_data("X11 capture buffer size overflow"))?;
-    let mut rgb = Vec::new();
-    rgb.try_reserve_exact(rgb_bytes)
-        .map_err(|_| invalid_data("could not allocate the X11 capture buffer"))?;
+    let mut rgb = buffers.take(width, height)?;
+    rgb.clear();
     for y in 0..height {
         for x in 0..width {
             let (red, green, blue) = layout.decode(ximage.get_pixel(x, y));
@@ -4894,6 +5017,63 @@ mod tests {
                 ReadbackDecoder::Generic
             );
         }
+    }
+
+    #[test]
+    fn rgb_readback_reuses_released_storage_without_aliasing_live_frames() {
+        let mut buffers = CaptureImageRecycler::default();
+        let old_bytes = [1, 2, 3, 0, 4, 5, 6, 0];
+        let first = decode_bgrx32_rows_reusing(&old_bytes, 2, 1, 8, &mut buffers).unwrap();
+        let first_ptr = first.as_raw().as_ptr();
+        let live = decode_bgrx32_rows_reusing(&[9; 8], 2, 1, 8, &mut buffers).unwrap();
+        assert_ne!(live.as_raw().as_ptr(), first_ptr);
+        buffers.recycle_image(first);
+        let next = decode_bgrx32_rows_reusing(&[8; 8], 2, 1, 8, &mut buffers).unwrap();
+        assert_eq!(next.as_raw().as_ptr(), first_ptr);
+        assert!(next.as_raw().iter().all(|value| *value == 8));
+        assert!(live.as_raw().iter().all(|value| *value == 9));
+        buffers.recycle_image(next);
+        let small = decode_bgrx32_rows_reusing(&[7; 4], 1, 1, 4, &mut buffers).unwrap();
+        assert_eq!(small.dimensions(), (1, 1));
+        assert_eq!(small.as_raw(), &[7; 3]);
+        buffers.recycle_image(small);
+        let large = decode_bgrx32_rows_reusing(&[6; 24], 3, 2, 12, &mut buffers).unwrap();
+        assert_eq!(large.dimensions(), (3, 2));
+        assert_eq!(large.as_raw(), &[6; 18]);
+        buffers.recycle_image(large);
+        buffers.recycle_image(live);
+        buffers.recycle_image(RgbImage::new(9, 9));
+        assert_eq!(
+            buffers.spare.lock().unwrap().len(),
+            2,
+            "the spare pool is bounded"
+        );
+    }
+
+    #[test]
+    fn sender_can_return_owned_image_to_capture_thread() {
+        let mut buffers = CaptureImageRecycler::default();
+        let image = decode_bgrx32_rows_reusing(&[2; 8], 2, 1, 8, &mut buffers).unwrap();
+        let address = image.as_raw().as_ptr() as usize;
+        let sender = buffers.clone();
+        std::thread::spawn(move || sender.recycle_image(image))
+            .join()
+            .unwrap();
+        let next = decode_bgrx32_rows_reusing(&[3; 8], 2, 1, 8, &mut buffers).unwrap();
+        assert_eq!(next.as_raw().as_ptr() as usize, address);
+        assert_eq!(next.as_raw(), &[3; 6]);
+    }
+
+    #[test]
+    fn failed_decode_keeps_reusable_storage_for_same_frame_fallback() {
+        let mut buffers = CaptureImageRecycler::default();
+        buffers.recycle_image(RgbImage::new(2, 1));
+        let ptr = buffers.spare.lock().unwrap()[0].as_ptr();
+        assert!(decode_bgrx32_rows_reusing(&[0; 7], 2, 1, 8, &mut buffers).is_err());
+        assert_eq!(buffers.spare.lock().unwrap()[0].as_ptr(), ptr);
+        let image = decode_bgrx32_rows_reusing(&[4; 8], 2, 1, 8, &mut buffers).unwrap();
+        assert_eq!(image.as_raw().as_ptr(), ptr);
+        assert_eq!(image.as_raw(), &[4; 6]);
     }
 
     #[test]

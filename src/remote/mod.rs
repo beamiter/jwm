@@ -27,6 +27,7 @@ pub mod key;
 pub mod messages;
 mod pacing;
 pub mod protocol;
+mod sender;
 pub mod session_env;
 pub mod ssh;
 mod tile;
