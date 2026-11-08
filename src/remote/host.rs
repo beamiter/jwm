@@ -77,6 +77,8 @@ const CLIPBOARD_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const BUSY_REASON: &str = "another viewer is already connected to this host";
 /// Reason sent to the viewer when the host is asked to stop.
 const HOST_STOPPING_REASON: &str = "the host stopped sharing its desktop";
+/// Encoding is terminal, but has no structured v13 code. Keep details local.
+const ENCODING_FAILURE_REASON: &str = "host could not encode the shared display";
 /// Budget for that one goodbye record. A peer too slow to take a few dozen
 /// bytes must not hold up Ctrl+C; it then sees the connection drop instead.
 const GOODBYE_WRITE_DEADLINE: Duration = Duration::from_millis(250);
@@ -2583,26 +2585,55 @@ fn is_end_of_stream(error: &super::RemoteError) -> bool {
     }
 }
 
+/// Internal notification choice. Encoding has no structured v13 code and
+/// therefore uses the existing terminal legacy Close without changing the wire.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum RuntimeClose {
+    Structured(SessionClose),
+    Encoding,
+}
+
+impl From<SessionClose> for RuntimeClose {
+    fn from(close: SessionClose) -> Self {
+        Self::Structured(close)
+    }
+}
+
 /// A known local producer failure, not an arbitrary error in its surrounding
 /// loop (which also writes to the transport and coordinates other workers).
 /// Keep the detailed error local; the wire gets only a fixed public reason.
 #[derive(Debug)]
 struct LocalRuntimeFailure {
-    code: SessionCloseCode,
+    close: RuntimeClose,
     source: super::RemoteError,
 }
 
 impl LocalRuntimeFailure {
+    fn encoding(source: super::RemoteError) -> super::RemoteError {
+        Box::new(Self {
+            close: RuntimeClose::Encoding,
+            source,
+        })
+    }
+
     fn capture(source: super::RemoteError) -> super::RemoteError {
         Box::new(Self {
-            code: SessionCloseCode::CaptureUnavailable,
+            close: SessionClose::new(
+                SessionCloseCode::CaptureUnavailable,
+                "host capture became unavailable",
+            )
+            .into(),
             source,
         })
     }
 
     fn clipboard(source: super::RemoteError) -> super::RemoteError {
         Box::new(Self {
-            code: SessionCloseCode::ClipboardUnavailable,
+            close: SessionClose::new(
+                SessionCloseCode::ClipboardUnavailable,
+                "host clipboard became unavailable",
+            )
+            .into(),
             source,
         })
     }
@@ -2620,32 +2651,27 @@ impl std::error::Error for LocalRuntimeFailure {
     }
 }
 
-fn runtime_close(error: &super::RemoteError) -> Option<SessionClose> {
-    error.downcast_ref::<LocalRuntimeFailure>().map(|failure| {
-        SessionClose::new(
-            failure.code,
-            match failure.code {
-                SessionCloseCode::CaptureUnavailable => "host capture became unavailable",
-                SessionCloseCode::ClipboardUnavailable => "host clipboard became unavailable",
-                _ => unreachable!("only local capture/clipboard failures are tagged"),
-            },
-        )
-    })
+fn runtime_close(error: &super::RemoteError) -> Option<RuntimeClose> {
+    error
+        .downcast_ref::<LocalRuntimeFailure>()
+        .map(|failure| failure.close.clone())
 }
 
 /// Tell the viewer why the session ended, best effort. Never wait for an
 /// occupied/poisoned mutex or append to a failed authenticated record.
 fn say_session_close<W: std::io::Write + SetWriteTimeout>(
     writer: &Mutex<SessionWriter<DeadlineWriter<W>>>,
-    close: SessionClose,
+    close: impl Into<RuntimeClose>,
 ) {
     if let Ok(mut writer) = writer.try_lock() {
-        let _ = write_session_record(
-            &mut writer,
-            MessageKind::SessionClose,
-            &close.encode(),
-            GOODBYE_WRITE_DEADLINE,
-        );
+        let (kind, payload) = match close.into() {
+            RuntimeClose::Structured(close) => (MessageKind::SessionClose, close.encode()),
+            RuntimeClose::Encoding => (
+                MessageKind::Close,
+                ENCODING_FAILURE_REASON.as_bytes().to_vec(),
+            ),
+        };
+        let _ = write_session_record(&mut writer, kind, &payload, GOODBYE_WRITE_DEADLINE);
     }
 }
 
@@ -2655,7 +2681,7 @@ fn say_session_close<W: std::io::Write + SetWriteTimeout>(
 /// path may shut down the socket concurrently; delivery is never guaranteed.
 fn shutdown_stream<W: std::io::Write + SetWriteTimeout>(
     writer: &Mutex<SessionWriter<DeadlineWriter<W>>>,
-    close: Option<SessionClose>,
+    close: Option<RuntimeClose>,
     mut shutdown: impl FnMut(Shutdown),
 ) {
     shutdown(Shutdown::Read);
@@ -2669,7 +2695,7 @@ fn capture_stop_notice(
     result: &RemoteResult<()>,
     shutdown: bool,
     first_stop: &FirstStop,
-) -> Option<SessionClose> {
+) -> Option<RuntimeClose> {
     if let Err(error) = result {
         // The loop also carries mailbox, source-state and transport errors.
         // Only tagged backend operations can claim CaptureUnavailable.
@@ -2682,7 +2708,7 @@ fn capture_stop_notice(
         first_stop.record(StopCause::Graceful);
     }
     (first_stop.cause() == StopCause::Graceful)
-        .then(|| SessionClose::new(SessionCloseCode::HostStopping, HOST_STOPPING_REASON))
+        .then(|| SessionClose::new(SessionCloseCode::HostStopping, HOST_STOPPING_REASON).into())
 }
 
 fn admission_refusal(state: u8) -> SessionClose {
@@ -2771,22 +2797,28 @@ fn stream_frames(
     let sender = match thread::Builder::new()
         .name("jwm-remote-video".into())
         .spawn(move || {
-            let _stop_on_exit = StopSessionOnDrop(Arc::clone(&sender_running));
-            let result = send_frames_scoped(
-                sender_mailbox,
-                sender_writer,
+            run_video_worker(
+                || {
+                    send_frames_scoped(
+                        Arc::clone(&sender_mailbox),
+                        Arc::clone(&sender_writer),
+                        &sender_running,
+                        &sender_credits,
+                        &sender_telemetry,
+                        &sender_jpeg_quality,
+                        Some(&sender_sources),
+                    )
+                },
                 &sender_running,
-                &sender_credits,
-                &sender_telemetry,
-                &sender_jpeg_quality,
-                Some(&sender_sources),
-            );
-            if result.is_err() {
-                sender_stop.record(StopCause::Sender);
-                sender_running.store(false, Ordering::Release);
-                let _ = sender_control.shutdown(Shutdown::Both);
-            }
-            result
+                &sender_stop,
+                |close| {
+                    sender_mailbox.close();
+                    sender_credits.close();
+                    shutdown_stream(&sender_writer, close, |how| {
+                        let _ = sender_control.shutdown(how);
+                    });
+                },
+            )
         }) {
         Ok(sender) => sender,
         Err(error) => {
@@ -3162,11 +3194,15 @@ fn send_frames_with_encoder_scoped<W: std::io::Write + SetWriteTimeout>(
             }
         }
         let planned_at = Instant::now();
-        let mut plan = sender.plan_at(&pending.frame, planned_at)?;
+        let mut plan = sender
+            .plan_at(&pending.frame, planned_at)
+            .map_err(LocalRuntimeFailure::encoding)?;
         if !plan.keyframe && sender.refinement_due(planned_at) {
             let current = jpeg_quality.current_quality();
             if sender.encoder.has_quality_debt(current) {
-                plan = sender.refine_at(current, planned_at)?;
+                plan = sender
+                    .refine_at(current, planned_at)
+                    .map_err(LocalRuntimeFailure::encoding)?;
             }
         }
         telemetry.record_dirty_scan(planned_at.elapsed());
@@ -3179,7 +3215,9 @@ fn send_frames_with_encoder_scoped<W: std::io::Write + SetWriteTimeout>(
             // Pending ACKs can lower quality after the read-only debt check.
             // Replan at the actual epoch's quality, never upgrading debt using
             // a stale pre-congestion target or overwriting a sharper tile.
-            plan = sender.refine_at(quality.quality, planned_at)?;
+            plan = sender
+                .refine_at(quality.quality, planned_at)
+                .map_err(LocalRuntimeFailure::encoding)?;
         }
         let unchanged_keepalive = plan.dirty_tiles == 0;
         if let Some(adjustment) = quality.adjustment {
@@ -3206,7 +3244,8 @@ fn send_frames_with_encoder_scoped<W: std::io::Write + SetWriteTimeout>(
         let encode_started = Instant::now();
         sender
             .encoder
-            .encode_into(&mut payload, sequence, &pending.frame, quality.quality)?;
+            .encode_into(&mut payload, sequence, &pending.frame, quality.quality)
+            .map_err(LocalRuntimeFailure::encoding)?;
         telemetry.record_encoded(encode_started.elapsed(), plan);
         if let Some(stages) = sender.encoder.encode_timings() {
             telemetry.record_encode_stages(stages);
@@ -3289,14 +3328,36 @@ fn send_frames_with_encoder_scoped<W: std::io::Write + SetWriteTimeout>(
     Ok(())
 }
 
+/// Report only a known local encoding failure, after all sender/encoder,
+/// source-state and writer guards have unwound. Transport/ACK/coordination
+/// errors still stop the session without claiming an encoding failure.
+fn run_video_worker(
+    task: impl FnOnce() -> RemoteResult<()>,
+    running: &Arc<AtomicBool>,
+    first_stop: &FirstStop,
+    shutdown: impl FnOnce(Option<RuntimeClose>),
+) -> RemoteResult<()> {
+    let _stop_on_exit = StopSessionOnDrop(Arc::clone(running));
+    let result = task();
+    if let Err(error) = &result {
+        let close = first_stop
+            .record(StopCause::Sender)
+            .then(|| runtime_close(error))
+            .flatten();
+        running.store(false, Ordering::Release);
+        shutdown(close);
+    }
+    result
+}
+
 /// Stop on clipboard failure without reclassifying secondary teardown errors.
 /// Only the first cause may attempt a terminal record, and only a confirmed
 /// local backend/start failure gets a ClipboardUnavailable code.
 fn stop_clipboard_session(
     running: &AtomicBool,
     first_stop: &FirstStop,
-    close: Option<SessionClose>,
-    shutdown: impl FnOnce(Option<SessionClose>),
+    close: Option<RuntimeClose>,
+    shutdown: impl FnOnce(Option<RuntimeClose>),
 ) {
     if running.load(Ordering::Acquire) {
         // Publish the cause before capture/input can observe stopped state.
@@ -3311,7 +3372,7 @@ fn run_clipboard_worker(
     task: impl FnOnce() -> RemoteResult<()>,
     running: &Arc<AtomicBool>,
     first_stop: &FirstStop,
-    shutdown: impl FnOnce(Option<SessionClose>),
+    shutdown: impl FnOnce(Option<RuntimeClose>),
 ) -> RemoteResult<()> {
     let _stop_on_exit = StopSessionOnDrop(Arc::clone(running));
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(task)) {
@@ -3334,7 +3395,7 @@ fn admit_clipboard_worker<T>(
     worker: Option<RemoteResult<T>>,
     running: &AtomicBool,
     first_stop: &FirstStop,
-    shutdown: impl FnOnce(Option<SessionClose>),
+    shutdown: impl FnOnce(Option<RuntimeClose>),
 ) -> (Option<T>, RemoteResult<()>) {
     match worker {
         Some(Ok(worker)) => (Some(worker), Ok(())),
@@ -5061,6 +5122,331 @@ mod tests {
     }
 
     #[test]
+    fn local_plan_refinement_and_jpeg_failures_send_legacy_close_without_committing() {
+        // Exercise the actual four tagged operations. The JPEG fixture uses
+        // the real bounded writer, and each refinement loses its detection
+        // only at the selected call. No large image or X server is needed.
+        for (stage, had_baseline) in [(0, false), (1, true), (2, true), (3, false), (3, true)] {
+            let key = [0xa1; 32];
+            let writer = Arc::new(runtime_record_writer(key));
+            let mailbox = Arc::new(LatestMailbox::new());
+            let running = Arc::new(AtomicBool::new(true));
+            let first_stop = FirstStop::new();
+            let credits = FrameCredits::new();
+            let telemetry = HostTelemetry::new();
+            let quality = JpegQualityController::new_at(
+                85,
+                85,
+                false,
+                Duration::from_millis(100),
+                Instant::now(),
+            )
+            .unwrap();
+            let mut sender = FrameSender::new();
+            let baseline_at = Instant::now() - Duration::from_secs(3);
+            let baseline = test_captured_frame(10);
+            if had_baseline {
+                accept_frame(&mut sender, &baseline, baseline_at);
+            }
+            let mut pending = test_pending_frame(if stage == 3 { 20 } else { 10 });
+            let expected = match stage {
+                0 => {
+                    pending.frame.source_width = 0;
+                    "remote frame has an empty dimension"
+                }
+                1 | 2 => {
+                    sender.encoder.forget_detection_on_refinement = Some(stage);
+                    "tile refinement selected without detection"
+                }
+                3 => {
+                    sender.encoder.jpeg_payload_limit = Some(0);
+                    "encoded JPEG frame exceeds protocol limit of 0 bytes"
+                }
+                _ => unreachable!(),
+            };
+            mailbox.publish(pending).unwrap();
+            let sender = std::cell::RefCell::new(sender);
+            let mut shutdowns = Vec::new();
+            let result = run_video_worker(
+                || {
+                    send_frames_with_encoder(
+                        Arc::clone(&mailbox),
+                        Arc::clone(&writer),
+                        &running,
+                        &credits,
+                        &telemetry,
+                        &quality,
+                        &mut sender.borrow_mut(),
+                    )
+                },
+                &running,
+                &first_stop,
+                |close| {
+                    assert_eq!(close, Some(RuntimeClose::Encoding));
+                    assert_eq!(first_stop.cause(), StopCause::Sender);
+                    assert!(!running.load(Ordering::Acquire));
+                    assert!(sender.try_borrow_mut().is_ok(), "encoder must be released");
+                    assert!(writer.try_lock().is_ok(), "writer must be released");
+                    mailbox.close();
+                    credits.close();
+                    shutdown_stream(&writer, close, |how| {
+                        assert!(mailbox.state.lock().unwrap().closed);
+                        assert!(credits.state.lock().unwrap().closed);
+                        let written = lock_writer(&writer).get_ref().get_ref().bytes.len();
+                        assert_eq!(written == 0, how == Shutdown::Read);
+                        shutdowns.push(how);
+                    });
+                },
+            );
+            assert_eq!(shutdowns, [Shutdown::Read, Shutdown::Both]);
+            let wire = lock_writer(&writer).get_ref().get_ref().bytes.clone();
+            let mut reader = SessionReader::new(Cursor::new(&wire), key);
+            let (kind, reason) = reader.read_message().unwrap();
+            assert_eq!(kind, MessageKind::Close);
+            assert_eq!(reason, ENCODING_FAILURE_REASON.as_bytes());
+            assert!(
+                reader.read_message().is_err(),
+                "exactly one terminal record"
+            );
+            crate::remote::client::tests::assert_runtime_terminal_record(
+                &wire,
+                key,
+                None,
+                ENCODING_FAILURE_REASON,
+            );
+            let error = stream_result_for_stop(
+                first_stop.cause(),
+                Err(io::Error::other("secondary capture failure").into()),
+                result,
+                Err(io::Error::other("secondary clipboard failure").into()),
+            )
+            .unwrap_err();
+            assert_eq!(error.to_string(), expected);
+            let source = error.source().unwrap();
+            if stage == 3 {
+                let image::ImageError::IoError(source) =
+                    source.downcast_ref::<image::ImageError>().unwrap()
+                else {
+                    panic!("expected the real bounded JPEG writer failure")
+                };
+                assert_eq!(source.kind(), io::ErrorKind::InvalidData);
+            } else {
+                assert_eq!(
+                    source.downcast_ref::<io::Error>().unwrap().kind(),
+                    io::ErrorKind::InvalidData
+                );
+            }
+            assert_eq!(credits.outstanding(), 0);
+            assert_eq!(telemetry.state.lock().unwrap().window.sent, 0);
+            let mut sender = sender.into_inner();
+            assert_eq!(sender.committed_at, had_baseline.then_some(baseline_at));
+            assert!(sender.last_refinement.is_none());
+            sender.discard();
+            let next = sender.plan_at(&baseline, baseline_at).unwrap();
+            assert_eq!(next.keyframe, !had_baseline);
+            assert_eq!(
+                next.emit, !had_baseline,
+                "failed encoding must not change the baseline"
+            );
+            if had_baseline {
+                assert!(
+                    sender.encoder.has_quality_debt(85),
+                    "failed repair cannot pay quality debt"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn video_transport_and_credit_errors_stay_unclassified_and_release_guards() {
+        for credit_error in [false, true] {
+            let key = [0xa2; 32];
+            let writer = Arc::new(Mutex::new(SessionWriter::new(
+                DeadlineWriter::new(FlushFailWriter::default(), WRITE_TIMEOUT),
+                key,
+            )));
+            let mailbox = Arc::new(LatestMailbox::new());
+            mailbox.publish(test_pending_frame(10)).unwrap();
+            let running = Arc::new(AtomicBool::new(true));
+            let first_stop = FirstStop::new();
+            let credits = FrameCredits::new();
+            if credit_error {
+                let now = Instant::now();
+                credits.mark_sent(0, now, now, 1, 70, 0).unwrap();
+            }
+            let sources = test_source_control();
+            let telemetry = HostTelemetry::new();
+            let quality = JpegQualityController::new_at(
+                70,
+                70,
+                false,
+                Duration::from_millis(100),
+                Instant::now(),
+            )
+            .unwrap();
+            let result = run_video_worker(
+                || {
+                    send_frames_scoped(
+                        Arc::clone(&mailbox),
+                        Arc::clone(&writer),
+                        &running,
+                        &credits,
+                        &telemetry,
+                        &quality,
+                        Some(&sources),
+                    )
+                },
+                &running,
+                &first_stop,
+                |close| {
+                    assert!(
+                        close.is_none(),
+                        "transport/credit failures are not encoding failures"
+                    );
+                    assert!(writer.try_lock().is_ok());
+                    assert!(
+                        sources.state.try_lock().is_ok(),
+                        "source guard must unwind too"
+                    );
+                    mailbox.close();
+                    credits.close();
+                    let before = lock_writer(&writer).get_ref().get_ref().bytes.len();
+                    shutdown_stream(&writer, close, |_| {});
+                    assert_eq!(lock_writer(&writer).get_ref().get_ref().bytes.len(), before);
+                },
+            );
+            let error = result.unwrap_err();
+            assert!(runtime_close(&error).is_none());
+            assert!(error.to_string().contains(if credit_error {
+                "remote frame sender sequence mismatch"
+            } else {
+                "injected flush failure"
+            }));
+            assert!(!running.load(Ordering::Acquire));
+            assert_eq!(first_stop.cause(), StopCause::Sender);
+        }
+    }
+
+    #[test]
+    fn video_ack_and_source_presentation_timeouts_never_claim_encoding_failure() {
+        // Both real sender waits run concurrently. Their production timeout
+        // remains untouched instead of adding a test-only scheduler path.
+        thread::scope(|scope| {
+            for source_timeout in [false, true] {
+                scope.spawn(move || {
+                    let writer = Arc::new(runtime_record_writer([0xa3; 32]));
+                    let mailbox = Arc::new(LatestMailbox::new());
+                    mailbox.publish(test_pending_frame(10)).unwrap();
+                    let running = Arc::new(AtomicBool::new(true));
+                    let first_stop = FirstStop::new();
+                    let credits = FrameCredits::new();
+                    let sources = test_source_control();
+                    if source_timeout {
+                        let mut state = sources.state.lock().unwrap();
+                        let version = state.policy.current();
+                        state.policy.publish_keyframe(version, 0).unwrap();
+                    } else {
+                        let now = Instant::now();
+                        for sequence in 0..MAX_OUTSTANDING_FRAMES {
+                            credits.mark_sent(sequence, now, now, 1, 70, 0).unwrap();
+                        }
+                    }
+                    let telemetry = HostTelemetry::new();
+                    let quality = JpegQualityController::new_at(
+                        70,
+                        70,
+                        false,
+                        Duration::from_millis(100),
+                        Instant::now(),
+                    )
+                    .unwrap();
+                    let result = run_video_worker(
+                        || {
+                            send_frames_scoped(
+                                Arc::clone(&mailbox),
+                                Arc::clone(&writer),
+                                &running,
+                                &credits,
+                                &telemetry,
+                                &quality,
+                                source_timeout.then_some(&sources),
+                            )
+                        },
+                        &running,
+                        &first_stop,
+                        |close| {
+                            assert!(close.is_none());
+                            assert!(sources.state.try_lock().is_ok());
+                            mailbox.close();
+                            credits.close();
+                            shutdown_stream(&writer, close, |_| {});
+                        },
+                    );
+                    let error = result.unwrap_err();
+                    assert!(runtime_close(&error).is_none());
+                    assert_eq!(
+                        error.downcast_ref::<io::Error>().unwrap().kind(),
+                        io::ErrorKind::TimedOut
+                    );
+                    assert!(error.to_string().contains(if source_timeout {
+                        "source keyframe was not presented"
+                    } else {
+                        "remote viewer stopped acknowledging displayed frames"
+                    }));
+                    assert!(lock_writer(&writer).get_ref().get_ref().bytes.is_empty());
+                    assert_eq!(first_stop.cause(), StopCause::Sender);
+                });
+            }
+        });
+    }
+
+    #[test]
+    fn video_encoder_report_requires_first_cause_ownership_and_never_reports_panic() {
+        for prior in [
+            StopCause::Input,
+            StopCause::Capture,
+            StopCause::Clipboard,
+            StopCause::Graceful,
+            StopCause::Sender,
+        ] {
+            let running = Arc::new(AtomicBool::new(true));
+            let first_stop = FirstStop::new();
+            first_stop.record(prior);
+            let result = run_video_worker(
+                || {
+                    Err(LocalRuntimeFailure::encoding(
+                        io::Error::other("private encoder failure").into(),
+                    ))
+                },
+                &running,
+                &first_stop,
+                |close| {
+                    assert!(
+                        close.is_none(),
+                        "only the successful first-stop owner may notify"
+                    )
+                },
+            );
+            assert_eq!(result.unwrap_err().to_string(), "private encoder failure");
+            assert_eq!(first_stop.cause(), prior);
+            assert!(!running.load(Ordering::Acquire));
+        }
+        let running = Arc::new(AtomicBool::new(true));
+        let first_stop = FirstStop::new();
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            run_video_worker(
+                || panic!("injected encoder panic"),
+                &running,
+                &first_stop,
+                |_| panic!("panic cannot fabricate a terminal encoding report"),
+            )
+        }));
+        assert!(panic.is_err());
+        assert_eq!(first_stop.cause(), StopCause::None);
+        assert!(!running.load(Ordering::Acquire));
+    }
+
+    #[test]
     fn runtime_capture_backend_failure_is_terminal_without_exposing_local_error() {
         let key = [0x98; 32];
         let writer = runtime_record_writer(key);
@@ -5196,54 +5582,56 @@ mod tests {
     #[test]
     fn runtime_close_read_shutdown_wakes_tcp_reader_before_a_blocked_write() {
         use std::io::Read;
-        let (_peer, control) = loopback_pair();
-        let mut input = control.try_clone().unwrap();
-        input
-            .set_read_timeout(Some(Duration::from_secs(2)))
-            .unwrap();
-        let (started_tx, started_rx) = std::sync::mpsc::channel();
-        let (released_tx, released_rx) = std::sync::mpsc::channel();
-        let input_thread = thread::spawn(move || {
-            started_tx.send(()).unwrap();
-            let result = input.read(&mut [0_u8; 1]);
-            released_tx.send(result).unwrap();
-        });
-        started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
-        let gate = Arc::new((Mutex::new(GateState::default()), Condvar::new()));
-        let writer = Mutex::new(SessionWriter::new(
-            DeadlineWriter::new(GateWriter(Arc::clone(&gate)), WRITE_TIMEOUT),
-            [0x9b; 32],
-        ));
-        let reporter = thread::spawn(move || {
-            shutdown_stream(
-                &writer,
-                Some(SessionClose::new(
-                    SessionCloseCode::CaptureUnavailable,
-                    "host capture became unavailable",
-                )),
-                |how| control.shutdown(how).unwrap(),
-            );
-        });
-        let (lock, ready) = &*gate;
-        let state = lock.lock().unwrap();
-        let (mut state, _) = ready
-            .wait_timeout_while(state, Duration::from_secs(2), |state| {
-                state.write_calls == 0
-            })
-            .unwrap();
-        let writing = state.write_calls > 0;
-        drop(state);
-        // Sample while the outgoing write is still blocked, then always open
-        // the gate before asserting so a failed test cannot strand the worker.
-        let released = released_rx.recv_timeout(Duration::from_secs(1));
-        state = lock.lock().unwrap();
-        state.open = true;
-        ready.notify_all();
-        drop(state);
-        reporter.join().unwrap();
-        input_thread.join().unwrap();
-        assert!(writing);
-        assert_eq!(released.unwrap().unwrap(), 0);
+        for close in [
+            SessionClose::new(
+                SessionCloseCode::CaptureUnavailable,
+                "host capture became unavailable",
+            )
+            .into(),
+            RuntimeClose::Encoding,
+        ] {
+            let (_peer, control) = loopback_pair();
+            let mut input = control.try_clone().unwrap();
+            input
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let (started_tx, started_rx) = std::sync::mpsc::channel();
+            let (released_tx, released_rx) = std::sync::mpsc::channel();
+            let input_thread = thread::spawn(move || {
+                started_tx.send(()).unwrap();
+                let result = input.read(&mut [0_u8; 1]);
+                released_tx.send(result).unwrap();
+            });
+            started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+            let gate = Arc::new((Mutex::new(GateState::default()), Condvar::new()));
+            let writer = Mutex::new(SessionWriter::new(
+                DeadlineWriter::new(GateWriter(Arc::clone(&gate)), WRITE_TIMEOUT),
+                [0x9b; 32],
+            ));
+            let reporter = thread::spawn(move || {
+                shutdown_stream(&writer, Some(close), |how| control.shutdown(how).unwrap());
+            });
+            let (lock, ready) = &*gate;
+            let state = lock.lock().unwrap();
+            let (mut state, _) = ready
+                .wait_timeout_while(state, Duration::from_secs(2), |state| {
+                    state.write_calls == 0
+                })
+                .unwrap();
+            let writing = state.write_calls > 0;
+            drop(state);
+            // Sample while the outgoing write is still blocked, then always open
+            // the gate before asserting so a failed test cannot strand the worker.
+            let released = released_rx.recv_timeout(Duration::from_secs(1));
+            state = lock.lock().unwrap();
+            state.open = true;
+            ready.notify_all();
+            drop(state);
+            reporter.join().unwrap();
+            input_thread.join().unwrap();
+            assert!(writing);
+            assert_eq!(released.unwrap().unwrap(), 0);
+        }
     }
 
     #[test]
@@ -5271,6 +5659,87 @@ mod tests {
             SessionCloseCode::CaptureUnavailable
         );
         assert!(reader.read_message().is_err());
+    }
+
+    #[test]
+    fn legacy_encoding_close_survives_read_shutdown_and_arrives_before_eof() {
+        let (peer, control) = loopback_pair();
+        peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let key = [0xa4; 32];
+        let writer = Mutex::new(SessionWriter::new(
+            DeadlineWriter::new(control.try_clone().unwrap(), WRITE_TIMEOUT),
+            key,
+        ));
+        let running = Arc::new(AtomicBool::new(true));
+        let first_stop = FirstStop::new();
+        run_video_worker(
+            || {
+                Err(LocalRuntimeFailure::encoding(
+                    io::Error::other("private encoder detail").into(),
+                ))
+            },
+            &running,
+            &first_stop,
+            |close| shutdown_stream(&writer, close, |how| control.shutdown(how).unwrap()),
+        )
+        .unwrap_err();
+        let mut reader = SessionReader::new(peer, key);
+        let (kind, payload) = reader.read_message().unwrap();
+        assert_eq!(kind, MessageKind::Close);
+        assert_eq!(payload, ENCODING_FAILURE_REASON.as_bytes());
+        assert!(reader.read_message().is_err());
+    }
+
+    #[test]
+    fn legacy_encoding_close_skips_contended_or_poisoned_writer_without_retry() {
+        for poison in [false, true] {
+            let writer = runtime_record_writer([0xa5; 32]);
+            if poison {
+                let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let _held = writer.lock().unwrap();
+                    panic!("writer ownership interrupted");
+                }));
+                assert!(panic.is_err());
+            }
+            let held = (!poison).then(|| writer.lock().unwrap());
+            let running = Arc::new(AtomicBool::new(true));
+            let first_stop = FirstStop::new();
+            let started = Instant::now();
+            let mut shutdowns = Vec::new();
+            let result = run_video_worker(
+                || {
+                    Err(LocalRuntimeFailure::encoding(
+                        io::Error::other("private encoder detail").into(),
+                    ))
+                },
+                &running,
+                &first_stop,
+                |close| shutdown_stream(&writer, close, |how| shutdowns.push(how)),
+            );
+            assert_eq!(result.unwrap_err().to_string(), "private encoder detail");
+            assert!(started.elapsed() < Duration::from_secs(1));
+            assert_eq!(shutdowns, [Shutdown::Read, Shutdown::Both]);
+            drop(held);
+            assert!(lock_writer(&writer).get_ref().get_ref().bytes.is_empty());
+            run_video_worker(
+                || {
+                    Err(LocalRuntimeFailure::encoding(
+                        io::Error::other("secondary encoder detail").into(),
+                    ))
+                },
+                &running,
+                &first_stop,
+                |close| {
+                    assert!(
+                        close.is_none(),
+                        "no retry after the writer becomes available"
+                    );
+                    shutdown_stream(&writer, close, |_| {});
+                },
+            )
+            .unwrap_err();
+            assert!(lock_writer(&writer).get_ref().get_ref().bytes.is_empty());
+        }
     }
 
     #[test]
@@ -5347,10 +5816,19 @@ mod tests {
 
     #[test]
     fn terminal_notice_deadline_never_retries_partial_write_or_expired_flush() {
-        for code in [
-            SessionCloseCode::HostStopping,
-            SessionCloseCode::CaptureUnavailable,
-            SessionCloseCode::ClipboardUnavailable,
+        for close in [
+            SessionClose::new(SessionCloseCode::HostStopping, "host became unavailable").into(),
+            SessionClose::new(
+                SessionCloseCode::CaptureUnavailable,
+                "host became unavailable",
+            )
+            .into(),
+            SessionClose::new(
+                SessionCloseCode::ClipboardUnavailable,
+                "host became unavailable",
+            )
+            .into(),
+            RuntimeClose::Encoding,
         ] {
             for slow_flush in [false, true] {
                 let writer = Mutex::new(SessionWriter::new(
@@ -5375,7 +5853,7 @@ mod tests {
                     [0x92; 32],
                 ));
                 let started = Instant::now();
-                say_session_close(&writer, SessionClose::new(code, "host became unavailable"));
+                say_session_close(&writer, close.clone());
                 assert!(started.elapsed() < Duration::from_secs(1));
                 let before = {
                     let writer = writer.lock().unwrap();
@@ -5388,7 +5866,7 @@ mod tests {
                 };
                 assert!(before.0 > 0);
                 assert_eq!(before.1, usize::from(slow_flush));
-                say_session_close(&writer, SessionClose::new(code, "must not append"));
+                say_session_close(&writer, close.clone());
                 let writer = writer.lock().unwrap();
                 let inner = writer.get_ref().get_ref();
                 assert_eq!((inner.bytes.len(), inner.flushes), before);
@@ -5410,7 +5888,7 @@ mod tests {
                         io::Error::other("capture primary").into(),
                     ));
                     if let Some(close) = capture_stop_notice(&result, false, &first_stop) {
-                        notices.lock().unwrap().push(close.code);
+                        notices.lock().unwrap().push(close);
                     }
                     running.store(false, Ordering::Release);
                 });
@@ -5426,7 +5904,7 @@ mod tests {
                         &first_stop,
                         |close| {
                             if let Some(close) = close {
-                                notices.lock().unwrap().push(close.code);
+                                notices.lock().unwrap().push(close);
                             }
                         },
                     );
@@ -5434,8 +5912,21 @@ mod tests {
                 });
                 scope.spawn(|| {
                     barrier.wait();
-                    first_stop.record(StopCause::Sender);
-                    running.store(false, Ordering::Release);
+                    let result = run_video_worker(
+                        || {
+                            Err(LocalRuntimeFailure::encoding(
+                                io::Error::other("sender primary").into(),
+                            ))
+                        },
+                        &running,
+                        &first_stop,
+                        |close| {
+                            if let Some(close) = close {
+                                notices.lock().unwrap().push(close);
+                            }
+                        },
+                    );
+                    assert!(result.is_err());
                 });
                 barrier.wait();
             });
@@ -5446,8 +5937,17 @@ mod tests {
                 assert_eq!(
                     *code,
                     match first_stop.cause() {
-                        StopCause::Capture => SessionCloseCode::CaptureUnavailable,
-                        StopCause::Clipboard => SessionCloseCode::ClipboardUnavailable,
+                        StopCause::Capture => SessionClose::new(
+                            SessionCloseCode::CaptureUnavailable,
+                            "host capture became unavailable",
+                        )
+                        .into(),
+                        StopCause::Clipboard => SessionClose::new(
+                            SessionCloseCode::ClipboardUnavailable,
+                            "host clipboard became unavailable",
+                        )
+                        .into(),
+                        StopCause::Sender => RuntimeClose::Encoding,
                         other => panic!("unclassified first cause {other:?} cannot notify"),
                     }
                 );

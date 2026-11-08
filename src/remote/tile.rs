@@ -156,6 +156,12 @@ pub(crate) struct TileEncoder {
     detected_dirty: Vec<u32>,
     #[cfg(test)]
     pub(crate) detection_scans: usize,
+    /// Per-instance fault fixtures, absent from production. Lose detection on
+    /// the selected (one-based) refinement, or fail the real JPEG writer early.
+    #[cfg(test)]
+    pub(crate) forget_detection_on_refinement: Option<usize>,
+    #[cfg(test)]
+    pub(crate) jpeg_payload_limit: Option<usize>,
 }
 
 impl TileEncoder {
@@ -185,6 +191,10 @@ impl TileEncoder {
             detected_dirty: Vec::new(),
             #[cfg(test)]
             detection_scans: 0,
+            #[cfg(test)]
+            forget_detection_on_refinement: None,
+            #[cfg(test)]
+            jpeg_payload_limit: None,
         }
     }
 
@@ -299,6 +309,16 @@ impl TileEncoder {
         &mut self,
         refinement: Option<(u8, usize)>,
     ) -> RemoteResult<TilePlan> {
+        #[cfg(test)]
+        if refinement.is_some()
+            && let Some(remaining) = self.forget_detection_on_refinement.as_mut()
+        {
+            *remaining = remaining.saturating_sub(1);
+            if *remaining == 0 {
+                self.detected = None;
+                self.forget_detection_on_refinement = None;
+            }
+        }
         let detected = self
             .detected
             .ok_or_else(|| invalid_data("tile refinement selected without detection"))?;
@@ -471,8 +491,11 @@ impl TileEncoder {
             let pack_started = now();
             self.pack_atlas(&frame.image, planned.columns, rows);
             let jpeg_started = now();
+            let payload_limit = MAX_SOURCE_INNER_PAYLOAD_LEN;
+            #[cfg(test)]
+            let payload_limit = self.jpeg_payload_limit.unwrap_or(payload_limit);
             JpegEncoder::new_with_quality(
-                BoundedPayloadWriter::new(payload, MAX_SOURCE_INNER_PAYLOAD_LEN),
+                BoundedPayloadWriter::new(payload, payload_limit),
                 quality.clamp(1, 100),
             )
             .encode(

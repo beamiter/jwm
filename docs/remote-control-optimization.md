@@ -431,3 +431,28 @@ terminal record suppresses automatic reconnect; failure to receive one cannot
 prove the host had no operational error. Wire v13 and diagnostic schema 2 are
 unchanged. Offline authenticated-record and shutdown-order tests do not replace
 live X11 held-input and failure acceptance testing.
+
+### Terminal reporting for local video preparation failures
+
+Local tile planning, refinement and JPEG-encoding errors are distinguished
+from frame-credit timeouts, source coordination and socket operations. When
+such a local error owns the session's first stop cause, the video worker may
+send a fixed legacy Close reason through the same bounded notification path.
+The detailed error stays local. It is not mislabeled as capture unavailable or
+host stopping, and no new application version or structured code is introduced.
+
+The worker publishes stopped state and closes its waiters before read-side
+shutdown, then makes at most one nonblocking-lock/250ms notification attempt
+before full shutdown. All encoding and writer guards have unwound first. A
+failed notification cannot replace the original error, revive a poisoned
+record stream or commit the encoder's sent-frame baseline. Contention and
+concurrent teardown can still prevent delivery.
+
+An authenticated legacy Close remains terminal in both first-frame and steady
+reception. Command diagnostics report `peer_closed` with `peer_close_code: null`;
+the fixed human reason is not included in JSON and never grants reconnect
+permission. Local cleanup failure keeps priority. The per-instance encoder
+fault fixtures used for regression tests exist only under `cfg(test)` and add
+no production setting or runtime fault behavior. Input/keymap and input-release
+reporting remain separate lifecycle work; the existing ambiguous-EOF caveat
+still applies.

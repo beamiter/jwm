@@ -2423,13 +2423,15 @@ pub(super) mod tests {
     pub(in crate::remote) fn assert_runtime_terminal_record(
         wire: &[u8],
         key: [u8; PSK_LEN],
-        expected_code: SessionCloseCode,
+        expected_code: impl Into<Option<SessionCloseCode>>,
         expected_reason: &str,
     ) {
+        let expected_code = expected_code.into();
         let code_name = match expected_code {
-            SessionCloseCode::CaptureUnavailable => "capture_unavailable",
-            SessionCloseCode::ClipboardUnavailable => "clipboard_unavailable",
-            _ => panic!("expected a runtime capture or clipboard close"),
+            Some(SessionCloseCode::CaptureUnavailable) => Some("capture_unavailable"),
+            Some(SessionCloseCode::ClipboardUnavailable) => Some("clipboard_unavailable"),
+            None => None,
+            _ => panic!("expected a runtime capture, clipboard or legacy close"),
         };
         for phase in [ClientStage::FirstFrame, ClientStage::Session] {
             for cleanup_fails in [false, true] {
@@ -2437,7 +2439,7 @@ pub(super) mod tests {
                     .downcast::<ClientFailure>()
                     .unwrap();
                 let close = failure.cause.downcast_ref::<PeerClosed>().unwrap();
-                assert_eq!(close.code, Some(expected_code));
+                assert_eq!(close.code, expected_code);
                 assert_eq!(close.reason, expected_reason);
                 let result = finish_session(
                     Err(failure.cause),
