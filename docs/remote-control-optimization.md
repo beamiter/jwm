@@ -40,8 +40,8 @@ It is not completion of the entire remote-control roadmap.
   reuse while X11 consumes a segment; input polling continues while completion
   and server-copy fences are pending. Frame ACK follows both conditions, never
   receipt alone. Geometry setup and initial resource allocation may still block.
-- Protocol v13 negotiates an explicit supported stream profile and sends initial
-  viewport before capture. v6/v7/v8/v9/v10/v11/v12/v13 peers must update together; there is no silent
+- Protocol v14 negotiates an explicit supported stream profile and sends initial
+  viewport before capture. v6/v7/v8/v9/v10/v11/v12/v13/v14 peers must update together; there is no silent
   downgrade. Tile video and cursor state carry a geometry epoch.
 - Independent bounded cursor shape/position records are negotiated when host
   XFixes and viewer XRender formats support them. Cursor movement avoids video
@@ -71,7 +71,7 @@ It is not completion of the entire remote-control roadmap.
   in view-only mode. A scoped initial selection never implicitly grants root.
   Source changes release input and reset frame/cursor state; unsafe transitions
   fail closed. Extra grants are explicit on host/SSH CLI and cannot be saved in
-  profiles yet. Both peers require a coordinated v13 upgrade.
+  profiles yet. Both peers require a coordinated v14 upgrade.
 - This source-switching work is covered by offline tests only in this checkout;
   no new live-X11, hardware timing, or benchmark result is claimed here.
 
@@ -114,7 +114,7 @@ It is not completion of the entire remote-control roadmap.
 ## Explicitly deferred
 
 - Observed session-state restoration, exact window-manager placement, XKB/IME,
-  runtime clipboard mode changes, partial host readback, Wayland and hardware
+  runtime clipboard expansion/direction changes, partial host readback, Wayland and hardware
   encoding. Explicit saved viewer size and best-effort requested position are
   implemented; they do not observe or automatically restore window-manager state.
 - Broader negotiated capabilities, mutable source authorization and backward-compatible extension framing.
@@ -186,7 +186,7 @@ this cloud workspace; live-X11 results remain pending until it runs.
 
 ## Compatibility note for Rust callers
 
-Wire v13 is intentionally incompatible with prior application protocol versions.
+Wire v14 is intentionally incompatible with prior application protocol versions.
 The public `DecodedFrame` and synchronous `Viewer::draw` behavior remain usable.
 `HostOptions`, `ClientOptions` and `SshOptions` now require `frame_limits`;
 `StreamCapabilities` also adds that field. `FrameLimits::default()` retains the
@@ -538,3 +538,35 @@ paths may close the transport first; no new coordination wait guarantees
 notification delivery. Received legacy Close is terminal with a null peer code;
 local cleanup failure retains diagnostic priority. Offline fake-injector
 release/destructor tests do not replace real X11 input-release acceptance.
+
+
+### Runtime clipboard content narrowing
+
+Application protocol v14 adds bounded, versioned restriction request/acknowledgement
+records. The viewer's Ctrl+Super+Alt+configured escape key narrows the initial
+content grant through all, text + images, text and off, including in view-only
+mode. It consumes shortcut edges and releases remotely held modifiers. Initial
+directions remain fixed; there is no re-enable, profile mutation, GUI or IPC
+control. An originally clipboard-off session remains inactive.
+
+The local gate changes immediately. A pending title/terminal status is distinct
+from confirmation: both endpoints must cross transfer-worker and backend fences,
+and the host acknowledgement must pass its ordered outgoing stream. A reader
+merely parsing a request is not a completed restriction. One request may be
+pending; invalid masks, expansion, stale revisions and unsolicited or duplicate
+acknowledgements fail closed. Timeout ends the session without restoring sharing.
+Reserved control capacity prevents ordinary clipboard queue saturation from
+blocking restriction admission.
+
+Capture, transfer processing, inbound acceptance, backend fulfilment and final
+outgoing dispatch enforce the narrowed content grant. Forbidden active transfers
+are cancelled and unfulfilled offers abandoned. Discarded outbound data retains
+cumulative flow accounting through bounded content-free skip records, avoiding
+resets that could lose credit or strand later permitted transfers. File receipts
+release only proven-unpublished staging; advertised paths retain the existing
+retention policy.
+
+Previously transmitted bytes, clipboard history, exposed files and pastes already
+in progress cannot be erased by this control. Synchronous native work can delay
+confirmation. Deterministic state/queue tests are separate from live shortcut,
+clipboard-owner and paste acceptance, which remains unverified in this checkout.

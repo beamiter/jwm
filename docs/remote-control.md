@@ -376,14 +376,14 @@ gives each complete authenticated video record, including its final flush, one
 budget; a partial or timed-out record closes the whole session so its wire
 sequence can never be retried out of sync.
 
-The current application protocol is version 13. Versions 2 to 12 are
+The current application protocol is version 14. Versions 2 to 13 are
 deliberately incompatible, so update `jwm-remote` on both machines together;
 negotiation rejects an older peer before screen or input data is exchanged.
 Version 7 introduced initial viewport and explicit stream selectors. Version 8
 adds an independently negotiated cursor plane and a video geometry epoch;
 it does not silently reinterpret v7 video or cursor selector semantics.
 
-The v13 hello prefix is the existing 8-byte magic, big-endian `u16` version,
+The v14 hello prefix is the existing 8-byte magic, big-endian `u16` version,
 and capability flags. Both hellos append three one-byte selectors in order:
 codec `1` (JPEG tiles), cursor `1` (composited) or `2` (independent), input `1`
 (X11 keycodes). A viewer advertises independent cursor only after verifying local XRender
@@ -437,11 +437,37 @@ one zero dimension is invalid. The server hello is exactly 36 bytes. Unknown
 selectors, trailing bytes and incomplete keymaps are rejected. Input and
 clipboard permission flags remain independent of the stream profile.
 
-Compatibility: v13 viewer/v13 host works; v6/v7/v8/v9/v10/v11/v12 with v13 in either direction is
+Compatibility: v14 viewer/v14 host works; v6/v7/v8/v9/v10/v11/v12/v13 with v14 in either direction is
 rejected during negotiation. There is no automatic legacy-version fallback.
 Keep both binaries on the same release; this change does not alter transport
-crypto. Within v13, unsupported independent-cursor capability falls back to
+crypto. Within v14, unsupported independent-cursor capability falls back to
 composited video explicitly in HelloAck.
+
+Version 14 adds viewer-to-host `ClipboardRestrict` (kind 21) and host-to-viewer
+`ClipboardRestricted` (kind 22). Each payload is exactly 10 bytes: record
+version `1`, a big-endian `u64` revision, and one content-mask byte. Masks are
+`7` (all), `3` (text and images), `1` (text), or `0` (off). Revisions start at
+one and increase exactly once per strict subset request. Initial directions
+never change. Invalid, expanding, overlapping, duplicate or out-of-order
+records fail closed. Only one restriction may await confirmation.
+
+The host ACK follows its transfer worker, actual native-backend fence and
+ordered clipboard stream. The viewer also waits for its own worker/backend
+fence and actual outgoing request write. A native fence has a five-second
+worker wait; the viewer's overall confirmation timeout is ten seconds. Missing
+confirmation ends the session without restoring sharing. After any runtime
+restriction, automatic reconnect is disabled, even after an otherwise clean
+transport loss: a fresh explicit connect must renegotiate permission.
+
+Clipboard transfer opcode `7` is `Skip`: `id` (big-endian `u32`) followed by a
+big-endian `u64` omitted-byte count from 1 through 128 KiB. Final outbound
+dispatch substitutes it for already-counted, now-forbidden Data. It carries no
+clipboard content, consumes the same bounded in-flight credit and cumulative
+ACK accounting, and never feeds a sink or completes an offer. It abandons a
+matching incomplete offer. This prevents cancelled data from leaking or
+silently corrupting credit for subsequent permitted transfers. All previously
+transmitted bytes, exposed files, history and completed pastes remain outside
+the restriction's revocation guarantee.
 
 Version 13 adds authenticated host-to-viewer `SessionClose` records (kind 20),
 without changing the hello layout or transport version. Their payload is a
@@ -1109,10 +1135,34 @@ the existing monitor-switch behavior. Local window size does not change identity
 
 Text-only does not request image/file payloads or read copied file contents.
 A file manager may still offer its paths as ordinary text, which text-only can
-share. Receive-only endpoints do not capture local clipboard contents. Policy
-is immutable for the session; reconnect explicitly to change it. Saved profiles
-preserve narrowing, and missing scope fields retain legacy all/both semantics
+share. Receive-only endpoints do not capture local clipboard contents. Initial
+direction restrictions stay fixed for the session. Saved profiles preserve
+initial narrowing, and missing scope fields retain legacy all/both semantics
 only when the required clipboard consent boolean is already true.
+
+**Restrict sharing without reconnecting.** In the viewer, press
+**Ctrl+Super+Alt+F12** to narrow content one step: all → text + images → text →
+off. With `--escape-key Pause`, use Ctrl+Super+Alt+Pause. This works in view-only
+mode and releases remotely held modifiers. Ctrl+Super alone still releases
+input; Ctrl+Super+Shift still cycles sources. The shortcut does nothing if
+clipboard sharing was not negotiated or is already off. It cannot enable
+sharing, restore a removed content type, change direction permissions or modify
+a saved profile. Start a new session explicitly to broaden sharing.
+
+The title and terminal distinguish a pending restriction from confirmed scope.
+Local admission narrows immediately, but confirmation waits for both endpoints'
+transfer workers, backend clipboard fences and ordered outgoing records. Only
+one restriction can be pending; repeat presses do not issue overlapping
+requests. Failure to confirm within the bounded timeout ends the session without
+restoring permissions. Native synchronous X11 or file operations can delay this
+confirmation. Newly forbidden transfers are cancelled and unfulfilled offers
+abandoned; cumulative transfer accounting remains intact.
+
+Restriction cannot retract bytes already transmitted, files already advertised,
+clipboard-manager history, or a paste already underway. Already advertised files
+retain the existing staging-retention policy. This is a forward sharing boundary,
+not an erasure guarantee. Shortcut, clipboard-owner and live paste behavior still
+require isolated live-X11 verification; deterministic tests do not establish it.
 
 With the default all/both settings, whatever you copy on either desktop is what
 you paste on the other:

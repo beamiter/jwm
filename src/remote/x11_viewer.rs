@@ -59,6 +59,7 @@ const RENDER_FILTER_BILINEAR: &[u8] = b"bilinear";
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ViewerEvent {
     CycleSource,
+    NarrowClipboard,
     Close,
     Pointer {
         x: u16,
@@ -597,6 +598,8 @@ pub struct Viewer {
     forward_input: bool,
     source_switching: bool,
     source_cycle_enabled: bool,
+    clipboard_narrowing_enabled: bool,
+    clipboard_shortcut: ViewerKeyboardState,
     switching_label: Option<String>,
     source_label: Option<String>,
     presented_geometry: Option<u64>,
@@ -616,7 +619,24 @@ pub struct Viewer {
     closed: bool,
     user_close_requested: bool,
     user_released_grab: bool,
+    user_restricted_clipboard: bool,
     close_reported: bool,
+}
+
+fn local_retry_intent_allows(
+    events: &[ViewerEvent],
+    closed: bool,
+    released: bool,
+    restricted: bool,
+    backlog: bool,
+) -> bool {
+    !closed
+        && !released
+        && !restricted
+        && !backlog
+        && !events
+            .iter()
+            .any(|event| matches!(event, ViewerEvent::Close | ViewerEvent::NarrowClipboard))
 }
 
 /// Bound viewer resources independently of negotiated capture/startup budgets.
@@ -1141,6 +1161,8 @@ impl Viewer {
             forward_input,
             source_switching: false,
             source_cycle_enabled: false,
+            clipboard_narrowing_enabled: false,
+            clipboard_shortcut: ViewerKeyboardState::default(),
             switching_label: None,
             source_label: None,
             presented_geometry: None,
@@ -1159,6 +1181,7 @@ impl Viewer {
             closed: false,
             user_close_requested: false,
             user_released_grab: false,
+            user_restricted_clipboard: false,
             close_reported: false,
         })
     }
@@ -1183,10 +1206,13 @@ impl Viewer {
         let released = self.release_local_grab();
         let events = events?;
         released?;
-        Ok(!events.contains(&ViewerEvent::Close)
-            && !self.user_close_requested
-            && !self.user_released_grab
-            && !self.has_pending_events()?)
+        Ok(local_retry_intent_allows(
+            &events,
+            self.user_close_requested,
+            self.user_released_grab,
+            self.user_restricted_clipboard,
+            self.has_pending_events()?,
+        ))
     }
 
     /// Drain a bounded batch of X11 events without blocking.
@@ -1218,7 +1244,8 @@ impl Viewer {
                 continue;
             }
             if let Event::KeyPress(key) = &event
-                && self.keyboard.consume_repeat(key.detail, key.time)
+                && (self.clipboard_shortcut.consume_repeat(key.detail, key.time)
+                    || self.keyboard.consume_repeat(key.detail, key.time))
             {
                 // Core X11 autorepeat is a synthetic release/press pair with
                 // identical keycode and timestamp. Keep the remote key held
@@ -1227,6 +1254,7 @@ impl Viewer {
             }
             self.keyboard
                 .flush_release(&mut result, self.forward_keyboard);
+            self.clipboard_shortcut.flush_release(&mut result, false);
             match event {
                 Event::Expose(event) if event.window == self.window => {
                     redraw |= event.count == 0;
@@ -1258,6 +1286,7 @@ impl Viewer {
                     break;
                 }
                 Event::UnmapNotify(event) if event.window == self.window => {
+                    self.clipboard_shortcut = ViewerKeyboardState::default();
                     self.release_local_grab()?;
                     self.release_all_input(&mut result);
                 }
@@ -1265,6 +1294,7 @@ impl Viewer {
                     if event.event == self.window
                         && focus_out_releases_input(event.mode, self.grabbed) =>
                 {
+                    self.clipboard_shortcut = ViewerKeyboardState::default();
                     self.release_local_grab()?;
                     self.release_all_input(&mut result);
                 }
@@ -1310,6 +1340,34 @@ impl Viewer {
                         button: event.detail,
                         pressed: false,
                     });
+                }
+                Event::KeyPress(event)
+                    if event.event == self.window
+                        && (self.clipboard_shortcut.held.contains(&event.detail)
+                            || (self.clipboard_narrowing_enabled
+                                && self.is_escape(event.detail)
+                                && clipboard_narrow_modifiers_match(event.state))) =>
+                {
+                    // Independent of forwarding permission and source geometry:
+                    // view-only viewers can restrict clipboard sharing too.
+                    if self.clipboard_shortcut.press(event.detail, true, false)
+                        == KeyPressAction::ReleaseGrab
+                    {
+                        // Intent during teardown must not be lost and later
+                        // reconnect using the original, broader clipboard grant.
+                        self.user_restricted_clipboard = true;
+                        self.release_all_input(&mut result);
+                        result.push(ViewerEvent::NarrowClipboard);
+                    }
+                }
+                Event::KeyRelease(event)
+                    if event.event == self.window
+                        && self.clipboard_shortcut.held.contains(&event.detail) =>
+                {
+                    // Keep consuming the edge after off/pending disables the
+                    // shortcut, and distinguish a real release from autorepeat.
+                    self.clipboard_shortcut
+                        .defer_release(event.detail, event.time, Instant::now());
                 }
                 Event::KeyPress(event)
                     if event.event == self.window
@@ -1408,6 +1466,15 @@ impl Viewer {
                 .flush_release(&mut result, self.forward_keyboard);
         }
 
+        if !budget.exhausted()
+            && self
+                .clipboard_shortcut
+                .pending_release
+                .is_some_and(|release| release.queued_at.elapsed() >= KEY_RELEASE_DEFER)
+        {
+            self.clipboard_shortcut.flush_release(&mut result, false);
+        }
+
         if (self.width, self.height) != backing_dimensions && !self.closed {
             // Coalesce this batch, but do not allocate/render before its input
             // reaches the host. Continuous event floods yield at the budget.
@@ -1465,10 +1532,13 @@ impl Viewer {
             self.deferred_events.push_back(event);
             return Ok(true);
         }
-        Ok(self
-            .keyboard
-            .pending_release
-            .is_some_and(|release| release.queued_at.elapsed() >= KEY_RELEASE_DEFER))
+        Ok([&self.keyboard, &self.clipboard_shortcut]
+            .into_iter()
+            .any(|keyboard| {
+                keyboard
+                    .pending_release
+                    .is_some_and(|release| release.queued_at.elapsed() >= KEY_RELEASE_DEFER)
+            }))
     }
 
     /// File descriptor used by the event-driven client loop.
@@ -1485,8 +1555,18 @@ impl Viewer {
             .keyboard
             .pending_release
             .and_then(|release| release.queued_at.checked_add(KEY_RELEASE_DEFER));
+        let shortcut = self
+            .clipboard_shortcut
+            .pending_release
+            .and_then(|release| release.queued_at.checked_add(KEY_RELEASE_DEFER));
         let presentation = self.presentations.front().map(|pending| pending.deadline);
-        key.into_iter().chain(presentation).min()
+        key.into_iter().chain(shortcut).chain(presentation).min()
+    }
+
+    /// The session enables this only for its originally negotiated clipboard.
+    /// Disabling never drops a held shortcut's release/autorepeat tracking.
+    pub(crate) fn enable_clipboard_narrowing(&mut self, enabled: bool) {
+        self.clipboard_narrowing_enabled = enabled;
     }
 
     pub(crate) fn enable_source_cycle(&mut self, enabled: bool) {
@@ -4250,6 +4330,11 @@ fn source_cycle_modifiers_match(state: KeyButMask) -> bool {
     state & modifiers == KeyButMask::SHIFT | KeyButMask::CONTROL | KeyButMask::MOD4
 }
 
+fn clipboard_narrow_modifiers_match(state: KeyButMask) -> bool {
+    let modifiers = KeyButMask::SHIFT | KeyButMask::CONTROL | KeyButMask::MOD1 | KeyButMask::MOD4;
+    state & modifiers == KeyButMask::CONTROL | KeyButMask::MOD1 | KeyButMask::MOD4
+}
+
 fn escape_modifiers_match(state: KeyButMask) -> bool {
     let modifiers = KeyButMask::SHIFT | KeyButMask::CONTROL | KeyButMask::MOD1 | KeyButMask::MOD4;
     state & modifiers == KeyButMask::CONTROL | KeyButMask::MOD4
@@ -4671,6 +4756,42 @@ mod tests {
         assert!(keyboard.pending_release.is_none());
         assert!(buttons.0.is_empty());
         assert!(presented.is_none());
+    }
+
+    #[test]
+    fn clipboard_narrow_shortcut_is_distinct_and_ignores_locks() {
+        let chord = KeyButMask::CONTROL | KeyButMask::MOD4 | KeyButMask::MOD1;
+        assert!(clipboard_narrow_modifiers_match(chord));
+        assert!(clipboard_narrow_modifiers_match(
+            chord | KeyButMask::LOCK | KeyButMask::MOD2 | KeyButMask::BUTTON1
+        ));
+        assert!(!clipboard_narrow_modifiers_match(chord | KeyButMask::SHIFT));
+        assert!(!clipboard_narrow_modifiers_match(
+            KeyButMask::CONTROL | KeyButMask::MOD4
+        ));
+        assert!(!escape_modifiers_match(chord));
+        assert!(!source_cycle_modifiers_match(chord));
+    }
+
+    #[test]
+    fn clipboard_narrow_shortcut_view_only_consumes_repeat_and_release() {
+        let mut shortcut = ViewerKeyboardState::default();
+        let mut remote = ViewerKeyboardState::default();
+        let mut buttons = ForwardedButtons::default();
+        let mut events = Vec::new();
+        assert_eq!(shortcut.press(96, true, false), KeyPressAction::ReleaseGrab);
+        clear_forwarded_input(&mut remote, &mut buttons, &mut events);
+        assert_eq!(events, vec![ViewerEvent::ReleaseAll]);
+        assert_eq!(shortcut.press(96, true, false), KeyPressAction::Ignore);
+        shortcut.defer_release(96, 42, Instant::now());
+        assert!(shortcut.consume_repeat(96, 42));
+        assert_eq!(shortcut.press(96, true, false), KeyPressAction::Ignore);
+        shortcut.defer_release(96, 43, Instant::now());
+        assert!(!shortcut.consume_repeat(96, 44));
+        shortcut.flush_release(&mut events, false);
+        assert_eq!(events, vec![ViewerEvent::ReleaseAll]);
+        assert!(shortcut.held.is_empty());
+        assert_eq!(shortcut.press(96, true, false), KeyPressAction::ReleaseGrab);
     }
 
     #[test]
@@ -6347,5 +6468,24 @@ mod tests {
         });
         assert_eq!(core_calls.get(), 0);
         assert!(matches!(outcome, UploadOutcome::Error("connection")));
+    }
+    #[test]
+    fn late_clipboard_shortcut_or_sticky_intent_prevents_reconnect() {
+        assert!(local_retry_intent_allows(&[], false, false, false, false));
+        assert!(!local_retry_intent_allows(
+            &[ViewerEvent::NarrowClipboard],
+            false,
+            false,
+            false,
+            false
+        ));
+        assert!(!local_retry_intent_allows(&[], false, false, true, false));
+        assert!(!local_retry_intent_allows(
+            &[ViewerEvent::ReleaseAll],
+            false,
+            false,
+            true,
+            false
+        ));
     }
 }

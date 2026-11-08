@@ -170,6 +170,10 @@ pub enum MessageKind {
     SourceChanged = 19,
     /// Structured host termination, never a reconnect or cleanup guarantee.
     SessionClose = 20,
+    /// Viewer requests a monotonic clipboard content restriction.
+    ClipboardRestrict = 21,
+    /// Host worker, backend and ordered writer have crossed the restriction.
+    ClipboardRestricted = 22,
 }
 
 impl TryFrom<u8> for MessageKind {
@@ -197,6 +201,8 @@ impl TryFrom<u8> for MessageKind {
             18 => Ok(Self::SourceRequest),
             19 => Ok(Self::SourceChanged),
             20 => Ok(Self::SessionClose),
+            21 => Ok(Self::ClipboardRestrict),
+            22 => Ok(Self::ClipboardRestricted),
             other => Err(ProtocolError::UnknownMessageKind(other)),
         }
     }
@@ -842,16 +848,37 @@ mod tests {
     #[test]
     fn application_message_kinds_remain_a_closed_set() {
         for (tag, kind) in [
+            (1, MessageKind::Hello),
+            (2, MessageKind::HelloAck),
+            (3, MessageKind::Frame),
+            (4, MessageKind::Pointer),
+            (5, MessageKind::Key),
+            (6, MessageKind::Button),
+            (7, MessageKind::ReleaseAll),
+            (8, MessageKind::Close),
+            (9, MessageKind::Heartbeat),
+            (10, MessageKind::FrameAck),
+            (11, MessageKind::InputBatch),
+            (12, MessageKind::Viewport),
+            (13, MessageKind::Clipboard),
+            (14, MessageKind::ClipboardTransfer),
+            (15, MessageKind::CursorShape),
+            (16, MessageKind::CursorPosition),
             (17, MessageKind::SourceCatalog),
             (18, MessageKind::SourceRequest),
             (19, MessageKind::SourceChanged),
             (20, MessageKind::SessionClose),
+            (21, MessageKind::ClipboardRestrict),
+            (22, MessageKind::ClipboardRestricted),
         ] {
             assert_eq!(MessageKind::try_from(tag).unwrap(), kind);
             assert_eq!(u8::from(kind), tag);
         }
-        for tag in [0, 21, 255] {
-            assert!(MessageKind::try_from(tag).is_err());
+        for tag in (0..=u8::MAX).filter(|tag| !(1..=22).contains(tag)) {
+            assert!(
+                matches!(MessageKind::try_from(tag), Err(ProtocolError::UnknownMessageKind(rejected)) if rejected == tag),
+                "unallocated application message kind {tag} must be rejected"
+            );
         }
     }
 

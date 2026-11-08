@@ -21,6 +21,7 @@ pub mod clipboard_files;
 pub mod clipboard_policy;
 pub mod clipboard_staging_budget;
 pub mod clipboard_sync;
+pub mod clipboard_wire;
 pub mod close_wire;
 pub mod cursor;
 mod deadline;

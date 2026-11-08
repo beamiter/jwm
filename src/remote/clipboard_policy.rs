@@ -1,4 +1,4 @@
-//! Immutable, explicitly consented clipboard policy. Directions are always
+//! Explicitly consented clipboard policy with monotonic runtime narrowing. Directions are always
 //! named relative to the host, including when evaluated on the host itself.
 use serde::{Deserialize, Serialize};
 use std::{fmt, str::FromStr};
@@ -118,6 +118,27 @@ pub fn label(content: u8, directions: u8) -> String {
         _ => return "off".into(),
     };
     format!("{content}, {direction}")
+}
+
+/// Runtime controls can remove content, never add it or change direction.
+pub const fn valid_content(content: u8) -> bool {
+    matches!(content, 0 | 1 | 3 | 7)
+}
+
+pub const fn next_content(content: u8) -> Option<u8> {
+    match content {
+        7 => Some(3),
+        3 => Some(1),
+        1 => Some(0),
+        _ => None,
+    }
+}
+
+pub const fn strictly_narrows(current: u8, requested: u8) -> bool {
+    valid_content(current)
+        && valid_content(requested)
+        && current != requested
+        && requested & !current == 0
 }
 
 #[cfg(test)]

@@ -6,6 +6,7 @@ use super::clipboard_sync::{
     ClipboardInbox, ClipboardOutbox, ClipboardSync, MAX_TRANSFER_RECORD_BYTES, Outgoing,
     SyncOptions,
 };
+use super::clipboard_wire::{ClipboardRestriction, OutboundGate};
 use super::close_wire::{SessionClose, SessionCloseCode};
 use super::deadline::TcpStreamDeadline;
 use super::key::KeySource;
@@ -3469,16 +3470,32 @@ fn forward_clipboard<W: std::io::Write + SetWriteTimeout>(
     writer: &Mutex<SessionWriter<DeadlineWriter<W>>>,
     running: &AtomicBool,
 ) -> RemoteResult<()> {
-    forward_clipboard_from(|timeout| outbox.next_timeout(timeout), writer, running)
+    forward_clipboard_with_policy(
+        |timeout| outbox.next_timeout(timeout),
+        writer,
+        running,
+        Some(&outbox.control()),
+    )
 }
 
 /// Write each clipboard record the worker queues, one record per lock, so a
 /// frame can always slip in between two chunks of a large copy.
+#[cfg(test)]
 fn forward_clipboard_from<W: std::io::Write + SetWriteTimeout>(
-    mut receive: impl FnMut(Duration) -> Result<Option<Outgoing>, std::sync::mpsc::RecvError>,
+    receive: impl FnMut(Duration) -> Result<Option<Outgoing>, std::sync::mpsc::RecvError>,
     writer: &Mutex<SessionWriter<DeadlineWriter<W>>>,
     running: &AtomicBool,
 ) -> RemoteResult<()> {
+    forward_clipboard_with_policy(receive, writer, running, None)
+}
+
+fn forward_clipboard_with_policy<W: std::io::Write + SetWriteTimeout>(
+    mut receive: impl FnMut(Duration) -> Result<Option<Outgoing>, std::sync::mpsc::RecvError>,
+    writer: &Mutex<SessionWriter<DeadlineWriter<W>>>,
+    running: &AtomicBool,
+    control: Option<&super::clipboard_sync::ClipboardControl>,
+) -> RemoteResult<()> {
+    let mut gate = OutboundGate::default();
     while running.load(Ordering::Acquire) {
         let record = match receive(CLIPBOARD_POLL_INTERVAL) {
             Ok(Some(record)) => record,
@@ -3496,12 +3513,34 @@ fn forward_clipboard_from<W: std::io::Write + SetWriteTimeout>(
         };
         let result = {
             let mut writer = lock_writer(writer);
-            write_session_record(
-                &mut writer,
-                record.kind,
-                &record.payload,
-                FRAME_WRITE_DEADLINE,
-            )
+            // Check after obtaining actual writer ownership. Bytes already in a
+            // native write precede this stream's restriction acknowledgement.
+            let payload = if let Some(control) = control {
+                gate.filter(record.kind, &record.payload, control.policy().content())?
+            } else {
+                Some(record.payload.clone())
+            };
+            if record.kind == MessageKind::ClipboardRestricted {
+                let restriction = ClipboardRestriction::decode(&record.payload)?;
+                control
+                    .ok_or_else(|| invalid_data("clipboard barrier without control"))?
+                    .with_written_barrier(restriction, || {
+                        write_session_record(
+                            &mut writer,
+                            record.kind,
+                            &record.payload,
+                            FRAME_WRITE_DEADLINE,
+                        )
+                        .map_err(Into::into)
+                    })?;
+                eprintln!(
+                    "jwm-remote: clipboard restriction applied (revision {}, content mask {})",
+                    restriction.revision, restriction.content
+                );
+            } else if let Some(payload) = payload {
+                write_session_record(&mut writer, record.kind, &payload, FRAME_WRITE_DEADLINE)?;
+            }
+            Ok::<_, super::RemoteError>(())
         };
         if let Err(error) = result {
             return Err(error.into());
@@ -3864,6 +3903,12 @@ fn receive_input_scoped(
                 MessageKind::Heartbeat => {
                     return Err(invalid_data("client heartbeat payload must be empty").into());
                 }
+                MessageKind::ClipboardRestrict => {
+                    let request = ClipboardRestriction::decode(&payload)?;
+                    clipboard
+                        .ok_or_else(|| invalid_data("clipboard sharing was not negotiated"))?
+                        .restrict(request)?;
+                }
                 MessageKind::Clipboard | MessageKind::ClipboardTransfer => {
                     match clipboard {
                         Some(clipboard) => clipboard.deliver(kind, &payload)?,
@@ -3941,7 +3986,8 @@ fn receive_input_scoped(
                 | MessageKind::CursorPosition
                 | MessageKind::SourceCatalog
                 | MessageKind::SourceChanged
-                | MessageKind::SessionClose => {
+                | MessageKind::SessionClose
+                | MessageKind::ClipboardRestricted => {
                     return Err(invalid_data(format!("unexpected client message: {kind:?}")).into());
                 }
             }
@@ -7185,7 +7231,7 @@ mod tests {
             let (kind, reason) = reader.read_message().unwrap();
             assert_eq!(kind, MessageKind::Close);
             let reason = String::from_utf8(reason).unwrap();
-            assert!(reason.contains("version 4; expected 13"), "{reason}");
+            assert!(reason.contains("version 4; expected 14"), "{reason}");
             assert!(
                 reason.contains("update jwm-remote on both machines"),
                 "{reason}"
@@ -7207,15 +7253,15 @@ mod tests {
             }
             .encode();
             assert!(ClientHello::decode(&valid).is_ok());
-            // v12 has the same Hello layout; only its application version differs.
+            // v13 has the same Hello layout; only its application version differs.
             let mut prior_version = valid.clone();
-            prior_version[8..10].copy_from_slice(&12_u16.to_be_bytes());
+            prior_version[8..10].copy_from_slice(&13_u16.to_be_bytes());
             let mut malformed = valid;
             malformed[10] |= 0x80;
             for (hello, expected) in [
                 (
                     prior_version,
-                    "unsupported JWM remote application version 12; expected 13",
+                    "unsupported JWM remote application version 13; expected 14",
                 ),
                 (malformed, "peer advertised unknown remote capabilities"),
             ] {
@@ -9222,5 +9268,105 @@ mod tests {
         let next_idle = sender.committed_at.unwrap() + UNCHANGED_FRAME_KEEPALIVE;
         let keepalive = sender.plan_at(&source, next_idle).unwrap();
         assert!(keepalive.emit && keepalive.dirty_tiles == 0);
+    }
+    #[test]
+    fn host_final_clipboard_writer_gates_queued_payload_on_both_sides_of_ack() {
+        use super::super::clipboard_sync::{ClipboardControl, TransferKind, TransferOp};
+        let native = Arc::new((
+            Mutex::new(GateState {
+                open: true,
+                ..Default::default()
+            }),
+            Condvar::new(),
+        ));
+        let writer = Mutex::new(SessionWriter::new(
+            DeadlineWriter::new(GateWriter(native.clone()), WRITE_TIMEOUT),
+            [0x79; 32],
+        ));
+        let control = ClipboardControl::for_test(7);
+        let request = ClipboardRestriction {
+            revision: 1,
+            content: 0,
+        };
+        control
+            .restrict(request, MessageKind::ClipboardRestricted)
+            .unwrap();
+        let record = |op: TransferOp| Outgoing {
+            kind: MessageKind::ClipboardTransfer,
+            payload: op.encode(),
+        };
+        let mut records = std::collections::VecDeque::from([
+            record(TransferOp::Begin {
+                id: 1,
+                kind: TransferKind::Files,
+                length: 3,
+                entries: 1,
+                items: 1,
+            }),
+            record(TransferOp::Data {
+                id: 1,
+                bytes: b"old".to_vec(),
+            }),
+            record(TransferOp::End { id: 1 }),
+            Outgoing {
+                kind: MessageKind::ClipboardRestricted,
+                payload: request.encode().to_vec(),
+            },
+            text_record("must not follow confirmed off"),
+            record(TransferOp::Begin {
+                id: 2,
+                kind: TransferKind::Image,
+                length: 4,
+                entries: 0,
+                items: 1,
+            }),
+            record(TransferOp::Data {
+                id: 2,
+                bytes: b"late".to_vec(),
+            }),
+            record(TransferOp::End { id: 2 }),
+        ]);
+        let running = AtomicBool::new(true);
+        forward_clipboard_with_policy(
+            |_| {
+                let record = records.pop_front();
+                if record.is_none() {
+                    running.store(false, Ordering::Release);
+                }
+                Ok(record)
+            },
+            &writer,
+            &running,
+            Some(&control),
+        )
+        .unwrap();
+        let bytes = native.0.lock().unwrap().bytes.clone();
+        let mut reader = SessionReader::new(std::io::Cursor::new(bytes), [0x79; 32]);
+        for expected in [
+            TransferOp::Cancel { id: 1 },
+            TransferOp::Skip { id: 1, bytes: 3 },
+            TransferOp::Cancel { id: 1 },
+        ] {
+            let (kind, payload) = reader.read_message().unwrap();
+            assert_eq!(kind, MessageKind::ClipboardTransfer);
+            assert_eq!(TransferOp::decode(&payload).unwrap(), expected);
+        }
+        let (kind, payload) = reader.read_message().unwrap();
+        assert_eq!(kind, MessageKind::ClipboardRestricted);
+        assert_eq!(ClipboardRestriction::decode(&payload).unwrap(), request);
+        for expected in [
+            TransferOp::Cancel { id: 2 },
+            TransferOp::Skip { id: 2, bytes: 4 },
+            TransferOp::Cancel { id: 2 },
+        ] {
+            let (kind, payload) = reader.read_message().unwrap();
+            assert_eq!(kind, MessageKind::ClipboardTransfer);
+            assert_eq!(TransferOp::decode(&payload).unwrap(), expected);
+        }
+        assert!(reader.read_message().is_err());
+        assert!(
+            control.restriction_written(request).is_err(),
+            "ACK cleared pending atomically"
+        );
     }
 }

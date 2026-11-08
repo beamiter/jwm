@@ -13,6 +13,7 @@
 //! op 4 Cancel  id (u32)                 sender gave up
 //! op 5 Ack     id (u32) || consumed (u64)   receiver -> sender
 //! op 6 Refuse  id (u32)                 receiver -> sender: stop
+//! op 7 Skip    id (u32) || omitted (u64) counted Data suppressed by v14 restriction
 //! ```
 //!
 //! An image's stream is its PNG; a file copy's is the entry stream of
@@ -36,11 +37,13 @@
 
 use super::RemoteResult;
 use super::clipboard_files::{ArchiveReceiver, Manifest, ManifestReader, Staging, human_bytes};
+use super::clipboard_wire::{ClipboardRestriction, validate_successor};
 use super::messages::{MAX_CLIPBOARD_BYTES, decode_clipboard, encode_clipboard};
 use super::protocol::MessageKind;
 use crate::backend::clipboard_x11::{
     CopiedClipboard, FileFulfilReceipt, PendingKind, RemoteCaptures, RemoteClipboard,
     RemoteClipboardOptions, RemoteClipboardShutdown, RemoteServe, RemoteSetter,
+    RuntimeClipboardPolicy,
 };
 use std::collections::VecDeque;
 use std::io;
@@ -72,6 +75,8 @@ const OP_END: u8 = 3;
 const OP_CANCEL: u8 = 4;
 const OP_ACK: u8 = 5;
 const OP_REFUSE: u8 = 6;
+const OP_SKIP: u8 = 7;
+const RESTRICTION_BACKEND_TIMEOUT: Duration = Duration::from_secs(5);
 const KIND_IMAGE: u8 = 1;
 const KIND_FILES: u8 = 2;
 
@@ -94,6 +99,11 @@ pub enum TransferOp {
     Data {
         id: u32,
         bytes: Vec<u8>,
+    },
+    /// Counted outgoing bytes suppressed by a runtime restriction. Never feeds a sink.
+    Skip {
+        id: u32,
+        bytes: u64,
     },
     End {
         id: u32,
@@ -124,6 +134,7 @@ impl TransferOp {
             Self::Cancel { id } => (OP_CANCEL, id),
             Self::Ack { id, .. } => (OP_ACK, id),
             Self::Refuse { id } => (OP_REFUSE, id),
+            Self::Skip { id, .. } => (OP_SKIP, id),
         };
         payload.push(op);
         payload.extend_from_slice(&id.to_be_bytes());
@@ -145,6 +156,7 @@ impl TransferOp {
             }
             Self::Data { bytes, .. } => payload.extend_from_slice(bytes),
             Self::Ack { consumed, .. } => payload.extend_from_slice(&consumed.to_be_bytes()),
+            Self::Skip { bytes, .. } => payload.extend_from_slice(&bytes.to_be_bytes()),
             Self::End { .. } | Self::Cancel { .. } | Self::Refuse { .. } => {}
         }
         payload
@@ -208,6 +220,14 @@ impl TransferOp {
                     consumed: u64::from_be_bytes(body.try_into().expect("fixed slice")),
                 }
             }
+            OP_SKIP => {
+                exact(8)?;
+                let bytes = u64::from_be_bytes(body.try_into().expect("fixed slice"));
+                if bytes == 0 || bytes > TRANSFER_CHUNK_BYTES as u64 {
+                    return Err(invalid_data("invalid skipped clipboard byte count").into());
+                }
+                Self::Skip { id, bytes }
+            }
             OP_REFUSE => {
                 exact(0)?;
                 Self::Refuse { id }
@@ -235,6 +255,15 @@ pub struct SyncOptions {
 }
 
 impl SyncOptions {
+    fn content(self) -> u8 {
+        if self.files && self.file_limit != 0 {
+            7
+        } else if self.images {
+            3
+        } else {
+            1
+        }
+    }
     fn validate_peer_op(self, op: &TransferOp) -> RemoteResult<()> {
         if !self.images && (!self.files || self.file_limit == 0) {
             return Err(invalid_data("clipboard transfers were not negotiated").into());
@@ -307,6 +336,10 @@ enum Command {
     LocalClosed,
     PeerText(String),
     Peer(TransferOp),
+    Restrict {
+        record: ClipboardRestriction,
+        reply: MessageKind,
+    },
     Stop,
 }
 
@@ -322,6 +355,7 @@ struct QueueState<T> {
     entries: VecDeque<(T, usize)>,
     bytes: usize,
     closed: bool,
+    reserved: Option<(T, usize)>,
 }
 
 struct BoundedQueue<T> {
@@ -338,6 +372,7 @@ impl<T> BoundedQueue<T> {
                 entries: VecDeque::new(),
                 bytes: 0,
                 closed: false,
+                reserved: None,
             }),
             ready: Condvar::new(),
             max_records,
@@ -352,14 +387,21 @@ impl<T> BoundedQueue<T> {
             return Err(());
         }
         let mut removed = 0;
+        let preceding = state.reserved.as_ref().map_or(0, |(_, before)| *before);
+        let mut index = 0;
+        let mut removed_before = 0;
         state.entries.retain(|(entry, size)| {
-            if replace(entry) {
+            let discard = replace(entry);
+            if discard {
                 removed += size;
-                false
-            } else {
-                true
+                removed_before += usize::from(index < preceding);
             }
+            index += 1;
+            !discard
         });
+        if let Some((_, before)) = &mut state.reserved {
+            *before -= removed_before;
+        }
         state.bytes -= removed;
         if state.entries.len() >= self.max_records
             || bytes > self.max_bytes.saturating_sub(state.bytes)
@@ -367,6 +409,7 @@ impl<T> BoundedQueue<T> {
             // Fail closed: dropping a transfer record and continuing would corrupt
             // the stream or its cumulative flow-control accounting.
             state.closed = true;
+            state.reserved = None;
             state.entries.clear();
             state.bytes = 0;
             self.ready.notify_all();
@@ -378,9 +421,39 @@ impl<T> BoundedQueue<T> {
         Ok(())
     }
 
+    /// A single bounded policy fence never competes with ordinary data capacity.
+    /// Worker controls preempt queued content; outgoing fences follow the old FIFO.
+    fn reserve(&self, value: T, ordered: bool) -> Result<(), ()> {
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        if state.closed || state.reserved.is_some() {
+            return Err(());
+        }
+        let before = if ordered { state.entries.len() } else { 0 };
+        state.reserved = Some((value, before));
+        self.ready.notify_all();
+        Ok(())
+    }
+
+    fn pop(state: &mut QueueState<T>) -> Option<T> {
+        if state
+            .reserved
+            .as_ref()
+            .is_some_and(|(_, before)| *before == 0)
+        {
+            return state.reserved.take().map(|(value, _)| value);
+        }
+        let (value, bytes) = state.entries.pop_front()?;
+        state.bytes -= bytes;
+        if let Some((_, before)) = &mut state.reserved {
+            *before -= 1;
+        }
+        Some(value)
+    }
+
     fn close(&self) {
         let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
         state.closed = true;
+        state.reserved = None;
         state.entries.clear();
         state.bytes = 0;
         self.ready.notify_all();
@@ -394,10 +467,11 @@ impl<T> BoundedQueue<T> {
         let state = self.state.lock().unwrap_or_else(|p| p.into_inner());
         let (mut state, _) = self
             .ready
-            .wait_timeout_while(state, timeout, |s| s.entries.is_empty() && !s.closed)
+            .wait_timeout_while(state, timeout, |s| {
+                s.entries.is_empty() && s.reserved.is_none() && !s.closed
+            })
             .unwrap_or_else(|p| p.into_inner());
-        if let Some((value, bytes)) = state.entries.pop_front() {
-            state.bytes -= bytes;
+        if let Some(value) = Self::pop(&mut state) {
             Ok(value)
         } else if state.closed {
             Err(mpsc::RecvTimeoutError::Disconnected)
@@ -408,8 +482,7 @@ impl<T> BoundedQueue<T> {
 
     fn try_recv(&self) -> Result<T, mpsc::TryRecvError> {
         let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
-        if let Some((value, bytes)) = state.entries.pop_front() {
-            state.bytes -= bytes;
+        if let Some(value) = Self::pop(&mut state) {
             Ok(value)
         } else if state.closed {
             Err(mpsc::TryRecvError::Disconnected)
@@ -425,6 +498,9 @@ impl BoundedQueue<Command> {
             // Shutdown has a reserved path even when the data queue is full.
             self.close();
             return Ok(());
+        }
+        if matches!(command, Command::Restrict { .. }) {
+            return self.reserve(command, false);
         }
         let bytes = match &command {
             Command::Local(copied) => copied.retained_bytes().unwrap_or(usize::MAX),
@@ -443,6 +519,12 @@ impl BoundedQueue<Command> {
 
 impl BoundedQueue<Outgoing> {
     fn send(&self, record: Outgoing) -> Result<(), ()> {
+        if matches!(
+            record.kind,
+            MessageKind::ClipboardRestrict | MessageKind::ClipboardRestricted
+        ) {
+            return self.reserve(record, true);
+        }
         let bytes = record.payload.capacity();
         let ack = record.kind == MessageKind::ClipboardTransfer
             && record.payload.first() == Some(&OP_ACK);
@@ -530,11 +612,101 @@ pub struct ClipboardInbox {
     commands: Arc<BoundedQueue<Command>>,
     in_flight: Arc<AtomicU64>,
     options: SyncOptions,
+    control: ClipboardControl,
 }
 
 /// Writer half: records the worker wants sent.
 pub struct ClipboardOutbox {
     records: Arc<BoundedQueue<Outgoing>>,
+    control: ClipboardControl,
+}
+
+#[derive(Clone)]
+pub struct ClipboardControl {
+    commands: Arc<BoundedQueue<Command>>,
+    policy: RuntimeClipboardPolicy,
+    state: Arc<Mutex<RestrictionControlState>>,
+}
+struct RestrictionControlState {
+    revision: u64,
+    content: u8,
+    pending: Option<ClipboardRestriction>,
+}
+impl ClipboardControl {
+    fn new(
+        commands: Arc<BoundedQueue<Command>>,
+        policy: RuntimeClipboardPolicy,
+        content: u8,
+    ) -> Self {
+        Self {
+            commands,
+            policy,
+            state: Arc::new(Mutex::new(RestrictionControlState {
+                revision: 0,
+                content,
+                pending: None,
+            })),
+        }
+    }
+    pub(crate) fn policy(&self) -> RuntimeClipboardPolicy {
+        self.policy.clone()
+    }
+    pub(crate) fn restrict(
+        &self,
+        record: ClipboardRestriction,
+        reply: MessageKind,
+    ) -> RemoteResult<()> {
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        if state.pending.is_some() {
+            return Err(invalid_data("clipboard restriction already pending").into());
+        }
+        validate_successor(state.revision, state.content, record)?;
+        self.policy.narrow(record.content).map_err(invalid_data)?;
+        state.revision = record.revision;
+        state.content = record.content;
+        state.pending = Some(record);
+        self.commands
+            .send(Command::Restrict { record, reply })
+            .map_err(|_| invalid_data("clipboard restriction queue unavailable"))?;
+        Ok(())
+    }
+    /// The request reader must not observe the old pending record after the
+    /// ACK becomes visible on the wire. Lock order: writer -> this state. The
+    /// reader holds this state only for gate/queue admission, never a writer.
+    pub(crate) fn with_written_barrier(
+        &self,
+        record: ClipboardRestriction,
+        write: impl FnOnce() -> RemoteResult<()>,
+    ) -> RemoteResult<()> {
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        if state.pending != Some(record) {
+            return Err(invalid_data("unexpected clipboard restriction barrier").into());
+        }
+        write()?;
+        state.pending = None;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(content: u8) -> Self {
+        Self::new(
+            Arc::new(BoundedQueue::new(
+                COMMAND_QUEUE_RECORDS,
+                COMMAND_QUEUE_BYTES,
+            )),
+            RuntimeClipboardPolicy::new(content),
+            content,
+        )
+    }
+
+    pub(crate) fn restriction_written(&self, record: ClipboardRestriction) -> RemoteResult<()> {
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        if state.pending != Some(record) {
+            return Err(invalid_data("unexpected clipboard restriction barrier").into());
+        }
+        state.pending = None;
+        Ok(())
+    }
 }
 
 type Wake = Box<dyn Fn() + Send>;
@@ -544,9 +716,23 @@ type Wake = Box<dyn Fn() + Send>;
 trait ClipboardTarget {
     /// `false` when the target can no longer accept requests.
     fn serve(&self, request: RemoteServe) -> bool;
+    fn policy(&self) -> Option<RuntimeClipboardPolicy> {
+        None
+    }
+    fn restrict(&self, _content: u8) -> Result<mpsc::Receiver<()>, String> {
+        let (tx, rx) = mpsc::sync_channel(1);
+        let _ = tx.send(());
+        Ok(rx)
+    }
 }
 
 impl ClipboardTarget for RemoteSetter {
+    fn policy(&self) -> Option<RuntimeClipboardPolicy> {
+        Some(self.policy())
+    }
+    fn restrict(&self, content: u8) -> Result<mpsc::Receiver<()>, String> {
+        self.restrict(content)
+    }
     fn serve(&self, request: RemoteServe) -> bool {
         self.send(request)
     }
@@ -580,7 +766,12 @@ fn spawn_worker<T: ClipboardTarget + Send + 'static>(
     let records_tx = Arc::clone(&records);
     let status = Arc::new(SyncStatus::default());
     let in_flight = Arc::new(AtomicU64::new(0));
+    let policy = target
+        .policy()
+        .unwrap_or_else(|| RuntimeClipboardPolicy::new(options.content()));
+    let control = ClipboardControl::new(commands.clone(), policy.clone(), options.content());
     let mut worker = Worker {
+        policy,
         target,
         out: records_tx,
         wake,
@@ -611,8 +802,9 @@ fn spawn_worker<T: ClipboardTarget + Send + 'static>(
             commands,
             in_flight,
             options,
+            control: control.clone(),
         },
-        ClipboardOutbox { records },
+        ClipboardOutbox { records, control },
         status,
     ))
 }
@@ -743,7 +935,28 @@ fn forward_captures(
     }
 }
 
+/// Use a CAS loop rather than APIs newer than the minimum supported Rust.
+fn reserve_in_flight(in_flight: &AtomicU64, bytes: u64) -> bool {
+    let mut pending = in_flight.load(Ordering::Acquire);
+    loop {
+        let Some(total) = pending
+            .checked_add(bytes)
+            .filter(|sum| *sum <= TRANSFER_WINDOW_BYTES)
+        else {
+            return false;
+        };
+        match in_flight.compare_exchange_weak(pending, total, Ordering::AcqRel, Ordering::Acquire) {
+            Ok(_) => return true,
+            Err(actual) => pending = actual,
+        }
+    }
+}
+
 impl ClipboardInbox {
+    pub(crate) fn restrict(&self, record: ClipboardRestriction) -> RemoteResult<()> {
+        self.control
+            .restrict(record, MessageKind::ClipboardRestricted)
+    }
     /// Hand one authenticated peer record to the worker.
     ///
     /// Checks record shape, flow control and bounded queue admission without
@@ -757,23 +970,26 @@ impl ClipboardInbox {
                         invalid_data("clipboard receive direction was not negotiated").into(),
                     );
                 }
-                Command::PeerText(decode_clipboard(payload)?)
+                let text = decode_clipboard(payload)?;
+                if self.control.policy.content() & 1 == 0 {
+                    return Ok(());
+                }
+                Command::PeerText(text)
             }
             MessageKind::ClipboardTransfer => {
                 let op = TransferOp::decode(payload)?;
                 self.options.validate_peer_op(&op)?;
-                if let TransferOp::Data { bytes, .. } = &op {
-                    let len = bytes.len() as u64;
-                    let pending = self.in_flight.fetch_add(len, Ordering::AcqRel) + len;
-                    if pending > TRANSFER_WINDOW_BYTES {
-                        self.in_flight.fetch_sub(len, Ordering::AcqRel);
-                        self.commands.close();
-                        return Err(invalid_data(
-                            "peer sent more clipboard data than it was allowed in flight",
-                        )
-                        .into());
-                    }
-                    data_bytes = len;
+                data_bytes = match &op {
+                    TransferOp::Data { bytes, .. } => bytes.len() as u64,
+                    TransferOp::Skip { bytes, .. } => *bytes,
+                    _ => 0,
+                };
+                if data_bytes != 0 && !reserve_in_flight(&self.in_flight, data_bytes) {
+                    self.commands.close();
+                    return Err(invalid_data(
+                        "peer sent more clipboard data than it was allowed in flight",
+                    )
+                    .into());
                 }
                 Command::Peer(op)
             }
@@ -799,6 +1015,9 @@ impl Drop for ClipboardOutbox {
 }
 
 impl ClipboardOutbox {
+    pub(crate) fn control(&self) -> ClipboardControl {
+        self.control.clone()
+    }
     /// The next queued record without waiting. `Err` once the worker stopped.
     pub fn try_next(&self) -> Result<Option<Outgoing>, mpsc::RecvError> {
         match self.records.try_recv() {
@@ -852,6 +1071,7 @@ struct Receiving {
 
 struct Worker<T> {
     target: T,
+    policy: RuntimeClipboardPolicy,
     out: Arc<BoundedQueue<Outgoing>>,
     wake: Option<Wake>,
     in_flight: Arc<AtomicU64>,
@@ -996,7 +1216,7 @@ impl<T: ClipboardTarget> Worker<T> {
         match command {
             Command::Local(copied) => self.share_local(copied),
             Command::PeerText(text) => {
-                if !self.options.receive {
+                if !self.options.receive || self.policy.content() & 1 == 0 {
                     return;
                 }
                 self.cancel_sending();
@@ -1008,7 +1228,58 @@ impl<T: ClipboardTarget> Worker<T> {
                 self.status.set(None);
             }
             Command::Peer(op) => self.on_peer(op),
+            Command::Restrict { record, reply } => self.apply_restriction(record, reply),
             Command::LocalClosed | Command::Stop => {}
+        }
+    }
+
+    fn apply_restriction(&mut self, record: ClipboardRestriction, reply: MessageKind) {
+        self.cancel_disallowed();
+        let barrier = self.target.restrict(record.content).and_then(|done| {
+            done.recv_timeout(RESTRICTION_BACKEND_TIMEOUT)
+                .map_err(|error| format!("clipboard backend restriction unconfirmed: {error}"))
+        });
+        if let Err(error) = barrier {
+            eprintln!("jwm-remote: {error}; ending session");
+            self.out.close();
+            if let Some(wake) = &self.wake {
+                wake();
+            }
+            return;
+        }
+        // The native fence, rather than an ordinary queue slot, abandoned the
+        // removed receive offer. Keep the token until that fence actually wins.
+        if self.receiving.is_none() {
+            self.pending_token = None;
+        }
+        if let Some(staging) = self.staging.as_mut() {
+            staging.reclaim_rejected();
+        }
+        self.queue(reply, record.encode().to_vec());
+    }
+
+    fn cancel_disallowed(&mut self) {
+        let content = self.policy.content();
+        if self.sending.as_ref().is_some_and(|s| match s.source {
+            Source::Image(_) => content & 2 == 0,
+            Source::Files(_) => content & 4 == 0,
+        }) {
+            self.sending = None;
+        }
+        // Do not compete with a saturated data queue for Cancel/Refuse slots.
+        // The ordered policy record stops the peer, while final dispatch turns
+        // already-counted payload into Skip. No credit is reset or discarded.
+        if self.receiving.as_ref().is_some_and(|r| match r.sink {
+            Sink::Image(_) => content & 2 == 0,
+            Sink::Files(_) => content & 4 == 0,
+        }) {
+            // Do not enqueue Abandon into a saturated backend mailbox. Its
+            // reserved fence clears all forbidden offers, including this token.
+            // Retain pending_token for teardown if the fence cannot complete.
+            self.receiving = None;
+            if let Some(staging) = self.staging.as_mut() {
+                staging.discard_in_progress();
+            }
         }
     }
 
@@ -1028,9 +1299,13 @@ impl<T: ClipboardTarget> Worker<T> {
     fn share_local(&mut self, copied: CopiedClipboard) {
         if !self.options.send
             || match &copied {
-                CopiedClipboard::Text(_) => false,
-                CopiedClipboard::Png(_) => !self.options.images,
-                CopiedClipboard::Files(_) => !self.options.files || self.options.file_limit == 0,
+                CopiedClipboard::Text(_) => self.policy.content() & 1 == 0,
+                CopiedClipboard::Png(_) => !self.options.images || self.policy.content() & 2 == 0,
+                CopiedClipboard::Files(_) => {
+                    !self.options.files
+                        || self.options.file_limit == 0
+                        || self.policy.content() & 4 == 0
+                }
             }
         {
             return;
@@ -1135,6 +1410,7 @@ impl<T: ClipboardTarget> Worker<T> {
 
     /// Send as much of the outgoing transfer as the window allows.
     fn pump(&mut self) {
+        self.cancel_disallowed();
         if let Some(staging) = self.staging.as_mut() {
             staging.reclaim_rejected();
         }
@@ -1161,7 +1437,11 @@ impl<T: ClipboardTarget> Worker<T> {
             match chunk {
                 Ok(bytes) if !bytes.is_empty() => {
                     sending.sent += bytes.len() as u64;
-                    self.sent_total += bytes.len() as u64;
+                    let Some(total) = self.sent_total.checked_add(bytes.len() as u64) else {
+                        self.out.close();
+                        return;
+                    };
+                    self.sent_total = total;
                     let id = sending.id;
                     // Borrow ends before queueing.
                     let op = TransferOp::Data { id, bytes };
@@ -1203,7 +1483,7 @@ impl<T: ClipboardTarget> Worker<T> {
     /// A newer copy supersedes the outgoing transfer.
     fn cancel_sending(&mut self) {
         if let Some(sending) = self.sending.take()
-            && !(sending.ended && self.acked_total >= sending.start + sending.length)
+            && !(sending.ended && self.acked_total >= sending.start.saturating_add(sending.length))
         {
             self.queue_op(&TransferOp::Cancel { id: sending.id });
         }
@@ -1230,6 +1510,7 @@ impl<T: ClipboardTarget> Worker<T> {
     }
 
     fn on_peer(&mut self, op: TransferOp) {
+        self.cancel_disallowed();
         if self.options.validate_peer_op(&op).is_err() {
             return;
         }
@@ -1289,7 +1570,11 @@ impl<T: ClipboardTarget> Worker<T> {
                 let result = self.receive_chunk(id, &bytes);
                 // Consumed or discarded, the window reopens either way.
                 self.in_flight.fetch_sub(len, Ordering::AcqRel);
-                self.consumed_total += len;
+                let Some(total) = self.consumed_total.checked_add(len) else {
+                    self.out.close();
+                    return;
+                };
+                self.consumed_total = total;
                 self.queue_op(&TransferOp::Ack {
                     id,
                     consumed: self.consumed_total,
@@ -1299,6 +1584,23 @@ impl<T: ClipboardTarget> Worker<T> {
                     self.show_outcome("copy failed".into());
                     self.drop_receiving(true);
                 }
+            }
+            TransferOp::Skip { id, bytes } => {
+                // A skipped byte was counted by the sender but contains no data.
+                // Never feed a sink, accept a transfer or manufacture completion.
+                self.in_flight.fetch_sub(bytes, Ordering::AcqRel);
+                let Some(total) = self.consumed_total.checked_add(bytes) else {
+                    self.out.close();
+                    return;
+                };
+                self.consumed_total = total;
+                if self.receiving.as_ref().is_some_and(|r| r.id == id) {
+                    self.drop_receiving(true);
+                }
+                self.queue_op(&TransferOp::Ack {
+                    id,
+                    consumed: total,
+                });
             }
             TransferOp::End { id } => self.finish_receiving(id),
             TransferOp::Cancel { id } => {
@@ -1313,7 +1615,7 @@ impl<T: ClipboardTarget> Worker<T> {
                 let Some(sending) = self.sending.as_mut().filter(|s| s.id == id) else {
                     return;
                 };
-                if sending.ended && acked_total >= sending.start + sending.length {
+                if sending.ended && acked_total >= sending.start.saturating_add(sending.length) {
                     eprintln!(
                         "jwm-remote: shared {} ({}) in {:.1} s",
                         sending.label,
@@ -1339,7 +1641,7 @@ impl<T: ClipboardTarget> Worker<T> {
         }
         match kind {
             TransferKind::Image => {
-                if !self.options.images {
+                if !self.options.images || self.policy.content() & 2 == 0 {
                     return Err("image sharing was not negotiated".into());
                 }
                 if length == 0 || length > MAX_SHARED_IMAGE_BYTES as u64 {
@@ -1351,7 +1653,10 @@ impl<T: ClipboardTarget> Worker<T> {
                 Ok(Sink::Image(Vec::with_capacity(length as usize)))
             }
             TransferKind::Files => {
-                if !self.options.files || self.options.file_limit == 0 {
+                if !self.options.files
+                    || self.options.file_limit == 0
+                    || self.policy.content() & 4 == 0
+                {
                     return Err("file sharing was not negotiated".into());
                 }
                 // The stream carries headers too; its length bounds the
@@ -1420,6 +1725,7 @@ impl<T: ClipboardTarget> Worker<T> {
     }
 
     fn finish_receiving(&mut self, id: u32) {
+        self.cancel_disallowed();
         let Some(receiving) = self.receiving.take_if(|r| r.id == id) else {
             return;
         };
@@ -1671,6 +1977,7 @@ mod tests {
 
     fn worker_for_target<T: ClipboardTarget>(target: T, options: SyncOptions) -> Worker<T> {
         Worker {
+            policy: RuntimeClipboardPolicy::new(options.content()),
             target,
             out: Arc::new(BoundedQueue::new(
                 OUTGOING_QUEUE_RECORDS,
@@ -1848,6 +2155,11 @@ mod tests {
                             COMMAND_QUEUE_BYTES,
                         ));
                         let inbox = ClipboardInbox {
+                            control: ClipboardControl::new(
+                                commands.clone(),
+                                RuntimeClipboardPolicy::new(policy.content()),
+                                policy.content(),
+                            ),
                             commands: commands.clone(),
                             in_flight: Arc::new(AtomicU64::new(0)),
                             options: policy,
@@ -2824,6 +3136,7 @@ mod tests {
     fn overloaded_ingress_returns_without_waiting_and_rolls_back_bytes() {
         let commands = Arc::new(BoundedQueue::new(1, TRANSFER_CHUNK_BYTES));
         let inbox = ClipboardInbox {
+            control: ClipboardControl::new(commands.clone(), RuntimeClipboardPolicy::new(7), 7),
             commands,
             in_flight: Arc::new(AtomicU64::new(0)),
             options: options(DEFAULT_FILE_LIMIT),
@@ -2935,6 +3248,7 @@ mod tests {
             COMMAND_QUEUE_BYTES,
         ));
         let inbox = ClipboardInbox {
+            control: ClipboardControl::new(commands.clone(), RuntimeClipboardPolicy::new(7), 7),
             commands,
             in_flight: Arc::new(AtomicU64::new(0)),
             options: SyncOptions {
@@ -3136,5 +3450,428 @@ mod tests {
         assert!(pair.b.nothing_served_for(Duration::from_millis(300)));
         let (_, line) = pair.a.status.changed_since(0).unwrap();
         assert_eq!(line.as_deref(), Some("copy not shared: too large"));
+    }
+    #[test]
+    fn restriction_control_uses_reserved_slots_without_reordering_counted_data() {
+        let commands = BoundedQueue::<Command>::new(2, 128);
+        commands.send(Command::PeerText("one".into())).unwrap();
+        commands.send(Command::PeerText("two".into())).unwrap();
+        let request = ClipboardRestriction {
+            revision: 1,
+            content: 0,
+        };
+        commands
+            .send(Command::Restrict {
+                record: request,
+                reply: MessageKind::ClipboardRestrict,
+            })
+            .unwrap();
+        assert!(matches!(commands.try_recv(), Ok(Command::Restrict { .. })));
+        assert!(matches!(commands.try_recv(), Ok(Command::PeerText(_))));
+        assert!(!commands.closed());
+        let outgoing = BoundedQueue::<Outgoing>::new(2, 128);
+        for id in 1..=2 {
+            outgoing
+                .send(Outgoing {
+                    kind: MessageKind::ClipboardTransfer,
+                    payload: TransferOp::Data {
+                        id,
+                        bytes: vec![id as u8],
+                    }
+                    .encode(),
+                })
+                .unwrap();
+        }
+        outgoing
+            .send(Outgoing {
+                kind: MessageKind::ClipboardRestrict,
+                payload: request.encode().to_vec(),
+            })
+            .unwrap();
+        for id in 1..=2 {
+            assert!(
+                matches!(TransferOp::decode(&outgoing.try_recv().unwrap().payload).unwrap(), TransferOp::Data { id: actual, .. } if actual == id)
+            );
+        }
+        assert_eq!(
+            outgoing.try_recv().unwrap().kind,
+            MessageKind::ClipboardRestrict
+        );
+        assert!(!outgoing.closed());
+    }
+
+    #[test]
+    fn restriction_fence_survives_ack_coalescing_before_and_after_it() {
+        let out = BoundedQueue::<Outgoing>::new(2, 128);
+        let ack = |n| Outgoing {
+            kind: MessageKind::ClipboardTransfer,
+            payload: TransferOp::Ack { id: 1, consumed: n }.encode(),
+        };
+        out.send(ack(1)).unwrap();
+        out.send(Outgoing {
+            kind: MessageKind::ClipboardRestricted,
+            payload: ClipboardRestriction {
+                revision: 1,
+                content: 0,
+            }
+            .encode()
+            .to_vec(),
+        })
+        .unwrap();
+        out.send(ack(2)).unwrap();
+        assert_eq!(
+            out.try_recv().unwrap().kind,
+            MessageKind::ClipboardRestricted
+        );
+        assert_eq!(out.try_recv().unwrap(), ack(2));
+    }
+
+    #[test]
+    fn skipped_bytes_are_bounded_accounted_and_never_fulfil_an_offer() {
+        for bytes in [0, TRANSFER_CHUNK_BYTES as u64 + 1, u64::MAX] {
+            assert!(TransferOp::decode(&TransferOp::Skip { id: 1, bytes }.encode()).is_err());
+        }
+        let (mut worker, served) = policy_worker(options(1024));
+        worker.on_peer(TransferOp::Begin {
+            id: 4,
+            kind: TransferKind::Image,
+            length: 10,
+            entries: 0,
+            items: 1,
+        });
+        assert!(matches!(
+            served.try_recv().unwrap(),
+            RemoteServe::Announce { .. }
+        ));
+        worker.in_flight.store(10, Ordering::Release);
+        worker.on_peer(TransferOp::Skip { id: 4, bytes: 10 });
+        assert_eq!(worker.in_flight.load(Ordering::Acquire), 0);
+        assert_eq!(worker.consumed_total, 10);
+        assert!(worker.receiving.is_none());
+        assert!(matches!(
+            served.try_recv().unwrap(),
+            RemoteServe::Abandon { .. }
+        ));
+        worker.on_peer(TransferOp::End { id: 4 });
+        assert!(served.try_recv().is_err());
+        for id in [4, 3, 99] {
+            worker.in_flight.store(7, Ordering::Release);
+            worker.on_peer(TransferOp::Skip { id, bytes: 7 });
+        }
+        assert_eq!(worker.consumed_total, 31);
+        assert_eq!(worker.in_flight.load(Ordering::Acquire), 0);
+        let mut last_ack = None;
+        while let Ok(record) = worker.out.try_recv() {
+            if let TransferOp::Ack { consumed, .. } = TransferOp::decode(&record.payload).unwrap() {
+                last_ack = Some(consumed);
+            }
+        }
+        assert_eq!(last_ack, Some(31));
+    }
+
+    #[test]
+    fn skipped_bytes_obey_ingress_window_and_overflow_is_terminal() {
+        let commands = Arc::new(BoundedQueue::new(20, 1024));
+        let inbox = ClipboardInbox {
+            control: ClipboardControl::new(commands.clone(), RuntimeClipboardPolicy::new(7), 7),
+            commands,
+            in_flight: Arc::new(AtomicU64::new(0)),
+            options: options(1024),
+        };
+        let skipped = TransferOp::Skip {
+            id: 123,
+            bytes: TRANSFER_CHUNK_BYTES as u64,
+        }
+        .encode();
+        for _ in 0..TRANSFER_WINDOW_BYTES / TRANSFER_CHUNK_BYTES as u64 {
+            inbox
+                .deliver(MessageKind::ClipboardTransfer, &skipped)
+                .unwrap();
+        }
+        assert_eq!(
+            inbox.in_flight.load(Ordering::Acquire),
+            TRANSFER_WINDOW_BYTES
+        );
+        assert!(
+            inbox
+                .deliver(MessageKind::ClipboardTransfer, &skipped)
+                .is_err()
+        );
+        assert_eq!(
+            inbox.in_flight.load(Ordering::Acquire),
+            TRANSFER_WINDOW_BYTES
+        );
+        let (mut worker, _) = policy_worker(options(1024));
+        worker.consumed_total = u64::MAX;
+        worker.in_flight.store(1, Ordering::Release);
+        worker.on_peer(TransferOp::Skip { id: 9, bytes: 1 });
+        assert!(worker.out.closed());
+        assert_eq!(worker.consumed_total, u64::MAX);
+    }
+
+    #[test]
+    fn restriction_discards_unpublished_file_staging_and_preserves_credit() {
+        use super::super::clipboard_staging_budget as budget;
+        let temp = TempDir::new("runtime-restriction-budget");
+        let root = temp.0.join("stage");
+        budget::set_limit(&root, 1024).unwrap();
+        let (mut worker, served) = policy_worker(options(1024));
+        worker.staging_root = Some(root.clone());
+        worker.on_peer(TransferOp::Begin {
+            id: 1,
+            kind: TransferKind::Files,
+            length: 10,
+            entries: 1,
+            items: 1,
+        });
+        assert!(matches!(
+            served.try_recv().unwrap(),
+            RemoteServe::Announce { .. }
+        ));
+        assert_eq!(budget::status(&root).unwrap().reserved_bytes, 10);
+        worker.sent_total = 21;
+        worker.acked_total = 7;
+        worker.consumed_total = 8;
+        worker.policy.narrow(3).unwrap();
+        worker.apply_restriction(
+            ClipboardRestriction {
+                revision: 1,
+                content: 3,
+            },
+            MessageKind::ClipboardRestricted,
+        );
+        assert!(served.try_recv().is_err(), "native fence owns abandonment");
+        assert!(worker.receiving.is_none());
+        assert_eq!(budget::status(&root).unwrap().reserved_bytes, 0);
+        assert_eq!(
+            (worker.sent_total, worker.acked_total, worker.consumed_total),
+            (21, 7, 8)
+        );
+        assert_eq!(
+            worker.out.try_recv().unwrap().kind,
+            MessageKind::ClipboardRestricted
+        );
+        worker.in_flight.store(2, Ordering::Release);
+        worker.on_peer(TransferOp::Data {
+            id: 1,
+            bytes: vec![0; 2],
+        });
+        assert_eq!(worker.consumed_total, 10);
+        assert_eq!(worker.in_flight.load(Ordering::Acquire), 0);
+        assert!(served.try_recv().is_err());
+    }
+
+    #[test]
+    fn restriction_barrier_waits_for_actual_target_and_rejects_overlap() {
+        struct FenceTarget {
+            calls: mpsc::Sender<RemoteServe>,
+            barrier: Mutex<Option<mpsc::Receiver<()>>>,
+        }
+        impl ClipboardTarget for FenceTarget {
+            fn serve(&self, request: RemoteServe) -> bool {
+                self.calls.send(request).is_ok()
+            }
+            fn restrict(&self, _: u8) -> Result<mpsc::Receiver<()>, String> {
+                self.barrier
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .ok_or_else(|| "duplicate fence".into())
+            }
+        }
+        let (calls, _received) = mpsc::channel();
+        let (ack, barrier) = mpsc::sync_channel(1);
+        let (commands, join, _inbox, outbox, _) = spawn_worker(
+            FenceTarget {
+                calls,
+                barrier: Mutex::new(Some(barrier)),
+            },
+            options(1024),
+            None,
+            None,
+        )
+        .unwrap();
+        let request = ClipboardRestriction {
+            revision: 1,
+            content: 0,
+        };
+        let control = outbox.control();
+        control
+            .restrict(request, MessageKind::ClipboardRestricted)
+            .unwrap();
+        assert_eq!(control.policy().content(), 0);
+        assert!(
+            control
+                .restrict(
+                    ClipboardRestriction {
+                        revision: 2,
+                        content: 0
+                    },
+                    MessageKind::ClipboardRestricted
+                )
+                .is_err()
+        );
+        assert!(
+            outbox
+                .next_timeout(Duration::from_millis(30))
+                .unwrap()
+                .is_none()
+        );
+        ack.send(()).unwrap();
+        let record = outbox
+            .next_timeout(Duration::from_secs(2))
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.kind, MessageKind::ClipboardRestricted);
+        assert_eq!(
+            ClipboardRestriction::decode(&record.payload).unwrap(),
+            request
+        );
+        control.restriction_written(request).unwrap();
+        assert!(control.restriction_written(request).is_err());
+        commands.send(Command::Stop).unwrap();
+        join.join().unwrap();
+    }
+
+    #[test]
+    fn target_fence_failure_never_emits_restriction_success() {
+        struct FailedTarget;
+        impl ClipboardTarget for FailedTarget {
+            fn serve(&self, _: RemoteServe) -> bool {
+                true
+            }
+            fn restrict(&self, _: u8) -> Result<mpsc::Receiver<()>, String> {
+                let (_tx, rx) = mpsc::sync_channel(1);
+                Ok(rx)
+            }
+        }
+        let mut worker = worker_for_target(FailedTarget, options(1024));
+        worker.policy.narrow(0).unwrap();
+        worker.apply_restriction(
+            ClipboardRestriction {
+                revision: 1,
+                content: 0,
+            },
+            MessageKind::ClipboardRestricted,
+        );
+        assert!(worker.out.closed());
+        assert_eq!(worker.policy.content(), 0);
+        assert!(worker.out.try_recv().is_err());
+    }
+    #[test]
+    fn restriction_does_not_need_an_ordinary_backend_abandon_slot() {
+        struct FullTarget(Arc<AtomicBool>);
+        impl ClipboardTarget for FullTarget {
+            fn serve(&self, _: RemoteServe) -> bool {
+                assert!(
+                    !self.0.load(Ordering::Acquire),
+                    "ordinary backend admission while full"
+                );
+                true
+            }
+        }
+        let full = Arc::new(AtomicBool::new(false));
+        let mut worker = worker_for_target(FullTarget(full.clone()), options(1024));
+        worker.on_peer(TransferOp::Begin {
+            id: 1,
+            kind: TransferKind::Image,
+            length: 10,
+            entries: 0,
+            items: 1,
+        });
+        assert!(worker.receiving.is_some());
+        full.store(true, Ordering::Release);
+        worker.policy.narrow(1).unwrap();
+        worker.pump();
+        assert!(worker.receiving.is_none());
+        assert!(worker.pending_token.is_some());
+        worker.apply_restriction(
+            ClipboardRestriction {
+                revision: 1,
+                content: 1,
+            },
+            MessageKind::ClipboardRestricted,
+        );
+        assert!(worker.pending_token.is_none());
+        assert!(!worker.out.closed());
+        assert_eq!(
+            worker.out.try_recv().unwrap().kind,
+            MessageKind::ClipboardRestricted
+        );
+    }
+    #[test]
+    fn next_revision_cannot_race_visible_ack_before_pending_clear() {
+        let control = ClipboardControl::for_test(7);
+        let first = ClipboardRestriction {
+            revision: 1,
+            content: 3,
+        };
+        control
+            .restrict(first, MessageKind::ClipboardRestricted)
+            .unwrap();
+        control.commands.try_recv().unwrap();
+        let (writing_tx, writing_rx) = mpsc::sync_channel(1);
+        let (requesting_tx, requesting_rx) = mpsc::sync_channel(1);
+        let (done_tx, done_rx) = mpsc::sync_channel(1);
+        let peer = control.clone();
+        let worker = thread::spawn(move || {
+            writing_rx.recv().unwrap();
+            requesting_tx.send(()).unwrap();
+            let result = peer.restrict(
+                ClipboardRestriction {
+                    revision: 2,
+                    content: 1,
+                },
+                MessageKind::ClipboardRestricted,
+            );
+            done_tx.send(result.is_ok()).unwrap();
+        });
+        control
+            .with_written_barrier(first, || {
+                writing_tx.send(()).unwrap();
+                requesting_rx.recv().unwrap();
+                assert!(matches!(
+                    done_rx.recv_timeout(Duration::from_millis(20)),
+                    Err(mpsc::RecvTimeoutError::Timeout)
+                ));
+                Ok(())
+            })
+            .unwrap();
+        assert!(done_rx.recv_timeout(Duration::from_secs(1)).unwrap());
+        worker.join().unwrap();
+        assert_eq!(control.policy().content(), 1);
+    }
+
+    #[test]
+    fn failed_ack_write_keeps_restriction_pending_and_mask_reduced() {
+        let control = ClipboardControl::for_test(7);
+        let request = ClipboardRestriction {
+            revision: 1,
+            content: 3,
+        };
+        control
+            .restrict(request, MessageKind::ClipboardRestricted)
+            .unwrap();
+        assert!(
+            control
+                .with_written_barrier(request, || Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "injected write timeout"
+                )
+                .into()))
+                .is_err()
+        );
+        assert_eq!(control.policy().content(), 3);
+        assert!(
+            control
+                .restrict(
+                    ClipboardRestriction {
+                        revision: 2,
+                        content: 1
+                    },
+                    MessageKind::ClipboardRestricted
+                )
+                .is_err()
+        );
     }
 }

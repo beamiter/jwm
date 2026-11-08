@@ -208,6 +208,13 @@ pub(crate) enum CopiedClipboard {
 
 #[cfg(feature = "remote-x11")]
 impl CopiedClipboard {
+    fn content_bit(&self) -> u8 {
+        match self {
+            Self::Text(_) => 1,
+            Self::Png(_) => 2,
+            Self::Files(_) => 4,
+        }
+    }
     pub(crate) fn retained_bytes(&self) -> Option<usize> {
         remote_mailbox::copied_bytes(self)
     }
@@ -292,6 +299,50 @@ impl FileFulfilReceipt {
     }
 }
 
+/// Monotonic content consent shared by capture, serving and session workers.
+#[cfg(feature = "remote-x11")]
+#[derive(Clone, Debug)]
+pub(crate) struct RuntimeClipboardPolicy(std::sync::Arc<std::sync::atomic::AtomicU8>);
+
+#[cfg(feature = "remote-x11")]
+impl RuntimeClipboardPolicy {
+    pub(crate) fn new(content: u8) -> Self {
+        assert!(matches!(content, 0 | 1 | 3 | 7));
+        Self(std::sync::Arc::new(std::sync::atomic::AtomicU8::new(
+            content,
+        )))
+    }
+    pub(crate) fn shared_content(&self) -> std::sync::Arc<std::sync::atomic::AtomicU8> {
+        self.0.clone()
+    }
+    pub(crate) fn content(&self) -> u8 {
+        self.0.load(std::sync::atomic::Ordering::Acquire)
+    }
+    pub(crate) fn narrow(&self, content: u8) -> Result<(), String> {
+        if !matches!(content, 0 | 1 | 3 | 7) {
+            return Err("invalid clipboard content mask".into());
+        }
+        let mut current = self.content();
+        loop {
+            if content & !current != 0 {
+                return Err("clipboard policy cannot expand".into());
+            }
+            match self.0.compare_exchange_weak(
+                current,
+                content,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            ) {
+                Ok(_) => return Ok(()),
+                Err(actual) => current = actual,
+            }
+        }
+    }
+    fn allows(&self, bit: u8) -> bool {
+        self.content() & bit == bit
+    }
+}
+
 /// What the remote helper asks its watcher to serve.
 ///
 /// A copy received from the other machine is announced as soon as it starts
@@ -323,6 +374,22 @@ pub(crate) enum RemoteServe {
 
 #[cfg(feature = "remote-x11")]
 impl RemoteServe {
+    fn content_bit(&self) -> u8 {
+        match self {
+            Self::Text(_) => 1,
+            Self::FulfilPng { .. }
+            | Self::Announce {
+                kind: PendingKind::Png,
+                ..
+            } => 2,
+            Self::FulfilFiles { .. }
+            | Self::Announce {
+                kind: PendingKind::Files,
+                ..
+            } => 4,
+            Self::Abandon { .. } => 0,
+        }
+    }
     pub(crate) fn reject_unpublished(&self) {
         if let Self::FulfilFiles { receipt, .. } = self {
             receipt.reject_unpublished();
@@ -396,6 +463,8 @@ struct Watcher {
     window: Window,
     atoms: Atoms,
     profile: CaptureProfile,
+    #[cfg(feature = "remote-x11")]
+    remote_policy: Option<RuntimeClipboardPolicy>,
     /// Data JWM currently offers as owner; `None` when another application
     /// owns the clipboard.
     offered: Option<OfferedData>,
@@ -485,6 +554,22 @@ impl From<ClipboardOffer> for OfferedData {
 
 impl OfferedData {
     #[cfg(feature = "remote-x11")]
+    fn content_bit(&self) -> u8 {
+        match self {
+            Self::Text(_) => 1,
+            Self::Png(_)
+            | Self::Pending {
+                kind: PendingKind::Png,
+                ..
+            } => 2,
+            Self::Files { .. }
+            | Self::Pending {
+                kind: PendingKind::Files,
+                ..
+            } => 4,
+        }
+    }
+    #[cfg(feature = "remote-x11")]
     fn files(paths: &[std::path::PathBuf]) -> Self {
         let payloads = crate::backend::clipboard_offer::file_list_payloads(paths);
         Self::Files {
@@ -573,10 +658,25 @@ impl OfferedData {
 
 #[derive(Debug)]
 struct OutgoingIncr {
+    #[cfg(feature = "remote-x11")]
+    content_bit: u8,
     target: Atom,
     data: std::sync::Arc<[u8]>,
     offset: usize,
     last_activity: std::time::Instant,
+}
+
+#[cfg(feature = "remote-x11")]
+impl OutgoingIncr {
+    /// Retain only the bounded handshake metadata, not revoked content.
+    /// ICCCM requires waiting for Property::DELETE before the empty terminal
+    /// chunk. Sending it now could overwrite an unread announcement/chunk.
+    fn restrict(&mut self, content: u8) {
+        if self.content_bit & content == 0 {
+            self.data = std::sync::Arc::from([]);
+            self.offset = 0;
+        }
+    }
 }
 
 /// Handle held by the backend: captured payloads arrive on `captured`,
@@ -677,6 +777,10 @@ fn spawn_watcher(
         .spawn(move || {
             match Watcher::new(display.as_deref(), profile) {
                 Ok(mut watcher) => {
+                    #[cfg(feature = "remote-x11")]
+                    if let ServeSource::Remote(source) = &endpoints.source {
+                        watcher.remote_policy = Some(source.0.policy());
+                    }
                     let _ = ready_tx.send(Ok(()));
                     watcher.run(
                         &endpoints.sink,
@@ -834,8 +938,16 @@ impl RemoteClipboard {
         display: Option<&str>,
         options: RemoteClipboardOptions,
     ) -> Result<(RemoteCaptures, RemoteSetter), String> {
-        let (captured_tx, captured) = remote_mailbox::capture_channel();
-        let serve = std::sync::Arc::new(remote_mailbox::ServeQueue::default());
+        if options.files && !options.images {
+            return Err(
+                "remote clipboard files require the canonical image-and-file content grant".into(),
+            );
+        }
+        let policy = RuntimeClipboardPolicy::new(
+            1 | if options.images { 2 } else { 0 } | if options.files { 4 } else { 0 },
+        );
+        let (captured_tx, captured) = remote_mailbox::capture_channel_with_policy(policy.clone());
+        let serve = std::sync::Arc::new(remote_mailbox::ServeQueue::with_policy(policy));
         let serve_rx = remote_mailbox::ServeReceiver(serve.clone());
         let (wake, worker) = spawn_watcher(
             display,
@@ -922,6 +1034,22 @@ pub(crate) struct RemoteSetter {
 
 #[cfg(feature = "remote-x11")]
 impl RemoteSetter {
+    pub(crate) fn policy(&self) -> RuntimeClipboardPolicy {
+        self.serve.queue.policy()
+    }
+
+    /// Reserved fence; completion is signalled only by the native owner thread.
+    pub(crate) fn restrict(&self, content: u8) -> Result<std::sync::mpsc::Receiver<()>, String> {
+        if !self.is_healthy() {
+            return Err("clipboard backend unavailable".into());
+        }
+        let acknowledged = self.serve.queue.restrict(content)?;
+        if !self.wake.notify() {
+            self.serve.queue.abort();
+            return Err("clipboard backend wake failed".into());
+        }
+        Ok(acknowledged)
+    }
     /// Sticky abnormal termination, excluding successful manager handoff.
     pub(crate) fn is_failed(&self) -> bool {
         self.serve.queue.aborted()
@@ -977,6 +1105,58 @@ fn intern(conn: &RustConnection, name: &str) -> Result<Atom, String> {
 }
 
 impl Watcher {
+    fn effective_profile(&self) -> CaptureProfile {
+        #[cfg(feature = "remote-x11")]
+        if let Some(policy) = &self.remote_policy {
+            let mut profile = self.profile;
+            profile.capture_enabled &= policy.allows(1);
+            profile.images &= policy.allows(2);
+            profile.files &= policy.allows(4);
+            return profile;
+        }
+        self.profile
+    }
+
+    #[cfg(feature = "remote-x11")]
+    fn apply_restriction(&mut self, content: u8) -> bool {
+        if self.capture.as_ref().is_some_and(|capture| {
+            !self
+                .effective_profile()
+                .allows_conversion(capture.conversion)
+        }) {
+            self.cancel_capture();
+        }
+        if self
+            .pending_offer
+            .as_ref()
+            .is_some_and(|pending| pending.data.content_bit() & content == 0)
+        {
+            self.pending_offer = None;
+        }
+        if self
+            .offered
+            .as_ref()
+            .is_some_and(|offer| offer.content_bit() & content == 0)
+        {
+            self.answer_deferred(false);
+            // Stop future serving without claiming to revoke pastes or file paths.
+            self.offered = None;
+        }
+        for transfer in self.outgoing_incr.values_mut() {
+            transfer.restrict(content);
+        }
+        // Completion certifies no forbidden content remains available to send.
+        // Empty INCR terminators follow each requestor's next delete; their
+        // delivery, and external paste completion, are not certified here.
+        // Flush and round-trip: completion cannot precede native operations above.
+        self.conn.flush().is_ok()
+            && self
+                .conn
+                .get_input_focus()
+                .ok()
+                .and_then(|cookie| cookie.reply().ok())
+                .is_some()
+    }
     /// Open a private connection, create the owner window, and start
     /// watching CLIPBOARD.
     fn new(display: Option<&str>, profile: CaptureProfile) -> Result<Self, String> {
@@ -1066,6 +1246,8 @@ impl Watcher {
             window,
             atoms,
             profile,
+            #[cfg(feature = "remote-x11")]
+            remote_policy: None,
             offered: None,
             pending_offer: None,
             #[cfg(feature = "remote-x11")]
@@ -1216,6 +1398,14 @@ impl Watcher {
             // data that fulfils it must not be coalesced into one.
             #[cfg(feature = "remote-x11")]
             ServeSource::Remote(serve) => {
+                if let Some((content, acknowledged)) = serve.0.take_restriction() {
+                    if !self.apply_restriction(content) {
+                        serve.0.abort();
+                        self.abort_remote();
+                        return false;
+                    }
+                    let _ = acknowledged.try_send(());
+                }
                 for _ in 0..remote_mailbox::SERVE_BUDGET {
                     if serve.0.aborted() {
                         self.abort_remote();
@@ -1247,6 +1437,14 @@ impl Watcher {
 
     #[cfg(feature = "remote-x11")]
     fn apply_remote(&mut self, request: RemoteServe) {
+        if self
+            .remote_policy
+            .as_ref()
+            .is_some_and(|policy| !policy.allows(request.content_bit()))
+        {
+            request.reject_unpublished();
+            return;
+        }
         match request {
             RemoteServe::Text(text) => self.take_ownership(PendingOwnership {
                 data: OfferedData::Text(text.into_bytes().into()),
@@ -1688,6 +1886,16 @@ impl Watcher {
 
     /// Route one X event. Returns a captured payload when a conversion completed.
     fn handle(&mut self, event: &x11rb::protocol::Event) -> Option<CopiedClipboard> {
+        #[cfg(feature = "remote-x11")]
+        if self.remote_policy.is_some()
+            && self.capture.as_ref().is_some_and(|capture| {
+                !self
+                    .effective_profile()
+                    .allows_conversion(capture.conversion)
+            })
+        {
+            self.cancel_capture();
+        }
         use x11rb::protocol::Event;
         match event {
             Event::XfixesSelectionNotify(e) => {
@@ -1787,7 +1995,7 @@ impl Watcher {
     }
 
     fn begin_capture(&mut self, owner: Window, request_time: u32) {
-        if !self.profile.capture_enabled {
+        if !self.effective_profile().capture_enabled {
             return;
         }
         self.cancel_capture();
@@ -2033,7 +2241,7 @@ impl Watcher {
     /// and worth it to keep one definition of "this is a secret". Text
     /// wins over PNG when both are advertised.
     fn request_payload_if_allowed(&mut self, targets: &[Atom]) {
-        if !self.profile.capture_enabled {
+        if !self.effective_profile().capture_enabled {
             self.cancel_capture();
             return;
         }
@@ -2075,7 +2283,7 @@ impl Watcher {
             return;
         }
         let mut candidates = self
-            .profile
+            .effective_profile()
             .capture_candidates(&self.atoms, &targets)
             .into_iter();
         let Some(first) = candidates.next() else {
@@ -2089,7 +2297,7 @@ impl Watcher {
     }
 
     fn request_candidate(&mut self, (conversion, target): (Conversion, Atom)) {
-        if !self.profile.allows_conversion(conversion) {
+        if !self.effective_profile().allows_conversion(conversion) {
             self.cancel_capture();
             return;
         }
@@ -2177,6 +2385,14 @@ impl Watcher {
         else {
             return self.offered.is_some() && self.is_current_owner(self.window);
         };
+        #[cfg(feature = "remote-x11")]
+        if self
+            .remote_policy
+            .as_ref()
+            .is_some_and(|policy| !policy.allows(offer.content_bit()))
+        {
+            return false;
+        }
         self.offered = Some(offer);
         let set = self
             .conn
@@ -2258,6 +2474,14 @@ impl Watcher {
         let Some(offered) = self.offered.clone() else {
             return false;
         };
+        #[cfg(feature = "remote-x11")]
+        if self
+            .remote_policy
+            .as_ref()
+            .is_some_and(|policy| !policy.allows(offered.content_bit()))
+        {
+            return false;
+        }
         if target == self.atoms.targets {
             let targets = offered.targets(&self.atoms);
             return self
@@ -2441,6 +2665,8 @@ impl Watcher {
         self.outgoing_incr.insert(
             key,
             OutgoingIncr {
+                #[cfg(feature = "remote-x11")]
+                content_bit: self.offered.as_ref().map_or(0, OfferedData::content_bit),
                 target,
                 data,
                 offset: 0,
@@ -2469,6 +2695,10 @@ impl Watcher {
             let Some(transfer) = self.outgoing_incr.get_mut(&key) else {
                 return None;
             };
+            #[cfg(feature = "remote-x11")]
+            if let Some(policy) = &self.remote_policy {
+                transfer.restrict(policy.content());
+            }
             let (range, terminal) = next_x11_incr_chunk_with_limit(
                 transfer.data.len(),
                 &mut transfer.offset,
@@ -2680,7 +2910,7 @@ impl Watcher {
     }
 
     fn retry_unanswered_conversion(&mut self, now: std::time::Instant) {
-        if !self.profile.capture_enabled {
+        if !self.effective_profile().capture_enabled {
             self.cancel_capture();
             return;
         }
@@ -2822,6 +3052,63 @@ mod tests {
             receiver.try_recv(),
             Err(std::sync::mpsc::TryRecvError::Empty)
         );
+    }
+
+    #[cfg(feature = "remote-x11")]
+    #[test]
+    fn runtime_restriction_preserves_empty_incr_termination_without_payload() {
+        let mut file = OutgoingIncr {
+            content_bit: 4,
+            target: 123,
+            data: std::sync::Arc::from([1u8, 2, 3, 4]),
+            offset: 2,
+            last_activity: std::time::Instant::now(),
+        };
+        let old = std::sync::Arc::downgrade(&file.data);
+        file.restrict(3);
+        assert!(
+            old.upgrade().is_none(),
+            "revoked payload allocation is released"
+        );
+        assert!(file.data.is_empty());
+        assert_eq!(file.offset, 0);
+        assert_eq!(
+            file.target, 123,
+            "terminal chunk retains the original target"
+        );
+        file.restrict(3);
+        let (range, terminal) =
+            next_x11_incr_chunk_with_limit(file.data.len(), &mut file.offset, 2);
+        assert!(terminal);
+        assert!(file.data[range].is_empty());
+
+        let mut image = OutgoingIncr {
+            content_bit: 2,
+            target: 124,
+            data: std::sync::Arc::from([9u8, 8]),
+            offset: 1,
+            last_activity: std::time::Instant::now(),
+        };
+        image.restrict(3);
+        assert_eq!(&*image.data, &[9, 8]);
+        assert_eq!(image.offset, 1);
+        image.restrict(1);
+        let (range, terminal) =
+            next_x11_incr_chunk_with_limit(image.data.len(), &mut image.offset, 2);
+        assert!(terminal && image.data[range].is_empty());
+        image.restrict(0);
+        assert!(image.data.is_empty());
+    }
+
+    #[cfg(feature = "remote-x11")]
+    #[test]
+    fn noncanonical_remote_clipboard_options_fail_before_opening_display() {
+        let options = RemoteClipboardOptions {
+            images: false,
+            ..remote_test_options()
+        };
+        let result = RemoteClipboard::start(Some("must-not-open-display"), options);
+        assert!(matches!(result, Err(message) if message.contains("canonical")));
     }
 
     #[cfg(feature = "remote-x11")]

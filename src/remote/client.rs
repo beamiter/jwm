@@ -4,6 +4,7 @@ use super::clipboard_policy::{self, ClipboardDirection, ClipboardMode};
 use super::clipboard_sync::{
     ClipboardInbox, ClipboardOutbox, ClipboardSync, Outgoing, SyncOptions, SyncStatus,
 };
+use super::clipboard_wire::{ClipboardRestriction, RestrictionState};
 use super::close_wire::{SessionClose, SessionCloseCode};
 use super::deadline::TcpStreamDeadline;
 use super::frame::{RecyclableDecodedFrame, SharedDecodeBufferPool, new_decode_buffer_pool};
@@ -475,6 +476,9 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
     *stage = ClientStage::FirstFrame;
     let mut initial_state = ReceiveState::new();
     initial_state.frame_limits = hello.stream.frame_limits;
+    *initial_state.clipboard_restriction.get_mut().unwrap() = hello
+        .clipboard_enabled
+        .then(|| RestrictionState::new(hello.stream.clipboard_content));
     let state = Arc::new(initial_state);
     state.cursor_enabled.store(
         hello.stream.cursor == super::messages::CursorMode::Independent,
@@ -540,6 +544,7 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
         &options.peer_label,
     )?;
     viewer.set_clipboard_status(hello.clipboard_enabled);
+    viewer.enable_clipboard_narrowing(hello.clipboard_enabled);
     viewer.set_clipboard_policy(clipboard_policy::label(
         hello.stream.clipboard_content,
         hello.stream.clipboard_directions,
@@ -558,8 +563,27 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
             if kind == MessageKind::FrameAck {
                 sender_state.telemetry.record_acked();
             }
+            if kind == MessageKind::ClipboardRestrict {
+                let mut restriction = sender_state.clipboard_restriction.lock().unwrap();
+                let result = restriction
+                    .as_mut()
+                    .ok_or_else(|| invalid_data("clipboard barrier without consent").into())
+                    .and_then(|state| {
+                        let request = state
+                            .pending()
+                            .ok_or_else(|| invalid_data("clipboard barrier without request"))?;
+                        state.local_complete(request)
+                    });
+                if let Err(error) = result {
+                    *sender_state.error.lock().unwrap() = Some(error);
+                    sender_state.alive.store(false, Ordering::Release);
+                }
+            }
         },
     )?;
+    if let Some(outbox) = &clipboard_outbox {
+        writer.set_clipboard_policy(outbox.control().policy().shared_content())?;
+    }
     let mut pending_presentations = std::collections::VecDeque::new();
     if !submit_frame(&mut viewer, first_frame, &mut pending_presentations)? {
         return Ok(());
@@ -613,6 +637,7 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
         &mut wake_receiver,
         clipboard_outbox.as_ref(),
         clipboard_status.as_deref(),
+        hello.stream.clipboard_directions,
         &mut pending_presentations,
     );
     let graceful_close = matches!(
@@ -631,7 +656,9 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
     let result = finish_session(
         suppress_reconnect(
             loop_result.map(|_| ()),
-            viewer.user_close_requested() || viewer.user_released_grab(),
+            viewer.user_close_requested()
+                || viewer.user_released_grab()
+                || clipboard_was_restricted(&state, hello.stream.clipboard_content),
         ),
         cancel_result,
         receiver_exit,
@@ -639,6 +666,17 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
         clipboard_result,
     );
     finalize_retry_intent(result, || viewer.reconnect_allowed_after_cleanup())
+}
+
+/// Reconnecting with the original CLI grant could silently undo a runtime
+/// restriction. Once reduced, only a fresh explicit connect may renegotiate.
+fn clipboard_was_restricted(state: &ReceiveState, initial: u8) -> bool {
+    state
+        .clipboard_restriction
+        .lock()
+        .unwrap()
+        .as_ref()
+        .is_some_and(|restriction| restriction.content() != initial)
 }
 
 /// The old window remains visible while workers join. Consume local intent
@@ -1066,6 +1104,7 @@ fn viewer_loop(
     wake: &mut WakeReceiver,
     clipboard: Option<&ClipboardOutbox>,
     clipboard_status: Option<&SyncStatus>,
+    clipboard_directions: u8,
     pending_presentations: &mut std::collections::VecDeque<PendingFrameTiming>,
 ) -> RemoteResult<ViewerLoopExit> {
     let mut clipboard_status_seen = 0;
@@ -1104,6 +1143,23 @@ fn viewer_loop(
                 error
             }
         })?;
+        if events.contains(&ViewerEvent::NarrowClipboard) && !events.contains(&ViewerEvent::Close) {
+            let mut restriction = state.clipboard_restriction.lock().unwrap();
+            if let Some(restriction) = restriction.as_mut()
+                && let Some(request) = restriction.begin_next(Instant::now())?
+            {
+                let clipboard =
+                    clipboard.ok_or_else(|| invalid_data("clipboard control without consent"))?;
+                clipboard
+                    .control()
+                    .restrict(request, MessageKind::ClipboardRestrict)?;
+                write_source_release(writer, presented_scope, pointer_enabled || keyboard_enabled)?;
+                let label = clipboard_policy::label(request.content, clipboard_directions);
+                viewer
+                    .set_clipboard_policy(format!("restricting to {label}; confirmation pending"));
+                eprintln!("jwm-remote: restricting clipboard to {label}; confirmation pending");
+            }
+        }
         if events.contains(&ViewerEvent::CycleSource)
             && !events.contains(&ViewerEvent::Close)
             && !switching
@@ -1163,13 +1219,45 @@ fn viewer_loop(
         }
         if let Some(clipboard) = clipboard {
             // Closing the viewer wins over a simultaneous local worker exit.
-            wrote |= forward_viewer_clipboard_from(|| clipboard.try_next(), writer, outcome.close)?;
+            wrote |= forward_viewer_clipboard_from(
+                || {
+                    let record = clipboard.try_next()?;
+                    if let Some(record) = &record
+                        && record.kind == MessageKind::ClipboardRestrict
+                    {
+                        // The sender's on_written callback confirms this local barrier
+                        // only after its real FIFO write, never at UI enqueue time.
+                        let restriction = ClipboardRestriction::decode(&record.payload)
+                            .map_err(|_| std::sync::mpsc::RecvError)?;
+                        clipboard
+                            .control()
+                            .restriction_written(restriction)
+                            .map_err(|_| std::sync::mpsc::RecvError)?;
+                    }
+                    Ok(record)
+                },
+                writer,
+                outcome.close,
+            )?;
         }
         if let Some((version, line)) =
             clipboard_status.and_then(|status| status.changed_since(clipboard_status_seen))
         {
             clipboard_status_seen = version;
             viewer.set_clipboard_activity(line);
+        }
+        {
+            let mut restriction = state.clipboard_restriction.lock().unwrap();
+            if let Some(restriction) = restriction.as_mut() {
+                restriction.check_timeout(Instant::now())?;
+                if let Some(confirmed) = restriction.take_confirmed() {
+                    let label = clipboard_policy::label(confirmed.content, clipboard_directions);
+                    viewer.set_clipboard_policy(format!("{label}; restriction confirmed"));
+                    viewer.set_clipboard_status(confirmed.content != 0);
+                    viewer.enable_clipboard_narrowing(confirmed.content != 0);
+                    eprintln!("jwm-remote: clipboard restriction confirmed: {label}");
+                }
+            }
         }
         if Instant::now() >= next_heartbeat {
             writer.write_message(MessageKind::Heartbeat, &[])?;
@@ -1370,7 +1458,7 @@ fn for_each_input_batch(
                 continue;
             }
             ViewerEvent::Pointer { .. } => continue,
-            ViewerEvent::CycleSource => continue,
+            ViewerEvent::CycleSource | ViewerEvent::NarrowClipboard => continue,
             ViewerEvent::Close => unreachable!(),
         };
 
@@ -1946,6 +2034,7 @@ fn average_millis(duration: Duration, count: u64) -> f64 {
 }
 
 struct ReceiveState {
+    clipboard_restriction: Mutex<Option<RestrictionState>>,
     catalog: Mutex<Option<SourceCatalog>>,
     source_epoch: AtomicU64,
     frame_limits: super::messages::FrameLimits,
@@ -1962,6 +2051,7 @@ struct ReceiveState {
 impl ReceiveState {
     fn new() -> Self {
         Self {
+            clipboard_restriction: Mutex::new(None),
             catalog: Mutex::new(None),
             source_epoch: AtomicU64::new(1),
             frame_limits: super::messages::FrameLimits::default(),
@@ -2187,6 +2277,19 @@ fn receive_frame_records(
             })?;
         let kind = read_record(&mut payload, remaining)?;
         match kind {
+            MessageKind::ClipboardRestricted => {
+                let request = ClipboardRestriction::decode(&payload)?;
+                state
+                    .clipboard_restriction
+                    .lock()
+                    .unwrap()
+                    .as_mut()
+                    .ok_or_else(|| {
+                        invalid_data("clipboard restriction acknowledgement without consent")
+                    })?
+                    .acknowledge(request)?;
+                completion.signal()?;
+            }
             MessageKind::SourceChanged => {
                 let changed = decode_source_changed(&payload)?;
                 {
@@ -2272,7 +2375,8 @@ fn receive_frame_records(
             | MessageKind::InputBatch
             | MessageKind::Viewport
             | MessageKind::SourceCatalog
-            | MessageKind::SourceRequest => {
+            | MessageKind::SourceRequest
+            | MessageKind::ClipboardRestrict => {
                 return Err(invalid_data(format!("unexpected host message: {kind:?}")).into());
             }
             MessageKind::Clipboard | MessageKind::ClipboardTransfer => match clipboard.as_ref() {
@@ -5039,5 +5143,39 @@ mod diagnostic_tests {
             assert!(!summary.reconnect_certified);
             assert!(!serde_json::to_string(&summary).unwrap().contains("999"));
         }
+    }
+    #[test]
+    fn clipboard_restriction_pending_or_confirmed_prevents_broader_reconnect() {
+        let state = ReceiveState::new();
+        *state.clipboard_restriction.lock().unwrap() = Some(RestrictionState::new(7));
+        assert!(!clipboard_was_restricted(&state, 7));
+        let request = state
+            .clipboard_restriction
+            .lock()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .begin_next(Instant::now())
+            .unwrap()
+            .unwrap();
+        assert!(clipboard_was_restricted(&state, 7));
+        let loss = || -> RemoteResult<()> {
+            Err(Box::new(ReceiverTransportLoss(ProtocolError::Io(
+                io::Error::new(io::ErrorKind::UnexpectedEof, "lost"),
+            ))))
+        };
+        assert!(
+            !suppress_reconnect(loss(), clipboard_was_restricted(&state, 7))
+                .unwrap_err()
+                .is::<ReceiverTransportLoss>()
+        );
+        {
+            let mut restriction = state.clipboard_restriction.lock().unwrap();
+            let restriction = restriction.as_mut().unwrap();
+            restriction.local_complete(request).unwrap();
+            restriction.acknowledge(request).unwrap();
+            assert_eq!(restriction.take_confirmed(), Some(request));
+        }
+        assert!(clipboard_was_restricted(&state, 7));
     }
 }

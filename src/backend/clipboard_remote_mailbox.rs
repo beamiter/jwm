@@ -1,5 +1,5 @@
 //! Remote-only bounded transport between the X watcher and session workers.
-use super::{CopiedClipboard, RemoteServe};
+use super::{CopiedClipboard, RemoteServe, RuntimeClipboardPolicy};
 use crate::backend::clipboard_offer::{MAX_FILE_LIST_ITEMS, MAX_TEXT_BYTES};
 use std::collections::VecDeque;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
@@ -61,13 +61,23 @@ struct LatestState {
 }
 #[derive(Default)]
 struct Latest {
+    policy: Option<RuntimeClipboardPolicy>,
     state: Mutex<LatestState>,
     changed: Condvar,
 }
 pub(super) struct CaptureSender(Arc<Latest>);
 pub(super) struct CaptureReceiver(Arc<Latest>);
+#[cfg(test)]
 pub(super) fn capture_channel() -> (CaptureSender, CaptureReceiver) {
-    let state = Arc::new(Latest::default());
+    capture_channel_with_policy(RuntimeClipboardPolicy::new(7))
+}
+pub(super) fn capture_channel_with_policy(
+    policy: RuntimeClipboardPolicy,
+) -> (CaptureSender, CaptureReceiver) {
+    let state = Arc::new(Latest {
+        policy: Some(policy),
+        ..Latest::default()
+    });
     (CaptureSender(state.clone()), CaptureReceiver(state))
 }
 impl CaptureSender {
@@ -75,6 +85,14 @@ impl CaptureSender {
         let mut state = lock(&self.0.state);
         if state.closed {
             return false;
+        }
+        if self
+            .0
+            .policy
+            .as_ref()
+            .is_some_and(|policy| !policy.allows(value.content_bit()))
+        {
+            return true;
         }
         if copied_bytes(&value).is_none() {
             state.value = None;
@@ -113,7 +131,16 @@ impl CaptureReceiver {
             .wait_timeout_while(state, timeout, |s| s.value.is_none() && !s.closed)
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(value) = state.value.take() {
-            Ok(Some(value))
+            if self
+                .0
+                .policy
+                .as_ref()
+                .is_some_and(|policy| !policy.allows(value.content_bit()))
+            {
+                Ok(None)
+            } else {
+                Ok(Some(value))
+            }
         } else if state.closed {
             Err(std::sync::mpsc::RecvError)
         } else {
@@ -129,16 +156,55 @@ struct QueueState {
     aborted: bool,
     closed: bool,
     finished: bool,
+    restriction: Option<(u8, std::sync::mpsc::SyncSender<()>)>,
 }
-#[derive(Default)]
-pub(super) struct ServeQueue(Mutex<QueueState>);
+pub(super) struct ServeQueue(Mutex<QueueState>, RuntimeClipboardPolicy);
+impl Default for ServeQueue {
+    fn default() -> Self {
+        Self::with_policy(RuntimeClipboardPolicy::new(7))
+    }
+}
 impl ServeQueue {
+    pub(super) fn with_policy(policy: RuntimeClipboardPolicy) -> Self {
+        Self(Mutex::new(QueueState::default()), policy)
+    }
+    pub(super) fn policy(&self) -> RuntimeClipboardPolicy {
+        self.1.clone()
+    }
+    pub(super) fn restrict(&self, content: u8) -> Result<std::sync::mpsc::Receiver<()>, String> {
+        let mut state = lock(&self.0);
+        if state.closed || state.aborted || state.restriction.is_some() {
+            return Err("clipboard backend fence unavailable or already pending".into());
+        }
+        self.1.narrow(content)?;
+        let mut removed = 0;
+        state.queue.retain(|(request, bytes)| {
+            if !self.1.allows(request.content_bit()) {
+                request.reject_unpublished();
+                removed += bytes;
+                false
+            } else {
+                true
+            }
+        });
+        state.bytes -= removed;
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        state.restriction = Some((content, tx));
+        Ok(rx)
+    }
+    pub(super) fn take_restriction(&self) -> Option<(u8, std::sync::mpsc::SyncSender<()>)> {
+        lock(&self.0).restriction.take()
+    }
     pub(super) fn send(&self, value: RemoteServe) -> bool {
         let bytes = request_bytes(&value);
         let mut state = lock(&self.0);
         if state.closed || state.aborted {
             value.reject_unpublished();
             return false;
+        }
+        if !self.1.allows(value.content_bit()) {
+            value.reject_unpublished();
+            return true;
         }
         let Some(bytes) = bytes.filter(|bytes| {
             state.queue.len() < MAX_COMMANDS && *bytes <= MAX_RETAINED_BYTES - state.bytes
@@ -153,6 +219,7 @@ impl ServeQueue {
     }
     fn abort_locked(state: &mut QueueState) {
         state.aborted = true;
+        state.restriction = None;
         for (request, _) in state.queue.drain(..) {
             request.reject_unpublished();
         }
@@ -171,7 +238,8 @@ impl ServeQueue {
         Some(value)
     }
     pub(super) fn has_backlog(&self) -> bool {
-        !lock(&self.0).queue.is_empty()
+        let state = lock(&self.0);
+        !state.queue.is_empty() || state.restriction.is_some()
     }
     pub(super) fn close(&self) {
         let mut state = lock(&self.0);
@@ -185,6 +253,7 @@ impl ServeQueue {
     }
     pub(super) fn close_normally(&self) -> bool {
         let mut state = lock(&self.0);
+        state.restriction = None;
         for (request, _) in state.queue.drain(..) {
             request.reject_unpublished();
         }
@@ -384,5 +453,103 @@ mod tests {
         assert!(queue.aborted());
         assert!(lock(&queue.0).closed);
         assert!(!lock(&queue.0).finished);
+    }
+}
+
+#[cfg(test)]
+mod restriction_tests {
+    use super::*;
+    use crate::backend::clipboard_x11::{FileFulfilReceipt, PendingKind};
+
+    #[test]
+    fn restriction_reserved_fence_survives_full_queue_and_rejects_unpublished_files() {
+        let queue = ServeQueue::default();
+        let receipt = FileFulfilReceipt::default();
+        assert!(queue.send(RemoteServe::FulfilFiles {
+            token: 1,
+            paths: vec!["/tmp/restriction-never-published".into()],
+            receipt: receipt.clone()
+        }));
+        for token in 1..MAX_COMMANDS {
+            assert!(queue.send(RemoteServe::Abandon {
+                token: token as u64
+            }));
+        }
+        let completed = queue.restrict(3).unwrap();
+        assert!(!queue.aborted());
+        assert!(receipt.rejected_unpublished());
+        assert!(matches!(
+            completed.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+        assert!(queue.restrict(1).is_err());
+        let (mask, acknowledged) = queue.take_restriction().unwrap();
+        assert_eq!(mask, 3);
+        assert!(matches!(
+            completed.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+        acknowledged.try_send(()).unwrap();
+        completed.try_recv().unwrap();
+        while let Some(request) = queue.pop() {
+            assert!(matches!(request, RemoteServe::Abandon { .. }));
+        }
+        let late = FileFulfilReceipt::default();
+        assert!(queue.send(RemoteServe::FulfilFiles {
+            token: 1,
+            paths: vec![],
+            receipt: late.clone()
+        }));
+        assert!(late.rejected_unpublished());
+        assert!(queue.pop().is_none());
+        assert!(queue.restrict(7).is_err());
+    }
+
+    #[test]
+    fn capture_gate_filters_queued_and_concurrent_old_generation_content() {
+        let policy = RuntimeClipboardPolicy::new(7);
+        let (sender, receiver) = capture_channel_with_policy(policy.clone());
+        assert!(sender.send(CopiedClipboard::Files(vec![])));
+        policy.narrow(3).unwrap();
+        assert!(receiver.recv_timeout(Duration::ZERO).unwrap().is_none());
+        let thread = std::thread::spawn(move || {
+            for _ in 0..1000 {
+                assert!(sender.send(CopiedClipboard::Files(vec![])));
+            }
+            assert!(sender.send(CopiedClipboard::Text("permitted".into())));
+        });
+        thread.join().unwrap();
+        assert_eq!(
+            receiver.recv_timeout(Duration::ZERO).unwrap(),
+            Some(CopiedClipboard::Text("permitted".into()))
+        );
+    }
+
+    #[test]
+    fn narrowing_is_monotonic_and_aborted_fence_never_confirms() {
+        let queue = ServeQueue::default();
+        for mask in [3, 1, 0] {
+            let ack = queue.restrict(mask).unwrap();
+            assert_eq!(queue.policy().content(), mask);
+            let (_, tx) = queue.take_restriction().unwrap();
+            drop(tx);
+            assert!(matches!(
+                ack.try_recv(),
+                Err(std::sync::mpsc::TryRecvError::Disconnected)
+            ));
+        }
+        assert!(queue.restrict(1).is_err());
+        assert!(queue.restrict(2).is_err());
+        assert!(queue.send(RemoteServe::Announce {
+            token: 3,
+            kind: PendingKind::Png
+        }));
+        assert!(queue.pop().is_none());
+        let ack = queue.restrict(0).unwrap();
+        queue.abort();
+        assert!(matches!(
+            ack.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Disconnected)
+        ));
     }
 }

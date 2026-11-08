@@ -3,12 +3,14 @@
 //! losing an input edge or silently corrupting a clipboard transfer.
 
 use super::RemoteResult;
+use super::clipboard_wire::{ClipboardRestriction, OutboundGate};
 use super::messages::{MAX_CLIPBOARD_BYTES, decode_source_input, encode_source_input_into};
 use super::protocol::{MessageKind, SessionWriter};
 use super::x11_input::InputEvent;
 use std::collections::VecDeque;
 use std::io;
 use std::net::{Shutdown, TcpStream};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -62,6 +64,9 @@ struct Queue {
     error: Option<String>,
     writing_since: Option<Instant>,
     input_scope: Option<(u64, u64)>,
+    clipboard_policy: Option<Arc<AtomicU8>>,
+    // One reserved FIFO barrier survives ordinary queue saturation.
+    clipboard_barrier: Option<(Record, usize)>,
 }
 
 impl Queue {
@@ -77,6 +82,24 @@ impl Queue {
 
     fn push(&mut self, kind: MessageKind, payload: &[u8]) -> RemoteResult<()> {
         self.check()?;
+        if kind == MessageKind::ClipboardRestrict {
+            ClipboardRestriction::decode(payload)?;
+            if self.clipboard_barrier.is_some() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "a clipboard restriction is already queued",
+                )
+                .into());
+            }
+            self.clipboard_barrier = Some((
+                Record {
+                    kind,
+                    payload: payload.to_vec(),
+                },
+                self.bulk.len(),
+            ));
+            return Ok(());
+        }
         let expected = match kind {
             MessageKind::Heartbeat => Some(0),
             MessageKind::FrameAck => Some(16),
@@ -152,6 +175,7 @@ impl Queue {
         // before Close when input was negotiated.
         self.control.clear();
         self.bulk.clear();
+        self.clipboard_barrier = None;
         self.control_bytes = 0;
         self.bulk_bytes = 0;
         if input_enabled {
@@ -180,8 +204,17 @@ impl Queue {
         if let Some(record) = self.control.pop_front() {
             self.control_bytes -= record.payload.len();
             Some(record)
+        } else if self
+            .clipboard_barrier
+            .as_ref()
+            .is_some_and(|(_, preceding)| *preceding == 0)
+        {
+            self.clipboard_barrier.take().map(|(record, _)| record)
         } else if let Some(record) = self.bulk.pop_front() {
             self.bulk_bytes -= record.payload.len();
+            if let Some((_, preceding)) = self.clipboard_barrier.as_mut() {
+                *preceding -= 1;
+            }
             Some(record)
         } else {
             None
@@ -213,6 +246,22 @@ pub(super) fn reap_worker(worker: thread::JoinHandle<()>) -> io::Result<mpsc::Re
 }
 
 impl Sender {
+    /// Install before queueing clipboard data. The shared mask only narrows;
+    /// final dispatch loads it after dequeue, immediately before serialization.
+    pub(super) fn set_clipboard_policy(&mut self, policy: Arc<AtomicU8>) -> RemoteResult<()> {
+        let mut queue = self.shared.0.lock().unwrap_or_else(|p| p.into_inner());
+        queue.check()?;
+        if queue.clipboard_policy.is_some() || !queue.bulk.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "clipboard dispatch policy must be installed once before data",
+            )
+            .into());
+        }
+        queue.clipboard_policy = Some(policy);
+        Ok(())
+    }
+
     pub(super) fn shutdown_timeout(&mut self, timeout: Duration) -> RemoteResult<()> {
         {
             let mut queue = self.shared.0.lock().unwrap_or_else(|p| p.into_inner());
@@ -330,8 +379,9 @@ impl Sender {
                             ))
                             .into());
                         }
+                        let mut clipboard_gate = OutboundGate::default();
                         loop {
-                            let record = {
+                            let (record, clipboard_policy) = {
                                 let (lock, wake) = &*worker_shared;
                                 let mut queue = lock.lock().unwrap_or_else(|p| p.into_inner());
                                 loop {
@@ -341,20 +391,32 @@ impl Sender {
                                     if let Some(record) = queue.pop() {
                                         queue.writing_since = Some(Instant::now());
                                         wake.notify_all();
-                                        break record;
+                                        break (record, queue.clipboard_policy.clone());
                                     }
                                     queue = wake.wait(queue).unwrap_or_else(|p| p.into_inner());
                                 }
                             };
-                            writer.write_message(record.kind, &record.payload)?;
-                            writer.flush()?;
+                            let payload = match clipboard_policy {
+                                Some(policy) => clipboard_gate.filter(
+                                    record.kind,
+                                    &record.payload,
+                                    policy.load(Ordering::Acquire),
+                                )?,
+                                None => Some(record.payload),
+                            };
+                            if let Some(payload) = &payload {
+                                writer.write_message(record.kind, payload)?;
+                                writer.flush()?;
+                            }
                             worker_shared
                                 .0
                                 .lock()
                                 .unwrap_or_else(|p| p.into_inner())
                                 .writing_since = None;
                             worker_shared.1.notify_all();
-                            on_written(record.kind);
+                            if payload.is_some() {
+                                on_written(record.kind);
+                            }
                             if record.kind == MessageKind::Close {
                                 return Ok(());
                             }
@@ -477,6 +539,42 @@ mod tests {
         let mut bytes = Vec::new();
         test_encode_input(events, &mut bytes).unwrap();
         queue.push(MessageKind::InputBatch, &bytes).unwrap();
+    }
+
+    #[test]
+    fn restriction_barrier_has_reserved_capacity_and_preserves_bulk_order() {
+        let mut q = Queue::default();
+        for _ in 0..CONTROL_RECORDS {
+            input(
+                &mut q,
+                &[InputEvent::Key {
+                    keycode: 42,
+                    pressed: true,
+                }],
+            );
+        }
+        for _ in 0..BULK_RECORDS {
+            q.push(MessageKind::Clipboard, b"before").unwrap();
+        }
+        let request = ClipboardRestriction {
+            revision: 1,
+            content: 3,
+        }
+        .encode();
+        q.push(MessageKind::ClipboardRestrict, &request).unwrap();
+        assert!(q.push(MessageKind::ClipboardRestrict, &request).is_err());
+        for _ in 0..CONTROL_RECORDS {
+            assert_eq!(q.pop().unwrap().kind, MessageKind::InputBatch);
+        }
+        assert_eq!(q.pop().unwrap().payload, b"before");
+        q.push(MessageKind::Clipboard, b"after").unwrap();
+        for _ in 1..BULK_RECORDS {
+            assert_eq!(q.pop().unwrap().payload, b"before");
+        }
+        assert_eq!(q.pop().unwrap().kind, MessageKind::ClipboardRestrict);
+        assert_eq!(q.pop().unwrap().payload, b"after");
+        assert!(q.pop().is_none());
+        assert_eq!(q.bulk_bytes, 0);
     }
 
     #[test]
@@ -636,6 +734,80 @@ mod tests {
         q.close(false);
         assert_eq!(q.pop().unwrap().kind, MessageKind::Close);
         assert!(q.pop().is_none());
+    }
+
+    #[test]
+    fn queued_revoked_payloads_are_removed_at_actual_socket_dispatch() {
+        use super::super::clipboard_sync::{TransferKind, TransferOp};
+        use super::super::protocol::SessionReader;
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let socket = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (peer, _) = listener.accept().unwrap();
+        peer.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let key = [71; 32];
+        let (entered_tx, entered_rx) = mpsc::sync_channel(1);
+        let (release_tx, release_rx) = mpsc::sync_channel(1);
+        let (barrier_tx, barrier_rx) = mpsc::sync_channel(1);
+        let mut sender = Sender::spawn(SessionWriter::new(socket, key), false, move |kind| {
+            if kind == MessageKind::Heartbeat {
+                entered_tx.send(()).unwrap();
+                release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            } else if kind == MessageKind::ClipboardRestrict {
+                barrier_tx.send(()).unwrap();
+            }
+        })
+        .unwrap();
+        let policy = Arc::new(AtomicU8::new(7));
+        sender.set_clipboard_policy(Arc::clone(&policy)).unwrap();
+        sender.write_message(MessageKind::Heartbeat, &[]).unwrap();
+        entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let begin = TransferOp::Begin {
+            id: 9,
+            kind: TransferKind::Files,
+            length: 3,
+            entries: 1,
+            items: 1,
+        };
+        let data = TransferOp::Data {
+            id: 9,
+            bytes: vec![11, 22, 33],
+        };
+        for op in [begin, data, TransferOp::End { id: 9 }] {
+            sender
+                .write_message(MessageKind::ClipboardTransfer, &op.encode())
+                .unwrap();
+        }
+        sender
+            .write_message(MessageKind::Clipboard, b"private text")
+            .unwrap();
+        policy.store(0, Ordering::Release);
+        let request = ClipboardRestriction {
+            revision: 1,
+            content: 0,
+        };
+        sender
+            .write_message(MessageKind::ClipboardRestrict, &request.encode())
+            .unwrap();
+        release_tx.send(()).unwrap();
+        barrier_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        sender.close().unwrap();
+        let mut reader = SessionReader::new(peer, key);
+        assert_eq!(reader.read_message().unwrap().0, MessageKind::Heartbeat);
+        for expected in [
+            TransferOp::Cancel { id: 9 },
+            TransferOp::Skip { id: 9, bytes: 3 },
+            TransferOp::Cancel { id: 9 },
+        ] {
+            let (kind, payload) = reader.read_message().unwrap();
+            assert_eq!(kind, MessageKind::ClipboardTransfer);
+            assert_eq!(TransferOp::decode(&payload).unwrap(), expected);
+        }
+        let (kind, payload) = reader.read_message().unwrap();
+        assert_eq!(kind, MessageKind::ClipboardRestrict);
+        assert_eq!(ClipboardRestriction::decode(&payload).unwrap(), request);
+        assert_eq!(reader.read_message().unwrap().0, MessageKind::Close);
+        assert!(reader.read_message().is_err());
     }
 
     #[test]
