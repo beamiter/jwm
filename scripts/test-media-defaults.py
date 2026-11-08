@@ -102,9 +102,25 @@ with tempfile.TemporaryDirectory(prefix="jwm-media-test-") as directory:
     # Exercise the actual user installer with private build artifacts. In
     # particular, older xdg-utils cannot resolve unnecessarily quoted Exec
     # paths, even though GIO accepts those entries.
+    # Only this mocked-build fixture supplies development metadata; the real
+    # MIME queries above and the production installer's checks stay intact.
+    pkg_config_log = root / "native-pkg-config.log"
+    cargo_log = root / "native-cargo.log"
+    pkg_config = binary_dir / "pkg-config"
+    pkg_config.write_text('''#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$*" >> "$NATIVE_INSTALL_PKG_CONFIG_LOG"
+[[ $# == 4 ]] || exit 90
+[[ $1 == --exists && $2 == cairo && $3 == pangocairo && $4 == gio-2.0 ]] || exit 90
+for dependency in "${@:2}"; do
+    [[ $dependency != "${NATIVE_INSTALL_MISSING_DEPENDENCY:-}" ]] || exit 1
+done
+''')
+    pkg_config.chmod(0o755)
     cargo = binary_dir / "cargo"
     cargo.write_text('''#!/usr/bin/env bash
 set -euo pipefail
+printf '%s\\n' "$*" >> "$NATIVE_INSTALL_CARGO_LOG"
 target= profile=debug
 while (($#)); do
     case "$1" in
@@ -120,10 +136,26 @@ for name in jwm-notes jwm-image-viewer; do
 done
 ''')
     cargo.chmod(0o755)
+    native_env = dict(env, CARGO_TARGET_DIR=str(root / "build"),
+                      NATIVE_INSTALL_PKG_CONFIG_LOG=str(pkg_config_log),
+                      NATIVE_INSTALL_CARGO_LOG=str(cargo_log),
+                      NATIVE_INSTALL_MISSING_DEPENDENCY="")
     result = subprocess.run(["bash", str(ROOT / "scripts/install-native-apps.sh"), "--debug"],
-                            env=dict(env, CARGO_TARGET_DIR=str(root / "build")),
+                            env=dict(native_env, NATIVE_INSTALL_MISSING_DEPENDENCY="pangocairo"),
+                            capture_output=True, text=True)
+    assert result.returncode == 1, (result.stdout, result.stderr)
+    assert "Cairo/Pango/GLib development files are required" in result.stderr
+    assert pkg_config_log.read_text().splitlines() == ["--exists cairo pangocairo gio-2.0"]
+    assert not cargo_log.exists(), "missing native dependency reached Cargo"
+    assert not (root / ".local/bin").exists(), "missing dependency installed native applications"
+    assert shared.read_text() == original and target.stat().st_mtime_ns == revision
+    print("Missing native dependency fails before building or installing: PASS")
+    result = subprocess.run(["bash", str(ROOT / "scripts/install-native-apps.sh"), "--debug"],
+                            env=native_env,
                             capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
+    assert pkg_config_log.read_text().splitlines() == ["--exists cairo pangocairo gio-2.0"] * 2
+    assert len(cargo_log.read_text().splitlines()) == 1
     assert shared.read_text() == original
     assert (root / ".local/bin/jwm-notes").is_file()
     assert (root / ".local/bin/jwm-image-viewer").is_file()

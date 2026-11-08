@@ -449,12 +449,22 @@ check_tauri_private_runtime() (
     unset NO_COLOR WEBKIT_INSTALL_PREFIX
     prefix="$HOME/.local/opt/jwm-webkitgtk"
     mkdir -p "$prefix/lib" "$CARGO_HOME/bin" "$XDG_CONFIG_HOME/jwm"
+    # This fixture exercises an upgrade of an existing bar installation, not
+    # config generation by a JWM binary (the build command is stubbed above).
+    printf '[status_bar]\nname = "custom_bar"\n' > "$XDG_CONFIG_HOME/jwm/config_x11.toml"
+    cp "$XDG_CONFIG_HOME/jwm/config_x11.toml" "$XDG_CONFIG_HOME/jwm/config_wayland.toml"
     touch "$prefix/lib/libwebkit2gtk-4.1.so.0" "$prefix/lib/libjavascriptcoregtk-4.1.so.0"
     destination="$CARGO_HOME/bin/tauri_leptos_bar"
     printf '#!/bin/sh\nprintf "original bar\\n"\n' > "$destination"
     chmod +x "$destination"
     for generation in 1 2; do
-        JWM_BAR_NAME='' bash "$REPO/scripts/install-jwm.sh" --bar tauri_leptos_bar --skip-jwm --skip-eva > "$CASE_DIR/install-$generation.log" 2>&1
+        JWM_BAR_NAME='' bash "$REPO/scripts/install-jwm.sh" --bar tauri_leptos_bar --skip-jwm --skip-eva > "$CASE_DIR/install-$generation.log" 2>&1 || {
+            cat "$CASE_DIR/install-$generation.log" >&2
+            fail "private runtime upgrade generation $generation failed"
+        }
+        for config in config_x11.toml config_wayland.toml; do
+            grep -Fq 'name = "tauri_leptos_bar"' "$XDG_CONFIG_HOME/jwm/$config" || fail "private runtime upgrade ignored $config"
+        done
         grep -Fq JWM_PRIVATE_WEBKIT_LAUNCHER "$destination" || fail 'Tauri upgrade dropped private runtime launcher'
         [[ -x $prefix/libexec/jwm/tauri_leptos_bar ]] || fail 'private bar executable missing'
         [[ -x $prefix/bin/run-with-webkit-transparent.sh ]] || fail 'launcher depends on the source checkout'
