@@ -2329,7 +2329,7 @@ fn invalid_data(message: impl Into<String>) -> io::Error {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use crate::remote::frame::{DecodedFrame, decode_pool_snapshot};
     use crate::remote::messages::decode_source_frame_ack;
@@ -2370,7 +2370,15 @@ mod tests {
         writer
             .write_message(MessageKind::Frame, b"must not be decoded")
             .unwrap();
-        let mut reader = SessionReader::new(Cursor::new(writer.into_inner()), receive_key);
+        authenticated_terminal_wire_at(phase, &writer.into_inner(), receive_key)
+    }
+
+    fn authenticated_terminal_wire_at(
+        phase: ClientStage,
+        wire: &[u8],
+        receive_key: [u8; PSK_LEN],
+    ) -> RemoteError {
+        let mut reader = SessionReader::new(Cursor::new(wire), receive_key);
         let cause = match phase {
             ClientStage::Negotiate => {
                 reader.set_max_payload_len(MAX_NEGOTIATION_PAYLOAD_LEN);
@@ -2409,6 +2417,78 @@ mod tests {
             stage: phase,
             cause,
         })
+    }
+
+    /// Exercise genuine host runtime reports through both post-Hello readers.
+    pub(in crate::remote) fn assert_runtime_terminal_record(
+        wire: &[u8],
+        key: [u8; PSK_LEN],
+        expected_code: SessionCloseCode,
+        expected_reason: &str,
+    ) {
+        let code_name = match expected_code {
+            SessionCloseCode::CaptureUnavailable => "capture_unavailable",
+            SessionCloseCode::ClipboardUnavailable => "clipboard_unavailable",
+            _ => panic!("expected a runtime capture or clipboard close"),
+        };
+        for phase in [ClientStage::FirstFrame, ClientStage::Session] {
+            for cleanup_fails in [false, true] {
+                let failure = authenticated_terminal_wire_at(phase, wire, key)
+                    .downcast::<ClientFailure>()
+                    .unwrap();
+                let close = failure.cause.downcast_ref::<PeerClosed>().unwrap();
+                assert_eq!(close.code, Some(expected_code));
+                assert_eq!(close.reason, expected_reason);
+                let result = finish_session(
+                    Err(failure.cause),
+                    Ok(()),
+                    ReceiverExit::Completed,
+                    Ok(()),
+                    if cleanup_fails {
+                        Err(io::Error::other("PRIVATE /cleanup/path").into())
+                    } else {
+                        Ok(())
+                    },
+                );
+                let cause = finalize_retry_intent(result, || {
+                    panic!("runtime peer reports cannot acquire a retry certificate")
+                })
+                .unwrap_err();
+                let error: RemoteError = Box::new(ClientFailure {
+                    stage: phase,
+                    cause,
+                });
+                let summary = classify_failure(error.as_ref());
+                // Exact content-free JSON also excludes local and peer reason text.
+                assert_eq!(
+                    serde_json::to_value(&summary).unwrap(),
+                    serde_json::json!({
+                        "stage": if matches!(phase, ClientStage::FirstFrame) {
+                            "first_frame"
+                        } else {
+                            "session"
+                        },
+                        "category": if cleanup_fails { "cleanup_failed" } else { "peer_closed" },
+                        "io_kind": null,
+                        "peer_close_code": code_name,
+                        "cleanup": if cleanup_fails { "incomplete" } else { "unknown" },
+                        "reconnect_certified": false,
+                    })
+                );
+                let mut error = Some(error);
+                let mut attempts = 0;
+                reconnect_with(
+                    5,
+                    || {
+                        attempts += 1;
+                        Err(error.take().expect("runtime peer report must not retry"))
+                    },
+                    |_, _| panic!("runtime peer reports must not schedule reconnect"),
+                )
+                .unwrap_err();
+                assert_eq!(attempts, 1);
+            }
+        }
     }
 
     #[test]

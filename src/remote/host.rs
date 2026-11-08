@@ -1529,14 +1529,16 @@ impl FirstStop {
         Self(AtomicU8::new(StopCause::None as u8))
     }
 
-    fn record(&self, cause: StopCause) {
+    fn record(&self, cause: StopCause) -> bool {
         debug_assert!(!matches!(cause, StopCause::None | StopCause::ThreadPanic));
-        let _ = self.0.compare_exchange(
-            StopCause::None as u8,
-            cause as u8,
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        );
+        self.0
+            .compare_exchange(
+                StopCause::None as u8,
+                cause as u8,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
     }
 
     fn promote_graceful_to_input_error(&self) {
@@ -2581,21 +2583,106 @@ fn is_end_of_stream(error: &super::RemoteError) -> bool {
     }
 }
 
-/// Tell the viewer the host is stopping on purpose, best effort.
-///
-/// Skipped while the video sender holds the writer mid-record, rather than
-/// waiting behind a write that may itself be stuck on a slow peer.
-fn say_goodbye<W: std::io::Write + SetWriteTimeout>(
+/// A known local producer failure, not an arbitrary error in its surrounding
+/// loop (which also writes to the transport and coordinates other workers).
+/// Keep the detailed error local; the wire gets only a fixed public reason.
+#[derive(Debug)]
+struct LocalRuntimeFailure {
+    code: SessionCloseCode,
+    source: super::RemoteError,
+}
+
+impl LocalRuntimeFailure {
+    fn capture(source: super::RemoteError) -> super::RemoteError {
+        Box::new(Self {
+            code: SessionCloseCode::CaptureUnavailable,
+            source,
+        })
+    }
+
+    fn clipboard(source: super::RemoteError) -> super::RemoteError {
+        Box::new(Self {
+            code: SessionCloseCode::ClipboardUnavailable,
+            source,
+        })
+    }
+}
+
+impl std::fmt::Display for LocalRuntimeFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.source.fmt(f)
+    }
+}
+
+impl std::error::Error for LocalRuntimeFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.source.as_ref())
+    }
+}
+
+fn runtime_close(error: &super::RemoteError) -> Option<SessionClose> {
+    error.downcast_ref::<LocalRuntimeFailure>().map(|failure| {
+        SessionClose::new(
+            failure.code,
+            match failure.code {
+                SessionCloseCode::CaptureUnavailable => "host capture became unavailable",
+                SessionCloseCode::ClipboardUnavailable => "host clipboard became unavailable",
+                _ => unreachable!("only local capture/clipboard failures are tagged"),
+            },
+        )
+    })
+}
+
+/// Tell the viewer why the session ended, best effort. Never wait for an
+/// occupied/poisoned mutex or append to a failed authenticated record.
+fn say_session_close<W: std::io::Write + SetWriteTimeout>(
     writer: &Mutex<SessionWriter<DeadlineWriter<W>>>,
+    close: SessionClose,
 ) {
     if let Ok(mut writer) = writer.try_lock() {
         let _ = write_session_record(
             &mut writer,
             MessageKind::SessionClose,
-            &SessionClose::new(SessionCloseCode::HostStopping, HOST_STOPPING_REASON).encode(),
+            &close.encode(),
             GOODBYE_WRITE_DEADLINE,
         );
     }
+}
+
+/// Wake the input reader before spending any time on the outgoing close, so
+/// held-input release does not wait behind this best-effort write. Callers
+/// publish stopped state and close mailbox/credit waiters first. Another stop
+/// path may shut down the socket concurrently; delivery is never guaranteed.
+fn shutdown_stream<W: std::io::Write + SetWriteTimeout>(
+    writer: &Mutex<SessionWriter<DeadlineWriter<W>>>,
+    close: Option<SessionClose>,
+    mut shutdown: impl FnMut(Shutdown),
+) {
+    shutdown(Shutdown::Read);
+    if let Some(close) = close {
+        say_session_close(writer, close);
+    }
+    shutdown(Shutdown::Both);
+}
+
+fn capture_stop_notice(
+    result: &RemoteResult<()>,
+    shutdown: bool,
+    first_stop: &FirstStop,
+) -> Option<SessionClose> {
+    if let Err(error) = result {
+        // The loop also carries mailbox, source-state and transport errors.
+        // Only tagged backend operations can claim CaptureUnavailable.
+        return first_stop
+            .record(StopCause::Capture)
+            .then(|| runtime_close(error))
+            .flatten();
+    }
+    if shutdown {
+        first_stop.record(StopCause::Graceful);
+    }
+    (first_stop.cause() == StopCause::Graceful)
+        .then(|| SessionClose::new(SessionCloseCode::HostStopping, HOST_STOPPING_REASON))
 }
 
 fn admission_refusal(state: u8) -> SessionClose {
@@ -2708,7 +2795,7 @@ fn stream_frames(
         }
     };
 
-    let clipboard_thread = clipboard_outbox.map(|outbox| {
+    let clipboard_thread = clipboard_outbox.map(|outbox| -> RemoteResult<_> {
         let clipboard_control = control.try_clone()?;
         let writer = Arc::clone(&writer);
         let running = Arc::clone(running);
@@ -2722,22 +2809,27 @@ fn stream_frames(
                     || forward_clipboard(&outbox, &writer, &running),
                     &running,
                     &first_stop,
-                    || {
+                    |close| {
                         mailbox.close();
                         credits.close();
-                        let _ = clipboard_control.shutdown(Shutdown::Both);
+                        shutdown_stream(&writer, close, |how| {
+                            let _ = clipboard_control.shutdown(how);
+                        });
                     },
                 )
             })
+            .map_err(|error| LocalRuntimeFailure::clipboard(error.into()))
     });
     // Negotiation already promised clipboard support. A failed worker start
     // must enter the ordinary teardown path, joining the video sender that
     // was started above, rather than leaving a half-working session alive.
     let (clipboard_thread, clipboard_start_result) =
-        admit_clipboard_worker(clipboard_thread, running, first_stop, || {
+        admit_clipboard_worker(clipboard_thread, running, first_stop, |close| {
             mailbox.close();
             credits.close();
-            let _ = control.shutdown(Shutdown::Both);
+            shutdown_stream(&writer, close, |how| {
+                let _ = control.shutdown(how);
+            });
         });
 
     let interval = target_frame_interval(options.fps);
@@ -2761,7 +2853,9 @@ fn stream_frames(
             if let Some((version, area)) = switch {
                 // Input was released before this request became visible.
                 // A failed install closes the session, never restores old pixels.
-                capture.switch_area(area)?;
+                capture
+                    .switch_area(area)
+                    .map_err(LocalRuntimeFailure::capture)?;
                 let mut writer = lock_writer(&writer);
                 mailbox.clear();
                 credits.abandon_source();
@@ -2804,7 +2898,10 @@ fn stream_frames(
             // Cursor movement has its own bounded cadence, independent of the
             // configured video FPS and video-credit backpressure.
             if capture.cursor_plane_enabled() && Instant::now() >= next_cursor_poll {
-                if let Some(sample) = capture.poll_cursor_plane()? {
+                if let Some(sample) = capture
+                    .poll_cursor_plane()
+                    .map_err(LocalRuntimeFailure::capture)?
+                {
                     let mut writer = writer.lock().unwrap();
                     let state = sources.state.lock().unwrap();
                     let version = state.policy.current();
@@ -2829,7 +2926,9 @@ fn stream_frames(
                 } else {
                     wait
                 };
-                capture.wait_for_activity(wait)?;
+                capture
+                    .wait_for_activity(wait)
+                    .map_err(LocalRuntimeFailure::capture)?;
                 continue;
             }
             if !running.load(Ordering::Acquire) || shutdown.load(Ordering::Acquire) {
@@ -2855,7 +2954,9 @@ fn stream_frames(
                 version
             };
             let capture_started = Instant::now();
-            let Some(frame) = captured_frame_from_outcome(capture.frame()?) else {
+            let Some(frame) =
+                captured_frame_from_outcome(capture.frame().map_err(LocalRuntimeFailure::capture)?)
+            else {
                 telemetry.record_damage_skipped();
                 continue;
             };
@@ -2888,20 +2989,19 @@ fn stream_frames(
         Ok(())
     })();
 
-    if capture_result.is_err() {
-        first_stop.record(StopCause::Capture);
-    } else if shutdown.load(Ordering::Acquire) {
-        first_stop.record(StopCause::Graceful);
-    }
-    if first_stop.cause() == StopCause::Graceful {
-        say_goodbye(&writer);
-    }
+    let close = capture_stop_notice(
+        &capture_result,
+        shutdown.load(Ordering::Acquire),
+        first_stop,
+    );
     running.store(false, Ordering::Release);
     mailbox.close();
     credits.close();
-    // Interrupt a send that is blocked behind a dead or very slow peer. This
-    // also wakes the input reader so held input can be released promptly.
-    let _ = control.shutdown(Shutdown::Both);
+    // Input release starts before the bounded close, then interrupt any send
+    // blocked behind a slow peer. A failed close never replaces the cause.
+    shutdown_stream(&writer, close, |how| {
+        let _ = control.shutdown(how);
+    });
     let sender_result = match sender.join() {
         Ok(result) => result,
         Err(_) => {
@@ -3189,26 +3289,20 @@ fn send_frames_with_encoder_scoped<W: std::io::Write + SetWriteTimeout>(
     Ok(())
 }
 
-/// Lock the shared writer, tolerating a poisoned mutex.
-///
-/// A panicking writer thread already tears the session down through its own
-/// stop path; refusing to write here as well would only turn one failure into
-/// two different ones.
-/// Forward locally copied text to the peer until the session ends.
-///
-/// Runs on its own thread because the video sender parks on display credit and
-/// on its capture mailbox, either of which can be seconds long on an idle
-/// desktop; queueing clipboard text behind that would make copy-paste feel
-/// broken rather than merely delayed.
-fn stop_clipboard_session(running: &AtomicBool, first_stop: &FirstStop, shutdown: impl FnOnce()) {
-    // Shutdown can itself make an in-flight write fail. Do not turn that
-    // secondary failure into the cause of an already-stopped session.
+/// Stop on clipboard failure without reclassifying secondary teardown errors.
+/// Only the first cause may attempt a terminal record, and only a confirmed
+/// local backend/start failure gets a ClipboardUnavailable code.
+fn stop_clipboard_session(
+    running: &AtomicBool,
+    first_stop: &FirstStop,
+    close: Option<SessionClose>,
+    shutdown: impl FnOnce(Option<SessionClose>),
+) {
     if running.load(Ordering::Acquire) {
-        // Publish the cause before capture/input can observe stopped state
-        // and race to attribute the resulting transport shutdown.
-        first_stop.record(StopCause::Clipboard);
+        // Publish the cause before capture/input can observe stopped state.
+        let first = first_stop.record(StopCause::Clipboard);
         if running.swap(false, Ordering::AcqRel) {
-            shutdown();
+            shutdown(if first { close } else { None });
         }
     }
 }
@@ -3217,37 +3311,37 @@ fn run_clipboard_worker(
     task: impl FnOnce() -> RemoteResult<()>,
     running: &Arc<AtomicBool>,
     first_stop: &FirstStop,
-    shutdown: impl FnOnce(),
+    shutdown: impl FnOnce(Option<SessionClose>),
 ) -> RemoteResult<()> {
     let _stop_on_exit = StopSessionOnDrop(Arc::clone(running));
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(task)) {
         Ok(result) => {
-            if result.is_err() {
-                stop_clipboard_session(running, first_stop, shutdown);
+            if let Err(error) = &result {
+                stop_clipboard_session(running, first_stop, runtime_close(error), shutdown);
             }
             result
         }
         Err(panic) => {
-            // Join still observes the panic, but its first cause must become
-            // visible before the drop guard exposes a stopped session.
-            stop_clipboard_session(running, first_stop, shutdown);
+            // A panic may occur in the writer. Its ownership and record state
+            // are unknown, so do not synthesize a clipboard backend failure.
+            stop_clipboard_session(running, first_stop, None, shutdown);
             std::panic::resume_unwind(panic)
         }
     }
 }
 
 fn admit_clipboard_worker<T>(
-    worker: Option<io::Result<T>>,
+    worker: Option<RemoteResult<T>>,
     running: &AtomicBool,
     first_stop: &FirstStop,
-    shutdown: impl FnOnce(),
+    shutdown: impl FnOnce(Option<SessionClose>),
 ) -> (Option<T>, RemoteResult<()>) {
     match worker {
         Some(Ok(worker)) => (Some(worker), Ok(())),
         None => (None, Ok(())),
         Some(Err(error)) => {
-            stop_clipboard_session(running, first_stop, shutdown);
-            (None, Err(error.into()))
+            stop_clipboard_session(running, first_stop, runtime_close(&error), shutdown);
+            (None, Err(error))
         }
     }
 }
@@ -3268,6 +3362,8 @@ fn finish_clipboard_worker(
     }
 }
 
+/// Forward clipboard records independently of video credits and capture, so
+/// an idle desktop does not park copy/paste behind its next frame.
 fn forward_clipboard<W: std::io::Write + SetWriteTimeout>(
     outbox: &ClipboardOutbox,
     writer: &Mutex<SessionWriter<DeadlineWriter<W>>>,
@@ -3289,11 +3385,13 @@ fn forward_clipboard_from<W: std::io::Write + SetWriteTimeout>(
             Ok(None) => continue,
             Err(_) if !running.load(Ordering::Acquire) => return Ok(()),
             Err(_) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::BrokenPipe,
-                    "local clipboard capture worker stopped",
-                )
-                .into());
+                return Err(LocalRuntimeFailure::clipboard(
+                    io::Error::new(
+                        io::ErrorKind::BrokenPipe,
+                        "local clipboard capture worker stopped",
+                    )
+                    .into(),
+                ));
             }
         };
         let result = {
@@ -4628,14 +4726,16 @@ mod tests {
             || forward_clipboard_from(|_| Ok(text.take()), &writer, &running),
             &running,
             &first_stop,
-            || {
+            |close| {
+                assert!(close.is_none(), "transport failures are not clipboard loss");
                 assert!(writer.try_lock().is_ok(), "release writer before teardown");
                 mailbox.close();
                 credits.close();
+                shutdown_stream(&writer, close, |_| {});
                 stopped.set(true);
             },
         );
-        assert!(result.is_err());
+        assert!(runtime_close(result.as_ref().unwrap_err()).is_none());
         assert!(stopped.get());
         assert_eq!(first_stop.cause(), StopCause::Clipboard);
         assert!(mailbox.receive().unwrap().is_none());
@@ -4649,6 +4749,10 @@ mod tests {
         let before = (
             writes.load(Ordering::Relaxed),
             flushes.load(Ordering::Relaxed),
+        );
+        say_session_close(
+            &writer,
+            SessionClose::new(SessionCloseCode::ClipboardUnavailable, "unavailable"),
         );
         assert!(
             write_session_record(
@@ -4690,20 +4794,29 @@ mod tests {
         let mailbox = LatestMailbox::<PendingFrame>::new();
         let credits = FrameCredits::new();
         let stopped = std::cell::Cell::new(false);
+        let writer = runtime_record_writer([0x97; 32]);
         let (worker, result) = admit_clipboard_worker::<()>(
-            Some(Err(io::Error::new(
-                io::ErrorKind::WouldBlock,
-                "injected spawn refusal",
+            Some(Err(LocalRuntimeFailure::clipboard(
+                io::Error::new(io::ErrorKind::WouldBlock, "injected spawn refusal").into(),
             ))),
             &running,
             &first_stop,
-            || {
+            |close| {
                 mailbox.close();
                 credits.close();
+                assert!(!running.load(Ordering::Acquire));
+                shutdown_stream(&writer, close, |_| {});
                 stopped.set(true);
             },
         );
         assert!(worker.is_none());
+        let wire = lock_writer(&writer).get_ref().get_ref().bytes.clone();
+        crate::remote::client::tests::assert_runtime_terminal_record(
+            &wire,
+            [0x97; 32],
+            SessionCloseCode::ClipboardUnavailable,
+            "host clipboard became unavailable",
+        );
         assert!(
             result
                 .unwrap_err()
@@ -4728,7 +4841,7 @@ mod tests {
             let expected = candidate.as_ref().map(|_| 7);
             let running = AtomicBool::new(true);
             let first_stop = FirstStop::new();
-            let (worker, result) = admit_clipboard_worker(candidate, &running, &first_stop, || {
+            let (worker, result) = admit_clipboard_worker(candidate, &running, &first_stop, |_| {
                 panic!("a successful or disabled clipboard does not shut down")
             });
             assert_eq!(worker, expected);
@@ -4756,7 +4869,10 @@ mod tests {
                         || Err(io::Error::other("clipboard failure after first outcome").into()),
                         &running,
                         &first_stop,
-                        || calls.set(calls.get() + 1),
+                        |close| {
+                            assert!(close.is_none());
+                            calls.set(calls.get() + 1);
+                        },
                     )
                     .is_err()
                 );
@@ -4823,8 +4939,10 @@ mod tests {
             },
             &running,
             &first_stop,
-            || {
+            |close| {
                 assert!(writer.try_lock().is_ok());
+                assert!(!running.load(Ordering::Acquire));
+                shutdown_stream(&writer, close, |_| {});
                 stopped.set(true);
             },
         );
@@ -4844,6 +4962,12 @@ mod tests {
         let (kind, payload) = reader.read_message().unwrap();
         assert_eq!(kind, MessageKind::Clipboard);
         assert_eq!(payload, b"last text");
+        let (kind, payload) = reader.read_message().unwrap();
+        assert_eq!(kind, MessageKind::SessionClose);
+        let close = SessionClose::decode(&payload).unwrap();
+        assert_eq!(close.code, SessionCloseCode::ClipboardUnavailable);
+        assert_eq!(close.reason, "host clipboard became unavailable");
+        assert!(reader.read_message().is_err(), "only one terminal record");
     }
 
     #[test]
@@ -4868,7 +4992,7 @@ mod tests {
             },
             &running,
             &first_stop,
-            || panic!("already stopped"),
+            |_| panic!("already stopped"),
         )
         .unwrap();
         assert_eq!(first_stop.cause(), StopCause::Graceful);
@@ -4906,7 +5030,7 @@ mod tests {
             },
             &running,
             &first_stop,
-            || panic!("normal stop must not report a worker failure"),
+            |_| panic!("normal stop must not report a worker failure"),
         )
         .unwrap();
         assert_eq!(first_stop.cause(), StopCause::None);
@@ -4918,6 +5042,235 @@ mod tests {
         assert_eq!(payload, b"normal clipboard");
         let stopped = AtomicBool::new(false);
         forward_clipboard_from(|_| panic!("no receive after stop"), &writer, &stopped).unwrap();
+    }
+
+    fn runtime_record_writer(key: [u8; 32]) -> Mutex<SessionWriter<DeadlineWriter<DripWriter>>> {
+        Mutex::new(SessionWriter::new(
+            DeadlineWriter::new(
+                DripWriter {
+                    bytes: Vec::new(),
+                    max_chunk: usize::MAX,
+                    write_delay: Duration::ZERO,
+                    flush_delay: Duration::ZERO,
+                    flushes: 0,
+                },
+                WRITE_TIMEOUT,
+            ),
+            key,
+        ))
+    }
+
+    #[test]
+    fn runtime_capture_backend_failure_is_terminal_without_exposing_local_error() {
+        let key = [0x98; 32];
+        let writer = runtime_record_writer(key);
+        let first_stop = FirstStop::new();
+        let original = io::Error::new(io::ErrorKind::NotFound, "private display detail");
+        let result = Err(LocalRuntimeFailure::capture(original.into()));
+        let close = capture_stop_notice(&result, false, &first_stop);
+        let mut shutdowns = Vec::new();
+        shutdown_stream(&writer, close, |how| {
+            let written = lock_writer(&writer).get_ref().get_ref().bytes.len();
+            if how == Shutdown::Read {
+                assert_eq!(written, 0, "wake input before outgoing close");
+            } else {
+                assert!(written > 0, "finish close before disabling writes");
+            }
+            shutdowns.push(how);
+        });
+        assert_eq!(shutdowns, [Shutdown::Read, Shutdown::Both]);
+        let wire = lock_writer(&writer).get_ref().get_ref().bytes.clone();
+        crate::remote::client::tests::assert_runtime_terminal_record(
+            &wire,
+            key,
+            SessionCloseCode::CaptureUnavailable,
+            "host capture became unavailable",
+        );
+        assert_eq!(first_stop.cause(), StopCause::Capture);
+        assert!(capture_stop_notice(&result, false, &first_stop).is_none());
+        let error = stream_result_for_stop(first_stop.cause(), result, Ok(()), Ok(())).unwrap_err();
+        assert_eq!(error.to_string(), "private display detail");
+        let source = error.source().unwrap().downcast_ref::<io::Error>().unwrap();
+        assert_eq!(source.kind(), io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn runtime_capture_transport_and_secondary_errors_never_claim_backend_loss() {
+        let result =
+            Err(io::Error::new(io::ErrorKind::BrokenPipe, "cursor transport failed").into());
+        let first_stop = FirstStop::new();
+        assert!(capture_stop_notice(&result, false, &first_stop).is_none());
+        assert_eq!(first_stop.cause(), StopCause::Capture);
+        let backend = Err(LocalRuntimeFailure::capture(
+            io::Error::other("capture failed").into(),
+        ));
+        for prior in [
+            StopCause::Capture,
+            StopCause::Clipboard,
+            StopCause::Input,
+            StopCause::Sender,
+            StopCause::Graceful,
+        ] {
+            let first_stop = FirstStop::new();
+            first_stop.record(prior);
+            assert!(capture_stop_notice(&backend, false, &first_stop).is_none());
+            assert_eq!(first_stop.cause(), prior);
+        }
+    }
+
+    #[test]
+    fn runtime_clipboard_socket_clone_failure_remains_unclassified() {
+        let running = AtomicBool::new(true);
+        let first_stop = FirstStop::new();
+        let (_, result) = admit_clipboard_worker::<()>(
+            Some(Err(io::Error::other("socket clone failed").into())),
+            &running,
+            &first_stop,
+            |close| assert!(close.is_none()),
+        );
+        assert_eq!(result.unwrap_err().to_string(), "socket clone failed");
+        assert!(!running.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn runtime_clipboard_outbox_loss_reaches_client_as_terminal() {
+        let key = [0x99; 32];
+        let writer = runtime_record_writer(key);
+        let running = Arc::new(AtomicBool::new(true));
+        let first_stop = FirstStop::new();
+        let result = run_clipboard_worker(
+            || forward_clipboard_from(|_| Err(std::sync::mpsc::RecvError), &writer, &running),
+            &running,
+            &first_stop,
+            |close| {
+                assert!(!running.load(Ordering::Acquire));
+                shutdown_stream(&writer, close, |_| {});
+            },
+        );
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "local clipboard capture worker stopped"
+        );
+        let wire = lock_writer(&writer).get_ref().get_ref().bytes.clone();
+        crate::remote::client::tests::assert_runtime_terminal_record(
+            &wire,
+            key,
+            SessionCloseCode::ClipboardUnavailable,
+            "host clipboard became unavailable",
+        );
+        assert!(capture_stop_notice(&Ok(()), false, &first_stop).is_none());
+    }
+
+    #[test]
+    fn runtime_close_skips_contended_or_poisoned_writer_without_retry() {
+        for poison in [false, true] {
+            let writer = runtime_record_writer([0x9a; 32]);
+            if poison {
+                let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let _held = writer.lock().unwrap();
+                    panic!("writer ownership interrupted");
+                }));
+                assert!(panic.is_err());
+            }
+            let held = (!poison).then(|| writer.lock().unwrap());
+            let result = Err(LocalRuntimeFailure::capture(
+                io::Error::other("primary capture failure").into(),
+            ));
+            let first_stop = FirstStop::new();
+            let started = Instant::now();
+            let mut shutdowns = Vec::new();
+            shutdown_stream(
+                &writer,
+                capture_stop_notice(&result, false, &first_stop),
+                |how| shutdowns.push(how),
+            );
+            assert!(started.elapsed() < Duration::from_secs(1));
+            assert_eq!(shutdowns, [Shutdown::Read, Shutdown::Both]);
+            drop(held);
+            assert!(lock_writer(&writer).get_ref().get_ref().bytes.is_empty());
+            assert!(capture_stop_notice(&result, false, &first_stop).is_none());
+            assert_eq!(result.unwrap_err().to_string(), "primary capture failure");
+        }
+    }
+
+    #[test]
+    fn runtime_close_read_shutdown_wakes_tcp_reader_before_a_blocked_write() {
+        use std::io::Read;
+        let (_peer, control) = loopback_pair();
+        let mut input = control.try_clone().unwrap();
+        input
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (released_tx, released_rx) = std::sync::mpsc::channel();
+        let input_thread = thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            let result = input.read(&mut [0_u8; 1]);
+            released_tx.send(result).unwrap();
+        });
+        started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let gate = Arc::new((Mutex::new(GateState::default()), Condvar::new()));
+        let writer = Mutex::new(SessionWriter::new(
+            DeadlineWriter::new(GateWriter(Arc::clone(&gate)), WRITE_TIMEOUT),
+            [0x9b; 32],
+        ));
+        let reporter = thread::spawn(move || {
+            shutdown_stream(
+                &writer,
+                Some(SessionClose::new(
+                    SessionCloseCode::CaptureUnavailable,
+                    "host capture became unavailable",
+                )),
+                |how| control.shutdown(how).unwrap(),
+            );
+        });
+        let (lock, ready) = &*gate;
+        let state = lock.lock().unwrap();
+        let (mut state, _) = ready
+            .wait_timeout_while(state, Duration::from_secs(2), |state| {
+                state.write_calls == 0
+            })
+            .unwrap();
+        let writing = state.write_calls > 0;
+        drop(state);
+        // Sample while the outgoing write is still blocked, then always open
+        // the gate before asserting so a failed test cannot strand the worker.
+        let released = released_rx.recv_timeout(Duration::from_secs(1));
+        state = lock.lock().unwrap();
+        state.open = true;
+        ready.notify_all();
+        drop(state);
+        reporter.join().unwrap();
+        input_thread.join().unwrap();
+        assert!(writing);
+        assert_eq!(released.unwrap().unwrap(), 0);
+    }
+
+    #[test]
+    fn runtime_close_survives_tcp_read_shutdown_and_arrives_before_eof() {
+        let (peer, control) = loopback_pair();
+        peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let key = [0x9c; 32];
+        let writer = Mutex::new(SessionWriter::new(
+            DeadlineWriter::new(control.try_clone().unwrap(), WRITE_TIMEOUT),
+            key,
+        ));
+        let result = Err(LocalRuntimeFailure::capture(
+            io::Error::other("private backend failure").into(),
+        ));
+        shutdown_stream(
+            &writer,
+            capture_stop_notice(&result, false, &FirstStop::new()),
+            |how| control.shutdown(how).unwrap(),
+        );
+        let mut reader = SessionReader::new(peer, key);
+        let (kind, payload) = reader.read_message().unwrap();
+        assert_eq!(kind, MessageKind::SessionClose);
+        assert_eq!(
+            SessionClose::decode(&payload).unwrap().code,
+            SessionCloseCode::CaptureUnavailable
+        );
+        assert!(reader.read_message().is_err());
     }
 
     #[test]
@@ -4933,7 +5286,10 @@ mod tests {
             DeadlineWriter::new(GateWriter(Arc::clone(&state)), WRITE_TIMEOUT),
             [0x92; 32],
         ));
-        say_goodbye(&writer);
+        say_session_close(
+            &writer,
+            SessionClose::new(SessionCloseCode::HostStopping, HOST_STOPPING_REASON),
+        );
         let wire = state.0.lock().unwrap().bytes.clone();
         let mut reader = SessionReader::new(Cursor::new(wire), [0x92; 32]);
         let (kind, payload) = reader.read_message().unwrap();
@@ -4946,7 +5302,10 @@ mod tests {
         // rather than queued behind a possibly stuck write.
         let written = state.0.lock().unwrap().bytes.len();
         let held = writer.lock().unwrap();
-        say_goodbye(&writer);
+        say_session_close(
+            &writer,
+            SessionClose::new(SessionCloseCode::HostStopping, HOST_STOPPING_REASON),
+        );
         drop(held);
         assert_eq!(state.0.lock().unwrap().bytes.len(), written);
     }
@@ -4987,35 +5346,129 @@ mod tests {
     }
 
     #[test]
-    fn stopping_goodbye_is_bounded_and_never_retries_a_partial_record() {
-        let writer = Mutex::new(SessionWriter::new(
-            DeadlineWriter::new(
-                DripWriter {
-                    bytes: Vec::new(),
-                    max_chunk: 1,
-                    write_delay: Duration::from_millis(8),
-                    flush_delay: Duration::ZERO,
-                    flushes: 0,
-                },
-                WRITE_TIMEOUT,
-            ),
-            [0x92; 32],
-        ));
-        let started = Instant::now();
-        say_goodbye(&writer);
-        assert!(started.elapsed() < Duration::from_secs(1));
-        let partial_len = {
-            let writer = writer.lock().unwrap();
-            assert!(writer.get_ref().failed);
-            assert_eq!(writer.next_sequence(), 0);
-            writer.get_ref().get_ref().bytes.len()
-        };
-        assert!(partial_len > 0);
-        say_goodbye(&writer);
-        assert_eq!(
-            writer.lock().unwrap().get_ref().get_ref().bytes.len(),
-            partial_len
-        );
+    fn terminal_notice_deadline_never_retries_partial_write_or_expired_flush() {
+        for code in [
+            SessionCloseCode::HostStopping,
+            SessionCloseCode::CaptureUnavailable,
+            SessionCloseCode::ClipboardUnavailable,
+        ] {
+            for slow_flush in [false, true] {
+                let writer = Mutex::new(SessionWriter::new(
+                    DeadlineWriter::new(
+                        DripWriter {
+                            bytes: Vec::new(),
+                            max_chunk: if slow_flush { usize::MAX } else { 1 },
+                            write_delay: if slow_flush {
+                                Duration::ZERO
+                            } else {
+                                Duration::from_millis(8)
+                            },
+                            flush_delay: if slow_flush {
+                                GOODBYE_WRITE_DEADLINE + Duration::from_millis(10)
+                            } else {
+                                Duration::ZERO
+                            },
+                            flushes: 0,
+                        },
+                        WRITE_TIMEOUT,
+                    ),
+                    [0x92; 32],
+                ));
+                let started = Instant::now();
+                say_session_close(&writer, SessionClose::new(code, "host became unavailable"));
+                assert!(started.elapsed() < Duration::from_secs(1));
+                let before = {
+                    let writer = writer.lock().unwrap();
+                    assert!(writer.get_ref().failed);
+                    // The record sequence advances after complete bytes, not
+                    // flush. Either failure still poisons all later writes.
+                    assert_eq!(writer.next_sequence(), u64::from(slow_flush));
+                    let inner = writer.get_ref().get_ref();
+                    (inner.bytes.len(), inner.flushes)
+                };
+                assert!(before.0 > 0);
+                assert_eq!(before.1, usize::from(slow_flush));
+                say_session_close(&writer, SessionClose::new(code, "must not append"));
+                let writer = writer.lock().unwrap();
+                let inner = writer.get_ref().get_ref();
+                assert_eq!((inner.bytes.len(), inner.flushes), before);
+            }
+        }
+    }
+
+    #[test]
+    fn runtime_concurrent_failures_allow_only_the_first_cause_to_notify() {
+        for _ in 0..16 {
+            let running = Arc::new(AtomicBool::new(true));
+            let first_stop = Arc::new(FirstStop::new());
+            let barrier = Arc::new(std::sync::Barrier::new(4));
+            let notices = Mutex::new(Vec::new());
+            thread::scope(|scope| {
+                scope.spawn(|| {
+                    barrier.wait();
+                    let result = Err(LocalRuntimeFailure::capture(
+                        io::Error::other("capture primary").into(),
+                    ));
+                    if let Some(close) = capture_stop_notice(&result, false, &first_stop) {
+                        notices.lock().unwrap().push(close.code);
+                    }
+                    running.store(false, Ordering::Release);
+                });
+                scope.spawn(|| {
+                    barrier.wait();
+                    let result = run_clipboard_worker(
+                        || {
+                            Err(LocalRuntimeFailure::clipboard(
+                                io::Error::other("clipboard primary").into(),
+                            ))
+                        },
+                        &running,
+                        &first_stop,
+                        |close| {
+                            if let Some(close) = close {
+                                notices.lock().unwrap().push(close.code);
+                            }
+                        },
+                    );
+                    assert!(result.is_err());
+                });
+                scope.spawn(|| {
+                    barrier.wait();
+                    first_stop.record(StopCause::Sender);
+                    running.store(false, Ordering::Release);
+                });
+                barrier.wait();
+            });
+            assert!(!running.load(Ordering::Acquire));
+            let notices = notices.into_inner().unwrap();
+            assert!(notices.len() <= 1);
+            if let Some(code) = notices.first() {
+                assert_eq!(
+                    *code,
+                    match first_stop.cause() {
+                        StopCause::Capture => SessionCloseCode::CaptureUnavailable,
+                        StopCause::Clipboard => SessionCloseCode::ClipboardUnavailable,
+                        other => panic!("unclassified first cause {other:?} cannot notify"),
+                    }
+                );
+            }
+            let selected = stream_result_for_stop(
+                first_stop.cause(),
+                Err(io::Error::other("capture primary").into()),
+                Err(io::Error::other("sender primary").into()),
+                Err(io::Error::other("clipboard primary").into()),
+            )
+            .unwrap_err();
+            assert_eq!(
+                selected.to_string(),
+                match first_stop.cause() {
+                    StopCause::Capture => "capture primary",
+                    StopCause::Clipboard => "clipboard primary",
+                    StopCause::Sender => "sender primary",
+                    other => panic!("unexpected cause {other:?}"),
+                }
+            );
+        }
     }
 
     #[test]
@@ -5097,7 +5550,8 @@ mod tests {
                 || panic!("injected clipboard worker panic"),
                 &running,
                 &first_stop,
-                || {
+                |close| {
+                    assert!(close.is_none(), "panic ownership is unknown");
                     assert_eq!(first_stop.cause(), StopCause::Clipboard);
                     assert!(!running.load(Ordering::Acquire));
                     first_stop.record(StopCause::Graceful);

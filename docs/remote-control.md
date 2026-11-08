@@ -312,15 +312,18 @@ permission flags remain unchanged. Delays are 1, 2, 4, 8 and 8 seconds; the
 budget never resets during the command. Ctrl+C stops the command, including
 while waiting between attempts.
 
-Startup/connect failures, authentication/protocol/decode failures, frame-idle
-and socket timeouts, explicit host Close, local X11/clipboard errors, and any
-incomplete cleanup never retry. Sender-side failures also stop conservatively,
+Startup/connect failures, authentication/protocol/decode failures observed by
+the viewer, frame-idle and socket timeouts, explicit host Close/SessionClose,
+local X11/clipboard errors, and any incomplete local cleanup never retry. Sender-side failures also stop conservatively,
 even when the underlying cause might be network loss. Closing the viewer never
 retries. Using Ctrl+Super+F12 (or the configured escape shortcut) still only
 releases the grab; it also disables reconnect for that session so a later drop
-cannot unexpectedly reopen a grabbed viewer. Layout/selection changes and
-identity or authentication failures never silently retry, downgrade or broaden
-sharing. A fresh connection reapplies an explicit `--window-size`, if supplied, but does
+cannot unexpectedly reopen a grabbed viewer. Explicitly reported layout/selection
+rejections and identity/authentication failures do not silently retry or
+downgrade. Every replacement connection repeats normal permission negotiation.
+A bare EOF/reset is ambiguous: it can also result from a host failure whose
+best-effort terminal record could not be delivered. Client cleanup certification
+does not prove the host stopped only because of network loss. A fresh connection reapplies an explicit `--window-size`, if supplied, but does
 not restore observed window geometry or clipboard transfer progress. SSH and saved profile runs never reconnect automatically;
 nonzero reconnect consent cannot be saved in a profile.
 

@@ -219,15 +219,18 @@ a detached worker/reaper; it is not permission to start a replacement session.
 Clipboard sync, capture-forwarder and X11 worker shutdown share one explicit
 deadline and preserve incomplete cleanup errors. Their Drop paths signal only;
 stalled owned work may continue after a reported timeout, so timeout never proves
-all workers exited. The existing host input-thread join is still unbounded.
+all workers exited. Host input and clipboard post-stream joins now share a
+two-second budget; synchronous capture and outer joins remain outside it.
 Actual window-close intent is latched before fallible local input release and
 network flushes, and remains typed when those operations fail.
 
 Explicit direct-connect retry is bounded to at most five additional sessions
 with a lifetime budget and 1/2/4/8/8-second delays; default remains disabled.
 Only tagged established receiver EOF/reset/abort errors with certified successful
-cleanup qualify. User/peer closes, local escape, protocol/authentication failures,
-timeouts and any incomplete cleanup do not qualify. Pending local intent is
+local cleanup qualify. User/peer closes, local escape, viewer-observed
+protocol/authentication failures, timeouts and any incomplete local cleanup do
+not qualify. A bare EOF/reset cannot prove that an unreported host operational
+failure did not cause it; remote terminal reporting remains best-effort. Pending local intent is
 checked again after cleanup before certification. SSH and saved-profile retries
 remain unsupported; SSH exit 255 cannot reliably distinguish network loss from
 authentication or host verification failure. No session/transfer state resumes. The escape shortcut only releases
@@ -401,3 +404,30 @@ while preserving the peer code separately. Best-effort host goodbye still uses
 its existing nonblocking lock attempt and bounded write deadline. These changes
 are covered by offline authenticated-record and codec tests, not live graphical
 or performance acceptance.
+
+### Best-effort runtime capture and clipboard failure reporting
+
+The host reuses v13 `CaptureUnavailable` and `ClipboardUnavailable` records for
+identified runtime producer failures. Capture classification is attached only
+to source switching, cursor sampling, activity waits and frame capture calls;
+other failures in the capture loop do not acquire that code. A local clipboard
+outbox loss or confirmed worker-start failure is distinguished from socket
+cloning and transport write errors. Human reasons sent for these failures are
+fixed strings; the original contextual error remains local.
+
+Shutdown still marks the session stopped and closes its frame mailbox/credits
+first. Read-side socket shutdown wakes the input reader before one bounded
+outgoing notification attempt, then full socket shutdown follows. The notifier
+uses a nonblocking writer-lock attempt and the existing 250ms record deadline.
+It never waits for ownership, retries a notification, or appends to a poisoned
+partial-record stream. Concurrent termination keeps the original first cause;
+notification failure does not replace the primary error.
+
+This is best-effort reporting, not guaranteed delivery or whole-host bounded
+termination. Another shutdown, writer contention, poison or deadline expiry can
+leave the viewer with an ambiguous EOF/reset. Input/keymap and local encoder
+failures are not relabeled as capture or clipboard failures. Receiving a valid
+terminal record suppresses automatic reconnect; failure to receive one cannot
+prove the host had no operational error. Wire v13 and diagnostic schema 2 are
+unchanged. Offline authenticated-record and shutdown-order tests do not replace
+live X11 held-input and failure acceptance testing.
