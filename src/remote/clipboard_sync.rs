@@ -963,11 +963,12 @@ impl<T: ClipboardTarget> Worker<T> {
 
     fn cleanup(&mut self) {
         self.sending = None;
+        // Close receiver descriptors before deleting files and releasing budget.
+        self.receiving = None;
         if let Some(staging) = self.staging.as_mut() {
             staging.reclaim_rejected();
             staging.discard_in_progress();
         }
-        self.receiving = None;
         if let Some(token) = self.pending_token.take() {
             self.target.serve(RemoteServe::Abandon { token });
         }
@@ -1218,9 +1219,9 @@ impl<T: ClipboardTarget> Worker<T> {
         }
         // Keep the token available to boundary cleanup if queueing's wake panics.
         let receiving = self.receiving.take().expect("receiving was present");
-        if self.serve(RemoteServe::Abandon {
-            token: receiving.token,
-        }) {
+        let token = receiving.token;
+        drop(receiving);
+        if self.serve(RemoteServe::Abandon { token }) {
             self.pending_token = None;
         }
         if let Some(staging) = self.staging.as_mut() {
@@ -1389,9 +1390,12 @@ impl<T: ClipboardTarget> Worker<T> {
                     ));
                 }
                 let directory = staging
-                    .begin()
+                    .begin(length)
                     .map_err(|error| format!("could not create a staging directory: {error}"))?;
-                Ok(Sink::Files(ArchiveReceiver::new(directory, entries)))
+                Ok(Sink::Files(
+                    ArchiveReceiver::new(directory, entries)
+                        .map_err(|error| format!("could not pin the staging directory: {error}"))?,
+                ))
             }
         }
     }
@@ -1402,14 +1406,16 @@ impl<T: ClipboardTarget> Worker<T> {
             return Ok(());
         };
         let len = bytes.len() as u64;
-        if receiving.received + len > receiving.length {
-            return Err("the copy was longer than announced".into());
-        }
+        let received = receiving
+            .received
+            .checked_add(len)
+            .filter(|received| *received <= receiving.length)
+            .ok_or_else(|| "the copy was longer than announced".to_owned())?;
         match &mut receiving.sink {
             Sink::Image(png) => png.extend_from_slice(bytes),
             Sink::Files(archive) => archive.feed(bytes).map_err(|error| error.to_string())?,
         }
-        receiving.received += len;
+        receiving.received = received;
         Ok(())
     }
 
@@ -1692,6 +1698,102 @@ mod tests {
     fn policy_worker(options: SyncOptions) -> (Worker<Recorder>, mpsc::Receiver<RemoteServe>) {
         let (served, received) = mpsc::channel();
         (worker_for_target(Recorder(served), options), received)
+    }
+
+    #[test]
+    fn staging_budget_refuses_before_announcement_and_reserves_before_acceptance() {
+        use super::super::clipboard_staging_budget as budget;
+        let temp = TempDir::new("budget-admission");
+        let root = temp.0.join("staging");
+        budget::set_limit(&root, 99).unwrap();
+        let (mut worker, served) = policy_worker(options(1024));
+        worker.staging_root = Some(root.clone());
+        worker.on_peer(TransferOp::Begin {
+            id: 1,
+            kind: TransferKind::Files,
+            length: 100,
+            entries: 1,
+            items: 1,
+        });
+        assert!(
+            served.try_recv().is_err(),
+            "rejected budget must never announce"
+        );
+        assert!(worker.receiving.is_none());
+        let refusal = worker.out.try_recv().unwrap();
+        assert_eq!(
+            TransferOp::decode(&refusal.payload).unwrap(),
+            TransferOp::Refuse { id: 1 }
+        );
+        assert_eq!(budget::status(&root).unwrap().reserved_bytes, 0);
+        for entry in fs::read_dir(&root).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                assert_eq!(fs::read_dir(path).unwrap().count(), 0);
+            }
+        }
+        budget::set_limit(&root, 100).unwrap();
+        worker.on_peer(TransferOp::Begin {
+            id: 2,
+            kind: TransferKind::Files,
+            length: 100,
+            entries: 1,
+            items: 1,
+        });
+        assert!(matches!(
+            served.try_recv().unwrap(),
+            RemoteServe::Announce { .. }
+        ));
+        assert_eq!(budget::status(&root).unwrap().reserved_bytes, 100);
+        worker.on_peer(TransferOp::Cancel { id: 2 });
+        assert_eq!(budget::status(&root).unwrap().reserved_bytes, 0);
+    }
+
+    #[test]
+    fn staging_budget_completion_keeps_archive_charge_until_explicit_rejection() {
+        use super::super::clipboard_staging_budget as budget;
+        let temp = TempDir::new("budget-receipt");
+        let source = temp.0.join("file");
+        fs::write(&source, b"payload").unwrap();
+        let manifest = Manifest::build(&[source], 1024).unwrap();
+        let length = manifest.stream_bytes;
+        let entries = manifest.entry_count();
+        let bytes = ManifestReader::new(manifest).next_chunk(1024).unwrap();
+        let root = temp.0.join("staging");
+        budget::set_limit(&root, length).unwrap();
+        let (mut worker, served) = policy_worker(options(1024));
+        worker.staging_root = Some(root.clone());
+        worker.on_peer(TransferOp::Begin {
+            id: 1,
+            kind: TransferKind::Files,
+            length,
+            entries,
+            items: 1,
+        });
+        assert!(matches!(
+            served.try_recv().unwrap(),
+            RemoteServe::Announce { .. }
+        ));
+        worker
+            .in_flight
+            .store(bytes.len() as u64, Ordering::Release);
+        worker.on_peer(TransferOp::Data { id: 1, bytes });
+        worker.on_peer(TransferOp::End { id: 1 });
+        let RemoteServe::FulfilFiles { paths, receipt, .. } = served.try_recv().unwrap() else {
+            panic!("expected file handoff");
+        };
+        assert!(length > 7, "headers and names are part of the charge");
+        assert_eq!(budget::status(&root).unwrap().reserved_bytes, length);
+        worker.cleanup();
+        assert!(
+            paths[0].exists(),
+            "unknown receipt remains possibly advertised"
+        );
+        assert_eq!(budget::status(&root).unwrap().reserved_bytes, length);
+        receipt.reject_unpublished();
+        worker.staging.as_mut().unwrap().reclaim_rejected();
+        assert!(!paths[0].exists());
+        assert_eq!(budget::status(&root).unwrap().reserved_bytes, 0);
     }
 
     #[test]
@@ -2583,10 +2685,10 @@ mod tests {
         }
         let temp = TempDir::new("normal-close-staging");
         let mut staging = Staging::create_in(&temp.0.join("staging")).unwrap();
-        let completed = staging.begin().unwrap().join("complete.txt");
+        let completed = staging.begin(1024).unwrap().join("complete.txt");
         fs::write(&completed, b"complete").unwrap();
         staging.complete();
-        let incomplete = staging.begin().unwrap().join("incomplete.txt");
+        let incomplete = staging.begin(1024).unwrap().join("incomplete.txt");
         fs::write(&incomplete, b"incomplete").unwrap();
         let mut worker = worker_for_target(ClosedNormally, options(100));
         worker.staging = Some(staging);

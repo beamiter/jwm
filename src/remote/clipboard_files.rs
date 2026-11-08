@@ -22,11 +22,13 @@
 //! copied symlink itself is followed), devices, sockets and FIFOs, owners, and
 //! set-id bits. Only the executable bits of a mode survive.
 
+use super::clipboard_staging_budget::{self, Session};
 use crate::backend::clipboard_x11::FileFulfilReceipt;
 use std::collections::VecDeque;
 use std::ffi::OsStr;
 use std::fs::{self, File};
 use std::io::{self, Read as _, Write as _};
+use std::os::fd::AsRawFd as _;
 use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::fs::{DirBuilderExt as _, MetadataExt as _, OpenOptionsExt as _};
 use std::path::{Path, PathBuf};
@@ -327,6 +329,7 @@ fn encode_header(entry: &Entry, size: u64) -> Vec<u8> {
 /// Recreates a received entry stream under one fresh directory.
 pub struct ArchiveReceiver {
     root: PathBuf,
+    directory: File,
     header: Vec<u8>,
     file: Option<(File, u64, i64)>,
     entries_left: u32,
@@ -335,18 +338,20 @@ pub struct ArchiveReceiver {
 
 impl ArchiveReceiver {
     /// `root` must be a new, empty directory this process created.
-    #[must_use]
-    pub fn new(root: PathBuf, entries: u32) -> Self {
-        Self {
+    pub fn new(root: PathBuf, entries: u32) -> io::Result<Self> {
+        let directory = clipboard_staging_budget::open_private_directory(&root, false)?;
+        Ok(Self {
             root,
+            directory,
             header: Vec::with_capacity(HEADER_FIXED_LEN + 256),
             file: None,
             entries_left: entries,
             top_level: Vec::new(),
-        }
+        })
     }
 
     pub fn feed(&mut self, mut data: &[u8]) -> io::Result<()> {
+        self.verify_root()?;
         while !data.is_empty() {
             if let Some((file, remaining, mtime)) = self.file.as_mut() {
                 let take = (*remaining).min(data.len() as u64) as usize;
@@ -381,6 +386,16 @@ impl ArchiveReceiver {
         Ok(())
     }
 
+    fn verify_root(&self) -> io::Result<()> {
+        let current = clipboard_staging_budget::open_private_directory(&self.root, false)?;
+        let current = current.metadata()?;
+        let pinned = self.directory.metadata()?;
+        if current.dev() != pinned.dev() || current.ino() != pinned.ino() {
+            return Err(invalid("received clipboard directory was replaced"));
+        }
+        Ok(())
+    }
+
     fn open_entry(&mut self) -> io::Result<()> {
         let header = std::mem::take(&mut self.header);
         if self.entries_left == 0 {
@@ -393,7 +408,21 @@ impl ArchiveReceiver {
         let size = u64::from_be_bytes(header[15..23].try_into().expect("fixed slice"));
         let name = &header[HEADER_FIXED_LEN..];
         let relative = validate_name(name)?;
-        let path = self.root.join(&relative);
+        // Resolve every directory through a pinned, no-follow descriptor. The
+        // separately retained ordinary path is used only for clipboard URIs.
+        let mut parent = self.directory.try_clone()?;
+        let components: Vec<_> = relative.components().collect();
+        for component in &components[..components.len() - 1] {
+            let path = PathBuf::from(format!("/proc/self/fd/{}", parent.as_raw_fd()))
+                .join(component.as_os_str());
+            parent = clipboard_staging_budget::open_directory(&path)?;
+        }
+        let path = PathBuf::from(format!("/proc/self/fd/{}", parent.as_raw_fd())).join(
+            components
+                .last()
+                .expect("validated nonempty name")
+                .as_os_str(),
+        );
         match kind {
             KIND_DIR if size == 0 => {
                 fs::DirBuilder::new()
@@ -405,6 +434,7 @@ impl ArchiveReceiver {
                     .write(true)
                     .create_new(true)
                     .mode((mode & MODE_MASK) | 0o600)
+                    .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
                     .open(&path)?;
                 if size == 0 {
                     finish_file(&file, mtime);
@@ -415,7 +445,7 @@ impl ArchiveReceiver {
             _ => return Err(invalid("received an entry of an unknown kind")),
         }
         if !name.contains(&b'/') {
-            self.top_level.push(path);
+            self.top_level.push(self.root.join(&relative));
         }
         self.header = header;
         self.header.clear();
@@ -425,6 +455,7 @@ impl ArchiveReceiver {
     /// The top-level paths, once the stream ended exactly on an entry
     /// boundary with every announced entry present.
     pub fn finish(self) -> io::Result<Vec<PathBuf>> {
+        self.verify_root()?;
         if self.file.is_some() || !self.header.is_empty() {
             return Err(invalid("the transfer ended in the middle of an entry"));
         }
@@ -483,7 +514,7 @@ const KEPT_TRANSFERS: usize = 3;
 /// few copies are kept for the session and the newest survives it; a later
 /// session removes directories whose process has exited.
 pub struct Staging {
-    session: PathBuf,
+    budget: Session,
     next: u32,
     completed: VecDeque<(PathBuf, FileFulfilReceipt)>,
     in_progress: Option<PathBuf>,
@@ -496,33 +527,9 @@ impl Staging {
 
     /// [`Self::create`] under an explicit root, for tests.
     pub(crate) fn create_in(root: &Path) -> io::Result<Self> {
-        fs::create_dir_all(root.parent().unwrap_or(root))?;
-        match fs::DirBuilder::new().mode(0o700).create(root) {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-            Err(error) => return Err(error),
-        }
-        let metadata = fs::symlink_metadata(root)?;
-        // SAFETY: getuid has no preconditions and cannot fail.
-        let uid = unsafe { libc::getuid() };
-        if !metadata.is_dir() || metadata.uid() != uid || metadata.mode() & 0o077 != 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                format!(
-                    "{} must be a private directory owned by you",
-                    root.display()
-                ),
-            ));
-        }
-        sweep_exited_sessions(root);
-        let session = root.join(format!(
-            "s{}-{:08x}",
-            std::process::id(),
-            rand::random::<u32>()
-        ));
-        fs::DirBuilder::new().mode(0o700).create(&session)?;
+        let budget = Session::create(root)?;
         Ok(Self {
-            session,
+            budget,
             next: 1,
             completed: VecDeque::new(),
             in_progress: None,
@@ -530,11 +537,14 @@ impl Staging {
     }
 
     /// A new empty directory for one incoming copy.
-    pub fn begin(&mut self) -> io::Result<PathBuf> {
+    pub fn begin(&mut self, archive_bytes: u64) -> io::Result<PathBuf> {
         self.discard_in_progress();
-        let directory = self.session.join(self.next.to_string());
-        self.next += 1;
-        fs::DirBuilder::new().mode(0o700).create(&directory)?;
+        let copy = self.next;
+        self.next = self
+            .next
+            .checked_add(1)
+            .ok_or_else(|| invalid("staging copy identifier exhausted"))?;
+        let directory = self.budget.reserve(copy, archive_bytes)?;
         self.in_progress = Some(directory.clone());
         Ok(directory)
     }
@@ -552,14 +562,14 @@ impl Staging {
         }
         while self.completed.len() > KEPT_TRANSFERS {
             if let Some((oldest, _)) = self.completed.pop_front() {
-                let _ = fs::remove_dir_all(oldest);
+                self.delete(&oldest);
             }
         }
     }
 
     pub fn discard_in_progress(&mut self) {
         if let Some(directory) = self.in_progress.take() {
-            let _ = fs::remove_dir_all(directory);
+            self.delete(&directory);
         }
     }
 
@@ -568,9 +578,10 @@ impl Staging {
     /// reused wire token. Unknown and potentially published copies stay under
     /// the existing retention policy, including on backend failure.
     pub(crate) fn reclaim_rejected(&mut self) {
+        let budget = &self.budget;
         self.completed.retain(|(directory, receipt)| {
             if receipt.rejected_unpublished() {
-                let _ = fs::remove_dir_all(directory);
+                let _ = delete_reserved(budget, directory);
                 false
             } else {
                 true
@@ -578,11 +589,15 @@ impl Staging {
         });
     }
 
+    fn delete(&self, directory: &Path) {
+        // Cleanup is best effort under a nonblocking root lock. Failure may
+        // leave files, but the durable ledger retains their full reservation.
+        let _ = delete_reserved(&self.budget, directory);
+    }
+
     /// Bytes an unprivileged writer may still use on the staging filesystem.
     pub fn available_bytes(&self) -> io::Result<u64> {
-        let stats = nix::sys::statvfs::statvfs(&self.session).map_err(io::Error::from)?;
-        #[allow(clippy::unnecessary_cast, clippy::useless_conversion)]
-        Ok(u64::from(stats.blocks_available()).saturating_mul(u64::from(stats.fragment_size())))
+        self.budget.available_bytes()
     }
 }
 
@@ -594,16 +609,16 @@ impl Drop for Staging {
         // after the session, until the next session sweeps it away.
         while self.completed.len() > 1 {
             if let Some((oldest, _)) = self.completed.pop_front() {
-                let _ = fs::remove_dir_all(oldest);
+                self.delete(&oldest);
             }
         }
         if self.completed.is_empty() {
-            let _ = fs::remove_dir(&self.session);
+            let _ = self.budget.remove_if_empty();
         }
     }
 }
 
-fn staging_root() -> io::Result<PathBuf> {
+pub fn staging_root() -> io::Result<PathBuf> {
     let cache = std::env::var_os("XDG_CACHE_HOME")
         .map(PathBuf::from)
         .filter(|path| path.is_absolute())
@@ -617,31 +632,13 @@ fn staging_root() -> io::Result<PathBuf> {
     Ok(cache.join("jwm").join("remote-clipboard"))
 }
 
-/// Remove session directories whose process no longer exists.
-fn sweep_exited_sessions(root: &Path) {
-    let Ok(entries) = fs::read_dir(root) else {
-        return;
-    };
-    for entry in entries.filter_map(Result::ok) {
-        let name = entry.file_name();
-        let Some(pid) = name
-            .to_str()
-            .and_then(|name| name.strip_prefix('s'))
-            .and_then(|rest| rest.split_once('-'))
-            .and_then(|(pid, _)| pid.parse::<u32>().ok())
-        else {
-            continue;
-        };
-        if pid == std::process::id() || Path::new(&format!("/proc/{pid}")).exists() {
-            continue;
-        }
-        let path = entry.path();
-        // remove_dir_all never follows a symlink; still, only sweep real
-        // directories this naming scheme could have produced.
-        if fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.is_dir()) {
-            let _ = fs::remove_dir_all(path);
-        }
-    }
+fn delete_reserved(budget: &Session, directory: &Path) -> io::Result<()> {
+    let copy = directory
+        .file_name()
+        .and_then(OsStr::to_str)
+        .and_then(|name| name.parse::<u32>().ok())
+        .ok_or_else(|| invalid("invalid reserved staging path"))?;
+    budget.delete(copy)
 }
 
 /// `1.5 MiB`, `312 KiB`, `12 bytes`.
@@ -721,7 +718,7 @@ mod tests {
                 std::process::id(),
                 rand::random::<u32>()
             ));
-            fs::create_dir(&path).unwrap();
+            fs::DirBuilder::new().mode(0o700).create(&path).unwrap();
             Self(path)
         }
     }
@@ -777,7 +774,7 @@ mod tests {
 
         for chunk in [1, 7, 64 * 1024, 1 << 20] {
             let destination = TempDir::new("dst");
-            let mut receiver = ArchiveReceiver::new(destination.0.clone(), entries);
+            let mut receiver = ArchiveReceiver::new(destination.0.clone(), entries).unwrap();
             let bytes = stream(Manifest::build(&paths, u64::MAX).unwrap(), chunk);
             for piece in bytes.chunks(chunk.max(3) - 2) {
                 receiver.feed(piece).unwrap();
@@ -811,7 +808,8 @@ mod tests {
         let paths = vec![source.0.join("a/x"), source.0.join("b/x")];
         let manifest = Manifest::build(&paths, u64::MAX).unwrap();
         let destination = TempDir::new("dupdst");
-        let mut receiver = ArchiveReceiver::new(destination.0.clone(), manifest.entry_count());
+        let mut receiver =
+            ArchiveReceiver::new(destination.0.clone(), manifest.entry_count()).unwrap();
         receiver.feed(&stream(manifest, 4096)).unwrap();
         let top = receiver.finish().unwrap();
         assert_eq!(top[1], destination.0.join("x (2)"));
@@ -879,42 +877,67 @@ mod tests {
             b"trailing/",
         ] {
             let destination = TempDir::new("hostile");
-            let mut receiver = ArchiveReceiver::new(destination.0.clone(), 4);
+            let mut receiver = ArchiveReceiver::new(destination.0.clone(), 4).unwrap();
             let error = receiver.feed(&entry(KIND_FILE, name, 0)).unwrap_err();
             assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{name:?}");
         }
         // A file named twice, or under a parent that was never sent.
         let destination = TempDir::new("twice");
-        let mut receiver = ArchiveReceiver::new(destination.0.clone(), 4);
+        let mut receiver = ArchiveReceiver::new(destination.0.clone(), 4).unwrap();
         receiver.feed(&entry(KIND_FILE, b"x", 0)).unwrap();
         assert!(receiver.feed(&entry(KIND_FILE, b"x", 0)).is_err());
-        let mut receiver = ArchiveReceiver::new(destination.0.clone(), 4);
+        let mut receiver = ArchiveReceiver::new(destination.0.clone(), 4).unwrap();
         assert!(receiver.feed(&entry(KIND_FILE, b"nope/x", 0)).is_err());
+    }
+
+    #[test]
+    fn receiver_never_follows_replaced_ancestors_or_root() {
+        let destination = TempDir::new("pinned-receiver");
+        let outside = TempDir::new("outside-receiver");
+        let mut receiver = ArchiveReceiver::new(destination.0.clone(), 2).unwrap();
+        receiver.feed(&entry(KIND_DIR, b"nested", 0)).unwrap();
+        fs::remove_dir(destination.0.join("nested")).unwrap();
+        std::os::unix::fs::symlink(&outside.0, destination.0.join("nested")).unwrap();
+        assert!(
+            receiver
+                .feed(&entry(KIND_FILE, b"nested/escape", 0))
+                .is_err()
+        );
+        assert!(!outside.0.join("escape").exists());
+
+        let root = destination.0.join("root");
+        fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
+        let mut receiver = ArchiveReceiver::new(root.clone(), 1).unwrap();
+        fs::rename(&root, destination.0.join("old-root")).unwrap();
+        fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
+        assert!(receiver.feed(&entry(KIND_FILE, b"file", 0)).is_err());
+        assert!(!root.join("file").exists());
+        assert!(!destination.0.join("old-root/file").exists());
     }
 
     #[test]
     fn a_stream_must_match_what_was_announced() {
         let destination = TempDir::new("count");
-        let mut receiver = ArchiveReceiver::new(destination.0.clone(), 1);
+        let mut receiver = ArchiveReceiver::new(destination.0.clone(), 1).unwrap();
         receiver.feed(&entry(KIND_FILE, b"a", 0)).unwrap();
         assert!(receiver.feed(&entry(KIND_FILE, b"b", 0)).is_err());
 
         let destination = TempDir::new("short");
-        let mut receiver = ArchiveReceiver::new(destination.0.clone(), 2);
+        let mut receiver = ArchiveReceiver::new(destination.0.clone(), 2).unwrap();
         receiver.feed(&entry(KIND_FILE, b"a", 0)).unwrap();
         assert!(receiver.finish().is_err(), "an entry is missing");
 
         let destination = TempDir::new("partial");
-        let mut receiver = ArchiveReceiver::new(destination.0.clone(), 1);
+        let mut receiver = ArchiveReceiver::new(destination.0.clone(), 1).unwrap();
         let mut bytes = entry(KIND_FILE, b"a", 4);
         bytes.extend_from_slice(b"ab");
         receiver.feed(&bytes).unwrap();
         assert!(receiver.finish().is_err(), "the file is incomplete");
 
         let destination = TempDir::new("kind");
-        let mut receiver = ArchiveReceiver::new(destination.0.clone(), 1);
+        let mut receiver = ArchiveReceiver::new(destination.0.clone(), 1).unwrap();
         assert!(receiver.feed(&entry(9, b"a", 0)).is_err());
-        let mut receiver = ArchiveReceiver::new(destination.0.clone(), 1);
+        let mut receiver = ArchiveReceiver::new(destination.0.clone(), 1).unwrap();
         assert!(receiver.feed(&entry(KIND_DIR, b"d", 5)).is_err());
     }
 
@@ -925,12 +948,12 @@ mod tests {
         let mut first = Staging::create_in(&root).unwrap();
         let mut second = Staging::create_in(&root).unwrap();
         let old_receipt = FileFulfilReceipt::default();
-        let old = first.begin().unwrap();
+        let old = first.begin(1024).unwrap();
         first.complete_with_receipt(old_receipt.clone());
         let newer_receipt = FileFulfilReceipt::default();
-        let newer = first.begin().unwrap();
+        let newer = first.begin(1024).unwrap();
         first.complete_with_receipt(newer_receipt);
-        let other = second.begin().unwrap();
+        let other = second.begin(1024).unwrap();
         second.complete();
         old_receipt.reject_unpublished();
         first.reclaim_rejected();
@@ -951,7 +974,7 @@ mod tests {
         for accepted in [false, true] {
             let mut staging = Staging::create_in(&root).unwrap();
             let receipt = FileFulfilReceipt::default();
-            let copy = staging.begin().unwrap();
+            let copy = staging.begin(1024).unwrap();
             staging.complete_with_receipt(receipt.clone());
             if accepted {
                 receipt.accepted_or_may_publish();
@@ -966,7 +989,7 @@ mod tests {
         }
         let mut staging = Staging::create_in(&root).unwrap();
         let late = FileFulfilReceipt::default();
-        let copy = staging.begin().unwrap();
+        let copy = staging.begin(1024).unwrap();
         staging.complete_with_receipt(late.clone());
         drop(staging);
         late.reject_unpublished();
@@ -983,22 +1006,32 @@ mod tests {
         // A session left behind by a process that has exited.
         fs::create_dir_all(root.join("s999999999-deadbeef/1")).unwrap();
         fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(
+            root.join("s999999999-deadbeef"),
+            fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+        fs::set_permissions(
+            root.join("s999999999-deadbeef/1"),
+            fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
         let mut staging = Staging::create_in(&root).unwrap();
         assert!(!root.join("s999999999-deadbeef").exists());
         let mut kept = Vec::new();
         for _ in 0..5 {
-            let directory = staging.begin().unwrap();
+            let directory = staging.begin(1024).unwrap();
             fs::write(directory.join("f"), b"x").unwrap();
             staging.complete();
             kept.push(directory);
         }
         assert!(!kept[0].exists() && !kept[1].exists());
         assert!(kept[2].exists() && kept[4].exists());
-        let abandoned = staging.begin().unwrap();
+        let abandoned = staging.begin(1024).unwrap();
         staging.discard_in_progress();
         assert!(!abandoned.exists());
         assert!(staging.available_bytes().unwrap() > 0);
-        let session = staging.session.clone();
+        let session = staging.budget.path();
         drop(staging);
         assert!(kept[4].exists(), "the newest copy outlives the session");
         assert!(!kept[3].exists());

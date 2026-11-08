@@ -102,8 +102,10 @@ It is not completion of the entire remote-control roadmap.
   a clipboard offer. Backend failure alone does not prove previously advertised
   paths are unused, so accepted or uncertain copies retain the existing bounded
   newest-directory policy rather than being eagerly deleted.
-  This is not a global staging-disk bound: the sweep skips live PIDs, so multiple
-  sessions in one process can retain multiple completed directories.
+  Retention alone is not a global staging-disk bound: the sweep skips live PIDs,
+  so multiple sessions in one process can retain multiple completed directories.
+  The optional local admission cap described below separately accounts logical
+  archive reservations across cooperating processes sharing one cache root.
   This bounds the application queues, not total process/X-server memory or
   synchronous X11/disk call duration. Generic native clipboard history retains
   its existing channel semantics. Live overload/paste tests remain ignored here
@@ -126,9 +128,9 @@ It is not completion of the entire remote-control roadmap.
 ```sh
 cargo fmt --all -- --check
 cargo check --locked --no-default-features --features remote-x11 --all-targets
-cargo test --locked --no-default-features --features remote-x11 --lib remote::
-cargo test --locked --no-default-features --features remote-x11 --lib backend::clipboard_x11::tests::
-cargo test --locked --no-default-features --features remote-x11 --bin jwm-remote
+scripts/test.sh --no-default-features --features remote-x11 --lib remote::
+scripts/test.sh --no-default-features --features remote-x11 --lib backend::clipboard_x11::tests::
+scripts/test.sh --no-default-features --features remote-x11 --bin jwm-remote
 cargo clippy --locked --no-default-features --features remote-x11 --lib --bin jwm-remote --no-deps -- -D warnings
 ```
 
@@ -163,13 +165,13 @@ machine that can start an isolated X server. It has not run in this environment.
 Reproduce the CPU comparison (release build, no live desktop required):
 
 ```sh
-cargo test --release --locked --no-default-features --features remote-x11 --lib remote::downscale::tests::benchmark_cached_serial_and_pool -- --ignored --nocapture
+scripts/test.sh --release --no-default-features --features remote-x11 --lib remote::downscale::tests::benchmark_cached_serial_and_pool -- --ignored --nocapture
 ```
 
 Run the live asynchronous presentation regression only on an isolated X server:
 
 ```sh
-JWM_TEST_X11_DISPLAY=:177 cargo test --locked --no-default-features --features remote-x11 --lib remote::x11_viewer::tests:: -- --ignored --nocapture --test-threads=1
+JWM_TEST_X11_DISPLAY=:177 scripts/test.sh --no-default-features --features remote-x11 --lib remote::x11_viewer::tests:: -- --ignored --nocapture --test-threads=1
 ```
 
 ## Reproducible transport faults and CI
@@ -195,6 +197,11 @@ External Rust users constructing `ClientOptions`, `SshOptions`, or profile
 `Viewer` literals must now supply `window_size: None` and
 `window_position: None` to retain the defaults.
 The public `x11_viewer::Viewer::connect` signature is unchanged.
+
+External Rust callers of clipboard staging must now supply the full announced
+archive stream length to `Staging::begin(archive_bytes)`. `ArchiveReceiver::new`
+now returns `io::Result<Self>` because it pins and validates the private staging
+directory before accepting bytes. These are Rust API changes, not wire changes.
 
 The source identity must change when the selected geometry changes; dimensions
 alone are not sufficient to authorize a different shared source.
@@ -380,6 +387,53 @@ bounding or indefinite paste retention. The existing PID-based sweep and retenti
 policy still apply. Pure queue, staging and mock-target tests establish receipt
 ownership transitions; real clipboard-manager handoff and ownership races
 remain unverified without an isolated X11 session.
+
+### Opt-in local clipboard staging admission
+
+`jwm-remote clipboard-staging status|set-limit SIZE|disable` manages one local
+private cache root. No numeric cap is selected by default. `set-limit` is the
+explicit activation step; status does not create, delete, reconcile or repair
+persistent state, and disable preserves accounting and staged files. A lower
+limit than current accounted usage is rejected without changing the cap.
+The setting never enters SSH arguments or saved profiles, and adds no wire
+field or protocol-version change. See [activation and size syntax](remote-control.md#optional-local-clipboard-staging-cap).
+
+Upgraded uncapped sessions already journal exact reservations. Before first
+activation, the versioned `legacy_pending` state permits coexistence with old
+live writers without sweeping them. Read-only status and activation refuse an
+incomplete total if any untracked writer is live. Safe inactive legacy copies
+are inventoried; first successful activation imports them and permanently
+requires tracked writers. Disabling changes only the byte cap and never restores
+the legacy-coexistence phase. Missing parts of initialized metadata, corrupt
+state and mismatched directory identities fail closed rather than resetting
+usage. Old binaries remain outside this advisory protocol and must not be used
+with the root after activation.
+
+Full incoming logical archive bytes are reserved before admission, and active
+and retained copies share that accounting across cooperating processes. No
+copy is evicted to satisfy the cap. Proven unpublished receipt reclamation and
+the existing newest-three active / newest-one shutdown policy remain separate
+lifecycle decisions. Cleanup must establish removal before releasing the
+corresponding reservation; uncertain cleanup remains charged rather than
+making room on speculation.
+
+The bound is not total disk usage, allocated blocks, metadata/inodes, or a quota
+against old binaries and same-user writers. Separate cache roots have separate
+budgets. Root-lock contention is an immediate refusal; bounded metadata and
+inventory do not make synchronous filesystem I/O time-bounded. Limits include
+4 MiB serialized metadata, 1,024 recorded sessions, 16,384 reservations, 1,088
+root entries and payload-tree walks of at most 1,000,000 entries, depth 64 and
+4,096 relative-path bytes. These accounting limits also apply with no byte cap.
+Inventory or state-validation failures do not silently reset accounting or enable a cap.
+The per-copy file limit, free-disk check and clipboard consent remain unchanged.
+
+The CLI uses exact checked sizes rather than floating-point conversion, and
+reports exact byte counts. Content-free diagnostics add fixed command names
+`clipboard_staging_status`, `clipboard_staging_set_limit` and
+`clipboard_staging_disable` under existing schema 2; they do not include cache
+paths, sizes or inventory contents. CLI and accounting tests are offline;
+live paste/ownership behavior, physical disk pressure and a long-running
+multi-process soak remain separate validation requirements.
 
 ### Structured authenticated peer termination
 

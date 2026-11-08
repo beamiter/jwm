@@ -182,7 +182,8 @@ jwm-remote keygen
 
 If `XDG_CONFIG_HOME` is set, create its `jwm` directory instead; it must be an
 absolute path. `keygen` refuses to overwrite an existing key and reports a
-missing parent. No helper command creates directories or repairs permissions.
+missing parent. `keygen` and `doctor` do not create parent directories or repair
+permissions.
 Do not generate two different keys for the same connection. Run `doctor` again
 after copying the key; its output never contains key bytes.
 
@@ -1185,6 +1186,98 @@ not you paste them there. That is the point of the feature, but it is a much
 broader grant than screen sharing alone, so it stays opt-in on both ends rather
 than following from `--allow-input`. Use `--clipboard-file-limit 0` to share
 text and images but not files.
+
+#### Optional local clipboard staging cap
+
+The per-copy limit above does not bound all received copies across sessions.
+To opt into a shared admission cap, run these commands **on each receiving
+machine separately**, as the same user and with the same cache environment as
+its `jwm-remote` processes:
+
+```sh
+jwm-remote clipboard-staging status
+jwm-remote clipboard-staging set-limit 8G  # Example only; choose your own limit.
+jwm-remote clipboard-staging disable
+```
+
+There is **no numeric default**: staging remains uncapped unless you explicitly
+run `set-limit`. The setting is local to the private
+`$XDG_CACHE_HOME/jwm/remote-clipboard/` root (otherwise
+`$HOME/.cache/jwm/remote-clipboard/`). It is not forwarded by `ssh`, negotiated
+with the peer, or stored/overridden by a connection profile. A different cache
+root has independent settings and accounting. These maintenance commands open
+neither X11 nor a network connection and do not grant clipboard consent.
+
+`SIZE` accepts positive whole bytes or binary K/M/G/T suffixes, including
+KB/KiB spellings, case-insensitively. Surrounding whitespace and a space before
+the suffix are accepted. Exact fractions such as `1.5G` are accepted; fractional
+bytes, zero, overflow and scientific notation are rejected. Fractions have at
+most 18 decimal places. Use `disable`, not a zero limit, to return to uncapped
+admission. The existing `--clipboard-file-limit` parser and defaults are unchanged.
+
+- `status` is read-only: it does not create a missing cache root, write or repair
+  accounting, reclaim stale records, or remove files. It prints the escaped
+  local root, cap in exact bytes (or `disabled (uncapped)`), reserved archive
+  bytes, reservation count and whether accounting has been initialized. Safe
+  inactive legacy copies are included through a bounded read-only inventory
+  when needed. An initialized accounting file does not mean a cap is enabled.
+  Unsafe or uncertain inventory is an error, not an assumed zero.
+- `set-limit` explicitly enables or replaces the cap. A requested limit below
+  current accounted usage fails without replacing the previous setting or
+  evicting copies. Choose a sufficient limit or resolve the existing retained
+  files through their normal lifecycle first. Setting a cap does not forcibly
+  cancel already admitted transfers.
+- `disable` removes the cap while preserving accounting and staged files. It
+  does not reset usage, delete copies, or promise that the disk has free space.
+  If complete accounting cannot be inspected, it fails without reporting a
+  partial total.
+
+**Upgrading an existing cache.** Upgraded receivers track their reservations
+persistently even before a cap is enabled. Until the first successful
+`set-limit`, they can coexist with untracked live older processes, whose
+session directories are not swept while those processes may still be running.
+Because those old writers do not report reservations, `status` and first
+activation refuse to report a complete total while one is live. Stop older
+`jwm-remote` processes that used this root before enabling the cap. A live
+upgraded process with tracked reservations does not by itself prevent activation.
+
+First activation imports safe inactive legacy copies without removing them,
+checks that the requested cap covers all accounted usage, and permanently
+requires tracked writers for that root. **Disabling the cap does not undo that
+tracking requirement.** Use upgraded binaries thereafter: old binaries can
+bypass the cap, and unexpected untracked directories make newer operations
+refuse rather than guess. Incomplete, malformed or identity-mismatched metadata
+is refused rather than silently reset. Unknown process state and PID reuse
+are treated conservatively, so old files or reservations may remain charged.
+
+The cap charges **logical reserved archive bytes**, including serialized entry
+headers, names and file contents. It is shared across cooperating processes
+using this one private root. An incoming archive must fit in the remaining
+budget before its transfer is admitted; it does not grow unaccounted while
+being written. Active and retained reservations both consume that budget.
+This is not a filesystem quota, disk-block or metadata/inode limit, a global
+per-user limit across different roots, or protection against older binaries or
+other same-user writers. The existing per-copy limit and free-disk check still
+apply independently.
+
+Admission does not evict an older copy to make room. The separate retention
+policy remains newest three during a session and newest one after shutdown,
+with the existing conservative treatment of advertised or uncertain clipboard
+paths. Deletion failures and uncertain cleanup can leave reservations charged;
+turning the cap off does not discard that accounting. A cap refusal means the
+incoming copy was not admitted, not that an earlier paste has been revoked.
+
+State changes and reservations use a shared root lock. Contention fails
+immediately rather than waiting for another process. Metadata and inventory
+work have explicit size/count bounds: 4 MiB metadata, 1,024 recorded sessions,
+16,384 reservations and 1,088 root entries. Payload-tree walks are capped at
+1,000,000 entries, depth 64 and 4,096 relative-path bytes. These bookkeeping
+limits still apply when the byte cap is disabled. Filesystem calls themselves
+are synchronous and have no elapsed-time bound. A read-only status failure is not
+permission to delete accounting files or repair permissions manually. Stop
+conflicting processes or investigate the reported filesystem problem before
+retrying. Offline tests cover the local accounting and CLI contracts, not live
+X11 pasting, real disk-pressure behavior, or a multi-hour resource soak.
 
 ### Independent cursor plane
 

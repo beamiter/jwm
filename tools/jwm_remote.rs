@@ -2,8 +2,9 @@
 
 use clap::{Args, Parser, Subcommand};
 use jwm::remote::client::{ClientOptions, run_client_reconnecting};
-use jwm::remote::clipboard_files::parse_size;
+use jwm::remote::clipboard_files::{parse_size, staging_root};
 use jwm::remote::clipboard_policy::{ClipboardDirection, ClipboardMode};
+use jwm::remote::clipboard_staging_budget::{self, Status as StagingBudgetStatus};
 use jwm::remote::host::{HostOptions, run_host};
 use jwm::remote::key::{KeySource, generate_key_file};
 use jwm::remote::messages::FrameLimits;
@@ -18,7 +19,7 @@ use jwm::remote::window_size::WindowSize;
 use jwm::remote::x11_capture::{CaptureArea, CaptureRegion, CaptureSource, ScalingPolicy};
 use jwm::remote::x11_viewer::DEFAULT_ESCAPE_KEY;
 use jwm::remote::{RemoteResult, messages::APPLICATION_VERSION, protocol::TRANSPORT_VERSION};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 const DEFAULT_JPEG_QUALITY_FLOOR: u8 = 40;
 /// Default `--clipboard-file-limit`; matches `clipboard_sync::DEFAULT_FILE_LIMIT`.
@@ -115,6 +116,14 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Inspect or explicitly cap received-file staging on this machine only.
+    #[command(
+        after_help = "No cap is enabled by default. SIZE is a positive byte count or binary K/M/G/T size, such as 512M or 1.5G.\nThis is a logical archive-byte admission cap shared by cooperating processes using the same private cache root, not a disk quota.\nstatus never creates or deletes files; set-limit never evicts copies; disable preserves accounting and files.\nNo setting is forwarded over SSH or saved in a connection profile."
+    )]
+    ClipboardStaging {
+        #[command(subcommand)]
+        action: ClipboardStagingAction,
+    },
     /// Developer-only offline synthetic tile codec replay; emits JSON, opens no display.
     ReplayBenchmark {
         #[arg(long, default_value_t = 320, value_parser = clap::value_parser!(u16).range(1..=1920))]
@@ -440,6 +449,20 @@ enum Command {
 }
 
 #[derive(Debug, Subcommand)]
+enum ClipboardStagingAction {
+    /// Read local cap and accounting without creating, deleting or repairing state.
+    Status,
+    /// Enable or replace the cap; refuses a limit below current reservations.
+    SetLimit {
+        /// Positive bytes or binary K/M/G/T size; use disable to remove the cap.
+        #[arg(value_name = "SIZE", value_parser = parse_staging_limit)]
+        size: u64,
+    },
+    /// Remove the cap, preserving accounting and all staged files.
+    Disable,
+}
+
+#[derive(Debug, Subcommand)]
 enum ProfileAction {
     /// Create the private profile directory explicitly; never changes existing permissions.
     Init,
@@ -497,6 +520,11 @@ fn diagnostic_command(command: &Command) -> &'static str {
         Command::Keygen { .. } => "keygen",
         Command::Doctor { .. } => "doctor",
         Command::ReplayBenchmark { .. } => "replay_benchmark",
+        Command::ClipboardStaging { action } => match action {
+            ClipboardStagingAction::Status => "clipboard_staging_status",
+            ClipboardStagingAction::SetLimit { .. } => "clipboard_staging_set_limit",
+            ClipboardStagingAction::Disable => "clipboard_staging_disable",
+        },
         Command::Profile { action, .. } => match action {
             ProfileAction::Init => "profile_init",
             ProfileAction::Save { .. } => "profile_save",
@@ -884,8 +912,115 @@ fn resolve_key_path(explicit: Option<PathBuf>) -> std::io::Result<PathBuf> {
     )
 }
 
+/// Parse exact bytes without floating-point rounding at the u64 boundary.
+fn parse_staging_limit(value: &str) -> Result<u64, String> {
+    let invalid =
+        || "expected positive whole bytes or a binary K/M/G/T size such as 512M or 1.5G".to_owned();
+    let value = value.trim();
+    if value.is_empty() || value.len() > 64 {
+        return Err(invalid());
+    }
+    let split = value
+        .find(|ch: char| !ch.is_ascii_digit() && ch != '.')
+        .unwrap_or(value.len());
+    let number = &value[..split];
+    let unit = value[split..].trim().to_ascii_uppercase();
+    let multiplier: u128 = match unit.as_str() {
+        "" | "B" => 1,
+        "K" | "KB" | "KIB" => 1 << 10,
+        "M" | "MB" | "MIB" => 1 << 20,
+        "G" | "GB" | "GIB" => 1 << 30,
+        "T" | "TB" | "TIB" => 1 << 40,
+        _ => return Err(invalid()),
+    };
+    let (whole, fraction) = number.split_once('.').unwrap_or((number, ""));
+    if whole.is_empty()
+        || !whole.bytes().all(|byte| byte.is_ascii_digit())
+        || fraction.len() > 18
+        || !fraction.bytes().all(|byte| byte.is_ascii_digit())
+        || (number.contains('.') && fraction.is_empty())
+    {
+        return Err(invalid());
+    }
+    let whole = whole.parse::<u64>().map_err(|_| invalid())?;
+    let denominator = 10_u128.pow(fraction.len() as u32);
+    let numerator = if fraction.is_empty() {
+        0
+    } else {
+        fraction.parse::<u128>().map_err(|_| invalid())? * multiplier
+    };
+    if !numerator.is_multiple_of(denominator) {
+        return Err("staging limit must resolve to a whole number of bytes".to_owned());
+    }
+    let bytes = u128::from(whole) * multiplier + numerator / denominator;
+    let bytes = u64::try_from(bytes).map_err(|_| "staging limit exceeds u64 bytes".to_owned())?;
+    if bytes == 0 {
+        return Err("staging limit must be greater than zero; use clipboard-staging disable to remove the cap".to_owned());
+    }
+    Ok(bytes)
+}
+
+fn write_staging_status(
+    writer: &mut impl std::io::Write,
+    root: &Path,
+    status: &StagingBudgetStatus,
+) -> std::io::Result<()> {
+    // Debug formatting escapes control characters in the local cache path.
+    writeln!(writer, "Local clipboard staging root: {root:?}")?;
+    match status.limit_bytes {
+        Some(limit) => writeln!(writer, "Admission cap: {limit} bytes")?,
+        None => writeln!(writer, "Admission cap: disabled (uncapped)")?,
+    }
+    writeln!(writer, "Reserved archive bytes: {}", status.reserved_bytes)?;
+    writeln!(writer, "Reservations: {}", status.reservations)?;
+    writeln!(
+        writer,
+        "Accounting: {}",
+        if status.initialized {
+            "initialized"
+        } else {
+            "not initialized (read-only inventory)"
+        }
+    )?;
+    writeln!(
+        writer,
+        "Scope: cooperating processes using this cache root; not a filesystem quota."
+    )
+}
+
+fn run_clipboard_staging(
+    action: ClipboardStagingAction,
+    root: &Path,
+    writer: &mut impl std::io::Write,
+) -> std::io::Result<()> {
+    let status = match action {
+        ClipboardStagingAction::Status => clipboard_staging_budget::status(root)?,
+        ClipboardStagingAction::SetLimit { size } => {
+            let status = clipboard_staging_budget::set_limit(root, size)?;
+            writeln!(
+                writer,
+                "Clipboard staging admission cap set; no files evicted."
+            )?;
+            status
+        }
+        ClipboardStagingAction::Disable => {
+            let status = clipboard_staging_budget::disable(root)?;
+            writeln!(
+                writer,
+                "Clipboard staging admission cap disabled; accounting and files preserved."
+            )?;
+            status
+        }
+    };
+    write_staging_status(writer, root, &status)
+}
+
 fn run(command: Command) -> RemoteResult<()> {
     match command {
+        Command::ClipboardStaging { action } => {
+            run_clipboard_staging(action, &staging_root()?, &mut std::io::stdout().lock())?;
+            Ok(())
+        }
         Command::ReplayBenchmark {
             width,
             height,
@@ -1219,6 +1354,284 @@ where
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn staging_limit_parser_is_exact_nonzero_and_checked() {
+        for (text, expected) in [
+            ("1", 1),
+            ("512M", 512 << 20),
+            ("1.5G", 3 << 29),
+            (" 1.5 mib ", 3 << 19),
+            ("1 KB", 1024),
+            ("1.000000000000000000B", 1),
+            ("0.0009765625K", 1),
+            ("18446744073709551615", u64::MAX),
+        ] {
+            assert_eq!(parse_staging_limit(text), Ok(expected), "{text}");
+        }
+        for text in [
+            "",
+            "0",
+            "0B",
+            "0.0G",
+            "0.1",
+            "0.1K",
+            "1.",
+            ".5G",
+            "-1",
+            "+1",
+            "NaN",
+            "inf",
+            "1e3",
+            "1 2M",
+            "1MiBB",
+            "1P",
+            "18446744073709551616",
+            "16777216T",
+            "16777215.999999999T",
+            "18446744073709551615K",
+            "1.0000000000000000000B",
+        ] {
+            assert!(parse_staging_limit(text).is_err(), "{text}");
+        }
+        assert!(
+            parse_staging_limit("0")
+                .unwrap_err()
+                .contains("clipboard-staging disable")
+        );
+        assert!(
+            parse_staging_limit("0.1K")
+                .unwrap_err()
+                .contains("whole number of bytes")
+        );
+        assert!(
+            parse_staging_limit("16777216T")
+                .unwrap_err()
+                .contains("exceeds u64")
+        );
+    }
+
+    #[test]
+    fn staging_cli_requires_explicit_action_and_size() {
+        assert!(matches!(
+            Cli::try_parse_from(["jwm-remote", "clipboard-staging", "status"])
+                .unwrap()
+                .command,
+            Command::ClipboardStaging {
+                action: ClipboardStagingAction::Status
+            }
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["jwm-remote", "clipboard-staging", "disable"])
+                .unwrap()
+                .command,
+            Command::ClipboardStaging {
+                action: ClipboardStagingAction::Disable
+            }
+        ));
+        let Command::ClipboardStaging {
+            action: ClipboardStagingAction::SetLimit { size },
+        } = Cli::try_parse_from(["jwm-remote", "clipboard-staging", "set-limit", "1.5G"])
+            .unwrap()
+            .command
+        else {
+            panic!("set-limit expected")
+        };
+        assert_eq!(size, 3 << 29);
+        for args in [
+            vec!["jwm-remote", "clipboard-staging"],
+            vec!["jwm-remote", "clipboard-staging", "set-limit"],
+            vec!["jwm-remote", "clipboard-staging", "set-limit", "0"],
+            vec!["jwm-remote", "clipboard-staging", "status", "1G"],
+            vec!["jwm-remote", "clipboard-staging", "disable", "1G"],
+        ] {
+            assert!(Cli::try_parse_from(args).is_err());
+        }
+        let help = Cli::try_parse_from(["jwm-remote", "clipboard-staging", "--help"])
+            .unwrap_err()
+            .to_string();
+        for expected in [
+            "No cap is enabled by default",
+            "set-limit",
+            "disable",
+            "not a disk quota",
+            "No setting is forwarded over SSH",
+        ] {
+            assert!(help.contains(expected), "missing {expected}");
+        }
+        let help = Cli::try_parse_from(["jwm-remote", "clipboard-staging", "set-limit", "--help"])
+            .unwrap_err()
+            .to_string();
+        assert!(help.contains("<SIZE>"));
+        assert!(!help.contains("[default:"));
+    }
+
+    #[test]
+    fn staging_commands_cannot_be_saved_or_overridden_per_connection() {
+        for tail in [vec!["status"], vec!["set-limit", "1G"], vec!["disable"]] {
+            let mut args = vec!["jwm-remote", "clipboard-staging"];
+            args.extend(tail);
+            let command = Cli::try_parse_from(args).unwrap().command;
+            let error = profile_from_command(command).unwrap_err();
+            assert!(error.to_string().contains("only connect and ssh"));
+        }
+        for args in [
+            vec![
+                "jwm-remote",
+                "ssh",
+                "desk",
+                "--clipboard-staging-limit",
+                "1G",
+            ],
+            vec!["jwm-remote", "host", "--clipboard-staging-limit", "1G"],
+            vec![
+                "jwm-remote",
+                "connect",
+                "desk",
+                "--clipboard-staging-limit",
+                "1G",
+            ],
+            vec![
+                "jwm-remote",
+                "profile",
+                "run",
+                "desk",
+                "--clipboard-staging-limit",
+                "1G",
+            ],
+            vec![
+                "jwm-remote",
+                "clipboard-staging",
+                "status",
+                "--directory",
+                "/tmp/other",
+            ],
+            vec![
+                "jwm-remote",
+                "clipboard-staging",
+                "status",
+                "--display",
+                ":0",
+            ],
+        ] {
+            assert!(Cli::try_parse_from(args).is_err());
+        }
+        let profile = profile_from_command(
+            Cli::try_parse_from(["jwm-remote", "ssh", "desk"])
+                .unwrap()
+                .command,
+        )
+        .unwrap();
+        let mut value = serde_json::to_value(profile).unwrap();
+        value["viewer"]["clipboard_staging_limit"] = 1024.into();
+        assert!(Profile::decode(&serde_json::to_vec(&value).unwrap()).is_err());
+    }
+
+    #[test]
+    fn staging_status_output_is_exact_and_escapes_the_local_path() {
+        let mut output = Vec::new();
+        let status = StagingBudgetStatus {
+            initialized: false,
+            limit_bytes: None,
+            reserved_bytes: 123,
+            reservations: 2,
+        };
+        write_staging_status(&mut output, Path::new("/cache\nFAKE"), &status).unwrap();
+        assert_eq!(
+            String::from_utf8(output).unwrap(),
+            concat!(
+                "Local clipboard staging root: \"/cache\\nFAKE\"\n",
+                "Admission cap: disabled (uncapped)\n",
+                "Reserved archive bytes: 123\n",
+                "Reservations: 2\n",
+                "Accounting: not initialized (read-only inventory)\n",
+                "Scope: cooperating processes using this cache root; not a filesystem quota.\n",
+            )
+        );
+        let mut output = Vec::new();
+        let status = StagingBudgetStatus {
+            initialized: true,
+            limit_bytes: Some(u64::MAX),
+            ..status
+        };
+        write_staging_status(&mut output, Path::new("/cache"), &status).unwrap();
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("Admission cap: 18446744073709551615 bytes\n"));
+        assert!(output.contains("Accounting: initialized\n"));
+    }
+
+    #[test]
+    fn staging_status_on_missing_root_does_not_create_anything() {
+        let absent_parent =
+            std::env::temp_dir().join(format!("jwm-staging-cli-{:032x}", rand::random::<u128>()));
+        let root = absent_parent.join("remote-clipboard");
+        assert!(!absent_parent.exists());
+        let mut output = Vec::new();
+        run_clipboard_staging(ClipboardStagingAction::Status, &root, &mut output).unwrap();
+        assert!(!absent_parent.exists());
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("Admission cap: disabled (uncapped)\n"));
+        assert!(output.contains("Reserved archive bytes: 0\n"));
+    }
+
+    #[test]
+    fn staging_invalid_limit_emits_no_success_and_creates_no_root() {
+        let root = std::env::temp_dir().join(format!(
+            "jwm-staging-cli-invalid-{:032x}",
+            rand::random::<u128>()
+        ));
+        assert!(!root.exists());
+        let mut output = Vec::new();
+        let error = run_clipboard_staging(
+            ClipboardStagingAction::SetLimit { size: 0 },
+            &root,
+            &mut output,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("disable"));
+        assert!(output.is_empty());
+        assert!(!root.exists());
+    }
+
+    #[test]
+    fn staging_command_diagnostics_are_fixed_and_content_free() {
+        for (tail, expected) in [
+            (vec!["status"], "clipboard_staging_status"),
+            (
+                vec!["set-limit", "123456789"],
+                "clipboard_staging_set_limit",
+            ),
+            (vec!["disable"], "clipboard_staging_disable"),
+        ] {
+            let mut args = vec!["jwm-remote", "clipboard-staging", "--diagnostics-json"];
+            args.extend(tail);
+            let cli = Cli::try_parse_from(args).unwrap();
+            assert!(cli.diagnostics_json);
+            assert_eq!(diagnostic_command(&cli.command), expected);
+            let mut output = Vec::new();
+            emit_diagnostic(&mut output, expected, &Ok(())).unwrap();
+            let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+            assert_eq!(value["command"], expected);
+            assert_eq!(value["schema_version"], 2);
+            assert_eq!(value["outcome"], "success");
+            assert!(value.get("limit_bytes").is_none());
+            output.clear();
+            let error = Err(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "PRIVATE /cache/user 123456789 reserved bytes",
+            )
+            .into());
+            emit_diagnostic(&mut output, expected, &error).unwrap();
+            let text = String::from_utf8(output).unwrap();
+            assert!(!text.contains("PRIVATE"));
+            assert!(!text.contains("/cache/user"));
+            assert!(!text.contains("123456789"));
+            let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+            assert_eq!(value["outcome"], "error");
+            assert_eq!(value["category"], "io");
+            assert_eq!(value["io_kind"], "would_block");
+        }
+    }
+
     #[test]
     fn replay_cli_is_offline_bounded_and_not_a_profile() {
         let command = Cli::try_parse_from([
