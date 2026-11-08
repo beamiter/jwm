@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Exercise native Cairo windows on private Xvfb and D-Bus sessions.
 
-Requires Xvfb, xdotool, ImageMagick and Pillow. Never uses the user's display,
-session bus, notes, or application defaults. Build the apps before running.
+Requires Xvfb, xdotool, xprop (x11-utils), ImageMagick, D-Bus and Pillow. Never
+uses the user's display, session bus, notes, or application defaults. Build the
+apps before running.
 """
 import argparse
 import io
@@ -18,26 +19,43 @@ import time
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def require_tools():
+    # Check before starting any session: a missing probe must not look like an
+    # application that never created its window.
+    for tool in ("dbus-run-session", "Xvfb", "xdotool", "xprop", "import"):
+        if not shutil.which(tool):
+            raise SystemExit(f"Required tool unavailable: {tool}")
+
+
+def find_window(command, name):
+    # Winit publishes the Unicode title in _NET_WM_NAME;
+    # xdotool's legacy WM_NAME search interprets it as Latin-1.
+    ids = command("xdotool", "search", "--onlyvisible", "--class", "org.jwm").splitlines()
+    return next((identifier for identifier in ids
+                 if re.search(name, command("xprop", "-id", identifier, "_NET_WM_NAME"))), None)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--bin-dir", type=Path, default=ROOT / "target/native-apps/debug")
     parser.add_argument("--evidence-dir", type=Path)
     parser.add_argument("--under-bus", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
+    require_tools()
     if not args.under_bus:
         return subprocess.call(["dbus-run-session", "--", sys.executable, __file__,
                                 *sys.argv[1:], "--under-bus"])
     from PIL import Image
 
-    for tool in ("Xvfb", "xdotool", "import"):
-        if not shutil.which(tool):
-            raise SystemExit(f"Required tool unavailable: {tool}")
     binary_dir = args.bin_dir.resolve()
     processes = []
     with tempfile.TemporaryDirectory(prefix="jwm-native-ui-") as temporary:
         work = Path(temporary)
         with (work / "apps.log").open("w+") as log:
-            xvfb = subprocess.Popen(["Xvfb", "-displayfd", "1", "-screen", "0", "1280x900x24"],
+            # Readiness is reported once, then its pipe is closed. Keep the
+            # server alive across gaps between short-lived probe clients.
+            xvfb = subprocess.Popen(["Xvfb", "-displayfd", "1", "-noreset", "-nolisten", "tcp",
+                                     "-screen", "0", "1280x900x24"],
                                     stdout=subprocess.PIPE, stderr=log)
             processes.append(xvfb)
             display = ":" + xvfb.stdout.readline().decode().strip()
@@ -51,24 +69,28 @@ def main():
                 env.pop(name, None)
 
             def command(*argv):
-                return subprocess.check_output(list(map(str, argv)), env=env, stderr=subprocess.DEVNULL).decode().strip()
+                return subprocess.check_output(list(map(str, argv)), env=env, stderr=subprocess.PIPE).decode().strip()
 
             def wait(predicate, message):
                 deadline = time.monotonic() + 8
+                last_probe_error = None
                 while time.monotonic() < deadline:
                     try:
                         value = predicate()
                         if value:
                             return value
-                    except (subprocess.CalledProcessError, FileNotFoundError):
-                        pass
+                    except subprocess.CalledProcessError as error:
+                        last_probe_error = (f"{error.cmd!r} exited {error.returncode}: "
+                                            f"{(error.stderr or b'').decode(errors='replace').strip()}")
                     time.sleep(.05)
                 log.flush()
                 if args.evidence_dir:
                     args.evidence_dir.mkdir(parents=True, exist_ok=True)
+                    shutil.copyfile(work / "apps.log", args.evidence_dir / "apps.log")
                     subprocess.run(["import", "-window", "root", str(args.evidence_dir / "failure.png")], env=env)
                 saved = {str(path.relative_to(work)): path.read_text() for path in work.glob("data/jwm/notes/*.txt")}
-                raise AssertionError(message + "\nSaved: " + repr(saved) + "\n" + (work / "apps.log").read_text())
+                raise AssertionError(message + "\nLast probe error: " + str(last_probe_error)
+                                     + "\nSaved: " + repr(saved) + "\n" + (work / "apps.log").read_text())
 
             def launch(name, *files):
                 process = subprocess.Popen([str(binary_dir / name), "--", *map(str, files)],
@@ -77,13 +99,7 @@ def main():
                 return process
 
             def window(name):
-                def find():
-                    # Winit publishes the Unicode title in _NET_WM_NAME;
-                    # xdotool's legacy WM_NAME search interprets it as Latin-1.
-                    ids = command("xdotool", "search", "--onlyvisible", "--class", "org.jwm").splitlines()
-                    return next((identifier for identifier in ids
-                                 if re.search(name, command("xprop", "-id", identifier, "_NET_WM_NAME"))), None)
-                return wait(find, f"Window did not appear: {name}")
+                return wait(lambda: find_window(command, name), f"Window did not appear: {name}")
 
             def focus(identifier):
                 command("xdotool", "windowfocus", "--sync", identifier)

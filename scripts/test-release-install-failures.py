@@ -16,7 +16,7 @@ def bundle(version, legacy=False):
  b=p/('bundle-'+version); payload=b/('payload/usr/local/lib/jwm/versions/'+version);payload.mkdir(parents=True)
  entries=manifest.read_text().splitlines()
  if legacy:
-  entries=[l for l in entries if not any(name in l for name in ['jwm-player','jwm-player.desktop','jwm-video.desktop','69-jwm-touchpad-gestures.rules','jwm-notes','jwm-image-viewer','crates/jwm_apps/dist/'])]
+  entries=[l for l in entries if not any(name in l for name in ['jwm-remote','jwm-player','jwm-player.desktop','jwm-video.desktop','69-jwm-touchpad-gestures.rules','jwm-notes','jwm-image-viewer','crates/jwm_apps/dist/'])]
  shutil.copy(patch,b/'install-release.sh');(b/'release-manifest.tsv').write_text('\n'.join(entries)+'\n');(b/'VERSION').write_text(version+'\n')
  for l in entries:
   if not l or l.startswith('#'):continue
@@ -30,6 +30,7 @@ for stage in ['install','ln','mv']:
   for upgrade in [False,True]:
    case=p/f'{stage}-{nth}-{upgrade}';root=case/'root';(root/'usr/local/bin').mkdir(parents=True); (root/'usr/local/bin/jwm').write_text('legacy\n')
    (root/'usr/local/bin/jwm-player').write_text('legacy-player\n')
+   (root/'usr/local/bin/jwm-remote').write_text('legacy-remote\n')
    def invoke(b,env=None): return subprocess.run(['bash',str(b/'install-release.sh'),'install','--destdir',str(root),'--replace'],env=env,capture_output=True,text=True,timeout=30)
    if upgrade:
     r=invoke(b1);assert r.returncode==0,r.stderr
@@ -47,15 +48,17 @@ exec '{shutil.which(stage)}' "$@"
    if r.returncode!=0:
     assert (root/'usr/local/bin/jwm').read_text()==('1.0.0\n' if upgrade else 'legacy\n'),(stage,nth,upgrade,r.stderr)
     assert (root/'usr/local/bin/jwm-player').read_text()=='legacy-player\n',(stage,nth,upgrade,r.stderr)
+    assert (root/'usr/local/bin/jwm-remote').read_text()=='legacy-remote\n',(stage,nth,upgrade,r.stderr)
     for name,content in before.items(): assert (state/name).read_bytes()==content,(stage,nth,name,r.stderr)
     rr=invoke(b2 if upgrade else b1);assert rr.returncode==0,(stage,nth,upgrade,rr.stderr)
    records.append({'command':stage,'nth':nth,'upgrade':upgrade,'exit':r.returncode,'restored_then_retry':r.returncode!=0,'stderr':r.stderr})
 # Fail after the upgrade backed up a newly managed helper and changed current:
 # restoring only the core executable is insufficient; retry must see the old
 # stable-path and backup journals exactly, without an orphan helper destination.
-for failed_leaf in ['jwm-player','jwm-player.desktop','jwm-video.desktop','jwm-notes','jwm-image-viewer','org.jwm.Notes.desktop','org.jwm.ImageViewer.desktop']:
+for failed_leaf in ['jwm-remote','jwm-player','jwm-player.desktop','jwm-video.desktop','jwm-notes','jwm-image-viewer','org.jwm.Notes.desktop','org.jwm.ImageViewer.desktop']:
  case=p/('extension-'+failed_leaf);root=case/'root';(root/'usr/local/bin').mkdir(parents=True)
  (root/'usr/local/bin/jwm-player').write_text('legacy-player\n')
+ (root/'usr/local/bin/jwm-remote').write_text('legacy-remote\n')
  def invoke_extension(b,env=None): return subprocess.run(['bash',str(b/'install-release.sh'),'install','--destdir',str(root),'--replace'],env=env,capture_output=True,text=True,timeout=30)
  r=invoke_extension(b1);assert r.returncode==0,r.stderr
  state=root/'usr/local/lib/jwm/.release-state'
@@ -66,6 +69,7 @@ for failed_leaf in ['jwm-player','jwm-player.desktop','jwm-video.desktop','jwm-n
  assert r.returncode!=0,(failed_leaf,r.stderr)
  assert (root/'usr/local/bin/jwm').read_text()=='1.0.0\n',r.stderr
  assert (root/'usr/local/bin/jwm-player').read_text()=='legacy-player\n',r.stderr
+ assert (root/'usr/local/bin/jwm-remote').read_text()=='legacy-remote\n',r.stderr
  for name,content in before.items(): assert (state/name).read_bytes()==content,(failed_leaf,name,r.stderr)
  r=invoke_extension(b2);assert r.returncode==0,(failed_leaf,r.stderr)
  records.append({'extension_failure':failed_leaf,'restored_then_retry':True})

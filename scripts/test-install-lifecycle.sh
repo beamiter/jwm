@@ -89,9 +89,9 @@ mkdir -p -- "$DESTDIR/usr/local/bin"
 printf 'legacy-jwm\n' > "$DESTDIR/usr/local/bin/jwm"
 chmod 0751 -- "$DESTDIR/usr/local/bin/jwm"
 
-# Model a pre-player release. v2 adds player/desktop stable destinations and
-# the older versioned-only remote helper. Upgrade and rollback must retain the
-# original managed paths and restore collisions only with explicit --replace.
+# Model a pre-player release. v2 adds player/desktop and remote-helper stable
+# destinations. Upgrade and rollback must retain the original managed paths
+# and restore collisions only with explicit --replace.
 LEGACY_MANIFEST="$TMP_ROOT/release-manifest-v1.tsv"
 awk -F '\t' '
     NR == 1 { sub("format 3", "format 1") }
@@ -204,28 +204,40 @@ fi
 assert_file_contains "$TMP_ROOT/remap.log" 'bundle changes an installed stable path'
 [[ $(readlink -- "$DESTDIR/usr/local/lib/jwm/current") == versions/1.0.0 ]] || fail "rejected path remap changed current"
 
+printf 'legacy-remote\n' > "$DESTDIR/usr/local/bin/jwm-remote"
+chmod 0711 -- "$DESTDIR/usr/local/bin/jwm-remote"
+if bash "$BUNDLE_V2/install-release.sh" install --destdir "$DESTDIR" >"$TMP_ROOT/remote-collision.log" 2>&1; then
+    fail "upgrade replaced a newly managed remote destination without --replace"
+fi
+assert_file_contains "$TMP_ROOT/remote-collision.log" '/usr/local/bin/jwm-remote'
+assert_file_contains "$DESTDIR/usr/local/bin/jwm-remote" legacy-remote
+[[ $(readlink -- "$DESTDIR/usr/local/lib/jwm/current") == versions/1.0.0 ]] || fail "remote collision changed current"
+
 printf 'legacy-player\n' > "$DESTDIR/usr/local/bin/jwm-player"
 if bash "$BUNDLE_V2/install-release.sh" install --destdir "$DESTDIR" >"$TMP_ROOT/player-collision.log" 2>&1; then
     fail "upgrade replaced a newly managed player destination without --replace"
 fi
+assert_file_contains "$TMP_ROOT/player-collision.log" '/usr/local/bin/jwm-player'
 assert_file_contains "$DESTDIR/usr/local/bin/jwm-player" legacy-player
 [[ $(readlink -- "$DESTDIR/usr/local/lib/jwm/current") == versions/1.0.0 ]] || fail "player collision changed current"
 bash "$BUNDLE_V2/install-release.sh" install --destdir "$DESTDIR" --replace
 [[ $(readlink -- "$DESTDIR/usr/local/lib/jwm/current") == versions/2.0.0 ]] || fail "v2 did not become current"
 assert_file_contains "$DESTDIR/usr/local/bin/jwm" release-v2:jwm
 assert_file_contains "$DESTDIR/usr/local/lib/jwm/current/bin/jwm-remote" release-v2:jwm-remote
+assert_relative_link "$DESTDIR/usr/local/bin/jwm-remote"
+assert_file_contains "$DESTDIR/usr/local/bin/jwm-remote" release-v2:jwm-remote
+assert_file_contains "$DESTDIR/usr/local/lib/jwm/.release-state/backups/usr/local/bin/jwm-remote" legacy-remote
 assert_file_contains "$DESTDIR/usr/local/bin/jwm-player" release-v2:jwm-player
 assert_relative_link "$DESTDIR/usr/local/share/applications/jwm-player.desktop"
 assert_relative_link "$DESTDIR/usr/local/share/applications/jwm-video.desktop"
 assert_file_contains "$DESTDIR/usr/local/lib/jwm/.release-state/backups/usr/local/bin/jwm-player" legacy-player
-[[ ! -e $DESTDIR/usr/local/bin/jwm-remote && ! -L $DESTDIR/usr/local/bin/jwm-remote ]] ||
-    fail "v2 created an upgrade-incompatible stable jwm-remote path"
-
 bash "$BUNDLE_V2/install-release.sh" rollback --destdir "$DESTDIR"
 [[ $(readlink -- "$DESTDIR/usr/local/lib/jwm/current") == versions/1.0.0 ]] || fail "rollback did not reactivate v1"
 assert_file_contains "$DESTDIR/usr/local/bin/jwm" release-v1:jwm
 [[ ! -e $DESTDIR/usr/local/lib/jwm/current/bin/jwm-remote ]] ||
     fail "rollback to pre-remote v1 left jwm-remote active"
+[[ -L $DESTDIR/usr/local/bin/jwm-remote && ! -e $DESTDIR/usr/local/bin/jwm-remote ]] ||
+    fail "rollback to pre-remote release left remote executable active"
 [[ -L $DESTDIR/usr/local/bin/jwm-player && ! -e $DESTDIR/usr/local/bin/jwm-player ]] ||
     fail "rollback to pre-player release left player executable active"
 [[ -d $DESTDIR/usr/local/lib/jwm/versions/2.0.0 ]] || fail "rollback unexpectedly deleted v2"
@@ -240,21 +252,27 @@ bash "$BUNDLE_V2/install-release.sh" uninstall --destdir "$DESTDIR" --version 2.
 bash "$BUNDLE_V2/install-release.sh" install --destdir "$DESTDIR"
 [[ $(readlink -- "$DESTDIR/usr/local/lib/jwm/current") == versions/2.0.0 ]] || fail "reinstalled v2 did not become current"
 assert_file_contains "$DESTDIR/usr/local/lib/jwm/current/bin/jwm-remote" release-v2:jwm-remote
+assert_file_contains "$DESTDIR/usr/local/bin/jwm-remote" release-v2:jwm-remote
 bash "$BUNDLE_V2/install-release.sh" uninstall --destdir "$DESTDIR" --version 2.0.0
 [[ $(readlink -- "$DESTDIR/usr/local/lib/jwm/current") == versions/1.0.0 ]] || fail "removing active v2 did not reactivate v1"
 assert_file_contains "$DESTDIR/usr/local/bin/jwm" release-v1:jwm
 [[ ! -e $DESTDIR/usr/local/lib/jwm/current/bin/jwm-remote ]] ||
-    fail "removing v2 left its versioned-only jwm-remote active"
+    fail "removing v2 left its jwm-remote active"
+[[ -L $DESTDIR/usr/local/bin/jwm-remote && ! -e $DESTDIR/usr/local/bin/jwm-remote ]] ||
+    fail "removing v2 left remote executable active"
 
 bash "$BUNDLE_V2/install-release.sh" uninstall --destdir "$DESTDIR"
 [[ -f $DESTDIR/usr/local/bin/jwm && ! -L $DESTDIR/usr/local/bin/jwm ]] || fail "legacy jwm was not restored"
 assert_file_contains "$DESTDIR/usr/local/bin/jwm" legacy-jwm
 [[ $(stat -c '%a' "$DESTDIR/usr/local/bin/jwm") == 751 ]] || fail "legacy jwm mode was not restored"
+[[ -f $DESTDIR/usr/local/bin/jwm-remote && ! -L $DESTDIR/usr/local/bin/jwm-remote ]] || fail "legacy remote helper was not restored"
+assert_file_contains "$DESTDIR/usr/local/bin/jwm-remote" legacy-remote
+[[ $(stat -c '%a' "$DESTDIR/usr/local/bin/jwm-remote") == 711 ]] || fail "legacy remote helper mode was not restored"
 [[ ! -e $DESTDIR/usr/local/lib/jwm && ! -L $DESTDIR/usr/local/lib/jwm ]] || fail "managed library tree remains after uninstall"
 
 while IFS=$'\t' read -r kind source version_path stable_path mode extra || [[ -n ${kind:-} ]]; do
     [[ -n ${kind:-} && $kind != \#* && $stable_path != - ]] || continue
-    [[ $stable_path == usr/local/bin/jwm || $stable_path == usr/local/bin/jwm-player ]] && continue
+    [[ $stable_path == usr/local/bin/jwm || $stable_path == usr/local/bin/jwm-player || $stable_path == usr/local/bin/jwm-remote ]] && continue
     [[ ! -e $DESTDIR/$stable_path && ! -L $DESTDIR/$stable_path ]] || fail "managed destination remains after uninstall: $stable_path"
 done < "$MANIFEST"
 assert_file_contains "$DESTDIR/usr/local/bin/jwm-player" legacy-player

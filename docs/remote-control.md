@@ -582,12 +582,13 @@ The default build includes `jwm-remote`:
 cargo build --locked --release --bin jwm-remote
 ```
 
-The source installer places it in `/usr/local/bin`. A managed release bundle
-keeps the new helper at `/usr/local/lib/jwm/current/bin/jwm-remote` so adding it
-does not break upgrades from older release manifests. When switching from a
-source install to a managed bundle, run `type -a jwm-remote`: an old
-`/usr/local/bin/jwm-remote` is intentionally not taken over by the managed
-installer and should be removed only after verifying the managed command above.
+Both the source installer and managed release bundles expose
+`/usr/local/bin/jwm-remote`. The managed path is a relative symlink to
+`/usr/local/lib/jwm/current/bin/jwm-remote`; upgrades from older manifests can
+add this stable path. An existing source-installed helper is replaced only
+with explicit `--replace`, backed up, and restored by final uninstall.
+Rolling back to a release without the helper leaves the managed symlink
+inactive until a release containing it becomes current again.
 
 Slim X11 builds must keep the `remote-x11` feature. The helper still works
 with either selected JWM backend because it opens its own X11 connection:
