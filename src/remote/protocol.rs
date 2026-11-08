@@ -168,6 +168,8 @@ pub enum MessageKind {
     SourceRequest = 18,
     /// Committed source identity and new epoch.
     SourceChanged = 19,
+    /// Structured host termination, never a reconnect or cleanup guarantee.
+    SessionClose = 20,
 }
 
 impl TryFrom<u8> for MessageKind {
@@ -194,6 +196,7 @@ impl TryFrom<u8> for MessageKind {
             17 => Ok(Self::SourceCatalog),
             18 => Ok(Self::SourceRequest),
             19 => Ok(Self::SourceChanged),
+            20 => Ok(Self::SessionClose),
             other => Err(ProtocolError::UnknownMessageKind(other)),
         }
     }
@@ -837,16 +840,17 @@ mod tests {
     }
 
     #[test]
-    fn source_message_kinds_remain_a_closed_set() {
+    fn application_message_kinds_remain_a_closed_set() {
         for (tag, kind) in [
             (17, MessageKind::SourceCatalog),
             (18, MessageKind::SourceRequest),
             (19, MessageKind::SourceChanged),
+            (20, MessageKind::SessionClose),
         ] {
             assert_eq!(MessageKind::try_from(tag).unwrap(), kind);
             assert_eq!(u8::from(kind), tag);
         }
-        for tag in [0, 20, 255] {
+        for tag in [0, 21, 255] {
             assert!(MessageKind::try_from(tag).is_err());
         }
     }

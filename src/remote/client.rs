@@ -4,6 +4,7 @@ use super::clipboard_policy::{self, ClipboardDirection, ClipboardMode};
 use super::clipboard_sync::{
     ClipboardInbox, ClipboardOutbox, ClipboardSync, Outgoing, SyncOptions, SyncStatus,
 };
+use super::close_wire::{SessionClose, SessionCloseCode};
 use super::deadline::TcpStreamDeadline;
 use super::frame::{RecyclableDecodedFrame, SharedDecodeBufferPool, new_decode_buffer_pool};
 use super::key::KeySource;
@@ -142,6 +143,7 @@ pub struct FailureDiagnostic {
     pub stage: Option<&'static str>,
     pub category: &'static str,
     pub io_kind: Option<&'static str>,
+    pub peer_close_code: Option<SessionCloseCode>,
     pub cleanup: &'static str,
     pub reconnect_certified: bool,
 }
@@ -156,6 +158,7 @@ pub fn classify_failure(error: &(dyn std::error::Error + 'static)) -> FailureDia
         stage: None,
         category: "unknown",
         io_kind: None,
+        peer_close_code: None,
         cleanup: if certified { "complete" } else { "unknown" },
         reconnect_certified: certified,
     };
@@ -181,7 +184,9 @@ pub fn classify_failure(error: &(dyn std::error::Error + 'static)) -> FailureDia
             if result.category == "unknown" {
                 result.category = "transport_loss";
             }
-        } else if error.is::<PeerClosed>() {
+        } else if let Some(peer) = error.downcast_ref::<PeerClosed>() {
+            result.peer_close_code = peer.code;
+            result.reconnect_certified = false;
             if result.category == "unknown" {
                 result.category = "peer_closed";
             }
@@ -676,15 +681,42 @@ fn user_close_cleanup_failure(error: RemoteError) -> RemoteError {
     })
 }
 
-/// A valid authenticated Close, including an empty reason, is terminal.
+/// Any valid authenticated close, including a legacy empty reason, is terminal.
+/// The code is separate from display-only, sanitized peer text.
 #[derive(Debug)]
-struct PeerClosed(String);
+struct PeerClosed {
+    code: Option<SessionCloseCode>,
+    reason: String,
+}
+
+impl PeerClosed {
+    fn legacy(payload: &[u8]) -> Self {
+        Self {
+            code: None,
+            reason: refusal_reason_for_display(payload),
+        }
+    }
+
+    fn decode(kind: MessageKind, payload: &[u8]) -> RemoteResult<Self> {
+        match kind {
+            MessageKind::Close => Ok(Self::legacy(payload)),
+            MessageKind::SessionClose => {
+                let close = SessionClose::decode(payload)?;
+                Ok(Self {
+                    code: Some(close.code),
+                    reason: refusal_reason_for_display(close.reason.as_bytes()),
+                })
+            }
+            _ => Err(invalid_data("not a host close message").into()),
+        }
+    }
+}
 
 impl std::fmt::Display for PeerClosed {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "host closed the remote session")?;
-        if !self.0.trim().is_empty() {
-            write!(f, ": {}", self.0)?;
+        if !self.reason.trim().is_empty() {
+            write!(f, ": {}", self.reason)?;
         }
         Ok(())
     }
@@ -834,25 +866,7 @@ fn negotiate_session(
         .encode(),
     )?;
     writer.flush()?;
-    let (kind, payload) = reader
-        .read_message()
-        .map_err(|error| explain_negotiation_eof(error, true))?;
-    if kind == MessageKind::Close {
-        // The host declined the session and said why. Surfacing its reason is
-        // the difference between "another viewer is already connected" and a
-        // bare timeout that looks like a wrong address or a firewall.
-        let reason = refusal_reason_for_display(&payload);
-        let reason = if reason.trim().is_empty() {
-            "host declined the session without a reason".to_string()
-        } else {
-            reason
-        };
-        return Err(io::Error::new(io::ErrorKind::ConnectionRefused, reason).into());
-    }
-    if kind != MessageKind::HelloAck {
-        return Err(invalid_data("host did not acknowledge remote session negotiation").into());
-    }
-    let hello = ServerHello::decode(&payload)?;
+    let hello = read_server_hello(&mut reader)?;
     validate_server_frame_limits(&hello, frame_limits)?;
     if hello.stream.cursor == super::messages::CursorMode::Independent && !request_cursor_plane {
         return Err(invalid_data("host enabled independent cursor without viewer support").into());
@@ -872,6 +886,25 @@ fn negotiate_session(
         .set_read_timeout(Some(FIRST_FRAME_TIMEOUT))?;
     writer.get_ref().set_write_timeout(Some(WRITE_TIMEOUT))?;
     Ok((reader, writer, hello))
+}
+
+/// Read only authenticated records, accepting explicit terminal responses before
+/// HelloAck as well as after negotiation. The phase remains in ClientFailure.
+fn read_server_hello<R: io::Read>(reader: &mut SessionReader<R>) -> RemoteResult<ServerHello> {
+    let (kind, payload) = reader
+        .read_message()
+        .map_err(|error| explain_negotiation_eof(error, true))?;
+    match kind {
+        MessageKind::Close | MessageKind::SessionClose => {
+            let mut close = PeerClosed::decode(kind, &payload)?;
+            if close.reason.trim().is_empty() {
+                close.reason = "host declined the session without a reason".to_owned();
+            }
+            Err(close.into())
+        }
+        MessageKind::HelloAck => ServerHello::decode(&payload),
+        _ => Err(invalid_data("host did not acknowledge remote session negotiation").into()),
+    }
 }
 
 /// Say what a hang-up during negotiation most likely means.
@@ -1011,12 +1044,12 @@ fn read_initial_frame_records<R: io::Read>(
             kind @ (MessageKind::CursorShape | MessageKind::CursorPosition) if cursor_enabled => {
                 deliver_clipboard(kind, &payload)?;
             }
-            MessageKind::Close => {
-                return Err(io::Error::new(
-                    io::ErrorKind::ConnectionAborted,
-                    "host closed before sending an initial video frame",
-                )
-                .into());
+            kind @ (MessageKind::Close | MessageKind::SessionClose) => {
+                let mut close = PeerClosed::decode(kind, &payload)?;
+                if close.reason.trim().is_empty() {
+                    close.reason = "host closed before sending an initial video frame".to_owned();
+                }
+                return Err(close.into());
             }
             _ => return Err(invalid_data("host did not send an initial video frame").into()),
         }
@@ -1193,7 +1226,7 @@ fn viewer_loop(
                 .lock()
                 .unwrap()
                 .take()
-                .unwrap_or_else(|| Box::new(PeerClosed(String::new())));
+                .unwrap_or_else(|| Box::new(PeerClosed::legacy(&[])));
             return Err(error);
         }
         telemetry_reporter.maybe_report();
@@ -2109,6 +2142,32 @@ impl Drop for ReceiveCompletion {
 fn receive_frames(
     mut reader: SessionReader<TcpStream>,
     state: Arc<ReceiveState>,
+    last_sequence: u64,
+    payload: Vec<u8>,
+    wake: WakeSender,
+    tile_decoder: TileDecoder,
+    clipboard: Option<ClipboardInbox>,
+) {
+    receive_frame_records(
+        |payload, remaining| {
+            reader.get_ref().set_read_timeout(Some(remaining))?;
+            reader
+                .read_message_into(payload)
+                .map_err(receiver_read_error)
+        },
+        state,
+        last_sequence,
+        payload,
+        wake,
+        tile_decoder,
+        clipboard,
+    );
+}
+
+/// Record handling is shared by TCP and authenticated in-memory fixtures.
+fn receive_frame_records(
+    mut read_record: impl FnMut(&mut Vec<u8>, Duration) -> RemoteResult<MessageKind>,
+    state: Arc<ReceiveState>,
     mut last_sequence: u64,
     mut payload: Vec<u8>,
     wake: WakeSender,
@@ -2126,10 +2185,7 @@ fn receive_frames(
             .ok_or_else(|| {
                 io::Error::new(io::ErrorKind::TimedOut, "host stopped sending video frames")
             })?;
-        reader.get_ref().set_read_timeout(Some(remaining))?;
-        let kind = reader
-            .read_message_into(&mut payload)
-            .map_err(receiver_read_error)?;
+        let kind = read_record(&mut payload, remaining)?;
         match kind {
             MessageKind::SourceChanged => {
                 let changed = decode_source_changed(&payload)?;
@@ -2196,9 +2252,9 @@ fn receive_frames(
                 // slot is unlocked before the stale frame reaches Drop.
                 drop(replaced);
             }
-            MessageKind::Close => {
-                // Authenticated Close is deliberate, never a transport failure.
-                break Err(PeerClosed(refusal_reason_for_display(&payload)).into());
+            MessageKind::Close | MessageKind::SessionClose => {
+                // A peer code/reason never certifies cleanup or permits retry.
+                break Err(PeerClosed::decode(kind, &payload)?.into());
             }
             MessageKind::CursorShape | MessageKind::CursorPosition => {
                 receive_cursor(&state, kind, &payload)?;
@@ -2288,6 +2344,225 @@ mod tests {
     use std::net::TcpListener;
 
     const TEST_PSK: [u8; PSK_LEN] = [0x5a; PSK_LEN];
+
+    const CLOSE_CODES: [SessionCloseCode; 5] = [
+        SessionCloseCode::Busy,
+        SessionCloseCode::AdmissionDisabled,
+        SessionCloseCode::CaptureUnavailable,
+        SessionCloseCode::ClipboardUnavailable,
+        SessionCloseCode::HostStopping,
+    ];
+    const CLOSE_PHASES: [ClientStage; 3] = [
+        ClientStage::Negotiate,
+        ClientStage::FirstFrame,
+        ClientStage::Session,
+    ];
+
+    fn authenticated_terminal_at(
+        phase: ClientStage,
+        kind: MessageKind,
+        payload: &[u8],
+        receive_key: [u8; PSK_LEN],
+    ) -> RemoteError {
+        let mut writer = SessionWriter::new(Vec::new(), TEST_PSK);
+        writer.write_message(kind, payload).unwrap();
+        // A close ends the session, even if a peer continues sending records.
+        writer
+            .write_message(MessageKind::Frame, b"must not be decoded")
+            .unwrap();
+        let mut reader = SessionReader::new(Cursor::new(writer.into_inner()), receive_key);
+        let cause = match phase {
+            ClientStage::Negotiate => {
+                reader.set_max_payload_len(MAX_NEGOTIATION_PAYLOAD_LEN);
+                read_server_hello(&mut reader).unwrap_err()
+            }
+            ClientStage::FirstFrame => {
+                read_initial_frame_records(&mut reader, true, true, |_, _| {
+                    panic!("a close must not be delivered as clipboard or cursor data")
+                })
+                .unwrap_err()
+            }
+            ClientStage::Session => {
+                let state = Arc::new(ReceiveState::new());
+                let (_wake_receiver, wake_sender) = wake_pair().unwrap();
+                receive_frame_records(
+                    |payload, _| {
+                        reader
+                            .read_message_into(payload)
+                            .map_err(receiver_read_error)
+                    },
+                    Arc::clone(&state),
+                    0,
+                    Vec::new(),
+                    wake_sender,
+                    TileDecoder::new(),
+                    None,
+                );
+                assert!(!state.alive.load(Ordering::Acquire));
+                assert!(state.latest.lock().unwrap().is_none());
+                assert_eq!(decode_pool_snapshot(&state.decode_pool).0, 0);
+                state.error.lock().unwrap().take().expect("terminal cause")
+            }
+            _ => unreachable!(),
+        };
+        Box::new(ClientFailure {
+            stage: phase,
+            cause,
+        })
+    }
+
+    #[test]
+    fn structured_close_is_terminal_in_all_three_authenticated_phases() {
+        for code in CLOSE_CODES {
+            for phase in CLOSE_PHASES {
+                let payload = SessionClose::new(
+                    code,
+                    "PRIVATE /home/alice/key host:48221 retry now; cleanup complete\n\u{1b}[31m",
+                )
+                .encode();
+                let error =
+                    authenticated_terminal_at(phase, MessageKind::SessionClose, &payload, TEST_PSK);
+                let failure = error.downcast_ref::<ClientFailure>().unwrap();
+                let close = failure.cause.downcast_ref::<PeerClosed>().unwrap();
+                assert_eq!(close.code, Some(code));
+                assert!(close.reason.contains("retry now; cleanup complete"));
+                assert!(!close.reason.chars().any(char::is_control));
+                let summary = classify_failure(error.as_ref());
+                assert_eq!(summary.peer_close_code, Some(code));
+                assert_eq!(summary.category, "peer_closed");
+                assert_eq!(summary.cleanup, "unknown");
+                assert!(!summary.reconnect_certified);
+                let json = serde_json::to_string(&summary).unwrap();
+                for private in [
+                    "PRIVATE",
+                    "/home/alice",
+                    "host:48221",
+                    "retry now",
+                    "reason",
+                ] {
+                    assert!(!json.contains(private), "{json}");
+                }
+                let mut error = Some(error);
+                let mut attempts = 0;
+                reconnect_with(
+                    5,
+                    || {
+                        attempts += 1;
+                        Err(error.take().expect("peer close must not retry"))
+                    },
+                    |_, _| panic!("peer text and codes cannot authorize reconnect"),
+                )
+                .unwrap_err();
+                assert_eq!(attempts, 1);
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_empty_and_forged_close_text_remain_terminal_without_a_code() {
+        for phase in CLOSE_PHASES {
+            for reason in [
+                b"".as_slice(),
+                b"host_stopping busy: retry; cleanup complete",
+            ] {
+                let error = authenticated_terminal_at(phase, MessageKind::Close, reason, TEST_PSK);
+                let summary = classify_failure(error.as_ref());
+                assert_eq!(summary.category, "peer_closed");
+                assert_eq!(summary.peer_close_code, None);
+                assert_eq!(summary.cleanup, "unknown");
+                assert!(!summary.reconnect_certified);
+                assert!(serde_json::to_value(summary).unwrap()["peer_close_code"].is_null());
+            }
+        }
+    }
+
+    #[test]
+    fn malformed_and_unauthenticated_structured_close_never_become_peer_codes() {
+        for phase in CLOSE_PHASES {
+            for payload in [
+                vec![],
+                vec![2, 1, 0, 0],
+                vec![1, 0, 0, 0],
+                vec![1, 1, 0, 1],
+                vec![1, 1, 0, 0, b'x'],
+                vec![1, 1, 0, 1, 0xff],
+            ] {
+                let error =
+                    authenticated_terminal_at(phase, MessageKind::SessionClose, &payload, TEST_PSK);
+                let summary = classify_failure(error.as_ref());
+                assert_eq!(summary.category, "io");
+                assert_eq!(summary.io_kind, Some("invalid_data"));
+                assert_eq!(summary.peer_close_code, None);
+                assert!(!summary.reconnect_certified);
+            }
+            let payload = SessionClose::new(SessionCloseCode::Busy, "retry").encode();
+            let error = authenticated_terminal_at(
+                phase,
+                MessageKind::SessionClose,
+                &payload,
+                [0xff; PSK_LEN],
+            );
+            let summary = classify_failure(error.as_ref());
+            assert_eq!(summary.category, "authentication_failed");
+            assert_eq!(summary.peer_close_code, None);
+            assert!(!summary.reconnect_certified);
+        }
+    }
+
+    #[test]
+    fn structured_close_survives_cleanup_without_ever_certifying_reconnect() {
+        for code in CLOSE_CODES {
+            for cleanup_fails in [false, true] {
+                let payload =
+                    SessionClose::new(code, "PRIVATE host:48221 cleanup complete; retry").encode();
+                let peer: RemoteError = PeerClosed::decode(MessageKind::SessionClose, &payload)
+                    .unwrap()
+                    .into();
+                let result = finish_session(
+                    Err(peer),
+                    Ok(()),
+                    ReceiverExit::Completed,
+                    Ok(()),
+                    if cleanup_fails {
+                        Err(io::Error::other("PRIVATE /cleanup/path").into())
+                    } else {
+                        Ok(())
+                    },
+                );
+                let error = finalize_retry_intent(result, || {
+                    panic!("peer termination must never acquire a retry certificate")
+                })
+                .unwrap_err();
+                let failure = ClientFailure {
+                    stage: ClientStage::Session,
+                    cause: error,
+                };
+                let summary = classify_failure(&failure);
+                assert_eq!(summary.peer_close_code, Some(code));
+                assert_eq!(
+                    summary.category,
+                    if cleanup_fails {
+                        "cleanup_failed"
+                    } else {
+                        "peer_closed"
+                    }
+                );
+                assert_eq!(
+                    summary.cleanup,
+                    if cleanup_fails {
+                        "incomplete"
+                    } else {
+                        "unknown"
+                    }
+                );
+                assert!(!summary.reconnect_certified);
+                let json = serde_json::to_string(&summary).unwrap();
+                for private in ["PRIVATE", "host:48221", "/cleanup/path", "retry"] {
+                    assert!(!json.contains(private), "{json}");
+                }
+            }
+        }
+    }
 
     #[test]
     fn invalid_startup_size_fails_before_reading_key_or_display() {
@@ -3984,7 +4259,7 @@ mod tests {
         for terminal in [
             None,
             Some(Box::new(UserClosed) as RemoteError),
-            Some(Box::new(PeerClosed("stop".into()))),
+            Some(Box::new(PeerClosed::legacy(b"stop"))),
             Some(Box::new(io::Error::from(io::ErrorKind::BrokenPipe))),
         ] {
             let mut terminal = Some(terminal);
@@ -4154,7 +4429,7 @@ mod tests {
             error.downcast_ref::<ProtocolError>(),
             Some(ProtocolError::AuthenticationFailed)
         ));
-        let peer: RemoteError = Box::new(PeerClosed(String::new()));
+        let peer: RemoteError = Box::new(PeerClosed::legacy(&[]));
         let error =
             finish_session(Err(peer), Ok(()), ReceiverExit::Completed, Ok(()), Ok(())).unwrap_err();
         assert!(error.is::<PeerClosed>());
@@ -4610,7 +4885,7 @@ mod diagnostic_tests {
             "io"
         );
         assert_eq!(
-            classify_failure(&PeerClosed("PRIVATE\npeer".into())).category,
+            classify_failure(&PeerClosed::legacy(b"PRIVATE\npeer")).category,
             "peer_closed"
         );
         assert_eq!(classify_failure(&UserClosed).category, "user_closed");

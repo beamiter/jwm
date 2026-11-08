@@ -372,14 +372,14 @@ gives each complete authenticated video record, including its final flush, one
 budget; a partial or timed-out record closes the whole session so its wire
 sequence can never be retried out of sync.
 
-The current application protocol is version 12. Versions 2 to 11 are
+The current application protocol is version 13. Versions 2 to 12 are
 deliberately incompatible, so update `jwm-remote` on both machines together;
 negotiation rejects an older peer before screen or input data is exchanged.
 Version 7 introduced initial viewport and explicit stream selectors. Version 8
 adds an independently negotiated cursor plane and a video geometry epoch;
 it does not silently reinterpret v7 video or cursor selector semantics.
 
-The v12 hello prefix is the existing 8-byte magic, big-endian `u16` version,
+The v13 hello prefix is the existing 8-byte magic, big-endian `u16` version,
 and capability flags. Both hellos append three one-byte selectors in order:
 codec `1` (JPEG tiles), cursor `1` (composited) or `2` (independent), input `1`
 (X11 keycodes). A viewer advertises independent cursor only after verifying local XRender
@@ -390,8 +390,9 @@ view-only viewers also see host-local cursor movement.
 Version 9 appends a big-endian `u64` aggregate clipboard file-byte limit after
 the selectors in both hellos. The viewer offers its limit; the host acknowledges
 the smaller of its own and the viewer's limits. Zero disables files. The host
-acknowledges zero if file sharing is not enabled, including if clipboard startup
-fails. The viewer rejects an enlarged limit, a nonzero limit with files disabled,
+acknowledges zero if file sharing is not enabled. Requested clipboard startup
+failure instead ends the session and disables replacement admission until host
+restart, because its cleanup cannot be confirmed. The viewer rejects an enlarged limit, a nonzero limit with files disabled,
 or a zero limit with files enabled before starting clipboard workers. Both peers
 apply the selected limit to outgoing manifests and incoming transfers. Text and
 images retain their existing fixed bounds.
@@ -432,11 +433,28 @@ one zero dimension is invalid. The server hello is exactly 36 bytes. Unknown
 selectors, trailing bytes and incomplete keymaps are rejected. Input and
 clipboard permission flags remain independent of the stream profile.
 
-Compatibility: v12 viewer/v12 host works; v6/v7/v8/v9/v10/v11 with v12 in either direction is
+Compatibility: v13 viewer/v13 host works; v6/v7/v8/v9/v10/v11/v12 with v13 in either direction is
 rejected during negotiation. There is no automatic legacy-version fallback.
 Keep both binaries on the same release; this change does not alter transport
-crypto. Within v12, unsupported independent-cursor capability falls back to
+crypto. Within v13, unsupported independent-cursor capability falls back to
 composited video explicitly in HelloAck.
+
+Version 13 adds authenticated host-to-viewer `SessionClose` records (kind 20),
+without changing the hello layout or transport version. Their payload is a
+one-byte record version (`1`), one-byte code, big-endian `u16` reason length,
+and exactly that many UTF-8 bytes, capped at 240 bytes. Codes are `1` busy,
+`2` admission disabled, `3` capture unavailable, `4` clipboard unavailable,
+and `5` host stopping. Unknown versions/codes, invalid UTF-8, oversized,
+truncated or trailing data fail closed.
+
+A host may send this record after validating the current ClientHello, including
+before HelloAck. Invalid or older hellos still receive legacy text Close so
+version mismatch remains readable. Viewers handle both records during
+negotiation, initial-frame wait and an established session. Legacy text never
+acquires a code by matching words. A host rejects SessionClose in the reverse
+direction. Every peer termination remains terminal: no code authorizes retry
+or proves local cleanup succeeded. Human reasons are sanitized for display;
+command diagnostics include only the fixed code, never the reason text.
 
 A version-5 or later host tells an older viewer which version it speaks instead
 of hanging up on it, and a version-5 or later viewer reports an older host's

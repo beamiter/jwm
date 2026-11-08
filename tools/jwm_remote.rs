@@ -529,13 +529,14 @@ fn emit_diagnostic(
             stage: None,
             category: "success",
             io_kind: None,
+            peer_close_code: None,
             cleanup: "unknown",
             reconnect_certified: false,
         },
     };
     let record = Record {
         record_type: "jwm_remote_command_result",
-        schema_version: 1,
+        schema_version: 2,
         command,
         outcome: if result.is_ok() { "success" } else { "error" },
         failure,
@@ -2129,9 +2130,10 @@ mod tests {
         assert_eq!(
             value,
             serde_json::json!({
-                "type": "jwm_remote_command_result", "schema_version": 1,
+                "type": "jwm_remote_command_result", "schema_version": 2,
                 "command": "doctor", "outcome": "success", "stage": null,
-                "category": "success", "io_kind": null, "cleanup": "unknown",
+                "category": "success", "io_kind": null, "peer_close_code": null,
+                "cleanup": "unknown",
                 "reconnect_certified": false
             })
         );

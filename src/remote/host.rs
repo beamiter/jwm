@@ -6,6 +6,7 @@ use super::clipboard_sync::{
     ClipboardInbox, ClipboardOutbox, ClipboardSync, MAX_TRANSFER_RECORD_BYTES, Outgoing,
     SyncOptions,
 };
+use super::close_wire::{SessionClose, SessionCloseCode};
 use super::deadline::TcpStreamDeadline;
 use super::key::KeySource;
 use super::messages::{
@@ -2028,14 +2029,11 @@ where
                     }
                 };
                 let Some(slot) = ViewerSlot::claim(&worker_slot) else {
-                    let reason = if worker_slot.load(Ordering::Acquire) == VIEWER_POISONED {
-                        "host cleanup is incomplete; restart the host before reconnecting"
-                    } else {
-                        BUSY_REASON
-                    };
+                    let close = admission_refusal(worker_slot.load(Ordering::Acquire));
+                    let reason = &close.reason;
                     let refused = peer_session
                         .writer
-                        .write_message(MessageKind::Close, reason.as_bytes())
+                        .write_message(MessageKind::SessionClose, &close.encode())
                         .and_then(|()| peer_session.writer.flush());
                     match refused {
                         Ok(()) => {
@@ -2128,7 +2126,7 @@ fn authenticate_peer(mut stream: TcpStream, key: &[u8]) -> RemoteResult<Authenti
             // Usually a viewer from another release. It holds the key, and
             // every release prints a refusal reason, so say which version
             // this host speaks rather than hanging up on it.
-            decline_session(
+            decline_legacy_session(
                 &mut writer,
                 &format!("{error}; update jwm-remote on both machines together"),
             );
@@ -2185,10 +2183,7 @@ fn serve_authenticated(
             // Dropping the socket here left the viewer with a bare
             // end-of-file and a hint about keys and versions. It has proved
             // it holds the key, so it may learn why the host cannot serve it.
-            decline_session(
-                &mut writer,
-                &format!("host cannot capture its display: {error}"),
-            );
+            decline_session(&mut writer, capture_refusal(&error.to_string()));
             return Err(error);
         }
     };
@@ -2270,10 +2265,7 @@ fn serve_authenticated(
                 // Startup currently returns an opaque error after potentially
                 // spawning threads. It cannot certify that no ownership remains,
                 // even when the failure was simply an unavailable X11 backend.
-                decline_session(
-                    &mut writer,
-                    "host clipboard startup failed; restart the host before reconnecting",
-                );
+                decline_session(&mut writer, clipboard_refusal());
                 return Err(host_clipboard_start_failed(error));
             }
         }
@@ -2599,15 +2591,47 @@ fn say_goodbye<W: std::io::Write + SetWriteTimeout>(
     if let Ok(mut writer) = writer.try_lock() {
         let _ = write_session_record(
             &mut writer,
-            MessageKind::Close,
-            HOST_STOPPING_REASON.as_bytes(),
+            MessageKind::SessionClose,
+            &SessionClose::new(SessionCloseCode::HostStopping, HOST_STOPPING_REASON).encode(),
             GOODBYE_WRITE_DEADLINE,
         );
     }
 }
 
-/// Tell an authenticated viewer why its session cannot start, best effort.
-fn decline_session<W: std::io::Write>(writer: &mut SessionWriter<W>, reason: &str) {
+fn admission_refusal(state: u8) -> SessionClose {
+    if state == VIEWER_POISONED {
+        SessionClose::new(
+            SessionCloseCode::AdmissionDisabled,
+            "host cleanup is incomplete; restart the host before reconnecting",
+        )
+    } else {
+        SessionClose::new(SessionCloseCode::Busy, BUSY_REASON)
+    }
+}
+
+fn capture_refusal(error: &str) -> SessionClose {
+    SessionClose::new(
+        SessionCloseCode::CaptureUnavailable,
+        &format!("host cannot capture its display: {error}"),
+    )
+}
+
+fn clipboard_refusal() -> SessionClose {
+    SessionClose::new(
+        SessionCloseCode::ClipboardUnavailable,
+        "host clipboard startup failed; restart the host before reconnecting",
+    )
+}
+
+/// Tell a version-compatible viewer why its session cannot start, best effort.
+fn decline_session<W: std::io::Write>(writer: &mut SessionWriter<W>, close: SessionClose) {
+    let _ = writer
+        .write_message(MessageKind::SessionClose, &close.encode())
+        .and_then(|()| writer.flush());
+}
+
+/// Old or malformed Hello records cannot negotiate structured close support.
+fn decline_legacy_session<W: std::io::Write>(writer: &mut SessionWriter<W>, reason: &str) {
     let mut end = reason.len().min(MAX_SETUP_REASON_BYTES);
     while !reason.is_char_boundary(end) {
         end -= 1;
@@ -3711,7 +3735,8 @@ fn receive_input_scoped(
                 | MessageKind::CursorShape
                 | MessageKind::CursorPosition
                 | MessageKind::SourceCatalog
-                | MessageKind::SourceChanged => {
+                | MessageKind::SourceChanged
+                | MessageKind::SessionClose => {
                     return Err(invalid_data(format!("unexpected client message: {kind:?}")).into());
                 }
             }
@@ -4912,8 +4937,10 @@ mod tests {
         let wire = state.0.lock().unwrap().bytes.clone();
         let mut reader = SessionReader::new(Cursor::new(wire), [0x92; 32]);
         let (kind, payload) = reader.read_message().unwrap();
-        assert_eq!(kind, MessageKind::Close);
-        assert_eq!(payload, HOST_STOPPING_REASON.as_bytes());
+        assert_eq!(kind, MessageKind::SessionClose);
+        let close = SessionClose::decode(&payload).unwrap();
+        assert_eq!(close.code, SessionCloseCode::HostStopping);
+        assert_eq!(close.reason, HOST_STOPPING_REASON);
 
         // A sender mid-record keeps the writer; the goodbye is skipped
         // rather than queued behind a possibly stuck write.
@@ -4925,11 +4952,131 @@ mod tests {
     }
 
     #[test]
+    fn structured_refusals_preserve_exact_producer_codes_and_reasons() {
+        for (close, code, reason) in [
+            (
+                admission_refusal(VIEWER_ACTIVE),
+                SessionCloseCode::Busy,
+                "another viewer is already connected to this host",
+            ),
+            (
+                admission_refusal(VIEWER_POISONED),
+                SessionCloseCode::AdmissionDisabled,
+                "host cleanup is incomplete; restart the host before reconnecting",
+            ),
+            (
+                capture_refusal("backend unavailable"),
+                SessionCloseCode::CaptureUnavailable,
+                "host cannot capture its display: backend unavailable",
+            ),
+            (
+                clipboard_refusal(),
+                SessionCloseCode::ClipboardUnavailable,
+                "host clipboard startup failed; restart the host before reconnecting",
+            ),
+        ] {
+            let mut writer = SessionWriter::new(Vec::new(), [0x93; 32]);
+            decline_session(&mut writer, close);
+            let mut reader = SessionReader::new(Cursor::new(writer.into_inner()), [0x93; 32]);
+            let (kind, payload) = reader.read_message().unwrap();
+            assert_eq!(kind, MessageKind::SessionClose);
+            let decoded = SessionClose::decode(&payload).unwrap();
+            assert_eq!(decoded.code, code);
+            assert_eq!(decoded.reason, reason);
+        }
+    }
+
+    #[test]
+    fn stopping_goodbye_is_bounded_and_never_retries_a_partial_record() {
+        let writer = Mutex::new(SessionWriter::new(
+            DeadlineWriter::new(
+                DripWriter {
+                    bytes: Vec::new(),
+                    max_chunk: 1,
+                    write_delay: Duration::from_millis(8),
+                    flush_delay: Duration::ZERO,
+                    flushes: 0,
+                },
+                WRITE_TIMEOUT,
+            ),
+            [0x92; 32],
+        ));
+        let started = Instant::now();
+        say_goodbye(&writer);
+        assert!(started.elapsed() < Duration::from_secs(1));
+        let partial_len = {
+            let writer = writer.lock().unwrap();
+            assert!(writer.get_ref().failed);
+            assert_eq!(writer.next_sequence(), 0);
+            writer.get_ref().get_ref().bytes.len()
+        };
+        assert!(partial_len > 0);
+        say_goodbye(&writer);
+        assert_eq!(
+            writer.lock().unwrap().get_ref().get_ref().bytes.len(),
+            partial_len
+        );
+    }
+
+    #[test]
+    fn host_rejects_structured_close_in_the_client_direction() {
+        let (client, server) = loopback_pair();
+        let key = [0x48; 32];
+        let mut writer = SessionWriter::new(client, key);
+        writer
+            .write_message(
+                MessageKind::SessionClose,
+                &SessionClose::new(SessionCloseCode::HostStopping, "stopping").encode(),
+            )
+            .unwrap();
+        writer.flush().unwrap();
+        let running = Arc::new(AtomicBool::new(true));
+        let first_stop = Arc::new(FirstStop::new());
+        let credits = Arc::new(FrameCredits::new());
+        let telemetry = Arc::new(HostTelemetry::new());
+        let quality = Arc::new(
+            JpegQualityController::new_at(
+                70,
+                70,
+                false,
+                Duration::from_millis(100),
+                Instant::now(),
+            )
+            .unwrap(),
+        );
+        let error = receive_input_scoped(
+            SessionReader::new(server, key),
+            None,
+            (0, 0).into(),
+            false,
+            None,
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+            &running,
+            &first_stop,
+            &credits,
+            &telemetry,
+            &quality,
+            &ViewportRequest::new(),
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("unexpected client message: SessionClose")
+        );
+        assert!(!running.load(Ordering::Acquire));
+        assert_eq!(first_stop.cause(), StopCause::Input);
+    }
+
+    #[test]
     fn a_setup_failure_reaches_the_viewer_as_a_bounded_close_reason() {
         let mut writer = SessionWriter::new(Vec::new(), [0x93; 32]);
         // Multi-byte text straddling the cap must not be cut mid-character.
         let reason = format!("host cannot capture its display: {}", "显示".repeat(200));
-        decline_session(&mut writer, &reason);
+        decline_legacy_session(&mut writer, &reason);
         let mut reader = SessionReader::new(Cursor::new(writer.into_inner()), [0x93; 32]);
         let (kind, payload) = reader.read_message().unwrap();
         assert_eq!(kind, MessageKind::Close);
@@ -5517,7 +5664,7 @@ mod tests {
             let (kind, reason) = reader.read_message().unwrap();
             assert_eq!(kind, MessageKind::Close);
             let reason = String::from_utf8(reason).unwrap();
-            assert!(reason.contains("version 4; expected 12"), "{reason}");
+            assert!(reason.contains("version 4; expected 13"), "{reason}");
             assert!(
                 reason.contains("update jwm-remote on both machines"),
                 "{reason}"
@@ -5525,6 +5672,58 @@ mod tests {
 
             shutdown.store(true, Ordering::Release);
             handle.join().unwrap().unwrap();
+        }
+
+        #[test]
+        fn prior_version_and_malformed_current_hello_receive_legacy_text_close() {
+            let valid = ClientHello {
+                stream: Default::default(),
+                initial_viewport: None,
+                request_input: false,
+                request_clipboard: false,
+                request_clipboard_files: false,
+                keymap: KeymapTable::empty(),
+            }
+            .encode();
+            assert!(ClientHello::decode(&valid).is_ok());
+            // v12 has the same Hello layout; only its application version differs.
+            let mut prior_version = valid.clone();
+            prior_version[8..10].copy_from_slice(&12_u16.to_be_bytes());
+            let mut malformed = valid;
+            malformed[10] |= 0x80;
+            for (hello, expected) in [
+                (
+                    prior_version,
+                    "unsupported JWM remote application version 12; expected 13",
+                ),
+                (malformed, "peer advertised unknown remote capabilities"),
+            ] {
+                let (mut client, server) = loopback_pair();
+                client
+                    .set_read_timeout(Some(Duration::from_secs(10)))
+                    .unwrap();
+                // Authenticate only: neither refusal may reach capture or session setup.
+                let host = thread::spawn(move || {
+                    authenticate_peer(server, &KEY)
+                        .err()
+                        .expect("invalid Hello must not create an authenticated session")
+                        .to_string()
+                });
+                let keys = client_handshake(&mut client, &KEY, [0x13; NONCE_LEN]).unwrap();
+                let (receive, send) = keys.into_client();
+                let mut reader = SessionReader::new(client.try_clone().unwrap(), receive);
+                let mut writer = SessionWriter::new(client, send);
+                writer.write_message(MessageKind::Hello, &hello).unwrap();
+                writer.flush().unwrap();
+                let (kind, payload) = reader.read_message().unwrap();
+                assert_eq!(kind, MessageKind::Close);
+                let reason = String::from_utf8(payload).unwrap();
+                assert_eq!(
+                    reason,
+                    format!("{expected}; update jwm-remote on both machines together")
+                );
+                assert_eq!(host.join().unwrap(), expected);
+            }
         }
 
         #[test]
@@ -5559,8 +5758,10 @@ mod tests {
             let (first, _, _first_stream) = negotiate(address);
             assert_eq!(first, MessageKind::HelloAck);
             let (second, reason, _) = negotiate(address);
-            assert_eq!(second, MessageKind::Close);
-            assert_eq!(reason, BUSY_REASON.as_bytes());
+            assert_eq!(second, MessageKind::SessionClose);
+            let close = SessionClose::decode(&reason).unwrap();
+            assert_eq!(close.code, SessionCloseCode::Busy);
+            assert_eq!(close.reason, BUSY_REASON);
 
             release_tx.send(()).unwrap();
             shutdown.store(true, Ordering::Release);

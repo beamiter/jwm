@@ -40,8 +40,8 @@ It is not completion of the entire remote-control roadmap.
   reuse while X11 consumes a segment; input polling continues while completion
   and server-copy fences are pending. Frame ACK follows both conditions, never
   receipt alone. Geometry setup and initial resource allocation may still block.
-- Protocol v12 negotiates an explicit supported stream profile and sends initial
-  viewport before capture. v6/v7/v8/v9/v10/v11/v12 peers must update together; there is no silent
+- Protocol v13 negotiates an explicit supported stream profile and sends initial
+  viewport before capture. v6/v7/v8/v9/v10/v11/v12/v13 peers must update together; there is no silent
   downgrade. Tile video and cursor state carry a geometry epoch.
 - Independent bounded cursor shape/position records are negotiated when host
   XFixes and viewer XRender formats support them. Cursor movement avoids video
@@ -71,7 +71,7 @@ It is not completion of the entire remote-control roadmap.
   in view-only mode. A scoped initial selection never implicitly grants root.
   Source changes release input and reset frame/cursor state; unsafe transitions
   fail closed. Extra grants are explicit on host/SSH CLI and cannot be saved in
-  profiles yet. Both peers require a coordinated v12 upgrade.
+  profiles yet. Both peers require a coordinated v13 upgrade.
 - This source-switching work is covered by offline tests only in this checkout;
   no new live-X11, hardware timing, or benchmark result is claimed here.
 
@@ -115,7 +115,7 @@ It is not completion of the entire remote-control roadmap.
   runtime clipboard mode changes, partial host readback, Wayland and hardware
   encoding. Explicit saved viewer size and best-effort requested position are
   implemented; they do not observe or automatically restore window-manager state.
-- Broader negotiated capabilities, mutable source authorization, structured errors and backward-compatible extension framing.
+- Broader negotiated capabilities, mutable source authorization and backward-compatible extension framing.
 - Input-to-visible instrumentation and live desktop workload replay.
   The offline synthetic tile-codec baseline is documented in
   [remote-replay-benchmark.md](remote-replay-benchmark.md); it measures neither
@@ -184,7 +184,7 @@ this cloud workspace; live-X11 results remain pending until it runs.
 
 ## Compatibility note for Rust callers
 
-Wire v12 is intentionally incompatible with prior application protocol versions.
+Wire v13 is intentionally incompatible with prior application protocol versions.
 The public `DecodedFrame` and synchronous `Viewer::draw` behavior remain usable.
 `HostOptions`, `ClientOptions` and `SshOptions` now require `frame_limits`;
 `StreamCapabilities` also adds that field. `FrameLimits::default()` retains the
@@ -335,7 +335,7 @@ synthetic workers and do not establish live X11 release behavior.
 
 The global opt-in `--diagnostics-json` flag emits one best-effort JSON line on
 stderr after a successfully parsed command returns. Its type is
-`jwm_remote_command_result` and schema version is 1. Fixed-vocabulary fields
+`jwm_remote_command_result` and schema version is 2. Fixed-vocabulary fields
 identify the command, success/error outcome, known client stage, error category,
 I/O kind, cleanup status and existing reconnect certificate. Nested profile runs,
 reconnect attempts and SSH helpers do not emit additional records. The flag is
@@ -377,3 +377,27 @@ bounding or indefinite paste retention. The existing PID-based sweep and retenti
 policy still apply. Pure queue, staging and mock-target tests establish receipt
 ownership transitions; real clipboard-manager handoff and ownership races
 remain unverified without an isolated X11 session.
+
+### Structured authenticated peer termination
+
+Application protocol v13 adds a bounded host-only SessionClose record with five
+existing operational causes: busy, admission disabled, capture unavailable,
+clipboard unavailable and host stopping. Its strict UTF-8 codec caps the human
+reason at 240 bytes and rejects unknown tags, malformed lengths and trailing
+data. The encrypted transport remains version 2; both application endpoints
+must upgrade together. This is a concrete record, not a generic extension
+framework or backward-compatible version negotiation.
+
+The viewer preserves the typed code through negotiation, initial-frame wait
+and established reception. Old or invalid Hello replies retain legacy text
+Close, and legacy reason text never impersonates a structured code. Command
+diagnostic schema 2 adds nullable `peer_close_code` with a fixed snake_case
+value; raw reasons remain excluded. Host-stats telemetry keeps schema 1.
+
+Every peer close is terminal, including admission and startup failures. Remote
+codes do not authorize reconnection or assert local cleanup status. A local
+cleanup failure retains diagnostic priority and clears reconnect certification,
+while preserving the peer code separately. Best-effort host goodbye still uses
+its existing nonblocking lock attempt and bounded write deadline. These changes
+are covered by offline authenticated-record and codec tests, not live graphical
+or performance acceptance.
