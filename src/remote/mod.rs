@@ -28,6 +28,7 @@ mod deadline;
 mod downscale;
 pub mod frame;
 pub mod host;
+mod host_capture;
 pub mod key;
 pub mod messages;
 mod pacing;
@@ -42,6 +43,9 @@ pub mod ssh;
 mod tile;
 mod triangle_patch;
 pub mod usability;
+mod window_capture;
+#[cfg(test)]
+mod window_capture_integration;
 pub mod window_position;
 pub mod window_size;
 pub mod x11_capture;

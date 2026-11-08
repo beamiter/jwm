@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>JWM remote browser workload (offline)</title>
+<style>
+body { margin: 0; color: #e8e8e8; background: #18202a; font: 14px monospace; }
+header { position: sticky; top: 0; background: #101820; padding: 12px; }
+button { font: inherit; padding: 8px; }
+#marker { display: inline-block; width: 100px; height: 40px; background: white; color: black; vertical-align: middle; }
+#motion { height: 80px; position: relative; overflow: hidden; background: #303842; }
+#tile { width: 64px; height: 64px; position: absolute; top: 8px; background: #0cf; }
+#text { white-space: pre; overflow: auto; height: 60vh; margin: 0; }
+</style>
+<header>
+<button id="toggle">Start motion + scroll</button>
+<button id="dialog">Open modal</button>
+<span id="marker">KEY 0</span>
+<p>Offline fixture. Press a key: the marker alternates. Motion stops after 30 s.</p>
+<p>Browser event-to-paint is NOT physical key-to-photon latency. Use an external camera.</p>
+</header>
+<div id="motion"><div id="tile"></div></div><pre id="text"></pre>
+<dialog id="modal"><p>Modal/focus fixture — close with Escape or the button.</p><button id="close">Close</button></dialog>
+<script>
+'use strict';
+const text = document.querySelector('#text');
+text.textContent = Array.from({length: 500}, (_, i) =>
+  String(i).padStart(4, '0') + ' │ Il1|  0O  中文标点：，。  αβγ  fn frame() { return 123; }\n').join('');
+const tile = document.querySelector('#tile');
+const toggle = document.querySelector('#toggle');
+let start = null;
+let animation = null;
+function stop() {
+  cancelAnimationFrame(animation);
+  start = null;
+  toggle.textContent = 'Start motion + scroll';
+}
+function tick(now) {
+  if (start === null) start = now;
+  const elapsed = now - start;
+  if (elapsed >= 30000) { stop(); return; }
+  const width = Math.max(1, document.querySelector('#motion').clientWidth - 64);
+  tile.style.left = ((elapsed * 0.25) % width) + 'px';
+  text.scrollTop = (elapsed * 0.3) % Math.max(1, text.scrollHeight - text.clientHeight);
+  animation = requestAnimationFrame(tick);
+}
+toggle.onclick = () => {
+  if (animation !== null && toggle.textContent === 'Stop') { stop(); return; }
+  start = null;
+  toggle.textContent = 'Stop';
+  animation = requestAnimationFrame(tick);
+};
+let keys = 0;
+document.addEventListener('keydown', event => {
+  if (event.repeat) return;
+  const marker = document.querySelector('#marker');
+  keys += 1;
+  marker.textContent = 'KEY ' + keys;
+  marker.style.background = keys % 2 ? '#000' : '#fff';
+  marker.style.color = keys % 2 ? '#fff' : '#000';
+});
+const modal = document.querySelector('#modal');
+document.querySelector('#dialog').onclick = () => modal.showModal();
+document.querySelector('#close').onclick = () => modal.close();
+document.addEventListener('visibilitychange', () => { if (document.hidden) stop(); });
+</script>
+</html>

@@ -72,6 +72,7 @@ impl SourceSession {
         for (id, area) in grants {
             let valid = match &area {
                 CaptureArea::Root => true,
+                CaptureArea::Window(id) => *id != 0,
                 CaptureArea::Monitor(name) => {
                     !name.is_empty() && name.len() <= 256 && !name.chars().any(char::is_control)
                 }

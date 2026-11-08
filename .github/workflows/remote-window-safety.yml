@@ -1,0 +1,47 @@
+name: Remote window safety
+
+on:
+  push:
+    branches: [dot/remote-window-plan]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: remote-window-safety-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  window-safety:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Install compiler and private X11 dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential pkg-config libxkbcommon-dev libxcb1-dev xvfb xauth
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          components: rustfmt,clippy
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
+      - name: Format and lint remote targets
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --locked --no-default-features --features remote-x11 --lib --bin jwm-remote --tests --no-deps -- -D warnings
+      - name: Unit and workload regressions
+        run: |
+          export XDG_RUNTIME_DIR="$(mktemp -d)"
+          cargo test --locked --no-default-features --features remote-x11 --lib remote::
+          cargo test --locked --no-default-features --features remote-x11 --bin jwm-remote
+          python3 scripts/test-remote-workload-report.py
+          python3 scripts/test-remote-benchmark-metadata.py
+      - name: Real X11 lifecycle and pixel isolation tests
+        run: |
+          xvfb-run -a -s '-screen 0 800x600x24 -nolisten tcp' sh -c '
+            export JWM_REMOTE_TEST_DISPLAY="$DISPLAY"
+            cargo test --locked --no-default-features --features remote-x11 --lib window_capture_integration -- --ignored --test-threads=1 --nocapture
+          '

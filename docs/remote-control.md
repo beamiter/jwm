@@ -1459,6 +1459,10 @@ once, by a line that had long since scrolled away.
 
 ### Machine-readable pipeline timings
 
+For repeatable terminal/browser/Isaac Sim workloads and physical latency
+measurement, see [the workload baseline protocol](remote-workload-benchmark.md).
+Offline telemetry analysis does not certify physical input-to-display latency.
+
 `jwm-remote host --stats-json` replaces the five-second human statistics line
 with a JSON object on stderr (`type: "jwm_remote_host_stats"`, schema version 1).
 Other diagnostics still use stderr, so select JSON objects by their `type`

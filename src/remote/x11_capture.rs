@@ -75,6 +75,8 @@ bitflags::bitflags! {
     pub struct CaptureMode: u32 {
         /// Capturing the Composite overlay rather than the bare root.
         const OVERLAY = 1 << 0;
+        /// Capturing only an explicitly authorized application pixmap.
+        const WINDOW = 1 << 7;
         /// Downscaling in the X server instead of on the CPU.
         const XRENDER = 1 << 1;
         /// Reading back through MIT-SHM rather than core `GetImage`.
@@ -96,7 +98,9 @@ impl CaptureMode {
     #[must_use]
     pub fn describe(self) -> String {
         let mut parts = Vec::with_capacity(5);
-        parts.push(if self.contains(Self::OVERLAY) {
+        parts.push(if self.contains(Self::WINDOW) {
+            "window-pixmap"
+        } else if self.contains(Self::OVERLAY) {
             "overlay"
         } else {
             "root"
@@ -116,7 +120,9 @@ impl CaptureMode {
         } else {
             "no-damage"
         });
-        parts.push(if self.contains(Self::CURSOR_EVENTS) {
+        parts.push(if self.contains(Self::WINDOW) {
+            "no-cursor"
+        } else if self.contains(Self::CURSOR_EVENTS) {
             "cursor-events"
         } else {
             "cursor-poll"
@@ -132,7 +138,7 @@ impl CaptureMode {
 }
 
 /// Wait for `fd` to become readable, returning false on timeout.
-fn wait_readable(fd: BorrowedFd<'_>, timeout: Duration) -> RemoteResult<bool> {
+pub(crate) fn wait_readable(fd: BorrowedFd<'_>, timeout: Duration) -> RemoteResult<bool> {
     let mut fds = [PollFd::new(
         fd,
         PollFlags::POLLIN | PollFlags::POLLERR | PollFlags::POLLHUP,
@@ -4121,7 +4127,7 @@ fn decode_ximage_generic(
     )
 }
 
-fn decode_ximage_reusing(
+pub(crate) fn decode_ximage_reusing(
     ximage: &XImage<'_>,
     width: u16,
     height: u16,
@@ -4503,6 +4509,8 @@ pub enum CaptureArea {
     Monitor(String),
     /// A fixed rectangle in root coordinates.
     Region(CaptureRegion),
+    /// A host-authorized instance, captured only by WindowCapture.
+    Window(u32),
 }
 
 /// Resolve what the operator asked to share into a rectangle.
@@ -4518,6 +4526,11 @@ fn resolve_capture_area(
     root_height: u16,
 ) -> RemoteResult<Option<CaptureRegion>> {
     let region = match area {
+        CaptureArea::Window(_) => {
+            return Err(
+                invalid_data("window grants require the isolated window capture backend").into(),
+            );
+        }
         CaptureArea::Root => return Ok(None),
         CaptureArea::Region(region) => *region,
         CaptureArea::Monitor(name) => {
@@ -4692,7 +4705,7 @@ pub fn scaled_dimensions(width: u16, height: u16, max_width: u16, max_height: u1
 /// search the original aspect ratio's longer axis with integer arithmetic.
 /// This avoids floating-point rounding above the cap and double-rounding the
 /// aspect ratio after an initial dimension clamp.
-fn frame_dimensions(
+pub(crate) fn frame_dimensions(
     width: u16,
     height: u16,
     viewport_width: u16,

@@ -78,6 +78,17 @@ pub struct SshOptions {
 }
 
 pub fn run_ssh(options: SshOptions) -> RemoteResult<()> {
+    if options
+        .shared_sources
+        .iter()
+        .any(|area| matches!(area, CaptureArea::Window(_)))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "window instance grants must be authorized by a local host --window command",
+        )
+        .into());
+    }
     if let Some(size) = options.window_size {
         size.validate()?;
     }
@@ -569,6 +580,10 @@ fn remote_host_script_with(options: &SshOptions, remote_port: u16, managed: &str
     }
     for area in &options.shared_sources {
         match area {
+            // Never reinterpret an unsupported instance grant as a root grant.
+            CaptureArea::Window(_) => {
+                return "echo 'window grants require local authorization' >&2; exit 64".into();
+            }
             CaptureArea::Root => host.push_str(" --share-root"),
             CaptureArea::Monitor(name) => {
                 host.push_str(" --share-monitor ");

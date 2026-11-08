@@ -31,6 +31,7 @@ use super::x11_capture::{
 };
 use super::x11_input::{InputArea, InputError, InputInjector};
 use super::x11_keymap::{KeymapMatch, KeymapTable};
+use super::{host_capture::HostCapture, window_capture::WindowCapture};
 use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 use signal_hook::consts::{SIGINT, SIGTERM};
 use signal_hook::flag;
@@ -1629,6 +1630,7 @@ fn host_source_grants(options: &HostOptions) -> RemoteResult<Vec<(SourceId, Capt
 fn source_label(area: &CaptureArea) -> String {
     match area {
         CaptureArea::Root => "Whole desktop".into(),
+        CaptureArea::Window(_) => "Authorized application window".into(),
         CaptureArea::Monitor(name) => name.clone(),
         CaptureArea::Region(region) => format!(
             "{}x{}{:+}{:+}",
@@ -1780,6 +1782,26 @@ fn listener_security_notice(address: IpAddr) -> Option<&'static str> {
     (!address.is_loopback()).then_some(TRUSTED_LAN_NOTICE)
 }
 
+fn validate_window_policy(options: &HostOptions) -> RemoteResult<()> {
+    let window = matches!(options.capture_area, CaptureArea::Window(_));
+    if options
+        .shared_sources
+        .iter()
+        .any(|area| matches!(area, CaptureArea::Window(_)))
+        || (window
+            && (options.allow_input
+                || options.allow_clipboard
+                || !options.once
+                || !options.shared_sources.is_empty()))
+    {
+        return Err(permission_denied(
+            "window sharing requires --once, view-only, no clipboard and no additional sources",
+        )
+        .into());
+    }
+    Ok(())
+}
+
 pub fn run_host(options: HostOptions) -> RemoteResult<()> {
     options.frame_limits.validate()?;
     JpegQualityController::new_at(
@@ -1790,10 +1812,23 @@ pub fn run_host(options: HostOptions) -> RemoteResult<()> {
         Instant::now(),
     )?;
     let key = options.key.load()?;
+    validate_window_policy(&options)?;
     let grants = host_source_grants(&options)?;
-    for (_, area) in &grants {
-        validate_capture_area(options.display.as_deref(), area)?;
-    }
+    // Bind the instance before announcing readiness, not on viewer arrival.
+    // Keep its X connection and pixmap alive throughout the waiting period.
+    let window_capture = if let CaptureArea::Window(id) = options.capture_area {
+        Some(WindowCapture::connect(
+            options.display.as_deref(),
+            id,
+            options.max_width,
+        )?)
+    } else {
+        for (_, area) in &grants {
+            validate_capture_area(options.display.as_deref(), area)?;
+        }
+        None
+    };
+    let window_capture = Mutex::new(window_capture);
     let listener = TcpListener::bind(&options.listen)
         .map_err(|error| listener_bind_error(&options.listen, error))?;
     listener.set_nonblocking(true)?;
@@ -1824,7 +1859,7 @@ pub fn run_host(options: HostOptions) -> RemoteResult<()> {
     let once = options.once;
     let session_shutdown = Arc::clone(&shutdown);
     accept_connections(&listener, key, &shutdown, once, move |peer| {
-        serve_authenticated(peer, &options, &session_shutdown)
+        serve_authenticated(peer, &options, &session_shutdown, &window_capture)
     })
 }
 
@@ -2154,6 +2189,7 @@ fn serve_authenticated(
     peer: AuthenticatedPeer,
     options: &HostOptions,
     shutdown: &Arc<AtomicBool>,
+    window_capture: &Mutex<Option<WindowCapture>>,
 ) -> RemoteResult<()> {
     let AuthenticatedPeer {
         mut reader,
@@ -2180,13 +2216,24 @@ fn serve_authenticated(
         .stream
         .negotiate_file_limit(options.clipboard_file_limit);
     let files_enabled = clipboard_policy.0 & 4 != 0 && file_limit > 0;
-    let mut capture = match X11Capture::connect(
-        options.display.as_deref(),
-        options.capture_source,
-        options.max_width,
-        options.capture_area.clone(),
-        options.scaling,
-    ) {
+    let capture_result = if matches!(options.capture_area, CaptureArea::Window(_)) {
+        window_capture
+            .lock()
+            .unwrap()
+            .take()
+            .map(|capture| HostCapture::Window(Box::new(capture)))
+            .ok_or_else(|| permission_denied("window instance grant already consumed").into())
+    } else {
+        X11Capture::connect(
+            options.display.as_deref(),
+            options.capture_source,
+            options.max_width,
+            options.capture_area.clone(),
+            options.scaling,
+        )
+        .map(|capture| HostCapture::Desktop(Box::new(capture)))
+    };
+    let mut capture = match capture_result {
         Ok(capture) => capture,
         Err(error) => {
             // Dropping the socket here left the viewer with a bare
@@ -2807,7 +2854,7 @@ fn stream_frames(
     sources: &Arc<SourceControl>,
     viewport: &ViewportRequest,
     clipboard_outbox: Option<ClipboardOutbox>,
-    capture: &mut X11Capture,
+    capture: &mut HostCapture,
     writer: SharedWriter,
     control: &TcpStream,
     running: &Arc<AtomicBool>,
@@ -4820,6 +4867,27 @@ mod tests {
         assert!(host_source_grants(&options).is_err());
         options.shared_sources = vec![CaptureArea::Monitor("bad\nlabel".into())];
         assert!(host_source_grants(&options).is_err());
+    }
+
+    #[test]
+    fn window_grants_are_exclusive_view_only_single_use() {
+        let mut options = test_host_source_options();
+        options.capture_area = CaptureArea::Window(42);
+        assert!(validate_window_policy(&options).is_ok());
+        for denied in 0..4 {
+            let mut options = test_host_source_options();
+            options.capture_area = CaptureArea::Window(42);
+            match denied {
+                0 => options.allow_input = true,
+                1 => options.allow_clipboard = true,
+                2 => options.once = false,
+                _ => options.shared_sources.push(CaptureArea::Root),
+            }
+            assert!(validate_window_policy(&options).is_err());
+        }
+        let mut options = test_host_source_options();
+        options.shared_sources.push(CaptureArea::Window(42));
+        assert!(validate_window_policy(&options).is_err());
     }
 
     fn test_host_source_options() -> HostOptions {

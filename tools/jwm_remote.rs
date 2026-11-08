@@ -249,6 +249,10 @@ enum Command {
         #[arg(long, value_name = "NAME", conflicts_with = "region", value_parser = parse_monitor)]
         monitor: Option<String>,
 
+        /// View one opaque X11 window instance; requires --once, without input or clipboard.
+        #[arg(long, value_name = "XID", value_parser = parse_window_id, conflicts_with_all = ["monitor", "region", "share_monitor", "share_region", "share_root", "allow_input", "allow_clipboard"], requires = "once")]
+        window: Option<u32>,
+
         #[command(flatten)]
         shares: ShareArgs,
 
@@ -1069,6 +1073,7 @@ fn run(command: Command) -> RemoteResult<()> {
             capture_source,
             scaling,
             monitor,
+            window,
             shares,
             region,
             allow_lan,
@@ -1088,10 +1093,11 @@ fn run(command: Command) -> RemoteResult<()> {
             };
             let display = resolve_host_display(display)?;
             let jpeg_quality_floor = resolve_quality_floor(jpeg_quality, jpeg_quality_floor)?;
-            let capture_area = match (monitor, region) {
-                (Some(name), _) => CaptureArea::Monitor(name),
-                (None, Some(region)) => CaptureArea::Region(region),
-                (None, None) => CaptureArea::Root,
+            let capture_area = match (window, monitor, region) {
+                (Some(id), _, _) => CaptureArea::Window(id),
+                (None, Some(name), _) => CaptureArea::Monitor(name),
+                (None, None, Some(region)) => CaptureArea::Region(region),
+                (None, None, None) => CaptureArea::Root,
             };
             let shared_sources = shares.areas(&capture_area)?;
             run_host(HostOptions {
@@ -1350,6 +1356,22 @@ where
         return Err(format!("{label} must be between {min} and {max}"));
     }
     Ok(parsed)
+}
+
+/// Accept xwininfo-style hexadecimal IDs or unsigned decimal IDs.
+fn parse_window_id(value: &str) -> Result<u32, String> {
+    let parsed = if let Some(hex) = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+    {
+        u32::from_str_radix(hex, 16)
+    } else {
+        value.parse::<u32>()
+    };
+    parsed
+        .ok()
+        .filter(|id| *id != 0)
+        .ok_or_else(|| "window XID must be a nonzero decimal or hexadecimal integer".into())
 }
 
 #[cfg(test)]
@@ -2460,6 +2482,22 @@ mod tests {
             resolve_key_path(Some(PathBuf::from("explicit.key"))).unwrap(),
             PathBuf::from("explicit.key")
         );
+    }
+
+    #[test]
+    fn window_host_is_explicit_single_use_and_view_only() {
+        let base = ["jwm-remote", "host", "--window", "0x200001", "--once"];
+        assert!(Cli::try_parse_from(base).is_ok());
+        assert!(Cli::try_parse_from(["jwm-remote", "host", "--window", "1"]).is_err());
+        for flag in ["--allow-input", "--allow-clipboard", "--share-root"] {
+            let mut args = base.to_vec();
+            args.push(flag);
+            assert!(Cli::try_parse_from(args).is_err());
+        }
+        for id in ["0", "0x0", "-1", "4294967296", "window-name"] {
+            assert!(parse_window_id(id).is_err());
+        }
+        assert_eq!(parse_window_id("0x200001").unwrap(), 0x200001);
     }
 
     #[test]
