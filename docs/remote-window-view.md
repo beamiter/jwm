@@ -21,8 +21,7 @@ issue window grants; start the authorized host explicitly instead.
 The host binds the window instance **before** printing its listening address.
 It retains that X connection and named Composite pixmap while waiting for an
 authenticated viewer. The grant is consumed once, even when the session fails.
-Destroy, unmap or reparent of the window **or any ancestor**, and native resize
-of the selected window, revoke the grant. Ancestor lifecycle notifications are
+Destroy, unmap or reparent of the window **or any ancestor** revoke the grant. Ancestor lifecycle notifications are
 subscribed before authorization, so a brief ancestor unmap followed by map
 between frame checks still revokes permanently. Starting another
 window with the same title or a reused XID does not restore it. Restart the host
@@ -44,7 +43,7 @@ of window-scoped control. X11 itself is not an isolation boundary against other
 local X clients.
 
 Viewer resizing changes encoded image bounds only, not the original application
-size. Native resizing, input ownership, focus/lock handling, reconnect recovery
+size. Remote-requested native resizing, input ownership, focus/lock handling, reconnect recovery
 and Wayland window grants remain separate follow-up work.
 
 ## Required validation before deployment
@@ -56,7 +55,7 @@ A real X server integration run must additionally demonstrate:
    colored/textured window and confirm capture still contains only its content.
 2. Destroy the selected window while the host waits for a connection; then create
    a replacement. Connecting must fail rather than show any replacement pixels.
-3. During streaming, destroy/unmap/reparent/resize the selected window. The session
+3. During streaming, destroy/unmap/reparent the selected window. The session
    must stop without publishing root pixels or reopening the XID.
 4. Place the selected client inside a parent window. Between frame checks,
    unmap and immediately remap the parent without unmapping the client itself.
@@ -85,3 +84,36 @@ its own Composite redirection and checks pixels, exact XID reuse, ancestor
 unmap/remap and resize/restore against the actual server. Merely compiling these
 ignored tests does not mean they passed. Environments that prohibit local X11
 sockets cannot run this suite; do not weaken host security settings to do so.
+
+## Local resize of an authorized window
+
+A local user or application may resize the same live authorized window without
+ending view-only capture. The capture backend stops producing frames from a
+known-stale named pixmap, obtains a new one, and validates actual pixmap geometry
+and lifecycle events before returning a frame.
+Each accepted backing-store replacement advances a checked geometry epoch, even
+when a resize is followed by restoration to the original dimensions. The existing
+geometry-keyframe path supplies a fresh canvas to the viewer. A resize racing
+capture drops that readback and retries on a later capture tick; it never falls
+back to a root rectangle or returns a frame from a known-stale backing store.
+This does not retract frames already captured, queued or sent; an older queued
+frame may be delivered before the fresh geometry-epoch frame. Remote resize/input
+will need a separate geometry publication fence.
+
+This is **not** remote resize: the viewer still changes only encoded bounds.
+There is no new input, clipboard, reconnect or resize RPC permission. Destroy,
+unmap, reparent, compositor changes and errors still revoke permanently. A new
+pixmap is obtained only while the original instance/ancestor watchers stay live.
+Real-server tests cover changed dimensions, resize/restore, and 100 consecutive
+resizes with alternating repainted colors followed by destruction/XID reuse.
+Deterministic after-name hooks also test resize/restore candidate rejection and
+destroy/exact-XID-reuse revocation before readback; those tests must run, not merely compile, before calling this validated.
+
+### Lock-screen limitation
+
+Named-pixmap capture intentionally continues while another window obscures the
+application. There is currently **no trusted host lock-screen or focus policy**
+in this backend. Do not assume locking the desktop automatically revokes sharing:
+the local host must explicitly stop the session/grant. This is not safe exclusive
+control or production-complete remote control. A trusted native JWM lock/lease
+boundary is separate prerequisite work before adding remote input privileges.

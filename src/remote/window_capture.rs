@@ -1,14 +1,15 @@
 //! Fail-closed, view-only capture of one authorized X11 window instance.
 //!
 //! Unlike desktop capture, this backend never reads the root, an overlay, or
-//! screen coordinates. The only pixel source is the Composite named pixmap
-//! acquired when the host authorizes the window. Keep this object alive from
+//! screen coordinates. The only pixel source is a Composite named pixmap of
+//! the originally authorized live window. Keep this object alive from
 //! authorization through the (single) viewer session: reconstructing it from
 //! the numeric XID on reconnect would authorize an unrelated reused XID.
 //!
-//! This first version deliberately revokes on unmap, reparent or resize. It
+//! This version revokes on unmap or reparent. Local resize replaces the named
+//! pixmap only after ordered lifecycle and geometry validation. It
 //! excludes global cursor/clipboard/input and rejects alpha visuals. Window
-//! native-resize and application-owned popups need separate authorization work.
+//! remote-requested resize and application-owned popups remain separate work.
 
 use super::RemoteResult;
 use super::messages::FrameLimits;
@@ -40,6 +41,9 @@ struct WindowLifetime {
     width: u16,
     height: u16,
     revoked: bool,
+    observed_size: (u16, u16),
+    revision: u64,
+    needs_rebind: bool,
 }
 
 impl WindowLifetime {
@@ -52,12 +56,24 @@ impl WindowLifetime {
             Event::DestroyNotify(e) => self.covers(e.window),
             Event::UnmapNotify(e) => self.covers(e.window),
             Event::ReparentNotify(e) => self.covers(e.window),
-            Event::ConfigureNotify(e) => {
-                e.window == self.window && (e.width, e.height) != (self.width, self.height)
+            Event::ConfigureNotify(e) if e.window == self.window => {
+                self.observe_size((e.width, e.height));
+                e.border_width != 0
             }
             _ => false,
         };
         self.revoked |= invalid;
+    }
+
+    fn observe_size(&mut self, size: (u16, u16)) {
+        if size != self.observed_size {
+            self.observed_size = size;
+            self.needs_rebind = true;
+            match self.revision.checked_add(1) {
+                Some(revision) => self.revision = revision,
+                None => self.revoked = true,
+            }
+        }
     }
 
     fn check(&self) -> RemoteResult<()> {
@@ -178,6 +194,9 @@ impl WindowCapture {
                 width: geometry.width,
                 height: geometry.height,
                 revoked: false,
+                observed_size: (geometry.width, geometry.height),
+                revision: 0,
+                needs_rebind: false,
             },
             compositor_selection: selection,
             compositor_owner: owner,
@@ -213,7 +232,7 @@ impl WindowCapture {
     /// Ordered server reply, then drain queued lifecycle events. Never publish
     /// a readback for which we already observed invalidation. Pixels sent
     /// before a later server event cannot be retracted from a remote viewer.
-    fn verify_live(&mut self) -> RemoteResult<()> {
+    fn verify_live(&mut self) -> RemoteResult<(u16, u16)> {
         self.lifetime.check()?;
         let owner = self
             .conn
@@ -231,27 +250,110 @@ impl WindowCapture {
             .reply()?;
         let geometry = self.conn.get_geometry(self.lifetime.window)?.reply()?;
         if attributes.map_state != MapState::VIEWABLE
-            || (geometry.width, geometry.height) != (self.lifetime.width, self.lifetime.height)
+            || geometry.depth != 24
             || geometry.border_width != 0
         {
             self.lifetime.revoked = true;
         }
+        super::frame::validate_dimensions(geometry.width, geometry.height)?;
+        let size = (geometry.width, geometry.height);
+        self.lifetime.observe_size(size);
         self.drain_events()?;
-        Ok(())
+        Ok(size)
+    }
+
+    /// Retire the stale backing store without ever reacquiring permission.
+    /// The original connection and immutable ancestor watch remain active.
+    /// A resize racing either query/name/readback discards the candidate; a
+    /// lifecycle revocation is terminal even if the XID was reused meanwhile.
+    fn rebind(&mut self, size: (u16, u16)) -> RemoteResult<bool> {
+        self.rebind_after_name(size, || {})
+    }
+
+    fn rebind_after_name(
+        &mut self,
+        size: (u16, u16),
+        after_name: impl FnOnce(),
+    ) -> RemoteResult<bool> {
+        self.lifetime.check()?;
+        let revision = self.lifetime.revision;
+        let candidate = self.conn.generate_id()?;
+        composite::name_window_pixmap(&self.conn, self.lifetime.window, candidate)?.check()?;
+        after_name();
+        let validated = (|| -> RemoteResult<bool> {
+            let geometry = self.conn.get_geometry(candidate)?.reply()?;
+            let current = self.verify_live()?;
+            Ok(self.lifetime.revision == revision
+                && current == size
+                && self.lifetime.observed_size == size
+                && (geometry.width, geometry.height) == size
+                && geometry.depth == 24)
+        })();
+        if !matches!(validated, Ok(true)) {
+            if let Ok(cookie) = self.conn.free_pixmap(candidate) {
+                let _ = cookie.check();
+            }
+            return validated;
+        }
+        if let Err(error) = self.advance_epoch() {
+            if let Ok(cookie) = self.conn.free_pixmap(candidate) {
+                let _ = cookie.check();
+            }
+            return Err(error);
+        }
+        let old = std::mem::replace(&mut self.pixmap, candidate);
+        self.lifetime.width = size.0;
+        self.lifetime.height = size.1;
+        self.lifetime.needs_rebind = false;
+        self.conn.free_pixmap(old)?.check()?;
+        Ok(true)
+    }
+
+    /// Deterministic integration-test seam at the server's name/query boundary.
+    /// Production passes a no-op and cannot supply callbacks through the API.
+    #[cfg(test)]
+    pub(super) fn rebind_with_test_hook(
+        &mut self,
+        after_name: impl FnOnce(),
+    ) -> RemoteResult<bool> {
+        let result = (|| {
+            let size = self.verify_live()?;
+            self.rebind_after_name(size, after_name)
+        })();
+        if result.is_err() {
+            self.lifetime.revoked = true;
+        }
+        result
+    }
+
+    fn advance_epoch(&mut self) -> RemoteResult<()> {
+        match self.epoch.checked_add(1) {
+            Some(epoch) => {
+                self.epoch = epoch;
+                Ok(())
+            }
+            None => {
+                self.lifetime.revoked = true;
+                Err(invalid("window geometry epoch exhausted").into())
+            }
+        }
     }
 
     pub(super) fn frame(&mut self) -> RemoteResult<CaptureOutcome> {
         let result = self.read_frame();
         if result.is_err() {
             // Readback, decoding and connection failures are terminal too;
-            // there is no desktop fallback and no pixmap reacquisition.
+            // there is no desktop fallback or authorization reacquisition.
             self.lifetime.revoked = true;
         }
         result
     }
 
     fn read_frame(&mut self) -> RemoteResult<CaptureOutcome> {
-        self.verify_live()?;
+        let size = self.verify_live()?;
+        if self.lifetime.needs_rebind && !self.rebind(size)? {
+            return Ok(CaptureOutcome::NoChange);
+        }
         let (width, height) = (self.lifetime.width, self.lifetime.height);
         let (out_width, out_height) =
             frame_dimensions(width, height, self.max_width, self.max_height, self.limits);
@@ -295,6 +397,10 @@ impl WindowCapture {
             scaled
         };
         self.verify_live()?;
+        if self.lifetime.needs_rebind {
+            self.recycler.recycle_image(rgb);
+            return Ok(CaptureOutcome::NoChange);
+        }
         Ok(CaptureOutcome::Frame(CapturedFrame {
             geometry_epoch: self.epoch,
             image: rgb,
@@ -309,8 +415,7 @@ impl WindowCapture {
             return false;
         }
         self.limits = limits;
-        self.epoch = self.epoch.saturating_add(1);
-        true
+        self.advance_epoch().is_ok()
     }
 
     pub(super) fn set_encoded_bounds(&mut self, width: u16, height: u16) -> bool {
@@ -322,8 +427,7 @@ impl WindowCapture {
         }
         self.max_width = width;
         self.max_height = height;
-        self.epoch = self.epoch.saturating_add(1);
-        true
+        self.advance_epoch().is_ok()
     }
 
     #[must_use]
@@ -422,6 +526,9 @@ mod tests {
             width: 800,
             height: 600,
             revoked: false,
+            observed_size: (800, 600),
+            revision: 0,
+            needs_rebind: false,
         }
     }
 
@@ -459,7 +566,7 @@ mod tests {
     }
 
     #[test]
-    fn moving_is_safe_but_resize_requires_fresh_authorization() {
+    fn moving_is_safe_but_resize_requires_fresh_pixmap() {
         let mut state = grant();
         state.observe(&Event::ConfigureNotify(ConfigureNotifyEvent {
             window: 42,
@@ -476,7 +583,9 @@ mod tests {
             height: 600,
             ..Default::default()
         }));
-        assert!(state.check().is_err());
+        assert!(state.check().is_ok());
+        assert!(state.needs_rebind);
+        assert_eq!(state.revision, 1);
     }
 
     #[test]
@@ -558,6 +667,45 @@ mod tests {
                 ..Default::default()
             }));
         }
+        assert!(state.check().is_ok());
+        assert!(state.needs_rebind);
+        assert_eq!(state.revision, 2);
+        assert_eq!(state.observed_size, (800, 600));
+    }
+
+    #[test]
+    fn resize_revision_overflow_revokes() {
+        let mut state = grant();
+        state.revision = u64::MAX;
+        state.observe_size((801, 600));
+        assert!(state.check().is_err());
+    }
+
+    #[test]
+    fn border_change_then_restore_permanently_revokes() {
+        let mut state = grant();
+        for border_width in [1, 0] {
+            state.observe(&Event::ConfigureNotify(ConfigureNotifyEvent {
+                window: 42,
+                width: 800,
+                height: 600,
+                border_width,
+                ..Default::default()
+            }));
+        }
+        assert!(state.check().is_err());
+    }
+
+    #[test]
+    fn resize_does_not_override_lifecycle_revocation() {
+        let mut state = grant();
+        state.observe_size((801, 600));
+        state.observe(&Event::DestroyNotify(DestroyNotifyEvent {
+            window: 42,
+            ..Default::default()
+        }));
+        state.observe_size((800, 600));
+        assert!(state.needs_rebind);
         assert!(state.check().is_err());
     }
 

@@ -190,6 +190,35 @@ impl Fixture {
         self.conn.sync().unwrap();
     }
 
+    fn paint_blue(&self, window: Window, width: u16) {
+        self.paint_color(window, width, 0x0000ff);
+    }
+
+    fn paint_color(&self, window: Window, width: u16, color: u32) {
+        let gc = self.conn.generate_id().unwrap();
+        self.conn
+            .create_gc(gc, window, &CreateGCAux::new().foreground(color))
+            .unwrap()
+            .check()
+            .unwrap();
+        self.conn
+            .poly_fill_rectangle(
+                window,
+                gc,
+                &[Rectangle {
+                    x: 0,
+                    y: 0,
+                    width,
+                    height: HEIGHT,
+                }],
+            )
+            .unwrap()
+            .check()
+            .unwrap();
+        self.conn.free_gc(gc).unwrap().check().unwrap();
+        self.conn.sync().unwrap();
+    }
+
     fn capture(&self, window: Window) -> WindowCapture {
         WindowCapture::connect(Some(&self.display), window, 0).unwrap()
     }
@@ -324,11 +353,12 @@ fn ancestor_unmap_then_remap_between_frames_revokes_grant() {
 
 #[test]
 #[ignore = "requires explicitly configured, dedicated Xvfb via JWM_REMOTE_TEST_DISPLAY"]
-fn target_resize_then_restore_between_frames_revokes_grant() {
+fn target_resize_then_restore_rebinds_with_new_epoch() {
     let fixture = Fixture::new();
     let target = fixture.patterned_target(fixture.root, 20, 20);
     let mut capture = fixture.capture(target);
     assert_pattern(&frame(&mut capture));
+    let previous_epoch = capture.geometry_epoch();
     for width in [u32::from(WIDTH) + 8, u32::from(WIDTH)] {
         fixture
             .conn
@@ -337,10 +367,196 @@ fn target_resize_then_restore_between_frames_revokes_grant() {
             .check()
             .unwrap();
     }
+    fixture.paint_blue(target, WIDTH);
+    let resized = frame(&mut capture);
+    assert_eq!(resized.dimensions(), (WIDTH.into(), HEIGHT.into()));
+    assert!(
+        resized.pixels().all(|p| p.0 == [0, 0, 255]),
+        "old backing store was reused"
+    );
+    assert!(capture.geometry_epoch() > previous_epoch);
+    let stable_epoch = capture.geometry_epoch();
+    let _ = frame(&mut capture);
+    assert_eq!(capture.geometry_epoch(), stable_epoch);
+}
+
+#[test]
+#[ignore = "requires explicitly configured, dedicated Xvfb via JWM_REMOTE_TEST_DISPLAY"]
+fn local_resize_delivers_new_source_geometry_without_expanding_permissions() {
+    let fixture = Fixture::new();
+    let target = fixture.patterned_target(fixture.root, 20, 20);
+    let mut capture = fixture.capture(target);
+    let _ = frame(&mut capture);
+    let previous_epoch = capture.geometry_epoch();
+    fixture
+        .conn
+        .configure_window(
+            target,
+            &ConfigureWindowAux::new().width(u32::from(WIDTH) + 8),
+        )
+        .unwrap()
+        .check()
+        .unwrap();
+    fixture.paint_blue(target, WIDTH + 8);
+    let CaptureOutcome::Frame(resized) = capture.frame().unwrap() else {
+        panic!("expected resized frame")
+    };
+    assert_eq!(
+        (resized.source_width, resized.source_height),
+        (WIDTH + 8, HEIGHT)
+    );
+    assert_eq!(
+        resized.image.dimensions(),
+        (u32::from(WIDTH) + 8, HEIGHT.into())
+    );
+    assert!(resized.image.pixels().all(|p| p.0 == [0, 0, 255]));
+    assert!(resized.geometry_epoch > previous_epoch);
+    fixture.conn.unmap_window(target).unwrap().check().unwrap();
+    fixture.conn.map_window(target).unwrap().check().unwrap();
     fixture.conn.sync().unwrap();
     assert!(
         capture.frame().is_err(),
-        "restored geometry must not revive old pixmap grant"
+        "resize support must not weaken unmap revocation"
+    );
+}
+
+#[test]
+#[ignore = "requires explicitly configured, dedicated Xvfb via JWM_REMOTE_TEST_DISPLAY"]
+fn one_hundred_local_resizes_keep_fresh_geometry_and_pixels_then_revoke_on_reuse() {
+    let fixture = Fixture::new();
+    let target = fixture.patterned_target(fixture.root, 20, 20);
+    let mut capture = fixture.capture(target);
+    let _ = frame(&mut capture);
+    let mut previous_epoch = capture.geometry_epoch();
+    for step in 1..=100_u16 {
+        let width = WIDTH + step % 8;
+        fixture
+            .conn
+            .configure_window(target, &ConfigureWindowAux::new().width(u32::from(width)))
+            .unwrap()
+            .check()
+            .unwrap();
+        let color = if step % 2 == 0 { 0x0000ff } else { 0xff00ff };
+        let expected = if step % 2 == 0 {
+            [0, 0, 255]
+        } else {
+            [255, 0, 255]
+        };
+        fixture.paint_color(target, width, color);
+        // Stable, synchronized fixture geometry must settle within a bounded
+        // number of readback retries; do not hide an endless NoChange loop.
+        let mut fresh = None;
+        for _ in 0..4 {
+            if let CaptureOutcome::Frame(frame) = capture.frame().unwrap() {
+                fresh = Some(frame);
+                break;
+            }
+        }
+        let fresh = fresh.expect("stable resized window failed to produce a fresh frame");
+        assert_eq!((fresh.source_width, fresh.source_height), (width, HEIGHT));
+        assert_eq!(fresh.image.dimensions(), (width.into(), HEIGHT.into()));
+        assert!(
+            fresh.geometry_epoch > previous_epoch,
+            "resize {step} reused geometry epoch"
+        );
+        assert!(
+            fresh.image.pixels().all(|p| p.0 == expected),
+            "resize {step} reused stale pixels"
+        );
+        previous_epoch = fresh.geometry_epoch;
+    }
+    fixture
+        .conn
+        .destroy_window(target)
+        .unwrap()
+        .check()
+        .unwrap();
+    fixture.create_patterned_target(target, fixture.root, 20, 20);
+    assert!(
+        capture.frame().is_err(),
+        "resize must not enable XID reuse authorization"
+    );
+}
+
+#[test]
+#[ignore = "requires explicitly configured, dedicated Xvfb via JWM_REMOTE_TEST_DISPLAY"]
+fn resize_restore_after_naming_discards_candidate_before_readback() {
+    let fixture = Fixture::new();
+    let target = fixture.patterned_target(fixture.root, 20, 20);
+    let mut capture = fixture.capture(target);
+    let _ = frame(&mut capture);
+    let previous_epoch = capture.geometry_epoch();
+    fixture
+        .conn
+        .configure_window(
+            target,
+            &ConfigureWindowAux::new().width(u32::from(WIDTH) + 8),
+        )
+        .unwrap()
+        .check()
+        .unwrap();
+    fixture.paint_blue(target, WIDTH + 8);
+    let accepted = capture
+        .rebind_with_test_hook(|| {
+            for width in [u32::from(WIDTH) + 16, u32::from(WIDTH) + 8] {
+                fixture
+                    .conn
+                    .configure_window(target, &ConfigureWindowAux::new().width(width))
+                    .unwrap()
+                    .check()
+                    .unwrap();
+            }
+            fixture.paint_color(target, WIDTH + 8, 0xff00ff);
+        })
+        .unwrap();
+    assert!(
+        !accepted,
+        "candidate named before resize/restore must be discarded"
+    );
+    assert_eq!(
+        capture.geometry_epoch(),
+        previous_epoch,
+        "discarded candidate must not become current"
+    );
+    let fresh = frame(&mut capture);
+    assert_eq!(fresh.dimensions(), (u32::from(WIDTH) + 8, HEIGHT.into()));
+    assert!(fresh.pixels().all(|p| p.0 == [255, 0, 255]));
+    assert!(capture.geometry_epoch() > previous_epoch);
+}
+
+#[test]
+#[ignore = "requires explicitly configured, dedicated Xvfb via JWM_REMOTE_TEST_DISPLAY"]
+fn destroy_exact_xid_reuse_after_naming_permanently_revokes_before_readback() {
+    let fixture = Fixture::new();
+    let target = fixture.patterned_target(fixture.root, 20, 20);
+    let mut capture = fixture.capture(target);
+    let _ = frame(&mut capture);
+    fixture
+        .conn
+        .configure_window(
+            target,
+            &ConfigureWindowAux::new().width(u32::from(WIDTH) + 8),
+        )
+        .unwrap()
+        .check()
+        .unwrap();
+    fixture.paint_blue(target, WIDTH + 8);
+    let result = capture.rebind_with_test_hook(|| {
+        fixture
+            .conn
+            .destroy_window(target)
+            .unwrap()
+            .check()
+            .unwrap();
+        fixture.create_patterned_target(target, fixture.root, 20, 20);
+    });
+    assert!(
+        result.is_err(),
+        "destroy/reuse after naming must revoke, not merely retry"
+    );
+    assert!(
+        capture.frame().is_err(),
+        "replacement must never become the capture target"
     );
 }
 
