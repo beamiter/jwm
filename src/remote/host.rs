@@ -28,7 +28,7 @@ use super::x11_capture::{
     CaptureArea, CaptureImageRecycler, CaptureMode, CaptureOutcome, CaptureSource, CapturedFrame,
     ScalingPolicy, X11Capture, validate_capture_area,
 };
-use super::x11_input::{InputArea, InputInjector};
+use super::x11_input::{InputArea, InputError, InputInjector};
 use super::x11_keymap::{KeymapMatch, KeymapTable};
 use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 use signal_hook::consts::{SIGINT, SIGTERM};
@@ -79,6 +79,10 @@ const BUSY_REASON: &str = "another viewer is already connected to this host";
 const HOST_STOPPING_REASON: &str = "the host stopped sharing its desktop";
 /// Encoding is terminal, but has no structured v13 code. Keep details local.
 const ENCODING_FAILURE_REASON: &str = "host could not encode the shared display";
+const INPUT_FAILURE_REASON: &str = "host input became unavailable";
+const KEYMAP_VERIFY_FAILURE_REASON: &str = "host could not verify keyboard input";
+const KEYMAP_CHANGED_REASON: &str =
+    "host keyboard mapping changed; reconnect to re-verify keyboard input";
 /// Budget for that one goodbye record. A peer too slow to take a few dozen
 /// bytes must not hold up Ctrl+C; it then sees the connection drop instead.
 const GOODBYE_WRITE_DEADLINE: Duration = Duration::from_millis(250);
@@ -2359,6 +2363,8 @@ fn serve_authenticated(
             );
         }
 
+        let writer: SharedWriter = Arc::new(Mutex::new(writer));
+        let input_writer = Arc::clone(&writer);
         let input_running = Arc::clone(&running);
         let input_stop = Arc::clone(&first_stop);
         let input_credits = Arc::clone(&credits);
@@ -2388,6 +2394,7 @@ fn serve_authenticated(
                     clipboard_inbox.as_ref(),
                     Some(&input_sources),
                 )
+                .report(|close| say_session_close(&input_writer, close))
             })?;
 
         let stream_result = stream_frames(
@@ -2585,12 +2592,15 @@ fn is_end_of_stream(error: &super::RemoteError) -> bool {
     }
 }
 
-/// Internal notification choice. Encoding has no structured v13 code and
-/// therefore uses the existing terminal legacy Close without changing the wire.
+/// Internal notification choice. Encoding and input/keymap failures have no
+/// structured v13 code and use the existing terminal legacy Close.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum RuntimeClose {
     Structured(SessionClose),
     Encoding,
+    InputUnavailable,
+    KeymapUnavailable,
+    KeymapChanged,
 }
 
 impl From<SessionClose> for RuntimeClose {
@@ -2609,6 +2619,25 @@ struct LocalRuntimeFailure {
 }
 
 impl LocalRuntimeFailure {
+    /// Injection and event polling also report peer-data validation failures.
+    /// Only actual X11 transport/reply failures establish backend loss.
+    fn input(source: InputError) -> super::RemoteError {
+        match source {
+            source @ (InputError::Connection(_) | InputError::Reply(_)) => Box::new(Self {
+                close: RuntimeClose::InputUnavailable,
+                source: source.into(),
+            }),
+            source => source.into(),
+        }
+    }
+
+    fn keymap(source: super::RemoteError) -> super::RemoteError {
+        Box::new(Self {
+            close: RuntimeClose::KeymapUnavailable,
+            source,
+        })
+    }
+
     fn encoding(source: super::RemoteError) -> super::RemoteError {
         Box::new(Self {
             close: RuntimeClose::Encoding,
@@ -2669,6 +2698,17 @@ fn say_session_close<W: std::io::Write + SetWriteTimeout>(
             RuntimeClose::Encoding => (
                 MessageKind::Close,
                 ENCODING_FAILURE_REASON.as_bytes().to_vec(),
+            ),
+            RuntimeClose::InputUnavailable => {
+                (MessageKind::Close, INPUT_FAILURE_REASON.as_bytes().to_vec())
+            }
+            RuntimeClose::KeymapUnavailable => (
+                MessageKind::Close,
+                KEYMAP_VERIFY_FAILURE_REASON.as_bytes().to_vec(),
+            ),
+            RuntimeClose::KeymapChanged => (
+                MessageKind::Close,
+                KEYMAP_CHANGED_REASON.as_bytes().to_vec(),
             ),
         };
         let _ = write_session_record(&mut writer, kind, &payload, GOODBYE_WRITE_DEADLINE);
@@ -2767,7 +2807,7 @@ fn stream_frames(
     viewport: &ViewportRequest,
     clipboard_outbox: Option<ClipboardOutbox>,
     capture: &mut X11Capture,
-    writer: SessionWriter<DeadlineWriter<TcpStream>>,
+    writer: SharedWriter,
     control: &TcpStream,
     running: &Arc<AtomicBool>,
     first_stop: &Arc<FirstStop>,
@@ -2777,7 +2817,6 @@ fn stream_frames(
     shutdown: &AtomicBool,
     options: &HostOptions,
 ) -> RemoteResult<()> {
-    let writer: SharedWriter = Arc::new(Mutex::new(writer));
     let sender_sources = Arc::clone(sources);
     let sender_writer = Arc::clone(&writer);
     let mailbox = Arc::new(LatestMailbox::new());
@@ -3710,7 +3749,7 @@ fn receive_input_scoped(
     viewport: &ViewportRequest,
     clipboard: Option<&ClipboardInbox>,
     sources: Option<&SourceControl>,
-) -> RemoteResult<()> {
+) -> InputExit {
     let mut payload = Vec::new();
     let mut input_geometry =
         sources.map_or(0, |sources| sources.state.lock().unwrap().geometry_epoch);
@@ -3751,7 +3790,10 @@ fn receive_input_scoped(
             if let Some(sources) = sources {
                 let geometry = sources.state.lock().unwrap().geometry_epoch;
                 refresh_input_geometry(&mut input_geometry, geometry, || {
-                    injector.as_mut().map_or(Ok(()), InputInjector::release_all)
+                    injector
+                        .as_mut()
+                        .map_or(Ok(()), InputInjector::release_all)
+                        .map_err(LocalRuntimeFailure::input)
                 })?;
             }
             match kind {
@@ -3766,7 +3808,7 @@ fn receive_input_scoped(
                         match admission {
                             SourceInputAdmission::Stale => Ok(()),
                             SourceInputAdmission::ReleaseOnly => {
-                                injector.release_all()?;
+                                injector.release_all().map_err(LocalRuntimeFailure::input)?;
                                 Ok(())
                             }
                             SourceInputAdmission::Inject(area) => {
@@ -3781,9 +3823,13 @@ fn receive_input_scoped(
                                 if keyboard_enabled {
                                     verify_injector_keymap(injector, verified_keymap.as_ref())?;
                                 } else {
-                                    let _ = injector.take_keymap_change()?;
+                                    let _ = injector
+                                        .take_keymap_change()
+                                        .map_err(LocalRuntimeFailure::input)?;
                                 }
-                                injector.inject_batch(&events, area)?;
+                                injector
+                                    .inject_batch(&events, area)
+                                    .map_err(LocalRuntimeFailure::input)?;
                                 Ok(())
                             }
                         }
@@ -3847,7 +3893,7 @@ fn receive_input_scoped(
                     // This thread owns every injection, so no input edge can
                     // race this release or enter the new mapping before ACK.
                     if let Some(injector) = injector.as_mut() {
-                        injector.release_all()?;
+                        injector.release_all().map_err(LocalRuntimeFailure::input)?;
                     }
                     let mut state = sources.state.lock().unwrap();
                     state.presented_geometry = None;
@@ -3903,23 +3949,78 @@ fn receive_input_scoped(
         Ok(())
     })();
 
+    finalize_input(
+        session_result,
+        injector,
+        running,
+        first_stop,
+        credits,
+        |injector| {
+            injector
+                .as_mut()
+                .map_or(Ok(()), InputInjector::release_all)
+                .map_err(Into::into)
+        },
+    )
+}
+
+/// This value can leave the input receiver only after its injector is gone.
+/// It conveys no claim about successful release or any other worker's cleanup.
+struct InputExit {
+    result: RemoteResult<()>,
+    notice: Option<RuntimeClose>,
+}
+
+impl InputExit {
+    fn report(self, notify: impl FnOnce(RuntimeClose)) -> RemoteResult<()> {
+        if let Some(close) = self.notice {
+            notify(close);
+        }
+        self.result
+    }
+}
+
+/// Stop producers before release work, and finish both the explicit release
+/// and injector destruction before returning a report to the outer wrapper.
+/// InputInjector::Drop retries release_all, so moving notification into this
+/// helper before drop would put a socket write ahead of held-input cleanup.
+fn finalize_input<I>(
+    session_result: RemoteResult<()>,
+    mut injector: I,
+    running: &AtomicBool,
+    first_stop: &FirstStop,
+    credits: &FrameCredits,
+    release: impl FnOnce(&mut I) -> RemoteResult<()>,
+) -> InputExit {
     let session_failed = session_result.is_err();
-    first_stop.record(if session_failed {
+    let first = first_stop.record(if session_failed {
         StopCause::Input
     } else {
         StopCause::Graceful
     });
+    // Capture ownership and the original directly tagged error, not a later
+    // atomic cause or a cleanup wrapper that might hide or change its meaning.
+    let notice = first
+        .then(|| session_result.as_ref().err().and_then(runtime_close))
+        .flatten()
+        .filter(|close| {
+            matches!(
+                close,
+                RuntimeClose::InputUnavailable
+                    | RuntimeClose::KeymapUnavailable
+                    | RuntimeClose::KeymapChanged
+            )
+        });
     running.store(false, Ordering::Release);
     credits.close();
 
-    let release_result = match injector.as_mut() {
-        Some(injector) => injector.release_all(),
-        None => Ok(()),
-    };
+    let release_result = release(&mut injector);
     if !session_failed && release_result.is_err() {
         first_stop.promote_graceful_to_input_error();
     }
-    combine_host_cleanup(session_result, release_result.map_err(Into::into))
+    let result = combine_host_cleanup(session_result, release_result);
+    drop(injector);
+    InputExit { result, notice }
 }
 
 /// A partial record cannot be resynchronized, so expiry closes the session;
@@ -3947,19 +4048,33 @@ fn verify_injector_keymap(
     injector: &mut InputInjector,
     viewer_keymap: Option<&KeymapTable>,
 ) -> RemoteResult<()> {
-    if !injector.take_keymap_change()? {
+    let changed = injector
+        .take_keymap_change()
+        .map_err(LocalRuntimeFailure::input)?;
+    verify_current_keymap(changed, viewer_keymap, || injector.keymap())
+}
+
+fn verify_current_keymap(
+    changed: bool,
+    viewer_keymap: Option<&KeymapTable>,
+    current_keymap: impl FnOnce() -> RemoteResult<KeymapTable>,
+) -> RemoteResult<()> {
+    if !changed {
         return Ok(());
     }
     let viewer_keymap =
         viewer_keymap.ok_or_else(|| invalid_data("keyboard input has no verified keymap"))?;
     // Re-run the negotiation comparison: a spare keycode bound since then by
     // a typing tool on this desktop keeps the session, a remapped key ends it.
-    match viewer_keymap.compare(&injector.keymap()?) {
+    match viewer_keymap.compare(&current_keymap().map_err(LocalRuntimeFailure::keymap)?) {
         KeymapMatch::Compatible => Ok(()),
-        mismatch => Err(invalid_data(format!(
-            "host X11 keymap changed ({mismatch}); reconnect to re-verify keyboard input"
-        ))
-        .into()),
+        mismatch => Err(Box::new(LocalRuntimeFailure {
+            close: RuntimeClose::KeymapChanged,
+            source: invalid_data(format!(
+                "host X11 keymap changed ({mismatch}); reconnect to re-verify keyboard input"
+            ))
+            .into(),
+        })),
     }
 }
 
@@ -5121,6 +5236,433 @@ mod tests {
         ))
     }
 
+    struct InputDropAction<F: FnOnce()>(Option<F>);
+
+    impl<F: FnOnce()> Drop for InputDropAction<F> {
+        fn drop(&mut self) {
+            self.0.take().unwrap()();
+        }
+    }
+
+    fn input_backend_failure() -> super::super::RemoteError {
+        LocalRuntimeFailure::input(InputError::Connection(
+            io::Error::other("PRIVATE /host/input/path").into(),
+        ))
+    }
+
+    fn test_keymap_bytes() -> Vec<u8> {
+        let mut bytes = vec![8, 32];
+        bytes.extend_from_slice(&[0; 32]);
+        bytes.extend_from_slice(&[1; 32 * super::super::x11_keymap::KEY_DIGEST_LEN]);
+        bytes
+    }
+
+    #[test]
+    fn runtime_input_backend_tags_exclude_validation_setup_and_transport_errors() {
+        for error in [
+            InputError::Connection(io::Error::other("private X11 connection").into()),
+            InputError::Reply(io::Error::other("private X11 reply").into()),
+        ] {
+            let message = error.to_string();
+            let error = LocalRuntimeFailure::input(error);
+            assert_eq!(runtime_close(&error), Some(RuntimeClose::InputUnavailable));
+            assert_eq!(error.to_string(), message);
+            assert!(error.source().unwrap().is::<InputError>());
+        }
+        for error in [
+            InputError::Connect(x11rb::rust_connection::ConnectError::InvalidScreen),
+            InputError::ScreenUnavailable { screen: 2 },
+            InputError::UnsupportedXtestVersion { major: 1, minor: 0 },
+            InputError::InvalidKeycode {
+                keycode: 1,
+                min: 8,
+                max: 255,
+            },
+            InputError::InvalidButton { button: 0 },
+            InputError::UnmappedButton { button: 5 },
+            InputError::CoordinateOutOfRange {
+                axis: 'x',
+                value: u16::MAX,
+            },
+        ] {
+            let error = LocalRuntimeFailure::input(error);
+            assert!(error.is::<InputError>());
+            assert!(runtime_close(&error).is_none());
+        }
+        let unrelated: Vec<super::super::RemoteError> = vec![
+            io::Error::new(io::ErrorKind::TimedOut, INPUT_FAILURE_REASON).into(),
+            io::Error::new(io::ErrorKind::UnexpectedEof, KEYMAP_CHANGED_REASON).into(),
+            ProtocolError::AuthenticationFailed.into(),
+            ProtocolError::Io(io::ErrorKind::ConnectionReset.into()).into(),
+            decode_source_input(&[]).unwrap_err(),
+            invalid_data("keyboard input was not negotiated").into(),
+            permission_denied("source is not granted").into(),
+            invalid_data("future source ACK").into(),
+            invalid_data("clipboard sharing was not negotiated").into(),
+            combine_host_cleanup(
+                Err(input_backend_failure()),
+                Err(io::Error::other("release failed").into()),
+            )
+            .unwrap_err(),
+            LocalRuntimeFailure::encoding(io::Error::other("wrong producer").into()),
+        ];
+        for error in unrelated {
+            let running = AtomicBool::new(true);
+            let credits = FrameCredits::new();
+            let exit = finalize_input(
+                Err(error),
+                (),
+                &running,
+                &FirstStop::new(),
+                &credits,
+                |_| Ok(()),
+            );
+            assert!(exit.notice.is_none());
+            assert!(exit.result.is_err());
+            assert!(!running.load(Ordering::Acquire));
+            assert!(credits.state.lock().unwrap().closed);
+        }
+    }
+
+    #[test]
+    fn runtime_keymap_tags_require_a_local_read_failure_or_confirmed_mismatch() {
+        let bytes = test_keymap_bytes();
+        let viewer = KeymapTable::decode(&bytes).unwrap();
+        verify_current_keymap(false, None, || panic!("no read without notification")).unwrap();
+        let invariant =
+            verify_current_keymap(true, None, || panic!("missing verified map")).unwrap_err();
+        assert!(runtime_close(&invariant).is_none());
+        verify_current_keymap(true, Some(&viewer), || Ok(viewer.clone())).unwrap();
+        let read = verify_current_keymap(true, Some(&viewer), || {
+            Err(io::Error::other("PRIVATE /host/keymap/path").into())
+        })
+        .unwrap_err();
+        assert_eq!(runtime_close(&read), Some(RuntimeClose::KeymapUnavailable));
+        assert!(read.to_string().contains("PRIVATE"));
+        for changed in [2, 34, 35] {
+            let mut different = bytes.clone();
+            if changed == 35 {
+                different[34..].fill(0);
+            } else {
+                different[changed] = 2;
+            }
+            let host = KeymapTable::decode(&different).unwrap();
+            assert!(!matches!(viewer.compare(&host), KeymapMatch::Compatible));
+            let error = verify_current_keymap(true, Some(&viewer), || Ok(host)).unwrap_err();
+            assert_eq!(runtime_close(&error), Some(RuntimeClose::KeymapChanged));
+            assert!(error.to_string().contains("host X11 keymap changed"));
+        }
+    }
+
+    #[test]
+    fn runtime_input_notice_follows_release_and_drop_and_preserves_cleanup_failure() {
+        for close in [
+            RuntimeClose::InputUnavailable,
+            RuntimeClose::KeymapUnavailable,
+            RuntimeClose::KeymapChanged,
+        ] {
+            for release_fails in [false, true] {
+                let running = AtomicBool::new(true);
+                let first_stop = FirstStop::new();
+                let credits = FrameCredits::new();
+                let events = Mutex::new(Vec::new());
+                let injector = InputDropAction(Some(|| {
+                    events.lock().unwrap().push("drop completed");
+                }));
+                let key = [0xb1; 32];
+                let writer = runtime_record_writer(key);
+                let primary = Box::new(LocalRuntimeFailure {
+                    close: close.clone(),
+                    source: io::Error::other("PRIVATE /host/input/path").into(),
+                });
+                let result = finalize_input(
+                    Err(primary),
+                    injector,
+                    &running,
+                    &first_stop,
+                    &credits,
+                    |_| {
+                        assert!(!running.load(Ordering::Acquire));
+                        assert!(credits.state.lock().unwrap().closed);
+                        assert_eq!(first_stop.cause(), StopCause::Input);
+                        events.lock().unwrap().push("release");
+                        if release_fails {
+                            Err(io::Error::other("PRIVATE release failed").into())
+                        } else {
+                            Ok(())
+                        }
+                    },
+                )
+                .report(|notice| {
+                    assert_eq!(*events.lock().unwrap(), ["release", "drop completed"]);
+                    events.lock().unwrap().push("notice");
+                    assert_eq!(notice, close);
+                    say_session_close(&writer, notice);
+                });
+                let error = result.unwrap_err();
+                assert_eq!(
+                    *events.lock().unwrap(),
+                    ["release", "drop completed", "notice"]
+                );
+                assert!(error.to_string().contains("PRIVATE /host/input/path"));
+                if release_fails {
+                    let cleanup = error.downcast_ref::<HostCleanupError>().unwrap();
+                    assert_eq!(
+                        runtime_close(cleanup.primary.as_ref().unwrap()),
+                        Some(close.clone())
+                    );
+                    assert!(cleanup.cleanup.to_string().contains("release failed"));
+                } else {
+                    assert_eq!(runtime_close(&error), Some(close.clone()));
+                }
+                let admission = Arc::new(AtomicU8::new(VIEWER_IDLE));
+                let slot = ViewerSlot::claim(&admission).unwrap();
+                run_admitted_session(slot, || {
+                    finish_host_session(StopCause::Input, Ok(()), Ok(Err(error)), Ok(()))
+                })
+                .unwrap_err();
+                assert_eq!(ViewerSlot::claim(&admission).is_none(), release_fails);
+                let wire = lock_writer(&writer).get_ref().get_ref().bytes.clone();
+                let reason = match close {
+                    RuntimeClose::InputUnavailable => INPUT_FAILURE_REASON,
+                    RuntimeClose::KeymapUnavailable => KEYMAP_VERIFY_FAILURE_REASON,
+                    RuntimeClose::KeymapChanged => KEYMAP_CHANGED_REASON,
+                    _ => unreachable!(),
+                };
+                crate::remote::client::tests::assert_runtime_terminal_record(
+                    &wire, key, None, reason,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn runtime_input_blocked_release_or_destructor_keeps_stop_observable_without_notice() {
+        for block_drop in [false, true] {
+            let running = Arc::new(AtomicBool::new(true));
+            let credits = Arc::new(FrameCredits::new());
+            let first_stop = Arc::new(FirstStop::new());
+            let notices = Arc::new(AtomicU32::new(0));
+            let dropped = Arc::new(AtomicBool::new(false));
+            let gate = Arc::new((Mutex::new(false), Condvar::new()));
+            let (entered, entering) = std::sync::mpsc::channel();
+            let worker_running = Arc::clone(&running);
+            let worker_credits = Arc::clone(&credits);
+            let worker_stop = Arc::clone(&first_stop);
+            let worker_notices = Arc::clone(&notices);
+            let worker_dropped = Arc::clone(&dropped);
+            let worker_gate = Arc::clone(&gate);
+            let worker = thread::spawn(move || {
+                let block = || {
+                    entered.send(()).unwrap();
+                    let open = worker_gate.0.lock().unwrap();
+                    let (_open, timeout) = worker_gate
+                        .1
+                        .wait_timeout_while(open, Duration::from_secs(5), |open| !*open)
+                        .unwrap();
+                    assert!(!timeout.timed_out(), "test must unblock cleanup");
+                };
+                let injector = InputDropAction(Some(|| {
+                    if block_drop {
+                        block();
+                    }
+                    worker_dropped.store(true, Ordering::Release);
+                }));
+                finalize_input(
+                    Err(input_backend_failure()),
+                    injector,
+                    &worker_running,
+                    &worker_stop,
+                    &worker_credits,
+                    |_| {
+                        if !block_drop {
+                            block();
+                        }
+                        Ok(())
+                    },
+                )
+                .report(|_| {
+                    assert!(worker_dropped.load(Ordering::Acquire));
+                    worker_notices.fetch_add(1, Ordering::AcqRel);
+                })
+            });
+            let blocked = entering.recv_timeout(Duration::from_secs(2));
+            let stopped = !running.load(Ordering::Acquire);
+            let credits_closed = credits.state.lock().unwrap().closed;
+            let cause = first_stop.cause();
+            let early_notices = notices.load(Ordering::Acquire);
+            let early_drop = dropped.load(Ordering::Acquire);
+            // Always unblock before asserting, including failed observations.
+            *gate.0.lock().unwrap() = true;
+            gate.1.notify_all();
+            let result = worker.join().unwrap();
+            blocked.unwrap();
+            assert!(stopped && credits_closed);
+            assert_eq!(cause, StopCause::Input);
+            assert_eq!(early_notices, 0);
+            assert!(!early_drop);
+            assert!(result.is_err());
+            assert!(dropped.load(Ordering::Acquire));
+            assert_eq!(notices.load(Ordering::Acquire), 1);
+        }
+    }
+
+    #[test]
+    fn runtime_input_release_or_destructor_panic_skips_notice_and_disables_admission() {
+        for release_panics in [false, true] {
+            let running = Arc::new(AtomicBool::new(true));
+            let credits = Arc::new(FrameCredits::new());
+            let notices = Arc::new(AtomicU32::new(0));
+            let worker_running = Arc::clone(&running);
+            let worker_credits = Arc::clone(&credits);
+            let worker_notices = Arc::clone(&notices);
+            let worker = thread::spawn(move || {
+                let injector = InputDropAction(Some(|| {
+                    // Exactly one panic per fixture: a double panic would abort.
+                    assert!(release_panics, "injector destructor panicked");
+                }));
+                finalize_input(
+                    Err(input_backend_failure()),
+                    injector,
+                    &worker_running,
+                    &FirstStop::new(),
+                    &worker_credits,
+                    |_| {
+                        assert!(!release_panics, "explicit release panicked");
+                        Ok(())
+                    },
+                )
+                .report(|_| {
+                    worker_notices.fetch_add(1, Ordering::AcqRel);
+                })
+            });
+            let admission = Arc::new(AtomicU8::new(VIEWER_IDLE));
+            let slot = ViewerSlot::claim(&admission).unwrap();
+            let error = run_admitted_session(slot, || {
+                cleanup_host_session(
+                    Instant::now() + Duration::from_secs(2),
+                    StopCause::Input,
+                    Ok(()),
+                    worker,
+                    |_| Ok(()),
+                )
+            })
+            .unwrap_err();
+            assert!(error.is::<HostCleanupError>());
+            assert!(error.to_string().contains("input thread panicked"));
+            assert!(ViewerSlot::claim(&admission).is_none());
+            assert!(!running.load(Ordering::Acquire));
+            assert!(credits.state.lock().unwrap().closed);
+            assert_eq!(notices.load(Ordering::Acquire), 0);
+        }
+    }
+
+    #[test]
+    fn runtime_input_notice_ownership_comes_from_record_not_later_cause() {
+        for cause in [
+            StopCause::Input,
+            StopCause::Graceful,
+            StopCause::Capture,
+            StopCause::Sender,
+            StopCause::Clipboard,
+            StopCause::ThreadPanic,
+        ] {
+            let first_stop = FirstStop::new();
+            if cause == StopCause::ThreadPanic {
+                first_stop.record_thread_panic();
+            } else {
+                assert!(first_stop.record(cause));
+            }
+            let exit = finalize_input(
+                Err(input_backend_failure()),
+                (),
+                &AtomicBool::new(true),
+                &first_stop,
+                &FrameCredits::new(),
+                |_| Ok(()),
+            );
+            assert!(exit.notice.is_none(), "earlier {cause:?} owns the stop");
+            assert_eq!(first_stop.cause(), cause);
+        }
+        let first_stop = FirstStop::new();
+        let exit = finalize_input(
+            Err(input_backend_failure()),
+            (),
+            &AtomicBool::new(true),
+            &first_stop,
+            &FrameCredits::new(),
+            |_| {
+                first_stop.record_thread_panic();
+                Ok(())
+            },
+        );
+        assert_eq!(first_stop.cause(), StopCause::ThreadPanic);
+        assert_eq!(exit.notice, Some(RuntimeClose::InputUnavailable));
+
+        for earlier_graceful in [false, true] {
+            let first_stop = FirstStop::new();
+            if earlier_graceful {
+                assert!(first_stop.record(StopCause::Graceful));
+            }
+            let exit = finalize_input(
+                Ok(()),
+                (),
+                &AtomicBool::new(true),
+                &first_stop,
+                &FrameCredits::new(),
+                |_| Err(input_backend_failure()),
+            );
+            assert_eq!(first_stop.cause(), StopCause::Input);
+            assert!(
+                exit.notice.is_none(),
+                "cleanup-only failure cannot become a runtime report"
+            );
+            assert!(exit.result.unwrap_err().is::<HostCleanupError>());
+        }
+    }
+
+    #[test]
+    fn runtime_input_notice_skips_busy_or_poisoned_writer_without_retry() {
+        for poison in [false, true] {
+            let writer = runtime_record_writer([0xb2; 32]);
+            if poison {
+                let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let _held = writer.lock().unwrap();
+                    panic!("writer ownership interrupted");
+                }));
+                assert!(panic.is_err());
+            }
+            let held = (!poison).then(|| writer.lock().unwrap());
+            let running = AtomicBool::new(true);
+            let first_stop = FirstStop::new();
+            let credits = FrameCredits::new();
+            let started = Instant::now();
+            finalize_input(
+                Err(input_backend_failure()),
+                (),
+                &running,
+                &first_stop,
+                &credits,
+                |_| Ok(()),
+            )
+            .report(|close| say_session_close(&writer, close))
+            .unwrap_err();
+            assert!(started.elapsed() < Duration::from_secs(1));
+            drop(held);
+            assert!(lock_writer(&writer).get_ref().get_ref().bytes.is_empty());
+            finalize_input(
+                Err(input_backend_failure()),
+                (),
+                &running,
+                &first_stop,
+                &credits,
+                |_| Ok(()),
+            )
+            .report(|_| panic!("no retry after the writer becomes available"))
+            .unwrap_err();
+        }
+    }
+
     #[test]
     fn local_plan_refinement_and_jpeg_failures_send_legacy_close_without_committing() {
         // Exercise the actual four tagged operations. The JPEG fixture uses
@@ -5829,6 +6371,9 @@ mod tests {
             )
             .into(),
             RuntimeClose::Encoding,
+            RuntimeClose::InputUnavailable,
+            RuntimeClose::KeymapUnavailable,
+            RuntimeClose::KeymapChanged,
         ] {
             for slow_flush in [false, true] {
                 let writer = Mutex::new(SessionWriter::new(
@@ -5879,9 +6424,22 @@ mod tests {
         for _ in 0..16 {
             let running = Arc::new(AtomicBool::new(true));
             let first_stop = Arc::new(FirstStop::new());
-            let barrier = Arc::new(std::sync::Barrier::new(4));
+            let barrier = Arc::new(std::sync::Barrier::new(5));
             let notices = Mutex::new(Vec::new());
             thread::scope(|scope| {
+                scope.spawn(|| {
+                    barrier.wait();
+                    finalize_input(
+                        Err(input_backend_failure()),
+                        (),
+                        &running,
+                        &first_stop,
+                        &FrameCredits::new(),
+                        |_| Ok(()),
+                    )
+                    .report(|close| notices.lock().unwrap().push(close))
+                    .unwrap_err();
+                });
                 scope.spawn(|| {
                     barrier.wait();
                     let result = Err(LocalRuntimeFailure::capture(
@@ -5948,15 +6506,22 @@ mod tests {
                         )
                         .into(),
                         StopCause::Sender => RuntimeClose::Encoding,
+                        StopCause::Input => RuntimeClose::InputUnavailable,
                         other => panic!("unclassified first cause {other:?} cannot notify"),
                     }
                 );
             }
-            let selected = stream_result_for_stop(
+            let stream_result = stream_result_for_stop(
                 first_stop.cause(),
                 Err(io::Error::other("capture primary").into()),
                 Err(io::Error::other("sender primary").into()),
                 Err(io::Error::other("clipboard primary").into()),
+            );
+            let selected = finish_host_session(
+                first_stop.cause(),
+                stream_result,
+                Ok(Err(io::Error::other("input primary").into())),
+                Ok(()),
             )
             .unwrap_err();
             assert_eq!(
@@ -5965,6 +6530,7 @@ mod tests {
                     StopCause::Capture => "capture primary",
                     StopCause::Clipboard => "clipboard primary",
                     StopCause::Sender => "sender primary",
+                    StopCause::Input => "input primary",
                     other => panic!("unexpected cause {other:?}"),
                 }
             );
@@ -6014,6 +6580,7 @@ mod tests {
             None,
             None,
         )
+        .report(|_| panic!("invalid client records cannot report backend loss"))
         .unwrap_err();
         assert!(
             error
@@ -8315,6 +8882,7 @@ mod tests {
                 None,
                 None,
             )
+            .report(|_| panic!("network timeout cannot report backend loss"))
         });
 
         thread::sleep(Duration::from_millis(120));

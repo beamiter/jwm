@@ -453,6 +453,34 @@ reception. Command diagnostics report `peer_closed` with `peer_close_code: null`
 the fixed human reason is not included in JSON and never grants reconnect
 permission. Local cleanup failure keeps priority. The per-instance encoder
 fault fixtures used for regression tests exist only under `cfg(test)` and add
-no production setting or runtime fault behavior. Input/keymap and input-release
-reporting remain separate lifecycle work; the existing ambiguous-EOF caveat
-still applies.
+no production setting or runtime fault behavior. Input/keymap reporting uses
+the distinct post-release lifecycle described below; the existing ambiguous-EOF
+caveat still applies.
+
+### Post-release input and keymap failure reporting
+
+Selected local X11 input failures and confirmed keymap failures may produce a
+fixed legacy Close, without changing v13 or diagnostic schema 2. Classification
+is attached to actual X11 connection/reply failures, local keymap reads and
+confirmed incompatible mappings. Invalid peer input, decoding, network reads,
+source authorization, ACK validation, clipboard ingress and missing-keymap
+invariants are not relabeled as backend failures.
+
+The winning input stop cause is captured before publishing stopped state and
+closing frame credits. Optional notification is derived from the original
+classified error, not from later cleanup wrappers or the current atomic cause.
+Explicit input release and injector destruction finish before the outer input
+worker can attempt any notification. A blocked release or destructor therefore
+cannot postpone stopped-state visibility, and no notice is sent ahead of a
+pending destructor's release retry. Panics retain the existing join/admission
+failure handling rather than emitting a success-like notification.
+
+Cleanup errors remain intact even if a destructor later completes. Final release
+failure after an otherwise normal close does not create a new notice. The
+thread's result type, cleanup reaper and admission poisoning remain unchanged.
+The notification makes no claim that thread-local destructors or other workers
+have exited, or that all held input was successfully released. Other teardown
+paths may close the transport first; no new coordination wait guarantees
+notification delivery. Received legacy Close is terminal with a null peer code;
+local cleanup failure retains diagnostic priority. Offline fake-injector
+release/destructor tests do not replace real X11 input-release acceptance.
