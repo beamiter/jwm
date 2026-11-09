@@ -14638,9 +14638,13 @@ mod fbo_cursor_rect_tests {
     }
     #[test]
     fn malformed_or_overflowing_rectangles_fail_closed() {
+        // Smithay's safe constructor rejects negative dimensions first. Model
+        // malformed stored geometry explicitly so the production gate is tested.
+        let mut negative_width = rect(0, 0, 1, 4);
+        negative_width.size.w = -1;
         for r in [
             rect(0, 0, 0, 4),
-            rect(0, 0, -1, 4),
+            negative_width,
             rect(i32::MAX, 0, 1, 4),
             rect(0, i32::MAX, 4, 1),
         ] {
