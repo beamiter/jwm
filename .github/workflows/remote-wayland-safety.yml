@@ -59,6 +59,11 @@ jobs:
         run: |
           python3 scripts/test-remote-keyboard-keymap.py --self-test
           python3 scripts/test-remote-keyboard-keymap.py
+      - name: Actual owned X11 viewer presentation and scoped pointer interaction
+        run: |
+          export XDG_RUNTIME_DIR="$(mktemp -d)"
+          python3 scripts/test-remote-viewer-e2e.py --self-test
+          python3 scripts/test-remote-viewer-e2e.py
       - name: Native source adapter, transport, and CLI regressions
         run: |
           export XDG_RUNTIME_DIR="$(mktemp -d)"

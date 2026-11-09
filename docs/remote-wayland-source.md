@@ -175,3 +175,26 @@ tests, native production-renderer frame tests, adapter tests and the
 authenticated transport path. Pure coordinate tests or successful compilation
 alone are not evidence of safe pointer delivery. These cloud/offscreen checks
 are not physical DRM, dual-machine or real desktop-viewer acceptance.
+
+### Actual viewer interaction regression
+
+`python3 scripts/test-remote-viewer-e2e.py` is the CI-only actual-viewer runner.
+It creates and later reaps its own isolated Xvfb, removes ambient display
+selection, and requires the exact ignored integration test to execute once.
+It does not operate on a user desktop. The test runs the production viewer,
+authenticated TCP host, native capture renderer and original `wl_pointer`
+recipients. XTEST is used only by this test driver on that owned Xvfb; it does
+not expand host input permission.
+
+The matrix covers actual presented red target pixels and Ready-gated clicks,
+black-bar input, focus loss, viewport change, resize-restore history and a
+view-only session. The viewer must revoke on each real size-change event,
+even if the window returns to its original dimensions in the same event batch.
+Final dimensions alone are not enough to establish the presented coordinate
+mapping. Any revocation in a batch takes precedence over pointer actions.
+
+This matrix is specifically the pointer viewer path. It is not actual keyboard
+viewer acceptance, a physical-display/DRM test, a two-computer network test or
+a proof of usability under WAN latency. A pending-click cancellation caused
+specifically by a newly presented frame remains covered by client state tests,
+not by a distinct actual-window frame-boundary scenario in this matrix.

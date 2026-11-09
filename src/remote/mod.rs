@@ -66,3 +66,6 @@ pub mod x11_capture;
 pub mod x11_input;
 pub mod x11_keymap;
 pub mod x11_viewer;
+
+#[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+mod viewer_test_driver;

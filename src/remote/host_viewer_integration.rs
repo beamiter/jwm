@@ -1,0 +1,504 @@
+//! Real X11 viewer presentation/input -> authenticated TCP -> native Wayland recipient.
+//! All X input is injected only into a runner-owned Xvfb. Production offscreen
+//! rendering is exercised, not two-machine latency or DRM presentation.
+use super::*;
+use crate::backend::wayland::state::JwmClientState;
+use crate::backend::wayland_udev::backend::fulfill_test_toplevel_capture;
+use crate::backend::wayland_udev::compositor::headless_render::HeadlessSmithayGles;
+use crate::backend::wayland_udev::image_copy_capture::{
+    authority_tests::App, init_image_copy_capture, wire_test_client::Server,
+};
+use crate::remote::wayland_capture::WaylandCapture;
+use crate::remote::{
+    client::{ClientOptions, run_client},
+    viewer_test_driver::ViewerTestDriver,
+    window_size::WindowSize,
+};
+use smithay::utils::SERIAL_COUNTER;
+use smithay::{backend::input::InputTime, input::pointer::MotionEvent};
+use std::os::unix::net::UnixStream;
+use std::sync::mpsc;
+
+const TEST_KEY: [u8; 32] = [0x47; 32];
+#[derive(Clone, Copy, Debug)]
+enum Case {
+    Positive,
+    BlackBar,
+    Viewport,
+    ResizeRestore,
+    Focus,
+    ReadOnly,
+}
+struct ShutdownGuard(Arc<AtomicBool>);
+impl Drop for ShutdownGuard {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Release);
+    }
+}
+
+fn options() -> HostOptions {
+    HostOptions {
+        frame_limits: Default::default(),
+        listen: "127.0.0.1:0".into(),
+        key: KeySource::File("/unused-private-test-key".into()),
+        display: None,
+        wayland_select: true,
+        wayland_display: None,
+        fps: 30,
+        jpeg_quality: 90,
+        jpeg_quality_floor: 90,
+        fixed_jpeg_quality: true,
+        max_width: 0,
+        capture_source: CaptureSource::Auto,
+        capture_area: CaptureArea::Root,
+        shared_sources: Vec::new(),
+        scaling: ScalingPolicy::Auto,
+        allow_lan: false,
+        allow_input: false,
+        allow_window_resize: false,
+        allow_wayland_keyboard: false,
+        allow_wayland_pointer: true,
+        allow_clipboard: false,
+        clipboard_mode: Default::default(),
+        clipboard_direction: Default::default(),
+        clipboard_file_limit: 0,
+        once: true,
+        stats_json: false,
+    }
+}
+fn sync(server: &mut Server) {
+    server.roundtrip();
+    server.roundtrip();
+}
+fn bind(server: &mut Server, app: &mut App) -> u32 {
+    let seat = app.client.bind("wl_seat", 7);
+    let pointer = app.client.new_id();
+    app.client.request(seat, 0, &[pointer]);
+    let keyboard = app.client.new_id();
+    app.client.request(seat, 1, &[keyboard]);
+    sync(server);
+    app.client.events();
+    pointer
+}
+fn focused(server: &mut Server, app: &App) {
+    let surface = server.state.surface_for_window(app.window).unwrap();
+    server
+        .state
+        .set_keyboard_focus(Some(surface.clone()), SERIAL_COUNTER.next_serial());
+    let pointer = server.state.seat.get_pointer().unwrap();
+    pointer.motion(
+        &mut server.state,
+        Some((surface, (0.0, 0.0).into())),
+        &MotionEvent {
+            location: (5.0, 5.0).into(),
+            serial: SERIAL_COUNTER.next_serial(),
+            time: InputTime::now(),
+        },
+    );
+    pointer.frame(&mut server.state);
+    sync(server);
+}
+fn received(app: &mut App, pointer: u32) -> Vec<(u16, Vec<u32>)> {
+    let ev = app.client.events();
+    assert!(ev.iter().all(|e| !(e.sender == 1 && e.opcode == 0)));
+    ev.into_iter()
+        .filter(|e| e.sender == pointer)
+        .map(|e| (e.opcode, e.args))
+        .collect()
+}
+type Trace = Arc<Mutex<Vec<String>>>;
+struct Probe {
+    case: Case,
+    trace: Trace,
+    failures: mpsc::Receiver<String>,
+}
+fn note(trace: &Trace, message: impl Into<String>) {
+    trace.lock().unwrap().push(message.into());
+}
+fn pump_until(
+    server: &mut Server,
+    gl: &mut HeadlessSmithayGles,
+    cache: &mut Option<(i32, i32, smithay::backend::renderer::gles::GlesRenderbuffer)>,
+    probe: &Probe,
+    phase: &str,
+    mut done: impl FnMut() -> bool,
+) {
+    eprintln!("actual viewer pointer case={:?} phase={phase}", probe.case);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !done() {
+        if let Ok(error) = probe.failures.try_recv() {
+            panic!(
+                "case={:?} phase={phase}: {error}; trace={:?}",
+                probe.case,
+                probe.trace.lock().unwrap()
+            );
+        }
+        assert!(
+            Instant::now() < deadline,
+            "case={:?} phase={phase}: real actual viewer pointer test timed out; trace={:?}",
+            probe.case,
+            probe.trace.lock().unwrap()
+        );
+        server.roundtrip();
+        fulfill_test_toplevel_capture(
+            &mut gl.renderer,
+            cache,
+            &server.state,
+            server.state.image_capture_pending.as_ref().unwrap(),
+        );
+        server.roundtrip();
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+fn client_options(
+    address: std::net::SocketAddr,
+    display: String,
+    label: String,
+    case: Case,
+) -> ClientOptions {
+    ClientOptions {
+        wayland_keyboard: false,
+        wayland_pointer: !matches!(case, Case::ReadOnly),
+        resize_source: None,
+        window_size: Some(WindowSize {
+            width: 1000,
+            height: 600,
+        }),
+        window_position: None,
+        frame_limits: Default::default(),
+        address: address.to_string(),
+        peer_label: label,
+        key: KeySource::Bytes(TEST_KEY.to_vec()),
+        display: Some(display),
+        view_only: matches!(case, Case::ReadOnly),
+        grab_input: false,
+        clipboard: false,
+        clipboard_mode: Default::default(),
+        clipboard_direction: Default::default(),
+        clipboard_file_limit: 0,
+        escape_key: "Escape".into(),
+    }
+}
+fn drive(label: &str, case: Case, steps: mpsc::Receiver<()>, trace: &Trace) -> RemoteResult<()> {
+    let driver = ViewerTestDriver::connect()?;
+    let window = driver.wait_window(label)?;
+    driver.focus(window)?;
+    driver.wait_red(window)?;
+    note(trace, "real viewer framebuffer red");
+    if matches!(case, Case::ReadOnly) {
+        assert!(!driver.title(window)?.contains("Pointer: Ready"));
+        driver.motion(window, 500, 300)?;
+        driver.click_at_current()?;
+        std::thread::sleep(Duration::from_millis(100));
+        driver.close(window)?;
+        return Ok(());
+    }
+    let ready = driver.wait_ready_after(window, None)?;
+    if matches!(case, Case::BlackBar) {
+        driver.motion(window, 10, 300)?;
+        driver.click_at_current()?;
+        note(trace, "black bar click actually injected");
+    }
+    driver.motion(window, 500, 300)?;
+    steps.recv_timeout(Duration::from_secs(5))?; // native accepted real viewer motion
+    let ready = driver.wait_ready_after(window, Some(ready))?;
+    driver.click_at_current()?;
+    steps.recv_timeout(Duration::from_secs(5))?; // balanced native click, not a UI claim
+    note(
+        trace,
+        "first balanced click received by original native target",
+    );
+    match case {
+        Case::Positive => {
+            let _ = driver.wait_ready_after(window, Some(ready))?;
+            driver.click_at_current()?;
+            steps.recv_timeout(Duration::from_secs(5))?;
+        }
+        Case::Focus => {
+            driver.unfocus()?;
+            driver.wait_title(window, "Pointer: Revoked")?;
+            driver.focus(window)?;
+            driver.motion(window, 500, 300)?;
+            driver.click_at_current()?;
+            driver.wait_title(window, "Pointer: Revoked")?;
+        }
+        Case::Viewport => {
+            driver.resize(window, 900, 600)?;
+            driver.wait_title(window, "Pointer: Revoked")?;
+            driver.resize(window, 1000, 600)?;
+            driver.motion(window, 500, 300)?;
+            driver.click_at_current()?;
+            driver.wait_title(window, "Pointer: Revoked")?;
+        }
+        Case::ResizeRestore => {
+            driver.resize_restore(window, 900, 600, 1000, 600)?;
+            driver.wait_title(window, "Pointer: Revoked")?;
+            driver.motion(window, 500, 300)?;
+            driver.click_at_current()?;
+            driver.wait_title(window, "Pointer: Revoked")?;
+        }
+        Case::BlackBar => {}
+        Case::ReadOnly => unreachable!(),
+    }
+    std::thread::sleep(Duration::from_millis(100));
+    driver.close(window)?;
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires runner-owned Xvfb and production offscreen GL; run via test-remote-viewer-e2e.py"]
+fn actual_viewer_tcp_pointer_presented_scope_and_revocation() {
+    if std::env::var_os("JWM_REMOTE_TEST_VIEWER_DISPLAY").is_none() {
+        assert!(
+            std::env::var_os("JWM_REMOTE_TEST_REQUIRE_VIEWER").is_none(),
+            "owned Xvfb viewer display required"
+        );
+        return;
+    }
+    assert_eq!(
+        std::env::var("JWM_REMOTE_TEST_VIEWER_OWNED").as_deref(),
+        Ok("1")
+    );
+    let display = std::env::var("JWM_REMOTE_TEST_VIEWER_DISPLAY").unwrap();
+    let Some(mut gl) = HeadlessSmithayGles::new() else {
+        panic!("actual viewer test requires production offscreen GL");
+    };
+    for case in [
+        Case::Positive,
+        Case::BlackBar,
+        Case::Viewport,
+        Case::ResizeRestore,
+        Case::Focus,
+        Case::ReadOnly,
+    ] {
+        let mut server = Server::new();
+        server.state.image_capture_pending =
+            Some(init_image_copy_capture(&server.display.handle()));
+        let mut app = App::with_color(&mut server, [0, 0, 255, 255]);
+        let app_pointer = bind(&mut server, &mut app);
+        focused(&mut server, &app);
+        let (native, peer_socket) = UnixStream::pair().unwrap();
+        server
+            .display
+            .handle()
+            .insert_client(native, Arc::new(JwmClientState::default()))
+            .unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let _shutdown_guard = ShutdownGuard(Arc::clone(&shutdown));
+        let (host_done, host_rx) = mpsc::channel();
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let trace: Trace = Arc::new(Mutex::new(Vec::new()));
+        let (failed_tx, failed_rx) = mpsc::channel();
+        let probe = Probe {
+            case,
+            trace: Arc::clone(&trace),
+            failures: failed_rx,
+        };
+        let host_trace = Arc::clone(&trace);
+        let host_failed = failed_tx.clone();
+        let host = std::thread::spawn(move || {
+            note(&host_trace, "host connecting native capture");
+            let result =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> RemoteResult<()> {
+                    let capture = WaylandCapture::connect_test_stream(peer_socket, 1, 0)?;
+                    note(&host_trace, "host native capture selected");
+                    ready_tx.send(())?;
+                    let deadline = Instant::now() + Duration::from_secs(10);
+                    let stream = loop {
+                        if shutdown.load(Ordering::Acquire) || Instant::now() >= deadline {
+                            return Err(io::Error::other(
+                                "private host accept canceled or timed out",
+                            )
+                            .into());
+                        }
+                        match listener.accept() {
+                            Ok((stream, _)) => break stream,
+                            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                                std::thread::sleep(Duration::from_millis(1))
+                            }
+                            Err(error) => return Err(error.into()),
+                        }
+                    };
+                    let peer = authenticate_peer(stream, &TEST_KEY)?;
+                    note(&host_trace, "host authenticated");
+                    serve_authenticated(
+                        peer,
+                        &options(),
+                        &shutdown,
+                        &Mutex::new(Some(GrantedCapture::Wayland(Box::new(capture)))),
+                    )
+                }));
+            let result = match result {
+                Ok(result) => result.map_err(|error| error.to_string()),
+                Err(_) => {
+                    let _ = host_failed.send("host worker panicked".into());
+                    Err("host worker panicked".into())
+                }
+            };
+            note(&host_trace, format!("host finished: {result:?}"));
+            let _ = host_done.send(result);
+        });
+        let mut cache = None;
+        pump_until(
+            &mut server,
+            &mut gl,
+            &mut cache,
+            &probe,
+            "native selection",
+            || match ready_rx.try_recv() {
+                Ok(()) => true,
+                Err(mpsc::TryRecvError::Empty) => false,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    panic!("native selection ended: {:?}", trace.lock().unwrap())
+                }
+            },
+        );
+
+        let mut other = App::with_color(&mut server, [255, 0, 0, 255]);
+        let other_pointer = bind(&mut server, &mut other);
+        focused(&mut server, &app);
+        app.client.events();
+        other.client.events();
+
+        let label = format!("owned-viewer-{}-{case:?}", std::process::id());
+        let opts = client_options(address, display.clone(), label.clone(), case);
+        let client_trace = Arc::clone(&trace);
+        let client_failed = failed_tx.clone();
+        let client = std::thread::spawn(move || {
+            let result =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_client(opts)));
+            let result = match result {
+                Ok(result) => result.map_err(|e| e.to_string()),
+                Err(_) => Err("actual viewer client panicked".into()),
+            };
+            note(&client_trace, format!("client finished {result:?}"));
+            if let Err(error) = &result {
+                let _ = client_failed.send(error.clone());
+            }
+            result
+        });
+        let (steps, step_rx) = mpsc::channel();
+        let driver_trace = Arc::clone(&trace);
+        let driver = std::thread::spawn(move || {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                drive(&label, case, step_rx, &driver_trace)
+            }));
+            let result = match result {
+                Ok(result) => result.map_err(|e| e.to_string()),
+                Err(_) => Err("owned viewer driver panicked".into()),
+            };
+            note(&driver_trace, format!("driver finished {result:?}"));
+            if let Err(error) = &result {
+                let _ = failed_tx.send(error.clone());
+            }
+            result
+        });
+        let mut events = Vec::new();
+        let mut unexpected = Vec::new();
+        let mut notified = 0;
+        pump_until(
+            &mut server,
+            &mut gl,
+            &mut cache,
+            &probe,
+            "real viewer actions",
+            || {
+                events.extend(received(&mut app, app_pointer));
+                unexpected.extend(received(&mut other, other_pointer));
+                let motion = events.iter().any(|(op, _)| *op == 2);
+                let edges = events.iter().filter(|(op, _)| *op == 3).count();
+                if notified == 0 && motion {
+                    steps.send(()).unwrap();
+                    notified = 1;
+                }
+                if notified == 1 && edges >= 2 {
+                    steps.send(()).unwrap();
+                    notified = 2;
+                }
+                if notified == 2 && edges >= 4 {
+                    steps.send(()).unwrap();
+                    notified = 3;
+                }
+                driver.is_finished()
+            },
+        );
+        driver
+            .join()
+            .expect("driver thread panicked")
+            .expect("real viewer driver failed");
+        pump_until(
+            &mut server,
+            &mut gl,
+            &mut cache,
+            &probe,
+            "actual client teardown",
+            || client.is_finished(),
+        );
+        client
+            .join()
+            .expect("client thread panicked")
+            .expect("actual client failed");
+        let mut ended = false;
+        pump_until(
+            &mut server,
+            &mut gl,
+            &mut cache,
+            &probe,
+            "host teardown",
+            || {
+                if let Ok(result) = host_rx.try_recv() {
+                    assert_ne!(
+                        result.as_ref().err().map(String::as_str),
+                        Some("host worker panicked")
+                    );
+                    ended = true;
+                }
+                ended
+            },
+        );
+        host.join().expect("host thread panicked");
+        sync(&mut server);
+        events.extend(received(&mut app, app_pointer));
+        unexpected.extend(received(&mut other, other_pointer));
+        let buttons: Vec<_> = events
+            .iter()
+            .filter(|(op, _)| *op == 3)
+            .map(|(_, args)| (args[2], args[3]))
+            .collect();
+        let clicks = if matches!(case, Case::ReadOnly) {
+            0
+        } else if matches!(case, Case::Positive) {
+            2
+        } else {
+            1
+        };
+        assert_eq!(
+            buttons,
+            [(0x110, 1), (0x110, 0)].repeat(clicks),
+            "case={case:?} trace={trace:?}"
+        );
+        assert!(
+            unexpected.is_empty(),
+            "non-target native recipient received actual viewer action"
+        );
+        if matches!(case, Case::ReadOnly) {
+            assert!(
+                events.is_empty(),
+                "read-only viewer emitted native pointer events"
+            );
+        }
+        for (_, args) in events.iter().filter(|(op, _)| *op == 2) {
+            assert!(
+                args[1] >= 398 * 256
+                    && args[1] <= 402 * 256
+                    && args[2] >= 298 * 256
+                    && args[2] <= 302 * 256,
+                "unexpected mapped coordinate {args:?}"
+            );
+        }
+    }
+}

@@ -10276,3 +10276,7 @@ mod host_keyboard_integration;
 #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
 #[path = "host_pointer_integration.rs"]
 mod host_pointer_integration;
+
+#[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+#[path = "host_viewer_integration.rs"]
+mod host_viewer_integration;

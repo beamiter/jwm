@@ -1244,6 +1244,12 @@ fn viewer_loop(
                     }
                 }
                 viewer.set_wayland_pointer_status(pointer.label(Instant::now()));
+                #[cfg(test)]
+                viewer.observe_pointer_ready(if pointer.fresh(Instant::now()) {
+                    pointer.ready.map(|scope| scope.frame_sequence)
+                } else {
+                    None
+                })?;
             }
         }
         let received_epoch = state.source_epoch.load(Ordering::Acquire);
@@ -1364,6 +1370,12 @@ fn viewer_loop(
                     }
                 }
                 viewer.set_wayland_pointer_status(pointer.label(Instant::now()));
+                #[cfg(test)]
+                viewer.observe_pointer_ready(if pointer.fresh(Instant::now()) {
+                    pointer.ready.map(|scope| scope.frame_sequence)
+                } else {
+                    None
+                })?;
                 events.retain(|event| matches!(event, ViewerEvent::Close));
             }
         }
@@ -1559,6 +1571,12 @@ fn viewer_loop(
                 if pointer.enabled {
                     viewer.wayland_pointer_presented(sequence);
                     viewer.set_wayland_pointer_status(pointer.label(Instant::now()));
+                    #[cfg(test)]
+                    viewer.observe_pointer_ready(if pointer.fresh(Instant::now()) {
+                        pointer.ready.map(|scope| scope.frame_sequence)
+                    } else {
+                        None
+                    })?;
                 }
             }
             viewer.source_presented(presented_scope.1);

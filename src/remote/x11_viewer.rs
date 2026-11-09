@@ -1304,6 +1304,25 @@ impl Viewer {
             self.update_title();
         }
     }
+    /// Test observation only: never read by the authorization or ACK path.
+    #[cfg(test)]
+    pub(super) fn observe_pointer_ready(&self, sequence: Option<u64>) -> RemoteResult<()> {
+        let atom = intern_atom(&self.conn, b"_JWM_TEST_POINTER_READY")?;
+        if let Some(sequence) = sequence {
+            self.conn
+                .change_property32(
+                    PropMode::REPLACE,
+                    self.window,
+                    atom,
+                    AtomEnum::CARDINAL,
+                    &[sequence as u32, (sequence >> 32) as u32],
+                )?
+                .check()?;
+        } else {
+            self.conn.delete_property(self.window, atom)?.check()?;
+        }
+        Ok(())
+    }
     pub(super) fn wayland_pointer_presented(&mut self, sequence: u64) {
         self.pointer_presented = Some(sequence);
     }
@@ -1394,6 +1413,12 @@ impl Viewer {
                 Event::ConfigureNotify(event) if event.window == self.window => {
                     let (new_width, new_height) =
                         configured_viewer_dimensions(event.width, event.height)?;
+                    revoke_scoped_pointer_on_resize(
+                        self.wayland_pointer,
+                        (self.width, self.height),
+                        (new_width, new_height),
+                        &mut result,
+                    );
                     if (new_width, new_height) != (self.width, self.height) {
                         self.width = new_width;
                         self.height = new_height;
@@ -4464,6 +4489,42 @@ fn find_viewer_window(
         }
     }
     Ok(None)
+}
+
+fn revoke_scoped_pointer_on_resize(
+    enabled: bool,
+    old: (u16, u16),
+    new: (u16, u16),
+    events: &mut Vec<ViewerEvent>,
+) {
+    // Record every native transition, not just the final dimensions after a
+    // coalesced event batch. Resize-and-restore must not resurrect a gate.
+    if enabled && old != new {
+        events.push(ViewerEvent::WaylandPointerRevoke);
+    }
+}
+
+#[cfg(test)]
+mod scoped_pointer_resize_history_tests {
+    use super::*;
+
+    #[test]
+    fn resize_restore_in_one_batch_revokes_even_with_equal_final_dimensions() {
+        let mut events = vec![ViewerEvent::WaylandPointerCancel];
+        revoke_scoped_pointer_on_resize(true, (1000, 600), (900, 600), &mut events);
+        revoke_scoped_pointer_on_resize(true, (900, 600), (1000, 600), &mut events);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| **e == ViewerEvent::WaylandPointerRevoke)
+                .count(),
+            2
+        );
+        let mut unchanged = Vec::new();
+        revoke_scoped_pointer_on_resize(true, (1000, 600), (1000, 600), &mut unchanged);
+        revoke_scoped_pointer_on_resize(false, (1000, 600), (900, 600), &mut unchanged);
+        assert!(unchanged.is_empty());
+    }
 }
 
 /// Whether a viewer window title belongs to `peer_label`.
