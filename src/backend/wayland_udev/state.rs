@@ -407,6 +407,11 @@ pub struct JwmWaylandState {
     pub fractional_scale_state: FractionalScaleManagerState,
     pub cursor_shape_state: CursorShapeManagerState,
     pub presentation_state: PresentationState,
+    /// Exact output submissions from an earlier VT tenure can never prove
+    /// presentation after pause/resume. None permanently disables evidence
+    /// after generation exhaustion instead of permitting an ABA wraparound.
+    #[cfg_attr(not(feature = "backend-wayland-udev"), allow(dead_code))]
+    pub(crate) presentation_generation: Option<u64>,
     pub pointer_gestures_state: PointerGesturesState,
     pub single_pixel_buffer_state: SinglePixelBufferState,
     pub content_type_state: ContentTypeState,
@@ -760,7 +765,16 @@ where
     due
 }
 
+fn next_presentation_generation(generation: Option<u64>) -> Option<u64> {
+    generation.and_then(|generation| generation.checked_add(1))
+}
+
 impl JwmWaylandState {
+    #[cfg_attr(not(feature = "backend-wayland-udev"), allow(dead_code))]
+    pub(crate) fn invalidate_presentation_generation(&mut self) {
+        self.presentation_generation = next_presentation_generation(self.presentation_generation);
+    }
+
     #[allow(dead_code)]
     pub(crate) fn set_manager_window_mapped(&mut self, win: WindowId, mapped: bool) {
         if !mapped
@@ -3481,6 +3495,14 @@ impl JwmWaylandState {
         let cursor_shape_state = CursorShapeManagerState::new::<JwmWaylandState>(dh);
         let presentation_state =
             PresentationState::new::<JwmWaylandState>(dh, libc::CLOCK_MONOTONIC as u32);
+        // The same backend capability currently selects the real DRM/KMS
+        // frame pipeline. Nested winit/X11 loops neither fulfill capture nor
+        // provide submission-bound presentation evidence. Remove the global
+        // before dispatch, rather than advertise a protocol that never replies.
+        // Owned protocol tests may explicitly register their own implementation.
+        if !frame_capture_supported {
+            dh.remove_global::<JwmWaylandState>(presentation_state.global());
+        }
         let pointer_gestures_state = PointerGesturesState::new::<JwmWaylandState>(dh);
         let single_pixel_buffer_state = SinglePixelBufferState::new::<JwmWaylandState>(dh);
         let content_type_state = ContentTypeState::new::<JwmWaylandState>(dh);
@@ -3576,6 +3598,7 @@ impl JwmWaylandState {
                 fractional_scale_state,
                 cursor_shape_state,
                 presentation_state,
+                presentation_generation: Some(1),
                 pointer_gestures_state,
                 single_pixel_buffer_state,
                 content_type_state,
@@ -9427,3 +9450,20 @@ mod popup_input_authority_tests {
 #[path = "virtual_keyboard.rs"]
 mod virtual_keyboard;
 use virtual_keyboard::VirtualKeyboardDelivery;
+
+#[cfg(test)]
+mod presentation_generation_tests {
+    use super::next_presentation_generation;
+
+    #[test]
+    fn pause_resume_never_reuses_a_submission_generation() {
+        assert_eq!(next_presentation_generation(Some(1)), Some(2));
+        assert_ne!(next_presentation_generation(Some(1)), Some(1));
+    }
+
+    #[test]
+    fn exhausted_presentation_generation_is_permanently_fail_closed() {
+        assert_eq!(next_presentation_generation(Some(u64::MAX)), None);
+        assert_eq!(next_presentation_generation(None), None);
+    }
+}

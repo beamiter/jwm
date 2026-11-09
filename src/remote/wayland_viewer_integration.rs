@@ -165,16 +165,18 @@ impl Peer {
         self.thread.take().unwrap().join().unwrap();
     }
 }
+// Production nested state intentionally exposes no presentation global. The
+// owned compositor explicitly takes responsibility for controlled GL feedback.
+fn register_test_presentation(server: &mut Server) {
+    server.state.presentation_state = smithay::wayland::presentation::PresentationState::new::<
+        crate::backend::wayland::state::JwmWaylandState,
+    >(&server.display.handle(), libc::CLOCK_MONOTONIC as u32);
+}
 fn server_and_peer(missing_presentation: bool) -> (Server, Peer) {
     let mut server = Server::new();
     server.state.image_capture_pending = Some(init_image_copy_capture(&server.display.handle()));
-    if missing_presentation {
-        server
-            .display
-            .handle()
-            .remove_global::<crate::backend::wayland::state::JwmWaylandState>(
-                server.state.presentation_state.global(),
-            );
+    if !missing_presentation {
+        register_test_presentation(&mut server);
     }
     let (native, stream) = UnixStream::pair().unwrap();
     server
@@ -473,6 +475,7 @@ fn actual_wayland_viewer_tcp_ack_waits_for_presented_not_release() {
         return;
     };
     let mut server = Server::new();
+    register_test_presentation(&mut server);
     server.state.image_capture_pending = Some(init_image_copy_capture(&server.display.handle()));
     let (native, stream) = UnixStream::pair().unwrap();
     server
@@ -704,4 +707,39 @@ fn actual_wayland_viewer_source_switch_rejects_pending_presentation_without_ack(
     for callback in feedback {
         callback.discarded();
     }
+}
+
+#[test]
+fn actual_wayland_viewer_nested_registry_does_not_advertise_unfulfilled_presentation() {
+    let mut server = Server::new();
+    let mut client = server.connect();
+    // A second real registry request gives this test the exact wire globals,
+    // independently of the fixture's cached private registry lookup.
+    let registry = client.new_id();
+    client.request(1, 1, &[registry]);
+    server.roundtrip();
+    let names: Vec<String> = client
+        .events()
+        .into_iter()
+        .filter(|event| event.sender == registry && event.opcode == 0)
+        .map(|event| {
+            assert!(event.args.len() >= 3);
+            let len = usize::try_from(event.args[1]).unwrap();
+            let bytes: Vec<u8> = event.args[2..]
+                .iter()
+                .flat_map(|word| word.to_ne_bytes())
+                .collect();
+            assert!(len > 0 && len <= bytes.len());
+            assert_eq!(bytes[len - 1], 0);
+            String::from_utf8(bytes[..len - 1].to_vec()).unwrap()
+        })
+        .collect();
+    assert!(
+        names.iter().any(|name| name == "wl_compositor"),
+        "real registry positive control"
+    );
+    assert!(
+        !names.iter().any(|name| name == "wp_presentation"),
+        "nested backend must not advertise feedback it cannot complete"
+    );
 }

@@ -4136,6 +4136,8 @@ impl UdevBackend {
                 .handle()
                 .insert_source(notifier, move |event, &mut (), state| match event {
                     SessionEvent::PauseSession => {
+                        // Queue-bound presentation proof cannot survive VT ABA.
+                        state.invalidate_presentation_generation();
                         crate::backend::wayland_udev::image_copy_capture::set_toplevel_capture_block(state,crate::backend::wayland_udev::image_copy_capture::CAPTURE_BLOCK_INACTIVE,true);
                         cancel_native_swipe(state);
                         state.gesture_swipe_device = None;

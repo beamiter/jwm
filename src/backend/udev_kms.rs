@@ -1,3 +1,7 @@
+#[path = "presentation_batch.rs"]
+mod presentation_batch;
+use presentation_batch::{Completion, PresentationBatch, Submission};
+
 #[path = "udev_screenshot_route.rs"]
 mod screenshot_route;
 
@@ -54,7 +58,7 @@ use smithay::utils::{Buffer as BufferCoord, Clock, Monotonic, Size};
 use smithay::utils::{DeviceFd, Physical, Point, Rectangle, Scale, Transform};
 use smithay::wayland::compositor::{TraversalAction, with_states, with_surface_tree_downward};
 use smithay::wayland::dmabuf::get_dmabuf;
-use smithay::wayland::presentation::{PresentationFeedbackCachedState, Refresh};
+use smithay::wayland::presentation::{PresentationFeedbackCachedState, PresentationFeedbackCallback, Refresh};
 use smithay::wayland::shell::wlr_layer::Layer as WlrLayer;
 use smithay::wayland::shell::xdg::SurfaceCachedState;
 
@@ -120,6 +124,9 @@ struct KmsOutputState {
 
     frame_pending: bool,
     frame_pending_boundary: Option<FrameQueueBoundary>,
+    presentation_output_generation: u64,
+    presentation_submission: Option<Submission>,
+    presentation_uncertain: bool,
     /// A watchdog/DPMS cancellation can race a late page-flip event. The first
     /// subsequent event re-establishes ordering but is not trusted as a color
     /// delivery observation.
@@ -2160,8 +2167,10 @@ impl FrameColorTransaction {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 struct QueuedFrameData {
+    presentation: Option<PresentationBatch<PresentationFeedbackCallback>>,
+    presentation_generation: Option<u64>,
     color_transaction: Option<FrameColorTransaction>,
     companion: Option<crate::backend::compositor_common::companion_scene::FrameEvidence>,
     color_delivery: Option<ColorDeliveryPlan>,
@@ -3037,12 +3046,62 @@ fn linear_tail_blocker_names(
     names
 }
 
+// Identities never reuse a CRTC or output name after hotplug/reconstruction.
+fn next_presentation_identity() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    // compare_exchange is available at the Rust 1.89 MSRV; try_update is not.
+    let mut current = NEXT.load(Ordering::Relaxed);
+    loop {
+        let next = current
+            .checked_add(1)
+            .expect("presentation identity exhausted");
+        match NEXT.compare_exchange_weak(current, next, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => return current,
+            Err(observed) => current = observed,
+        }
+    }
+}
+
+fn take_rendered_presentation_callbacks(
+    roots: &[WlSurface],
+    render_states: &smithay::backend::renderer::element::RenderElementStates,
+    proven_route: bool,
+) -> Vec<PresentationFeedbackCallback> {
+    let mut sampled = Vec::new();
+    for root in roots {
+        with_surface_tree_downward(
+            root,
+            (),
+            |_, _, _| TraversalAction::DoChildren(()),
+            |surface, states, _| {
+                let visible = proven_route
+                    && render_states
+                        .element_render_state(surface)
+                        .is_some_and(|r| {
+                            r.visible_area > 0 && r.presentation_state !=
+                        smithay::backend::renderer::element::RenderElementPresentationState::Skipped
+                        });
+                let mut cached = states.cached_state.get::<PresentationFeedbackCachedState>();
+                for callback in cached.current().callbacks.drain(..) {
+                    if visible {
+                        sampled.push(callback);
+                    } else {
+                        callback.discarded();
+                    }
+                }
+            },
+            |_, _, _| true,
+        );
+    }
+    sampled
+}
+
 impl KmsState {
     fn deliver_frame_callbacks(
         out: &mut KmsOutputState,
         flush_tx: &Sender<()>,
         flush_pending: &AtomicBool,
-        presentation_time: Option<std::time::Duration>,
+        _presentation_time: Option<std::time::Duration>,
     ) {
         if !out.send_frame_callbacks {
             return;
@@ -3064,7 +3123,6 @@ impl KmsState {
             reason = "Wayland Weak hashes by stable protocol-object identity; its internal liveness flag is not part of Hash or Eq"
         )]
         let visible = &out.frame_callback_visible;
-        let refresh = out.refresh_interval;
         for root in &out.frame_callback_roots {
             let mut root_tree_visible = visible.contains(&root.downgrade());
             if !root_tree_visible {
@@ -3081,32 +3139,8 @@ impl KmsState {
                 );
             }
 
-            // Send presentation feedback for wp_presentation protocol when this
-            // callback is tied to an actual vblank. Empty-damage callback
-            // delivery below intentionally omits presentation feedback.
-            if let Some(vblank_time) = presentation_time {
-                with_surface_tree_downward(
-                    root,
-                    (),
-                    |_, _, _| TraversalAction::DoChildren(()),
-                    |_surface, states, _| {
-                        let mut cached =
-                            states.cached_state.get::<PresentationFeedbackCachedState>();
-                        let feedback = cached.current();
-                        for cb in feedback.callbacks.drain(..) {
-                            cb.presented(
-                                &output,
-                                vblank_time,
-                                Refresh::fixed(refresh),
-                                0,
-                                smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind::Vsync
-                                    | smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind::HwClock,
-                            );
-                        }
-                    },
-                    |_, _, _| true,
-                );
-            }
+            // Presentation feedback is owned by the exact submitted batch,
+            // never by the surface's potentially newer current commit here.
 
             // wp-fifo/wp-commit-timing are intentionally advertised in
             // unmanaged mode; that mode installs no Smithay barriers to
@@ -3291,6 +3325,7 @@ impl KmsState {
         if !out.dpms_off {
             if out.frame_pending {
                 out.color_delivery_observation_uncertain = true;
+                out.presentation_uncertain = true;
             }
             out.color_delivery_retry_required = true;
             self.needs_render = true;
@@ -3389,10 +3424,12 @@ impl KmsState {
             out.frame_pending = false;
             out.frame_pending_since = None;
             out.frame_pending_boundary = None;
+            out.presentation_submission = None;
             // Unknown whether it reached the screen: the next locked frame
             // confirms instead.
             out.frame_pending_lock_epoch = None;
             out.color_delivery_observation_uncertain = true;
+            out.presentation_uncertain = true;
             out.color_delivery_retry_required = true;
             out.color_delivery.invalidate();
             recovered += 1;
@@ -5092,8 +5129,10 @@ impl KmsState {
                 self.outputs[output_idx].frame_pending = false;
                 self.outputs[output_idx].frame_pending_since = None;
                 self.outputs[output_idx].frame_pending_boundary = None;
+                self.outputs[output_idx].presentation_submission = None;
                 self.outputs[output_idx].frame_pending_lock_epoch = None;
                 self.outputs[output_idx].color_delivery_observation_uncertain = true;
+                self.outputs[output_idx].presentation_uncertain = true;
             }
             // Change the connector power state first. If that write fails the
             // still-visible scanout must retain its matching LUT/CTM instead
@@ -8439,6 +8478,9 @@ impl KmsState {
                 drm_output,
                 frame_pending: false,
                 frame_pending_boundary: None,
+                presentation_output_generation: next_presentation_identity(),
+                presentation_submission: None,
+                presentation_uncertain: false,
                 color_delivery_observation_uncertain: false,
                 color_delivery_retry_required: false,
                 color_delivery: OutputColorDeliveryTracker::default(),
@@ -8553,7 +8595,12 @@ impl KmsState {
                 DrmEvent::VBlank(crtc) => {
                     let presented = {
                         let mut kms = handle_clone.borrow_mut();
-                        kms.on_vblank(crtc, metadata, state.color_manager.as_ref());
+                        kms.on_vblank(
+                            crtc,
+                            metadata,
+                            state.color_manager.as_ref(),
+                            state.presentation_generation,
+                        );
                         kms.take_presented_locked_frames()
                     };
                     for (output_name, epoch) in presented {
@@ -8693,6 +8740,7 @@ impl KmsState {
         let im_popups = state.im_popup_positions();
         let mut any_skipped = false;
         let mut any_failed = false;
+        let unambiguous_presentation_output = self.outputs.len() == 1;
         for out_idx in 0..self.outputs.len() {
             // Outputs marked soft-disabled by wlr-output-management
             // `disable_head` Apply stop receiving frames but keep their
@@ -9807,6 +9855,26 @@ impl KmsState {
                 frame_flags,
             ) {
                 Ok(res) => {
+                    // Render and callback extraction occur without dispatching
+                    // another client commit. FBO composition does not expose
+                    // per-surface sampled state; multi-output ownership is not
+                    // proven in this first implementation. Both fail closed.
+                    let callbacks = take_rendered_presentation_callbacks(
+                        &frame_roots,
+                        &res.states,
+                        unambiguous_presentation_output && !use_compositor && !res.is_empty,
+                    );
+                    let queue_boundary = FrameQueueBoundary::now();
+                    let submission = Submission {
+                        output_generation: out.presentation_output_generation,
+                        serial: next_presentation_identity(),
+                    };
+                    let presentation = PresentationBatch::new(
+                        submission,
+                        queue_boundary.monotonic,
+                        callbacks,
+                        PresentationFeedbackCallback::discarded,
+                    );
                     let client_direct_scanout = client_direct_scanout_presented(
                         direct_scanout_eligible,
                         matches!(
@@ -9854,6 +9922,8 @@ impl KmsState {
                     };
                     let out = &mut self.outputs[out_idx];
                     let frame_data = QueuedFrameData {
+                        presentation: Some(presentation),
+                        presentation_generation: state.presentation_generation,
                         color_transaction: Some(FrameColorTransaction {
                             generation: out.desired_color_generation,
                             hdr: out.installed_hdr_metadata_blob.is_some(),
@@ -9871,9 +9941,8 @@ impl KmsState {
                                 ticket
                             }),
                     };
-                    // Sample both DRM timestamp domains before submitting: a
-                    // flip can happen immediately after the ioctl returns.
-                    let queue_boundary = FrameQueueBoundary::now();
+                    // The boundary was sampled before extracting this batch;
+                    // callbacks travel only with this exact framebuffer.
                     if let Err(err) = out
                         .drm_output
                         .queue_frame_with_properties(frame_data, properties)
@@ -9924,6 +9993,7 @@ impl KmsState {
                         out.frame_pending = true;
                         out.frame_pending_since = Some(std::time::Instant::now());
                         out.frame_pending_boundary = Some(queue_boundary);
+                        out.presentation_submission = Some(submission);
                         out.frame_pending_lock_epoch =
                             state.session_locked.then_some(state.session_lock_epoch);
                         out.send_frame_callbacks = true;
@@ -9980,6 +10050,7 @@ impl KmsState {
         crtc: crtc::Handle,
         metadata: &mut Option<DrmEventMetadata>,
         color_manager: Option<&crate::backend::wayland_udev::color_management::ColorManagerState>,
+        presentation_generation: Option<u64>,
     ) {
         let flush_tx = self.flush_tx.clone();
         let flush_pending = self.flush_pending.clone();
@@ -10021,13 +10092,33 @@ impl KmsState {
         let (submitted_color_delivery, retry_color_delivery_observation) = {
             let out = &mut self.outputs[output_idx];
             let uncertain = out.color_delivery_observation_uncertain;
-            let submitted_frame = match out.drm_output.frame_submitted() {
+            let mut submitted_frame = match out.drm_output.frame_submitted() {
                 Ok(frame) => frame,
                 Err(err) => {
                     log::debug!("drm frame_submitted error: {err:?}");
                     None
                 }
             };
+            if let Some(frame) = submitted_frame.as_mut()
+                && let Some(batch) = frame.presentation.take()
+            {
+                if let Some(submission) = out.presentation_submission.take() {
+                    let evidence = Completion {
+                        submission,
+                        monotonic_time: presentation_time,
+                        uncertain: out.presentation_uncertain
+                            || uncertain
+                            || presentation_generation.is_none()
+                            || frame.presentation_generation != presentation_generation,
+                    };
+                    batch.complete(evidence, |callback, time| {
+                        callback.presented(&out.output, time, Refresh::Unknown,
+                            metadata.as_ref().map_or(0, |m| u64::from(m.sequence)),
+                            smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind::HwClock);
+                    });
+                }
+                // Missing queue identity drops the batch and discards.
+            }
             if !uncertain {
                 if let Some(transaction) = submitted_frame
                     .as_ref()
@@ -10071,10 +10162,12 @@ impl KmsState {
                     );
                 }
             }
+            out.presentation_uncertain = false;
             let observation = submitted_color_delivery_observation(submitted_frame, uncertain);
             out.frame_pending = false;
             out.frame_pending_since = None;
             out.frame_pending_boundary = None;
+            out.presentation_submission = None;
             if let Some(epoch) = out.frame_pending_lock_epoch.take() {
                 self.presented_locked_frames
                     .push((out.output_name.clone(), epoch));
@@ -13311,6 +13404,8 @@ mod compositor_texture_ownership_tests {
         // fail-closed and arm a replacement frame.
         let (first, retry) = submitted_color_delivery_observation(
             Some(QueuedFrameData {
+                presentation: None,
+                presentation_generation: None,
                 color_transaction: None,
                 companion: None,
                 color_delivery: Some(plan.clone()),
@@ -13322,6 +13417,8 @@ mod compositor_texture_ownership_tests {
 
         let (second, retry) = submitted_color_delivery_observation(
             Some(QueuedFrameData {
+                presentation: None,
+                presentation_generation: None,
                 color_transaction: None,
                 companion: None,
                 color_delivery: Some(plan),

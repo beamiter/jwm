@@ -67,3 +67,22 @@ presentation. JWM's existing production presentation batching is a separate
 integration concern: a vblank must not acknowledge a newer surface commit that
 was not part of the completed output submission. Protocol-level viewer tests do
 not replace that audit or a real hardware acceptance run.
+
+## Current JWM compositor compatibility
+
+The viewer requires truthful presentation feedback, not just a compositor that
+advertises the protocol. JWM's nested backends do not advertise `wp_presentation`
+until they can forward real host presentation evidence. In the initial KMS
+batching implementation, only exactly one configured output object (disabled
+outputs also count), with individually proven surface render elements, can
+acknowledge a frame. FBO-composited content and
+multi-output frames are conservatively discarded instead of being reported as
+presented. This includes common/default composited configurations: the native
+viewer will stop rather than manufacture a display ACK. The existing X11 viewer
+remains the default usable path while these production rendering paths are
+integrated and validated.
+
+KMS feedback belongs to the exact queued submission and is discarded on an
+invalid output/VT generation, uncertain completion time, queue failure, or
+unsubmitted batch drop. Pure batch tests and controlled protocol tests do not
+constitute a real DRM pageflip acceptance run.

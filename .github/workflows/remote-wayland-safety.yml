@@ -43,6 +43,10 @@ jobs:
           cargo clippy --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib --bin jwm-remote --tests --no-deps -- -D warnings
       - name: Compile nested Wayland input revocation paths
         run: cargo check --locked --no-default-features --features remote-wayland,backend-wayland-nested --lib
+      - name: Presentation submission ownership and VT generation regressions
+        run: |
+          cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib presentation_batch::tests
+          cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib presentation_generation_tests::
       - name: Actual scoped keyboard lease recipient and revocation tests
         run: |
           export XDG_RUNTIME_DIR="$(mktemp -d)"
