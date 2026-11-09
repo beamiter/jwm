@@ -406,6 +406,7 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
     *stage = ClientStage::Negotiate;
     eprintln!("jwm-remote: connection opened; authenticating and negotiating permissions");
     let (mut reader, writer, hello) = negotiate_session(
+        options.resize_source.is_some(),
         stream,
         &key,
         request_input,
@@ -854,6 +855,7 @@ fn finish_session(
 }
 
 fn negotiate_session(
+    request_window_resize: bool,
     mut stream: TcpStream,
     key: &[u8],
     request_input: bool,
@@ -898,6 +900,7 @@ fn negotiate_session(
         MessageKind::Hello,
         &ClientHello {
             stream: super::messages::StreamCapabilities {
+                window_resize: request_window_resize,
                 frame_limits,
                 clipboard_content: requested_policy.0,
                 clipboard_directions: requested_policy.1,
@@ -926,6 +929,9 @@ fn negotiate_session(
     validate_server_frame_limits(&hello, frame_limits)?;
     if hello.stream.cursor == super::messages::CursorMode::Independent && !request_cursor_plane {
         return Err(invalid_data("host enabled independent cursor without viewer support").into());
+    }
+    if hello.stream.window_resize && !request_window_resize {
+        return Err(invalid_data("host granted unrequested native resize capability").into());
     }
     validate_server_capabilities(
         &hello,
@@ -4828,6 +4834,7 @@ pub(super) mod tests {
         let stream = TcpStream::connect(address).unwrap();
         let started = Instant::now();
         let result = negotiate_session(
+            false,
             stream,
             &TEST_PSK,
             false,
@@ -4885,6 +4892,7 @@ pub(super) mod tests {
         let stream = TcpStream::connect(address).unwrap();
         let started = Instant::now();
         let result = negotiate_session(
+            false,
             stream,
             &TEST_PSK,
             false,
@@ -4937,6 +4945,7 @@ pub(super) mod tests {
         });
         let stream = TcpStream::connect(address).unwrap();
         let result = negotiate_session(
+            false,
             stream,
             &TEST_PSK,
             false,
@@ -4955,6 +4964,64 @@ pub(super) mod tests {
         assert!(
             error.to_string().contains("too large") || error.to_string().contains("payload"),
             "{error}"
+        );
+    }
+
+    #[test]
+    fn explicit_resize_negotiation_never_accepts_an_unrequested_grant() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let keys = server_handshake(&mut stream, &TEST_PSK, [0x41; 32]).unwrap();
+            let reader_stream = stream.try_clone().unwrap();
+            let (receive_key, send_key) = keys.into_server();
+            let mut reader = SessionReader::new(reader_stream, receive_key);
+            let mut writer = SessionWriter::new(stream, send_key);
+            let (kind, payload) = reader.read_message().unwrap();
+            assert_eq!(kind, MessageKind::Hello);
+            assert!(!ClientHello::decode(&payload).unwrap().stream.window_resize);
+            writer
+                .write_message(
+                    MessageKind::HelloAck,
+                    &ServerHello {
+                        stream: super::super::messages::StreamCapabilities {
+                            window_resize: true,
+                            ..Default::default()
+                        },
+                        pointer_enabled: false,
+                        keyboard_enabled: false,
+                        clipboard_enabled: false,
+                        clipboard_files_enabled: false,
+                    }
+                    .encode(),
+                )
+                .unwrap();
+            writer.flush().unwrap();
+        });
+        let stream = TcpStream::connect(address).unwrap();
+        let result = negotiate_session(
+            false,
+            stream,
+            &TEST_PSK,
+            false,
+            false,
+            0,
+            ClipboardMode::All,
+            ClipboardDirection::Both,
+            &KeymapTable::empty(),
+            None,
+            false,
+            Default::default(),
+            Duration::from_secs(5),
+        );
+        server.join().unwrap();
+        assert!(
+            result
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("unrequested native resize")
         );
     }
 
@@ -4998,6 +5065,7 @@ pub(super) mod tests {
             });
             let stream = TcpStream::connect(address).unwrap();
             let result = negotiate_session(
+                false,
                 stream,
                 &TEST_PSK,
                 false,
@@ -5053,6 +5121,7 @@ pub(super) mod tests {
             assert_eq!(kind, MessageKind::Hello);
             let requested = ClientHello::decode(&payload).unwrap();
             assert_eq!(requested.stream.frame_limits, offered);
+            assert!(requested.stream.window_resize);
             assert_eq!(requested.initial_viewport, Some((1280, 720)));
             assert_eq!(
                 requested.stream.cursor,
@@ -5064,6 +5133,7 @@ pub(super) mod tests {
                     &ServerHello {
                         stream: super::super::messages::StreamCapabilities {
                             frame_limits: selected,
+                            window_resize: true,
                             ..Default::default()
                         },
                         pointer_enabled: false,
@@ -5082,6 +5152,7 @@ pub(super) mod tests {
 
         let stream = TcpStream::connect(address).unwrap();
         let (mut reader, _writer, hello) = negotiate_session(
+            true,
             stream,
             &TEST_PSK,
             false,
@@ -5097,6 +5168,7 @@ pub(super) mod tests {
         )
         .unwrap();
         assert_eq!(hello.stream.frame_limits, selected);
+        assert!(hello.stream.window_resize);
         assert!(!hello.pointer_enabled);
         assert!(!hello.keyboard_enabled);
         let (kind, payload) = reader.read_message().unwrap();
