@@ -183,6 +183,9 @@ mod native {
     use crate::backend::wayland_udev::image_copy_capture::{
         authority_tests::App, wire_test_client::Server,
     };
+    use crate::sync_ext::MutexExt;
+    use smithay::backend::renderer::buffer_has_alpha;
+    use smithay::backend::renderer::utils::RendererSurfaceStateUserData;
     use smithay::wayland::{
         compositor::with_states,
         presentation::{PresentationFeedbackCachedState, PresentationState},
@@ -191,6 +194,10 @@ mod native {
     use std::os::fd::AsRawFd;
 
     fn commit(server: &mut Server, app: &mut App, color: [u8; 4], format: u32) -> u32 {
+        let before_epoch = server
+            .state
+            .surface_commit_epoch(app.window)
+            .expect("mapped native commit epoch");
         let presentation = app.client.bind("wp_presentation", 1);
         let shm = app.client.bind("wl_shm", 1);
         let fd = nix::sys::memfd::memfd_create(
@@ -213,14 +220,63 @@ mod native {
         app.client.request(app.surface, 1, &[buffer, 0, 0]);
         app.client.request(app.surface, 2, &[0, 0, 16, 12]);
         app.client.request(app.surface, 6, &[]);
-        server.roundtrip();
-        assert!(
-            app.client
-                .events()
+        // Receiving SCM_RIGHTS can end one dispatch before the later buffer,
+        // feedback and attach/commit requests. A real sync after the commit is
+        // the fence; neither one dispatch nor a fixed sleep proves it applied.
+        let sync = app.client.new_id();
+        app.client.request(1, 0, &[sync]);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            server.roundtrip();
+            let events = app.client.events();
+            assert!(
+                events
+                    .iter()
+                    .all(|event| !(event.sender == 1 && event.opcode == 0)),
+                "native commit protocol error before sync"
+            );
+            if events
                 .iter()
-                .all(|event| !(event.sender == 1 && event.opcode == 0)),
-            "no native protocol error"
+                .any(|event| event.sender == sync && event.opcode == 0)
+            {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "native commit wl_display.sync not completed"
+            );
+            std::thread::yield_now();
+        }
+        assert!(
+            server
+                .state
+                .surface_commit_epoch(app.window)
+                .is_some_and(|epoch| epoch > before_epoch),
+            "sync must fence a new actual commit"
         );
+        let surface = server.state.toplevels[&app.window].wl_surface();
+        with_states(surface, |states| {
+            assert_eq!(
+                states
+                    .cached_state
+                    .get::<PresentationFeedbackCachedState>()
+                    .current()
+                    .callbacks
+                    .len(),
+                1,
+                "new feedback must be committed before prepare"
+            );
+            let data = states
+                .data_map
+                .get::<RendererSurfaceStateUserData>()
+                .expect("real on_commit buffer data")
+                .lock_safe();
+            assert_eq!(
+                buffer_has_alpha(&**data.buffer().expect("new committed SHM buffer")),
+                Some(format == 0),
+                "prepare must inspect the new buffer format, not cached initial ARGB"
+            );
+        });
         feedback
     }
     fn setup() -> (Server, App) {
