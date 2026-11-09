@@ -5,6 +5,8 @@ use crate::backend::wayland_udev::color_management::ParametricParams;
 use crate::backend::wayland_udev::color_pipeline::ColorTransform;
 use crate::sync_ext::MutexExt;
 
+#[path = "../fbo_presentation.rs"]
+pub(crate) mod fbo_presentation;
 #[path = "../udev_kms.rs"]
 mod kms;
 use self::kms::KmsState;
@@ -6321,6 +6323,22 @@ impl Backend for UdevBackend {
         self.minimized_capture_frame = self.minimized_capture_frame.saturating_add(1);
         let minimized_capture_frame = self.minimized_capture_frame;
 
+        // Capture callbacks only from a real current import. The owned candidate
+        // discards on every failed/unproven path; this function never dispatches
+        // client commits between import, compositor sampling and receipt binding.
+        let mut fbo_candidate = self.kms.as_ref().and_then(|kms| {
+            let mut kms = kms.borrow_mut();
+            if !kms.single_presentation_output() {
+                return None;
+            }
+            kms.with_gles_renderer(|renderer| {
+                fbo_presentation::prepare(&self.state, renderer, scene)
+            })
+        });
+        if let Some(kms) = &self.kms {
+            kms.borrow_mut().set_fbo_presentation(None);
+        }
+
         // Phase 1: Import surface textures into GL cache (borrow kms only, no compositor borrow).
         // Reuse a persistent scratch buffer (taken out so we can freely borrow
         // other self fields below) instead of allocating one each frame.
@@ -7321,6 +7339,8 @@ impl Backend for UdevBackend {
                     staged_external_draws,
                     internalized_classes[kms::ExternalElementClass::Cursor.index()],
                 );
+                compositor
+                    .set_presentation_candidate(fbo_candidate.as_ref().map(|p| p.candidate()));
                 let rendered = kms
                     .borrow_mut()
                     .with_renderer(|gl| {
@@ -7339,6 +7359,13 @@ impl Backend for UdevBackend {
                 if crf_log_this {
                     log::debug!("[crf] render_frame returned {rendered}");
                 }
+                let proof = fbo_candidate.take().and_then(|prepared| {
+                    compositor
+                        .take_presentation_receipt()
+                        .and_then(|receipt| prepared.finish(receipt, &self.state))
+                });
+                kms.borrow_mut().set_fbo_presentation(proof);
+
                 if rendered {
                     // The compositor texture now carries exactly the staged
                     // classes (its draw predicate matches the staging gate:

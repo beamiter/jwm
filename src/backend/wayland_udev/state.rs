@@ -777,6 +777,11 @@ impl JwmWaylandState {
 
     #[allow(dead_code)]
     pub(crate) fn set_manager_window_mapped(&mut self, win: WindowId, mapped: bool) {
+        if self.mapped_windows.contains(&win) != mapped
+            || self.manager_unmapped_windows.contains(&win) == mapped
+        {
+            self.invalidate_presentation_generation();
+        }
         if !mapped
             && crate::backend::wayland_udev::image_copy_capture::stop_toplevel_capture_sessions(
                 self, win,
@@ -798,6 +803,9 @@ impl JwmWaylandState {
     }
 
     fn take_window_mapping(&mut self, win: WindowId) -> bool {
+        // Invalidate before mutation: per-window commit counters may reset on
+        // unmap, so checking only current mapped state cannot detect an ABA.
+        self.invalidate_presentation_generation();
         if crate::backend::wayland_udev::image_copy_capture::stop_toplevel_capture_sessions(
             self, win,
         ) {
@@ -1467,6 +1475,7 @@ impl SessionLockHandler for JwmWaylandState {
         // or gave its request up: the spec lets a new client take over
         // without an `unlock`. Drop stale surfaces so the new locker owns
         // every output cleanly.
+        self.invalidate_presentation_generation();
         self.active_session_lock = None;
         self.lock_surfaces.clear();
         self.session_locked = true;
@@ -1512,6 +1521,7 @@ impl SessionLockHandler for JwmWaylandState {
 
     fn unlock(&mut self) {
         info!("[udev/wayland] session unlocked");
+        self.invalidate_presentation_generation();
         self.session_locked = false;
         self.lock_surfaces.clear();
         self.active_session_lock = None;
@@ -2766,6 +2776,7 @@ impl XwmHandler for JwmWaylandState {
         self.window_is_fullscreen.insert(win_id, false);
         self.window_stack.push(win_id);
 
+        self.invalidate_presentation_generation();
         self.mapped_windows.insert(win_id);
         self.needs_redraw = true;
 
@@ -4813,7 +4824,9 @@ impl CompositorHandler for JwmWaylandState {
         if let Some(win) = win {
             match buf_state {
                 BufferState::NewBuffer => {
-                    if self.manager_allows_surface_map(win) && self.mapped_windows.insert(win) {
+                    if self.manager_allows_surface_map(win) && !self.mapped_windows.contains(&win) {
+                        self.invalidate_presentation_generation();
+                        self.mapped_windows.insert(win);
                         info!("[udev/wayland] window mapped win={win:?}");
 
                         let offset = self.surface_window_geometry_loc(surface);

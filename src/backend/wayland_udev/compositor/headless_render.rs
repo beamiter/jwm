@@ -11995,3 +11995,6 @@ fn wayland_hdr_editor_chrome_and_local_cues_preserve_capture_pixels() {
         }
     }
 }
+
+#[path = "fbo_provenance_tests.rs"]
+mod fbo_provenance_tests;

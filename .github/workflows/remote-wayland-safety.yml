@@ -47,6 +47,10 @@ jobs:
         run: |
           cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib backend::wayland_udev::backend::kms::
           cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib presentation_generation_tests::
+      - name: Actual FBO sampling provenance and callback isolation
+        run: |
+          export XDG_RUNTIME_DIR="$(mktemp -d)"
+          env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib fbo_provenance -- --test-threads=1 --nocapture
       - name: Actual scoped keyboard lease recipient and revocation tests
         run: |
           export XDG_RUNTIME_DIR="$(mktemp -d)"

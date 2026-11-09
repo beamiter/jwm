@@ -34,7 +34,7 @@ use smithay::backend::renderer::element::surface::{
     WaylandSurfaceRenderElement, render_elements_from_surface_tree,
 };
 use smithay::backend::renderer::element::texture::TextureRenderElement;
-use smithay::backend::renderer::element::{AsRenderElements, Id, Kind};
+use smithay::backend::renderer::element::{AsRenderElements, Element, Id, Kind};
 use smithay::backend::renderer::gles::GlesRenderbuffer;
 use smithay::backend::renderer::gles::{GlesRenderer, GlesTexture};
 use smithay::backend::renderer::utils::{RendererSurfaceStateUserData, import_surface_tree};
@@ -2773,6 +2773,7 @@ pub(super) struct KmsState {
 
     pub(super) needs_render: bool,
     compositor_texture_cache: Option<(u32, u32, u32, u32, u64, GlesTexture)>,
+    fbo_presentation: Option<super::fbo_presentation::Proof>,
     /// Same wrapper cache for the compositor's dedicated capture-view texture,
     /// used only while an offscreen capture render runs.
     capture_texture_cache: Option<(u32, u32, u32, u32, u64, GlesTexture)>,
@@ -3062,6 +3063,24 @@ fn next_presentation_identity() -> u64 {
     }
 }
 
+// First FBO proof supports no output slicing, scaling or rotation. A visible
+// whole-texture element alone cannot establish that the sampled window lies
+// inside the particular physical output's slice of a global FBO.
+fn fbo_output_domain_is_exact(
+    origin: (i32, i32),
+    mode: (i32, i32),
+    fbo: (u32, u32),
+    scale: f64,
+    transform: Transform,
+) -> bool {
+    origin == (0, 0)
+        && mode.0 > 0
+        && mode.1 > 0
+        && (mode.0 as u32, mode.1 as u32) == fbo
+        && scale == 1.0
+        && transform == Transform::Normal
+}
+
 fn take_rendered_presentation_callbacks(
     roots: &[WlSurface],
     render_states: &smithay::backend::renderer::element::RenderElementStates,
@@ -3097,6 +3116,12 @@ fn take_rendered_presentation_callbacks(
 }
 
 impl KmsState {
+    pub(super) fn single_presentation_output(&self) -> bool {
+        self.outputs.len() == 1
+    }
+    pub(super) fn set_fbo_presentation(&mut self, proof: Option<super::fbo_presentation::Proof>) {
+        self.fbo_presentation = proof;
+    }
     fn deliver_frame_callbacks(
         out: &mut KmsOutputState,
         flush_tx: &Sender<()>,
@@ -8547,6 +8572,7 @@ impl KmsState {
             renderer,
             needs_render: true,
             compositor_texture_cache: None,
+            fbo_presentation: None,
             capture_texture_cache: None,
             compositor_texture_keepalive: Vec::new(),
             background_id: Id::new(),
@@ -8741,6 +8767,9 @@ impl KmsState {
         let mut any_skipped = false;
         let mut any_failed = false;
         let unambiguous_presentation_output = self.outputs.len() == 1;
+        // Take ownership once. Any skipped output/render error drops callbacks;
+        // no cached texture or subsequent client commit can reacquire them.
+        let mut fbo_presentation = self.fbo_presentation.take();
         for out_idx in 0..self.outputs.len() {
             // Outputs marked soft-disabled by wlr-output-management
             // `disable_head` Apply stop receiving frames but keep their
@@ -9856,14 +9885,26 @@ impl KmsState {
             ) {
                 Ok(res) => {
                     // Render and callback extraction occur without dispatching
-                    // another client commit. FBO composition does not expose
-                    // per-surface sampled state; multi-output ownership is not
-                    // proven in this first implementation. Both fail closed.
-                    let callbacks = take_rendered_presentation_callbacks(
+                    // another client commit. Direct surfaces use actual element
+                    // states; the narrow FBO route consumes only the earlier
+                    // owned import/draw receipt. Unproven routes discard.
+                    let mut callbacks = take_rendered_presentation_callbacks(
                         &frame_roots,
                         &res.states,
                         unambiguous_presentation_output && !use_compositor && !res.is_empty,
                     );
+                    if use_compositor && unambiguous_presentation_output && !res.is_empty
+                        && elements.len() == 1 && compositor_element_index == Some(0)
+                        && compositor.is_some_and(|comp| fbo_output_domain_is_exact(
+                            (ox, oy), (out_w, out_h), comp.screen_size(),
+                            out.output.current_scale().fractional_scale(), out.output.current_transform()))
+                        && res.states.element_render_state(elements[0].id().clone()).is_some_and(|r|
+                            r.visible_area > 0 && r.presentation_state != smithay::backend::renderer::element::RenderElementPresentationState::Skipped)
+                        && let (Some(proof), Some(comp)) = (fbo_presentation.take(), compositor)
+                    {
+                        callbacks.extend(proof.consume(state, comp.output_texture_id(),
+                            comp.output_texture_generation(), comp.output_content_serial()));
+                    }
                     let queue_boundary = FrameQueueBoundary::now();
                     let submission = Submission {
                         output_generation: out.presentation_output_generation,
@@ -14406,5 +14447,75 @@ mod frame_color_transaction_tests {
                 < queue.find(".render_frame(").unwrap()
         );
         assert!(queue.contains(".queue_frame_with_properties(frame_data, properties)"));
+    }
+}
+
+#[cfg(test)]
+mod fbo_output_domain_tests {
+    use super::{Transform, fbo_output_domain_is_exact};
+    #[test]
+    fn only_identity_single_output_pixel_domain_is_proven() {
+        assert!(fbo_output_domain_is_exact(
+            (0, 0),
+            (800, 600),
+            (800, 600),
+            1.0,
+            Transform::Normal
+        ));
+    }
+    #[test]
+    fn global_fbo_with_shifted_physical_slice_is_not_proof() {
+        assert!(!fbo_output_domain_is_exact(
+            (800, 0),
+            (800, 600),
+            (1600, 600),
+            1.0,
+            Transform::Normal
+        ));
+        assert!(!fbo_output_domain_is_exact(
+            (-800, 0),
+            (800, 600),
+            (800, 600),
+            1.0,
+            Transform::Normal
+        ));
+        assert!(!fbo_output_domain_is_exact(
+            (0, 0),
+            (800, 600),
+            (1600, 600),
+            1.0,
+            Transform::Normal
+        ));
+    }
+    #[test]
+    fn scaled_rotated_or_empty_domains_fail_closed() {
+        assert!(!fbo_output_domain_is_exact(
+            (0, 0),
+            (800, 600),
+            (800, 600),
+            2.0,
+            Transform::Normal
+        ));
+        assert!(!fbo_output_domain_is_exact(
+            (0, 0),
+            (800, 600),
+            (800, 600),
+            1.0,
+            Transform::_90
+        ));
+        assert!(!fbo_output_domain_is_exact(
+            (0, 0),
+            (0, 600),
+            (0, 600),
+            1.0,
+            Transform::Normal
+        ));
+        assert!(!fbo_output_domain_is_exact(
+            (0, 0),
+            (-1, 600),
+            (u32::MAX, 600),
+            1.0,
+            Transform::Normal
+        ));
     }
 }

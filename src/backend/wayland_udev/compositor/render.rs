@@ -2938,6 +2938,15 @@ impl WaylandCompositor {
         >,
         capture_view_required: bool,
     ) -> bool {
+        // No cached receipt survives even a skipped or failed render attempt.
+        let presentation_candidate = self.fbo_provenance.begin();
+        let presentation_gl_clean =
+            presentation_candidate.is_some() && unsafe { gl.GetError() == ffi::NO_ERROR };
+        let mut presentation_drawn = None;
+        if presentation_candidate.is_some() {
+            self.needs_render = true;
+            self.force_full_damage_next = true;
+        }
         self.companion_drawn_this_frame = false;
         let mut companion_frame_evidence =
             crate::backend::compositor_common::companion_scene::FrameEvidence::capture(
@@ -4030,6 +4039,27 @@ impl WaylandCompositor {
             .iter()
             .any(|&(id, ..)| self.windows.get(&id).is_some_and(|ws| ws.is_pip));
         let draw_rings = ordinary_borders || attention_active || any_pip;
+        // An actual quad, not scene membership, records evidence below. Keep
+        // the first proof route deliberately narrower than general composition.
+        let presentation_route = presentation_gl_clean
+            && presentation_candidate
+                .is_some_and(|c| c.covers_scene(scene, (self.screen_w, self.screen_h)))
+            && visible_scene.len() == 1
+            && damage_scissor.is_none()
+            && frame_is_calm
+            && !draw_rings
+            && !self.shadow_enabled
+            && !self.blur_enabled
+            && self.external_elements.is_empty()
+            && self.desktop_visual.is_none()
+            && !self.eva_overlay.visible()
+            && !self.transition_active
+            && self.workspace_swipe.is_none()
+            && !self.postprocess_active
+            && !self.temporal_blur_enabled
+            && !self.window_tilt_enabled
+            && self.wallpaper_transition_start.is_none()
+            && !self.tail_overlay_visibility().any();
 
         // =================================================================
         // 9. Draw windows (back-to-front)
@@ -4438,6 +4468,40 @@ impl WaylandCompositor {
                     gl.ActiveTexture(ffi::TEXTURE0);
                     self.bind_window_texture(gl, texture);
                     self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
+                    // This branch really sampled this exact texture. No mesh,
+                    // UV crop, opacity, motion, or color/effect fallback may
+                    // promote a window merely because it is present in scene.
+                    if presentation_route
+                        && let Some(candidate) = presentation_candidate
+                        && candidate.window == win_id
+                        && candidate.texture == texture
+                        && candidate.rect == (x, y, w, h)
+                        && wt.width == w
+                        && wt.height == h
+                        && !wt.has_alpha
+                        && !wt.is_shaped
+                        && !wt.is_moving
+                        && !wt.is_frosted
+                        && !wt.fading_out
+                        && !wt.ripple_active
+                        && wt.wobbly.is_none()
+                        && wt.motion_trail.is_empty()
+                        && wt.color_transform.is_none()
+                        && !wt.is_genie_minimizing
+                        && !wt.is_genie_restoring
+                        && wt.content_uv == [0.0, 0.0, 1.0, 1.0]
+                        && opacity == 1.0
+                        && dim == 1.0
+                        && desat == 0.0
+                        && radius == 0.0
+                        && scale == 1.0
+                        && wt.scale == 1.0
+                        && anim.dy == 0.0
+                        && (draw_x, draw_y, draw_w, draw_h)
+                            == (x as f32, y as f32, w as f32, h as f32)
+                    {
+                        presentation_drawn = Some(candidate);
+                    }
 
                     // Reset to default off so the next iteration's blur/ghost
                     // draws don't inherit this window's transform.
@@ -5427,6 +5491,19 @@ impl WaylandCompositor {
 
         companion_frame_evidence.body_drawn = self.companion_drawn_this_frame;
         self.companion_frame_evidence = Some(companion_frame_evidence);
+        // Seal only after the entire FBO pass, including its tail, completed.
+        // Every successful output redraw advances the independent content serial.
+        let proven = if presentation_drawn.is_some()
+            && !local_only_cues
+            && !self.tail_overlay_visibility().any()
+            && unsafe { gl.GetError() == ffi::NO_ERROR }
+        {
+            presentation_drawn
+        } else {
+            None
+        };
+        self.fbo_provenance
+            .finish(proven, self.output_texture, self.output_texture_generation);
         true
     }
 

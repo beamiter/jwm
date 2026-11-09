@@ -16,8 +16,10 @@ mod direct_scanout;
 mod dirty_region;
 mod effects;
 mod expose;
+mod fbo_provenance;
 #[allow(dead_code, unreachable_pub)]
 mod frame_rate;
+pub(crate) use fbo_provenance::{FboPresentationCandidate, FboPresentationReceipt};
 #[allow(dead_code, unreachable_pub)]
 mod gpu_fence_sync;
 #[cfg(test)]
@@ -1171,6 +1173,7 @@ pub(crate) struct WaylandCompositor {
     /// Changes whenever the output texture is recreated, even if GL recycles
     /// the numeric texture id.
     output_texture_generation: u64,
+    fbo_provenance: fbo_provenance::FboProvenance,
     /// FP16 (RGBA16F) intermediate target used when both the color-management
     /// render path and scene-linear compositing are requested. Creation and
     /// hot-enable allocate it at the output dimensions; resize/disable keep it
@@ -2826,6 +2829,7 @@ impl WaylandCompositor {
                 prepared_resize: None,
                 desktop_visual: None,
                 output_texture_generation: next_output_texture_generation(),
+                fbo_provenance: fbo_provenance::FboProvenance::default(),
                 // Treat a failed FP16 allocation as disabled. In particular,
                 // never advertise the scene-linear path to damage/KMS-offload
                 // code when there is no complete render target behind it.
@@ -4535,6 +4539,21 @@ impl WaylandCompositor {
         self.output_internal_format
     }
 
+    pub(crate) fn set_presentation_candidate(
+        &mut self,
+        candidate: Option<FboPresentationCandidate>,
+    ) {
+        self.fbo_provenance.stage(candidate);
+    }
+
+    pub(crate) fn take_presentation_receipt(&mut self) -> Option<FboPresentationReceipt> {
+        self.fbo_provenance.take()
+    }
+
+    pub(crate) fn output_content_serial(&self) -> Option<u64> {
+        self.fbo_provenance.serial()
+    }
+
     pub(crate) fn output_texture_generation(&self) -> u64 {
         self.output_texture_generation
     }
@@ -5369,6 +5388,7 @@ impl WaylandCompositor {
             self.screen_h = h;
             self.sysui_text_dirty = true;
             self.output_texture_generation = next_output_texture_generation();
+            self.fbo_provenance.stage(None);
             // Half-res mirrors of the blur chain that was just replaced.
             self.release_glass_backdrop_caches(gl);
             self.last_output_color_frame_state = None;

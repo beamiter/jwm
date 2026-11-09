@@ -72,15 +72,35 @@ not replace that audit or a real hardware acceptance run.
 
 The viewer requires truthful presentation feedback, not just a compositor that
 advertises the protocol. JWM's nested backends do not advertise `wp_presentation`
-until they can forward real host presentation evidence. In the initial KMS
-batching implementation, only exactly one configured output object (disabled
-outputs also count), with individually proven surface render elements, can
-acknowledge a frame. FBO-composited content and
-multi-output frames are conservatively discarded instead of being reported as
-presented. This includes common/default composited configurations: the native
-viewer will stop rather than manufacture a display ACK. The existing X11 viewer
-remains the default usable path while these production rendering paths are
-integrated and validated.
+until they can forward real host presentation evidence. KMS presentation
+requires exactly one configured output object (disabled outputs also count)
+and proof that the acknowledged content belongs to the completed submission.
+Individually proven surface render elements remain a separate path.
+
+The candidate FBO integration admits only a deliberately narrow case:
+
+- The single output has origin `(0, 0)`, a positive mode size exactly equal to
+  the entire FBO, scale `1`, and `Normal` output transform.
+- The scene contains one opaque native root surface, fully inside the FBO,
+  without subsurfaces, viewport cropping/scaling, effects, overlays or
+  occlusion. Surface buffer scale/transform and window geometry must also
+  satisfy the implementation's exact, untransformed layout checks.
+- Successful import is followed by an actual full redraw of that exact input
+  texture and rectangle. The proof owns the candidate commit's callbacks;
+  cached FBO content or an allocation identity alone cannot qualify.
+- An independent FBO content serial, allocation identity and live surface
+  generation must still match. Final output render-element states must confirm
+  the sole FBO element was not skipped and is visible before the proof is
+  consumed for one output submission.
+
+Anything outside the provable paths is discarded, including multi-output
+frames. These are candidate capability conditions, not a claim that the new
+FBO path has passed validation. Complex and common/default composited desktops
+may still be unsupported: the native viewer stops rather than manufacturing a
+display ACK. This is not general FBO presentation support or hardware DRM
+acceptance. The existing X11 viewer remains the default path while production
+rendering integrations are validated. The native viewer remains read-only;
+this presentation work adds no input or clipboard permissions.
 
 KMS feedback belongs to the exact queued submission and is discarded on an
 invalid output/VT generation, uncertain completion time, queue failure, or
