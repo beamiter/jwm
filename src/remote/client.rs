@@ -1337,15 +1337,10 @@ fn viewer_loop(
                     )
                 });
                 if revoke {
-                    if let Some(record) = keyboard.revoke() {
+                    if let Some(record) = keyboard.cancel_for_local_event()? {
                         writer
                             .write_message(MessageKind::WaylandKeyboardRevoke, &record.encode()?)?;
                         writer.flush()?;
-                    } else if keyboard.request.is_some() && keyboard.epoch.is_none() {
-                        return Err(invalid_data(
-                            "keyboard lease cancelled while grant was pending",
-                        )
-                        .into());
                     }
                     #[cfg(feature = "remote-wayland")]
                     viewer.disable_wayland_keyboard();
@@ -2767,6 +2762,21 @@ impl ClientKeyboard {
             pressed,
         }))
     }
+    fn cancel_for_local_event(
+        &mut self,
+    ) -> RemoteResult<Option<super::wayland_keyboard_wire::KeyboardRevoke>> {
+        // Snapshot before revoke mutates ended. A terminal denial is not an
+        // outstanding grant, but a real pending request must still fail closed.
+        let pending = self.request.is_some()
+            && self.epoch.is_none()
+            && !self.ended
+            && !self.terminal_received;
+        let record = self.revoke();
+        if pending {
+            return Err(invalid_data("keyboard lease cancelled while grant was pending").into());
+        }
+        Ok(record)
+    }
     fn revoke(&mut self) -> Option<super::wayland_keyboard_wire::KeyboardRevoke> {
         if self.ended {
             return None;
@@ -3503,6 +3513,69 @@ pub(super) mod tests {
         assert_eq!(keyboard.revoke().unwrap().lease_epoch, 9);
         assert!(keyboard.revoke().is_none());
         assert!(keyboard.key(38, true).unwrap().is_none());
+    }
+    #[test]
+    fn wayland_keyboard_local_cancel_distinguishes_denied_pending_and_active() {
+        use super::super::wayland_keyboard_wire::{LeaseStatus, LeaseStatusKind};
+        let fresh = || super::ClientKeyboard {
+            digest: Some([7; 32]),
+            ..Default::default()
+        };
+        let request = |keyboard: &mut super::ClientKeyboard| {
+            keyboard
+                .after_presentation((1, 1), 0, std::time::Instant::now())
+                .unwrap();
+        };
+        let granted = LeaseStatus {
+            lease_epoch: 9,
+            source_epoch: 1,
+            geometry_epoch: 1,
+            frame_sequence: 0,
+            status: LeaseStatusKind::Granted,
+        };
+        let denied = LeaseStatus {
+            lease_epoch: 0,
+            status: LeaseStatusKind::Denied,
+            ..granted
+        };
+        let mut keyboard = fresh();
+        request(&mut keyboard);
+        keyboard.receive(denied).unwrap();
+        assert!(keyboard.cancel_for_local_event().unwrap().is_none());
+        assert!(keyboard.key(38, true).unwrap().is_none());
+        assert!(!keyboard.needs_request());
+        assert!(keyboard.receive(granted).is_err());
+        assert!(keyboard.receive(denied).is_err());
+
+        let mut keyboard = fresh();
+        request(&mut keyboard);
+        assert!(keyboard.cancel_for_local_event().is_err());
+        assert!(keyboard.ended);
+        assert!(keyboard.receive(granted).is_err());
+        assert!(keyboard.key(38, true).unwrap().is_none());
+        assert!(!keyboard.needs_request());
+
+        let mut keyboard = fresh();
+        request(&mut keyboard);
+        keyboard.receive(granted).unwrap();
+        assert_eq!(
+            keyboard
+                .cancel_for_local_event()
+                .unwrap()
+                .unwrap()
+                .lease_epoch,
+            9
+        );
+        assert!(keyboard.cancel_for_local_event().unwrap().is_none());
+
+        let mut keyboard = fresh();
+        assert!(keyboard.cancel_for_local_event().unwrap().is_none());
+        assert!(!keyboard.needs_request());
+        assert!(
+            keyboard
+                .after_presentation((1, 1), 0, std::time::Instant::now())
+                .is_none()
+        );
     }
     #[test]
     fn wayland_keyboard_never_replays_pregrant_keys_and_deadlines_do_not_renew() {
