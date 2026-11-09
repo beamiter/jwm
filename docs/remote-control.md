@@ -1839,14 +1839,16 @@ With a `remote-wayland` build, native viewing remains an explicit choice:
 `connect HOST --viewer-backend wayland --wayland-keyboard` requests only the
 existing scoped keyboard lease, and requires the host's separate
 `--wayland-select --once --allow-wayland-keyboard` consent. Use the same private
-session key at both endpoints. The two viewer modes cannot be combined, and
-omitting both native modes is rejected; choosing Wayland never implicitly
+session key at both endpoints. A third alternative, `connect HOST --viewer-backend wayland --wayland-pointer`,
+requests the existing motion/atomic-left-click lease with separate host
+`--allow-wayland-pointer` consent. Exactly one of these three viewer modes is
+required; they cannot be combined, and omitting all native modes is rejected; choosing Wayland never implicitly
 permits legacy input.
 
 Keyboard admission retains full keymap compatibility and the exact selected
 surface/receiver identity. It lasts at most 30 seconds without renewal and is
 revoked on the existing focus, local takeover, lock and lifecycle boundaries.
-The native viewer does not accept pointer/scroll control, clipboard, grabs,
+The native viewer does not accept scroll control, clipboard, grabs,
 source resize/follow, automatic reconnect or saved-profile authorization.
 `--viewer-wayland-display` names a native socket; there is no X11 fallback.
 See [native Wayland source safety](remote-wayland-source.md) for limits and
@@ -1862,3 +1864,14 @@ both the X11 and native Wayland scoped-keyboard viewers.
 In the native Wayland keyboard viewer, local keyboard focus loss is fail-closed:
 the session terminates rather than reusing the lease after focus returns. Start
 a new explicitly authorized session to regain control.
+
+Native pointer mode observes a new local left-button press followed by its release
+before emitting an atomic click. An unmatched release cancels the candidate; it
+never synthesizes a press. Wayland enter events do not report an initial held-button
+snapshot, so this is not proof that all buttons were initially released. Non-left
+buttons, axis events or leaving the viewer surface permanently revoke the pointer
+lease, while video may continue read-only. Returning does not automatically
+regrant input. Unlike native keyboard focus loss, this need not close the session. There is no
+scroll, drag or button chord support. Every motion/click still needs the matching
+fresh, genuinely presented frame and host Ready ticket; the 30-second lease is
+not renewed. Default read-only viewing does not bind input devices.

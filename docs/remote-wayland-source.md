@@ -133,6 +133,21 @@ The separately negotiated pointer mode requires explicit local
 with the keyboard lease, legacy input, clipboard, resize or input grabs. It
 never enables XTEST. Saved profiles and automatic reconnect cannot grant it.
 
+The native viewer may explicitly select this mode with
+`connect ... --viewer-backend wayland --wayland-pointer`. Choose exactly one
+of native read-only, keyboard or pointer mode. Native scroll is not supported;
+`--wayland-scroll` remains limited to the X11 viewer. Native pointer input accepts
+only observed LeftDown→LeftUp pairs for atomic clicks. An unmatched release
+cancels, never creates a click. Since `wl_pointer.enter` provides no held-button
+snapshot, this does not establish that all buttons were initially released.
+Non-left button or axis input, or leaving the viewer surface, permanently revokes
+the pointer lease. Video may continue read-only; returning to the surface does
+not automatically recreate permission. This differs from native keyboard focus
+loss, which terminates the session.
+No drag, chords, implicit input grab or automatic renewal is enabled. The same
+fresh actual-presentation/Ready gate and 30-second lease apply. Default read-only
+native viewing does not bind input devices.
+
 The base pointer grant supports surface-local absolute motion and an atomic
 left click. Optional discrete vertical scrolling requires the separate explicit
 grant below; a pointer grant alone does not permit scrolling. Dragging, separate

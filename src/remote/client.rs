@@ -408,8 +408,10 @@ fn validate_viewer_backend(options: &ClientOptions) -> RemoteResult<()> {
     }
     if options.viewer_backend == ViewerBackend::Wayland {
         if !cfg!(feature = "remote-wayland")
-            || options.view_only == options.wayland_keyboard
-            || options.wayland_pointer
+            || usize::from(options.view_only)
+                + usize::from(options.wayland_keyboard)
+                + usize::from(options.wayland_pointer)
+                != 1
             || options.wayland_scroll
             || options.clipboard
             || options.resize_source.is_some()
@@ -417,7 +419,7 @@ fn validate_viewer_backend(options: &ClientOptions) -> RemoteResult<()> {
             || options.window_position.is_some()
             || options.display.is_some()
         {
-            return Err(invalid_data("Wayland viewer requires exactly one of view-only or scoped Wayland keyboard, without pointer, clipboard, source resize, grab, X11 display or window positioning").into());
+            return Err(invalid_data("Wayland viewer requires exactly one of view-only, scoped Wayland keyboard or scoped Wayland pointer, without scroll, clipboard, source resize, grab, X11 display or window positioning").into());
         }
     }
     Ok(())
@@ -7028,6 +7030,39 @@ mod native_viewer_permission_tests {
             assert!(validate_viewer_backend(&changed).is_err());
         }
         assert!(run_client_reconnecting(keyboard, 1).is_err());
+        let mut pointer = options.clone();
+        pointer.view_only = false;
+        pointer.wayland_pointer = true;
+        assert_eq!(
+            validate_viewer_backend(&pointer).is_ok(),
+            cfg!(feature = "remote-wayland")
+        );
+        for mutation in 0..10 {
+            let mut changed = pointer.clone();
+            match mutation {
+                0 => changed.view_only = true,
+                1 => changed.wayland_pointer = false,
+                2 => changed.wayland_keyboard = true,
+                3 => changed.wayland_scroll = true,
+                4 => changed.clipboard = true,
+                5 => changed.grab_input = true,
+                6 => changed.display = Some(":never-open".into()),
+                7 => {
+                    changed.resize_source = Some(super::super::window_size::WindowSize {
+                        width: 10,
+                        height: 10,
+                    })
+                }
+                8 => changed.follow_source_size = true,
+                _ => {
+                    changed.window_position =
+                        Some(super::super::window_position::WindowPosition { x: 0, y: 0 })
+                }
+            }
+            assert!(validate_viewer_backend(&changed).is_err());
+        }
+        assert!(run_client_reconnecting(pointer, 1).is_err());
+
         for mode in 0..4 {
             let mut restricted = options.clone();
             restricted.viewer_backend = ViewerBackend::X11;

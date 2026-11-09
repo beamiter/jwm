@@ -433,9 +433,9 @@ enum Command {
     },
     /// Open a remote JWM desktop in an explicitly selected local viewer.
     #[command(group(clap::ArgGroup::new("native_viewer_mode")
-        .args(["view_only", "wayland_keyboard"]).multiple(false)))]
+        .args(["view_only", "wayland_keyboard", "wayland_pointer"]).multiple(false)))]
     Connect {
-        /// Local backend; Wayland requires explicit view-only or scoped keyboard-only.
+        /// Local backend; Wayland requires explicit view-only, scoped keyboard or scoped pointer.
         #[arg(long, default_value_t=ViewerBackend::X11, requires_if("wayland", "native_viewer_mode"))]
         viewer_backend: ViewerBackend,
 
@@ -1800,6 +1800,46 @@ mod tests {
         assert!(profile_from_command(command).is_err());
     }
 
+    #[test]
+    fn native_wayland_pointer_is_explicit_narrow_and_never_profile_saved() {
+        let base = [
+            "jwm-remote",
+            "connect",
+            "host",
+            "--viewer-backend",
+            "wayland",
+            "--wayland-pointer",
+        ];
+        let cli = Cli::try_parse_from(base).unwrap();
+        assert!(matches!(
+            &cli.command,
+            Command::Connect {
+                viewer_backend: ViewerBackend::Wayland,
+                wayland_pointer: true,
+                wayland_keyboard: false,
+                wayland_scroll: false,
+                view_only: false,
+                clipboard: false,
+                grab_input: false,
+                reconnect_attempts: 0,
+                ..
+            }
+        ));
+        assert!(profile_from_command(cli.command).is_err());
+        for extra in [
+            vec!["--view-only"],
+            vec!["--wayland-keyboard"],
+            vec!["--clipboard"],
+            vec!["--grab-input"],
+            vec!["--resize-source", "640x480"],
+            vec!["--follow-source-size"],
+            vec!["--reconnect-attempts", "1"],
+        ] {
+            assert!(Cli::try_parse_from(base.into_iter().chain(extra)).is_err());
+        }
+        // Scroll is legal for the X11 viewer, so the backend-specific rejection
+        // lives in validate_viewer_backend, before any connection or input IO.
+    }
     #[test]
     fn staging_limit_parser_is_exact_nonzero_and_checked() {
         for (text, expected) in [

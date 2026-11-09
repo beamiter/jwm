@@ -998,3 +998,9 @@ mod keyboard_integration;
 
 #[path = "host_wayland_keyboard_viewer_integration.rs"]
 mod host_keyboard_integration;
+
+#[path = "wayland_viewer_pointer_integration.rs"]
+mod pointer_integration;
+
+#[path = "host_wayland_pointer_viewer_integration.rs"]
+mod host_pointer_integration;

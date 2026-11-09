@@ -30,6 +30,26 @@ thread_local! {
         std::cell::RefCell::new(None)
     };
 }
+// Scoped scheduling-only reuse by the owned native viewer regression.
+pub(super) fn with_forced_refresh<T>(
+    request: Arc<Mutex<Option<Instant>>>,
+    run: impl FnOnce() -> T,
+) -> T {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            FORCED_REFRESH.with(|slot| {
+                slot.borrow_mut().take();
+            });
+        }
+    }
+    FORCED_REFRESH.with(|slot| {
+        assert!(slot.borrow().is_none());
+        *slot.borrow_mut() = Some(request);
+    });
+    let _reset = Reset;
+    run()
+}
 pub(super) fn take_forced_refresh() -> bool {
     FORCED_REFRESH.with(|slot| {
         slot.borrow().as_ref().is_some_and(|request| {

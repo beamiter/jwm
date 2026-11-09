@@ -1,5 +1,5 @@
-//! Native Wayland viewer, read-only unless keyboard-only mode is explicitly enabled.
-//! No pointer, clipboard, grab or X11 binding.
+//! Native Wayland viewer, read-only unless one explicit scoped input mode is enabled.
+//! Keyboard-only and pointer-only are exclusive; no clipboard, grab or X11 binding.
 //! A buffer release only frees storage. Only wp_presentation.presented earns ACK.
 use super::RemoteResult;
 use super::frame::RecyclableDecodedFrame;
@@ -23,6 +23,8 @@ use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_ba
 
 #[path = "wayland_viewer_keyboard.rs"]
 mod keyboard;
+#[path = "wayland_viewer_pointer.rs"]
+mod pointer;
 
 const TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_PIXELS: u64 = 16 * 1024 * 1024;
@@ -124,6 +126,7 @@ fn socket_path(display: Option<&str>) -> RemoteResult<PathBuf> {
     Ok(runtime.join(path))
 }
 struct Pending {
+    mapping: pointer::Mapping,
     token: u64,
     sequence: u64,
     source_epoch: u64,
@@ -201,6 +204,7 @@ struct Retirement {
     started: Instant,
 }
 struct State {
+    pointer: pointer::Pointer,
     keyboard: keyboard::Keyboard,
     compositor: Option<wl_compositor::WlCompositor>,
     shm: Option<wl_shm::WlShm>,
@@ -253,6 +257,7 @@ impl State {
         Ok(())
     }
     fn advance_generation(&mut self) {
+        self.pointer.revoke("Wayland pointer geometry changed");
         if self.keyboard.requested {
             self.keyboard.revoke("Wayland viewer geometry changed");
         }
@@ -280,6 +285,8 @@ pub(super) struct WaylandViewer {
     surface: wl_surface::WlSurface,
     _xdg_surface: xdg_surface::XdgSurface,
     toplevel: xdg_toplevel::XdgToplevel,
+    base_title: String,
+    pointer_title_status: Option<&'static str>,
     token: u64,
     slot_identity: u64,
     upload_scratch: Box<[u8]>,
@@ -324,6 +331,7 @@ impl WaylandViewer {
         let qh = queue.handle();
         let registry = conn.display().get_registry(&qh, ());
         let mut state = State {
+            pointer: pointer::Pointer::default(),
             keyboard: keyboard::Keyboard::default(),
             compositor: None,
             shm: None,
@@ -391,6 +399,8 @@ impl WaylandViewer {
             surface,
             _xdg_surface: xdg_surface,
             toplevel,
+            base_title: title.to_owned(),
+            pointer_title_status: None,
             token: 0,
             slot_identity: 0,
             upload_scratch: vec![0; MAX_UPLOAD_SCRATCH_BYTES].into_boxed_slice(),
@@ -446,8 +456,8 @@ impl WaylandViewer {
         &mut self,
         _display: Option<&str>,
     ) -> RemoteResult<[u8; 32]> {
-        if self.state.keyboard.requested {
-            return Err("Wayland keyboard cannot be re-enabled".into());
+        if self.state.keyboard.requested || self.state.pointer.requested {
+            return Err("Wayland keyboard cannot be re-enabled or combined with pointer".into());
         }
         // Enumerate without binding any seat in the default read-only path.
         let deadline = Instant::now() + TIMEOUT;
@@ -524,9 +534,104 @@ impl WaylandViewer {
             .keyboard
             .revoke("Wayland keyboard permanently disabled");
     }
+    pub(super) fn enable_wayland_pointer(&mut self) -> RemoteResult<()> {
+        if self.state.pointer.requested || self.state.keyboard.requested {
+            return Err("Wayland pointer cannot be re-enabled or combined with keyboard".into());
+        }
+        let deadline = Instant::now() + TIMEOUT;
+        self.keyboard_fence(deadline)?; // Enumeration fence only; binds no keyboard.
+        if self.state.keyboard.ambiguous || self.state.keyboard.seats.len() != 1 {
+            return Err("Wayland pointer requires exactly one seat".into());
+        }
+        let (name, version) = self.state.keyboard.seats[0];
+        if version < 5 {
+            return Err("Wayland pointer requires frame-capable seat".into());
+        }
+        self.state.pointer.requested = true;
+        self.state.pointer.surface = Some(self.surface.clone());
+        self.toplevel.set_app_id("jwm-remote-pointer".into());
+        self.state.pointer.seat = Some(self.registry.bind(
+            name,
+            version.min(7),
+            &self.queue.handle(),
+            pointer::PointerSeat,
+        ));
+        loop {
+            self.pump()?;
+            if let Some(reason) = self.state.pointer.revoked {
+                return Err(reason.into());
+            }
+            if self.state.closed || Instant::now() >= deadline {
+                self.state
+                    .pointer
+                    .revoke("Wayland pointer initialization expired");
+                return Err("Wayland pointer initialization expired".into());
+            }
+            if self.state.pointer.device.is_some() {
+                return Ok(());
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+    pub(super) fn wayland_pointer_presented(&mut self, sequence: u64) {
+        self.state.pointer.confirm(sequence);
+    }
+    pub(super) fn set_wayland_pointer_status(&mut self, status: &'static str) {
+        let status = if self.state.pointer.revoked.is_some() {
+            "Pointer: Revoked"
+        } else if !self.state.pointer.locally_ready() {
+            "Pointer: Waiting for local focus/presentation"
+        } else {
+            status
+        };
+        if pointer_title_status_changed(&mut self.pointer_title_status, status) {
+            self.toplevel
+                .set_title(format!("{} — {status}", self.base_title));
+        }
+    }
+    fn fence_pointer_events(&mut self) -> RemoteResult<()> {
+        if !self.state.pointer.needs_fence() {
+            return Ok(());
+        }
+        #[cfg(all(test, feature = "backend-wayland-udev"))]
+        run_pointer_fence_hook();
+        let Some(id) = self.state.pointer.begin_fence() else {
+            return Ok(());
+        };
+        self.conn
+            .display()
+            .sync(&self.queue.handle(), pointer::PointerFence(id));
+        let deadline = Instant::now() + TIMEOUT;
+        while self.state.pointer.fence_done != id {
+            if let Err(error) = self.pump() {
+                self.state
+                    .pointer
+                    .revoke("Wayland pointer history fence failed");
+                return Err(error);
+            }
+            self.state.pointer.check();
+            if self.state.closed || Instant::now() >= deadline {
+                self.state
+                    .pointer
+                    .revoke("Wayland pointer history fence closed or expired");
+                return Ok(());
+            }
+            if self.state.pointer.revoked.is_some() {
+                return Ok(());
+            }
+            if self.state.pointer.fence_done != id {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+        Ok(())
+    }
     pub(super) fn poll_events(&mut self) -> RemoteResult<Vec<ViewerEvent>> {
         self.pump()?;
+        // An input frame does not fence xdg/registry history. Synchronize the
+        // same connection before releasing this batch, never future events.
+        self.fence_pointer_events()?;
         let mut events = self.state.keyboard.take_events();
+        events.extend(self.state.pointer.take_events());
         if self.state.closed {
             events.clear();
             events.push(ViewerEvent::Close);
@@ -552,6 +657,7 @@ impl WaylandViewer {
         if !self.can_submit_frame() {
             return Ok(false);
         }
+        self.state.pointer.invalidate_mapping();
         let scope = (frame.source_epoch(), frame.geometry_epoch());
         if self.state.scope.is_some_and(|old| old.0 != scope.0) {
             return self.invalidate_source(String::new()).map(|()| false);
@@ -610,6 +716,15 @@ impl WaylandViewer {
                 .unwrap()
                 .feedback(&self.surface, &qh, self.token);
         self.state.pending = Some(Pending {
+            mapping: pointer::Mapping {
+                sequence: frame.sequence(),
+                source_epoch: scope.0,
+                geometry_epoch: scope.1,
+                generation: self.state.generation,
+                viewport: (width, height),
+                encoded: (frame.image().width() as u16, frame.image().height() as u16),
+                source: (frame.source_width(), frame.source_height()),
+            },
             token: self.token,
             sequence: frame.sequence(),
             source_epoch: scope.0,
@@ -713,7 +828,10 @@ impl WaylandViewer {
     }
     pub(super) fn has_pending_events(&mut self) -> RemoteResult<bool> {
         let work = self.pump()?;
-        Ok(work || self.state.closed || !self.state.completed.is_empty())
+        Ok(work
+            || self.state.closed
+            || !self.state.completed.is_empty()
+            || self.state.pointer.has_events())
     }
     pub(super) fn connection_fd(&self) -> BorrowedFd<'_> {
         self.conn.as_fd()
@@ -725,6 +843,10 @@ impl WaylandViewer {
             .as_ref()
             .map(|p| p.started + TIMEOUT)
             .or_else(|| self.state.blocked_since.map(|at| at + TIMEOUT));
+        let pending = match (pending, self.state.pointer.deadline()) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
         if self.write_pending.get() {
             Some(
                 pending.map_or(Instant::now() + Duration::from_millis(5), |p| {
@@ -753,6 +875,7 @@ impl WaylandViewer {
     pub(super) fn invalidate_source(&mut self, _label: String) -> RemoteResult<()> {
         // A source switch would require a complete xdg unmap/remap handshake.
         // First-stage native viewer deliberately does not support that flow.
+        self.state.pointer.revoke("Wayland pointer source changed");
         self.state.failure =
             Some("Wayland viewer source switching is unsupported; session closed".into());
         self.state.completed.clear();
@@ -760,15 +883,26 @@ impl WaylandViewer {
     }
     pub(super) fn source_presented(&mut self, _epoch: u64) {}
     pub(super) fn set_source_label(&mut self, label: String) {
-        self.toplevel.set_title(
-            label
-                .chars()
-                .filter(|c| !c.is_control())
-                .take(256)
-                .collect(),
-        );
+        let label: String = label
+            .chars()
+            .filter(|c| !c.is_control())
+            .take(256)
+            .collect();
+        if label != self.base_title {
+            self.base_title = label;
+            self.pointer_title_status = None;
+            self.toplevel.set_title(self.base_title.clone());
+        }
     }
 }
+fn pointer_title_status_changed(cached: &mut Option<&'static str>, status: &'static str) -> bool {
+    if *cached == Some(status) {
+        return false;
+    }
+    *cached = Some(status);
+    true
+}
+
 fn pump_connection(
     conn: &Connection,
     queue: &mut EventQueue<State>,
@@ -831,6 +965,9 @@ impl Dispatch<wl_registry::WlRegistry, ()> for State {
             } => {
                 match interface.as_str() {
                     "wl_seat" => {
+                        state
+                            .pointer
+                            .revoke("Wayland pointer seat topology changed");
                         state.keyboard.global(name, version);
                         return;
                     }
@@ -855,6 +992,9 @@ impl Dispatch<wl_registry::WlRegistry, ()> for State {
                 }
             }
             wl_registry::Event::GlobalRemove { name } => {
+                if state.keyboard.seats.iter().any(|(id, _)| *id == name) {
+                    state.pointer.revoke("Wayland pointer seat removed");
+                }
                 state.keyboard.removed(name);
                 if state.globals.contains(&name) {
                     state.failure = Some("required Wayland global removed".into());
@@ -905,7 +1045,21 @@ impl Dispatch<xdg_toplevel::XdgToplevel, ()> for State {
         _: &QueueHandle<Self>,
     ) {
         match event {
-            xdg_toplevel::Event::Configure { width, height, .. } => {
+            xdg_toplevel::Event::Configure {
+                width,
+                height,
+                states,
+            } => {
+                state.pointer.activation(&states);
+                if state.pointer.requested
+                    && state.configured
+                    && ((width != 0 && width != i32::from(state.width))
+                        || (height != 0 && height != i32::from(state.height)))
+                {
+                    state
+                        .pointer
+                        .revoke("Wayland pointer resize history changed");
+                }
                 let width = if width == 0 {
                     Some(state.width)
                 } else {
@@ -1027,6 +1181,7 @@ impl Dispatch<wp_presentation_feedback::WpPresentationFeedback, u64> for State {
                         && state.scope == Some((p.source_epoch, p.geometry_epoch)) =>
                 {
                     p.presented = true;
+                    state.pointer.presented(p.mapping);
                     if state.completed.is_empty() {
                         state.completed.push(p.sequence);
                     } else {
@@ -1053,6 +1208,32 @@ wayland_client::delegate_noop!(State: ignore wp_presentation::WpPresentation);
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn pointer_title_status_cache_only_updates_for_final_display_changes() {
+        let mut cached = None;
+        assert!(pointer_title_status_changed(
+            &mut cached,
+            "Pointer: Waiting for local focus/presentation"
+        ));
+        for _ in 0..100 {
+            assert!(!pointer_title_status_changed(
+                &mut cached,
+                "Pointer: Waiting for local focus/presentation"
+            ));
+        }
+        assert!(pointer_title_status_changed(&mut cached, "Pointer: Ready"));
+        assert!(!pointer_title_status_changed(&mut cached, "Pointer: Ready"));
+        assert!(pointer_title_status_changed(
+            &mut cached,
+            "Pointer: Revoked"
+        ));
+        cached = None; // A changed source label requires one refreshed title.
+        assert!(pointer_title_status_changed(
+            &mut cached,
+            "Pointer: Revoked"
+        ));
+    }
+
     #[test]
     fn retirement_cannot_rehabilitate_changed_generation_viewport_or_source() {
         let before = (7, (800, 600), Some((1, 3)));
@@ -1330,3 +1511,35 @@ mod upload_tests {
 #[cfg(test)]
 #[path = "wayland_viewer_upload_benchmark.rs"]
 mod upload_benchmark;
+
+// A test may pause only after a real completed pointer frame exists, before
+// its real protocol fence. This never supplies state, presentation or authority.
+#[cfg(all(test, feature = "backend-wayland-udev"))]
+thread_local! {
+    static POINTER_FENCE_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const {
+        std::cell::RefCell::new(None)
+    };
+}
+#[cfg(all(test, feature = "backend-wayland-udev"))]
+pub(crate) fn with_pointer_fence_hook<T>(
+    hook: impl FnOnce() + 'static,
+    run: impl FnOnce() -> T,
+) -> T {
+    struct Restore(Option<Box<dyn FnOnce()>>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            POINTER_FENCE_HOOK.with(|slot| {
+                slot.replace(self.0.take());
+            });
+        }
+    }
+    let _restore = Restore(POINTER_FENCE_HOOK.with(|slot| slot.replace(Some(Box::new(hook)))));
+    run()
+}
+#[cfg(all(test, feature = "backend-wayland-udev"))]
+fn run_pointer_fence_hook() {
+    let hook = POINTER_FENCE_HOOK.with(|slot| slot.borrow_mut().take());
+    if let Some(hook) = hook {
+        hook();
+    }
+}

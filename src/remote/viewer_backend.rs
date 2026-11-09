@@ -249,7 +249,7 @@ impl Viewer {
         match self {
             Self::X11(v) => v.enable_wayland_pointer(),
             #[cfg(feature = "remote-wayland")]
-            Self::Wayland(_) => Err(std::io::Error::other("Wayland viewer is read-only").into()),
+            Self::Wayland(v) => v.enable_wayland_pointer(),
         }
     }
     pub(super) fn enable_source_cycle(&mut self, enabled: bool) {
@@ -301,18 +301,14 @@ impl Viewer {
         match self {
             Self::X11(v) => v.set_wayland_pointer_status(status),
             #[cfg(feature = "remote-wayland")]
-            Self::Wayland(_) => {
-                let _ = status;
-            }
+            Self::Wayland(v) => v.set_wayland_pointer_status(status),
         }
     }
     pub(super) fn wayland_pointer_presented(&mut self, sequence: u64) {
         match self {
             Self::X11(v) => v.wayland_pointer_presented(sequence),
             #[cfg(feature = "remote-wayland")]
-            Self::Wayland(_) => {
-                let _ = sequence;
-            }
+            Self::Wayland(v) => v.wayland_pointer_presented(sequence),
         }
     }
     #[cfg(feature = "remote-wayland")]
@@ -348,6 +344,7 @@ impl Viewer {
             Self::X11(v) => v.observe_keyboard_state(armed, ended),
             #[cfg(feature = "remote-wayland")]
             Self::Wayland(_) => {
+                #[cfg(feature = "backend-wayland-udev")]
                 TEST_WAYLAND_KEYBOARD_OBSERVER.with(|slot| {
                     if let Some(observer) = slot.borrow().as_ref() {
                         observer.store(
@@ -374,7 +371,12 @@ impl Viewer {
             Self::X11(v) => v.observe_pointer_ready(sequence),
             #[cfg(feature = "remote-wayland")]
             Self::Wayland(_) => {
-                let _ = sequence;
+                #[cfg(feature = "backend-wayland-udev")]
+                TEST_WAYLAND_POINTER_OBSERVER.with(|slot| {
+                    if let Some(observer) = slot.borrow().as_ref() {
+                        *observer.lock().unwrap() = sequence;
+                    }
+                });
                 Ok(())
             }
         }
@@ -390,7 +392,12 @@ impl Viewer {
             Self::X11(v) => v.observe_pointer_candidate(candidate, left_down, sequence),
             #[cfg(feature = "remote-wayland")]
             Self::Wayland(_) => {
-                let _ = (candidate, left_down, sequence);
+                #[cfg(feature = "backend-wayland-udev")]
+                TEST_WAYLAND_POINTER_CANDIDATE_OBSERVER.with(|slot| {
+                    if let Some(observer) = slot.borrow().as_ref() {
+                        *observer.lock().unwrap() = (candidate, left_down, sequence);
+                    }
+                });
                 Ok(())
             }
         }
@@ -422,9 +429,9 @@ pub(crate) fn with_wayland_test_stream<T>(
 }
 
 // Test-only observation of real client lease state, never an authorization input.
-#[cfg(all(test, feature = "remote-wayland"))]
+#[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
 thread_local! { static TEST_WAYLAND_KEYBOARD_OBSERVER: std::cell::RefCell<Option<Arc<std::sync::atomic::AtomicU8>>> = const { std::cell::RefCell::new(None) }; }
-#[cfg(all(test, feature = "remote-wayland"))]
+#[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
 pub(crate) fn with_wayland_keyboard_observer<T>(
     observer: Arc<std::sync::atomic::AtomicU8>,
     run: impl FnOnce() -> T,
@@ -438,6 +445,58 @@ pub(crate) fn with_wayland_keyboard_observer<T>(
         }
     }
     TEST_WAYLAND_KEYBOARD_OBSERVER.with(|slot| {
+        assert!(slot.borrow().is_none());
+        *slot.borrow_mut() = Some(observer);
+    });
+    let _reset = Reset;
+    run()
+}
+
+// Read-only test observation: None means not currently Ready; Some is the
+// exact actual-presented frame sequence accepted by the client lease state.
+#[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+thread_local! { static TEST_WAYLAND_POINTER_OBSERVER: std::cell::RefCell<Option<Arc<std::sync::Mutex<Option<u64>>>>> = const { std::cell::RefCell::new(None) }; }
+#[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+pub(crate) fn with_wayland_pointer_observer<T>(
+    observer: Arc<std::sync::Mutex<Option<u64>>>,
+    run: impl FnOnce() -> T,
+) -> T {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            TEST_WAYLAND_POINTER_OBSERVER.with(|slot| {
+                slot.borrow_mut().take();
+            });
+        }
+    }
+    TEST_WAYLAND_POINTER_OBSERVER.with(|slot| {
+        assert!(slot.borrow().is_none());
+        *slot.borrow_mut() = Some(observer);
+    });
+    let _reset = Reset;
+    run()
+}
+
+/// Observes only the production client's candidate, local held bit and action
+/// sequence. It cannot create a candidate, presentation acknowledgment or grant.
+#[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+type PointerCandidateObservation = Arc<std::sync::Mutex<(Option<u64>, bool, u64)>>;
+#[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+thread_local! { static TEST_WAYLAND_POINTER_CANDIDATE_OBSERVER: std::cell::RefCell<Option<PointerCandidateObservation>> = const { std::cell::RefCell::new(None) }; }
+#[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+pub(crate) fn with_wayland_pointer_candidate_observer<T>(
+    observer: PointerCandidateObservation,
+    run: impl FnOnce() -> T,
+) -> T {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            TEST_WAYLAND_POINTER_CANDIDATE_OBSERVER.with(|slot| {
+                slot.borrow_mut().take();
+            });
+        }
+    }
+    TEST_WAYLAND_POINTER_CANDIDATE_OBSERVER.with(|slot| {
         assert!(slot.borrow().is_none());
         *slot.borrow_mut() = Some(observer);
     });
