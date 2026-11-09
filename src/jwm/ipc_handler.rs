@@ -2050,13 +2050,21 @@ fn unknown_subscription_topics(topics: &[String]) -> Vec<String> {
 impl Jwm {
     pub(crate) fn process_ipc(&mut self, backend: &mut dyn Backend) {
         self.eva_tick(backend);
+        let resize_locked = self.features.system_ui.is_locked()
+            || !self.features.monitor_lock.is_empty()
+            || backend.compositor_session_locked();
         let ipc = match self.ipc_server.as_mut() {
             Some(s) => s,
-            None => return,
+            None => {
+                self.remote_resize_grants.retain_live(|_| false);
+                return;
+            }
         };
 
         ipc.accept_connections();
         let messages = ipc.poll_clients();
+        self.remote_resize_grants
+            .retain_live(|id| !resize_locked && ipc.resize_owner_is_live(id));
 
         for msg in messages {
             match msg {
@@ -2065,7 +2073,19 @@ impl Jwm {
                     name,
                     args,
                 } => {
-                    let resp = self.handle_ipc_command(backend, &name, &args);
+                    let resp = if super::remote_resize::is_command(&name) {
+                        if self
+                            .ipc_server
+                            .as_ref()
+                            .is_some_and(|ipc| ipc.resize_owner_is_live(client_id))
+                        {
+                            self.remote_resize_command(backend, client_id, &name, &args)
+                        } else {
+                            IpcResponse::err("resize requires a live persistent IPC connection")
+                        }
+                    } else {
+                        self.handle_ipc_command(backend, &name, &args)
+                    };
                     if let Some(ipc) = self.ipc_server.as_mut() {
                         ipc.respond(client_id, &resp);
                     }

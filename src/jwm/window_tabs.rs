@@ -411,6 +411,7 @@ mod tests {
             running: AtomicBool::new(true),
             is_restarting: AtomicBool::new(false),
             restart_state: crate::jwm::restart_state::PendingRestartState::default(),
+            remote_resize_grants: Default::default(),
             last_mouse_root: (0.0, 0.0),
             drag_ctl: None,
             wallpaper_drag: None,

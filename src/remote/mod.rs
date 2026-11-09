@@ -47,6 +47,8 @@ mod window_capture;
 #[cfg(test)]
 mod window_capture_integration;
 pub mod window_position;
+pub mod window_resize;
+mod window_resize_native;
 pub mod window_size;
 pub mod x11_capture;
 pub mod x11_input;

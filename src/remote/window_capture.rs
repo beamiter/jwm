@@ -13,6 +13,7 @@
 
 use super::RemoteResult;
 use super::messages::FrameLimits;
+use super::window_resize_native::NativeResizeGrant;
 use super::x11_capture::{
     CaptureImageRecycler, CaptureOutcome, CapturedFrame, decode_ximage_reusing, frame_dimensions,
     open_display, wait_readable,
@@ -30,6 +31,7 @@ use x11rb::protocol::xproto::{
 };
 use x11rb::protocol::{composite, xfixes};
 use x11rb::rust_connection::RustConnection;
+use x11rb::wrapper::ConnectionExt as _;
 
 /// Terminal grant state. No event, including a later Map/Create of the same
 /// XID, can bring a revoked instance back to life.
@@ -87,6 +89,8 @@ impl WindowLifetime {
 
 pub(super) struct WindowCapture {
     conn: RustConnection,
+    native_resize: Option<NativeResizeGrant>,
+    resize_challenge: Option<(Atom, [u8; 32])>,
     pixmap: Pixmap,
     lifetime: WindowLifetime,
     compositor_selection: Atom,
@@ -187,6 +191,8 @@ impl WindowCapture {
         composite::name_window_pixmap(&conn, window, pixmap)?.check()?;
         let mut capture = Self {
             conn,
+            native_resize: None,
+            resize_challenge: None,
             pixmap,
             lifetime: WindowLifetime {
                 window,
@@ -210,6 +216,110 @@ impl WindowCapture {
         };
         capture.verify_live()?;
         Ok(capture)
+    }
+
+    pub(super) fn enable_native_resize(&mut self) -> RemoteResult<()> {
+        self.verify_live()?;
+        let atom = self
+            .conn
+            .intern_atom(false, b"_JWM_REMOTE_RESIZE_CHALLENGE")?
+            .reply()?
+            .atom;
+        let old = self
+            .conn
+            .get_property(
+                false,
+                self.lifetime.window,
+                atom,
+                x11rb::protocol::xproto::AtomEnum::ANY,
+                0,
+                9,
+            )?
+            .reply()?;
+        if old.type_ != 0 {
+            return Err(invalid("window already has a resize lease").into());
+        }
+        let nonce: [u8; 32] = rand::random();
+        self.conn
+            .change_property8(
+                x11rb::protocol::xproto::PropMode::REPLACE,
+                self.lifetime.window,
+                atom,
+                x11rb::protocol::xproto::AtomEnum::STRING,
+                &nonce,
+            )?
+            .check()?;
+        self.resize_challenge = Some((atom, nonce));
+        let result = (|| {
+            // The write may have hit a replacement XID. Never grant until the
+            // original watcher has consumed all earlier lifecycle events.
+            self.verify_live()?;
+            let grant = NativeResizeGrant::connect(self.lifetime.window, nonce)?;
+            self.verify_live()?;
+            self.native_resize = Some(grant);
+            Ok(())
+        })();
+        if result.is_err() {
+            self.disable_native_resize();
+        }
+        result
+    }
+
+    pub(super) fn disable_native_resize(&mut self) {
+        self.native_resize = None;
+        let Some((atom, nonce)) = self.resize_challenge.take() else {
+            return;
+        };
+        // Compare+delete is one X server critical section, with no IPC wait.
+        let cleanup = (|| -> RemoteResult<()> {
+            self.conn.grab_server()?.check()?;
+            let result = (|| -> RemoteResult<()> {
+                let value = self
+                    .conn
+                    .get_property(
+                        false,
+                        self.lifetime.window,
+                        atom,
+                        x11rb::protocol::xproto::AtomEnum::STRING,
+                        0,
+                        9,
+                    )?
+                    .reply()?;
+                if value.format == 8 && value.bytes_after == 0 && value.value == nonce {
+                    self.conn
+                        .delete_property(self.lifetime.window, atom)?
+                        .check()?;
+                }
+                Ok(())
+            })();
+            let release = self.conn.ungrab_server()?.check();
+            self.conn.flush()?;
+            result?;
+            release?;
+            Ok(())
+        })();
+        let _ = cleanup;
+    }
+
+    pub(super) fn request_native_resize(
+        &mut self,
+        expected: (u16, u16),
+        target: (u16, u16),
+    ) -> RemoteResult<(u16, u16)> {
+        let result = (|| {
+            let actual = self.verify_live()?;
+            if actual != expected || self.lifetime.needs_rebind {
+                return Err(invalid("native resize geometry became stale").into());
+            }
+            self.native_resize
+                .as_mut()
+                .ok_or_else(|| invalid("native resize unavailable"))?
+                .apply(expected, target)
+        })();
+        if result.is_err() {
+            self.disable_native_resize();
+        }
+        result
     }
 
     fn drain_events(&mut self) -> RemoteResult<bool> {
@@ -458,6 +568,7 @@ impl WindowCapture {
 
 impl Drop for WindowCapture {
     fn drop(&mut self) {
+        self.disable_native_resize();
         if let Ok(cookie) = self.conn.free_pixmap(self.pixmap) {
             let _ = cookie.check();
         }

@@ -367,6 +367,9 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "zoom_master",
     ],
     special_commands: &[
+        "remote_resize_grant",
+        "remote_resize_apply",
+        "remote_resize_revoke",
         "register_agent_session",
         "unregister_agent_session",
         "activate_agent_session",

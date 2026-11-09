@@ -80,7 +80,7 @@ use std::env;
 use std::os::fd::{AsRawFd, BorrowedFd};
 use std::sync::{
     Arc, Mutex, RwLock,
-    atomic::{AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
 use xcb::{Cookie, Raw, Xid, XidNew, x};
 
@@ -429,6 +429,10 @@ struct XcbIdRegistry {
     next: Arc<AtomicU64>,
     x_to_wid: Arc<RwLock<HashMap<u32, WindowId>>>,
     wid_to_x: Arc<RwLock<HashMap<WindowId, u32>>>,
+    // Raw events consumed behind a native resize fence remain in server order
+    // for the ordinary event source. Uncertain history permanently denies resize.
+    deferred_raw: Arc<Mutex<VecDeque<xcb::Event>>>,
+    resize_uncertain: Arc<AtomicBool>,
 }
 
 impl XcbIdRegistry {
@@ -437,7 +441,117 @@ impl XcbIdRegistry {
             next: Arc::new(AtomicU64::new(start)),
             x_to_wid: Arc::new(RwLock::new(HashMap::new())),
             wid_to_x: Arc::new(RwLock::new(HashMap::new())),
+            deferred_raw: Default::default(),
+            resize_uncertain: Default::default(),
         }
+    }
+
+    fn lifecycle_window(event: &xcb::Event) -> Option<x::Window> {
+        match event {
+            xcb::Event::X(x::Event::UnmapNotify(event)) => Some(event.window()),
+            xcb::Event::X(x::Event::ReparentNotify(event)) => Some(event.window()),
+            xcb::Event::X(x::Event::DestroyNotify(event)) => Some(event.window()),
+            _ => None,
+        }
+    }
+
+    fn mark_resize_uncertain(&self) {
+        self.resize_uncertain.store(true, Ordering::Release);
+    }
+
+    fn pop_resize_deferred(&self) -> Option<xcb::Event> {
+        self.deferred_raw
+            .lock()
+            .unwrap_or_else(|poison| {
+                self.mark_resize_uncertain();
+                poison.into_inner()
+            })
+            .pop_front()
+    }
+
+    /// Observe raw lifecycle events before normalization or prefetch. Reparent
+    /// events ignored by higher layers still invalidate the native challenge.
+    /// Failure only disables resize: never swallow the ordinary event.
+    fn observe_resize_raw(&self, conn: &xcb::Connection, event: &xcb::Event) {
+        let Some(window) = Self::lifecycle_window(event) else {
+            return;
+        };
+        let invalidated = (|| -> XcbResult<()> {
+            let atom = resize_challenge_atom(conn)?;
+            if atom != x::ATOM_NONE {
+                delete_resize_challenge(conn, window, atom)?;
+            }
+            Ok(())
+        })();
+        if invalidated.is_err() {
+            self.mark_resize_uncertain();
+        }
+    }
+
+    /// Caller holds a checked GrabServer. Keep all events for normal dispatch,
+    /// including events already retained by an earlier fence.
+    fn fence_resize_lifecycle(
+        &self,
+        conn: &xcb::Connection,
+        target: x::Window,
+        atom: x::Atom,
+    ) -> XcbResult<()> {
+        if self.resize_uncertain.load(Ordering::Acquire) {
+            return Err(BackendError::Message(
+                "resize lifecycle history uncertain".into(),
+            ));
+        }
+        let mut queued = self.deferred_raw.lock().map_err(|_| {
+            self.mark_resize_uncertain();
+            BackendError::Message("resize lifecycle queue poisoned".into())
+        })?;
+        // The checked grab reply has already ordered the native queue. Polling
+        // queued events does not wait for clients blocked behind our grab.
+        let outcome = Self::drain_resize_events(&mut queued, target, || {
+            conn.poll_for_queued_event().map_err(xcb_err)
+        });
+        match outcome {
+            Ok(false) => Ok(()),
+            Ok(true) => {
+                if let Err(error) = delete_resize_challenge(conn, target, atom) {
+                    self.mark_resize_uncertain();
+                    return Err(error);
+                }
+                Err(BackendError::Message(
+                    "resize window lifecycle expired".into(),
+                ))
+            }
+            Err(error) => {
+                self.mark_resize_uncertain();
+                let _ = delete_resize_challenge(conn, target, atom);
+                Err(error)
+            }
+        }
+    }
+
+    fn drain_resize_events(
+        queued: &mut VecDeque<xcb::Event>,
+        target: x::Window,
+        mut poll: impl FnMut() -> XcbResult<Option<xcb::Event>>,
+    ) -> XcbResult<bool> {
+        const LIMIT: usize = 256;
+        let mut invalid = queued
+            .iter()
+            .any(|event| Self::lifecycle_window(event) == Some(target));
+        while queued.len() < LIMIT {
+            match poll()? {
+                Some(event) => {
+                    invalid |= Self::lifecycle_window(&event) == Some(target);
+                    queued.push_back(event);
+                }
+                None => return Ok(invalid),
+            }
+        }
+        // Do not consume a 257th event which cannot be preserved. Even an
+        // exactly-full queue is conservatively uncertain until backend restart.
+        Err(BackendError::Message(
+            "resize lifecycle queue budget exhausted".into(),
+        ))
     }
 
     fn intern(&self, win: x::Window) -> WindowId {
@@ -496,6 +610,91 @@ impl XcbIdRegistry {
     fn remove_id(&self, id: WindowId) {
         if let Some(raw) = self.wid_to_x.write().unwrap().remove(&id) {
             self.x_to_wid.write().unwrap().remove(&raw);
+        }
+    }
+}
+
+fn resize_challenge_atom(conn: &xcb::Connection) -> XcbResult<x::Atom> {
+    conn.wait_for_reply(conn.send_request(&x::InternAtom {
+        only_if_exists: true,
+        name: b"_JWM_REMOTE_RESIZE_CHALLENGE",
+    }))
+    .map(|reply| reply.atom())
+    .map_err(xcb_err)
+}
+
+fn delete_resize_challenge(
+    conn: &xcb::Connection,
+    window: x::Window,
+    property: x::Atom,
+) -> XcbResult<()> {
+    match conn.send_and_check_request(&x::DeleteProperty { window, property }) {
+        Ok(()) => Ok(()),
+        // A destroyed object has no surviving property. No other error proves
+        // that the challenge was actually retired.
+        Err(xcb::ProtocolError::X(x::Error::Window(_), _)) => Ok(()),
+        Err(error) => Err(xcb_err(error)),
+    }
+}
+
+fn read_resize_challenge(
+    conn: &xcb::Connection,
+    window: x::Window,
+    property: x::Atom,
+) -> XcbResult<Option<[u8; 32]>> {
+    let reply = conn
+        .wait_for_reply(conn.send_request(&x::GetProperty {
+            delete: false,
+            window,
+            property,
+            r#type: x::ATOM_STRING,
+            long_offset: 0,
+            long_length: 8,
+        }))
+        .map_err(xcb_err)?;
+    if reply.r#type() != x::ATOM_STRING
+        || reply.format() != 8
+        || reply.bytes_after() != 0
+        || reply.value::<u8>().len() != 32
+    {
+        return Ok(None);
+    }
+    Ok(reply.value::<u8>().try_into().ok())
+}
+
+/// No IPC, arbitrary callback or capture wait runs while the X server is held.
+/// Submit release and flush even when an earlier checked query failed.
+fn with_resize_server_grab<T>(
+    conn: &xcb::Connection,
+    ids: &XcbIdRegistry,
+    operation: impl FnOnce() -> XcbResult<T>,
+) -> XcbResult<T> {
+    if let Err(error) = conn.send_and_check_request(&x::GrabServer {}) {
+        ids.mark_resize_uncertain();
+        // A failed check can leave acquisition uncertain. Always submit the
+        // release even when the checked grab round trip itself failed.
+        let _ = conn.send_and_check_request(&x::UngrabServer {});
+        let _ = conn.flush();
+        return Err(xcb_err(error));
+    }
+    let result = operation();
+    let release = conn
+        .send_and_check_request(&x::UngrabServer {})
+        .map_err(xcb_err);
+    let flush = conn.flush().map_err(xcb_err);
+    if release.is_err() || flush.is_err() {
+        ids.mark_resize_uncertain();
+    }
+    match result {
+        Ok(value) => {
+            release?;
+            flush?;
+            Ok(value)
+        }
+        Err(error) => {
+            let _ = release;
+            let _ = flush;
+            Err(error)
         }
     }
 }
@@ -803,6 +1002,7 @@ struct XcbEventSource {
     conn: Arc<xcb::Connection>,
     pointer_drain: Arc<PointerEventDrain>,
     prefetched: Vec<(xcb::Event, bool)>,
+    resize_ids: XcbIdRegistry,
     key_repeat: ClassicKeyRepeat,
     wake_token: Option<Token>,
 }
@@ -845,9 +1045,15 @@ impl XcbEventSource {
             conn,
             pointer_drain,
             prefetched: Vec::new(),
+            resize_ids: XcbIdRegistry::default(),
             key_repeat: ClassicKeyRepeat::default(),
             wake_token: None,
         }
+    }
+
+    fn with_resize_ids(mut self, ids: XcbIdRegistry) -> Self {
+        self.resize_ids = ids;
+        self
     }
 
     fn prefetch_queued_before_sleep(&mut self) -> XcbResult<bool> {
@@ -862,8 +1068,13 @@ impl XcbEventSource {
 
         while *remaining > 0 {
             *remaining -= 1;
-            match self.conn.poll_for_queued_event() {
+            let polled = match self.resize_ids.pop_resize_deferred() {
+                Some(event) => Ok(Some(event)),
+                None => self.conn.poll_for_queued_event(),
+            };
+            match polled {
                 Ok(Some(event)) => {
+                    self.resize_ids.observe_resize_raw(&self.conn, &event);
                     let repeat = self.key_repeat.observe(raw_key_event(&event));
                     let event = (event, repeat);
                     self.prefetched.push(event);
@@ -874,6 +1085,7 @@ impl XcbEventSource {
                 // protocol errors: log the error and continue draining rather
                 // than terminating the window manager.
                 Err(error) => {
+                    self.resize_ids.mark_resize_uncertain();
                     self.key_repeat.observe(RawKeyEvent::Other);
                     log::log!(
                         xcb_async_protocol_error_level(&error),
@@ -908,18 +1120,25 @@ impl EventSource for XcbEventSource {
         F: FnMut(Self::Event, &mut Self::Metadata) -> Self::Ret,
     {
         let conn = &self.conn;
+        let resize_ids = &self.resize_ids;
         let key_repeat = &mut self.key_repeat;
         let mut remaining =
             XCB_EVENT_BATCH_LIMIT - self.prefetched.len().min(XCB_EVENT_BATCH_LIMIT);
         let events = collect_xcb_event_batch(&mut self.prefetched, || {
             remaining -= 1;
-            match conn.poll_for_event() {
+            let polled = match resize_ids.pop_resize_deferred() {
+                Some(event) => Ok(Some(event)),
+                None => conn.poll_for_event(),
+            };
+            match polled {
                 Ok(Some(event)) => {
+                    resize_ids.observe_resize_raw(conn, &event);
                     let repeat = key_repeat.observe(raw_key_event(&event));
                     XcbBatchPoll::Event((event, repeat))
                 }
                 Ok(None) => XcbBatchPoll::Empty,
                 Err(xcb::Error::Protocol(error)) => {
+                    resize_ids.mark_resize_uncertain();
                     key_repeat.observe(RawKeyEvent::Other);
                     log::log!(
                         xcb_async_protocol_error_level(&error),
@@ -928,6 +1147,7 @@ impl EventSource for XcbEventSource {
                     XcbBatchPoll::Skipped
                 }
                 Err(xcb::Error::Connection(error)) => {
+                    resize_ids.mark_resize_uncertain();
                     key_repeat.observe(RawKeyEvent::Other);
                     XcbBatchPoll::Fatal(xcb_err(error))
                 }
@@ -2778,7 +2998,8 @@ impl Backend for XcbBackend {
 
         handle
             .insert_source(
-                XcbEventSource::new(self.conn.clone(), self.pointer_drain.clone()),
+                XcbEventSource::new(self.conn.clone(), self.pointer_drain.clone())
+                    .with_resize_ids(self.ids.clone()),
                 |event, _, data| {
                     data.compositor_frame_consumed_this_dispatch = false;
                     let events = match event {
@@ -3202,6 +3423,87 @@ impl XcbWindowOps {
 }
 
 impl WindowOps for XcbWindowOps {
+    fn configure_remote_resize(
+        &self,
+        win: WindowId,
+        challenge: [u8; 32],
+        expected: Geometry,
+        target: Geometry,
+    ) -> XcbResult<()> {
+        if target.x != expected.x
+            || target.y != expected.y
+            || target.border != expected.border
+            || expected.border != 0
+            || target.w == 0
+            || target.h == 0
+            || target.w > 16_384
+            || target.h > 16_384
+            || u64::from(target.w) * u64::from(target.h) > 64 * 1024 * 1024
+        {
+            return Err(BackendError::Message(
+                "remote resize cannot move/redecorate a window or exceed capture limits".into(),
+            ));
+        }
+        let window = self.win(win)?;
+        let atom = resize_challenge_atom(&self.conn)?;
+        if atom == x::ATOM_NONE {
+            return Err(BackendError::Message("resize challenge missing".into()));
+        }
+        with_resize_server_grab(&self.conn, &self.ids, || {
+            self.ids.fence_resize_lifecycle(&self.conn, window, atom)?;
+            let proof = read_resize_challenge(&self.conn, window, atom)?;
+            let attrs = self
+                .conn
+                .wait_for_reply(self.conn.send_request(&x::GetWindowAttributes { window }))
+                .map_err(xcb_err)?;
+            let geometry = self
+                .conn
+                .wait_for_reply(self.conn.send_request(&x::GetGeometry {
+                    drawable: x::Drawable::Window(window),
+                }))
+                .map_err(xcb_err)?;
+            let tree = self
+                .conn
+                .wait_for_reply(self.conn.send_request(&x::QueryTree { window }))
+                .map_err(xcb_err)?;
+            if proof != Some(challenge)
+                || tree.parent() != self.root
+                || tree.root() != self.root
+                || attrs.override_redirect()
+                || attrs.class() != x::WindowClass::InputOutput
+                || attrs.map_state() != x::MapState::Viewable
+                || (
+                    i32::from(geometry.x()),
+                    i32::from(geometry.y()),
+                    u32::from(geometry.width()),
+                    u32::from(geometry.height()),
+                    u32::from(geometry.border_width()),
+                ) != (
+                    expected.x,
+                    expected.y,
+                    expected.w,
+                    expected.h,
+                    expected.border,
+                )
+            {
+                return Err(BackendError::Message(
+                    "resize instance or geometry fence failed".into(),
+                ));
+            }
+            self.conn
+                .send_and_check_request(&x::ConfigureWindow {
+                    window,
+                    value_list: &[
+                        x::ConfigWindow::Width(target.w),
+                        x::ConfigWindow::Height(target.h),
+                    ],
+                })
+                .map_err(xcb_err)?;
+            self.send_configure_notify(win, target.x, target.y, target.w, target.h, target.border)?;
+            Ok(())
+        })
+    }
+
     fn set_position(&self, win: WindowId, x: i32, y: i32) -> XcbResult<()> {
         if XcbBackend::debug_drag_enabled() {
             log::debug!("[drag] x11 set_position win={:?} x={} y={}", win, x, y);
@@ -3842,6 +4144,25 @@ impl XcbPropertyOps {
 }
 
 impl PropertyOps for XcbPropertyOps {
+    fn remote_resize_challenge(&self, win: WindowId) -> XcbResult<Option<[u8; 32]>> {
+        let window = self.win(win)?;
+        let atom = resize_challenge_atom(&self.conn)?;
+        if atom == x::ATOM_NONE {
+            return Ok(None);
+        }
+        with_resize_server_grab(&self.conn, &self.ids, || {
+            self.ids.fence_resize_lifecycle(&self.conn, window, atom)?;
+            let tree = self
+                .conn
+                .wait_for_reply(self.conn.send_request(&x::QueryTree { window }))
+                .map_err(xcb_err)?;
+            if tree.parent() != tree.root() {
+                return Ok(None);
+            }
+            read_resize_challenge(&self.conn, window, atom)
+        })
+    }
+
     fn get_restart_property(
         &self,
         win: WindowId,
@@ -9223,5 +9544,413 @@ mod button_grab_tests {
         assert!(button_index(0).is_none());
         assert!(button_index(8).is_none());
         assert!(button_index(9).is_none());
+    }
+}
+
+#[cfg(test)]
+mod resize_history_fence_xcb_tests {
+    use super::*;
+
+    fn unmap(window: u32) -> xcb::Event {
+        xcb::Event::X(x::Event::UnmapNotify(x::UnmapNotifyEvent::new(
+            x::Window::new(1),
+            x::Window::new(window),
+            false,
+        )))
+    }
+
+    #[test]
+    fn resize_history_fence_xcb_preserves_order_and_existing_lifetime_events() {
+        let mut queue = VecDeque::from([unmap(5)]);
+        let mut incoming = VecDeque::from([unmap(8), unmap(9)]);
+        assert!(
+            XcbIdRegistry::drain_resize_events(&mut queue, x::Window::new(5), || Ok(
+                incoming.pop_front()
+            ))
+            .unwrap()
+        );
+        assert_eq!(
+            queue
+                .iter()
+                .map(|event| XcbIdRegistry::lifecycle_window(event)
+                    .unwrap()
+                    .resource_id())
+                .collect::<Vec<_>>(),
+            [5, 8, 9]
+        );
+    }
+
+    #[test]
+    fn resize_history_fence_xcb_budget_does_not_consume_unretainable_event() {
+        let mut queue = VecDeque::new();
+        let mut polled = 0;
+        assert!(
+            XcbIdRegistry::drain_resize_events(&mut queue, x::Window::new(5), || {
+                polled += 1;
+                Ok(Some(unmap(8)))
+            })
+            .is_err()
+        );
+        assert_eq!(polled, 256);
+        assert_eq!(queue.len(), 256);
+        assert!(
+            XcbIdRegistry::drain_resize_events(&mut queue, x::Window::new(5), || panic!(
+                "full queue must not poll"
+            ))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn resize_history_fence_xcb_error_retains_already_polled_raw_events() {
+        let mut queue = VecDeque::new();
+        let mut polled = 0;
+        assert!(
+            XcbIdRegistry::drain_resize_events(&mut queue, x::Window::new(5), || {
+                polled += 1;
+                if polled == 1 {
+                    Ok(Some(unmap(8)))
+                } else {
+                    Err(BackendError::Message("disconnect".into()))
+                }
+            })
+            .is_err()
+        );
+        assert_eq!(queue.len(), 1);
+        assert_eq!(
+            XcbIdRegistry::lifecycle_window(&queue[0])
+                .unwrap()
+                .resource_id(),
+            8
+        );
+    }
+
+    #[test]
+    fn resize_history_fence_xcb_uncertainty_is_shared_and_permanent() {
+        let ids = XcbIdRegistry::new(1);
+        let clone = ids.clone();
+        ids.mark_resize_uncertain();
+        assert!(clone.resize_uncertain.load(Ordering::Acquire));
+        assert!(clone.pop_resize_deferred().is_none());
+        assert!(ids.resize_uncertain.load(Ordering::Acquire));
+    }
+
+    struct NativeResizeFixture {
+        // Keep the private server alive until both the connection and adapters
+        // have dropped. Never connect through the operator's DISPLAY.
+        conn: Arc<xcb::Connection>,
+        root: x::Window,
+        target: x::Window,
+        id: WindowId,
+        atom: x::Atom,
+        ids: XcbIdRegistry,
+        windows: XcbWindowOps,
+        properties: XcbPropertyOps,
+        _server: crate::backend::clipboard_offer::IsolatedXvfb,
+    }
+
+    impl NativeResizeFixture {
+        fn new() -> Self {
+            let server = crate::backend::clipboard_offer::IsolatedXvfb::acquire();
+            let (connection, screen) = xcb::Connection::connect(Some(server.name())).unwrap();
+            let conn = Arc::new(connection);
+            let root = conn
+                .get_setup()
+                .roots()
+                .nth(screen as usize)
+                .unwrap()
+                .root();
+            conn.send_and_check_request(&x::ChangeWindowAttributes {
+                window: root,
+                value_list: &[x::Cw::EventMask(x::EventMask::SUBSTRUCTURE_NOTIFY)],
+            })
+            .unwrap();
+            let target: x::Window = conn.generate_id();
+            conn.send_and_check_request(&x::CreateWindow {
+                depth: 0,
+                wid: target,
+                parent: root,
+                x: 10,
+                y: 20,
+                width: 32,
+                height: 24,
+                border_width: 0,
+                class: x::WindowClass::InputOutput,
+                visual: 0,
+                value_list: &[],
+            })
+            .unwrap();
+            conn.send_and_check_request(&x::MapWindow { window: target })
+                .unwrap();
+            let atom = conn
+                .wait_for_reply(conn.send_request(&x::InternAtom {
+                    only_if_exists: false,
+                    name: b"_JWM_REMOTE_RESIZE_CHALLENGE",
+                }))
+                .unwrap()
+                .atom();
+            let ids = XcbIdRegistry::new(1);
+            ids.intern(root);
+            let id = ids.intern(target);
+            let atoms = XcbAtoms::new(&conn).unwrap();
+            let windows = XcbWindowOps::new(
+                conn.clone(),
+                ids.clone(),
+                atoms,
+                root,
+                Arc::new(RwLock::new(None)),
+                Arc::new(Mutex::new(ManagedUnmapTracker::default())),
+            );
+            let properties = XcbPropertyOps::new(conn.clone(), ids.clone(), atoms);
+            // All initial events are creation/map, before any grant exists.
+            while conn.poll_for_event().unwrap().is_some() {}
+            let fixture = Self {
+                conn,
+                root,
+                target,
+                id,
+                atom,
+                ids,
+                windows,
+                properties,
+                _server: server,
+            };
+            fixture.set_proof();
+            fixture
+        }
+
+        fn set_proof(&self) {
+            self.conn
+                .send_and_check_request(&x::ChangeProperty {
+                    mode: x::PropMode::Replace,
+                    window: self.target,
+                    property: self.atom,
+                    r#type: x::ATOM_STRING,
+                    data: &[17_u8; 32],
+                })
+                .unwrap();
+        }
+
+        fn initial_geometry() -> Geometry {
+            Geometry {
+                x: 10,
+                y: 20,
+                w: 32,
+                h: 24,
+                border: 0,
+            }
+        }
+
+        fn requested_geometry() -> Geometry {
+            Geometry {
+                w: 48,
+                h: 40,
+                ..Self::initial_geometry()
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "requires private Xvfb; run explicitly in native X11 CI"]
+    fn resize_history_fence_xcb_native_apply_checks_nonce_and_complete_geometry() {
+        let fixture = NativeResizeFixture::new();
+        assert_eq!(
+            fixture
+                .properties
+                .remote_resize_challenge(fixture.id)
+                .unwrap(),
+            Some([17; 32])
+        );
+        let initial = NativeResizeFixture::initial_geometry();
+        let requested = NativeResizeFixture::requested_geometry();
+        assert!(
+            fixture
+                .windows
+                .configure_remote_resize(fixture.id, [18; 32], initial, requested)
+                .is_err()
+        );
+        assert_eq!(fixture.windows.get_geometry(fixture.id).unwrap().w, 32);
+        fixture
+            .windows
+            .configure_remote_resize(fixture.id, [17; 32], initial, requested)
+            .unwrap();
+        let actual = fixture.windows.get_geometry(fixture.id).unwrap();
+        assert_eq!(
+            (actual.x, actual.y, actual.w, actual.h, actual.border),
+            (10, 20, 48, 40, 0)
+        );
+        // Cached expected geometry cannot apply a second operation.
+        assert!(
+            fixture
+                .windows
+                .configure_remote_resize(fixture.id, [17; 32], initial, requested)
+                .is_err()
+        );
+        let shifted = Geometry { x: 11, ..requested };
+        assert!(
+            fixture
+                .windows
+                .configure_remote_resize(fixture.id, [17; 32], actual, shifted)
+                .is_err()
+        );
+    }
+
+    #[test]
+    #[ignore = "requires private Xvfb; run explicitly in native X11 CI"]
+    fn resize_history_fence_xcb_native_unmap_remap_revokes_even_restored_nonce() {
+        let fixture = NativeResizeFixture::new();
+        assert_eq!(
+            fixture
+                .properties
+                .remote_resize_challenge(fixture.id)
+                .unwrap(),
+            Some([17; 32])
+        );
+        fixture
+            .conn
+            .send_and_check_request(&x::UnmapWindow {
+                window: fixture.target,
+            })
+            .unwrap();
+        fixture
+            .conn
+            .send_and_check_request(&x::MapWindow {
+                window: fixture.target,
+            })
+            .unwrap();
+        fixture.set_proof();
+        assert!(
+            fixture
+                .windows
+                .configure_remote_resize(
+                    fixture.id,
+                    [17; 32],
+                    NativeResizeFixture::initial_geometry(),
+                    NativeResizeFixture::requested_geometry()
+                )
+                .is_err()
+        );
+        assert_eq!(fixture.windows.get_geometry(fixture.id).unwrap().w, 32);
+        assert_eq!(
+            read_resize_challenge(&fixture.conn, fixture.target, fixture.atom).unwrap(),
+            None
+        );
+        assert!(
+            fixture
+                .ids
+                .deferred_raw
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|event| XcbIdRegistry::lifecycle_window(event) == Some(fixture.target))
+        );
+    }
+
+    #[test]
+    #[ignore = "requires private Xvfb; run explicitly in native X11 CI"]
+    fn resize_history_fence_xcb_native_prefetch_invalidates_before_dispatch() {
+        let fixture = NativeResizeFixture::new();
+        fixture
+            .conn
+            .send_and_check_request(&x::UnmapWindow {
+                window: fixture.target,
+            })
+            .unwrap();
+        fixture
+            .conn
+            .send_and_check_request(&x::MapWindow {
+                window: fixture.target,
+            })
+            .unwrap();
+        fixture.set_proof();
+        let mut source =
+            XcbEventSource::new(fixture.conn.clone(), Arc::new(PointerEventDrain::default()))
+                .with_resize_ids(fixture.ids.clone());
+        assert!(source.prefetch_queued_before_sleep().unwrap());
+        assert_eq!(source.prefetched.len(), 1);
+        assert_eq!(
+            XcbIdRegistry::lifecycle_window(&source.prefetched[0].0),
+            Some(fixture.target)
+        );
+        assert_eq!(
+            read_resize_challenge(&fixture.conn, fixture.target, fixture.atom).unwrap(),
+            None
+        );
+        // The event remains available to the normal JWM event handler.
+        assert_eq!(source.prefetched.len(), 1);
+        assert!(!fixture.ids.resize_uncertain.load(Ordering::Acquire));
+        assert_ne!(fixture.root, fixture.target);
+    }
+
+    #[test]
+    fn resize_history_fence_xcb_tracks_reparent_and_destroy_before_normalization() {
+        let root = x::Window::new(1);
+        let target = x::Window::new(5);
+        let reparent = xcb::Event::X(x::Event::ReparentNotify(x::ReparentNotifyEvent::new(
+            root, target, root, 0, 0, false,
+        )));
+        let destroy = xcb::Event::X(x::Event::DestroyNotify(x::DestroyNotifyEvent::new(
+            root, target,
+        )));
+        assert_eq!(XcbIdRegistry::lifecycle_window(&reparent), Some(target));
+        assert_eq!(XcbIdRegistry::lifecycle_window(&destroy), Some(target));
+    }
+
+    #[test]
+    #[ignore = "requires private Xvfb; run explicitly in native X11 CI"]
+    fn resize_history_fence_xcb_native_destroy_exact_xid_reuse_cannot_restore_grant() {
+        let fixture = NativeResizeFixture::new();
+        assert_eq!(
+            fixture
+                .properties
+                .remote_resize_challenge(fixture.id)
+                .unwrap(),
+            Some([17; 32])
+        );
+        fixture
+            .conn
+            .send_and_check_request(&x::DestroyWindow {
+                window: fixture.target,
+            })
+            .unwrap();
+        fixture
+            .conn
+            .send_and_check_request(&x::CreateWindow {
+                depth: 0,
+                wid: fixture.target,
+                parent: fixture.root,
+                x: 10,
+                y: 20,
+                width: 32,
+                height: 24,
+                border_width: 0,
+                class: x::WindowClass::InputOutput,
+                visual: 0,
+                value_list: &[],
+            })
+            .unwrap();
+        fixture
+            .conn
+            .send_and_check_request(&x::MapWindow {
+                window: fixture.target,
+            })
+            .unwrap();
+        fixture.set_proof();
+        assert!(
+            fixture
+                .windows
+                .configure_remote_resize(
+                    fixture.id,
+                    [17; 32],
+                    NativeResizeFixture::initial_geometry(),
+                    NativeResizeFixture::requested_geometry()
+                )
+                .is_err()
+        );
+        assert_eq!(fixture.windows.get_geometry(fixture.id).unwrap().w, 32);
+        assert_eq!(
+            read_resize_challenge(&fixture.conn, fixture.target, fixture.atom).unwrap(),
+            None
+        );
     }
 }

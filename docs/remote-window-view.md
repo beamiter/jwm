@@ -1,7 +1,7 @@
 # X11 application-window viewing (experimental)
 
 This is the first, deliberately **view-only** window-scoped slice of the remote
-application plan. It does not implement native remote resize or exclusive input.
+application plan. It offers optional explicit native resize, but does not implement exclusive input.
 It reuses the authenticated/encrypted remote transport and ordinary viewer.
 
 ## Local authorization
@@ -117,3 +117,49 @@ in this backend. Do not assume locking the desktop automatically revokes sharing
 the local host must explicitly stop the session/grant. This is not safe exclusive
 control or production-complete remote control. A trusted native JWM lock/lease
 boundary is separate prerequisite work before adding remote input privileges.
+
+## Explicit native source resize (experimental)
+
+The host must opt in independently with `host --window XID --once --allow-window-resize`.
+The viewer may issue one operation with `connect ADDRESS --view-only --resize-source 800x600`.
+Keep the normal key-file arguments. Ordinary viewport resizing and `--window-size`
+only adjust the viewer/encoded picture, never the application's native geometry.
+No keyboard, pointer, clipboard, reconnect, focus switching or generic IPC is enabled.
+
+Application protocol v15 adds a separate negotiated capability and fixed-size
+28-byte request / 37-byte result, bound to source epoch, geometry epoch and
+monotonically increasing request ID. The host admits one pending operation,
+limits native execution to four requests per second, and disables resize after
+an uncertain native failure or three-second confirmation deadline. `Configured`
+from local IPC is not success: a fresh capture must confirm actual dimensions
+and, for a changed size, a newer geometry epoch before `Applied` is returned.
+`Unchanged` also requires native validation and a fresh capture. This is capture
+confirmation, not confirmation that the viewer has presented the result.
+Already queued or transmitted old video cannot be retracted.
+
+A private persistent same-user local IPC connection binds a server-owned grant
+to the selected ClientKey generation. A random 32-byte STRING property binds the
+grant to the actual X server and target, not merely a matching numeric XID.
+The property remains throughout the lease; native application rechecks it inside
+a short X server critical section. Cleanup compares the nonce before deleting it.
+The network cannot supply a native XID, nonce or arbitrary local command.
+
+Native resize additionally requires an InputOutput client with zero border;
+this does not promise support for arbitrary decorated windows.
+
+The native backends invalidate the proof on raw Unmap/Reparent/Destroy events,
+including events prefetched before normal dispatch. Grant/application fences
+retain raw events in a shared ordered queue capped at 256; uncertainty or budget
+exhaustion fails closed rather than discarding lifecycle history. Queue exhaustion,
+raw read errors or failed proof invalidation permanently disable native resize
+in that WM process, until JWM is restarted; ordinary window management continues.
+This is not merely a per-viewer reset. Native size
+hints are followed by limits of 16,384 pixels per axis and 67,108,864 total pixels.
+JWM's native lock transitions revoke resize grants. They do **not** stop the
+view-only named-pixmap capture or reliably detect third-party screen lockers.
+Covered windows intentionally continue to be shared; stop the local host to end
+that permission. This is not production-complete remote control or isolation
+from other same-user X11 clients.
+
+The reconstruction must pass fresh compile, unit and dedicated real-X CI tests;
+results from an earlier lost cloud workspace are not validation of this tree.

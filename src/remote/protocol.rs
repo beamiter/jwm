@@ -174,6 +174,8 @@ pub enum MessageKind {
     ClipboardRestrict = 21,
     /// Host worker, backend and ordered writer have crossed the restriction.
     ClipboardRestricted = 22,
+    WindowResizeRequest = 23,
+    WindowResizeResult = 24,
 }
 
 impl TryFrom<u8> for MessageKind {
@@ -201,6 +203,8 @@ impl TryFrom<u8> for MessageKind {
             18 => Ok(Self::SourceRequest),
             19 => Ok(Self::SourceChanged),
             20 => Ok(Self::SessionClose),
+            23 => Ok(Self::WindowResizeRequest),
+            24 => Ok(Self::WindowResizeResult),
             21 => Ok(Self::ClipboardRestrict),
             22 => Ok(Self::ClipboardRestricted),
             other => Err(ProtocolError::UnknownMessageKind(other)),
@@ -870,11 +874,13 @@ mod tests {
             (20, MessageKind::SessionClose),
             (21, MessageKind::ClipboardRestrict),
             (22, MessageKind::ClipboardRestricted),
+            (23, MessageKind::WindowResizeRequest),
+            (24, MessageKind::WindowResizeResult),
         ] {
             assert_eq!(MessageKind::try_from(tag).unwrap(), kind);
             assert_eq!(u8::from(kind), tag);
         }
-        for tag in (0..=u8::MAX).filter(|tag| !(1..=22).contains(tag)) {
+        for tag in (0..=u8::MAX).filter(|tag| !(1..=24).contains(tag)) {
             assert!(
                 matches!(MessageKind::try_from(tag), Err(ProtocolError::UnknownMessageKind(rejected)) if rejected == tag),
                 "unallocated application message kind {tag} must be rejected"

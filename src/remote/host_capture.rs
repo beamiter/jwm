@@ -13,6 +13,24 @@ pub(super) enum HostCapture {
 }
 
 impl HostCapture {
+    pub(super) fn disable_native_resize(&mut self) {
+        if let Self::Window(c) = self {
+            c.disable_native_resize();
+        }
+    }
+    pub(super) fn request_native_resize(
+        &mut self,
+        expected: (u16, u16),
+        target: (u16, u16),
+    ) -> RemoteResult<(u16, u16)> {
+        match self {
+            Self::Window(c) => c.request_native_resize(expected, target),
+            Self::Desktop(_) => {
+                Err(std::io::Error::other("native resize requires a window grant").into())
+            }
+        }
+    }
+
     pub(super) fn frame(&mut self) -> RemoteResult<CaptureOutcome> {
         match self {
             Self::Desktop(c) => c.frame(),

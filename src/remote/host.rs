@@ -25,6 +25,7 @@ use super::source_wire::{
 };
 use super::tile::{TileEncodeRequest, TileEncoder, TilePlan};
 use super::usability::listener_bind_error;
+use super::window_resize::{HostResizeState, ResizeRequest, ResizeResult};
 use super::x11_capture::{
     CaptureArea, CaptureImageRecycler, CaptureMode, CaptureOutcome, CaptureSource, CapturedFrame,
     ScalingPolicy, X11Capture, validate_capture_area,
@@ -1598,6 +1599,7 @@ pub struct HostOptions {
     pub scaling: ScalingPolicy,
     pub allow_lan: bool,
     pub allow_input: bool,
+    pub allow_window_resize: bool,
     pub allow_clipboard: bool,
     pub clipboard_mode: ClipboardMode,
     pub clipboard_direction: ClipboardDirection,
@@ -1695,6 +1697,8 @@ fn refresh_input_geometry<E>(
 struct SourceControl {
     state: Mutex<HostSourceState>,
     changed: Condvar,
+    resize_enabled: AtomicBool,
+    resize_request: Mutex<Option<ResizeRequest>>,
 }
 
 impl SourceControl {
@@ -1712,6 +1716,8 @@ impl SourceControl {
                 presented_geometry: None,
             }),
             changed: Condvar::new(),
+            resize_enabled: AtomicBool::new(false),
+            resize_request: Mutex::new(None),
         })
     }
 
@@ -1786,10 +1792,11 @@ fn listener_security_notice(address: IpAddr) -> Option<&'static str> {
 
 fn validate_window_policy(options: &HostOptions) -> RemoteResult<()> {
     let window = matches!(options.capture_area, CaptureArea::Window(_));
-    if options
-        .shared_sources
-        .iter()
-        .any(|area| matches!(area, CaptureArea::Window(_)))
+    if (options.allow_window_resize && !window)
+        || options
+            .shared_sources
+            .iter()
+            .any(|area| matches!(area, CaptureArea::Window(_)))
         || (window
             && (options.allow_input
                 || options.allow_clipboard
@@ -1819,11 +1826,12 @@ pub fn run_host(options: HostOptions) -> RemoteResult<()> {
     // Bind the instance before announcing readiness, not on viewer arrival.
     // Keep its X connection and pixmap alive throughout the waiting period.
     let window_capture = if let CaptureArea::Window(id) = options.capture_area {
-        Some(WindowCapture::connect(
-            options.display.as_deref(),
-            id,
-            options.max_width,
-        )?)
+        let mut capture =
+            WindowCapture::connect(options.display.as_deref(), id, options.max_width)?;
+        if options.allow_window_resize {
+            capture.enable_native_resize()?;
+        }
+        Some(capture)
     } else {
         for (_, area) in &grants {
             validate_capture_area(options.display.as_deref(), area)?;
@@ -2253,6 +2261,10 @@ fn serve_authenticated(
     }
     let mut negotiated_stream = hello.stream;
     negotiated_stream.frame_limits = frame_limits;
+    negotiated_stream.window_resize = hello.stream.window_resize && options.allow_window_resize;
+    if !negotiated_stream.window_resize {
+        capture.disable_native_resize();
+    }
     let can_separate = hello.stream.cursor == super::messages::CursorMode::Independent
         && capture.enable_cursor_plane();
     negotiated_stream.cursor = hello.stream.cursor.negotiate(can_separate);
@@ -2366,6 +2378,9 @@ fn serve_authenticated(
             input_area,
             capture.geometry_epoch(),
         )?);
+        sources
+            .resize_enabled
+            .store(negotiated_stream.window_resize, Ordering::Release);
         writer.write_message(
             MessageKind::HelloAck,
             &ServerHello {
@@ -2852,6 +2867,16 @@ fn decline_legacy_session<W: std::io::Write>(writer: &mut SessionWriter<W>, reas
 /// clipboard records are rare and tiny.
 type SharedWriter = Arc<Mutex<SessionWriter<DeadlineWriter<TcpStream>>>>;
 
+fn send_resize_result(writer: &SharedWriter, result: ResizeResult) -> RemoteResult<()> {
+    write_session_record(
+        &mut lock_writer(writer),
+        MessageKind::WindowResizeResult,
+        &result.encode()?,
+        FRAME_WRITE_DEADLINE,
+    )?;
+    Ok(())
+}
+
 fn stream_frames(
     sources: &Arc<SourceControl>,
     viewport: &ViewportRequest,
@@ -2964,9 +2989,42 @@ fn stream_frames(
     let mut cursor_sender = CursorSender::default();
     let mut next_cursor_poll = Instant::now();
     let cursor_interval = Duration::from_millis(16);
+    let mut resize = HostResizeState::new(sources.resize_enabled.load(Ordering::Acquire));
+    let mut source_size = (0u16, 0u16);
     let capture_result = (|| -> RemoteResult<()> {
         while running.load(Ordering::Acquire) && !shutdown.load(Ordering::Acquire) {
             let now = Instant::now();
+            if let Some(result) = resize.expire(now) {
+                capture.disable_native_resize();
+                sources.resize_enabled.store(false, Ordering::Release);
+                send_resize_result(&writer, result)?;
+            }
+            let request = sources.resize_request.lock().unwrap().take();
+            if let Some(request) = request {
+                let epoch = sources.state.lock().unwrap().policy.current().epoch;
+                match resize.accept(request, epoch, capture.geometry_epoch(), source_size, now)? {
+                    Some(result) => send_resize_result(&writer, result)?,
+                    None => {
+                        let applied = capture
+                            .request_native_resize(source_size, (request.width, request.height));
+                        let result = if let Some(expired) = resize.expire(Instant::now()) {
+                            Some(expired)
+                        } else {
+                            match applied {
+                                Ok(size) => resize.configured(size)?,
+                                Err(_) => resize.fail(),
+                            }
+                        };
+                        if !resize.enabled() {
+                            capture.disable_native_resize();
+                            sources.resize_enabled.store(false, Ordering::Release);
+                        }
+                        if let Some(result) = result {
+                            send_resize_result(&writer, result)?;
+                        }
+                    }
+                }
+            }
             // Announce every capture-path transition, not just the first. Each
             // of these degradations is large and was previously visible only
             // as a single line that had long since scrolled away.
@@ -3082,6 +3140,19 @@ fn stream_frames(
                 continue;
             };
             let capture_completed_at = Instant::now();
+            source_size = (frame.source_width, frame.source_height);
+            if let Some(result) = resize.observe_frame(
+                source_version.epoch,
+                frame.geometry_epoch,
+                source_size,
+                capture_completed_at,
+            ) {
+                if !resize.enabled() {
+                    capture.disable_native_resize();
+                    sources.resize_enabled.store(false, Ordering::Release);
+                }
+                send_resize_result(&writer, result)?;
+            }
             telemetry.record_captured(capture_completed_at.duration_since(capture_started));
             telemetry.record_dimensions(&frame);
             {
@@ -3969,6 +4040,19 @@ fn receive_input_scoped(
                         }
                     }
                 }
+                MessageKind::WindowResizeRequest => {
+                    let sources =
+                        sources.ok_or_else(|| invalid_data("window resize unavailable"))?;
+                    if !sources.resize_enabled.load(Ordering::Acquire) {
+                        return Err(invalid_data("window resize was not negotiated").into());
+                    }
+                    let request = ResizeRequest::decode(&payload)?;
+                    let mut slot = sources.resize_request.lock().unwrap();
+                    if slot.is_some() {
+                        return Err(invalid_data("window resize intake overflow").into());
+                    }
+                    *slot = Some(request);
+                }
                 MessageKind::Viewport => {
                     let (width, height) = decode_viewport(&payload)?;
                     viewport.request(width, height);
@@ -4036,7 +4120,8 @@ fn receive_input_scoped(
                 | MessageKind::SourceCatalog
                 | MessageKind::SourceChanged
                 | MessageKind::SessionClose
-                | MessageKind::ClipboardRestricted => {
+                | MessageKind::ClipboardRestricted
+                | MessageKind::WindowResizeResult => {
                     return Err(invalid_data(format!("unexpected client message: {kind:?}")).into());
                 }
             }
@@ -4892,6 +4977,23 @@ mod tests {
         assert!(validate_window_policy(&options).is_err());
     }
 
+    #[test]
+    fn explicit_resize_permission_does_not_expand_window_scope() {
+        let mut options = test_host_source_options();
+        options.allow_window_resize = true;
+        assert!(validate_window_policy(&options).is_err());
+        options.capture_area = CaptureArea::Window(42);
+        assert!(validate_window_policy(&options).is_ok());
+        options.allow_input = true;
+        assert!(validate_window_policy(&options).is_err());
+        options.allow_input = false;
+        options.allow_clipboard = true;
+        assert!(validate_window_policy(&options).is_err());
+        options.allow_clipboard = false;
+        options.once = false;
+        assert!(validate_window_policy(&options).is_err());
+    }
+
     fn test_host_source_options() -> HostOptions {
         HostOptions {
             frame_limits: super::super::messages::FrameLimits::default(),
@@ -4909,6 +5011,7 @@ mod tests {
             scaling: ScalingPolicy::Auto,
             allow_lan: false,
             allow_input: false,
+            allow_window_resize: false,
             allow_clipboard: false,
             clipboard_mode: Default::default(),
             clipboard_direction: Default::default(),
@@ -7301,7 +7404,7 @@ mod tests {
             let (kind, reason) = reader.read_message().unwrap();
             assert_eq!(kind, MessageKind::Close);
             let reason = String::from_utf8(reason).unwrap();
-            assert!(reason.contains("version 4; expected 14"), "{reason}");
+            assert!(reason.contains("version 4; expected 15"), "{reason}");
             assert!(
                 reason.contains("update jwm-remote on both machines"),
                 "{reason}"
@@ -7331,7 +7434,7 @@ mod tests {
             for (hello, expected) in [
                 (
                     prior_version,
-                    "unsupported JWM remote application version 13; expected 14",
+                    "unsupported JWM remote application version 13; expected 15",
                 ),
                 (malformed, "peer advertised unknown remote capabilities"),
             ] {
@@ -7467,6 +7570,7 @@ mod tests {
             scaling: ScalingPolicy::Auto,
             allow_lan: false,
             allow_input: false,
+            allow_window_resize: false,
             allow_clipboard: false,
             clipboard_mode: Default::default(),
             clipboard_direction: Default::default(),

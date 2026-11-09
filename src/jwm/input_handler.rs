@@ -1482,6 +1482,7 @@ impl Jwm {
                         self.features.system_ui_return_to_hub = false;
                         // Swap the panel for the lock overlay; the keyboard and
                         // pointer grabs stay in place for the lock screen.
+                        self.remote_resize_grants.retain_live(|_| false);
                         self.features.system_ui = crate::jwm::features::SystemUiState::lock();
                         self.features
                             .system_ui
@@ -5493,12 +5494,43 @@ mod tests {
 
     #[derive(Default)]
     struct ConfigureReplyWindowOps {
+        resize_geometry: Mutex<Option<Geometry>>,
+        resize_unmapped: bool,
+        resize_fail_configure: bool,
+        resize_race_position: bool,
         replies: Mutex<Vec<ConfigureReply>>,
         applied: Mutex<Vec<(WindowId, WindowChanges)>>,
         closed: Mutex<Vec<WindowId>>,
     }
 
     impl WindowOps for ConfigureReplyWindowOps {
+        fn configure_remote_resize(
+            &self,
+            win: WindowId,
+            challenge: [u8; 32],
+            expected: Geometry,
+            target: Geometry,
+        ) -> Result<(), BackendError> {
+            let mut actual = self.resize_geometry.lock().unwrap().unwrap();
+            if self.resize_race_position {
+                actual.x += 1;
+            }
+            if challenge != [7; 32]
+                || self.resize_unmapped
+                || (actual.x, actual.y, actual.w, actual.h, actual.border)
+                    != (
+                        expected.x,
+                        expected.y,
+                        expected.w,
+                        expected.h,
+                        expected.border,
+                    )
+            {
+                return Err(BackendError::Message("test native fence failed".into()));
+            }
+            self.configure(win, target.x, target.y, target.w, target.h, target.border)
+        }
+
         fn set_position(&self, _win: WindowId, _x: i32, _y: i32) -> Result<(), BackendError> {
             Ok(())
         }
@@ -5512,6 +5544,18 @@ mod tests {
             height: u32,
             border: u32,
         ) -> Result<(), BackendError> {
+            if self.resize_fail_configure {
+                return Err(BackendError::Message("test configure failure".into()));
+            }
+            if let Some(geometry) = self.resize_geometry.lock().unwrap().as_mut() {
+                *geometry = Geometry {
+                    x,
+                    y,
+                    w: width,
+                    h: height,
+                    border,
+                };
+            }
             self.replies
                 .lock()
                 .expect("configure reply lock")
@@ -5563,12 +5607,12 @@ mod tests {
         fn get_window_attributes(&self, _win: WindowId) -> Result<WindowAttributes, BackendError> {
             Ok(WindowAttributes {
                 override_redirect: false,
-                map_state_viewable: true,
+                map_state_viewable: !self.resize_unmapped,
             })
         }
 
         fn get_geometry(&self, _win: WindowId) -> Result<Geometry, BackendError> {
-            Ok(Geometry::default())
+            Ok(self.resize_geometry.lock().unwrap().unwrap_or_default())
         }
 
         fn scan_windows(&self) -> Result<Vec<WindowId>, BackendError> {
@@ -5601,11 +5645,19 @@ mod tests {
     /// handler, and one window as transient for another (child, parent).
     #[derive(Default)]
     struct ConfigureReplyPropertyOps {
+        resize_challenge: Option<[u8; 32]>,
         dialog: bool,
         transient: Option<(WindowId, WindowId)>,
     }
 
     impl crate::backend::api::PropertyOps for ConfigureReplyPropertyOps {
+        fn remote_resize_challenge(
+            &self,
+            _win: WindowId,
+        ) -> Result<Option<[u8; 32]>, BackendError> {
+            Ok(self.resize_challenge)
+        }
+
         fn get_title(&self, win: WindowId) -> String {
             DummyPropertyOps.get_title(win)
         }
@@ -5817,6 +5869,17 @@ mod tests {
     }
 
     impl Backend for ConfigureReplyBackend {
+        fn resolve_window_handoff_identity(
+            &self,
+            identity: crate::backend::api::WindowHandoffIdentity,
+        ) -> Option<WindowId> {
+            match identity {
+                crate::backend::api::WindowHandoffIdentity::X11(id) => {
+                    Some(WindowId::from_raw(u64::from(id)))
+                }
+            }
+        }
+
         fn capabilities(&self) -> Capabilities {
             Capabilities::default()
         }
@@ -7672,6 +7735,8 @@ mod tests {
         );
         assert_eq!(backend.annotation_points, [(130.0, 119.0), (170.0, 149.0)]);
     }
+
+    include!("remote_resize_tests.rs");
 
     fn add_floating_configure_client(
         jwm: &mut Jwm,

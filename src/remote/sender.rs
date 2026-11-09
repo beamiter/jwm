@@ -104,6 +104,7 @@ impl Queue {
             MessageKind::Heartbeat => Some(0),
             MessageKind::FrameAck => Some(16),
             MessageKind::Viewport => Some(4),
+            MessageKind::WindowResizeRequest => Some(28),
             _ => None,
         };
         if expected.is_some_and(|length| payload.len() != length) {
@@ -961,5 +962,26 @@ mod tests {
                 .contains("panicked")
         );
         assert!(sender.worker.is_none());
+    }
+}
+
+#[cfg(test)]
+mod explicit_resize_tests {
+    use super::*;
+    #[test]
+    fn explicit_resize_is_bounded_and_never_coalesced_as_viewport() {
+        let mut queue = Queue::default();
+        assert!(
+            queue
+                .push(MessageKind::WindowResizeRequest, &[0; 27])
+                .is_err()
+        );
+        queue
+            .push(MessageKind::WindowResizeRequest, &[1; 28])
+            .unwrap();
+        queue
+            .push(MessageKind::WindowResizeRequest, &[2; 28])
+            .unwrap();
+        assert_eq!(queue.control.len(), 2);
     }
 }

@@ -1691,6 +1691,7 @@ impl Jwm {
                 // A lock is terminal, never a page the Hub can be backed out
                 // to, so the Escape target goes with the panel it belonged to.
                 self.features.system_ui_return_to_hub = false;
+                self.remote_resize_grants.retain_live(|_| false);
                 self.features.system_ui = crate::jwm::features::SystemUiState::lock();
                 self.features
                     .system_ui
@@ -3609,6 +3610,7 @@ impl Jwm {
         // On X11, never display a pretend lock if the exclusive keyboard grab
         // failed. Wayland-udev performs interception in its input pipeline.
         self.prepare_system_ui(backend, "lock screen", SystemUiPointerGrab::Buttons)?;
+        self.remote_resize_grants.retain_live(|_| false);
         self.features.system_ui = crate::jwm::features::SystemUiState::lock();
         self.features
             .system_ui

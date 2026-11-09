@@ -57,6 +57,8 @@ const RECEIVER_JOIN_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Debug)]
 pub struct ClientOptions {
+    /// One explicit source-size operation; never replayed or saved in a profile.
+    pub resize_source: Option<super::window_size::WindowSize>,
     /// Explicit local client-area startup size; None preserves automatic sizing.
     pub window_size: Option<super::window_size::WindowSize>,
     /// Explicit local best-effort startup position; coordinates are bounded by i16.
@@ -274,6 +276,9 @@ pub fn run_client(options: ClientOptions) -> RemoteResult<()> {
 /// single-session entry point. The budget counts additional sessions and never
 /// resets, even when a replacement session runs successfully for a long time.
 pub fn run_client_reconnecting(options: ClientOptions, attempts: u8) -> RemoteResult<()> {
+    if options.resize_source.is_some() && attempts != 0 {
+        return Err(invalid_data("explicit source resize cannot automatically reconnect").into());
+    }
     if attempts > 5 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -371,6 +376,15 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
     if let Some(size) = options.window_size {
         size.validate()?;
     }
+    if let Some(size) = options.resize_source {
+        size.validate()?;
+        if !options.view_only || options.clipboard || options.grab_input {
+            return Err(invalid_data(
+                "explicit source resize requires view-only without clipboard or input grab",
+            )
+            .into());
+        }
+    }
     validate_escape_key(&options.escape_key)?;
     let key = options.key.load()?;
     let request_input = !options.view_only;
@@ -405,6 +419,9 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
         options.frame_limits,
         HANDSHAKE_TIMEOUT,
     )?;
+    if options.resize_source.is_some() && !hello.stream.window_resize {
+        return Err(invalid_data("host has not authorized native window resizing").into());
+    }
     *stage = ClientStage::FirstFrame;
     eprintln!("jwm-remote: authenticated; waiting for the first desktop frame");
     if request_input && !(hello.pointer_enabled || hello.keyboard_enabled) {
@@ -476,6 +493,7 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
     *stage = ClientStage::FirstFrame;
     let mut initial_state = ReceiveState::new();
     initial_state.frame_limits = hello.stream.frame_limits;
+    initial_state.resize.get_mut().unwrap().requested = options.resize_source;
     *initial_state.clipboard_restriction.get_mut().unwrap() = hello
         .clipboard_enabled
         .then(|| RestrictionState::new(hello.stream.clipboard_content));
@@ -1127,6 +1145,7 @@ fn viewer_loop(
         .is_some_and(|catalog| catalog.entries.len() > 1);
     loop {
         wake.drain()?;
+        state.resize.lock().unwrap().check_timeout(Instant::now())?;
         let received_epoch = state.source_epoch.load(Ordering::Acquire);
         if received_epoch != source_epoch {
             source_epoch = received_epoch;
@@ -1280,6 +1299,15 @@ fn viewer_loop(
                 presented_scope = (timing.source_epoch, timing.geometry_epoch);
             }
             acknowledge_presentation(writer, sequence, pending_presentations, &state.telemetry)?;
+            if let Some(request) = state
+                .resize
+                .lock()
+                .unwrap()
+                .after_presentation(presented_scope, Instant::now())
+            {
+                writer.write_message(MessageKind::WindowResizeRequest, &request.encode()?)?;
+                writer.flush()?;
+            }
             viewer.source_presented(presented_scope.1);
             viewer.enable_source_cycle(source_cycle_available);
             switching = false;
@@ -2033,7 +2061,67 @@ fn average_millis(duration: Duration, count: u64) -> f64 {
     }
 }
 
+#[derive(Default)]
+struct ClientResize {
+    requested: Option<super::window_size::WindowSize>,
+    pending: Option<(super::window_resize::ResizeRequest, Instant)>,
+}
+impl ClientResize {
+    fn after_presentation(
+        &mut self,
+        scope: (u64, u64),
+        now: Instant,
+    ) -> Option<super::window_resize::ResizeRequest> {
+        let size = self.requested.take()?;
+        let request = super::window_resize::ResizeRequest {
+            request_id: 1,
+            source_epoch: scope.0,
+            geometry_epoch: scope.1,
+            width: size.width,
+            height: size.height,
+        };
+        self.pending = Some((request, now));
+        Some(request)
+    }
+    fn check_timeout(&self, now: Instant) -> RemoteResult<()> {
+        if self.pending.as_ref().is_some_and(|(_, start)| {
+            now.saturating_duration_since(*start) >= Duration::from_secs(5)
+        }) {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "explicit source resize result timed out; not retried",
+            )
+            .into());
+        }
+        Ok(())
+    }
+    fn receive(&mut self, result: super::window_resize::ResizeResult) -> RemoteResult<()> {
+        let (request, _) = self
+            .pending
+            .as_ref()
+            .ok_or_else(|| invalid_data("unsolicited source resize result"))?;
+        if (
+            result.request_id,
+            result.source_epoch,
+            result.geometry_epoch,
+        ) != (
+            request.request_id,
+            request.source_epoch,
+            request.geometry_epoch,
+        ) {
+            return Err(invalid_data("source resize result scope mismatch").into());
+        }
+        self.pending = None;
+        eprintln!(
+            "jwm-remote: source resize {:?}: {}x{} (capture geometry {})",
+            result.status, result.width, result.height, result.observed_geometry_epoch
+        );
+        Ok(())
+    }
+}
+
 struct ReceiveState {
+    resize: Mutex<ClientResize>,
     clipboard_restriction: Mutex<Option<RestrictionState>>,
     catalog: Mutex<Option<SourceCatalog>>,
     source_epoch: AtomicU64,
@@ -2051,6 +2139,7 @@ struct ReceiveState {
 impl ReceiveState {
     fn new() -> Self {
         Self {
+            resize: Mutex::new(ClientResize::default()),
             clipboard_restriction: Mutex::new(None),
             catalog: Mutex::new(None),
             source_epoch: AtomicU64::new(1),
@@ -2277,6 +2366,14 @@ fn receive_frame_records(
             })?;
         let kind = read_record(&mut payload, remaining)?;
         match kind {
+            MessageKind::WindowResizeResult => {
+                state
+                    .resize
+                    .lock()
+                    .unwrap()
+                    .receive(super::window_resize::ResizeResult::decode(&payload)?)?;
+                completion.signal()?;
+            }
             MessageKind::ClipboardRestricted => {
                 let request = ClipboardRestriction::decode(&payload)?;
                 state
@@ -2376,6 +2473,7 @@ fn receive_frame_records(
             | MessageKind::Viewport
             | MessageKind::SourceCatalog
             | MessageKind::SourceRequest
+            | MessageKind::WindowResizeRequest
             | MessageKind::ClipboardRestrict => {
                 return Err(invalid_data(format!("unexpected host message: {kind:?}")).into());
             }
@@ -2753,6 +2851,7 @@ pub(super) mod tests {
     #[test]
     fn invalid_startup_size_fails_before_reading_key_or_display() {
         let options = ClientOptions {
+            resize_source: None,
             window_position: None,
             window_size: Some(super::super::window_size::WindowSize {
                 width: 0,
@@ -5177,5 +5276,41 @@ mod diagnostic_tests {
             assert_eq!(restriction.take_confirmed(), Some(request));
         }
         assert!(clipboard_was_restricted(&state, 7));
+    }
+}
+
+#[cfg(test)]
+mod explicit_resize_tests {
+    use super::*;
+    use crate::remote::window_resize::{ResizeResult, ResizeStatus};
+    #[test]
+    fn explicit_resize_once_scoped_to_presentation_and_timeout() {
+        let now = Instant::now();
+        let mut state = ClientResize {
+            requested: Some(super::super::window_size::WindowSize {
+                width: 480,
+                height: 320,
+            }),
+            pending: None,
+        };
+        let req = state.after_presentation((3, 7), now).unwrap();
+        assert_eq!((req.source_epoch, req.geometry_epoch), (3, 7));
+        assert!(state.after_presentation((3, 8), now).is_none());
+        assert!(state.check_timeout(now + Duration::from_secs(5)).is_err());
+        let mut result = ResizeResult {
+            request_id: req.request_id,
+            source_epoch: 4,
+            geometry_epoch: 7,
+            observed_geometry_epoch: 8,
+            width: 480,
+            height: 320,
+            status: ResizeStatus::Applied,
+        };
+        assert!(state.receive(result).is_err());
+        assert!(state.pending.is_some());
+        result.source_epoch = 3;
+        state.receive(result).unwrap();
+        assert!(state.pending.is_none());
+        assert!(state.receive(result).is_err());
     }
 }

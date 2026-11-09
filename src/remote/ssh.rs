@@ -147,6 +147,7 @@ pub fn run_ssh(options: SshOptions) -> RemoteResult<()> {
         )
         .and_then(|()| {
             run_client(ClientOptions {
+                resize_source: None,
                 window_size: options.window_size,
                 window_position: options.window_position,
                 address: format!("127.0.0.1:{local_port}"),

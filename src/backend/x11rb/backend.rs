@@ -1938,6 +1938,10 @@ mod ids {
         next: Arc<AtomicU64>,
         x11_to_wid: Arc<RwLock<HashMap<u32, WindowId>>>,
         wid_to_x11: Arc<RwLock<HashMap<WindowId, u32>>>,
+        // Preserve raw events drained by native resize fences for the event
+        // source, in server order. Total retained work is bounded to 256.
+        deferred_raw: Arc<std::sync::Mutex<std::collections::VecDeque<x11rb::protocol::Event>>>,
+        resize_uncertain: Arc<std::sync::atomic::AtomicBool>,
     }
 
     impl X11IdRegistry {
@@ -1946,7 +1950,131 @@ mod ids {
                 next: Arc::new(AtomicU64::new(start)),
                 x11_to_wid: Arc::new(RwLock::new(HashMap::new())),
                 wid_to_x11: Arc::new(RwLock::new(HashMap::new())),
+                deferred_raw: Default::default(),
+                resize_uncertain: Default::default(),
             }
+        }
+
+        fn lifecycle_window(event: &x11rb::protocol::Event) -> Option<u32> {
+            use x11rb::protocol::Event;
+            match event {
+                Event::UnmapNotify(e) => Some(e.window),
+                Event::ReparentNotify(e) => Some(e.window),
+                Event::DestroyNotify(e) => Some(e.window),
+                _ => None,
+            }
+        }
+        pub(super) fn poll_resize_safe_raw<C: x11rb::connection::Connection>(
+            &self,
+            conn: &C,
+        ) -> Result<Option<x11rb::protocol::Event>, x11rb::errors::ConnectionError> {
+            use x11rb::protocol::xproto::ConnectionExt as _;
+            let deferred = self.deferred_raw.lock().unwrap().pop_front();
+            let event = match deferred {
+                Some(event) => Some(event),
+                None => match conn.poll_for_event() {
+                    Ok(event) => event,
+                    Err(error) => {
+                        self.resize_uncertain.store(true, Ordering::Release);
+                        return Err(error);
+                    }
+                },
+            };
+            if let Some(window) = event.as_ref().and_then(Self::lifecycle_window) {
+                // Before normalization, including ignored Reparent events.
+                let invalidation = (|| -> Result<(), BackendError> {
+                    let atom = conn
+                        .intern_atom(true, b"_JWM_REMOTE_RESIZE_CHALLENGE")?
+                        .reply()?
+                        .atom;
+                    if atom != 0 {
+                        match conn.delete_property(window, atom)?.check() {
+                            Ok(()) => {}
+                            Err(x11rb::errors::ReplyError::X11Error(error))
+                                if error.error_kind == x11rb::protocol::ErrorKind::Window => {}
+                            Err(error) => return Err(error.into()),
+                        }
+                    }
+                    Ok(())
+                })();
+                if invalidation.is_err() {
+                    // Preserve the event, but never grant a resize after an
+                    // uncertain failure to invalidate a lifetime challenge.
+                    self.resize_uncertain.store(true, Ordering::Release);
+                }
+            }
+            Ok(event)
+        }
+        /// Caller holds GrabServer after its checked roundtrip. Exhaustion,
+        /// uncertain history or connection failure can only deny the resize.
+        pub(super) fn fence_resize_lifecycle<C: x11rb::connection::Connection>(
+            &self,
+            conn: &C,
+            target: u32,
+            atom: u32,
+        ) -> Result<(), BackendError> {
+            use x11rb::protocol::xproto::ConnectionExt as _;
+            if self.resize_uncertain.load(Ordering::Acquire) {
+                return Err(BackendError::Message(
+                    "resize lifecycle history uncertain".into(),
+                ));
+            }
+            let mut queued = self.deferred_raw.lock().unwrap();
+            match Self::drain_resize_events(&mut queued, target, || {
+                conn.poll_for_event().map_err(BackendError::from)
+            }) {
+                Ok(false) => Ok(()),
+                outcome => {
+                    if outcome.is_err() {
+                        self.resize_uncertain.store(true, Ordering::Release);
+                    }
+                    let invalidation = (|| -> Result<(), BackendError> {
+                        match conn.delete_property(target, atom)?.check() {
+                            Ok(()) => Ok(()),
+                            Err(x11rb::errors::ReplyError::X11Error(error))
+                                if error.error_kind == x11rb::protocol::ErrorKind::Window =>
+                            {
+                                Ok(())
+                            }
+                            Err(error) => Err(error.into()),
+                        }
+                    })();
+                    if let Err(error) = invalidation {
+                        self.resize_uncertain.store(true, Ordering::Release);
+                        return Err(error);
+                    }
+                    match outcome {
+                        Err(error) => Err(error),
+                        _ => Err(BackendError::Message(
+                            "resize window lifecycle expired".into(),
+                        )),
+                    }
+                }
+            }
+        }
+        fn drain_resize_events(
+            queued: &mut std::collections::VecDeque<x11rb::protocol::Event>,
+            target: u32,
+            mut poll: impl FnMut() -> Result<Option<x11rb::protocol::Event>, BackendError>,
+        ) -> Result<bool, BackendError> {
+            const LIMIT: usize = 256;
+            let mut invalid = queued
+                .iter()
+                .any(|event| Self::lifecycle_window(event) == Some(target));
+            while queued.len() < LIMIT {
+                match poll()? {
+                    Some(event) => {
+                        invalid |= Self::lifecycle_window(&event) == Some(target);
+                        queued.push_back(event);
+                    }
+                    None => return Ok(invalid),
+                }
+            }
+            // Do not consume an event we cannot retain, even at the exact
+            // boundary where the native queue might happen to be empty.
+            Err(BackendError::Message(
+                "resize lifecycle queue budget exhausted".into(),
+            ))
         }
 
         /// X11 window(u32) intern  WindowId
@@ -1999,6 +2127,69 @@ mod ids {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        fn unmap(window: u32) -> x11rb::protocol::Event {
+            x11rb::protocol::Event::UnmapNotify(x11rb::protocol::xproto::UnmapNotifyEvent {
+                response_type: 18,
+                sequence: 0,
+                event: 1,
+                window,
+                from_configure: false,
+            })
+        }
+        #[test]
+        fn resize_history_fence_preserves_order_and_existing_lifetime_events() {
+            let mut queue = std::collections::VecDeque::from([unmap(5)]);
+            let mut incoming = std::collections::VecDeque::from([unmap(8), unmap(9)]);
+            assert!(
+                X11IdRegistry::drain_resize_events(&mut queue, 5, || Ok(incoming.pop_front()))
+                    .unwrap()
+            );
+            assert_eq!(
+                queue
+                    .iter()
+                    .map(X11IdRegistry::lifecycle_window)
+                    .collect::<Vec<_>>(),
+                [Some(5), Some(8), Some(9)]
+            );
+        }
+        #[test]
+        fn resize_history_fence_budget_does_not_consume_unretainable_event() {
+            let mut queue = std::collections::VecDeque::new();
+            let mut polled = 0;
+            assert!(
+                X11IdRegistry::drain_resize_events(&mut queue, 5, || {
+                    polled += 1;
+                    Ok(Some(unmap(8)))
+                })
+                .is_err()
+            );
+            assert_eq!(polled, 256);
+            assert_eq!(queue.len(), 256);
+            assert!(
+                X11IdRegistry::drain_resize_events(&mut queue, 5, || panic!(
+                    "full queue must not poll"
+                ))
+                .is_err()
+            );
+        }
+        #[test]
+        fn resize_history_fence_error_retains_already_polled_raw_events() {
+            let mut queue = std::collections::VecDeque::new();
+            let mut polled = 0;
+            assert!(
+                X11IdRegistry::drain_resize_events(&mut queue, 5, || {
+                    polled += 1;
+                    if polled == 1 {
+                        Ok(Some(unmap(8)))
+                    } else {
+                        Err(BackendError::Message("disconnect".into()))
+                    }
+                })
+                .is_err()
+            );
+            assert_eq!(queue.len(), 1);
+        }
 
         #[test]
         fn native_lookup_survives_reordered_interning_without_allocating_unknown_xids() {
@@ -2841,7 +3032,6 @@ mod event_source {
         Arc,
         atomic::{AtomicU32, Ordering},
     };
-    use x11rb::connection::Connection;
     use x11rb::errors::ConnectionError;
     use x11rb::protocol::{ErrorKind, Event as XEvent, xproto};
     use x11rb::rust_connection::RustConnection;
@@ -3379,7 +3569,7 @@ mod event_source {
             }
 
             poll_mapped_event_with_budget(raw_attempts_remaining, || {
-                let Some(event) = self.conn.poll_for_event()? else {
+                let Some(event) = self.ids.poll_resize_safe_raw(self.conn.as_ref())? else {
                     return Ok(X11RawPoll::Empty);
                 };
                 let left_button_held = matches!(
@@ -5962,6 +6152,57 @@ mod property_ops {
     }
 
     impl<C: Connection + Send + Sync + 'static> PropertyOpsTrait for X11PropertyOps<C> {
+        fn remote_resize_challenge(&self, win: WindowId) -> Result<Option<[u8; 32]>, BackendError> {
+            let wid = self.ids.x11(win)?;
+            let atom = self
+                .conn
+                .intern_atom(true, b"_JWM_REMOTE_RESIZE_CHALLENGE")?
+                .reply()?
+                .atom;
+            if atom == 0 {
+                return Ok(None);
+            }
+            self.conn.grab_server()?.check()?;
+            let result = (|| -> Result<Option<[u8; 32]>, BackendError> {
+                self.ids
+                    .fence_resize_lifecycle(self.conn.as_ref(), wid, atom)?;
+                let tree = self.conn.query_tree(wid)?.reply()?;
+                if tree.parent != tree.root {
+                    return Ok(None);
+                }
+                let reply = self
+                    .conn
+                    .get_property(false, wid, atom, AtomEnum::STRING, 0, 8)?
+                    .reply()?;
+                if reply.type_ != u32::from(AtomEnum::STRING)
+                    || reply.format != 8
+                    || reply.bytes_after != 0
+                    || reply.length != 8
+                {
+                    return Ok(None);
+                }
+                Ok(reply.value.as_slice().try_into().ok())
+            })();
+            let release = self
+                .conn
+                .ungrab_server()
+                .map_err(BackendError::from)
+                .and_then(|cookie| cookie.check().map_err(BackendError::from));
+            let flush = self.conn.flush().map_err(BackendError::from);
+            match result {
+                Ok(value) => {
+                    release?;
+                    flush?;
+                    Ok(value)
+                }
+                Err(error) => {
+                    let _ = release;
+                    let _ = flush;
+                    Err(error)
+                }
+            }
+        }
+
         fn get_restart_property(
             &self,
             win: WindowId,
@@ -6924,6 +7165,101 @@ mod window_ops {
     }
 
     impl<C: Connection + Send + Sync + 'static> WindowOps for X11WindowOps<C> {
+        fn configure_remote_resize(
+            &self,
+            win: WindowId,
+            challenge: [u8; 32],
+            expected: Geometry,
+            target: Geometry,
+        ) -> Result<(), BackendError> {
+            if target.x != expected.x
+                || target.y != expected.y
+                || target.border != expected.border
+                || target.border != 0
+                || target.w == 0
+                || target.h == 0
+                || target.w > 16384
+                || target.h > 16384
+                || u64::from(target.w) * u64::from(target.h) > 64 * 1024 * 1024
+            {
+                return Err(BackendError::Message(
+                    "remote resize cannot move/redecorate a window or exceed capture limits".into(),
+                ));
+            }
+            let wid = self.ids.x11(win)?;
+            let atom = self
+                .conn
+                .intern_atom(true, b"_JWM_REMOTE_RESIZE_CHALLENGE")?
+                .reply()?
+                .atom;
+            if atom == 0 {
+                return Err(BackendError::Message("resize challenge missing".into()));
+            }
+            self.conn.grab_server()?.check()?;
+            let result = (|| -> Result<(), BackendError> {
+                self.ids
+                    .fence_resize_lifecycle(self.conn.as_ref(), wid, atom)?;
+                let proof = self
+                    .conn
+                    .get_property(false, wid, atom, AtomEnum::STRING, 0, 8)?
+                    .reply()?;
+                let attrs = self.conn.get_window_attributes(wid)?.reply()?;
+                let geometry = self.conn.get_geometry(wid)?.reply()?;
+                let tree = self.conn.query_tree(wid)?.reply()?;
+                if proof.type_ != u32::from(AtomEnum::STRING)
+                    || proof.format != 8
+                    || proof.bytes_after != 0
+                    || proof.length != 8
+                    || proof.value.as_slice() != challenge
+                    || tree.parent != tree.root
+                    || attrs.override_redirect
+                    || attrs.class != WindowClass::INPUT_OUTPUT
+                    || attrs.map_state != MapState::VIEWABLE
+                    || (
+                        i32::from(geometry.x),
+                        i32::from(geometry.y),
+                        u32::from(geometry.width),
+                        u32::from(geometry.height),
+                        u32::from(geometry.border_width),
+                    ) != (
+                        expected.x,
+                        expected.y,
+                        expected.w,
+                        expected.h,
+                        expected.border,
+                    )
+                {
+                    return Err(BackendError::Message(
+                        "resize instance or geometry fence failed".into(),
+                    ));
+                }
+                let aux = ConfigureWindowAux::new()
+                    .x(target.x)
+                    .y(target.y)
+                    .width(target.w)
+                    .height(target.h)
+                    .border_width(target.border);
+                self.conn.configure_window(wid, &aux)?.check()?;
+                self.send_configure_notify_internal(
+                    win,
+                    target.x as i16,
+                    target.y as i16,
+                    target.w as u16,
+                    target.h as u16,
+                    target.border as u16,
+                )?;
+                Ok(())
+            })();
+            // Submit and flush UngrabServer even on an earlier checked error.
+            let release = self
+                .conn
+                .ungrab_server()
+                .map_err(BackendError::from)
+                .and_then(|cookie| cookie.check().map_err(BackendError::from));
+            let flush = self.conn.flush().map_err(BackendError::from);
+            result.and(release).and(flush)
+        }
+
         fn set_position(&self, win: WindowId, x: i32, y: i32) -> Result<(), BackendError> {
             let w = self.ids.x11(win)?;
             if super::drag_trace_enabled() {

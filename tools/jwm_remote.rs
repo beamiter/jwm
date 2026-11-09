@@ -271,6 +271,10 @@ enum Command {
         #[arg(long)]
         allow_input: bool,
 
+        /// Permit one live window instance to resize through native JWM authority.
+        #[arg(long, requires_all = ["window", "once"])]
+        allow_window_resize: bool,
+
         /// Share the clipboard with the authenticated peer, both directions:
         /// text, images, and files copied in a file manager.
         ///
@@ -404,6 +408,10 @@ enum Command {
         /// The window manager may override this startup request.
         #[arg(long, value_name = "WIDTHxHEIGHT")]
         window_size: Option<WindowSize>,
+
+        /// Explicitly resize the authorized source once, after first presentation.
+        #[arg(long, value_name = "WIDTHxHEIGHT", requires = "view_only", conflicts_with_all = ["reconnect_attempts", "clipboard", "grab_input"])]
+        resize_source: Option<WindowSize>,
 
         /// Best-effort local client origin X,Y; off-screen positions fall back.
         #[arg(long, value_name = "X,Y", allow_hyphen_values = true)]
@@ -590,6 +598,7 @@ fn profile_from_command(command: Command) -> RemoteResult<Profile> {
             key_file,
             display,
             window_size,
+            resize_source,
             window_position,
             view_only,
             grab_input,
@@ -600,6 +609,11 @@ fn profile_from_command(command: Command) -> RemoteResult<Profile> {
             clipboard_file_limit,
             frame_limits,
         } => {
+            if resize_source.is_some() {
+                return Err(
+                    profile_error("explicit source resize cannot be saved in a profile").into(),
+                );
+            }
             if reconnect_attempts != 0 {
                 return Err(profile_error(
                     "reconnect consent cannot be saved in a profile; use connect directly",
@@ -1078,6 +1092,7 @@ fn run(command: Command) -> RemoteResult<()> {
             region,
             allow_lan,
             allow_input,
+            allow_window_resize,
             allow_clipboard,
             clipboard_mode,
             clipboard_direction,
@@ -1115,6 +1130,7 @@ fn run(command: Command) -> RemoteResult<()> {
                 scaling,
                 allow_lan,
                 allow_input,
+                allow_window_resize,
                 allow_clipboard,
                 clipboard_mode,
                 clipboard_direction,
@@ -1177,6 +1193,7 @@ fn run(command: Command) -> RemoteResult<()> {
             key_file,
             display,
             window_size,
+            resize_source,
             window_position,
             view_only,
             grab_input,
@@ -1193,6 +1210,7 @@ fn run(command: Command) -> RemoteResult<()> {
                 key: KeySource::File(resolve_key_path(key_file)?),
                 display,
                 window_size,
+                resize_source,
                 window_position,
                 view_only,
                 grab_input,
@@ -2642,5 +2660,58 @@ mod tests {
             .next()
             .unwrap();
         assert!(!run.contains("emit_diagnostic("));
+    }
+}
+
+#[cfg(test)]
+mod explicit_resize_tests {
+    use super::*;
+    #[test]
+    fn explicit_resize_flags_require_scope_and_cannot_be_saved() {
+        let args = [
+            "jwm-remote",
+            "connect",
+            "127.0.0.1:9876",
+            "--view-only",
+            "--resize-source",
+            "480x320",
+        ];
+        let parsed = Cli::try_parse_from(args).unwrap();
+        assert!(profile_from_command(parsed.command).is_err());
+        assert!(
+            Cli::try_parse_from([
+                "jwm-remote",
+                "connect",
+                "host",
+                "--resize-source",
+                "480x320"
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "jwm-remote",
+                "connect",
+                "host",
+                "--view-only",
+                "--resize-source",
+                "480x320",
+                "--reconnect-attempts",
+                "1"
+            ])
+            .is_err()
+        );
+        assert!(Cli::try_parse_from(["jwm-remote", "host", "--allow-window-resize"]).is_err());
+        assert!(
+            Cli::try_parse_from([
+                "jwm-remote",
+                "host",
+                "--window",
+                "0x200001",
+                "--once",
+                "--allow-window-resize"
+            ])
+            .is_ok()
+        );
     }
 }

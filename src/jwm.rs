@@ -42,6 +42,7 @@ pub mod monitor_management;
 pub(crate) mod native_chrome;
 pub mod positioning;
 pub mod process;
+pub(crate) mod remote_resize;
 pub mod rendering;
 pub(crate) mod window_preferences;
 pub mod window_state;
@@ -145,6 +146,7 @@ pub struct Jwm {
     pub running: AtomicBool,
     pub is_restarting: AtomicBool,
     pub(crate) restart_state: restart_state::PendingRestartState,
+    pub(crate) remote_resize_grants: remote_resize::RemoteResizeGrants,
     pub last_mouse_root: (f64, f64),
 
     /// A pointer drag being watched: armed by a button press or a client
@@ -1459,6 +1461,7 @@ impl Jwm {
             running: AtomicBool::new(true),
             is_restarting: AtomicBool::new(false),
             restart_state: restart_state::PendingRestartState::default(),
+            remote_resize_grants: Default::default(),
 
             message: SharedMessage::default(),
 
