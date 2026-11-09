@@ -393,6 +393,10 @@ fn wire_pointer_remote_click_serial_cannot_authorize_popup_grab() {
         .client
         .request(xdg, 2, &[popup, f.app.xdg, positioner]);
     f.app.client.request(popup, 1, &[f.seat, serial]);
+    // Smithay defers requested_grab until the popup's first surface commit.
+    // Commit without a buffer (before any configure acknowledgement/mapping)
+    // so this exercises the real JWM grab policy, not merely the wire parser.
+    f.app.client.request(surface, 6, &[]);
     sync(&mut f.server);
     let ev = events(&mut f.app.client);
     assert!(

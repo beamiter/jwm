@@ -1113,7 +1113,7 @@ mod tests {
     }
 
     #[test]
-    fn hello_uses_version_sixteen_and_rejects_neighbouring_versions() {
+    fn hello_uses_version_seventeen_and_rejects_neighbouring_versions() {
         let payload = ServerHello {
             stream: Default::default(),
             pointer_enabled: false,
@@ -1128,7 +1128,7 @@ mod tests {
         // would end the session on the first copied image or file. It must
         // fail on its version instead. Version 4 sent one digest of the whole
         // keymap where later versions send a per-keycode table.
-        for older in [4_u16, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15] {
+        for older in [4_u16, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16] {
             let mut previous = payload;
             previous[8..10].copy_from_slice(&older.to_be_bytes());
             let error = ServerHello::decode(&previous).unwrap_err();
@@ -1139,7 +1139,7 @@ mod tests {
             );
         }
 
-        for rejected in [0_u16, 2, 3, 17, u16::MAX] {
+        for rejected in [0_u16, 2, 3, 18, u16::MAX] {
             let mut other = payload;
             other[8..10].copy_from_slice(&rejected.to_be_bytes());
             assert!(

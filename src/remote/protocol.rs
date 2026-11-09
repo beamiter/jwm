@@ -896,11 +896,15 @@ mod tests {
             (26, MessageKind::WaylandKeyboardStatus),
             (27, MessageKind::WaylandKeyboardKey),
             (28, MessageKind::WaylandKeyboardRevoke),
+            (29, MessageKind::WaylandPointerRequest),
+            (30, MessageKind::WaylandPointerStatus),
+            (31, MessageKind::WaylandPointerAction),
+            (32, MessageKind::WaylandPointerRevoke),
         ] {
             assert_eq!(MessageKind::try_from(tag).unwrap(), kind);
             assert_eq!(u8::from(kind), tag);
         }
-        for tag in (0..=u8::MAX).filter(|tag| !(1..=28).contains(tag)) {
+        for tag in (0..=u8::MAX).filter(|tag| !(1..=32).contains(tag)) {
             assert!(
                 matches!(MessageKind::try_from(tag), Err(ProtocolError::UnknownMessageKind(rejected)) if rejected == tag),
                 "unallocated application message kind {tag} must be rejected"
