@@ -115,10 +115,30 @@ impl KeyboardPeer {
         self.worker.take().unwrap().join().unwrap();
     }
     fn events(&self, server: &mut Server) -> Vec<ViewerEvent> {
+        // Queue the real protocol stimulus before waking the nonblocking
+        // viewer poll. A server flush is not a client dispatch barrier: callers
+        // expecting a terminal event must still await that explicit evidence.
+        server.roundtrip();
         self.commands.send(KeyboardCommand::Poll).unwrap();
         match self.receive(server, "poll") {
             KeyboardReply::Events(events) => events,
             other => panic!("expected events: {other:?}"),
+        }
+    }
+    fn revoked_events(&self, server: &mut Server, phase: &str) -> Vec<ViewerEvent> {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let events = self.events(server);
+            // Even an earlier partial batch must never leak a key. In
+            // particular SCM_RIGHTS delivery need not finish in one poll.
+            assert_no_keys(&events);
+            if events.contains(&ViewerEvent::ReleaseAll) {
+                return events;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "{phase}: no explicit ReleaseAll before deadline; last events: {events:?}"
+            );
         }
     }
 }
@@ -199,7 +219,12 @@ fn actual_wayland_viewer_keyboard_default_is_unbound_and_optin_uses_real_keymap_
     enter_clean(&mut server, &peer, &keyboard);
     keyboard.key(3, 1, 30, KeyState::Pressed);
     keyboard.key(4, 2, 30, KeyState::Released);
-    let events = peer.events(&mut server);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut events = Vec::new();
+    while events.len() < 2 {
+        events.extend(peer.events(&mut server));
+        assert!(Instant::now() < deadline, "balanced key delivery deadline");
+    }
     let keys: Vec<_> = events
         .iter()
         .filter_map(|event| match event {
@@ -213,7 +238,7 @@ fn actual_wayland_viewer_keyboard_default_is_unbound_and_optin_uses_real_keymap_
         "Wayland evdev must receive exactly one +8 adapter translation"
     );
     keyboard.repeat_info(200, 1);
-    assert_no_keys(&peer.events(&mut server));
+    peer.revoked_events(&mut server, "repeat-info replacement");
     assert_no_keys(&peer.events(&mut server));
     peer.stop(&mut server);
 }
@@ -259,7 +284,7 @@ fn actual_wayland_viewer_keyboard_leave_same_batch_key_and_restore_never_forward
     keyboard.leave(4, &surface);
     keyboard.enter(5, &surface, Vec::new());
     keyboard.modifiers(6, 0, 0, 0, 0);
-    let events = peer.events(&mut server);
+    let events = peer.revoked_events(&mut server, "leave and restore");
     assert_no_keys(&events);
     assert!(events.contains(&ViewerEvent::ReleaseAll));
     keyboard.key(7, 2, 31, KeyState::Pressed);
@@ -301,7 +326,7 @@ fn actual_wayland_viewer_keyboard_capability_and_global_history_are_terminal() {
             }
         }
         keyboard.key(9, 9, 30, KeyState::Pressed);
-        let events = peer.events(&mut server);
+        let events = peer.revoked_events(&mut server, &format!("terminal case {case}"));
         assert_no_keys(&events);
         assert!(
             events.contains(&ViewerEvent::ReleaseAll),
@@ -338,7 +363,7 @@ fn actual_wayland_viewer_keyboard_bad_edges_and_queue_overflow_clear_whole_batch
                 }
             }
         }
-        let events = peer.events(&mut server);
+        let events = peer.revoked_events(&mut server, &format!("terminal case {case}"));
         assert_no_keys(&events);
         assert!(
             events.contains(&ViewerEvent::ReleaseAll),
@@ -371,9 +396,11 @@ fn actual_wayland_viewer_keyboard_map_replacement_fd_never_restores_authority() 
         };
         keyboard.keymap(KeymapFormat::XkbV1, file.as_fd(), size);
         keyboard.key(8, 8, 30, KeyState::Pressed);
-        let events = peer.events(&mut server);
+        let events = peer.revoked_events(&mut server, &format!("terminal case {case}"));
         assert_no_keys(&events);
         assert!(events.contains(&ViewerEvent::ReleaseAll));
+        keyboard.key(9, 9, 30, KeyState::Released);
+        assert_no_keys(&peer.events(&mut server));
         peer.stop(&mut server);
     }
 }

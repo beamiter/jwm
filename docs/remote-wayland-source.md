@@ -92,7 +92,10 @@ display, and does not promise the latest visual content before every keystroke.
 The viewer and native host must agree on the **entire** canonical XKB keymap,
 using SHA-256 of the bounded canonical text, not the older truncated per-key
 core-X11 comparison. Release all viewer keys before connecting; initial
-modifier/group state must be clean. Wait for the granted status before typing. Keymap/layout
+modifier/group state must be clean. Wait for **Wayland keyboard ready; you may type**
+before typing. The earlier **host approved** message is not readiness: local focus
+validation is still pending, and a key edge during that interval terminates the session.
+The ready message follows successful local validation; later focus loss still revokes access. Keymap/layout
 changes, including a change later restored, revoke the permission. Unsupported
 or different maps are rejected without guessing a keycode translation.
 The native lease uses independent keyboard state and accepts only its bounded

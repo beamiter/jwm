@@ -390,7 +390,7 @@ mod tests;
 
 /// Read-only evidence of create-lease requests, including rejected attempts.
 /// The production handler increments next_epoch before checking source/admission.
-#[cfg(all(test, feature = "backend-wayland-udev"))]
+#[cfg(all(test, feature = "backend-wayland-udev", feature = "remote-wayland"))]
 pub(crate) fn attempts_for_test(state: &JwmWaylandState) -> u32 {
     state.remote_keyboard.next_epoch
 }

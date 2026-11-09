@@ -1361,6 +1361,9 @@ fn viewer_loop(
                 #[cfg(feature = "remote-wayland")]
                 viewer.check_wayland_keyboard(true)?;
                 keyboard.activated = true;
+                eprintln!(
+                    "jwm-remote: Wayland keyboard ready; you may type (fixed source; no automatic renewal)"
+                );
             }
             #[cfg(test)]
             if keyboard.configured() {
@@ -2894,7 +2897,7 @@ impl ClientKeyboard {
                 self.check_timeout(Instant::now())?;
                 self.epoch = Some(result.lease_epoch);
                 eprintln!(
-                    "jwm-remote: Wayland keyboard lease granted (fixed source; no automatic renewal)"
+                    "jwm-remote: Wayland keyboard host approved; waiting for local focus validation, do not type yet"
                 );
             }
             LeaseStatusKind::Denied if !self.ended && self.epoch.is_none() => {
