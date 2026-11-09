@@ -741,26 +741,28 @@ impl HostTelemetry {
         });
     }
 
-    fn record_write_stages(&self, wait: Duration, socket: Duration) {
-        self.update(|window| {
-            window.writer_wait_elapsed = window.writer_wait_elapsed.saturating_add(wait);
-            window.socket_write_elapsed = window.socket_write_elapsed.saturating_add(socket);
-            window.writer_wait_samples.record(wait);
-            window.socket_write_samples.record(socket);
-        });
-    }
-
     fn record_outstanding(&self, outstanding: u64) {
         self.update(|window| window.max_outstanding = window.max_outstanding.max(outstanding));
     }
 
-    fn record_sent(&self, bytes: usize, elapsed: Duration) {
+    /// Commit one completed write as a single reporting-window observation.
+    /// The periodic reporter may reset the window at any lock acquisition, so
+    /// counts, durations and samples must never be published separately.
+    /// Total write time ends at successful flush (wait + socket), excluding
+    /// this accounting update and the subsequent writer-lock release.
+    fn record_sent(&self, bytes: usize, wait: Duration, socket: Duration) {
         self.update(|window| {
             window.sent = window.sent.saturating_add(1);
             window.bytes = window
                 .bytes
                 .saturating_add(u64::try_from(bytes).unwrap_or(u64::MAX));
-            window.write_elapsed = window.write_elapsed.saturating_add(elapsed);
+            window.write_elapsed = window
+                .write_elapsed
+                .saturating_add(wait.saturating_add(socket));
+            window.writer_wait_elapsed = window.writer_wait_elapsed.saturating_add(wait);
+            window.socket_write_elapsed = window.socket_write_elapsed.saturating_add(socket);
+            window.writer_wait_samples.record(wait);
+            window.socket_write_samples.record(socket);
         });
     }
 
@@ -3386,7 +3388,8 @@ fn send_frames_with_encoder_scoped<W: std::io::Write + SetWriteTimeout>(
             let socket_started = Instant::now();
             let result = write_frame_record(&mut writer, wire_payload, FRAME_WRITE_DEADLINE);
             if result.is_ok() {
-                telemetry.record_write_stages(
+                telemetry.record_sent(
+                    wire_payload.len(),
                     socket_started.duration_since(write_started),
                     socket_started.elapsed(),
                 );
@@ -3399,7 +3402,6 @@ fn send_frames_with_encoder_scoped<W: std::io::Write + SetWriteTimeout>(
             sender.discard();
             return Err(error.into());
         }
-        telemetry.record_sent(wire_payload.len(), write_started.elapsed());
         if unchanged_keepalive {
             telemetry.record_unchanged_keepalive();
         }
@@ -8258,6 +8260,85 @@ mod tests {
     }
 
     #[test]
+    fn telemetry_completed_write_is_whole_on_either_side_of_reset() {
+        let base = Instant::now();
+        for reset_first in [false, true] {
+            let telemetry = HostTelemetry::new_at(base);
+            if reset_first {
+                let empty = telemetry.take_due_at(base + TELEMETRY_INTERVAL).unwrap();
+                assert_eq!(empty.window.sent, 0);
+                assert_eq!(empty.window.writer_wait_samples.count, 0);
+                assert_eq!(empty.window.socket_write_samples.count, 0);
+            }
+            telemetry.record_sent(100, Duration::from_millis(2), Duration::from_millis(3));
+            let snapshot = telemetry
+                .take_due_at(base + TELEMETRY_INTERVAL * 2)
+                .unwrap();
+            let window = snapshot.window;
+            assert_eq!(window.sent, 1);
+            assert_eq!(window.bytes, 100);
+            assert_eq!(window.write_elapsed, Duration::from_millis(5));
+            assert_eq!(window.writer_wait_samples.count, 1);
+            assert_eq!(window.socket_write_samples.count, 1);
+            let json = host_telemetry_json(snapshot, 0);
+            assert_eq!(json["stages"]["writer_wait_ms"]["mean"], 2.0);
+            assert_eq!(json["stages"]["socket_write_ms"]["mean"], 3.0);
+            assert!(
+                telemetry
+                    .take_final_at(base + TELEMETRY_INTERVAL * 2)
+                    .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn telemetry_concurrent_resets_never_split_completed_write_observations() {
+        let base = Instant::now();
+        let telemetry = HostTelemetry::new_at(base);
+        let start = std::sync::Barrier::new(2);
+        let done = AtomicBool::new(false);
+        let validate = |window: HostTelemetryWindow| {
+            let count = u32::try_from(window.sent).unwrap();
+            assert_eq!(window.bytes, window.sent * 100);
+            assert_eq!(window.write_elapsed, Duration::from_millis(5) * count);
+            assert_eq!(window.writer_wait_elapsed, Duration::from_millis(2) * count);
+            assert_eq!(
+                window.socket_write_elapsed,
+                Duration::from_millis(3) * count
+            );
+            assert_eq!(window.writer_wait_samples.count, (count as usize).min(128));
+            assert_eq!(window.socket_write_samples.count, (count as usize).min(128));
+        };
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                start.wait();
+                for _ in 0..4096 {
+                    telemetry.record_sent(100, Duration::from_millis(2), Duration::from_millis(3));
+                    std::thread::yield_now();
+                }
+                done.store(true, Ordering::Release);
+            });
+            start.wait();
+            let mut sent = 0;
+            let mut tick = 1;
+            while !done.load(Ordering::Acquire) {
+                let snapshot = telemetry
+                    .take_due_at(base + TELEMETRY_INTERVAL * tick)
+                    .unwrap();
+                validate(snapshot.window);
+                sent += snapshot.window.sent;
+                tick += 1;
+                std::thread::yield_now();
+            }
+            if let Some(snapshot) = telemetry.take_final_at(base + TELEMETRY_INTERVAL * tick) {
+                validate(snapshot.window);
+                sent += snapshot.window.sent;
+            }
+            assert_eq!(sent, 4096);
+        });
+    }
+
+    #[test]
     fn telemetry_quantiles_are_bounded_and_empty_values_are_null() {
         let mut samples = StageSamples::default();
         assert_eq!(samples.json()["samples"], 0);
@@ -8285,8 +8366,7 @@ mod tests {
             atlas_pack: Duration::from_millis(2),
             jpeg: Duration::from_millis(4),
         });
-        telemetry.record_write_stages(Duration::from_millis(2), Duration::from_millis(3));
-        telemetry.record_sent(100, Duration::from_millis(5));
+        telemetry.record_sent(100, Duration::from_millis(2), Duration::from_millis(3));
         let snapshot = telemetry.take_due_at(base + TELEMETRY_INTERVAL).unwrap();
         let json = host_telemetry_json(snapshot, 1);
         let parsed: serde_json::Value = serde_json::from_str(&json.to_string()).unwrap();
@@ -8380,7 +8460,7 @@ mod tests {
             )
             .unwrap();
         telemetry.record_outstanding(outstanding);
-        telemetry.record_sent(100, Duration::from_millis(8));
+        telemetry.record_sent(100, Duration::ZERO, Duration::from_millis(8));
         let outstanding = credits
             .mark_sent(
                 1,
@@ -8392,7 +8472,7 @@ mod tests {
             )
             .unwrap();
         telemetry.record_outstanding(outstanding);
-        telemetry.record_sent(200, Duration::from_millis(9));
+        telemetry.record_sent(200, Duration::ZERO, Duration::from_millis(9));
 
         let sent_window = telemetry
             .take_due_at(base + TELEMETRY_INTERVAL)
@@ -8794,6 +8874,12 @@ mod tests {
         let window = telemetry.state.lock().unwrap().window;
         assert_eq!(window.encoded, 1);
         assert_eq!(window.sent, 0);
+        assert_eq!(window.bytes, 0);
+        assert_eq!(window.write_elapsed, Duration::ZERO);
+        assert_eq!(window.writer_wait_elapsed, Duration::ZERO);
+        assert_eq!(window.socket_write_elapsed, Duration::ZERO);
+        assert_eq!(window.writer_wait_samples.count, 0);
+        assert_eq!(window.socket_write_samples.count, 0);
         assert_eq!(window.unchanged_keepalive, 0);
         assert_eq!(window.unchanged_suppressed, 0);
         assert_eq!(credits.outstanding(), 1);
@@ -8846,6 +8932,12 @@ mod tests {
         let window = telemetry.state.lock().unwrap().window;
         assert_eq!(window.encoded, 1);
         assert_eq!(window.sent, 0);
+        assert_eq!(window.bytes, 0);
+        assert_eq!(window.write_elapsed, Duration::ZERO);
+        assert_eq!(window.writer_wait_elapsed, Duration::ZERO);
+        assert_eq!(window.socket_write_elapsed, Duration::ZERO);
+        assert_eq!(window.writer_wait_samples.count, 0);
+        assert_eq!(window.socket_write_samples.count, 0);
         assert_eq!(window.unchanged_keepalive, 0);
         assert_eq!(window.unchanged_suppressed, 0);
     }

@@ -1487,7 +1487,8 @@ in the window (zero dimensions mean no captured frame in that window).
 - `jpeg_ms`: JPEG encoder creation and encoding into the bounded payload writer.
   These two stage samples include only frames carrying an atlas; keepalives
   perform neither stage and do not dilute their means or quantiles.
-- `writer_wait_ms`: waiting to acquire the shared authenticated-record writer.
+- `writer_wait_ms`: time before starting the record write, including waiting
+  for the shared authenticated-record writer and validating/reserving the frame.
 - `socket_write_ms`: record encryption, socket writes and flush after acquiring
   the writer; it is not pure kernel/network time.
 - `capture_start_to_ack_ms`: capture **start** through the matching drawn ACK.
@@ -1497,6 +1498,13 @@ in the window (zero dimensions mean no captured frame in that window).
 - `send_to_ack_ms`: publication to the credit ledger through drawn ACK,
   including writer contention, transport, viewer processing and presentation.
   This is application feedback latency, **not network RTT**.
+
+Completed-write counts, bytes and both write-stage samples are recorded atomically
+in one reporting window. The text `write` average is `writer_wait_ms` plus
+`socket_write_ms`, ending at successful flush; it excludes the telemetry update
+and subsequent writer-lock release. Older text `write` measurements included that
+small accounting/release overhead. Failed or partial writes contribute neither a
+completed-write count nor write-stage samples.
 
 The record includes package version and optional compile-time
 `JWM_BUILD_COMMIT` (null when not supplied). For reproducible benchmark builds,
