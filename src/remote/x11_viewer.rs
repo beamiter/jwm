@@ -1568,15 +1568,15 @@ impl Viewer {
                             WaylandPointerEventKind::LeftDown,
                         )
                     } else if event.detail == 4 || event.detail == 5 {
-                        self.scoped_pointer_event(
-                            event.event_x,
-                            event.event_y,
-                            if event.detail == 4 {
-                                WaylandPointerEventKind::ScrollUp
-                            } else {
-                                WaylandPointerEventKind::ScrollDown
-                            },
-                        )
+                        match scoped_wheel_press(event.detail, event.state) {
+                            ScopedWheelPress::Scroll(kind) => {
+                                self.scoped_pointer_event(event.event_x, event.event_y, kind)
+                            }
+                            ScopedWheelPress::LeftHeld => {
+                                ViewerEvent::WaylandPointerButtonCancel { pressed: true }
+                            }
+                            ScopedWheelPress::Unsupported => ViewerEvent::WaylandPointerCancel,
+                        }
                     } else {
                         ViewerEvent::WaylandPointerCancel
                     });
@@ -4687,6 +4687,29 @@ fn append_source_title(title: &mut String, current: Option<&str>, switching: Opt
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum ScopedWheelPress {
+    Scroll(WaylandPointerEventKind),
+    LeftHeld,
+    Unsupported,
+}
+
+fn scoped_wheel_press(detail: u8, state: KeyButMask) -> ScopedWheelPress {
+    if !matches!(detail, 4 | 5) {
+        return ScopedWheelPress::Unsupported;
+    }
+    // X11's state reports a physical hold even if its original press was
+    // outside this viewer or before pointer mode was enabled.
+    if state.contains(KeyButMask::BUTTON1) {
+        return ScopedWheelPress::LeftHeld;
+    }
+    ScopedWheelPress::Scroll(if detail == 4 {
+        WaylandPointerEventKind::ScrollUp
+    } else {
+        WaylandPointerEventKind::ScrollDown
+    })
+}
+
 fn source_cycle_modifiers_match(state: KeyButMask) -> bool {
     let modifiers = KeyButMask::SHIFT | KeyButMask::CONTROL | KeyButMask::MOD1 | KeyButMask::MOD4;
     state & modifiers == KeyButMask::SHIFT | KeyButMask::CONTROL | KeyButMask::MOD4
@@ -4773,6 +4796,32 @@ fn invalid_data(message: impl Into<String>) -> io::Error {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn scoped_wheel_press_tracks_initial_physical_left_hold() {
+        use super::{KeyButMask, ScopedWheelPress, WaylandPointerEventKind, scoped_wheel_press};
+        for (button, kind) in [
+            (4, WaylandPointerEventKind::ScrollUp),
+            (5, WaylandPointerEventKind::ScrollDown),
+        ] {
+            assert_eq!(
+                scoped_wheel_press(button, KeyButMask::default()),
+                ScopedWheelPress::Scroll(kind)
+            );
+            assert_eq!(
+                scoped_wheel_press(button, KeyButMask::BUTTON1),
+                ScopedWheelPress::LeftHeld
+            );
+            assert_eq!(
+                scoped_wheel_press(button, KeyButMask::BUTTON1 | KeyButMask::SHIFT),
+                ScopedWheelPress::LeftHeld
+            );
+        }
+        assert_eq!(
+            scoped_wheel_press(6, KeyButMask::default()),
+            ScopedWheelPress::Unsupported
+        );
+    }
+
     use super::*;
     use crate::remote::frame::{
         DecodedFrame, RecyclableDecodedFrame, decode_pool_snapshot, new_decode_buffer_pool,

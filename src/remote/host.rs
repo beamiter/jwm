@@ -8084,7 +8084,13 @@ mod tests {
             let (kind, reason) = reader.read_message().unwrap();
             assert_eq!(kind, MessageKind::Close);
             let reason = String::from_utf8(reason).unwrap();
-            assert!(reason.contains("version 4; expected 17"), "{reason}");
+            assert!(
+                reason.contains(&format!(
+                    "version 4; expected {}",
+                    crate::remote::messages::APPLICATION_VERSION
+                )),
+                "{reason}"
+            );
             assert!(
                 reason.contains("update jwm-remote on both machines"),
                 "{reason}"
@@ -8114,9 +8120,15 @@ mod tests {
             for (hello, expected) in [
                 (
                     prior_version,
-                    "unsupported JWM remote application version 13; expected 17",
+                    format!(
+                        "unsupported JWM remote application version 13; expected {}",
+                        crate::remote::messages::APPLICATION_VERSION
+                    ),
                 ),
-                (malformed, "peer advertised unknown remote capabilities"),
+                (
+                    malformed,
+                    "peer advertised unknown remote capabilities".to_owned(),
+                ),
             ] {
                 let (mut client, server) = loopback_pair();
                 client
