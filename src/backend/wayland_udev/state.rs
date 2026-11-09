@@ -9111,7 +9111,9 @@ mod protocol_hardening_tests {
     /// stream kept showing a frozen window as live.
     #[test]
     fn closing_a_captured_window_stops_its_idle_capture_session() {
-        use crate::backend::wayland_udev::image_copy_capture::init_image_copy_capture;
+        use crate::backend::wayland_udev::image_copy_capture::{
+            authority_tests::App, init_image_copy_capture,
+        };
         // ext_image_copy_capture_session_v1.done/stopped.
         const SESSION_DONE: u16 = 4;
         const SESSION_STOPPED: u16 = 5;
@@ -9122,7 +9124,11 @@ mod protocol_hardening_tests {
         let display = server.display.handle();
         server.state.image_capture_pending = Some(init_image_copy_capture(&display));
         let mut client = RawClient::connect(&mut server, JwmClientState::default());
-        let (_, toplevel, window) = create_toplevel(&mut server, &mut client);
+        // A role alone is not capturable. Exercise the real configure/ACK,
+        // SHM buffer attach and commit mapping path before creating authority.
+        let mut app = App::new(&mut server);
+        let window = app.window;
+        assert!(server.state.mapped_windows.contains(&window));
         let list = client.bind("ext_foreign_toplevel_list_v1", 1);
         let sources = client.bind("ext_foreign_toplevel_image_capture_source_manager_v1", 1);
         let capture = client.bind("ext_image_copy_capture_manager_v1", 1);
@@ -9144,7 +9150,7 @@ mod protocol_hardening_tests {
         assert!(server.state.toplevel_capture_sessions.contains_key(&window));
 
         // No frame is in flight when the window closes.
-        client.request(toplevel, TOPLEVEL_DESTROY, &[]);
+        app.client.request(app.toplevel, TOPLEVEL_DESTROY, &[]);
         assert_eq!(
             opcodes_for(&mut server, &mut client, session),
             [SESSION_STOPPED]

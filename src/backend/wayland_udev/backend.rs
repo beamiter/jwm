@@ -9,17 +9,6 @@ use crate::sync_ext::MutexExt;
 mod kms;
 use self::kms::KmsState;
 
-/// Test-only entry to the production single-surface renderer, without exposing
-/// the KMS state or duplicating capture logic in the protocol fixtures.
-#[cfg(test)]
-pub(crate) fn fulfill_test_toplevel_capture(
-    renderer: &mut smithay::backend::renderer::gles::GlesRenderer,
-    cache: &mut Option<(i32, i32, smithay::backend::renderer::gles::GlesRenderbuffer)>,
-    state: &JwmWaylandState,
-    pending: &super::image_copy_capture::PendingImageCaptureQueue,
-) {
-    KmsState::fulfill_image_capture_toplevel_frames(renderer, cache, state, pending, None);
-}
 use super::compositor::{CompositorOutputTextureOwnership, WaylandCompositor};
 use super::output_management::proposed_output_framebuffer_size;
 use crate::backend::api::{
@@ -8329,6 +8318,20 @@ fn stop_capture_sessions_of_departed_outputs(
             crate::backend::wayland_udev::image_copy_capture::stop_output_capture_sessions(output);
     }
     stopped
+}
+
+// Keep test-only helpers after production code: structural regression tests
+// deliberately inspect the prefix before the first test-only item.
+/// Test-only entry to the production single-surface renderer, without exposing
+/// the KMS state or duplicating capture logic in the protocol fixtures.
+#[cfg(test)]
+pub(crate) fn fulfill_test_toplevel_capture(
+    renderer: &mut smithay::backend::renderer::gles::GlesRenderer,
+    cache: &mut Option<(i32, i32, smithay::backend::renderer::gles::GlesRenderbuffer)>,
+    state: &JwmWaylandState,
+    pending: &super::image_copy_capture::PendingImageCaptureQueue,
+) {
+    KmsState::fulfill_image_capture_toplevel_frames(renderer, cache, state, pending, None);
 }
 
 // For the headless GL suite, which drives the KMS staging composite under the

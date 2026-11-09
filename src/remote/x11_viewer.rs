@@ -1513,10 +1513,18 @@ impl Viewer {
                         && focus_out_releases_input(event.mode, self.grabbed) =>
                 {
                     #[cfg(test)]
-                    eprintln!(
-                        "viewer input revoke: FocusOut {event:?}; current focus={:?}",
-                        self.conn.get_input_focus()?.reply()?
-                    );
+                    {
+                        let focus = self.conn.get_input_focus()?.reply()?;
+                        eprintln!(
+                            "viewer input revoke: FocusOut event={:#x} mode={:?} detail={:?} sequence={}; current focus={:#x} revert_to={:?}",
+                            event.event,
+                            event.mode,
+                            event.detail,
+                            event.sequence,
+                            focus.focus,
+                            focus.revert_to
+                        );
+                    }
                     self.clipboard_shortcut = ViewerKeyboardState::default();
                     self.release_local_grab()?;
                     self.release_all_input(&mut result);

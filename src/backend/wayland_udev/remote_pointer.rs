@@ -473,7 +473,7 @@ impl Dispatch<JwmRemotePointerLeaseV1, LeaseData> for JwmWaylandState {
 #[cfg(test)]
 #[path = "remote_pointer_tests.rs"]
 mod tests;
-#[cfg(test)]
+#[cfg(all(test, feature = "backend-wayland-udev"))]
 pub(crate) fn expire_for_test(state: &mut JwmWaylandState) {
     if let Some(lease) = state.remote_pointer.active.as_mut() {
         lease.created = Instant::now() - TTL;

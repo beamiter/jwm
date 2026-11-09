@@ -4,7 +4,9 @@
 /// tools (OBS, portals, grim v2) to capture output and toplevel content.
 use crate::sync_ext::MutexExt;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+#[cfg(feature = "backend-wayland-udev")]
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -122,6 +124,7 @@ pub struct CaptureAuthority {
     pub(crate) surface: smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
     pub(crate) width: u32,
     pub(crate) height: u32,
+    #[cfg(any(test, feature = "backend-wayland-udev"))]
     owner: ClientId,
     lock_epoch: u64,
     buffer_layout: (
@@ -131,6 +134,7 @@ pub struct CaptureAuthority {
     revoked: AtomicBool,
     keyboard_consumed: AtomicBool,
     pointer_consumed: AtomicBool,
+    #[cfg(feature = "backend-wayland-udev")]
     ready_serial: AtomicU64,
 }
 impl CaptureAuthority {
@@ -153,8 +157,10 @@ pub(crate) struct ToplevelCaptureAuthorities {
     by_window: HashMap<WindowId, Vec<std::sync::Weak<CaptureAuthority>>>,
     blocked: u8,
 }
+#[cfg(feature = "backend-wayland-udev")]
 pub(crate) const CAPTURE_BLOCK_BUILTIN_LOCK: u8 = 1;
 pub(crate) const CAPTURE_BLOCK_MONITOR_LOCK: u8 = 2;
+#[cfg(feature = "backend-wayland-udev")]
 pub(crate) const CAPTURE_BLOCK_INACTIVE: u8 = 4;
 const MAX_TOPLEVEL_SOURCES: usize = 256;
 const MAX_TOPLEVEL_SESSIONS: usize = 512;
@@ -217,7 +223,7 @@ pub(crate) fn authority_is_current(state: &JwmWaylandState, authority: &CaptureA
 fn create_toplevel_source(
     state: &mut JwmWaylandState,
     window: WindowId,
-    owner: ClientId,
+    _owner: ClientId,
 ) -> Option<CaptureSource> {
     if state.session_locked
         || state.toplevel_capture_authorities.blocked != 0
@@ -252,11 +258,13 @@ fn create_toplevel_source(
         surface,
         width,
         height,
-        owner,
+        #[cfg(any(test, feature = "backend-wayland-udev"))]
+        owner: _owner,
         lock_epoch: state.session_lock_epoch,
         revoked: AtomicBool::new(false),
         keyboard_consumed: AtomicBool::new(false),
         pointer_consumed: AtomicBool::new(false),
+        #[cfg(feature = "backend-wayland-udev")]
         ready_serial: AtomicU64::new(0),
     });
     registry
@@ -399,7 +407,10 @@ pub struct PendingImageCapture {
 }
 unsafe impl Send for PendingImageCapture {}
 
+// Only the udev renderer fulfills capture frames. Nested backends never
+// publish ready authority or authorize input from an unrendered frame.
 impl PendingImageCapture {
+    #[cfg(feature = "backend-wayland-udev")]
     pub(crate) fn mark_ready(&self) {
         if let Some(data) = self.frame.data::<CaptureFrameData>() {
             if data.ready.load(Ordering::Acquire) {
@@ -425,6 +436,7 @@ impl PendingImageCapture {
             data.ready.store(true, Ordering::Release);
         }
     }
+    #[cfg(any(test, feature = "backend-wayland-udev"))]
     pub(crate) fn authorized(&self, state: &JwmWaylandState) -> bool {
         if !self.frame.is_alive() {
             return false;
@@ -1290,6 +1302,7 @@ pub(crate) mod wire_test_client {
         }
 
         /// Exercise production calloop timers in owned protocol fixtures.
+        #[cfg(feature = "backend-wayland-udev")]
         pub(crate) fn dispatch_timers(&mut self, duration: std::time::Duration) {
             self._event_loop
                 .dispatch(duration, &mut self.state)

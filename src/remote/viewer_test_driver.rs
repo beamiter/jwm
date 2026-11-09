@@ -383,6 +383,25 @@ impl ViewerTestDriver {
             .check()?;
         Ok(())
     }
+    /// Deterministic owned-X startup: keep PointerRoot/ancestor pointer focus
+    /// outside the future viewer before it is mapped and explicitly focused.
+    pub(super) fn initialize_outside_focus(&self) -> RemoteResult<()> {
+        let geometry = self.conn.get_geometry(self.root)?.reply()?;
+        let x = i16::try_from(geometry.width.checked_sub(1).ok_or("empty root")?)?;
+        let y = i16::try_from(geometry.height.checked_sub(1).ok_or("empty root")?)?;
+        self.motion(self.root, x, y)?;
+        self.unfocus()?;
+        let pointer = self.conn.query_pointer(self.root)?.reply()?;
+        let focus = self.conn.get_input_focus()?.reply()?;
+        eprintln!(
+            "owned startup root={:#x}, pointer=({},{}), focus={:#x}, revert_to={:?}",
+            self.root, pointer.root_x, pointer.root_y, focus.focus, focus.revert_to
+        );
+        if (pointer.root_x, pointer.root_y) != (x, y) || focus.focus != self.root {
+            return Err("owned startup focus/pointer setup not confirmed".into());
+        }
+        Ok(())
+    }
     pub(super) fn unfocus(&self) -> RemoteResult<()> {
         self.focus(self.root)
     }
