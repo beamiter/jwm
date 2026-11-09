@@ -1136,6 +1136,11 @@ pub fn ipc_catalog() -> Vec<CatalogEntry> {
         ("assistant_control", "command"),
         ("set_assistant_status", "command"),
         ("guarded_execute", "command"),
+        // Remote-window capability IPC is owner/instance-bound native protocol,
+        // never a model-callable action or a guarded voice adapter.
+        ("remote_resize_grant", "command"),
+        ("remote_resize_apply", "command"),
+        ("remote_resize_revoke", "command"),
         ("get_execution_context", "query"),
         ("get_execution_status", "query"),
         ("get_command_schema", "query"),
@@ -1374,6 +1379,35 @@ mod tests {
         assert_eq!(properties["question"]["type"], json!(["string", "null"]));
         assert!(parameters.get("if").is_none());
         assert!(parameters.get("oneOf").is_none());
+    }
+    #[test]
+    fn remote_resize_capabilities_are_internal_and_never_model_tools() {
+        let catalog = ipc_catalog();
+        let registry = full_registry();
+        let semantics = semantic_actions();
+        let tool = tool_schema().to_string();
+        for name in [
+            "remote_resize_grant",
+            "remote_resize_apply",
+            "remote_resize_revoke",
+        ] {
+            let entries: Vec<_> = catalog.iter().filter(|e| e.name == name).collect();
+            assert_eq!(entries.len(), 1, "exactly one reviewed role for {name}");
+            assert_eq!(entries[0].kind, "command");
+            assert_eq!(entries[0].role, "bridge_internal");
+            let spec = registry.iter().find(|s| s.canonical_name == name).unwrap();
+            assert_eq!(spec.role, "bridge_internal");
+            assert_eq!(spec.execution_adapter, "internal_only");
+            assert_eq!(spec.risk_class, "internal_only");
+            assert_eq!(spec.completion_contract, "internal_protocol");
+            assert!(!semantics.iter().any(|s| {
+                s.canonical_name == name || s.ipc_names.iter().any(|alias| alias == name)
+            }));
+            assert!(
+                !tool.contains(name),
+                "native capability exposed to model: {name}"
+            );
+        }
     }
     #[test]
     fn unknown_runtime_names_are_coverage_gaps() {
