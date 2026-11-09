@@ -3032,14 +3032,14 @@ fn process_keyboard(
     let result = match command {
         KeyboardCommand::Request(request) => {
             let drawn = sources.state.lock().unwrap().presented_frame;
+            // A missing/stale presentation claim is a protocol violation, not
+            // a native denial. End the session explicitly; otherwise a rejected
+            // request with no recorded scope could silently stream forever.
+            if let Err(error) = admit_keyboard_request(state, request, drawn, current) {
+                stop_keyboard(sources, capture, writer, state)?;
+                return Err(error);
+            }
             (|| -> RemoteResult<()> {
-                let drawn = drawn.ok_or_else(|| invalid_data("keyboard source was not drawn"))?;
-                if drawn.source_epoch != current.source_epoch
-                    || drawn.geometry_epoch != current.geometry_epoch
-                {
-                    return Err(invalid_data("keyboard drawn geometry is stale").into());
-                }
-                state.request(request, drawn)?;
                 let epoch = capture.arm_keyboard(request.keymap_digest)?;
                 if sources.keyboard_revoke.load(Ordering::Acquire) {
                     return Err(invalid_data("keyboard canceled while arming").into());
@@ -3058,6 +3058,27 @@ fn process_keyboard(
     }
     Ok(())
 }
+fn admit_keyboard_request(
+    state: &mut HostKeyboardState,
+    request: LeaseRequest,
+    drawn: Option<DrawnScope>,
+    current: DrawnScope,
+) -> RemoteResult<()> {
+    let result = (|| {
+        let drawn = drawn.ok_or_else(|| invalid_data("keyboard source was not drawn"))?;
+        if drawn.source_epoch != current.source_epoch
+            || drawn.geometry_epoch != current.geometry_epoch
+        {
+            return Err(invalid_data("keyboard drawn geometry is stale").into());
+        }
+        state.request(request, drawn)
+    })();
+    if result.is_err() {
+        let _ = state.revoke();
+    }
+    result
+}
+
 fn keyboard_allowlist() -> BTreeSet<u16> {
     #[cfg(feature = "remote-wayland")]
     {
@@ -5271,6 +5292,55 @@ mod tests {
         options.allow_input = false;
         options.allow_window_resize = true;
         assert!(validate_window_policy(&options).is_err());
+    }
+
+    #[test]
+    fn keyboard_drawn_gate_errors_are_terminal_and_cannot_be_retried() {
+        let scope = DrawnScope {
+            source_epoch: 1,
+            geometry_epoch: 2,
+            frame_sequence: 0,
+        };
+        let valid = LeaseRequest {
+            keymap_digest: [1; 32],
+            source_epoch: 1,
+            geometry_epoch: 2,
+            frame_sequence: 0,
+        };
+        for (request, drawn, current) in [
+            (valid, None, scope),
+            (
+                LeaseRequest {
+                    geometry_epoch: 3,
+                    ..valid
+                },
+                Some(scope),
+                scope,
+            ),
+            (
+                valid,
+                Some(scope),
+                DrawnScope {
+                    geometry_epoch: 3,
+                    ..scope
+                },
+            ),
+            (
+                LeaseRequest {
+                    frame_sequence: 1,
+                    ..valid
+                },
+                Some(scope),
+                scope,
+            ),
+        ] {
+            let mut state = HostKeyboardState::new();
+            assert!(admit_keyboard_request(&mut state, request, drawn, current).is_err());
+            assert!(state.grant(1, Instant::now()).is_err());
+            assert!(admit_keyboard_request(&mut state, valid, Some(scope), scope).is_err());
+        }
+        let mut valid_state = HostKeyboardState::new();
+        assert!(admit_keyboard_request(&mut valid_state, valid, Some(scope), scope).is_ok());
     }
 
     fn test_host_source_options() -> HostOptions {

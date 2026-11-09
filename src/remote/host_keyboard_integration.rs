@@ -85,11 +85,9 @@ fn bind_keyboard(server: &mut Server, app: &mut App) -> u32 {
 }
 fn collect_keys(app: &mut App, keyboard: u32, keys: &mut Vec<(u32, u32)>) {
     let events = app.client.events();
-    assert!(
-        events
-            .iter()
-            .all(|event| !(event.sender == 1 && event.opcode == 0))
-    );
+    assert!(events
+        .iter()
+        .all(|event| !(event.sender == 1 && event.opcode == 0)));
     keys.extend(
         events
             .into_iter()
@@ -97,17 +95,56 @@ fn collect_keys(app: &mut App, keyboard: u32, keys: &mut Vec<(u32, u32)>) {
             .map(|event| (event.args[2], event.args[3])),
     );
 }
+type Trace = Arc<Mutex<Vec<String>>>;
+struct Probe {
+    case: Case,
+    trace: Trace,
+    failures: mpsc::Receiver<String>,
+}
+fn note(trace: &Trace, message: impl Into<String>) {
+    trace.lock().unwrap().push(message.into());
+}
+fn read_before(
+    reader: &mut SessionReader<TcpStream>,
+    deadline: Instant,
+) -> Result<(MessageKind, Vec<u8>), ProtocolError> {
+    let left = deadline
+        .checked_duration_since(Instant::now())
+        .filter(|left| !left.is_zero())
+        .ok_or_else(|| {
+            ProtocolError::Io(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "absolute peer phase deadline",
+            ))
+        })?;
+    reader
+        .get_ref()
+        .set_read_timeout(Some(left.min(Duration::from_secs(3))))?;
+    reader.read_message()
+}
 fn pump_until(
     server: &mut Server,
     gl: &mut HeadlessSmithayGles,
     cache: &mut Option<(i32, i32, smithay::backend::renderer::gles::GlesRenderbuffer)>,
+    probe: &Probe,
+    phase: &str,
     mut done: impl FnMut() -> bool,
 ) {
+    eprintln!("TCP keyboard case={:?} phase={phase}", probe.case);
     let deadline = Instant::now() + Duration::from_secs(12);
     while !done() {
+        if let Ok(error) = probe.failures.try_recv() {
+            panic!(
+                "case={:?} phase={phase}: {error}; trace={:?}",
+                probe.case,
+                probe.trace.lock().unwrap()
+            );
+        }
         assert!(
             Instant::now() < deadline,
-            "real TCP keyboard test timed out"
+            "case={:?} phase={phase}: real TCP keyboard test timed out; trace={:?}",
+            probe.case,
+            probe.trace.lock().unwrap()
         );
         server.roundtrip();
         fulfill_test_toplevel_capture(
@@ -126,7 +163,9 @@ fn peer(
     case: Case,
     commands: mpsc::Receiver<PeerCommand>,
     events: mpsc::Sender<PeerEvent>,
+    trace: &Trace,
 ) -> RemoteResult<()> {
+    note(trace, "peer handshake");
     let mut socket = TcpStream::connect_timeout(&address, Duration::from_secs(3))?;
     socket.set_read_timeout(Some(Duration::from_secs(3)))?;
     socket.set_write_timeout(Some(Duration::from_secs(3)))?;
@@ -149,19 +188,27 @@ fn peer(
         .encode(),
     )?;
     writer.flush()?;
-    let (kind, payload) = reader.read_message()?;
+    note(trace, "peer waiting hello ack");
+    let (kind, payload) = read_before(&mut reader, Instant::now() + Duration::from_secs(5))?;
     assert_eq!(kind, MessageKind::HelloAck);
     let hello = ServerHello::decode(&payload)?;
     assert!(hello.stream.wayland_keyboard);
     assert!(!hello.pointer_enabled && !hello.keyboard_enabled && !hello.clipboard_enabled);
     let mut decoder = TileDecoder::with_frame_limits(hello.stream.frame_limits)?;
+    note(trace, "peer waiting first frame");
+    let frame_deadline = Instant::now() + Duration::from_secs(5);
     let scope = loop {
-        let (kind, payload) = reader.read_message()?;
+        let (kind, payload) = read_before(&mut reader, frame_deadline)?;
         if kind == MessageKind::Frame {
             let (source_epoch, inner) = decode_source_payload(&payload)?;
             let frame =
                 decoder.decode_into(inner, super::super::frame::new_decode_buffer_pool())?;
             assert_eq!(frame.dimensions(), (800, 600));
+            let pixel = frame.image().get_pixel(400, 300).0;
+            assert!(
+                pixel[0] > 240 && pixel[1] < 16 && pixel[2] < 16,
+                "wrong selected source pixels: {pixel:?}"
+            );
             break DrawnScope {
                 source_epoch,
                 geometry_epoch: frame.geometry_epoch(),
@@ -182,16 +229,30 @@ fn peer(
     };
     writer.write_message(MessageKind::WaylandKeyboardRequest, &request.encode()?)?;
     writer.flush()?;
+    note(trace, format!("peer sent lease request case={case:?}"));
+    let lease_deadline = Instant::now() + Duration::from_secs(5);
     let status = loop {
-        match reader.read_message() {
+        match read_before(&mut reader, lease_deadline) {
             Ok((MessageKind::WaylandKeyboardStatus, payload)) => {
                 break LeaseStatus::decode(&payload)?;
             }
             Ok((MessageKind::Frame, _)) => continue,
-            Ok((MessageKind::SessionClose | MessageKind::Close, _)) | Err(_)
+            Ok((MessageKind::SessionClose | MessageKind::Close, _))
                 if matches!(case, Case::BadDrawnScope) =>
             {
                 let _ = events.send(PeerEvent::Denied);
+                return Ok(());
+            }
+            Err(ProtocolError::Io(error))
+                if matches!(case, Case::BadDrawnScope)
+                    && matches!(
+                        error.kind(),
+                        io::ErrorKind::UnexpectedEof
+                            | io::ErrorKind::ConnectionReset
+                            | io::ErrorKind::ConnectionAborted
+                    ) =>
+            {
+                events.send(PeerEvent::Denied)?;
                 return Ok(());
             }
             other => {
@@ -217,6 +278,7 @@ fn peer(
             scope.frame_sequence
         )
     );
+    note(trace, "peer granted");
     events.send(PeerEvent::Granted)?;
     assert!(matches!(
         commands.recv_timeout(Duration::from_secs(5))?,
@@ -231,12 +293,14 @@ fn peer(
         keycode: 30,
         pressed: true,
     };
+    note(trace, "peer sent press");
     writer.write_message(MessageKind::WaylandKeyboardKey, &key.encode()?)?;
     writer.flush()?;
     assert!(matches!(
         commands.recv_timeout(Duration::from_secs(5))?,
         PeerCommand::End
     ));
+    note(trace, format!("peer ending case={case:?}"));
     match case {
         Case::OldEpoch => writer.write_message(
             MessageKind::WaylandKeyboardKey,
@@ -259,8 +323,9 @@ fn peer(
         Case::BadDrawnScope => unreachable!(),
     }
     writer.flush()?;
+    let revoke_deadline = Instant::now() + Duration::from_secs(5);
     loop {
-        let (kind, payload) = reader.read_message()?;
+        let (kind, payload) = read_before(&mut reader, revoke_deadline)?;
         if kind == MessageKind::WaylandKeyboardStatus {
             assert_eq!(
                 LeaseStatus::decode(&payload)?.status,
@@ -321,92 +386,198 @@ fn actual_tcp_keyboard_host_requires_drawn_scope_and_cleans_only_original_recipi
         let shutdown = Arc::new(AtomicBool::new(false));
         let _shutdown_guard = ShutdownGuard(Arc::clone(&shutdown));
         let (host_done, host_rx) = mpsc::channel();
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let trace: Trace = Arc::new(Mutex::new(Vec::new()));
+        let (failed_tx, failed_rx) = mpsc::channel();
+        let probe = Probe {
+            case,
+            trace: Arc::clone(&trace),
+            failures: failed_rx,
+        };
+        let host_trace = Arc::clone(&trace);
+        let host_failed = failed_tx.clone();
         let host = std::thread::spawn(move || {
-            let result = (|| -> RemoteResult<()> {
-                let capture = WaylandCapture::connect_test_stream(peer_socket, 1, 0)?;
-                let deadline = Instant::now() + Duration::from_secs(10);
-                let stream = loop {
-                    if shutdown.load(Ordering::Acquire) || Instant::now() >= deadline {
-                        return Err(
-                            io::Error::other("private host accept canceled or timed out").into(),
-                        );
-                    }
-                    match listener.accept() {
-                        Ok((stream, _)) => break stream,
-                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                            std::thread::sleep(Duration::from_millis(1))
+            note(&host_trace, "host connecting native capture");
+            let result =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> RemoteResult<()> {
+                    let capture = WaylandCapture::connect_test_stream(peer_socket, 1, 0)?;
+                    note(&host_trace, "host native capture selected");
+                    ready_tx.send(())?;
+                    let deadline = Instant::now() + Duration::from_secs(10);
+                    let stream = loop {
+                        if shutdown.load(Ordering::Acquire) || Instant::now() >= deadline {
+                            return Err(io::Error::other(
+                                "private host accept canceled or timed out",
+                            )
+                            .into());
                         }
-                        Err(error) => return Err(error.into()),
-                    }
-                };
-                let peer = authenticate_peer(stream, &TEST_KEY)?;
-                serve_authenticated(
-                    peer,
-                    &options(),
-                    &shutdown,
-                    &Mutex::new(Some(GrantedCapture::Wayland(Box::new(capture)))),
-                )
-            })();
-            let _ = host_done.send(result.map_err(|error| error.to_string()));
+                        match listener.accept() {
+                            Ok((stream, _)) => break stream,
+                            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                                std::thread::sleep(Duration::from_millis(1))
+                            }
+                            Err(error) => return Err(error.into()),
+                        }
+                    };
+                    let peer = authenticate_peer(stream, &TEST_KEY)?;
+                    note(&host_trace, "host authenticated");
+                    serve_authenticated(
+                        peer,
+                        &options(),
+                        &shutdown,
+                        &Mutex::new(Some(GrantedCapture::Wayland(Box::new(capture)))),
+                    )
+                }));
+            let result = match result {
+                Ok(result) => result.map_err(|error| error.to_string()),
+                Err(_) => {
+                    let _ = host_failed.send("host worker panicked".into());
+                    Err("host worker panicked".into())
+                }
+            };
+            note(&host_trace, format!("host finished: {result:?}"));
+            let _ = host_done.send(result);
         });
+        let mut cache = None;
+        pump_until(
+            &mut server,
+            &mut gl,
+            &mut cache,
+            &probe,
+            "native selection",
+            || match ready_rx.try_recv() {
+                Ok(()) => true,
+                Err(mpsc::TryRecvError::Empty) => false,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    panic!("native selection ended: {:?}", trace.lock().unwrap())
+                }
+            },
+        );
+        // Selection already holds the only live handle present at that point.
+        // Finish *all* receiver registration before the native keyboard snapshot:
+        // new_kbd correctly invalidates seat-wide authority, even for other apps.
+        let mut other = App::with_color(&mut server, [255, 0, 0, 255]);
+        let other_keyboard = bind_keyboard(&mut server, &mut other);
+        server
+            .state
+            .set_keyboard_focus(Some(surface.clone()), SERIAL_COUNTER.next_serial());
+        server.roundtrip();
+        server.roundtrip();
+        app.client.events();
+        other.client.events();
         let (commands, command_rx) = mpsc::channel();
         let (events, event_rx) = mpsc::channel();
-        let client = std::thread::spawn(move || peer(address, digest, case, command_rx, events));
-        let mut cache = None;
-        let mut first = None;
-        pump_until(&mut server, &mut gl, &mut cache, || {
-            if let Ok(event) = event_rx.try_recv() {
-                first = Some(event);
-                true
-            } else {
-                false
+        let peer_trace = Arc::clone(&trace);
+        let client = std::thread::spawn(move || {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                peer(address, digest, case, command_rx, events, &peer_trace)
+            }));
+            let result = match result {
+                Ok(result) => result.map_err(|error| error.to_string()),
+                Err(_) => Err("protocol peer panicked".into()),
+            };
+            note(&peer_trace, format!("peer finished: {result:?}"));
+            if let Err(error) = &result {
+                let _ = failed_tx.send(error.clone());
             }
+            result
         });
+        let mut first = None;
+        pump_until(
+            &mut server,
+            &mut gl,
+            &mut cache,
+            &probe,
+            "lease decision",
+            || {
+                if let Ok(event) = event_rx.try_recv() {
+                    first = Some(event);
+                    true
+                } else {
+                    false
+                }
+            },
+        );
         if matches!(case, Case::BadDrawnScope) {
             assert!(matches!(first, Some(PeerEvent::Denied)));
             let mut keys = Vec::new();
             collect_keys(&mut app, app_keyboard, &mut keys);
             assert!(keys.is_empty());
+            collect_keys(&mut other, other_keyboard, &mut keys);
+            assert!(keys.is_empty());
         } else {
             assert!(matches!(first, Some(PeerEvent::Granted)));
-            // Create a competing recipient only after selection, without changing focus.
-            let mut other = App::with_color(&mut server, [255, 0, 0, 255]);
-            let other_keyboard = bind_keyboard(&mut server, &mut other);
             let mut received = Vec::new();
             let mut unexpected = Vec::new();
             commands.send(PeerCommand::Press).unwrap();
-            pump_until(&mut server, &mut gl, &mut cache, || {
-                collect_keys(&mut app, app_keyboard, &mut received);
-                collect_keys(&mut other, other_keyboard, &mut unexpected);
-                received == [(30, 1)]
-            });
+            pump_until(
+                &mut server,
+                &mut gl,
+                &mut cache,
+                &probe,
+                "target press",
+                || {
+                    collect_keys(&mut app, app_keyboard, &mut received);
+                    collect_keys(&mut other, other_keyboard, &mut unexpected);
+                    received == [(30, 1)]
+                },
+            );
             assert!(unexpected.is_empty());
             commands.send(PeerCommand::End).unwrap();
-            pump_until(&mut server, &mut gl, &mut cache, || {
-                collect_keys(&mut app, app_keyboard, &mut received);
-                collect_keys(&mut other, other_keyboard, &mut unexpected);
-                received == [(30, 1), (30, 0)]
-            });
+            pump_until(
+                &mut server,
+                &mut gl,
+                &mut cache,
+                &probe,
+                "held cleanup",
+                || {
+                    collect_keys(&mut app, app_keyboard, &mut received);
+                    collect_keys(&mut other, other_keyboard, &mut unexpected);
+                    received == [(30, 1), (30, 0)]
+                },
+            );
             assert!(unexpected.is_empty(), "cleanup must not send to other apps");
             let mut finished = false;
-            pump_until(&mut server, &mut gl, &mut cache, || {
-                if let Ok(PeerEvent::Finished) = event_rx.try_recv() {
-                    finished = true;
-                }
-                finished
-            });
+            pump_until(
+                &mut server,
+                &mut gl,
+                &mut cache,
+                &probe,
+                "peer terminal response",
+                || {
+                    if let Ok(PeerEvent::Finished) = event_rx.try_recv() {
+                        finished = true;
+                    }
+                    finished
+                },
+            );
         }
         client
             .join()
             .expect("private protocol peer panicked")
             .expect("private protocol peer failed");
         let mut ended = false;
-        pump_until(&mut server, &mut gl, &mut cache, || {
-            if host_rx.try_recv().is_ok() {
-                ended = true;
-            }
-            ended
-        });
+        pump_until(
+            &mut server,
+            &mut gl,
+            &mut cache,
+            &probe,
+            "host teardown",
+            || {
+                if let Ok(result) = host_rx.try_recv() {
+                    // Protocol rejection/disconnect may end the host with an error,
+                    // but catch_unwind must never turn a worker panic into success.
+                    assert_ne!(
+                        result.as_ref().err().map(String::as_str),
+                        Some("host worker panicked"),
+                        "host worker panicked: {:?}",
+                        trace.lock().unwrap()
+                    );
+                    ended = true;
+                }
+                ended
+            },
+        );
         host.join().expect("production host thread panicked");
     }
 }
