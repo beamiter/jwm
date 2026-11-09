@@ -3142,16 +3142,6 @@ fn fbo_cursor_composition_is_safe(
     })
 }
 
-#[cfg(test)]
-pub(crate) fn fbo_cursor_composition_for_test(
-    elements: &[KmsRenderElement],
-    cursor_prefix_len: usize,
-    compositor_index: Option<usize>,
-    target: (i32, i32, u32, u32),
-) -> bool {
-    fbo_cursor_composition_is_safe(elements, cursor_prefix_len, compositor_index, target)
-}
-
 fn take_rendered_presentation_callbacks(
     roots: &[WlSurface],
     render_states: &smithay::backend::renderer::element::RenderElementStates,
@@ -14708,4 +14698,14 @@ mod fbo_cursor_frame_flag_tests {
             assert_eq!(fbo_proof_frame_flags(flags, false), flags);
         }
     }
+}
+
+#[cfg(test)]
+pub(crate) fn fbo_cursor_composition_for_test(
+    elements: &[KmsRenderElement],
+    cursor_prefix_len: usize,
+    compositor_index: Option<usize>,
+    target: (i32, i32, u32, u32),
+) -> bool {
+    fbo_cursor_composition_is_safe(elements, cursor_prefix_len, compositor_index, target)
 }
