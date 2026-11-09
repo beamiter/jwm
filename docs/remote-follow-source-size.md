@@ -1,6 +1,6 @@
 # Explicit source-size following (direct X11 viewer)
 
-`--follow-source-size` is **off by default**. It is not local image scaling:
+`--follow-source-size` is **off by default**. It is more than local image scaling:
 resizing the viewer requests changes to the **real remote application's window
 size**. Other people using that remote desktop can see its layout change.
 Closing the viewer or stopping follow does not restore the old remote size.
@@ -39,12 +39,29 @@ A single-window resize grant is not permission to resize the entire desktop.
 - Local `--window-size` remains a local initial window-size request. Only the
   separate explicit follow flag allows subsequent source-size requests.
 
+## Capture scaling and local presentation
+
+For the entire connection started with this flag, `Hello.initial_viewport` is
+`None` and the client sends no dynamic `Viewport` records. This remains true
+if following later stops: the client does not silently resume host-side viewport
+adaptation. It avoids coupling capture scaling to native-window resize requests.
+
+The viewer still scales images locally to fit its client area. A larger source
+before resize, or after following stops, can therefore require more bandwidth
+and decoding work than an ordinary viewport-adapted session. The host's
+`max_width` and negotiated `FrameLimits` still apply; this mode neither removes
+those bounds nor guarantees 1:1 source, encoded-frame and local display pixels.
+
+A local viewer-size revision identifies the client area used for an actual local
+draw. It is not a host acknowledgement of `Viewport`, nor evidence that the
+remote application changed size. Native resize results and matching presented
+source geometry remain separate requirements.
+
 ## Runtime behavior and stop boundary
 
-After the first real presentation, the client compares the actual viewer client
-area with the source size. Equal sizes need no request. Otherwise it follows
-actual viewer client-area changes, coalescing resize bursts
-rather than queuing an unbounded history. Requests remain source/geometry-scoped,
+After the first real presentation, the client compares the locally drawn viewer
+client area with the source size. Equal sizes need no request. Otherwise it follows
+actual viewer client-area changes, coalescing resize bursts rather than queuing an unbounded history. Requests remain source/geometry-scoped,
 with at most one outstanding native resize and no more than four requests per
 second. The next request waits at least 250 ms after both the previous result
 and its matching actual presentation have completed. A new source
