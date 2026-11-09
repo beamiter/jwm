@@ -153,6 +153,7 @@ fn client_options(
         wayland_keyboard: true,
         wayland_pointer: false,
         resize_source: None,
+        follow_source_size: false,
         window_size: Some(WindowSize {
             width: 1000,
             height: 600,

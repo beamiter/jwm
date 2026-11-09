@@ -64,6 +64,7 @@ pub struct ClientOptions {
     pub wayland_pointer: bool,
     /// One explicit source-size operation; never replayed or saved in a profile.
     pub resize_source: Option<super::window_size::WindowSize>,
+    pub follow_source_size: bool,
     /// Explicit local client-area startup size; None preserves automatic sizing.
     pub window_size: Option<super::window_size::WindowSize>,
     /// Explicit local best-effort startup position; coordinates are bounded by i16.
@@ -281,7 +282,8 @@ pub fn run_client(options: ClientOptions) -> RemoteResult<()> {
 /// single-session entry point. The budget counts additional sessions and never
 /// resets, even when a replacement session runs successfully for a long time.
 pub fn run_client_reconnecting(options: ClientOptions, attempts: u8) -> RemoteResult<()> {
-    if (options.resize_source.is_some()
+    if (options.follow_source_size
+        || options.resize_source.is_some()
         || options.wayland_keyboard
         || options.wayland_pointer
         || options.viewer_backend == ViewerBackend::Wayland)
@@ -383,6 +385,17 @@ fn suppress_reconnect(result: RemoteResult<()>, suppress: bool) -> RemoteResult<
 }
 
 fn validate_viewer_backend(options: &ClientOptions) -> RemoteResult<()> {
+    if options.follow_source_size
+        && (options.viewer_backend != ViewerBackend::X11
+            || !options.view_only
+            || options.resize_source.is_some()
+            || options.clipboard
+            || options.grab_input
+            || options.wayland_keyboard
+            || options.wayland_pointer)
+    {
+        return Err(invalid_data("follow-source-size requires X11 view-only without input, clipboard, source resize or grabs").into());
+    }
     if options.viewer_backend == ViewerBackend::X11 && options.viewer_wayland_display.is_some() {
         return Err(
             invalid_data("--viewer-wayland-display requires Wayland viewer backend").into(),
@@ -466,7 +479,7 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
     *stage = ClientStage::Negotiate;
     eprintln!("jwm-remote: connection opened; authenticating and negotiating permissions");
     let (mut reader, writer, hello) = negotiate_session(
-        options.resize_source.is_some(),
+        options.resize_source.is_some() || options.follow_source_size,
         options.wayland_keyboard,
         options.wayland_pointer,
         stream,
@@ -482,7 +495,9 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
         options.frame_limits,
         HANDSHAKE_TIMEOUT,
     )?;
-    if options.resize_source.is_some() && !hello.stream.window_resize {
+    if (options.resize_source.is_some() || options.follow_source_size)
+        && !hello.stream.window_resize
+    {
         return Err(invalid_data("host has not authorized native window resizing").into());
     }
     *stage = ClientStage::FirstFrame;
@@ -557,6 +572,11 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
     let mut initial_state = ReceiveState::new();
     initial_state.frame_limits = hello.stream.frame_limits;
     initial_state.resize.get_mut().unwrap().requested = options.resize_source;
+    if options.follow_source_size {
+        initial_state.resize.get_mut().unwrap().follow =
+            Some(super::follow_source_size::FollowSourceSize::default());
+        eprintln!("jwm-remote: follow enabled; waiting for a presented viewport");
+    }
     *initial_state.clipboard_restriction.get_mut().unwrap() = hello
         .clipboard_enabled
         .then(|| RestrictionState::new(hello.stream.clipboard_content));
@@ -670,7 +690,21 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
         writer.set_clipboard_policy(outbox.control().policy().shared_content())?;
     }
     let mut pending_presentations = std::collections::VecDeque::new();
-    if !submit_frame(&mut viewer, first_frame, &mut pending_presentations)? {
+    let first_revision = {
+        let mut resize = state.resize.lock().unwrap();
+        if let Some(follow) = resize.follow.as_mut() {
+            follow.viewport(viewer.viewport());
+            follow.revision()
+        } else {
+            0
+        }
+    };
+    if !submit_frame_with_revision(
+        &mut viewer,
+        first_frame,
+        &mut pending_presentations,
+        first_revision,
+    )? {
         return Ok(());
     }
 
@@ -1304,6 +1338,9 @@ fn viewer_loop(
         }
         let received_epoch = state.source_epoch.load(Ordering::Acquire);
         if received_epoch != source_epoch {
+            if let Some(follow) = state.resize.lock().unwrap().follow.as_mut() {
+                follow.stop("source changed");
+            }
             let mut pointer = state.wayland_pointer.lock().unwrap();
             if pointer.enabled && !pointer.ended {
                 #[cfg(test)]
@@ -1476,6 +1513,9 @@ fn viewer_loop(
                 .as_ref()
                 .and_then(|catalog| next_source(catalog, source_epoch));
             if let Some((target, label)) = next {
+                if let Some(follow) = state.resize.lock().unwrap().follow.as_mut() {
+                    follow.stop("source change requested");
+                }
                 write_source_release(writer, presented_scope, pointer_enabled || keyboard_enabled)?;
                 writer.write_message(
                     MessageKind::SourceRequest,
@@ -1516,6 +1556,9 @@ fn viewer_loop(
         // into its final size, so a drag produces one request rather than one
         // per intermediate size.
         let viewport = viewer.viewport();
+        if let Some(follow) = state.resize.lock().unwrap().follow.as_mut() {
+            follow.viewport(viewport);
+        }
         if reported_viewport != Some(viewport) && !outcome.close {
             let (width, height) = viewport;
             writer.write_message(MessageKind::Viewport, &encode_viewport(width, height))?;
@@ -1583,6 +1626,14 @@ fn viewer_loop(
                     continue;
                 }
                 presented_scope = (timing.source_epoch, timing.geometry_epoch);
+                if let Some(follow) = state.resize.lock().unwrap().follow.as_mut() {
+                    follow.presented(
+                        presented_scope,
+                        timing.source_size,
+                        timing.viewport_revision,
+                        Instant::now(),
+                    );
+                }
             }
             acknowledge_presentation(writer, sequence, pending_presentations, &state.telemetry)?;
             {
@@ -1677,13 +1728,36 @@ fn viewer_loop(
                             pointer_enabled || keyboard_enabled,
                         )?;
                     }
-                    submit_frame(viewer, frame, pending_presentations)?;
+                    let revision = state
+                        .resize
+                        .lock()
+                        .unwrap()
+                        .follow
+                        .as_ref()
+                        .map_or(0, |follow| follow.revision());
+                    submit_frame_with_revision(viewer, frame, pending_presentations, revision)?;
                 }
             } else {
                 viewer.refresh_pending_redraw()?;
             }
         }
 
+        if !switching
+            && requested_epoch.is_none()
+            && state.source_epoch.load(Ordering::Acquire) == source_epoch
+        {
+            let request = state
+                .resize
+                .lock()
+                .unwrap()
+                .follow
+                .as_mut()
+                .and_then(|follow| follow.next(Instant::now()));
+            if let Some(request) = request {
+                writer.write_message(MessageKind::WindowResizeRequest, &request.encode()?)?;
+                writer.flush()?;
+            }
+        }
         // A source barrier may race the loop-top epoch snapshot. Never wait
         // after leaving its first keyframe/cursor queued for the next pass.
         if state.source_epoch.load(Ordering::Acquire) != source_epoch {
@@ -1704,6 +1778,16 @@ fn viewer_loop(
             continue;
         }
         let mut deadline = next_heartbeat.min(telemetry_reporter.next_deadline());
+        if let Some(follow_deadline) = state
+            .resize
+            .lock()
+            .unwrap()
+            .follow
+            .as_ref()
+            .and_then(|follow| follow.deadline())
+        {
+            deadline = deadline.min(follow_deadline);
+        }
         if let Some(viewer_deadline) = viewer.next_event_deadline() {
             deadline = deadline.min(viewer_deadline);
         }
@@ -1935,6 +2019,8 @@ impl<W: RecordWriter> RecordWriter for ScopedInputWriter<'_, W> {
 }
 
 struct PendingFrameTiming {
+    source_size: (u16, u16),
+    viewport_revision: u64,
     source_epoch: u64,
     geometry_epoch: u64,
     sequence: u64,
@@ -1942,12 +2028,15 @@ struct PendingFrameTiming {
     draw_started: Instant,
 }
 
-fn submit_frame(
+fn submit_frame_with_revision(
     viewer: &mut Viewer,
     queued: QueuedFrame,
     pending: &mut std::collections::VecDeque<PendingFrameTiming>,
+    viewport_revision: u64,
 ) -> RemoteResult<bool> {
     let timing = PendingFrameTiming {
+        source_size: (queued.frame.source_width(), queued.frame.source_height()),
+        viewport_revision,
         source_epoch: queued.frame.source_epoch(),
         geometry_epoch: queued.frame.geometry_epoch(),
         sequence: queued.frame.sequence(),
@@ -2822,6 +2911,7 @@ impl ClientKeyboard {
 
 #[derive(Default)]
 struct ClientResize {
+    follow: Option<super::follow_source_size::FollowSourceSize>,
     requested: Option<super::window_size::WindowSize>,
     pending: Option<(super::window_resize::ResizeRequest, Instant)>,
 }
@@ -2855,6 +2945,9 @@ impl ClientResize {
         Ok(())
     }
     fn receive(&mut self, result: super::window_resize::ResizeResult) -> RemoteResult<()> {
+        if let Some(follow) = self.follow.as_mut() {
+            return follow.receive(result, Instant::now());
+        }
         let (request, _) = self
             .pending
             .as_ref()
@@ -3955,6 +4048,7 @@ pub(super) mod tests {
             wayland_keyboard: false,
             wayland_pointer: false,
             resize_source: None,
+            follow_source_size: false,
             window_position: None,
             window_size: Some(super::super::window_size::WindowSize {
                 width: 0,
@@ -5176,6 +5270,8 @@ pub(super) mod tests {
         let now = Instant::now();
         let mut pending = (40..=42)
             .map(|sequence| PendingFrameTiming {
+                source_size: (1, 1),
+                viewport_revision: 0,
                 source_epoch: 1,
                 geometry_epoch: 0,
                 sequence,
@@ -5201,6 +5297,8 @@ pub(super) mod tests {
         let telemetry = ClientTelemetry::default();
         let now = Instant::now();
         let mut pending = std::collections::VecDeque::from([PendingFrameTiming {
+            source_size: (1, 1),
+            viewport_revision: 0,
             source_epoch: 7,
             geometry_epoch: 0,
             sequence: 42,
@@ -6487,6 +6585,7 @@ mod explicit_resize_tests {
     fn explicit_resize_once_scoped_to_presentation_and_timeout() {
         let now = Instant::now();
         let mut state = ClientResize {
+            follow: None,
             requested: Some(super::super::window_size::WindowSize {
                 width: 480,
                 height: 320,
@@ -6526,6 +6625,7 @@ mod native_viewer_permission_tests {
             wayland_keyboard: false,
             wayland_pointer: false,
             resize_source: None,
+            follow_source_size: false,
             window_position: None,
             window_size: None,
             frame_limits: super::super::messages::FrameLimits::default(),
@@ -6592,5 +6692,27 @@ mod native_viewer_permission_tests {
         options.viewer_backend = ViewerBackend::X11;
         options.viewer_wayland_display = Some("wayland-test".into());
         assert!(validate_viewer_backend(&options).is_err());
+        options.viewer_wayland_display = None;
+        options.follow_source_size = true;
+        assert!(validate_viewer_backend(&options).is_ok());
+        assert!(run_client_reconnecting(options.clone(), 1).is_err());
+        for mutation in 0..7 {
+            let mut changed = options.clone();
+            match mutation {
+                0 => changed.viewer_backend = ViewerBackend::Wayland,
+                1 => changed.view_only = false,
+                2 => changed.clipboard = true,
+                3 => changed.grab_input = true,
+                4 => changed.wayland_keyboard = true,
+                5 => changed.wayland_pointer = true,
+                _ => {
+                    changed.resize_source = Some(super::super::window_size::WindowSize {
+                        width: 10,
+                        height: 10,
+                    })
+                }
+            }
+            assert!(validate_viewer_backend(&changed).is_err());
+        }
     }
 }

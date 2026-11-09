@@ -453,6 +453,11 @@ enum Command {
         #[arg(long, value_name = "WIDTHxHEIGHT", requires = "view_only", conflicts_with_all = ["reconnect_attempts", "clipboard", "grab_input"])]
         resize_source: Option<WindowSize>,
 
+        /// Resize the real remote window to follow this X11 viewer's client size.
+        /// Explicit view-only mode, at most 4 requests/s; stops on refusal or timeout.
+        #[arg(long, requires = "view_only", conflicts_with_all = ["resize_source", "wayland_keyboard", "wayland_pointer", "clipboard", "grab_input", "reconnect_attempts", "viewer_wayland_display"])]
+        follow_source_size: bool,
+
         /// Request keyboard-only control of the locally selected Wayland surface.
         /// No pointer, clipboard, input grab, reconnect, or saved authorization.
         #[arg(long, conflicts_with_all = ["view_only", "resize_source", "clipboard", "grab_input", "reconnect_attempts"])]
@@ -651,6 +656,7 @@ fn profile_from_command(command: Command) -> RemoteResult<Profile> {
             display,
             window_size,
             resize_source,
+            follow_source_size,
             wayland_keyboard,
             wayland_pointer,
             window_position,
@@ -674,6 +680,9 @@ fn profile_from_command(command: Command) -> RemoteResult<Profile> {
                     "Wayland input authorization cannot be saved in a profile",
                 )
                 .into());
+            }
+            if follow_source_size {
+                return Err(profile_error("source-size following cannot be saved in a profile; consent is direct-connect only").into());
             }
             if resize_source.is_some() {
                 return Err(
@@ -1099,6 +1108,21 @@ fn run_clipboard_staging(
     write_staging_status(writer, root, &status)
 }
 
+/// Conditional backend conflicts must be checked before key lookup or connect.
+fn validate_follow_source_cli(
+    follow: bool,
+    backend: ViewerBackend,
+    wayland_display: Option<&str>,
+) -> RemoteResult<()> {
+    if follow && (backend != ViewerBackend::X11 || wayland_display.is_some()) {
+        return Err(profile_error(
+            "--follow-source-size requires the direct X11 viewer, never the Wayland viewer",
+        )
+        .into());
+    }
+    Ok(())
+}
+
 fn run(command: Command) -> RemoteResult<()> {
     match command {
         Command::ClipboardStaging { action } => {
@@ -1296,6 +1320,7 @@ fn run(command: Command) -> RemoteResult<()> {
             display,
             window_size,
             resize_source,
+            follow_source_size,
             wayland_keyboard,
             wayland_pointer,
             window_position,
@@ -1307,30 +1332,38 @@ fn run(command: Command) -> RemoteResult<()> {
             clipboard_file_limit,
             frame_limits,
             escape_key,
-        } => run_client_reconnecting(
-            ClientOptions {
+        } => {
+            validate_follow_source_cli(
+                follow_source_size,
                 viewer_backend,
-                viewer_wayland_display,
-                peer_label: address.clone(),
-                address,
-                key: KeySource::File(resolve_key_path(key_file)?),
-                display,
-                window_size,
-                resize_source,
-                wayland_keyboard,
-                wayland_pointer,
-                window_position,
-                view_only,
-                grab_input,
-                clipboard,
-                clipboard_mode,
-                clipboard_direction,
-                clipboard_file_limit,
-                frame_limits: frame_limits.limits(),
-                escape_key,
-            },
-            reconnect_attempts,
-        ),
+                viewer_wayland_display.as_deref(),
+            )?;
+            run_client_reconnecting(
+                ClientOptions {
+                    viewer_backend,
+                    viewer_wayland_display,
+                    peer_label: address.clone(),
+                    address,
+                    key: KeySource::File(resolve_key_path(key_file)?),
+                    display,
+                    window_size,
+                    resize_source,
+                    follow_source_size,
+                    wayland_keyboard,
+                    wayland_pointer,
+                    window_position,
+                    view_only,
+                    grab_input,
+                    clipboard,
+                    clipboard_mode,
+                    clipboard_direction,
+                    clipboard_file_limit,
+                    frame_limits: frame_limits.limits(),
+                    escape_key,
+                },
+                reconnect_attempts,
+            )
+        }
     }
 }
 
@@ -1502,6 +1535,124 @@ fn parse_window_id(value: &str) -> Result<u32, String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn follow_source_size_is_explicit_narrow_and_never_profile_saved() {
+        let plain = Cli::try_parse_from(["jwm-remote", "connect", "desk", "--view-only"])
+            .unwrap()
+            .command;
+        assert!(matches!(
+            &plain,
+            Command::Connect {
+                follow_source_size: false,
+                ..
+            }
+        ));
+        let profile = profile_from_command(plain).unwrap();
+        assert!(matches!(
+            command_from_profile(&profile).unwrap(),
+            Command::Connect {
+                follow_source_size: false,
+                ..
+            }
+        ));
+        let mut encoded = serde_json::to_value(profile).unwrap();
+        encoded["viewer"]["follow_source_size"] = serde_json::json!(true);
+        assert!(Profile::decode(&serde_json::to_vec(&encoded).unwrap()).is_err());
+        let base = [
+            "jwm-remote",
+            "connect",
+            "desk",
+            "--view-only",
+            "--follow-source-size",
+        ];
+        let enabled = Cli::try_parse_from(base).unwrap().command;
+        assert!(matches!(
+            &enabled,
+            Command::Connect {
+                follow_source_size: true,
+                ..
+            }
+        ));
+        assert!(
+            profile_from_command(enabled)
+                .unwrap_err()
+                .to_string()
+                .contains("cannot be saved")
+        );
+        assert!(
+            Cli::try_parse_from(["jwm-remote", "connect", "desk", "--follow-source-size"]).is_err()
+        );
+        for extra in [
+            vec!["--resize-source", "640x480"],
+            vec!["--wayland-keyboard"],
+            vec!["--wayland-pointer"],
+            vec!["--clipboard"],
+            vec!["--grab-input"],
+            vec!["--reconnect-attempts", "0"],
+            vec!["--reconnect-attempts", "1"],
+            vec!["--viewer-wayland-display", "wayland-1"],
+        ] {
+            let mut args = base.to_vec();
+            args.extend(extra);
+            assert!(Cli::try_parse_from(args).is_err());
+        }
+        assert!(
+            Cli::try_parse_from([
+                "jwm-remote",
+                "ssh",
+                "desk",
+                "--view-only",
+                "--follow-source-size"
+            ])
+            .is_err()
+        );
+        assert!(Cli::try_parse_from(["jwm-remote", "host", "--follow-source-size"]).is_err());
+        assert!(
+            Cli::try_parse_from([
+                "jwm-remote",
+                "profile",
+                "run",
+                "desk",
+                "--follow-source-size"
+            ])
+            .is_err()
+        );
+        assert!(validate_follow_source_cli(true, ViewerBackend::X11, None).is_ok());
+        assert!(validate_follow_source_cli(true, ViewerBackend::Wayland, None).is_err());
+        assert!(validate_follow_source_cli(true, ViewerBackend::X11, Some("wayland-1")).is_err());
+        // Actual command dispatch rejects the backend before key-file access or
+        // any display/network work. No socket is opened by this negative test.
+        let invalid = Cli::try_parse_from([
+            "jwm-remote",
+            "connect",
+            "desk",
+            "--view-only",
+            "--follow-source-size",
+            "--viewer-backend",
+            "wayland",
+        ])
+        .unwrap()
+        .command;
+        assert!(
+            run(invalid)
+                .unwrap_err()
+                .to_string()
+                .contains("requires the direct X11 viewer")
+        );
+        assert!(
+            Cli::try_parse_from([
+                "jwm-remote",
+                "connect",
+                "desk",
+                "--view-only",
+                "--follow-source-size",
+                "--viewer-backend",
+                "x11"
+            ])
+            .is_ok()
+        );
+    }
+
     #[test]
     fn native_viewer_backend_is_explicit_read_only_and_not_profile_saved() {
         let cli = Cli::try_parse_from(["jwm-remote", "connect", "host"]).unwrap();

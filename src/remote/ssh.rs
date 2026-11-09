@@ -152,6 +152,7 @@ pub fn run_ssh(options: SshOptions) -> RemoteResult<()> {
                 wayland_keyboard: false,
                 wayland_pointer: false,
                 resize_source: None,
+                follow_source_size: false,
                 window_size: options.window_size,
                 window_position: options.window_position,
                 address: format!("127.0.0.1:{local_port}"),

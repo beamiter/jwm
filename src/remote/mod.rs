@@ -73,3 +73,5 @@ mod viewer_test_driver;
 pub mod viewer_backend;
 #[cfg(feature = "remote-wayland")]
 mod wayland_viewer;
+
+mod follow_source_size;

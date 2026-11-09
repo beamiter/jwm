@@ -187,6 +187,7 @@ fn client_options(
         wayland_keyboard: false,
         wayland_pointer: !matches!(case, Case::ReadOnly),
         resize_source: None,
+        follow_source_size: false,
         // A small real viewport keeps the controlled short-hold regression
         // inexpensive in debug software rendering. This case also uses a real
         // 200x150 native source; the 250 ms assertion is never relaxed.

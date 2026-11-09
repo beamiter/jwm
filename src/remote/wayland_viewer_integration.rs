@@ -560,6 +560,7 @@ fn actual_wayland_viewer_tcp_ack_waits_for_presented_not_release() {
             wayland_keyboard: false,
             wayland_pointer: false,
             resize_source: None,
+            follow_source_size: false,
             window_size: None,
             window_position: None,
             frame_limits: Default::default(),

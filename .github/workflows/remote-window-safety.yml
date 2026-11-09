@@ -62,6 +62,10 @@ jobs:
         run: |
           python3 scripts/test-remote-window-resize-e2e.py --self-test
           python3 scripts/test-remote-window-resize-e2e.py --jwm target/debug/jwm --remote target/debug/jwm-remote --report /tmp/remote-window-resize-e2e.json
+      - name: Real JWM continuous read-only source-size following
+        run: |
+          python3 scripts/test-remote-follow-size-e2e.py --self-test
+          python3 scripts/test-remote-follow-size-e2e.py --jwm target/debug/jwm --remote target/debug/jwm-remote --report /tmp/remote-follow-size-e2e.json
       - name: Preserve bounded resize test diagnostics on failure
         if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
@@ -69,6 +73,10 @@ jobs:
           name: remote-window-resize-diagnostics
           path: |
             /tmp/remote-window-resize-e2e.json
+            /tmp/remote-follow-size-e2e.json
+            /tmp/jwm-follow-size-e2e-*/*.log
+            /tmp/jwm-follow-size-e2e-*/host/*.log
+            /tmp/jwm-follow-size-e2e-*/viewer/*.log
             /tmp/jwm-window-resize-e2e-*/*.log
             /tmp/jwm-window-resize-e2e-*/host/*.log
             /tmp/jwm-window-resize-e2e-*/viewer/*.log
