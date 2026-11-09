@@ -71,6 +71,7 @@ const SCENES: [Scene; 5] = [
 #[derive(Debug, Serialize)]
 pub struct TimingStats {
     samples: usize,
+    raw_us: Vec<f64>,
     mean_us: Option<f64>,
     p50_us: Option<f64>,
     p95_us: Option<f64>,
@@ -83,6 +84,7 @@ fn stats(values: &[f64]) -> TimingStats {
         |p: usize| (!sorted.is_empty()).then(|| sorted[(sorted.len() * p).div_ceil(100) - 1]);
     TimingStats {
         samples: sorted.len(),
+        raw_us: values.to_vec(),
         mean_us: (!sorted.is_empty()).then(|| sorted.iter().sum::<f64>() / sorted.len() as f64),
         p50_us: percentile(50),
         p95_us: percentile(95),
@@ -260,9 +262,142 @@ pub fn run(config: ReplayConfig) -> RemoteResult<ReplayReport> {
     })
 }
 
+/// Export the exact production replay generator, not a second implementation.
+/// Creates a new directory only, bounds all RGB files to 64 MiB, and writes the
+/// manifest last. A failed export may leave partial files; it never overwrites.
+pub fn export_fixture(config: ReplayConfig, output: &std::path::Path) -> RemoteResult<()> {
+    use sha2::{Digest, Sha256};
+    use std::io::Write;
+    config.validate()?;
+    let bytes =
+        u64::from(config.width) * u64::from(config.height) * u64::from(config.frames) * 5 * 3;
+    if bytes > 64 * 1024 * 1024 || config.warmup != 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "fixture requires warmup=0 and at most 64 MiB RGB across all five scenes",
+        )
+        .into());
+    }
+    std::fs::create_dir(output)?;
+    let mut entries = Vec::new();
+    for scene in SCENES {
+        let name = serde_json::to_value(scene)?.as_str().unwrap().to_owned();
+        for index in 0..config.frames {
+            let frame = generate(&config, scene, index);
+            let file = format!("{name}-{index:04}.rgb");
+            let rgb = frame.image.as_raw();
+            let digest: String = Sha256::digest(rgb)
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect();
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(output.join(&file))?
+                .write_all(rgb)?;
+            entries.push(serde_json::json!({"scene":name,"index":index,"width":frame.source_width,"height":frame.source_height,"geometry_epoch":frame.geometry_epoch,"file":file,"sha256":digest}));
+        }
+    }
+    let baseline = run(config.clone())?;
+    let manifest = serde_json::json!({"schema_version":1,"workload_version":1,"producer":"jwm-production-replay","pixel_format":"rgb24","config":config,"frames":entries,"tile_baseline":baseline,"baseline_order":"fixture export followed by fresh production tile replay; no warmup"});
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(output.join("manifest.json"))?;
+    serde_json::to_writer_pretty(file, &manifest)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn fixture_export_is_exact_bounded_and_never_overwrites() {
+        use sha2::{Digest, Sha256};
+        struct OwnedTestDir(std::path::PathBuf);
+        impl Drop for OwnedTestDir {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let path = std::env::temp_dir().join(format!(
+            "jwm-replay-fixture-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&path).unwrap();
+        let parent = OwnedTestDir(path);
+        let output = parent.0.join("fixture");
+        let config = ReplayConfig {
+            width: 33,
+            height: 25,
+            frames: 4,
+            warmup: 0,
+            seed: 7,
+            quality: 75,
+        };
+        export_fixture(config.clone(), &output).unwrap();
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(output.join("manifest.json")).unwrap()).unwrap();
+        let frames = manifest["frames"].as_array().unwrap();
+        assert_eq!(frames.len(), 20);
+        for (scene_index, scene) in SCENES.into_iter().enumerate() {
+            for index in 0..4 {
+                let entry = &frames[scene_index * 4 + index];
+                let bytes = std::fs::read(output.join(entry["file"].as_str().unwrap())).unwrap();
+                assert_eq!(
+                    bytes,
+                    *generate(&config, scene, index as u32).image.as_raw()
+                );
+                let hex: String = Sha256::digest(&bytes)
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect();
+                assert_eq!(entry["sha256"], hex);
+            }
+        }
+        let original = std::fs::read(output.join("manifest.json")).unwrap();
+        assert!(export_fixture(config.clone(), &output).is_err());
+        assert_eq!(
+            std::fs::read(output.join("manifest.json")).unwrap(),
+            original
+        );
+        let invalid = parent.0.join("invalid");
+        assert!(
+            export_fixture(
+                ReplayConfig {
+                    width: 1920,
+                    height: 1080,
+                    frames: 10,
+                    ..config.clone()
+                },
+                &invalid
+            )
+            .is_err()
+        );
+        assert!(!invalid.exists());
+        assert!(
+            export_fixture(
+                ReplayConfig {
+                    warmup: 1,
+                    ..config
+                },
+                &invalid
+            )
+            .is_err()
+        );
+        assert!(!invalid.exists());
+        assert_eq!(
+            manifest["tile_baseline"]["scenes"][0]["plan"]["raw_us"]
+                .as_array()
+                .unwrap()
+                .len(),
+            4
+        );
+    }
     #[test]
     fn deterministic_seeded_scenes() {
         let config = ReplayConfig {

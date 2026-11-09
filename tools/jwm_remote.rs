@@ -142,6 +142,21 @@ enum Command {
         #[arg(long, default_value_t = 75, value_parser = clap::value_parser!(u8).range(1..=100))]
         quality: u8,
     },
+    /// Export exact offline replay RGB fixtures and tile baseline to a NEW directory.
+    ReplayFixture {
+        #[arg(long)]
+        output: PathBuf,
+        #[arg(long, default_value_t = 320, value_parser = clap::value_parser!(u16).range(1..=1920))]
+        width: u16,
+        #[arg(long, default_value_t = 180, value_parser = clap::value_parser!(u16).range(1..=1080))]
+        height: u16,
+        #[arg(long, default_value_t = 12, value_parser = clap::value_parser!(u32).range(1..=300))]
+        frames: u32,
+        #[arg(long, default_value_t = 1)]
+        seed: u64,
+        #[arg(long, default_value_t = 75, value_parser = clap::value_parser!(u8).range(1..=100))]
+        quality: u8,
+    },
     /// Save, inspect and explicitly run named connection settings (no credentials).
     Profile {
         /// Existing private directory. Default: JWM config directory/remote-profiles.
@@ -566,6 +581,7 @@ fn diagnostic_command(command: &Command) -> &'static str {
         Command::Keygen { .. } => "keygen",
         Command::Doctor { .. } => "doctor",
         Command::ReplayBenchmark { .. } => "replay_benchmark",
+        Command::ReplayFixture { .. } => "replay_fixture",
         Command::ClipboardStaging { action } => match action {
             ClipboardStagingAction::Status => "clipboard_staging_status",
             ClipboardStagingAction::SetLimit { .. } => "clipboard_staging_set_limit",
@@ -1108,6 +1124,28 @@ fn run(command: Command) -> RemoteResult<()> {
                 })?;
             serde_json::to_writer_pretty(std::io::stdout().lock(), &report)?;
             println!();
+            Ok(())
+        }
+        Command::ReplayFixture {
+            output,
+            width,
+            height,
+            frames,
+            seed,
+            quality,
+        } => {
+            jwm::remote::replay_benchmark::export_fixture(
+                jwm::remote::replay_benchmark::ReplayConfig {
+                    width,
+                    height,
+                    frames,
+                    warmup: 0,
+                    seed,
+                    quality,
+                },
+                &output,
+            )?;
+            println!("{}", output.join("manifest.json").display());
             Ok(())
         }
         Command::Profile { directory, action } => run_profile(directory, action),

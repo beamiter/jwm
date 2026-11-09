@@ -48,7 +48,7 @@ are collected.
 Each scene reports measured frame/emission/suppression counts, encoded payload
 bytes (tile header/bitmap/JPEG, excluding transport framing), dirty tiles and
 keyframes. Stage durations are microseconds with sample count, arithmetic mean,
-and nearest-rank p50/p95/p99. Empty sample sets use JSON null, never fabricated
+and nearest-rank p50/p95/p99, plus ordered `raw_us` samples (an additive offline JSON field). Empty sample sets use JSON null, never fabricated
 zero latency. Stages:
 
 - `plan`: dirty detection and tile planning.
