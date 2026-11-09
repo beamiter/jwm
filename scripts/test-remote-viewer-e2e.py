@@ -66,17 +66,21 @@ def main():
         env.pop("DISPLAY", None)
         env.pop("WAYLAND_DISPLAY", None)
         env.update(JWM_REMOTE_TEST_VIEWER_OWNED="1", JWM_REMOTE_TEST_VIEWER_DISPLAY=display)
-        command = ["cargo", "test", "--locked", "--no-default-features", "--features",
-                   "remote-wayland,backend-wayland-udev", "--lib",
-                   "remote::host::host_viewer_integration::actual_viewer_tcp_pointer_presented_scope_and_revocation",
-                   "--", "--ignored", "--exact", "--test-threads=1", "--nocapture"]
-        result = run_test(command, env)
-        sys.stdout.write(result.stdout)
-        sys.stderr.write(result.stderr)
-        if result.returncode:
-            return result.returncode
-        if "1 passed; 0 failed; 0 ignored" not in result.stdout:
-            raise RuntimeError("mandatory real viewer test did not execute exactly once")
+        for test_name in (
+            "remote::host::host_viewer_integration::actual_viewer_tcp_pointer_presented_scope_and_revocation",
+            "remote::host::host_keyboard_viewer_integration::actual_viewer_tcp_keyboard_presented_scope_and_revocation",
+        ):
+            command = ["cargo", "test", "--locked", "--no-default-features", "--features",
+                       "remote-wayland,backend-wayland-udev", "--lib",
+                       test_name,
+                       "--", "--ignored", "--exact", "--test-threads=1", "--nocapture"]
+            result = run_test(command, env)
+            sys.stdout.write(result.stdout)
+            sys.stderr.write(result.stderr)
+            if result.returncode:
+                return result.returncode
+            if "1 passed; 0 failed; 0 ignored" not in result.stdout:
+                raise RuntimeError("mandatory real viewer test did not execute exactly once")
         return 0
     finally:
         if child is not None:

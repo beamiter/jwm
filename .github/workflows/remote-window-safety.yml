@@ -2,7 +2,7 @@ name: Remote window safety
 
 on:
   push:
-    branches: [dot/remote-window-plan]
+    branches: [master, dot/remote-window-plan]
   workflow_dispatch:
 
 permissions:

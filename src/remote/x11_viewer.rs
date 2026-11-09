@@ -1304,6 +1304,28 @@ impl Viewer {
             self.update_title();
         }
     }
+    /// Test-only observer. Never read by input authorization or presentation.
+    #[cfg(test)]
+    pub(super) fn observe_keyboard_state(&self, armed: bool, ended: bool) -> RemoteResult<()> {
+        let atom = intern_atom(&self.conn, b"_JWM_TEST_KEYBOARD_STATE")?;
+        let value = if ended {
+            2
+        } else if armed {
+            1
+        } else {
+            0
+        };
+        self.conn
+            .change_property32(
+                PropMode::REPLACE,
+                self.window,
+                atom,
+                AtomEnum::CARDINAL,
+                &[value],
+            )?
+            .check()?;
+        Ok(())
+    }
     /// Test observation only: never read by the authorization or ACK path.
     #[cfg(test)]
     pub(super) fn observe_pointer_ready(&self, sequence: Option<u64>) -> RemoteResult<()> {
@@ -1321,6 +1343,34 @@ impl Viewer {
         } else {
             self.conn.delete_property(self.window, atom)?.check()?;
         }
+        Ok(())
+    }
+    /// Test-only snapshot of real local candidate state, never input authority.
+    #[cfg(test)]
+    pub(super) fn observe_pointer_candidate(
+        &self,
+        candidate: Option<u64>,
+        left_down: bool,
+        sequence: u64,
+    ) -> RemoteResult<()> {
+        let atom = intern_atom(&self.conn, b"_JWM_TEST_POINTER_CANDIDATE")?;
+        let frame = candidate.unwrap_or(0);
+        self.conn
+            .change_property32(
+                PropMode::REPLACE,
+                self.window,
+                atom,
+                AtomEnum::CARDINAL,
+                &[
+                    u32::from(candidate.is_some()),
+                    frame as u32,
+                    (frame >> 32) as u32,
+                    u32::from(left_down),
+                    sequence as u32,
+                    (sequence >> 32) as u32,
+                ],
+            )?
+            .check()?;
         Ok(())
     }
     pub(super) fn wayland_pointer_presented(&mut self, sequence: u64) {

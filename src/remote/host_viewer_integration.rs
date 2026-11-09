@@ -19,10 +19,28 @@ use smithay::{backend::input::InputTime, input::pointer::MotionEvent};
 use std::os::unix::net::UnixStream;
 use std::sync::mpsc;
 
+// A per-host-thread scheduling request, never an authorization or clock override.
+// Only the actual viewer candidate checkpoint sets this flag. Consuming it
+// shortens the existing retained frame's lifetime and uses the ordinary
+// discard -> capture -> TCP -> presentation -> ACK path for the replacement.
+thread_local! {
+    static FORCED_REFRESH: std::cell::RefCell<Option<Arc<AtomicBool>>> = const {
+        std::cell::RefCell::new(None)
+    };
+}
+pub(super) fn take_forced_refresh() -> bool {
+    FORCED_REFRESH.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .is_some_and(|flag| flag.swap(false, Ordering::AcqRel))
+    })
+}
+
 const TEST_KEY: [u8; 32] = [0x47; 32];
 #[derive(Clone, Copy, Debug)]
 enum Case {
     Positive,
+    NewFrameCancel,
     BlackBar,
     Viewport,
     ResizeRestore,
@@ -113,7 +131,9 @@ struct Probe {
     failures: mpsc::Receiver<String>,
 }
 fn note(trace: &Trace, message: impl Into<String>) {
-    trace.lock().unwrap().push(message.into());
+    let message = message.into();
+    eprintln!("actual viewer phase: {message}");
+    trace.lock().unwrap().push(message);
 }
 fn pump_until(
     server: &mut Server,
@@ -161,9 +181,19 @@ fn client_options(
         wayland_keyboard: false,
         wayland_pointer: !matches!(case, Case::ReadOnly),
         resize_source: None,
-        window_size: Some(WindowSize {
-            width: 1000,
-            height: 600,
+        // A small real viewport keeps the controlled short-hold regression
+        // below 250 ms even with debug software rendering. Native capture and
+        // pointer coordinates remain 800x600; no input timeout is relaxed.
+        window_size: Some(if matches!(case, Case::NewFrameCancel) {
+            WindowSize {
+                width: 400,
+                height: 300,
+            }
+        } else {
+            WindowSize {
+                width: 1000,
+                height: 600,
+            }
         }),
         window_position: None,
         frame_limits: Default::default(),
@@ -180,10 +210,30 @@ fn client_options(
         escape_key: "Escape".into(),
     }
 }
-fn drive(label: &str, case: Case, steps: mpsc::Receiver<()>, trace: &Trace) -> RemoteResult<()> {
+fn drive(
+    label: &str,
+    case: Case,
+    steps: mpsc::Receiver<()>,
+    trace: &Trace,
+    refresh: Arc<AtomicBool>,
+    cancel_checkpoint: Arc<AtomicBool>,
+) -> RemoteResult<()> {
+    note(trace, "driver connecting owned Xvfb");
     let driver = ViewerTestDriver::connect()?;
+    note(trace, format!("driver waiting unique window label={label}"));
     let window = driver.wait_window(label)?;
+    note(
+        trace,
+        format!("driver found window={window}, requesting focus"),
+    );
     driver.focus(window)?;
+    note(
+        trace,
+        format!(
+            "driver waiting actual red framebuffer, title={:?}",
+            driver.title(window)?
+        ),
+    );
     driver.wait_red(window)?;
     note(trace, "real viewer framebuffer red");
     if matches!(case, Case::ReadOnly) {
@@ -194,15 +244,28 @@ fn drive(label: &str, case: Case, steps: mpsc::Receiver<()>, trace: &Trace) -> R
         driver.close(window)?;
         return Ok(());
     }
+    note(trace, "driver waiting initial true Ready property");
     let ready = driver.wait_ready_after(window, None)?;
+    note(trace, format!("driver initial Ready seq={ready}"));
     if matches!(case, Case::BlackBar) {
         driver.motion(window, 10, 300)?;
         driver.click_at_current()?;
         note(trace, "black bar click actually injected");
     }
-    driver.motion(window, 500, 300)?;
+    let (center_x, center_y) = if matches!(case, Case::NewFrameCancel) {
+        (200, 150)
+    } else {
+        (500, 300)
+    };
+    driver.motion(window, center_x, center_y)?;
+    note(trace, "driver waiting native accepted motion");
     steps.recv_timeout(Duration::from_secs(5))?; // native accepted real viewer motion
+    note(
+        trace,
+        format!("driver waiting post-motion Ready after={ready}"),
+    );
     let ready = driver.wait_ready_after(window, Some(ready))?;
+    note(trace, format!("driver post-motion Ready seq={ready}"));
     driver.click_at_current()?;
     steps.recv_timeout(Duration::from_secs(5))?; // balanced native click, not a UI claim
     note(
@@ -212,6 +275,64 @@ fn drive(label: &str, case: Case, steps: mpsc::Receiver<()>, trace: &Trace) -> R
     match case {
         Case::Positive => {
             let _ = driver.wait_ready_after(window, Some(ready))?;
+            driver.click_at_current()?;
+            steps.recv_timeout(Duration::from_secs(5))?;
+        }
+        Case::NewFrameCancel => {
+            let before = driver.wait_ready_after(window, Some(ready))?;
+            let started = Instant::now();
+            driver.button_down()?;
+            let candidate = driver.wait_pointer_candidate(window, before)?;
+            assert!(candidate.left_down);
+            assert_eq!(candidate.candidate_frame, Some(before));
+            assert_eq!(
+                candidate.action_sequence, 2,
+                "only motion and first click sent"
+            );
+            // This is the sole trigger. The host only discards the old frame;
+            // the replacement must still traverse real capture and presentation.
+            refresh.store(true, Ordering::Release);
+            let newer = driver.wait_ready_after(window, Some(before))?;
+            let observed = driver
+                .pointer_observation(window)?
+                .expect("candidate observation");
+            assert_eq!(
+                observed.candidate_frame, None,
+                "new presented frame cancels candidate"
+            );
+            assert!(
+                observed.left_down,
+                "still physically held across frame boundary"
+            );
+            assert_eq!(observed.action_sequence, 2);
+            assert!(
+                started.elapsed() < Duration::from_millis(250),
+                "new presentation exceeded short-hold budget"
+            );
+            driver.button_up()?;
+            let released = driver.wait_pointer_released(window, 2)?;
+            assert!(!released.left_down);
+            assert_eq!(released.candidate_frame, None);
+            assert_eq!(
+                released.action_sequence, 2,
+                "cancelled release must not emit an action"
+            );
+            assert!(
+                started.elapsed() < Duration::from_millis(250),
+                "release exceeded click duration; not cancellation evidence"
+            );
+            note(
+                trace,
+                format!(
+                    "short hold cancelled by actual frame {before}->{newer}, elapsed={:?}",
+                    started.elapsed()
+                ),
+            );
+            cancel_checkpoint.store(true, Ordering::Release);
+            steps.recv_timeout(Duration::from_secs(5))?; // native edges still exactly first click
+            // A subsequent real click must succeed on this SAME lease. This
+            // excludes native rejection/disconnect as a false cancellation proof.
+            let _ = driver.wait_ready_after(window, Some(before))?;
             driver.click_at_current()?;
             steps.recv_timeout(Duration::from_secs(5))?;
         }
@@ -266,6 +387,7 @@ fn actual_viewer_tcp_pointer_presented_scope_and_revocation() {
     };
     for case in [
         Case::Positive,
+        Case::NewFrameCancel,
         Case::BlackBar,
         Case::Viewport,
         Case::ResizeRestore,
@@ -298,9 +420,15 @@ fn actual_viewer_tcp_pointer_presented_scope_and_revocation() {
             trace: Arc::clone(&trace),
             failures: failed_rx,
         };
+        let refresh = Arc::new(AtomicBool::new(false));
+        let cancel_checkpoint = Arc::new(AtomicBool::new(false));
+        let host_refresh = Arc::clone(&refresh);
         let host_trace = Arc::clone(&trace);
         let host_failed = failed_tx.clone();
         let host = std::thread::spawn(move || {
+            if matches!(case, Case::NewFrameCancel) {
+                FORCED_REFRESH.with(|slot| *slot.borrow_mut() = Some(host_refresh));
+            }
             note(&host_trace, "host connecting native capture");
             let result =
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> RemoteResult<()> {
@@ -383,9 +511,17 @@ fn actual_viewer_tcp_pointer_presented_scope_and_revocation() {
         });
         let (steps, step_rx) = mpsc::channel();
         let driver_trace = Arc::clone(&trace);
+        let driver_checkpoint = Arc::clone(&cancel_checkpoint);
         let driver = std::thread::spawn(move || {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                drive(&label, case, step_rx, &driver_trace)
+                drive(
+                    &label,
+                    case,
+                    step_rx,
+                    &driver_trace,
+                    refresh,
+                    driver_checkpoint,
+                )
             }));
             let result = match result {
                 Ok(result) => result.map_err(|e| e.to_string()),
@@ -400,6 +536,7 @@ fn actual_viewer_tcp_pointer_presented_scope_and_revocation() {
         let mut events = Vec::new();
         let mut unexpected = Vec::new();
         let mut notified = 0;
+        let mut cancellation_checked = false;
         pump_until(
             &mut server,
             &mut gl,
@@ -419,6 +556,18 @@ fn actual_viewer_tcp_pointer_presented_scope_and_revocation() {
                     steps.send(()).unwrap();
                     notified = 2;
                 }
+                if matches!(case, Case::NewFrameCancel)
+                    && !cancellation_checked
+                    && cancel_checkpoint.load(Ordering::Acquire)
+                {
+                    assert_eq!(
+                        edges, 2,
+                        "cancelled candidate must not reach native recipient"
+                    );
+                    assert!(unexpected.is_empty());
+                    cancellation_checked = true;
+                    steps.send(()).unwrap();
+                }
                 if notified == 2 && edges >= 4 {
                     steps.send(()).unwrap();
                     notified = 3;
@@ -426,10 +575,13 @@ fn actual_viewer_tcp_pointer_presented_scope_and_revocation() {
                 driver.is_finished()
             },
         );
-        driver
-            .join()
-            .expect("driver thread panicked")
-            .expect("real viewer driver failed");
+        let driver_result = driver.join().expect("driver thread panicked");
+        if let Err(error) = driver_result {
+            panic!(
+                "real viewer driver failed: {error}; case={case:?}; trace={:?}",
+                trace.lock().unwrap()
+            );
+        }
         pump_until(
             &mut server,
             &mut gl,
@@ -471,11 +623,14 @@ fn actual_viewer_tcp_pointer_presented_scope_and_revocation() {
             .collect();
         let clicks = if matches!(case, Case::ReadOnly) {
             0
-        } else if matches!(case, Case::Positive) {
+        } else if matches!(case, Case::Positive | Case::NewFrameCancel) {
             2
         } else {
             1
         };
+        if matches!(case, Case::NewFrameCancel) {
+            assert!(cancellation_checked);
+        }
         assert_eq!(
             buttons,
             [(0x110, 1), (0x110, 0)].repeat(clicks),

@@ -3133,8 +3133,18 @@ fn process_pointer(
         return Ok(());
     }
     if let Some(frame) = tracked {
-        if now.saturating_duration_since(frame.at) >= FRAME_MAX_AGE {
-            if let (Some(epoch), Some(scope)) = (state.epoch(), frame.scope) {
+        let expired = now.saturating_duration_since(frame.at) >= FRAME_MAX_AGE;
+        // The owned-viewer regression may only shorten this one session's
+        // proof lifetime. It still requires a real new capture and drawn ACK.
+        #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+        let forced_refresh = host_viewer_integration::take_forced_refresh();
+        #[cfg(not(all(test, feature = "remote-wayland", feature = "backend-wayland-udev")))]
+        let forced_refresh = false;
+        if expired || forced_refresh {
+            // Only the controlled test refresh omits this advisory notification,
+            // isolating cancellation by a real new frame rather than Waiting.
+            // Host/native permission is still discarded before any new capture.
+            if !forced_refresh && let (Some(epoch), Some(scope)) = (state.epoch(), frame.scope) {
                 send_pointer_status(
                     writer,
                     PointerStatus {
@@ -10280,3 +10290,7 @@ mod host_pointer_integration;
 #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
 #[path = "host_viewer_integration.rs"]
 mod host_viewer_integration;
+
+#[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+#[path = "host_keyboard_viewer_integration.rs"]
+mod host_keyboard_viewer_integration;

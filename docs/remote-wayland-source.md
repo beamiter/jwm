@@ -193,8 +193,24 @@ even if the window returns to its original dimensions in the same event batch.
 Final dimensions alone are not enough to establish the presented coordinate
 mapping. Any revocation in a batch takes precedence over pointer actions.
 
-This matrix is specifically the pointer viewer path. It is not actual keyboard
-viewer acceptance, a physical-display/DRM test, a two-computer network test or
-a proof of usability under WAN latency. A pending-click cancellation caused
-specifically by a newly presented frame remains covered by client state tests,
-not by a distinct actual-window frame-boundary scenario in this matrix.
+The pending-click scenario also crosses an actual new presented frame during
+a short local button hold. A per-session test-only trigger may shorten the old
+frame's lifetime and omit that old frame's advisory Waiting notification to
+isolate the new-frame cancellation path. It cannot extend a native permission
+or inject a frame ACK.
+The next frame still uses real capture, encoding, transport and presentation.
+This controlled case uses a small viewer viewport to keep software rendering
+within the short-hold budget. The test requires the release to complete within
+the existing 250 ms click
+limit, no action to be sent for that cancelled candidate, and a subsequent
+legitimate click on the same lease to succeed.
+
+A separate actual keyboard viewer matrix explicitly installs the owned Xvfb's
+complete canonical XKB map on the native test seat before admission. It tests
+key edges only reaching the original target, held-key cleanup after viewer
+focus loss, and rejection of a deliberately different map. This establishes
+the explicitly matched-map path, not default keymap compatibility on arbitrary
+desktops. The product's full-map comparison remains unchanged.
+
+These are controlled software-display regressions, not physical-display/DRM
+tests, two-computer network tests or proof of usability under WAN latency.

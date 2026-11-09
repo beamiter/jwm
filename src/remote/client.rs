@@ -1228,6 +1228,16 @@ fn viewer_loop(
                 viewer.check_wayland_keyboard(true)?;
                 keyboard.activated = true;
             }
+            #[cfg(test)]
+            if keyboard.configured() {
+                viewer.observe_keyboard_state(
+                    keyboard.activated
+                        && keyboard.epoch.is_some()
+                        && keyboard.request.is_some()
+                        && !keyboard.ended,
+                    keyboard.ended,
+                )?;
+            }
         }
         {
             let mut pointer = state.wayland_pointer.lock().unwrap();
@@ -1244,6 +1254,12 @@ fn viewer_loop(
                     }
                 }
                 viewer.set_wayland_pointer_status(pointer.label(Instant::now()));
+                #[cfg(test)]
+                viewer.observe_pointer_candidate(
+                    pointer.click.map(|(scope, _, _, _)| scope.frame_sequence),
+                    pointer.left_down,
+                    pointer.sequence,
+                )?;
                 #[cfg(test)]
                 viewer.observe_pointer_ready(if pointer.fresh(Instant::now()) {
                     pointer.ready.map(|scope| scope.frame_sequence)
@@ -1333,6 +1349,14 @@ fn viewer_loop(
                         }
                     }
                 }
+                #[cfg(test)]
+                viewer.observe_keyboard_state(
+                    keyboard.activated
+                        && keyboard.epoch.is_some()
+                        && keyboard.request.is_some()
+                        && !keyboard.ended,
+                    keyboard.ended,
+                )?;
                 // These events never enter legacy InputBatch or pointer paths.
                 events.retain(|event| matches!(event, ViewerEvent::Close));
             }
@@ -1370,6 +1394,12 @@ fn viewer_loop(
                     }
                 }
                 viewer.set_wayland_pointer_status(pointer.label(Instant::now()));
+                #[cfg(test)]
+                viewer.observe_pointer_candidate(
+                    pointer.click.map(|(scope, _, _, _)| scope.frame_sequence),
+                    pointer.left_down,
+                    pointer.sequence,
+                )?;
                 #[cfg(test)]
                 viewer.observe_pointer_ready(if pointer.fresh(Instant::now()) {
                     pointer.ready.map(|scope| scope.frame_sequence)
@@ -1571,6 +1601,12 @@ fn viewer_loop(
                 if pointer.enabled {
                     viewer.wayland_pointer_presented(sequence);
                     viewer.set_wayland_pointer_status(pointer.label(Instant::now()));
+                    #[cfg(test)]
+                    viewer.observe_pointer_candidate(
+                        pointer.click.map(|(scope, _, _, _)| scope.frame_sequence),
+                        pointer.left_down,
+                        pointer.sequence,
+                    )?;
                     #[cfg(test)]
                     viewer.observe_pointer_ready(if pointer.fresh(Instant::now()) {
                         pointer.ready.map(|scope| scope.frame_sequence)

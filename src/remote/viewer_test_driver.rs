@@ -10,9 +10,18 @@ use x11rb::protocol::xproto::{
 use x11rb::protocol::xtest::ConnectionExt as _;
 use x11rb::rust_connection::RustConnection;
 
+#[derive(Clone, Copy, Debug)]
+pub(super) struct PointerObservation {
+    pub(super) candidate_frame: Option<u64>,
+    pub(super) left_down: bool,
+    pub(super) action_sequence: u64,
+}
+
 pub(super) struct ViewerTestDriver {
     conn: RustConnection,
     root: Window,
+    display: String,
+    last_observed: std::cell::RefCell<String>,
 }
 impl ViewerTestDriver {
     pub(super) fn connect() -> RemoteResult<Self> {
@@ -26,16 +35,122 @@ impl ViewerTestDriver {
         let (conn, screen) = x11rb::connect(Some(&display))?;
         let root = conn.setup().roots[screen].root;
         conn.xtest_get_version(2, 2)?.reply()?;
-        Ok(Self { conn, root })
+        Ok(Self {
+            conn,
+            root,
+            display,
+            last_observed: std::cell::RefCell::new(String::new()),
+        })
     }
-    fn until<T>(&self, mut poll: impl FnMut() -> RemoteResult<Option<T>>) -> RemoteResult<T> {
+    pub(super) fn snapshot_keymap(&self) -> RemoteResult<String> {
+        use xkbcommon::xkb;
+        let (conn, _) = xcb::Connection::connect_with_extensions(
+            Some(&self.display),
+            &[xcb::Extension::Xkb],
+            &[],
+        )?;
+        let (mut major, mut minor, mut event, mut error) = (0, 0, 0, 0);
+        if !xkb::x11::setup_xkb_extension(
+            &conn,
+            1,
+            0,
+            xkb::x11::SetupXkbExtensionFlags::NoFlags,
+            &mut major,
+            &mut minor,
+            &mut event,
+            &mut error,
+        ) {
+            return Err("owned XKB unavailable".into());
+        }
+        let device = xkb::x11::get_core_keyboard_device_id(&conn);
+        if device < 0 {
+            return Err("owned core keyboard unavailable".into());
+        }
+        let context = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
+        let map =
+            xkb::x11::keymap_new_from_device(&context, &conn, device, xkb::KEYMAP_COMPILE_NO_FLAGS);
+        if map.get_raw_ptr().is_null() {
+            return Err("owned keymap unavailable".into());
+        }
+        let text = map.get_as_string(xkb::KEYMAP_FORMAT_TEXT_V1);
+        super::keyboard_keymap::canonical_digest(text.as_bytes())?;
+        Ok(text)
+    }
+    pub(super) fn key_press(&self, evdev: u16) -> RemoteResult<()> {
+        self.key(evdev, true)
+    }
+    pub(super) fn key_release(&self, evdev: u16) -> RemoteResult<()> {
+        self.key(evdev, false)
+    }
+    fn key(&self, evdev: u16, pressed: bool) -> RemoteResult<()> {
+        let code = u8::try_from(evdev.checked_add(8).ok_or("keycode overflow")?)?;
+        self.conn
+            .xtest_fake_input(
+                if pressed {
+                    xproto::KEY_PRESS_EVENT
+                } else {
+                    xproto::KEY_RELEASE_EVENT
+                },
+                code,
+                CURRENT_TIME,
+                self.root,
+                0,
+                0,
+                0,
+            )?
+            .check()?;
+        Ok(())
+    }
+    pub(super) fn wait_keyboard_armed(&self, window: Window) -> RemoteResult<()> {
+        self.wait_keyboard_state(window, 1)
+    }
+    pub(super) fn wait_keyboard_revoked(&self, window: Window) -> RemoteResult<()> {
+        self.wait_keyboard_state(window, 2)
+    }
+    fn wait_keyboard_state(&self, window: Window, expected: u32) -> RemoteResult<()> {
+        let atom = self
+            .conn
+            .intern_atom(false, b"_JWM_TEST_KEYBOARD_STATE")?
+            .reply()?
+            .atom;
+        self.until("keyboard state", || {
+            let reply = self
+                .conn
+                .get_property(false, window, atom, AtomEnum::CARDINAL, 0, 1)?
+                .reply()?;
+            *self.last_observed.borrow_mut() = format!(
+                "window={window:#x}, expected keyboard={expected}, type={}, format={}, data={:?}",
+                reply.type_, reply.format, reply.value
+            );
+            if reply.type_ == u32::from(AtomEnum::NONE) {
+                return Ok(None);
+            }
+            if reply.format != 32 || reply.value.len() != 4 || reply.bytes_after != 0 {
+                return Err("invalid keyboard test observation".into());
+            }
+            Ok(
+                (reply.value32().and_then(|mut words| words.next()) == Some(expected))
+                    .then_some(()),
+            )
+        })
+    }
+    fn until<T>(
+        &self,
+        phase: &str,
+        mut poll: impl FnMut() -> RemoteResult<Option<T>>,
+    ) -> RemoteResult<T> {
+        self.last_observed.borrow_mut().clear();
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             if let Some(value) = poll()? {
                 return Ok(value);
             }
             if Instant::now() >= deadline {
-                return Err("viewer UI/presentation wait timed out".into());
+                return Err(format!(
+                    "viewer wait {phase} timed out; last observed: {}",
+                    self.last_observed.borrow()
+                )
+                .into());
             }
             std::thread::sleep(Duration::from_millis(10));
         }
@@ -48,12 +163,15 @@ impl ViewerTestDriver {
         if reply.bytes_after != 0 {
             return Err("oversized viewer title".into());
         }
-        Ok(String::from_utf8(reply.value)?)
+        let title = String::from_utf8(reply.value)?;
+        *self.last_observed.borrow_mut() = format!("window={window:#x}, WM_NAME={title:?}");
+        Ok(title)
     }
     pub(super) fn wait_window(&self, peer_label: &str) -> RemoteResult<Window> {
         let prefix = format!("{peer_label} - JWM Remote");
-        self.until(|| {
+        self.until("window discovery", || {
             let mut found = None;
+            *self.last_observed.borrow_mut() = format!("no root child matches prefix={prefix:?}");
             for window in self.conn.query_tree(self.root)?.reply()?.children {
                 if self.title(window)?.starts_with(&prefix) {
                     if found.is_some() {
@@ -66,7 +184,9 @@ impl ViewerTestDriver {
         })
     }
     pub(super) fn wait_title(&self, window: Window, substring: &str) -> RemoteResult<()> {
-        self.until(|| Ok(self.title(window)?.contains(substring).then_some(())))
+        self.until("title substring", || {
+            Ok(self.title(window)?.contains(substring).then_some(()))
+        })
     }
     pub(super) fn wait_ready_after(
         &self,
@@ -78,7 +198,7 @@ impl ViewerTestDriver {
             .intern_atom(false, b"_JWM_TEST_POINTER_READY")?
             .reply()?
             .atom;
-        self.until(|| {
+        self.until("pointer Ready frame", || {
             if !self.title(window)?.contains("Pointer: Ready") {
                 return Ok(None);
             }
@@ -86,6 +206,7 @@ impl ViewerTestDriver {
                 .conn
                 .get_property(false, window, atom, AtomEnum::CARDINAL, 0, 2)?
                 .reply()?;
+            *self.last_observed.borrow_mut() = format!("window={window:#x}, previous={previous:?}, Ready property type={}, format={}, data={:?}", reply.type_, reply.format, reply.value);
             if reply.type_ == u32::from(AtomEnum::NONE) {
                 return Ok(None);
             }
@@ -102,7 +223,7 @@ impl ViewerTestDriver {
     }
     /// Read the real X drawable, not the decoded frame or an acknowledgement.
     pub(super) fn wait_red(&self, window: Window) -> RemoteResult<()> {
-        self.until(|| {
+        self.until("red framebuffer", || {
             let geometry = self.conn.get_geometry(window)?.reply()?;
             let image = self
                 .conn
@@ -148,6 +269,7 @@ impl ViewerTestDriver {
                     (pixel & mask) >> mask.trailing_zeros()
                 }
             };
+            *self.last_observed.borrow_mut() = format!("window={window:#x}, size={}x{}, depth={}, bpp={}, pixel={pixel:#010x}, masks=({:#x},{:#x},{:#x}), rgb=({},{},{})", geometry.width, geometry.height, image.depth, format.bits_per_pixel, visual.red_mask, visual.green_mask, visual.blue_mask, channel(visual.red_mask), channel(visual.green_mask), channel(visual.blue_mask));
             Ok((channel(visual.red_mask) >= 220
                 && channel(visual.green_mask) <= 30
                 && channel(visual.blue_mask) <= 30)
@@ -172,21 +294,75 @@ impl ViewerTestDriver {
             .check()?;
         Ok(())
     }
-    pub(super) fn click_at_current(&self) -> RemoteResult<()> {
+    pub(super) fn pointer_observation(
+        &self,
+        window: Window,
+    ) -> RemoteResult<Option<PointerObservation>> {
+        let atom = self
+            .conn
+            .intern_atom(false, b"_JWM_TEST_POINTER_CANDIDATE")?
+            .reply()?
+            .atom;
+        let reply = self
+            .conn
+            .get_property(false, window, atom, AtomEnum::CARDINAL, 0, 6)?
+            .reply()?;
+        if reply.type_ == u32::from(AtomEnum::NONE) {
+            return Ok(None);
+        }
+        if reply.format != 32 || reply.value.len() != 24 || reply.bytes_after != 0 {
+            return Err("invalid pointer candidate observation".into());
+        }
+        let words: Vec<u32> = reply.value32().ok_or("missing candidate words")?.collect();
+        if words[0] > 1 || words[3] > 1 {
+            return Err("invalid candidate flags".into());
+        }
+        *self.last_observed.borrow_mut() = format!("window={window:#x}, candidate words={words:?}");
+        Ok(Some(PointerObservation {
+            candidate_frame: (words[0] == 1)
+                .then_some(u64::from(words[1]) | (u64::from(words[2]) << 32)),
+            left_down: words[3] == 1,
+            action_sequence: u64::from(words[4]) | (u64::from(words[5]) << 32),
+        }))
+    }
+    pub(super) fn wait_pointer_candidate(
+        &self,
+        window: Window,
+        frame: u64,
+    ) -> RemoteResult<PointerObservation> {
+        self.until("pointer candidate", || {
+            Ok(self
+                .pointer_observation(window)?
+                .filter(|s| s.left_down && s.candidate_frame == Some(frame)))
+        })
+    }
+    pub(super) fn wait_pointer_released(
+        &self,
+        window: Window,
+        expected_sequence: u64,
+    ) -> RemoteResult<PointerObservation> {
+        self.until("pointer released", || {
+            Ok(self.pointer_observation(window)?.filter(|s| {
+                !s.left_down
+                    && s.candidate_frame.is_none()
+                    && s.action_sequence == expected_sequence
+            }))
+        })
+    }
+    pub(super) fn button_down(&self) -> RemoteResult<()> {
+        self.button(true)
+    }
+    pub(super) fn button_up(&self) -> RemoteResult<()> {
+        self.button(false)
+    }
+    fn button(&self, pressed: bool) -> RemoteResult<()> {
         self.conn
             .xtest_fake_input(
-                xproto::BUTTON_PRESS_EVENT,
-                1,
-                CURRENT_TIME,
-                self.root,
-                0,
-                0,
-                0,
-            )?
-            .check()?;
-        self.conn
-            .xtest_fake_input(
-                xproto::BUTTON_RELEASE_EVENT,
+                if pressed {
+                    xproto::BUTTON_PRESS_EVENT
+                } else {
+                    xproto::BUTTON_RELEASE_EVENT
+                },
                 1,
                 CURRENT_TIME,
                 self.root,
@@ -196,6 +372,10 @@ impl ViewerTestDriver {
             )?
             .check()?;
         Ok(())
+    }
+    pub(super) fn click_at_current(&self) -> RemoteResult<()> {
+        self.button_down()?;
+        self.button_up()
     }
     pub(super) fn focus(&self, window: Window) -> RemoteResult<()> {
         self.conn
