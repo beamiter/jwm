@@ -382,14 +382,14 @@ gives each complete authenticated video record, including its final flush, one
 budget; a partial or timed-out record closes the whole session so its wire
 sequence can never be retried out of sync.
 
-The current application protocol is version 18. Versions 2 to 17 are
+The current application protocol is version 19. Versions 2 to 18 are
 deliberately incompatible, so update `jwm-remote` on both machines together;
 negotiation rejects an older peer before screen or input data is exchanged.
 Version 7 introduced initial viewport and explicit stream selectors. Version 8
 adds an independently negotiated cursor plane and a video geometry epoch;
 it does not silently reinterpret v7 video or cursor selector semantics.
 
-The v18 hello prefix is the existing 8-byte magic, big-endian `u16` version,
+The v19 hello prefix is the existing 8-byte magic, big-endian `u16` version,
 and capability flags. Both hellos append three one-byte selectors in order:
 codec `1` (JPEG tiles), cursor `1` (composited) or `2` (independent), input `1`
 (X11 keycodes). A viewer advertises independent cursor only after verifying local XRender
@@ -456,16 +456,22 @@ Pointer request/status/action/revoke records (kinds 29–32) are respectively
 See [Wayland source safety](remote-wayland-source.md) for explicit opt-in,
 recipient restrictions, frame lifetime and unsupported mapping arrangements.
 
+Version 18 appends the independent Wayland scroll boolean. Version 19 appends
+one `scroll_copy` boolean for video-only copy deltas, independent of every input
+permission. The bounded stream capability block is now 30 bytes; the host may
+enable copy deltas only when the viewer advertises support and the operator
+explicitly passes `--scroll-copy`.
+
 The client then appends big-endian `u16` viewport width and height, followed
 by the existing bounded keymap table. `(0, 0)` means no initial size; exactly
-one zero dimension is invalid. The server hello is exactly 39 bytes. Unknown
+one zero dimension is invalid. The v19 server hello is exactly 41 bytes. Unknown
 selectors, trailing bytes and incomplete keymaps are rejected. Input and
 clipboard permission flags remain independent of the stream profile.
 
-Compatibility: v18 viewer/v18 host works; v6/v7/v8/v9/v10/v11/v12/v13/v14/v15/v16/v17 with v18 in either direction is
+Compatibility: v19 viewer/v19 host works; v6/v7/v8/v9/v10/v11/v12/v13/v14/v15/v16/v17/v18 with v19 in either direction is
 rejected during negotiation. There is no automatic legacy-version fallback.
 Keep both binaries on the same release; this change does not alter transport
-crypto. Within v18, unsupported independent-cursor capability falls back to
+crypto. Within v19, unsupported independent-cursor capability falls back to
 composited video explicitly in HelloAck.
 
 Version 14 adds viewer-to-host `ClipboardRestrict` (kind 21) and host-to-viewer
@@ -1787,7 +1793,8 @@ missing directories privately and never changes existing directory permissions.
 
 ### Explicit discrete Wayland scroll (v18)
 
-The stream profile is now 29 bytes. Byte 28 is a strict boolean scroll capability,
+Version 18 extended the stream profile to 29 bytes; v19 adds the video-only
+copy selector for a total of 30 bytes. Byte 28 remains a strict boolean scroll capability,
 independent of byte 27's pointer permission. It must be false unless pointer is
 also true. Both `host --allow-wayland-pointer --allow-wayland-scroll` and
 `connect --wayland-pointer --wayland-scroll` are required. A missing or unsolicited
@@ -1797,3 +1804,30 @@ lease request remains motion/click only. Action kinds 2 and 3 are one up/down
 notch respectively, keeping the 45-byte scoped action format. Each consumes a
 fresh presented frame; waiting/held-click wheel input is discarded, never queued.
 No horizontal/smooth scroll, drag, new input permission, or lease extension is added.
+
+### Experimental vertical scroll-copy codec (v19)
+
+`jwm-remote host --scroll-copy` explicitly enables a CPU tile-codec optimization.
+It is off by default and is not saved in profiles or implicitly enabled by SSH.
+The flag grants **no input permission**: `--allow-wayland-scroll` remains a
+separate, explicitly authorized single-notch input capability.
+
+Both endpoints must use application protocol v19. Earlier peers are rejected
+at negotiation, not silently upgraded. Codec support is negotiated separately
+from keyboard, pointer, clipboard and scroll permissions.
+
+A candidate copies a full-width vertical overlap by an integral displacement
+of ±1 through ±64 encoded-image pixels, strictly less than the encoded image
+height. This does not move the source window or change input coordinates. The encoder
+requires at least half the image to overlap and an exact match of every raw RGB
+pixel in that overlap. Newly exposed pixels are sent through the existing tile
+path. Partial-column scrolling, fixed toolbars, unrelated changes and unsafe
+size changes do not qualify for that copy; ordinary tile encoding remains the
+fallback. Copy records bind to the exact previous decoded sequence and current
+source/geometry scope; stale, missing or cross-scope bases must not be applied.
+
+Copied pixels are the existing decoded pixels, not re-quantized JPEG. This does
+not guarantee lower image error than a fresh JPEG update. The experiment is
+software-only; no GPU acceleration, physical presentation latency, network
+latency or general bandwidth improvement is promised. Bounded offline A/B
+measurements compare the same deterministic RGB frames and JPEG quality.

@@ -77,7 +77,7 @@ source switching or automatic input grab. A saved profile cannot grant it.
 The default remains view-only. The selected target must already have exact
 native keyboard focus: the remote path never changes focus to obtain access.
 
-Current protocol v18 retains the independent keyboard capability introduced
+Current protocol v19 retains the independent keyboard capability introduced
 in v16 and the pointer capability introduced in v17; scrolling has its own v18
 opt-in. After the first frame is actually reported presented by the viewer, it
 requests one keyboard lease for
@@ -191,7 +191,7 @@ jwm-remote connect HOST:48221 --wayland-pointer --wayland-scroll ...
 
 The independent scroll capability does not extend an old pointer grant. Both
 sides must explicitly enable it; permission cannot be inferred from incoming
-actions. The stream protocol version is 18, and older versions are rejected
+actions. The current stream protocol version is 19, and older versions are rejected
 rather than silently downgrading. No profile, reconnect, keyboard, clipboard or
 legacy input permission is enabled by these flags.
 
@@ -259,3 +259,19 @@ desktops. The product's full-map comparison remains unchanged.
 
 These are controlled software-display regressions, not physical-display/DRM
 tests, two-computer network tests or proof of usability under WAN latency.
+
+### Scroll-copy is not scroll permission
+
+The separate experimental host `--scroll-copy` flag enables a default-off v19
+software codec optimization, not a native input capability. It can optimize a
+read-only source without allowing any keyboard, pointer or scroll events.
+The original explicit `--allow-wayland-scroll` / viewer opt-in, fresh-frame
+checks, exact receiver binding and 30-second nonrenewable lease remain unchanged.
+
+Only exact full-width RGB shifts of ±1..64 pixels with at least half-frame
+overlap qualify. Copies require the matching source, geometry and base sequence;
+fixed toolbars, other changes and unsupported resizes fall back to normal tiles.
+Older peers are rejected, and profiles/SSH do not implicitly persist this flag.
+This CPU experiment does not establish GPU, physical-display or WAN latency
+improvements; copying existing decoded pixels also does not guarantee better
+quality than re-encoding them.

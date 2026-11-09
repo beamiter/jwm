@@ -40,8 +40,8 @@ It is not completion of the entire remote-control roadmap.
   reuse while X11 consumes a segment; input polling continues while completion
   and server-copy fences are pending. Frame ACK follows both conditions, never
   receipt alone. Geometry setup and initial resource allocation may still block.
-- Current protocol v18 negotiates an explicit supported stream profile and sends
-  initial viewport before capture. Both peers must use v18; prior versions are
+- Current protocol v19 negotiates an explicit supported stream profile and sends
+  initial viewport before capture. Both peers must use v19; prior versions are
   rejected without silent downgrade. Tile video and cursor state carry a
   geometry epoch. Explicit source resize was introduced in v15; the subsequent
   v16 keyboard, v17 pointer and v18 scroll capabilities are separately negotiated.
@@ -73,7 +73,7 @@ It is not completion of the entire remote-control roadmap.
   in view-only mode. A scoped initial selection never implicitly grants root.
   Source changes release input and reset frame/cursor state; unsafe transitions
   fail closed. Extra grants are explicit on host/SSH CLI and cannot be saved in
-  profiles yet. Both peers now require a coordinated v18 upgrade.
+  profiles yet. Both peers now require a coordinated v19 upgrade.
 - This source-switching work is covered by offline tests only in this checkout;
   no new live-X11, hardware timing, or benchmark result is claimed here.
 
@@ -188,7 +188,7 @@ this cloud workspace; live-X11 results remain pending until it runs.
 
 ## Compatibility note for Rust callers
 
-Current wire v18 is intentionally incompatible with prior application protocol versions.
+Current wire v19 is intentionally incompatible with prior application protocol versions.
 The public `DecodedFrame` and synchronous `Viewer::draw` behavior remain usable.
 `HostOptions`, `ClientOptions` and `SshOptions` now require `frame_limits`;
 `StreamCapabilities` also adds that field. `FrameLimits::default()` retains the
@@ -572,3 +572,63 @@ Previously transmitted bytes, clipboard history, exposed files and pastes alread
 in progress cannot be erased by this control. Synchronous native work can delay
 confirmation. Deterministic state/queue tests are separate from live shortcut,
 clipboard-owner and paste acceptance, which remains unverified in this checkout.
+
+## Experimental v19 scroll-copy opt-in
+
+Host `--scroll-copy` is default-off and does not grant scroll input. It adds a
+negotiated software codec path for exact full-width vertical shifts of ±1..64
+encoded-image pixels, with at least half-frame overlap. Source, geometry and base-sequence
+identity are required; other motion, static headers/toolbars, unrelated changes
+and unsupported resize transitions retain ordinary tile encoding. The previous
+decoded overlap is copied without another JPEG quantization pass, but image
+error is not guaranteed to improve. This is not GPU encoding or a latency claim.
+Same-input, same-quality offline A/B measurements are required before considering
+a broader default; old application-protocol peers reject v19 negotiation.
+
+### Bounded synthetic A/B evidence
+
+One debug-build pass ran each arm once over the same six deterministic scenes,
+eight offered frames per scene, at JPEG quality 75. The normal size is 321×193;
+the odd-resize case changes to 303×181 after frame four. Each input frame's
+SHA-256 is asserted identical between the default-off and explicitly enabled
+arms. Payload totals include the initial keyframe. MSE is total squared channel
+error divided by total channel samples across all eight frames, including
+suppressed frames; it is not an average of rounded per-frame values.
+
+| Synthetic scene | Default-off payload bytes | Scroll-copy payload bytes | Default-off MSE | Scroll-copy MSE |
+| --- | ---: | ---: | ---: | ---: |
+| Static | 56,004 | 56,004 | 230.97731 | 230.97731 |
+| Up 7 pixels/frame | 448,827 | 106,253 | 231.30315 | 230.95062 |
+| Down 7 pixels/frame | 448,418 | 92,378 | 231.37526 | 233.60609 |
+| Random changes | 449,610 | 449,610 | 231.03998 | 231.03998 |
+| Fixed toolbar with scrolling content | 417,077 | 417,077 | 232.17857 | 232.17857 |
+| Odd-size resize | 104,704 | 104,704 | 230.85955 | 230.85955 |
+
+Both scroll scenes exercised production copy records. The other four scenes
+emitted no copy records, and their byte totals and unrounded SSE/sample ratios
+were identical between arms. Downward scrolling increased MSE in this pass:
+copying already decoded pixels does not guarantee better quality than a fresh
+JPEG update. These inputs are synthetic, not a desktop recording, physical
+DRM presentation or two-machine test. No CPU speedup or end-to-end latency
+improvement is inferred from this one pass. Host `--scroll-copy` remains off
+by default.
+
+The benchmark was rerun after JPEG-envelope validation hardening. All 96
+per-frame payload sizes, squared errors and input hashes matched the initial
+valid-JPEG run exactly. The boundary checks reject incomplete/trailing JPEG
+envelopes; they are not a proof of every entropy-coded coefficient's validity.
+
+Equivalent reproducible command (the initial pass ran the already-built debug
+test executable with this exact test filter):
+
+```sh
+cargo test --locked --no-default-features --features remote-x11 --lib \
+  remote::tile::scroll_benchmark::tile_scroll_copy_offline_ab_benchmark \
+  -- --ignored --exact --nocapture
+```
+
+The ignored test emits per-frame and aggregate JSON. It opens no display or
+socket and uses no GPU. Both arms together are bounded to 64 MiB of offered
+source RGB; inputs are generated one frame at a time, not retained as a replay
+history. Generation, input hashing and distortion calculation are excluded
+from the reported codec-stage timings.

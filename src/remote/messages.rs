@@ -8,9 +8,9 @@ use super::x11_keymap::{KeymapTable, MAX_ENCODED_KEYMAP_LEN};
 use std::io;
 
 const APPLICATION_MAGIC: &[u8; 8] = b"JWMREM01";
-pub const APPLICATION_VERSION: u16 = 18;
+pub const APPLICATION_VERSION: u16 = 19;
 const HELLO_PREFIX_LEN: usize = 11;
-const STREAM_CAPABILITIES_LEN: usize = 29;
+const STREAM_CAPABILITIES_LEN: usize = 30;
 const SERVER_HELLO_LEN: usize = HELLO_PREFIX_LEN + STREAM_CAPABILITIES_LEN;
 const CLIENT_HELLO_HEADER_LEN: usize = SERVER_HELLO_LEN + 4;
 /// Largest client hello: the shared prefix plus a full keymap table.
@@ -116,6 +116,8 @@ pub struct StreamCapabilities {
     pub wayland_pointer: bool,
     /// Separate opt-in for discrete vertical wheel notches. Requires pointer.
     pub wayland_scroll: bool,
+    /// Experimental video-only vertical copy deltas; no input authority.
+    pub scroll_copy: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -168,6 +170,7 @@ impl StreamCapabilities {
         payload[26] = u8::from(self.wayland_keyboard);
         payload[27] = u8::from(self.wayland_pointer);
         payload[28] = u8::from(self.wayland_scroll);
+        payload[29] = u8::from(self.scroll_copy);
         payload
     }
 
@@ -186,6 +189,7 @@ impl StreamCapabilities {
             || payload[26] > 1
             || payload[27] > 1
             || payload[28] > 1
+            || payload[29] > 1
             || (payload[28] == 1 && payload[27] != 1)
             || (payload[26] == 1 && payload[27] == 1)
             || (payload[23] == 0) != (payload[24] == 0)
@@ -208,8 +212,15 @@ impl StreamCapabilities {
             wayland_keyboard: payload[26] == 1,
             wayland_pointer: payload[27] == 1,
             wayland_scroll: payload[28] == 1,
+            scroll_copy: payload[29] == 1,
             ..Self::default()
         })
+    }
+
+    /// Video codec extension requires host opt-in and peer decoder support.
+    #[must_use]
+    pub fn negotiate_scroll_copy(self, host_enabled: bool) -> bool {
+        host_enabled && self.scroll_copy
     }
 
     /// Both directions use the stricter operator limit. A zero on either side
@@ -1010,7 +1021,7 @@ mod tests {
             ClientHello::decode(&legacy).unwrap_err(),
             ServerHello::decode(&legacy).unwrap_err(),
         ] {
-            assert!(error.to_string().contains("version 6; expected 18"));
+            assert!(error.to_string().contains("version 6; expected 19"));
         }
     }
 
@@ -1159,7 +1170,7 @@ mod tests {
     }
 
     #[test]
-    fn hello_uses_version_eighteen_and_rejects_neighbouring_versions() {
+    fn hello_uses_version_nineteen_and_rejects_neighbouring_versions() {
         let payload = ServerHello {
             stream: Default::default(),
             pointer_enabled: false,
@@ -1168,24 +1179,24 @@ mod tests {
             clipboard_files_enabled: false,
         }
         .encode();
-        assert_eq!(&payload[8..10], &18_u16.to_be_bytes());
+        assert_eq!(&payload[8..10], &19_u16.to_be_bytes());
 
         // Version 5 had no clipboard transfer records: a version-5 peer
         // would end the session on the first copied image or file. It must
         // fail on its version instead. Version 4 sent one digest of the whole
         // keymap where later versions send a per-keycode table.
-        for older in [4_u16, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17] {
+        for older in [4_u16, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18] {
             let mut previous = payload;
             previous[8..10].copy_from_slice(&older.to_be_bytes());
             let error = ServerHello::decode(&previous).unwrap_err();
             assert!(
                 error
                     .to_string()
-                    .contains(&format!("application version {older}; expected 18"))
+                    .contains(&format!("application version {older}; expected 19"))
             );
         }
 
-        for rejected in [0_u16, 2, 3, 19, u16::MAX] {
+        for rejected in [0_u16, 2, 3, 20, u16::MAX] {
             let mut other = payload;
             other[8..10].copy_from_slice(&rejected.to_be_bytes());
             assert!(
@@ -1595,9 +1606,9 @@ mod tests {
 mod scroll_capability_tests {
     use super::*;
     #[test]
-    fn scroll_is_explicit_boolean_and_requires_pointer_in_version_18() {
-        assert_eq!(APPLICATION_VERSION, 18);
-        assert_eq!(STREAM_CAPABILITIES_LEN, 29);
+    fn scroll_is_explicit_boolean_and_requires_pointer_in_version_19() {
+        assert_eq!(APPLICATION_VERSION, 19);
+        assert_eq!(STREAM_CAPABILITIES_LEN, 30);
         let mut caps = StreamCapabilities::default();
         assert!(
             !StreamCapabilities::decode(&caps.encode())
@@ -1614,5 +1625,31 @@ mod scroll_capability_tests {
             assert!(StreamCapabilities::decode(&payload).is_err());
         }
         assert!(StreamCapabilities::decode(&caps.encode()[..28]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod scroll_copy_capability_tests {
+    use super::*;
+    #[test]
+    fn scroll_copy_is_bounded_video_only_capability() {
+        let mut caps = StreamCapabilities::default();
+        assert!(!caps.scroll_copy);
+        caps.scroll_copy = true;
+        assert_eq!(StreamCapabilities::decode(&caps.encode()).unwrap(), caps);
+        assert!(!caps.wayland_pointer && !caps.wayland_scroll && !caps.wayland_keyboard);
+        for host in [false, true] {
+            for peer in [false, true] {
+                caps.scroll_copy = peer;
+                assert_eq!(caps.negotiate_scroll_copy(host), host && peer);
+            }
+        }
+        caps.scroll_copy = true;
+        for invalid in [2, 255] {
+            let mut payload = caps.encode();
+            payload[29] = invalid;
+            assert!(StreamCapabilities::decode(&payload).is_err());
+        }
+        assert!(StreamCapabilities::decode(&caps.encode()[..29]).is_err());
     }
 }

@@ -615,6 +615,7 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
     *stage = ClientStage::FirstFrame;
     let mut initial_state = ReceiveState::new();
     initial_state.frame_limits = hello.stream.frame_limits;
+    initial_state.scroll_copy = hello.stream.scroll_copy;
     initial_state.resize.get_mut().unwrap().requested = options.resize_source;
     if options.follow_source_size {
         initial_state.resize.get_mut().unwrap().follow =
@@ -654,7 +655,7 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
     state.telemetry.record_received();
     // SessionReader exposes this payload only after its record MAC succeeds;
     // no decoded-image allocation is checked out before authentication.
-    let mut tile_decoder = TileDecoder::with_frame_limits(hello.stream.frame_limits)?;
+    let mut tile_decoder = state.new_tile_decoder()?;
     let (initial_epoch, initial_payload) = decode_source_payload(&payload)?;
     if initial_epoch != 1 || state.catalog.lock().unwrap().is_none() {
         return Err(invalid_data("initial frame missing source catalog or initial epoch").into());
@@ -1064,6 +1065,7 @@ fn negotiate_session(
                 wayland_keyboard: request_wayland_keyboard,
                 wayland_pointer: request_wayland_pointer,
                 wayland_scroll: request_wayland_scroll,
+                scroll_copy: true,
                 frame_limits,
                 clipboard_content: requested_policy.0,
                 clipboard_directions: requested_policy.1,
@@ -3073,6 +3075,7 @@ struct ReceiveState {
     catalog: Mutex<Option<SourceCatalog>>,
     source_epoch: AtomicU64,
     frame_limits: super::messages::FrameLimits,
+    scroll_copy: bool,
     cursor_enabled: AtomicBool,
     cursor: Mutex<super::cursor::CursorInbox>,
     latest: Mutex<Option<QueuedFrame>>,
@@ -3084,6 +3087,14 @@ struct ReceiveState {
 }
 
 impl ReceiveState {
+    /// Source transitions rebuild all canvas/reference state while retaining
+    /// only the immutable negotiated codec permission.
+    fn new_tile_decoder(&self) -> RemoteResult<TileDecoder> {
+        let mut decoder = TileDecoder::with_frame_limits(self.frame_limits)?;
+        decoder.set_scroll_copy_enabled(self.scroll_copy);
+        Ok(decoder)
+    }
+
     fn new() -> Self {
         Self {
             resize: Mutex::new(ClientResize::default()),
@@ -3093,6 +3104,7 @@ impl ReceiveState {
             catalog: Mutex::new(None),
             source_epoch: AtomicU64::new(1),
             frame_limits: super::messages::FrameLimits::default(),
+            scroll_copy: false,
             cursor_enabled: AtomicBool::new(false),
             cursor: Mutex::new(super::cursor::CursorInbox::default()),
             latest: Mutex::new(None),
@@ -3372,7 +3384,7 @@ fn receive_frame_records(
                     }
                     catalog.current = changed;
                 }
-                tile_decoder = TileDecoder::with_frame_limits(state.frame_limits)?;
+                tile_decoder = state.new_tile_decoder()?;
                 *state.latest.lock().unwrap() = None;
                 *state.cursor.lock().unwrap() = super::cursor::CursorInbox::default();
                 state.source_epoch.store(changed.epoch, Ordering::Release);
@@ -7013,3 +7025,7 @@ mod follow_viewport_policy_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "scroll_copy_transport_tests.rs"]
+mod scroll_copy_transport_tests;

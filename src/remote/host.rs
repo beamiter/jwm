@@ -417,6 +417,7 @@ impl Drop for PendingFrame {
 /// rather than in the codec because it is a property of the *session*, and it
 /// must remain strictly inside the viewer's shared video idle timeout.
 struct FrameSender {
+    scroll_copy: bool,
     encoder: TileEncoder,
     committed_at: Option<Instant>,
     last_content_change: Option<Instant>,
@@ -426,9 +427,17 @@ struct FrameSender {
 }
 
 impl FrameSender {
+    #[cfg(test)]
     fn new() -> Self {
+        Self::with_scroll_copy(false)
+    }
+
+    fn with_scroll_copy(enabled: bool) -> Self {
+        let mut encoder = TileEncoder::new();
+        encoder.set_scroll_copy_enabled(enabled);
         Self {
-            encoder: TileEncoder::new(),
+            scroll_copy: enabled,
+            encoder,
             committed_at: None,
             last_content_change: None,
             last_refinement: None,
@@ -1629,6 +1638,8 @@ pub struct HostOptions {
     pub allow_wayland_keyboard: bool,
     pub allow_wayland_pointer: bool,
     pub allow_wayland_scroll: bool,
+    /// Experimental video codec optimization, independent of input grants.
+    pub scroll_copy: bool,
     pub allow_clipboard: bool,
     pub clipboard_mode: ClipboardMode,
     pub clipboard_direction: ClipboardDirection,
@@ -1741,6 +1752,7 @@ struct PointerFrame {
     announced: bool,
 }
 struct SourceControl {
+    scroll_copy: AtomicBool,
     pointer_enabled: AtomicBool,
     scroll_enabled: AtomicBool,
     pointer_revoke: AtomicBool,
@@ -1762,6 +1774,7 @@ impl SourceControl {
         geometry_epoch: u64,
     ) -> RemoteResult<Self> {
         Ok(Self {
+            scroll_copy: AtomicBool::new(false),
             pointer_enabled: AtomicBool::new(false),
             scroll_enabled: AtomicBool::new(false),
             pointer_revoke: AtomicBool::new(false),
@@ -2387,6 +2400,7 @@ fn serve_authenticated(
     }
     let mut negotiated_stream = hello.stream;
     negotiated_stream.frame_limits = frame_limits;
+    negotiated_stream.scroll_copy = hello.stream.negotiate_scroll_copy(options.scroll_copy);
     negotiated_stream.window_resize = hello.stream.window_resize && options.allow_window_resize;
     negotiated_stream.wayland_keyboard =
         hello.stream.wayland_keyboard && options.allow_wayland_keyboard;
@@ -2549,6 +2563,9 @@ fn serve_authenticated(
         sources
             .scroll_enabled
             .store(negotiated_stream.wayland_scroll, Ordering::Release);
+        sources
+            .scroll_copy
+            .store(negotiated_stream.scroll_copy, Ordering::Release);
         writer.write_message(
             MessageKind::HelloAck,
             &ServerHello {
@@ -3756,7 +3773,9 @@ fn send_frames_scoped<W: std::io::Write + SetWriteTimeout>(
     jpeg_quality: &JpegQualityController,
     sources: Option<&SourceControl>,
 ) -> RemoteResult<()> {
-    let mut sender = FrameSender::new();
+    let mut sender = FrameSender::with_scroll_copy(
+        sources.is_some_and(|source| source.scroll_copy.load(Ordering::Acquire)),
+    );
     send_frames_with_encoder_scoped(
         mailbox,
         writer,
@@ -3800,14 +3819,14 @@ fn send_frames_with_encoder_scoped<W: std::io::Write + SetWriteTimeout>(
                 continue;
             }
             if source_epoch != Some(pending.source_version.epoch) {
-                *sender = FrameSender::new();
+                *sender = FrameSender::with_scroll_copy(sender.scroll_copy);
                 source_epoch = Some(pending.source_version.epoch);
             }
         }
         // The retained native frame must receive its own authenticated sequence,
         // including a static scene. Never suppress a pointer proof as unchanged.
         if pending.pointer_serial.is_some() {
-            *sender = FrameSender::new();
+            *sender = FrameSender::with_scroll_copy(sender.scroll_copy);
         }
         let planned_at = Instant::now();
         let mut plan = sender
@@ -5672,6 +5691,7 @@ mod tests {
             allow_wayland_keyboard: false,
             allow_wayland_pointer: false,
             allow_wayland_scroll: false,
+            scroll_copy: false,
             allow_clipboard: false,
             clipboard_mode: Default::default(),
             clipboard_direction: Default::default(),
@@ -7568,6 +7588,90 @@ mod tests {
         );
     }
 
+    #[test]
+    fn frame_sender_scroll_copy_opt_in_survives_source_and_proof_resets() {
+        for enabled in [false, true] {
+            let key = [0x64; 32];
+            let mut writer = SessionWriter::new(
+                DeadlineWriter::new(
+                    DripWriter {
+                        bytes: Vec::new(),
+                        max_chunk: usize::MAX,
+                        write_delay: Duration::ZERO,
+                        flush_delay: Duration::ZERO,
+                        flushes: 0,
+                    },
+                    WRITE_TIMEOUT,
+                ),
+                key,
+            );
+            let mut sender = FrameSender::with_scroll_copy(enabled);
+            let now = Instant::now();
+            let mut sequence = 1;
+            // Both source changes and retained pointer-proof frames use this
+            // same production reset expression. Each must force a keyframe,
+            // preserve immutable permission, then allow a fresh copy base.
+            for reset in 0..3 {
+                if reset != 0 {
+                    sender = FrameSender::with_scroll_copy(sender.scroll_copy);
+                }
+                for (step, offset) in [14u32, 21, 14].into_iter().enumerate() {
+                    let frame = CapturedFrame {
+                        geometry_epoch: 1,
+                        source_width: 96,
+                        source_height: 80,
+                        image: RgbImage::from_fn(96, 80, |x, y| {
+                            let y = y + offset;
+                            Rgb([
+                                (x * 17 + y * 29) as u8,
+                                (y * 53 + x * 3) as u8,
+                                (x ^ (y * 11)) as u8,
+                            ])
+                        }),
+                    };
+                    let plan = sender.plan_at(&frame, now).unwrap();
+                    assert!(plan.emit);
+                    assert_eq!(plan.keyframe, step == 0);
+                    let mut payload = Vec::new();
+                    sender
+                        .encoder
+                        .encode_into(&mut payload, sequence, &frame, 85)
+                        .unwrap();
+                    write_frame_record(&mut writer, &payload, WRITE_TIMEOUT).unwrap();
+                    sender.commit_at(&frame, now);
+                    sequence += 1;
+                }
+            }
+            assert_eq!(writer.get_ref().get_ref().flushes, 9);
+            let bytes = &writer.get_ref().get_ref().bytes;
+            let mut reader = SessionReader::new(Cursor::new(bytes), key);
+            let mut decoder = TileDecoder::new();
+            decoder.set_scroll_copy_enabled(enabled);
+            for index in 0..9 {
+                let (kind, payload) = reader.read_message().unwrap();
+                assert_eq!(kind, MessageKind::Frame);
+                let keyframe = index % 3 == 0;
+                assert_eq!(payload[17] & 1 != 0, keyframe);
+                assert_eq!(payload[17] & 2 != 0, enabled && !keyframe);
+                if enabled && !keyframe {
+                    assert_eq!(
+                        u64::from_be_bytes(payload[32..40].try_into().unwrap()),
+                        index
+                    );
+                    assert_eq!(
+                        i16::from_be_bytes(payload[40..42].try_into().unwrap()),
+                        if index % 3 == 1 { 7 } else { -7 }
+                    );
+                }
+                let decoded = decoder
+                    .decode_into(&payload, new_decode_buffer_pool())
+                    .unwrap();
+                assert_eq!(decoded.sequence(), index + 1);
+                assert_eq!(decoded.dimensions(), (96, 80));
+            }
+        }
+    }
+
     /// Plan, encode and commit one frame the way the sender loop does.
     ///
     /// Committing without encoding would silently do nothing, so tests must
@@ -8268,6 +8372,7 @@ mod tests {
             allow_wayland_keyboard: false,
             allow_wayland_pointer: false,
             allow_wayland_scroll: false,
+            scroll_copy: false,
             allow_clipboard: false,
             clipboard_mode: Default::default(),
             clipboard_direction: Default::default(),

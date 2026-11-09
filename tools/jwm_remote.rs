@@ -304,6 +304,11 @@ enum Command {
         #[arg(long, requires_all = ["wayland_select", "once"], conflicts_with_all = ["allow_wayland_keyboard", "allow_input", "allow_clipboard", "allow_window_resize"])]
         allow_wayland_pointer: bool,
 
+        /// Experimentally encode exact bounded vertical screen shifts as copy plus changed pixels.
+        /// Codec optimization only; grants no input or scrolling permission.
+        #[arg(long)]
+        scroll_copy: bool,
+
         /// Separately permit discrete vertical scroll on the scoped pointer lease.
         #[arg(long, requires = "allow_wayland_pointer")]
         allow_wayland_scroll: bool,
@@ -1218,6 +1223,7 @@ fn run(command: Command) -> RemoteResult<()> {
             allow_wayland_keyboard,
             allow_wayland_pointer,
             allow_wayland_scroll,
+            scroll_copy,
             wayland_display,
             allow_clipboard,
             clipboard_mode,
@@ -1265,6 +1271,7 @@ fn run(command: Command) -> RemoteResult<()> {
                 allow_wayland_keyboard,
                 allow_wayland_pointer,
                 allow_wayland_scroll,
+                scroll_copy,
                 wayland_display,
                 allow_clipboard,
                 clipboard_mode,
@@ -3304,6 +3311,81 @@ mod wayland_scroll_cli_tests {
                 ])
                 .is_err()
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod scroll_copy_cli_tests {
+    use super::*;
+    #[test]
+    fn scroll_copy_is_host_only_default_off_and_does_not_grant_input() {
+        for enabled in [false, true] {
+            let mut args = vec!["jwm-remote", "host"];
+            if enabled {
+                args.push("--scroll-copy");
+            }
+            let Command::Host {
+                scroll_copy,
+                allow_input,
+                allow_wayland_pointer,
+                allow_wayland_scroll,
+                allow_clipboard,
+                ..
+            } = Cli::try_parse_from(args).unwrap().command
+            else {
+                panic!("host expected")
+            };
+            assert_eq!(scroll_copy, enabled);
+            assert!(
+                !allow_input && !allow_wayland_pointer && !allow_wayland_scroll && !allow_clipboard
+            );
+        }
+        for args in [
+            vec!["jwm-remote", "connect", "127.0.0.1", "--scroll-copy"],
+            vec!["jwm-remote", "ssh", "example", "--scroll-copy"],
+        ] {
+            assert!(
+                Cli::try_parse_from(&args).is_err(),
+                "unexpectedly accepted {args:?}"
+            );
+        }
+        // Profile save deliberately captures raw connection arguments. Follow
+        // run_profile's nested parse/validation boundary, not the outer parser.
+        // Neither step opens a connection or writes a profile.
+        for connection in [
+            vec!["--scroll-copy"],
+            vec!["connect", "127.0.0.1", "--scroll-copy"],
+            vec!["ssh", "example", "--scroll-copy"],
+            vec!["host", "--scroll-copy"],
+        ] {
+            let args = ["jwm-remote", "profile", "save", "example", "--"]
+                .into_iter()
+                .chain(connection.iter().copied())
+                .collect::<Vec<_>>();
+            let Command::Profile {
+                action:
+                    ProfileAction::Save {
+                        connection: raw, ..
+                    },
+                ..
+            } = Cli::try_parse_from(&args).unwrap().command
+            else {
+                panic!("profile save expected for {args:?}")
+            };
+            let parsed = Cli::try_parse_from(std::iter::once("jwm-remote".to_owned()).chain(raw));
+            if connection[0] == "host" {
+                let error = profile_from_command(parsed.unwrap().command).unwrap_err();
+                assert_eq!(
+                    error.to_string(),
+                    "only connect and ssh commands can be saved"
+                );
+            } else {
+                assert!(
+                    parsed.is_err(),
+                    "nested profile connection accepted {args:?}"
+                );
+            }
         }
     }
 }

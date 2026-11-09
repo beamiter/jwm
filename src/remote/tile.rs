@@ -29,6 +29,7 @@
 //! atlas_columns  u16
 //! dirty_tiles    u32
 //! geometry_epoch u64
+//! [base_sequence u64, scroll_dy i16] only when FLAG_SCROLL_COPY is set
 //! bitmap         ceil(tiles_across * tiles_down / 8) bytes, raster order
 //! atlas          JPEG, present only when dirty_tiles > 0
 //! ```
@@ -67,7 +68,17 @@ pub(crate) const DEFAULT_TILE_TOLERANCE: u8 = 4;
 
 /// Set when every tile is present, so a viewer may (re)initialise its canvas.
 const FLAG_KEYFRAME: u8 = 1 << 0;
-const KNOWN_FLAGS: u8 = FLAG_KEYFRAME;
+const FLAG_SCROLL_COPY: u8 = 1 << 1;
+const KNOWN_FLAGS: u8 = FLAG_KEYFRAME | FLAG_SCROLL_COPY;
+const SCROLL_HEADER_LEN: usize = 10;
+const MAX_SCROLL_DY: i16 = 64;
+
+#[derive(Clone, Copy, Debug)]
+struct ScrollCopy {
+    base_sequence: u64,
+    /// Destination row y reads old row y + dy.
+    dy: i16,
+}
 
 /// Upper bound on atlas columns for a given tile size, keeping the packed
 /// atlas inside [`MAX_DIMENSION`] even at the largest accepted tile.
@@ -100,6 +111,7 @@ pub(crate) struct TilePlan {
 /// Geometry the planner resolved, consumed by the matching encode.
 #[derive(Debug, Clone, Copy)]
 struct PlannedFrame {
+    scroll: Option<ScrollCopy>,
     geometry_epoch: u64,
     keyframe: bool,
     refinement_cursor: Option<usize>,
@@ -114,6 +126,7 @@ struct PlannedFrame {
 /// One capture's pixel damage, reusable while the quality controller changes epoch.
 #[derive(Debug, Clone, Copy)]
 struct DetectedFrame {
+    scroll: Option<ScrollCopy>,
     geometry_epoch: u64,
     keyframe: bool,
     request: TileEncodeRequest,
@@ -132,6 +145,10 @@ pub(crate) struct EncodeStageTimings {
 /// Host-side delta encoder holding the host's model of the viewer's canvas.
 #[derive(Debug)]
 pub(crate) struct TileEncoder {
+    scroll_copy_enabled: bool,
+    last_sequence: Option<u64>,
+    pending_sequence: Option<u64>,
+    pending_scroll: Option<ScrollCopy>,
     geometry_epoch: u64,
     tile_log2: u8,
     tolerance: u8,
@@ -171,6 +188,10 @@ impl TileEncoder {
 
     pub(crate) fn with_settings(tile_log2: u8, tolerance: u8) -> Self {
         Self {
+            scroll_copy_enabled: false,
+            last_sequence: None,
+            pending_sequence: None,
+            pending_scroll: None,
             geometry_epoch: 0,
             tile_log2: tile_log2.clamp(MIN_TILE_LOG2, MAX_TILE_LOG2),
             tolerance,
@@ -195,6 +216,17 @@ impl TileEncoder {
             forget_detection_on_refinement: None,
             #[cfg(test)]
             jpeg_payload_limit: None,
+        }
+    }
+
+    /// Explicit negotiated codec permission. Changing it requires a fresh keyframe.
+    pub(crate) fn set_scroll_copy_enabled(&mut self, enabled: bool) {
+        if self.scroll_copy_enabled != enabled {
+            self.discard();
+            self.reference = None;
+            self.last_sequence = None;
+            self.qualities.clear();
+            self.scroll_copy_enabled = enabled;
         }
     }
 
@@ -239,6 +271,8 @@ impl TileEncoder {
     }
 
     fn detect(&mut self, frame: &CapturedFrame, request: TileEncodeRequest) -> RemoteResult<()> {
+        self.pending_scroll = None;
+        self.pending_sequence = None;
         self.detected = None;
         self.planned = None;
         self.pending = false;
@@ -287,8 +321,38 @@ impl TileEncoder {
             );
         }
 
+        let mut scroll = None;
+        if !keyframe && self.scroll_copy_enabled && self.dirty.len() * 2 > total_tiles as usize {
+            if let (Some(reference), Some(base_sequence)) = (&self.reference, self.last_sequence) {
+                if let Some(dy) = find_scroll_copy(&frame.image, reference) {
+                    // Only the exposed strip is dirty. The entire overlap was
+                    // compared exactly, not using the ordinary tile tolerance.
+                    let exposed: Vec<u32> = (0..total_tiles)
+                        .filter(|index| {
+                            let (_, y0, _, y1) = tile_bounds(
+                                *index as usize,
+                                grid_w,
+                                tile,
+                                usize::from(encoded_width),
+                                usize::from(encoded_height),
+                            );
+                            scroll_exposes_tile(y0, y1, usize::from(encoded_height), dy)
+                        })
+                        .collect();
+                    if exposed.len() < self.dirty.len() {
+                        self.dirty = exposed;
+                        self.bitmap.fill(0);
+                        for index in &self.dirty {
+                            self.bitmap[*index as usize / 8] |= 1 << (*index % 8);
+                        }
+                        scroll = Some(ScrollCopy { base_sequence, dy });
+                    }
+                }
+            }
+        }
         self.detected_dirty.clone_from(&self.dirty);
         self.detected = Some(DetectedFrame {
+            scroll,
             geometry_epoch: frame.geometry_epoch,
             keyframe,
             request,
@@ -323,6 +387,7 @@ impl TileEncoder {
             .detected
             .ok_or_else(|| invalid_data("tile refinement selected without detection"))?;
         let DetectedFrame {
+            mut scroll,
             geometry_epoch,
             keyframe,
             request,
@@ -340,8 +405,21 @@ impl TileEncoder {
         let grid_w = self.grid.0;
         let mut refinement_cursor = keyframe.then_some(0);
         if !keyframe && let Some((quality, limit)) = refinement {
-            let (indices, next) =
-                refinement_tiles(&self.qualities, quality, limit, self.refinement_cursor);
+            let moved_qualities = scroll.map(|copy| {
+                shifted_qualities(
+                    &self.qualities,
+                    self.grid,
+                    usize::from(encoded_height),
+                    tile,
+                    copy.dy,
+                )
+            });
+            let (indices, next) = refinement_tiles(
+                moved_qualities.as_deref().unwrap_or(&self.qualities),
+                quality,
+                limit,
+                self.refinement_cursor,
+            );
             if !indices.is_empty() {
                 refinement_cursor = Some(next);
             }
@@ -359,6 +437,11 @@ impl TileEncoder {
 
         let dirty_tiles = u32::try_from(self.dirty.len())
             .map_err(|_| invalid_data("dirty tile count exceeds protocol range"))?;
+        // A full repair carries every pixel anyway; do not charge an unused
+        // copy extension or bind the receiver to an unnecessary predecessor.
+        if dirty_tiles == total_tiles {
+            scroll = None;
+        }
         let emit = dirty_tiles > 0 || request == TileEncodeRequest::Keepalive;
         if !emit {
             return Ok(TilePlan {
@@ -391,6 +474,7 @@ impl TileEncoder {
         };
 
         self.planned = Some(PlannedFrame {
+            scroll,
             geometry_epoch,
             keyframe,
             refinement_cursor,
@@ -443,6 +527,8 @@ impl TileEncoder {
         if result.is_err() {
             payload.clear();
             self.pending = false;
+            self.pending_scroll = None;
+            self.pending_sequence = None;
             self.planned = None;
         }
         result
@@ -476,7 +562,14 @@ impl TileEncoder {
         payload.extend_from_slice(&planned.encoded.0.to_be_bytes());
         payload.extend_from_slice(&planned.encoded.1.to_be_bytes());
         payload.push(self.tile_log2);
-        payload.push(if planned.keyframe { FLAG_KEYFRAME } else { 0 });
+        payload.push(
+            if planned.keyframe { FLAG_KEYFRAME } else { 0 }
+                | if planned.scroll.is_some() {
+                    FLAG_SCROLL_COPY
+                } else {
+                    0
+                },
+        );
         payload.extend_from_slice(
             &u16::try_from(planned.columns)
                 .map_err(|_| invalid_data("tile atlas column count exceeds protocol range"))?
@@ -484,8 +577,24 @@ impl TileEncoder {
         );
         payload.extend_from_slice(&planned.dirty_tiles.to_be_bytes());
         payload.extend_from_slice(&frame.geometry_epoch.to_be_bytes());
+        if let Some(copy) = planned.scroll {
+            if sequence <= copy.base_sequence {
+                return Err(invalid_data("scroll sequence must advance").into());
+            }
+            payload.extend_from_slice(&copy.base_sequence.to_be_bytes());
+            payload.extend_from_slice(&copy.dy.to_be_bytes());
+        }
         payload.extend_from_slice(&self.bitmap);
-        debug_assert_eq!(payload.len(), TILE_HEADER_LEN + self.bitmap.len());
+        debug_assert_eq!(
+            payload.len(),
+            TILE_HEADER_LEN
+                + if planned.scroll.is_some() {
+                    SCROLL_HEADER_LEN
+                } else {
+                    0
+                }
+                + self.bitmap.len()
+        );
 
         if let Some((rows, atlas_width, atlas_height)) = planned.atlas {
             let pack_started = now();
@@ -511,6 +620,8 @@ impl TileEncoder {
         }
 
         self.pending = true;
+        self.pending_sequence = Some(sequence);
+        self.pending_scroll = planned.scroll;
         self.pending_quality = quality.clamp(1, 100);
         self.pending_refinement_cursor = planned.refinement_cursor;
         self.planned = None;
@@ -526,6 +637,16 @@ impl TileEncoder {
             return;
         }
         self.pending = false;
+        self.last_sequence = self.pending_sequence.take();
+        if let Some(copy) = self.pending_scroll.take() {
+            let height = frame.image.height() as usize;
+            self.qualities =
+                shifted_qualities(&self.qualities, self.grid, height, self.tile(), copy.dy);
+            shift_rgb_rows(
+                self.reference.as_mut().expect("scroll has reference"),
+                copy.dy,
+            );
+        }
         if let Some(cursor) = self.pending_refinement_cursor.take() {
             self.refinement_cursor = cursor;
         }
@@ -562,6 +683,8 @@ impl TileEncoder {
 
     /// Drop an encoded-but-unsent frame without advancing the reference.
     pub(crate) fn discard(&mut self) {
+        self.pending_scroll = None;
+        self.pending_sequence = None;
         self.detected = None;
         self.pending = false;
         self.planned = None;
@@ -696,6 +819,8 @@ impl TileEncoder {
 /// Viewer-side canvas that reassembles dirty tiles into whole frames.
 #[derive(Debug, Default)]
 pub(crate) struct TileDecoder {
+    scroll_copy_enabled: bool,
+    tile_log2: Option<u8>,
     frame_limits: super::messages::FrameLimits,
     geometry_epoch: u64,
     snapshot: Option<TileSnapshot>,
@@ -721,6 +846,17 @@ impl TileDecoder {
         })
     }
 
+    /// Explicit negotiated codec permission. Changing it requires a fresh keyframe.
+    pub(crate) fn set_scroll_copy_enabled(&mut self, enabled: bool) {
+        if self.scroll_copy_enabled != enabled {
+            self.scroll_copy_enabled = enabled;
+            self.canvas = None;
+            self.snapshot = None;
+            self.last_sequence = None;
+            self.tile_log2 = None;
+        }
+    }
+
     /// Decode one authenticated tile-frame payload into a complete frame.
     pub(crate) fn decode_into(
         &mut self,
@@ -735,13 +871,14 @@ impl TileDecoder {
         }
 
         let bitmap_len = bitmap_len(header.total_tiles);
-        let body_start = TILE_HEADER_LEN
+        let body_start = header
+            .header_len()
             .checked_add(bitmap_len)
             .ok_or_else(|| invalid_data("tile frame header length overflow"))?;
         if payload.len() < body_start {
             return Err(invalid_data("tile frame is missing its dirty bitmap").into());
         }
-        let bitmap = &payload[TILE_HEADER_LEN..body_start];
+        let bitmap = &payload[header.header_len()..body_start];
         let counted = bitmap.iter().map(|byte| byte.count_ones()).sum::<u32>();
         if counted != header.dirty_tiles {
             return Err(
@@ -769,14 +906,85 @@ impl TileDecoder {
             u32::from(header.encoded_width),
             u32::from(header.encoded_height),
         );
-        if header.keyframe {
-            // A keyframe is self-contained; adopt its geometry unconditionally.
-            match self.canvas.as_mut() {
-                Some(canvas) if canvas.dimensions() == canvas_dimensions => {}
-                _ => {
-                    self.canvas = Some(RgbImage::new(canvas_dimensions.0, canvas_dimensions.1));
+        if !header.keyframe
+            && self
+                .canvas
+                .as_ref()
+                .is_none_or(|canvas| canvas.dimensions() != canvas_dimensions)
+        {
+            return Err(
+                invalid_data("tile delta frame does not match the current viewer canvas").into(),
+            );
+        }
+        if let Some(copy) = header.scroll {
+            if !self.scroll_copy_enabled
+                || self.last_sequence != Some(copy.base_sequence)
+                || header.sequence <= copy.base_sequence
+                || self.tile_log2 != Some(header.tile_log2)
+            {
+                return Err(invalid_data("scroll copy capability or base mismatch").into());
+            }
+            let tile = 1usize << header.tile_log2;
+            let grid_w = usize::from(header.encoded_width).div_ceil(tile);
+            for index in 0..header.total_tiles as usize {
+                let (_, y0, _, y1) = tile_bounds(
+                    index,
+                    grid_w,
+                    tile,
+                    usize::from(header.encoded_width),
+                    usize::from(header.encoded_height),
+                );
+                if scroll_exposes_tile(y0, y1, usize::from(header.encoded_height), copy.dy)
+                    && bitmap[index / 8] & (1 << (index % 8)) == 0
+                {
+                    return Err(invalid_data("scroll exposed strip is not fully supplied").into());
                 }
             }
+        }
+        // All fallible parsing and JPEG decoding precedes any canvas, snapshot
+        // or scope mutation. A rejected copy cannot poison its next base.
+        let atlas_layout = if header.dirty_tiles > 0 {
+            let tile = 1usize << header.tile_log2;
+            let columns = usize::from(header.atlas_columns);
+            let dirty = header.dirty_tiles as usize;
+            if columns == 0 {
+                return Err(invalid_data("tile frame declares no atlas columns").into());
+            }
+            if columns > dirty {
+                return Err(
+                    invalid_data("tile frame atlas is wider than its dirty tile count").into(),
+                );
+            }
+            let rows = dirty.div_ceil(columns);
+            let width = u16::try_from(columns * tile)
+                .map_err(|_| invalid_data("tile atlas width exceeds protocol range"))?;
+            let height = u16::try_from(rows * tile)
+                .map_err(|_| invalid_data("tile atlas height exceeds protocol range"))?;
+            validate_dimensions(width, height)?;
+            if payload.len() <= body_start {
+                return Err(invalid_data("tile frame is missing its atlas body").into());
+            }
+            decode_atlas(
+                &mut self.atlas,
+                &payload[body_start..],
+                width,
+                height,
+                payload.len(),
+            )?;
+            Some((tile, columns, width))
+        } else {
+            if header.scroll.is_some() || header.atlas_columns != 0 || payload.len() != body_start {
+                return Err(invalid_data("empty tile frame has unexpected body or copy").into());
+            }
+            None
+        };
+        if header.keyframe
+            && self
+                .canvas
+                .as_ref()
+                .is_none_or(|canvas| canvas.dimensions() != canvas_dimensions)
+        {
+            self.canvas = Some(RgbImage::new(canvas_dimensions.0, canvas_dimensions.1));
         }
         if header.geometry_epoch != self.geometry_epoch {
             self.snapshot = None;
@@ -784,54 +992,27 @@ impl TileDecoder {
         }
         self.geometry_epoch = header.geometry_epoch;
         self.source = (header.source_width, header.source_height);
-        let Self { canvas, atlas, .. } = self;
-        let canvas = canvas
+        self.tile_log2 = Some(header.tile_log2);
+        let canvas = self
+            .canvas
             .as_mut()
-            .filter(|canvas| canvas.dimensions() == canvas_dimensions)
-            .ok_or_else(|| {
-                invalid_data("tile delta frame does not match the current viewer canvas")
-            })?;
-
-        if header.dirty_tiles > 0 {
-            let tile = 1_usize << header.tile_log2;
-            let columns = usize::from(header.atlas_columns);
-            if columns == 0 {
-                return Err(invalid_data("tile frame declares no atlas columns").into());
-            }
-            let dirty = header.dirty_tiles as usize;
-            if columns > dirty {
-                return Err(
-                    invalid_data("tile frame atlas is wider than its dirty tile count").into(),
-                );
-            }
-            let rows = dirty.div_ceil(columns);
-            let atlas_width = u16::try_from(columns * tile)
-                .map_err(|_| invalid_data("tile atlas width exceeds protocol range"))?;
-            let atlas_height = u16::try_from(rows * tile)
-                .map_err(|_| invalid_data("tile atlas height exceeds protocol range"))?;
-            validate_dimensions(atlas_width, atlas_height)?;
-            if payload.len() <= body_start {
-                return Err(invalid_data("tile frame is missing its atlas body").into());
-            }
-            decode_atlas(
-                atlas,
-                &payload[body_start..],
-                atlas_width,
-                atlas_height,
-                payload.len(),
-            )?;
+            .expect("validated canvas or new keyframe");
+        if let Some(copy) = header.scroll {
+            shift_rgb_rows(canvas, copy.dy);
+        }
+        if let Some((tile, columns, width)) = atlas_layout {
             scatter_atlas(
                 canvas,
-                atlas,
+                &self.atlas,
                 bitmap,
                 header.total_tiles,
                 tile,
                 columns,
-                atlas_width,
+                width,
             );
         }
 
-        let damage = if header.keyframe {
+        let damage = if header.keyframe || header.scroll.is_some() {
             None
         } else {
             self.last_sequence.map(|base_sequence| FrameDamage {
@@ -846,7 +1027,11 @@ impl TileDecoder {
         };
         let snapshot = TileSnapshot::update(
             canvas,
-            self.snapshot.as_ref(),
+            if header.scroll.is_some() {
+                None
+            } else {
+                self.snapshot.as_ref()
+            },
             bitmap,
             1usize << header.tile_log2,
         );
@@ -869,6 +1054,60 @@ impl TileDecoder {
     }
 }
 
+/// Validate the single JPEG envelope emitted by our encoder. The image crate
+/// intentionally uses a tolerant entropy decoder; this marker walk rejects
+/// missing/truncated envelopes and trailing data, but is not a proof that every
+/// entropy-coded coefficient is semantically valid.
+fn validate_atlas_jpeg_envelope(body: &[u8]) -> RemoteResult<()> {
+    let malformed =
+        || invalid_data("tile atlas must contain one complete JPEG without trailing data");
+    if !body.starts_with(&[0xff, 0xd8]) {
+        return Err(malformed().into());
+    }
+    let mut at = 2usize;
+    let mut entropy = false;
+    let mut saw_scan = false;
+    loop {
+        if entropy {
+            while body.get(at).is_some_and(|byte| *byte != 0xff) {
+                at += 1;
+            }
+        }
+        if body.get(at) != Some(&0xff) {
+            return Err(malformed().into());
+        }
+        while body.get(at) == Some(&0xff) {
+            at += 1;
+        }
+        let marker = *body.get(at).ok_or_else(malformed)?;
+        at += 1;
+        if entropy && (marker == 0 || (0xd0..=0xd7).contains(&marker)) {
+            continue;
+        }
+        if marker == 0xd9 {
+            return if saw_scan && at == body.len() {
+                Ok(())
+            } else {
+                Err(malformed().into())
+            };
+        }
+        if marker == 0 || marker == 0xd8 || marker == 1 || (0xd0..=0xd7).contains(&marker) {
+            return Err(malformed().into());
+        }
+        let length_bytes = body.get(at..at + 2).ok_or_else(malformed)?;
+        let length = usize::from(u16::from_be_bytes([length_bytes[0], length_bytes[1]]));
+        if length < 2 {
+            return Err(malformed().into());
+        }
+        at = at
+            .checked_add(length)
+            .filter(|end| *end <= body.len())
+            .ok_or_else(malformed)?;
+        entropy = marker == 0xda;
+        saw_scan |= entropy;
+    }
+}
+
 fn decode_atlas(
     atlas: &mut Vec<u8>,
     body: &[u8],
@@ -876,6 +1115,7 @@ fn decode_atlas(
     atlas_height: u16,
     payload_len: usize,
 ) -> RemoteResult<()> {
+    validate_atlas_jpeg_envelope(body)?;
     {
         let mut decoder = JpegDecoder::new(Cursor::new(body))?;
         let expected = (u32::from(atlas_width), u32::from(atlas_height));
@@ -926,6 +1166,7 @@ fn decode_atlas(
 
 #[derive(Debug, Clone, Copy)]
 struct TileHeader {
+    scroll: Option<ScrollCopy>,
     geometry_epoch: u64,
     sequence: u64,
     source_width: u16,
@@ -940,6 +1181,14 @@ struct TileHeader {
 }
 
 impl TileHeader {
+    fn header_len(&self) -> usize {
+        TILE_HEADER_LEN
+            + if self.scroll.is_some() {
+                SCROLL_HEADER_LEN
+            } else {
+                0
+            }
+    }
     fn parse(payload: &[u8]) -> RemoteResult<Self> {
         if payload.len() < TILE_HEADER_LEN {
             return Err(invalid_data("tile frame is shorter than its header").into());
@@ -963,6 +1212,22 @@ impl TileHeader {
         if flags & !KNOWN_FLAGS != 0 {
             return Err(invalid_data("tile frame sets unknown flags").into());
         }
+        let scroll = if flags & FLAG_SCROLL_COPY != 0 {
+            if flags & FLAG_KEYFRAME != 0 || payload.len() < TILE_HEADER_LEN + SCROLL_HEADER_LEN {
+                return Err(invalid_data("invalid scroll copy header").into());
+            }
+            let base_sequence = u64::from_be_bytes(payload[32..40].try_into().unwrap());
+            let dy = i16::from_be_bytes(payload[40..42].try_into().unwrap());
+            if dy == 0
+                || dy.unsigned_abs() > MAX_SCROLL_DY as u16
+                || dy.unsigned_abs() >= encoded_height
+            {
+                return Err(invalid_data("scroll displacement out of range").into());
+            }
+            Some(ScrollCopy { base_sequence, dy })
+        } else {
+            None
+        };
         let tile = 1_usize << tile_log2;
         let total_tiles = usize::from(encoded_width)
             .div_ceil(tile)
@@ -973,6 +1238,7 @@ impl TileHeader {
             return Err(invalid_data("tile frame declares more dirty tiles than exist").into());
         }
         Ok(Self {
+            scroll,
             geometry_epoch,
             sequence,
             source_width,
@@ -986,6 +1252,87 @@ impl TileHeader {
             total_tiles,
         })
     }
+}
+
+/// At most 128 * 16 sampled pixels, then one exact contiguous overlap comparison.
+/// Search only after ordinary detection found over half the tiles dirty.
+fn find_scroll_copy(current: &RgbImage, previous: &RgbImage) -> Option<i16> {
+    if current.dimensions() != previous.dimensions() {
+        return None;
+    }
+    let width = current.width() as usize;
+    let height = current.height() as usize;
+    let limit = (height / 2).min(MAX_SCROLL_DY as usize);
+    let mut candidate = None;
+    'search: for magnitude in 1..=limit {
+        for dy in [magnitude as i16, -(magnitude as i16)] {
+            let (dest, source, rows) = scroll_ranges(height, dy);
+            let samples_match = (0..16).all(|sample| {
+                let y = sample * rows / 16;
+                let x = (sample * 7919) % width;
+                current.get_pixel(x as u32, (dest + y) as u32)
+                    == previous.get_pixel(x as u32, (source + y) as u32)
+            });
+            if samples_match {
+                candidate = Some(dy);
+                break 'search;
+            }
+        }
+    }
+    let dy = candidate?;
+    let (dest, source, rows) = scroll_ranges(height, dy);
+    let stride = width * 3;
+    (current.as_raw()[dest * stride..(dest + rows) * stride]
+        == previous.as_raw()[source * stride..(source + rows) * stride])
+        .then_some(dy)
+}
+
+fn scroll_ranges(height: usize, dy: i16) -> (usize, usize, usize) {
+    let amount = usize::from(dy.unsigned_abs());
+    if dy > 0 {
+        (0, amount, height - amount)
+    } else {
+        (amount, 0, height - amount)
+    }
+}
+fn scroll_exposes_tile(y0: usize, y1: usize, height: usize, dy: i16) -> bool {
+    let amount = usize::from(dy.unsigned_abs());
+    if dy > 0 {
+        y1 > height - amount
+    } else {
+        y0 < amount
+    }
+}
+fn shift_rgb_rows(image: &mut RgbImage, dy: i16) {
+    let stride = image.width() as usize * 3;
+    let (dest, source, rows) = scroll_ranges(image.height() as usize, dy);
+    image
+        .as_mut()
+        .copy_within(source * stride..(source + rows) * stride, dest * stride);
+}
+fn shifted_qualities(
+    old: &[u8],
+    grid: (usize, usize),
+    height: usize,
+    tile: usize,
+    dy: i16,
+) -> Vec<u8> {
+    let mut result = vec![0; grid.0 * grid.1];
+    for (index, quality) in result.iter_mut().enumerate() {
+        let row = index / grid.0;
+        let y0 = row * tile;
+        let y1 = ((row + 1) * tile).min(height);
+        if scroll_exposes_tile(y0, y1, height, dy) {
+            continue;
+        }
+        let source0 = (y0 as isize + dy as isize) as usize / tile;
+        let source1 = ((y1 - 1) as isize + dy as isize) as usize / tile;
+        *quality = (source0..=source1)
+            .map(|r| old.get(r * grid.0 + index % grid.0).copied().unwrap_or(0))
+            .min()
+            .unwrap_or(0);
+    }
+    result
 }
 
 fn scatter_atlas(
@@ -2311,5 +2658,37 @@ mod tests {
         assert!(refinement_tiles(&qualities, 50, 256, cursor).0.is_empty());
         let (indices, _) = refinement_tiles(&qualities, 85, usize::MAX, usize::MAX);
         assert_eq!(indices.len(), qualities.len());
+    }
+}
+
+#[cfg(test)]
+#[path = "tile_scroll_tests.rs"]
+mod scroll_tests;
+
+#[cfg(test)]
+#[path = "tile_scroll_benchmark.rs"]
+mod scroll_benchmark;
+
+#[cfg(test)]
+mod atlas_envelope_tests {
+    use super::*;
+    #[test]
+    fn complete_production_jpeg_rejects_truncation_and_trailing_payload() {
+        let mut jpeg = Vec::new();
+        JpegEncoder::new_with_quality(&mut jpeg, 75)
+            .encode(&[127; 16 * 16 * 3], 16, 16, ExtendedColorType::Rgb8)
+            .unwrap();
+        assert!(validate_atlas_jpeg_envelope(&jpeg).is_ok());
+        for cut in [0, 1, jpeg.len() / 2, jpeg.len() - 2, jpeg.len() - 1] {
+            assert!(validate_atlas_jpeg_envelope(&jpeg[..cut]).is_err());
+        }
+        for suffix in [vec![0], vec![0xff, 0xd9], jpeg.clone()] {
+            let mut trailing = jpeg.clone();
+            trailing.extend(suffix);
+            assert!(validate_atlas_jpeg_envelope(&trailing).is_err());
+        }
+        let mut atlas = Vec::new();
+        decode_atlas(&mut atlas, &jpeg, 16, 16, jpeg.len()).unwrap();
+        assert_eq!(atlas.len(), 16 * 16 * 3);
     }
 }
