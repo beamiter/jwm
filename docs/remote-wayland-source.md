@@ -199,10 +199,12 @@ frame's lifetime and omit that old frame's advisory Waiting notification to
 isolate the new-frame cancellation path. It cannot extend a native permission
 or inject a frame ACK.
 The next frame still uses real capture, encoding, transport and presentation.
-This controlled case uses a small viewer viewport to keep software rendering
-within the short-hold budget. The test requires the release to complete within
-the existing 250 ms click
-limit, no action to be sent for that cancelled candidate, and a subsequent
+This controlled case uses a real 200×150 SHM source and a 400×300 viewer
+viewport to bound debug software-rendering cost. Other pointer cases retain
+800×600 sources. This is a cancellation regression under controlled load,
+not a guarantee that arbitrary sources or networks present within 250 ms.
+The test logs candidate, refresh-consumption, presentation and release timing,
+and requires the release to complete within the existing 250 ms click limit, no action to be sent for that cancelled candidate, and a subsequent
 legitimate click on the same lease to succeed.
 
 A separate actual keyboard viewer matrix explicitly installs the owned Xvfb's

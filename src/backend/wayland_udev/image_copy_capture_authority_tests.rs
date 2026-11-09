@@ -40,19 +40,31 @@ pub(crate) fn shm_buffer_file(
     client: &mut Client,
     pixel: [u8; 4],
 ) -> (u32, File) {
+    sized_shm_buffer_file(server, client, pixel, W, H)
+}
+
+fn sized_shm_buffer_file(
+    server: &mut Server,
+    client: &mut Client,
+    pixel: [u8; 4],
+    width: u32,
+    height: u32,
+) -> (u32, File) {
+    assert!(width > 0 && height > 0 && width <= W && height <= H);
     let shm = client.bind("wl_shm", 1);
     let fd = nix::sys::memfd::memfd_create(
         c"capture-authority-wire",
         nix::sys::memfd::MFdFlags::MFD_CLOEXEC,
     )
     .unwrap();
-    nix::unistd::ftruncate(&fd, i64::from(W * H * 4)).unwrap();
+    nix::unistd::ftruncate(&fd, i64::from(width * height * 4)).unwrap();
     let mut file = File::from(fd);
-    file.write_all(&pixel.repeat((W * H) as usize)).unwrap();
+    file.write_all(&pixel.repeat((width * height) as usize))
+        .unwrap();
     let pool = client.new_id();
-    client.request_with_fd_args(shm, 0, &[pool, W * H * 4], file.as_raw_fd());
+    client.request_with_fd_args(shm, 0, &[pool, width * height * 4], file.as_raw_fd());
     let buffer = client.new_id();
-    client.request(pool, 0, &[buffer, 0, W, H, W * 4, 0]); // ARGB8888
+    client.request(pool, 0, &[buffer, 0, width, height, width * 4, 0]); // ARGB8888
     roundtrip(server);
     no_protocol_error(client);
     (buffer, file)
@@ -72,6 +84,15 @@ impl App {
     }
 
     pub(crate) fn with_color(server: &mut Server, color: [u8; 4]) -> Self {
+        Self::with_size_color(server, color, W, H)
+    }
+
+    pub(crate) fn with_size_color(
+        server: &mut Server,
+        color: [u8; 4],
+        width: u32,
+        height: u32,
+    ) -> Self {
         let previous: std::collections::HashSet<_> =
             server.state.toplevels.keys().copied().collect();
         let mut client = server.connect();
@@ -91,8 +112,16 @@ impl App {
             .keys()
             .find(|key| !previous.contains(key))
             .expect("new real xdg toplevel");
-        // The headless wire harness has no WM layout tick. Use the real shell
-        // configure primitive, then acknowledge it over the client protocol.
+        // The headless wire harness has no WM layout tick. Set its layout
+        // dimensions before the real configure/ACK and matching SHM commit.
+        if (width, height) != (W, H) {
+            let geometry = server.state.window_geometry.get_mut(&window).unwrap();
+            geometry.w = width;
+            geometry.h = height;
+            server.state.toplevels[&window].with_pending_state(|state| {
+                state.size = Some((width as i32, height as i32).into());
+            });
+        }
         server.state.toplevels[&window].send_configure();
         roundtrip(server);
         let serial = no_protocol_error(&mut client)
@@ -102,7 +131,7 @@ impl App {
             .expect("xdg configure")
             .args[0];
         client.request(xdg, 4, &[serial]);
-        let (buffer, _file) = shm_buffer_file(server, &mut client, color);
+        let (buffer, _file) = sized_shm_buffer_file(server, &mut client, color, width, height);
         client.request(surface, 1, &[buffer, 0, 0]);
         client.request(surface, 6, &[]);
         roundtrip(server);

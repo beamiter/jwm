@@ -24,15 +24,19 @@ use std::sync::mpsc;
 // shortens the existing retained frame's lifetime and uses the ordinary
 // discard -> capture -> TCP -> presentation -> ACK path for the replacement.
 thread_local! {
-    static FORCED_REFRESH: std::cell::RefCell<Option<Arc<AtomicBool>>> = const {
+    static FORCED_REFRESH: std::cell::RefCell<Option<Arc<Mutex<Option<Instant>>>>> = const {
         std::cell::RefCell::new(None)
     };
 }
 pub(super) fn take_forced_refresh() -> bool {
     FORCED_REFRESH.with(|slot| {
-        slot.borrow()
-            .as_ref()
-            .is_some_and(|flag| flag.swap(false, Ordering::AcqRel))
+        slot.borrow().as_ref().is_some_and(|request| {
+            let requested = request.lock().unwrap().take();
+            if let Some(at) = requested {
+                eprintln!("forced pointer refresh consumed after {:?}", at.elapsed());
+            }
+            requested.is_some()
+        })
     })
 }
 
@@ -182,8 +186,8 @@ fn client_options(
         wayland_pointer: !matches!(case, Case::ReadOnly),
         resize_source: None,
         // A small real viewport keeps the controlled short-hold regression
-        // below 250 ms even with debug software rendering. Native capture and
-        // pointer coordinates remain 800x600; no input timeout is relaxed.
+        // inexpensive in debug software rendering. This case also uses a real
+        // 200x150 native source; the 250 ms assertion is never relaxed.
         window_size: Some(if matches!(case, Case::NewFrameCancel) {
             WindowSize {
                 width: 400,
@@ -215,7 +219,7 @@ fn drive(
     case: Case,
     steps: mpsc::Receiver<()>,
     trace: &Trace,
-    refresh: Arc<AtomicBool>,
+    refresh: Arc<Mutex<Option<Instant>>>,
     cancel_checkpoint: Arc<AtomicBool>,
 ) -> RemoteResult<()> {
     note(trace, "driver connecting owned Xvfb");
@@ -291,8 +295,22 @@ fn drive(
             );
             // This is the sole trigger. The host only discards the old frame;
             // the replacement must still traverse real capture and presentation.
-            refresh.store(true, Ordering::Release);
+            note(
+                trace,
+                format!(
+                    "candidate observed after {:?}; forcing real refresh",
+                    started.elapsed()
+                ),
+            );
+            *refresh.lock().unwrap() = Some(Instant::now());
             let newer = driver.wait_ready_after(window, Some(before))?;
+            note(
+                trace,
+                format!(
+                    "replacement Ready {before}->{newer} after {:?}",
+                    started.elapsed()
+                ),
+            );
             let observed = driver
                 .pointer_observation(window)?
                 .expect("candidate observation");
@@ -307,9 +325,14 @@ fn drive(
             assert_eq!(observed.action_sequence, 2);
             assert!(
                 started.elapsed() < Duration::from_millis(250),
-                "new presentation exceeded short-hold budget"
+                "new presentation exceeded short-hold budget: {:?}",
+                started.elapsed()
             );
             driver.button_up()?;
+            note(
+                trace,
+                format!("button up flushed after {:?}", started.elapsed()),
+            );
             let released = driver.wait_pointer_released(window, 2)?;
             assert!(!released.left_down);
             assert_eq!(released.candidate_frame, None);
@@ -319,7 +342,8 @@ fn drive(
             );
             assert!(
                 started.elapsed() < Duration::from_millis(250),
-                "release exceeded click duration; not cancellation evidence"
+                "release exceeded click duration; not cancellation evidence: {:?}",
+                started.elapsed()
             );
             note(
                 trace,
@@ -397,7 +421,11 @@ fn actual_viewer_tcp_pointer_presented_scope_and_revocation() {
         let mut server = Server::new();
         server.state.image_capture_pending =
             Some(init_image_copy_capture(&server.display.handle()));
-        let mut app = App::with_color(&mut server, [0, 0, 255, 255]);
+        let mut app = if matches!(case, Case::NewFrameCancel) {
+            App::with_size_color(&mut server, [0, 0, 255, 255], 200, 150)
+        } else {
+            App::with_color(&mut server, [0, 0, 255, 255])
+        };
         let app_pointer = bind(&mut server, &mut app);
         focused(&mut server, &app);
         let (native, peer_socket) = UnixStream::pair().unwrap();
@@ -420,7 +448,7 @@ fn actual_viewer_tcp_pointer_presented_scope_and_revocation() {
             trace: Arc::clone(&trace),
             failures: failed_rx,
         };
-        let refresh = Arc::new(AtomicBool::new(false));
+        let refresh = Arc::new(Mutex::new(None));
         let cancel_checkpoint = Arc::new(AtomicBool::new(false));
         let host_refresh = Arc::clone(&refresh);
         let host_trace = Arc::clone(&trace);
@@ -658,12 +686,17 @@ fn actual_viewer_tcp_pointer_presented_scope_and_revocation() {
                 "read-only viewer emitted native pointer events"
             );
         }
+        let (native_x, native_y) = if matches!(case, Case::NewFrameCancel) {
+            (100, 75)
+        } else {
+            (400, 300)
+        };
         for (_, args) in events.iter().filter(|(op, _)| *op == 2) {
             assert!(
-                args[1] >= 398 * 256
-                    && args[1] <= 402 * 256
-                    && args[2] >= 298 * 256
-                    && args[2] <= 302 * 256,
+                args[1] >= (native_x - 2) * 256
+                    && args[1] <= (native_x + 2) * 256
+                    && args[2] >= (native_y - 2) * 256
+                    && args[2] <= (native_y + 2) * 256,
                 "unexpected mapped coordinate {args:?}"
             );
         }
