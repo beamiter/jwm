@@ -45,7 +45,12 @@ SHM storage uses a bounded pool of at most two slots. Once the compositor
 releases a buffer, its storage can be reused for a later frame of the same size
 instead of creating a new memfd and protocol buffer for every frame. Each reuse
 still rewrites the entire image, including letterboxing: this is allocation
-reuse, not incremental upload or zero-copy presentation.
+reuse, not incremental upload or zero-copy presentation. Conversion writes
+multiple complete rows per chunk using one reusable 256 KiB scratch buffer,
+rather than allocating a row and writing each row separately. The scratch is
+additional bounded CPU memory, not part of the 128 MiB SHM-slot budget. The
+pixel sampling and letterboxing are unchanged, and the complete upload must
+succeed before the buffer is attached and committed.
 
 Idle and busy slots both count toward the 128 MiB aggregate ceiling, including
 buffers still held from an earlier size. Each buffer also has checked width,
@@ -85,6 +90,37 @@ presentation. JWM's existing production presentation batching is a separate
 integration concern: a vblank must not acknowledge a newer surface commit that
 was not part of the completed output submission. Protocol-level viewer tests do
 not replace that audit or a real hardware acceptance run.
+
+## Offline upload measurement
+
+An opt-in test calls the production chunked upload helper and the historical
+row-at-a-time reference against separate owned memfds. It opens no display or
+socket and adds no runtime viewer option:
+
+```sh
+cargo test --locked --no-default-features --features remote-wayland \
+  --lib remote::wayland_viewer::upload_benchmark::offline_memfd_upload_samples \
+  -- --ignored --exact --nocapture
+```
+
+The `JWM_UPLOAD_BENCHMARK` JSON line records three bounded input/output cases,
+byte-for-byte output comparison, counted `Write` calls and bytes, scratch size
+and initialization time, first-use samples, and five subsequent raw nanosecond
+samples per implementation with alternating execution order. First-use samples
+are separate from subsequent samples; they are not claimed to be cold-cache
+measurements. Input generation, memfd creation/sizing, seeks and pixel checks
+are outside upload timings. The reference's per-frame row allocation is inside
+its upload timing; production scratch initialization is reported separately.
+
+These samples include CPU conversion and writes to memfd, not Wayland protocol
+submission, compositor rendering, GPU work, network or physical display latency.
+`Write` counts describe actual wrapper calls, including any short-write retries,
+not independently traced syscalls. Preserve the JSON with the source revision,
+dirty-tree status and build profile; `debug_assertions` is included in the
+report. Default debug runs establish correctness and call counts, not a CPU or
+frame-rate improvement. No statistical significance or hardware speedup follows
+from this small measurement alone. Memfds close automatically after each case;
+there are no persistent benchmark artifacts unless the caller saves stdout.
 
 ## Current JWM compositor compatibility
 

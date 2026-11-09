@@ -23,6 +23,8 @@ use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_ba
 const TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_PIXELS: u64 = 16 * 1024 * 1024;
 const MAX_RETAINED_BYTES: usize = 128 * 1024 * 1024;
+// Separate bounded upload working storage, not part of the SHM allocation budget.
+const MAX_UPLOAD_SCRATCH_BYTES: usize = 256 * 1024;
 
 fn dimensions(width: u16, height: u16) -> RemoteResult<()> {
     if width == 0
@@ -35,6 +37,66 @@ fn dimensions(width: u16, height: u16) -> RemoteResult<()> {
     }
     Ok(())
 }
+/// Upload complete native-endian XRGB rows, including black letterbox pixels.
+/// All scratch is caller-owned and reused; write_all handles partial writes and
+/// Interrupted. No presentation or buffer lifecycle changes happen in this helper.
+fn upload_xrgb(
+    writer: &mut impl Write,
+    image: &image::RgbImage,
+    width: u16,
+    height: u16,
+    scratch: &mut [u8],
+) -> io::Result<()> {
+    dimensions(width, height)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error.to_string()))?;
+    if image.width() == 0 || image.height() == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "empty upload image",
+        ));
+    }
+    let row_bytes = usize::from(width) * 4;
+    if scratch.len() > MAX_UPLOAD_SCRATCH_BYTES || scratch.len() < row_bytes {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "invalid upload scratch size",
+        ));
+    }
+    let rows_per_chunk = scratch.len() / row_bytes;
+    let (iw, ih) = (u64::from(image.width()), u64::from(image.height()));
+    let (dw, dh) = if u64::from(width) * ih <= u64::from(height) * iw {
+        (u32::from(width), (u64::from(width) * ih / iw).max(1) as u32)
+    } else {
+        (
+            (u64::from(height) * iw / ih).max(1) as u32,
+            u32::from(height),
+        )
+    };
+    let (ox, oy) = ((u32::from(width) - dw) / 2, (u32::from(height) - dh) / 2);
+    for first_y in (0..usize::from(height)).step_by(rows_per_chunk) {
+        let rows = rows_per_chunk.min(usize::from(height) - first_y);
+        let chunk = &mut scratch[..rows * row_bytes];
+        chunk.fill(0);
+        for local_y in 0..rows {
+            let y = (first_y + local_y) as u32;
+            if y < oy || y >= oy + dh {
+                continue;
+            }
+            let sy = ((u64::from(y - oy) * ih) / u64::from(dh)) as u32;
+            for x in 0..dw {
+                let sx = ((u64::from(x) * iw) / u64::from(dw)) as u32;
+                let rgb = image.get_pixel(sx, sy).0;
+                let pixel =
+                    (u32::from(rgb[0]) << 16) | (u32::from(rgb[1]) << 8) | u32::from(rgb[2]);
+                let at = local_y * row_bytes + ((x + ox) * 4) as usize;
+                chunk[at..at + 4].copy_from_slice(&pixel.to_ne_bytes());
+            }
+        }
+        writer.write_all(chunk)?;
+    }
+    Ok(())
+}
+
 fn socket_path(display: Option<&str>) -> RemoteResult<PathBuf> {
     let name = display
         .map(str::to_owned)
@@ -211,6 +273,7 @@ pub(super) struct WaylandViewer {
     toplevel: xdg_toplevel::XdgToplevel,
     token: u64,
     slot_identity: u64,
+    upload_scratch: Box<[u8]>,
     write_pending: std::cell::Cell<bool>,
 }
 impl WaylandViewer {
@@ -319,6 +382,7 @@ impl WaylandViewer {
             toplevel,
             token: 0,
             slot_identity: 0,
+            upload_scratch: vec![0; MAX_UPLOAD_SCRATCH_BYTES].into_boxed_slice(),
             write_pending: std::cell::Cell::new(false),
         })
     }
@@ -403,35 +467,17 @@ impl WaylandViewer {
             SlotPlan::Allocate => self.allocate_slot(width, height, bytes)?,
         };
         let slot = &mut self.state.slots[index];
-        debug_assert!(!slot.meta.busy);
-        slot.file.seek(SeekFrom::Start(0))?;
-        // One native-endian XRGB8888 upload, letterboxed without an extra scaled canvas.
-        let (iw, ih) = (u64::from(image.width()), u64::from(image.height()));
-        let (dw, dh) = if u64::from(width) * ih <= u64::from(height) * iw {
-            (u32::from(width), (u64::from(width) * ih / iw).max(1) as u32)
-        } else {
-            (
-                (u64::from(height) * iw / ih).max(1) as u32,
-                u32::from(height),
-            )
-        };
-        let (ox, oy) = ((u32::from(width) - dw) / 2, (u32::from(height) - dh) / 2);
-        let mut row = vec![0u8; usize::from(width) * 4];
-        for y in 0..u32::from(height) {
-            row.fill(0);
-            if y >= oy && y < oy + dh {
-                let sy = ((u64::from(y - oy) * ih) / u64::from(dh)) as u32;
-                for x in 0..dw {
-                    let sx = ((u64::from(x) * iw) / u64::from(dw)) as u32;
-                    let rgb = image.get_pixel(sx, sy).0;
-                    let pixel =
-                        (u32::from(rgb[0]) << 16) | (u32::from(rgb[1]) << 8) | u32::from(rgb[2]);
-                    let at = ((x + ox) * 4) as usize;
-                    row[at..at + 4].copy_from_slice(&pixel.to_ne_bytes());
-                }
-            }
-            slot.file.write_all(&row)?;
+        if slot.meta.busy {
+            return Err("refusing to overwrite busy Wayland SHM storage".into());
         }
+        slot.file.seek(SeekFrom::Start(0))?;
+        upload_xrgb(
+            &mut slot.file,
+            image,
+            width,
+            height,
+            &mut self.upload_scratch,
+        )?;
         self.token = self
             .token
             .checked_add(1)
@@ -983,3 +1029,179 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod upload_tests {
+    use super::*;
+    use image::{Rgb, RgbImage};
+
+    // Keep the pre-optimization row algorithm as an independent byte oracle.
+    fn reference(image: &RgbImage, width: u16, height: u16) -> Vec<u8> {
+        let (iw, ih) = (u64::from(image.width()), u64::from(image.height()));
+        let (dw, dh) = if u64::from(width) * ih <= u64::from(height) * iw {
+            (u32::from(width), (u64::from(width) * ih / iw).max(1) as u32)
+        } else {
+            (
+                (u64::from(height) * iw / ih).max(1) as u32,
+                u32::from(height),
+            )
+        };
+        let (ox, oy) = ((u32::from(width) - dw) / 2, (u32::from(height) - dh) / 2);
+        let mut bytes = Vec::new();
+        let mut row = vec![0; usize::from(width) * 4];
+        for y in 0..u32::from(height) {
+            row.fill(0);
+            if y >= oy && y < oy + dh {
+                let sy = ((u64::from(y - oy) * ih) / u64::from(dh)) as u32;
+                for x in 0..dw {
+                    let sx = ((u64::from(x) * iw) / u64::from(dw)) as u32;
+                    let rgb = image.get_pixel(sx, sy).0;
+                    let pixel =
+                        (u32::from(rgb[0]) << 16) | (u32::from(rgb[1]) << 8) | u32::from(rgb[2]);
+                    let at = ((x + ox) * 4) as usize;
+                    row[at..at + 4].copy_from_slice(&pixel.to_ne_bytes());
+                }
+            }
+            bytes.extend_from_slice(&row);
+        }
+        bytes
+    }
+    #[derive(Default)]
+    struct Writer {
+        bytes: Vec<u8>,
+        calls: usize,
+        limit: Option<usize>,
+        interrupt_at: Option<usize>,
+        fail_at: Option<(usize, io::ErrorKind)>,
+    }
+    impl Write for Writer {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.calls += 1;
+            if self.interrupt_at == Some(self.calls) {
+                return Err(io::ErrorKind::Interrupted.into());
+            }
+            if let Some((call, kind)) = self.fail_at
+                && call == self.calls
+            {
+                if kind == io::ErrorKind::WriteZero {
+                    return Ok(0);
+                }
+                return Err(kind.into());
+            }
+            let count = self.limit.unwrap_or(bytes.len()).min(bytes.len());
+            self.bytes.extend_from_slice(&bytes[..count]);
+            Ok(count)
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    fn image(width: u32, height: u32) -> RgbImage {
+        RgbImage::from_fn(width, height, |x, y| {
+            Rgb([(x * 13 + y) as u8, (y * 17 + x) as u8, (x ^ y) as u8])
+        })
+    }
+    #[test]
+    fn chunk_upload_matches_old_rows_for_odd_scaling_black_bars_and_reused_scratch() {
+        let mut scratch = vec![0xa5; MAX_UPLOAD_SCRATCH_BYTES];
+        for (iw, ih, width, height) in [
+            (1, 1, 1, 1),
+            (3, 7, 13, 9),
+            (7, 3, 9, 13),
+            (13, 11, 7, 5),
+            (1, 37, 15, 11),
+            (37, 1, 11, 15),
+            (17, 13, 641, 479),
+        ] {
+            let image = image(iw, ih);
+            let mut writer = Writer::default();
+            upload_xrgb(&mut writer, &image, width, height, &mut scratch).unwrap();
+            assert_eq!(writer.bytes, reference(&image, width, height));
+            assert_eq!(
+                writer.bytes.len(),
+                usize::from(width) * usize::from(height) * 4
+            );
+        }
+    }
+    #[test]
+    fn counting_writer_observes_chunk_calls_instead_of_rows_and_no_tail_garbage() {
+        let image = image(17, 13);
+        let mut scratch = vec![0xff; MAX_UPLOAD_SCRATCH_BYTES];
+        let mut writer = Writer::default();
+        upload_xrgb(&mut writer, &image, 640, 480, &mut scratch).unwrap();
+        assert_eq!(writer.calls, 5);
+        assert_eq!(writer.bytes, reference(&image, 640, 480));
+        let mut tiny = vec![0xff; 17 * 4 * 2 + 3];
+        let mut writer = Writer::default();
+        upload_xrgb(&mut writer, &image, 17, 19, &mut tiny).unwrap();
+        assert_eq!(writer.calls, 10);
+        assert_eq!(writer.bytes, reference(&image, 17, 19));
+        // Maximum legal width gives a 64 KiB row: four rows per full
+        // scratch, and an exact one-row tail must not expose stale bytes.
+        let mut writer = Writer::default();
+        upload_xrgb(&mut writer, &image, 16384, 9, &mut scratch).unwrap();
+        assert_eq!(writer.calls, 3);
+        assert_eq!(writer.bytes, reference(&image, 16384, 9));
+        // A non-integral scratch boundary must round DOWN to complete rows.
+        let mut writer = Writer::default();
+        upload_xrgb(
+            &mut writer,
+            &image,
+            16384,
+            9,
+            &mut scratch[..MAX_UPLOAD_SCRATCH_BYTES - 1],
+        )
+        .unwrap();
+        assert_eq!(writer.calls, 3);
+        assert_eq!(writer.bytes, reference(&image, 16384, 9));
+    }
+    #[test]
+    fn short_writes_and_interrupted_preserve_exact_pixels() {
+        let image = image(3, 7);
+        let mut scratch = vec![0; 13 * 4 * 2];
+        let mut writer = Writer {
+            limit: Some(3),
+            interrupt_at: Some(2),
+            ..Writer::default()
+        };
+        upload_xrgb(&mut writer, &image, 13, 9, &mut scratch).unwrap();
+        assert_eq!(writer.bytes, reference(&image, 13, 9));
+    }
+    #[test]
+    fn write_zero_and_mid_upload_error_stop_without_further_writes() {
+        let image = image(3, 7);
+        let mut scratch = vec![0; 13 * 4 * 2];
+        for kind in [io::ErrorKind::WriteZero, io::ErrorKind::Other] {
+            let mut writer = Writer {
+                fail_at: Some((2, kind)),
+                ..Writer::default()
+            };
+            assert_eq!(
+                upload_xrgb(&mut writer, &image, 13, 9, &mut scratch)
+                    .unwrap_err()
+                    .kind(),
+                kind
+            );
+            assert_eq!(writer.calls, 2);
+            assert_eq!(writer.bytes, reference(&image, 13, 9)[..104]);
+        }
+    }
+    #[test]
+    fn invalid_scratch_or_dimensions_write_nothing() {
+        for length in [0, 13 * 4 - 1, MAX_UPLOAD_SCRATCH_BYTES + 1] {
+            let mut scratch = vec![0; length];
+            let mut writer = Writer::default();
+            assert!(upload_xrgb(&mut writer, &image(3, 7), 13, 9, &mut scratch).is_err());
+            assert_eq!(writer.calls, 0);
+        }
+        let mut scratch = vec![0; MAX_UPLOAD_SCRATCH_BYTES];
+        let mut writer = Writer::default();
+        assert!(upload_xrgb(&mut writer, &image(1, 1), 0, 1, &mut scratch).is_err());
+        assert!(upload_xrgb(&mut writer, &RgbImage::new(0, 1), 1, 1, &mut scratch).is_err());
+        assert_eq!(writer.calls, 0);
+    }
+}
+
+#[cfg(test)]
+#[path = "wayland_viewer_upload_benchmark.rs"]
+mod upload_benchmark;
