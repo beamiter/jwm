@@ -41,16 +41,34 @@ avoids reusing X11's superseded-frame recovery semantics for unpresented native
 commits. Configure/source changes that invalidate an outstanding presentation
 also fail closed; uninterrupted resize is not promised in this first slice.
 
-SHM storage has at most two retained slots and a 128 MiB aggregate ceiling,
-including buffers still held from an earlier size. Each buffer also has checked
-width, height, stride and pixel limits. A compositor may retain the current
-buffer until a replacement arrives: a presented-but-unreleased slot is kept
-intact while the second slot carries the replacement. Busy storage is never
-rewritten. Missing presentation feedback or two-slot submission blockage has a
-five-second deadline. A single presented current buffer may legitimately remain
-held indefinitely during a static image; it consumes only its bounded slot.
-These are native-upload bounds, not a claim about total process memory including
-the decoder and transport.
+SHM storage uses a bounded pool of at most two slots. Once the compositor
+releases a buffer, its storage can be reused for a later frame of the same size
+instead of creating a new memfd and protocol buffer for every frame. Each reuse
+still rewrites the entire image, including letterboxing: this is allocation
+reuse, not incremental upload or zero-copy presentation.
+
+Idle and busy slots both count toward the 128 MiB aggregate ceiling, including
+buffers still held from an earlier size. Each buffer also has checked width,
+height, stride and pixel limits. A size change may replace only idle storage.
+Replacement first destroys the released idle slot but keeps its old bytes
+charged until a real `wl_display.sync` callback confirms the server processed
+the preceding destroy request; only then may replacement storage be allocated.
+A five-second fence timeout or configure change terminates the session. This is
+protocol-resource accounting and destroy acknowledgement, not a guarantee that
+an arbitrary compositor immediately frees private caches or physical pages.
+Old-size busy storage remains charged and cannot be overwritten. A compositor
+may retain the current buffer until a replacement arrives: a
+presented-but-unreleased slot stays intact while the second slot carries the
+replacement. Busy storage is never rewritten.
+
+Storage identity is separate from submission identity. Every commit requests
+its own presentation feedback, and only that commit's matching `presented`
+event can produce its display ACK; neither a release nor reuse of a previously
+presented slot is sufficient. Missing presentation feedback or two-slot
+submission blockage has a five-second deadline. A single presented current
+buffer may legitimately remain held indefinitely during a static image; it
+consumes only its bounded slot. These are native-upload bounds, not a claim
+about total process memory including the decoder and transport.
 
 ## Validation boundary
 

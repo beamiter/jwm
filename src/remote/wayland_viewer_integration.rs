@@ -74,7 +74,7 @@ impl Peer {
                                     RgbImage::from_pixel(
                                         800,
                                         600,
-                                        Rgb(if sequence == 22 {
+                                        Rgb(if sequence % 2 == 0 {
                                             [0, 0, 255]
                                         } else {
                                             [255, 0, 0]
@@ -173,19 +173,24 @@ fn register_test_presentation(server: &mut Server) {
     >(&server.display.handle(), libc::CLOCK_MONOTONIC as u32);
 }
 fn server_and_peer(missing_presentation: bool) -> (Server, Peer) {
+    let (server, peer, _probe) = server_and_peer_with_probe(missing_presentation);
+    (server, peer)
+}
+fn server_and_peer_with_probe(missing_presentation: bool) -> (Server, Peer, UnixStream) {
     let mut server = Server::new();
     server.state.image_capture_pending = Some(init_image_copy_capture(&server.display.handle()));
     if !missing_presentation {
         register_test_presentation(&mut server);
     }
     let (native, stream) = UnixStream::pair().unwrap();
+    let probe = native.try_clone().unwrap();
     server
         .display
         .handle()
         .insert_client(native, Arc::new(JwmClientState::default()))
         .unwrap();
     let peer = Peer::start(stream);
-    (server, peer)
+    (server, peer, probe)
 }
 fn viewer_surface(server: &Server) -> WlSurface {
     assert_eq!(
@@ -335,6 +340,12 @@ fn actual_wayland_viewer_release_and_frame_done_do_not_ack_and_presented_does() 
     let before = peer.poll(&mut server);
     assert!(before.presented.is_empty());
     assert!(!before.can_submit);
+    peer.command.send(Command::Draw(12)).unwrap();
+    assert!(
+        matches!(peer.recv(&mut server), Reply::Drawn(false)),
+        "release before presented must not permit overwrite or replacement"
+    );
+    assert_eq!(committed_buffer(&surface).id(), buffer.id());
     present(&mut server, feedback);
     let after = peer.poll(&mut server);
     assert_eq!(after.presented, [11]);
@@ -410,6 +421,242 @@ fn actual_wayland_viewer_delayed_release_bounds_submission_and_close_stays_live(
         "close must work while release is stalled"
     );
     peer.stop(&mut server);
+}
+
+/// Observe actual server resource identities, not client-side allocation counters
+/// or protocol IDs which can be recycled after destroy. Keep each old Buffer
+/// leased by the compositor until its replacement has really been imported.
+#[test]
+fn actual_wayland_viewer_stable_size_reuses_two_buffers_with_fresh_feedback() {
+    let Some(mut gl) = HeadlessSmithayGles::new() else {
+        return;
+    };
+    let (mut server, peer) = server_and_peer(false);
+    assert!(matches!(peer.recv(&mut server), Reply::Connected));
+    let surface = viewer_surface(&server);
+    let mut capture = None;
+    let mut previous: Option<smithay::backend::renderer::utils::Buffer> = None;
+    let mut identities = Vec::new();
+    for sequence in 101..=108 {
+        peer.command.send(Command::Draw(sequence)).unwrap();
+        assert!(matches!(peer.recv(&mut server), Reply::Drawn(true)));
+        let feedback = wait_feedback(&mut server, &surface);
+        let held = with_renderer_surface_state(&surface, |s| s.buffer().cloned())
+            .flatten()
+            .unwrap();
+        let identity = held.id();
+        if !identities.contains(&identity) {
+            identities.push(identity.clone());
+        }
+        assert!(
+            identities.len() <= 2,
+            "stable-size stream allocated a third wl_buffer"
+        );
+        if let Some(ref old) = previous {
+            assert_ne!(
+                old.id(),
+                identity,
+                "cannot overwrite the unreleased previous buffer"
+            );
+            smithay::wayland::shm::with_buffer_contents(old, |ptr, len, data| {
+                assert_eq!((data.width, data.height, data.stride), (800, 600, 3200));
+                let offset = usize::try_from(data.offset).unwrap();
+                let bytes = 800 * 600 * 4;
+                assert!(offset.checked_add(bytes).is_some_and(|end| end <= len));
+                // SAFETY: the checked range stays in the live SHM mapping.
+                let pixels = unsafe { std::slice::from_raw_parts(ptr.add(offset), bytes) };
+                let expected = if (sequence - 1) % 2 == 0 {
+                    [255, 0, 0]
+                } else {
+                    [0, 0, 255]
+                };
+                assert!(
+                    pixels.chunks_exact(4).all(|p| p[..3] == expected),
+                    "replacement must not alter the held previous frame"
+                );
+            })
+            .unwrap();
+        }
+        let capture = capture.get_or_insert_with(|| Capture::new(&mut server));
+        verify_actual_gl_color(&mut server, &mut gl, capture, sequence % 2 == 0);
+        // A released OLD slot is reusable storage, not completion of the new
+        // frame occupying the other slot. Neither it nor frame.done earns ACK.
+        drop(previous.take());
+        frame_callback_only(&surface);
+        server.roundtrip();
+        let waiting = peer.poll(&mut server);
+        assert!(
+            waiting.presented.is_empty(),
+            "release cannot reuse an old presentation ACK"
+        );
+        assert!(!waiting.can_submit, "new feedback is still outstanding");
+        present(&mut server, feedback);
+        let done = peer.poll(&mut server);
+        assert_eq!(done.presented, [sequence]);
+        assert!(done.can_submit);
+        assert!(
+            peer.poll(&mut server).presented.is_empty(),
+            "feedback is consumed exactly once"
+        );
+        previous = Some(held);
+    }
+    assert_eq!(
+        identities.len(),
+        2,
+        "held-frame replacement must use exactly two resources"
+    );
+    // A discarded feedback on another reuse is still terminal, and cannot
+    // inherit any of the preceding successful frame acknowledgments.
+    peer.command.send(Command::Draw(109)).unwrap();
+    assert!(matches!(peer.recv(&mut server), Reply::Drawn(true)));
+    let feedback = wait_feedback(&mut server, &surface);
+    assert!(identities.contains(&committed_buffer(&surface).id()));
+    verify_actual_gl_color(&mut server, &mut gl, capture.as_mut().unwrap(), false);
+    for callback in feedback {
+        callback.discarded();
+    }
+    server.roundtrip();
+    peer.command.send(Command::Poll).unwrap();
+    let reply = peer.recv(&mut server);
+    assert!(
+        matches!(reply, Reply::Failed(ref error) if error.to_lowercase().contains("discard")),
+        "reused buffer discard must fail, never ACK: {reply:?}"
+    );
+    peer.join_failed();
+    drop(previous);
+}
+
+#[test]
+fn actual_wayland_viewer_idle_resize_waits_for_destroy_sync_and_preserves_busy_storage() {
+    use std::os::fd::AsRawFd;
+    let Some(mut gl) = HeadlessSmithayGles::new() else {
+        return;
+    };
+    let (mut server, peer, probe) = server_and_peer_with_probe(false);
+    assert!(matches!(peer.recv(&mut server), Reply::Connected));
+    let surface = viewer_surface(&server);
+    peer.command.send(Command::Draw(101)).unwrap();
+    assert!(matches!(peer.recv(&mut server), Reply::Drawn(true)));
+    let feedback = wait_feedback(&mut server, &surface);
+    let first = committed_buffer(&surface);
+    let held_first = with_renderer_surface_state(&surface, |s| s.buffer().cloned())
+        .flatten()
+        .unwrap();
+    let mut capture = Capture::new(&mut server);
+    verify_actual_gl_color(&mut server, &mut gl, &mut capture, false);
+    present(&mut server, feedback);
+    assert_eq!(peer.poll(&mut server).presented, [101]);
+    peer.command.send(Command::Draw(102)).unwrap();
+    assert!(matches!(peer.recv(&mut server), Reply::Drawn(true)));
+    let feedback = wait_feedback(&mut server, &surface);
+    let held_second = with_renderer_surface_state(&surface, |s| s.buffer().cloned())
+        .flatten()
+        .unwrap();
+    verify_actual_gl_color(&mut server, &mut gl, &mut capture, true);
+    present(&mut server, feedback);
+    assert_eq!(peer.poll(&mut server).presented, [102]);
+    drop(held_first);
+    server.roundtrip();
+    assert!(peer.poll(&mut server).can_submit);
+    let top = server.state.toplevels.values().next().unwrap();
+    top.with_pending_state(|state| state.size = Some((640, 480).into()));
+    top.send_configure();
+    server.roundtrip();
+    assert!(peer.poll(&mut server).presented.is_empty());
+    // Drain the configure ACK before pausing server dispatch, so the following
+    // observed wl_display.sync belongs specifically to retirement.
+    server.roundtrip();
+    peer.command.send(Command::Draw(103)).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let mut bytes = [0u8; 4096];
+        // SAFETY: valid socket and writable slice; MSG_PEEK does not consume
+        // bytes or dispatch protocol requests. Retirement sends no SCM_RIGHTS.
+        let count = unsafe {
+            libc::recv(
+                probe.as_raw_fd(),
+                bytes.as_mut_ptr().cast(),
+                bytes.len(),
+                libc::MSG_PEEK | libc::MSG_DONTWAIT,
+            )
+        };
+        let mut sync_seen = false;
+        if count > 0 {
+            let mut at = 0;
+            while at + 8 <= count as usize {
+                let object = u32::from_ne_bytes(bytes[at..at + 4].try_into().unwrap());
+                let header = u32::from_ne_bytes(bytes[at + 4..at + 8].try_into().unwrap());
+                let length = (header >> 16) as usize;
+                assert!(length >= 8 && length % 4 == 0);
+                if at + length > count as usize {
+                    break;
+                }
+                sync_seen |= object == 1 && header & 0xffff == 0;
+                at += length;
+            }
+        } else if count < 0 {
+            assert_eq!(
+                std::io::Error::last_os_error().kind(),
+                std::io::ErrorKind::WouldBlock
+            );
+        }
+        if sync_seen {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "retirement did not send real wl_display.sync"
+        );
+        thread::yield_now();
+    }
+    assert!(
+        matches!(peer.reply.try_recv(), Err(mpsc::TryRecvError::Empty)),
+        "cannot allocate/submit replacement before server sync acknowledgment"
+    );
+    assert!(
+        first.is_alive(),
+        "server has deliberately not processed destroy yet"
+    );
+    assert_eq!(committed_buffer(&surface).id(), held_second.id());
+    assert!(matches!(peer.recv(&mut server), Reply::Drawn(true)));
+    let feedback = wait_feedback(&mut server, &surface);
+    assert!(
+        !first.is_alive(),
+        "old idle resource must be destroyed before new allocation"
+    );
+    let replacement = committed_buffer(&surface);
+    assert_ne!(replacement.id(), first.id());
+    assert_ne!(replacement.id(), held_second.id());
+    for (buffer, width, height, expected) in [
+        (&replacement, 640, 480, [0, 0, 255]),
+        (&*held_second, 800, 600, [255, 0, 0]),
+    ] {
+        smithay::wayland::shm::with_buffer_contents(buffer, |ptr, len, data| {
+            assert_eq!(
+                (data.width, data.height, data.stride),
+                (width, height, width * 4)
+            );
+            let offset = usize::try_from(data.offset).unwrap();
+            let bytes = usize::try_from(width * height * 4).unwrap();
+            assert!(offset.checked_add(bytes).is_some_and(|end| end <= len));
+            // SAFETY: validated byte range under the live SHM pool callback.
+            let pixels = unsafe { std::slice::from_raw_parts(ptr.add(offset), bytes) };
+            assert!(pixels.chunks_exact(4).all(|p| p[..3] == expected));
+        })
+        .unwrap();
+    }
+    assert!(peer.poll(&mut server).presented.is_empty());
+    // This final assertion is a real SHM/layout test, not a GL/physical-present
+    // claim. Do not manufacture presentation for the resized buffer.
+    for callback in feedback {
+        callback.discarded();
+    }
+    server.roundtrip();
+    peer.command.send(Command::Poll).unwrap();
+    assert!(
+        matches!(peer.recv(&mut server), Reply::Failed(ref e) if e.to_lowercase().contains("discard"))
+    );
+    peer.join_failed();
 }
 
 #[test]

@@ -7,14 +7,14 @@ use super::x11_viewer::ViewerEvent;
 use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 use nix::sys::memfd::{MFdFlags, memfd_create};
 use std::fs::File;
-use std::io::{self, Write};
+use std::io::{self, Seek, SeekFrom, Write};
 use std::os::fd::{AsFd, BorrowedFd};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use wayland_client::backend::WaylandError;
 use wayland_client::protocol::{
-    wl_buffer, wl_compositor, wl_registry, wl_shm, wl_shm_pool, wl_surface,
+    wl_buffer, wl_callback, wl_compositor, wl_registry, wl_shm, wl_shm_pool, wl_surface,
 };
 use wayland_client::{Connection, Dispatch, EventQueue, QueueHandle, WEnum};
 use wayland_protocols::wp::presentation_time::client::{wp_presentation, wp_presentation_feedback};
@@ -63,12 +63,76 @@ struct Pending {
     source_epoch: u64,
     geometry_epoch: u64,
     generation: u64,
-    bytes: usize,
-    released: bool,
     presented: bool,
     started: Instant,
+}
+#[derive(Clone, Copy)]
+struct SlotMeta {
+    size: (u16, u16),
+    bytes: usize,
+    busy: bool,
+}
+struct Slot {
+    id: u64,
+    meta: SlotMeta,
     buffer: wl_buffer::WlBuffer,
-    _file: File,
+    pool: wl_shm_pool::WlShmPool,
+    file: File,
+}
+impl Drop for Slot {
+    fn drop(&mut self) {
+        self.buffer.destroy();
+        self.pool.destroy();
+    }
+}
+#[derive(Debug, PartialEq, Eq)]
+enum SlotPlan {
+    Reuse(usize),
+    Allocate,
+    Replace(usize),
+}
+type RetirementScope = (u64, (u16, u16), Option<(u64, u64)>);
+fn retirement_scope_matches(before: RetirementScope, after: RetirementScope) -> bool {
+    before == after
+}
+fn storage_can_submit(pending: bool, completed: bool, slots: usize, has_idle: bool) -> bool {
+    !pending && !completed && (slots < 2 || (slots == 2 && has_idle))
+}
+fn plan_slot(slots: &[SlotMeta], size: (u16, u16)) -> RemoteResult<SlotPlan> {
+    dimensions(size.0, size.1)?;
+    if slots.len() > 2 {
+        return Err("Wayland SHM slot count exceeded".into());
+    }
+    let total = slots
+        .iter()
+        .try_fold(0usize, |sum, slot| sum.checked_add(slot.bytes))
+        .filter(|total| *total <= MAX_RETAINED_BYTES)
+        .ok_or("Wayland SHM accounting overflow")?;
+    if let Some(index) = slots
+        .iter()
+        .position(|slot| !slot.busy && slot.size == size)
+    {
+        return Ok(SlotPlan::Reuse(index));
+    }
+    let idle = slots.iter().position(|slot| !slot.busy);
+    let bytes = usize::from(size.0) * usize::from(size.1) * 4;
+    let retained = total - idle.map_or(0, |index| slots[index].bytes);
+    if retained
+        .checked_add(bytes)
+        .is_none_or(|sum| sum > MAX_RETAINED_BYTES)
+    {
+        return Err("Wayland retained SHM exceeds 128 MiB".into());
+    }
+    match idle {
+        Some(index) => Ok(SlotPlan::Replace(index)),
+        None if slots.len() < 2 => Ok(SlotPlan::Allocate),
+        None => Err("both Wayland SHM slots remain busy".into()),
+    }
+}
+struct Retirement {
+    id: u64,
+    bytes: usize,
+    started: Instant,
 }
 struct State {
     compositor: Option<wl_compositor::WlCompositor>,
@@ -84,7 +148,8 @@ struct State {
     generation: u64,
     scope: Option<(u64, u64)>,
     pending: Option<Pending>,
-    retained: Vec<Pending>,
+    slots: Vec<Slot>,
+    retirement: Option<Retirement>,
     blocked_since: Option<Instant>,
     completed: Vec<u64>,
     closed: bool,
@@ -95,6 +160,17 @@ impl State {
         if let Some(error) = &self.failure {
             return Err(error.clone().into());
         }
+        if let Some(retirement) = &self.retirement {
+            if retirement.started.elapsed() >= TIMEOUT {
+                return Err("Wayland SHM retirement deadline expired".into());
+            }
+            let total = self.slots.iter().try_fold(retirement.bytes, |sum, slot| {
+                sum.checked_add(slot.meta.bytes)
+            });
+            if total.is_none_or(|bytes| bytes > MAX_RETAINED_BYTES) {
+                return Err("Wayland retiring SHM exceeds 128 MiB".into());
+            }
+        }
         if self
             .pending
             .as_ref()
@@ -103,7 +179,7 @@ impl State {
             return Err("Wayland presentation deadline expired".into());
         }
         if self.blocked_since.is_some_and(|at| at.elapsed() >= TIMEOUT)
-            && self.retained.iter().filter(|p| !p.released).count() >= 2
+            && self.slots.iter().filter(|p| p.meta.busy).count() >= 2
         {
             return Err("both Wayland SHM slots remained busy past deadline".into());
         }
@@ -134,6 +210,7 @@ pub(super) struct WaylandViewer {
     _xdg_surface: xdg_surface::XdgSurface,
     toplevel: xdg_toplevel::XdgToplevel,
     token: u64,
+    slot_identity: u64,
     write_pending: std::cell::Cell<bool>,
 }
 impl WaylandViewer {
@@ -188,7 +265,8 @@ impl WaylandViewer {
             generation: 1,
             scope: None,
             pending: None,
-            retained: Vec::new(),
+            slots: Vec::new(),
+            retirement: None,
             blocked_since: None,
             completed: Vec::new(),
             closed: false,
@@ -240,29 +318,25 @@ impl WaylandViewer {
             _xdg_surface: xdg_surface,
             toplevel,
             token: 0,
+            slot_identity: 0,
             write_pending: std::cell::Cell::new(false),
         })
     }
     fn pump(&mut self) -> RemoteResult<bool> {
         let work = pump_connection(&self.conn, &mut self.queue, &mut self.state)?;
         if self.state.pending.as_ref().is_some_and(|p| p.presented) {
-            if let Some(pending) = self.state.pending.take() {
-                if pending.released {
-                    pending.buffer.destroy();
-                } else {
-                    self.state.retained.push(pending);
-                }
-            }
+            self.state.pending = None;
         }
-        self.state.retained.retain(|slot| {
-            if slot.released {
-                slot.buffer.destroy();
-                false
-            } else {
-                true
-            }
-        });
-        if self.state.retained.len() >= 2 {
+        // Released storage remains allocated and charged until reused or safely
+        // replaced. Presentation alone never makes its bytes writable.
+        if self
+            .state
+            .slots
+            .iter()
+            .filter(|slot| slot.meta.busy)
+            .count()
+            >= 2
+        {
             self.state.blocked_since.get_or_insert_with(Instant::now);
         } else {
             self.state.blocked_since = None;
@@ -282,9 +356,13 @@ impl WaylandViewer {
     }
     pub(super) fn can_submit_frame(&self) -> bool {
         !self.state.closed
-            && self.state.pending.is_none()
-            && self.state.retained.len() < 2
-            && self.state.completed.is_empty()
+            && self.state.retirement.is_none()
+            && storage_can_submit(
+                self.state.pending.is_some(),
+                !self.state.completed.is_empty(),
+                self.state.slots.len(),
+                self.state.slots.iter().any(|slot| !slot.meta.busy),
+            )
             && self.state.failure.is_none()
     }
     pub(super) fn draw_recyclable(&mut self, frame: RecyclableDecodedFrame) -> RemoteResult<bool> {
@@ -312,21 +390,21 @@ impl WaylandViewer {
         let (width, height) = self.viewport();
         dimensions(width, height)?;
         let bytes = usize::from(width) * usize::from(height) * 4;
-        let retained_bytes = self
-            .state
-            .retained
-            .iter()
-            .try_fold(0usize, |sum, slot| sum.checked_add(slot.bytes))
-            .ok_or("Wayland SHM accounting overflow")?;
-        if retained_bytes
-            .checked_add(bytes)
-            .is_none_or(|total| total > MAX_RETAINED_BYTES)
-        {
-            return Err("Wayland retained SHM exceeds 128 MiB".into());
-        }
-        let fd = memfd_create(c"jwm-readonly-viewer", MFdFlags::MFD_CLOEXEC)?;
-        let mut file = File::from(fd);
-        file.set_len(u64::try_from(bytes)?)?;
+        let metas: Vec<_> = self.state.slots.iter().map(|slot| slot.meta).collect();
+        let plan = plan_slot(&metas, (width, height))?;
+        let index = match plan {
+            SlotPlan::Reuse(index) => index,
+            SlotPlan::Replace(index) => {
+                // Destroy and close idle old-size storage BEFORE allocating;
+                // temporary allocations must not exceed the same byte budget.
+                self.retire_slot(index)?;
+                self.allocate_slot(width, height, bytes)?
+            }
+            SlotPlan::Allocate => self.allocate_slot(width, height, bytes)?,
+        };
+        let slot = &mut self.state.slots[index];
+        debug_assert!(!slot.meta.busy);
+        slot.file.seek(SeekFrom::Start(0))?;
         // One native-endian XRGB8888 upload, letterboxed without an extra scaled canvas.
         let (iw, ih) = (u64::from(image.width()), u64::from(image.height()));
         let (dw, dh) = if u64::from(width) * ih <= u64::from(height) * iw {
@@ -352,12 +430,78 @@ impl WaylandViewer {
                     row[at..at + 4].copy_from_slice(&pixel.to_ne_bytes());
                 }
             }
-            file.write_all(&row)?;
+            slot.file.write_all(&row)?;
         }
         self.token = self
             .token
             .checked_add(1)
             .ok_or("Wayland viewer token exhausted")?;
+        let qh = self.queue.handle();
+        let buffer = slot.buffer.clone();
+        slot.meta.busy = true;
+        let _feedback =
+            self.state
+                .presentation
+                .as_ref()
+                .unwrap()
+                .feedback(&self.surface, &qh, self.token);
+        self.state.pending = Some(Pending {
+            token: self.token,
+            sequence: frame.sequence(),
+            source_epoch: scope.0,
+            geometry_epoch: scope.1,
+            generation: self.state.generation,
+            presented: false,
+            started: Instant::now(),
+        });
+        self.surface.attach(Some(&buffer), 0, 0);
+        self.surface
+            .damage_buffer(0, 0, i32::from(width), i32::from(height));
+        self.surface.commit();
+        self.prepare_wait()?;
+        Ok(true)
+    }
+    fn retire_slot(&mut self, index: usize) -> RemoteResult<()> {
+        if self.state.retirement.is_some() || self.state.slots[index].meta.busy {
+            return Err("cannot retire busy Wayland SHM storage".into());
+        }
+        let snapshot = (self.state.generation, self.viewport(), self.state.scope);
+        let slot = self.state.slots.remove(index);
+        self.state.retirement = Some(Retirement {
+            id: slot.id,
+            bytes: slot.meta.bytes,
+            started: Instant::now(),
+        });
+        let id = slot.id;
+        // Merely dropping the local fd is not a server-side memory fence.
+        // Keep these bytes charged until the server has processed both destroys.
+        drop(slot);
+        self.conn.display().sync(&self.queue.handle(), id);
+        while self.state.retirement.is_some() {
+            self.prepare_wait()?;
+            pump_connection(&self.conn, &mut self.queue, &mut self.state)?;
+            if self.state.closed
+                || !retirement_scope_matches(
+                    snapshot,
+                    (self.state.generation, self.viewport(), self.state.scope),
+                )
+            {
+                return Err("Wayland viewer changed while retiring SHM storage".into());
+            }
+            self.state.check()?;
+            if self.state.retirement.is_some() {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+        Ok(())
+    }
+    fn allocate_slot(&mut self, width: u16, height: u16, bytes: usize) -> RemoteResult<usize> {
+        let id = self
+            .slot_identity
+            .checked_add(1)
+            .ok_or("Wayland buffer identity exhausted")?;
+        let file = File::from(memfd_create(c"jwm-readonly-viewer", MFdFlags::MFD_CLOEXEC)?);
+        file.set_len(u64::try_from(bytes)?)?;
         let qh = self.queue.handle();
         let pool = self.state.shm.as_ref().unwrap().create_pool(
             file.as_fd(),
@@ -372,34 +516,22 @@ impl WaylandViewer {
             i32::from(width) * 4,
             wl_shm::Format::Xrgb8888,
             &qh,
-            self.token,
+            id,
         );
-        pool.destroy();
-        let _feedback =
-            self.state
-                .presentation
-                .as_ref()
-                .unwrap()
-                .feedback(&self.surface, &qh, self.token);
-        self.state.pending = Some(Pending {
-            token: self.token,
-            sequence: frame.sequence(),
-            source_epoch: scope.0,
-            geometry_epoch: scope.1,
-            generation: self.state.generation,
-            bytes,
-            released: false,
-            presented: false,
-            started: Instant::now(),
-            buffer: buffer.clone(),
-            _file: file,
+        self.slot_identity = id;
+        let index = self.state.slots.len();
+        self.state.slots.push(Slot {
+            id,
+            meta: SlotMeta {
+                size: (width, height),
+                bytes,
+                busy: false,
+            },
+            buffer,
+            pool,
+            file,
         });
-        self.surface.attach(Some(&buffer), 0, 0);
-        self.surface
-            .damage_buffer(0, 0, i32::from(width), i32::from(height));
-        self.surface.commit();
-        self.prepare_wait()?;
-        Ok(true)
+        Ok(index)
     }
     pub(super) fn take_presented_sequences(&mut self) -> RemoteResult<Vec<u64>> {
         self.pump()?;
@@ -668,6 +800,27 @@ impl Dispatch<wl_surface::WlSurface, ()> for State {
         }
     }
 }
+impl Dispatch<wl_callback::WlCallback, u64> for State {
+    fn event(
+        state: &mut Self,
+        _: &wl_callback::WlCallback,
+        event: wl_callback::Event,
+        id: &u64,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let wl_callback::Event::Done { .. } = event {
+            match state.retirement.as_ref() {
+                Some(retirement)
+                    if retirement.id == *id && retirement.started.elapsed() < TIMEOUT =>
+                {
+                    state.retirement = None;
+                }
+                _ => state.failure = Some("stale or expired Wayland SHM retirement fence".into()),
+            }
+        }
+    }
+}
 impl Dispatch<wl_buffer::WlBuffer, u64> for State {
     fn event(
         state: &mut Self,
@@ -678,13 +831,8 @@ impl Dispatch<wl_buffer::WlBuffer, u64> for State {
         _: &QueueHandle<Self>,
     ) {
         if let wl_buffer::Event::Release = event {
-            let slot = state
-                .pending
-                .as_mut()
-                .filter(|p| p.token == *token)
-                .or_else(|| state.retained.iter_mut().find(|p| p.token == *token));
-            match slot {
-                Some(p) if !p.released => p.released = true,
+            match state.slots.iter_mut().find(|slot| slot.id == *token) {
+                Some(slot) if slot.meta.busy => slot.meta.busy = false,
                 _ => state.failure = Some("stale or duplicate Wayland buffer release".into()),
             }
         }
@@ -734,6 +882,88 @@ wayland_client::delegate_noop!(State: ignore wp_presentation::WpPresentation);
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn retirement_cannot_rehabilitate_changed_generation_viewport_or_source() {
+        let before = (7, (800, 600), Some((1, 3)));
+        assert!(retirement_scope_matches(before, before));
+        for after in [
+            (8, (800, 600), Some((1, 3))),
+            (7, (640, 480), Some((1, 3))),
+            (7, (800, 600), Some((2, 3))),
+            (7, (800, 600), Some((1, 4))),
+        ] {
+            assert!(!retirement_scope_matches(before, after));
+        }
+    }
+    fn slot(size: (u16, u16), busy: bool) -> SlotMeta {
+        SlotMeta {
+            size,
+            bytes: usize::from(size.0) * usize::from(size.1) * 4,
+            busy,
+        }
+    }
+    #[test]
+    fn released_storage_is_reused_but_busy_storage_never_is() {
+        let size = (800, 600);
+        assert_eq!(
+            plan_slot(&[slot(size, false)], size).unwrap(),
+            SlotPlan::Reuse(0)
+        );
+        assert_eq!(
+            plan_slot(&[slot(size, true)], size).unwrap(),
+            SlotPlan::Allocate
+        );
+        assert_eq!(
+            plan_slot(&[slot(size, true), slot(size, false)], size).unwrap(),
+            SlotPlan::Reuse(1)
+        );
+        assert!(plan_slot(&[slot(size, true), slot(size, true)], size).is_err());
+    }
+    #[test]
+    fn resize_replaces_only_idle_slot_and_keeps_busy_old_size_charged() {
+        let old = (4096, 4096);
+        let size = (800, 600);
+        assert_eq!(
+            plan_slot(&[slot(old, true), slot(old, false)], size).unwrap(),
+            SlotPlan::Replace(1)
+        );
+        assert_eq!(
+            plan_slot(&[slot(old, true)], old).unwrap(),
+            SlotPlan::Allocate
+        );
+        assert!(plan_slot(&[slot(old, true), slot(old, true)], size).is_err());
+        assert!(plan_slot(&[], (4097, 4096)).is_err());
+    }
+    #[test]
+    fn accounting_includes_idle_and_detects_overflow_and_slot_excess() {
+        let corrupt = SlotMeta {
+            size: (1, 1),
+            bytes: usize::MAX,
+            busy: false,
+        };
+        assert!(plan_slot(&[corrupt, slot((1, 1), false)], (1, 1)).is_err());
+        assert!(plan_slot(&[slot((1, 1), false); 3], (1, 1)).is_err());
+        assert!(
+            plan_slot(
+                &[SlotMeta {
+                    bytes: MAX_RETAINED_BYTES + 1,
+                    ..slot((1, 1), false)
+                }],
+                (1, 1)
+            )
+            .is_err()
+        );
+    }
+    #[test]
+    fn release_does_not_bypass_pending_feedback_or_unconsumed_ack() {
+        assert!(!storage_can_submit(true, false, 1, true));
+        assert!(!storage_can_submit(false, true, 1, true));
+        assert!(storage_can_submit(false, false, 1, false));
+        assert!(!storage_can_submit(false, false, 2, false));
+        assert!(storage_can_submit(false, false, 2, true));
+        assert!(!storage_can_submit(false, false, 3, true));
+    }
+
     #[test]
     fn native_viewer_shm_dimensions_are_bounded() {
         assert!(dimensions(1, 1).is_ok());
