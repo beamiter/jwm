@@ -1096,6 +1096,100 @@ impl RemoteSetter {
     }
 }
 
+/// This polling wait is bounded; the preceding request submission/flush is not
+/// covered by its deadline. No acknowledgement proves requestor consumption.
+/// `Some(false)` is an unrelated queued event, not permission to declare success.
+#[cfg(feature = "remote-x11")]
+fn wait_terminal_fence(
+    deadline: std::time::Instant,
+    mut now: impl FnMut() -> std::time::Instant,
+    mut next: impl FnMut() -> Result<Option<bool>, String>,
+    mut wait: impl FnMut(std::time::Duration) -> Result<(), String>,
+) -> Result<(), String> {
+    let mut events = 0usize;
+    loop {
+        let remaining = deadline.saturating_duration_since(now());
+        if remaining.is_zero() {
+            return Err("terminal destruction acknowledgement timed out".into());
+        }
+        match next()? {
+            Some(true) => return Ok(()),
+            Some(false) => {
+                events += 1;
+                if events >= 4096 {
+                    return Err("terminal fence event budget exhausted".into());
+                }
+            }
+            None => wait(remaining)?,
+        }
+    }
+}
+
+#[cfg(feature = "remote-x11")]
+fn is_terminal_destroy(
+    event: &xproto::DestroyNotifyEvent,
+    window: Window,
+    observed: u64,
+    sequence: u64,
+) -> bool {
+    event.response_type & 0x80 == 0
+        && event.window == window
+        && event.event == window
+        && observed == sequence
+}
+
+#[cfg(feature = "remote-x11")]
+fn terminal_destroy_fence(
+    conn: &RustConnection,
+    window: Window,
+    sequence: u64,
+) -> Result<(), String> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+    wait_terminal_fence(
+        deadline,
+        std::time::Instant::now,
+        || {
+            let Some((event, observed)) = conn
+                .poll_for_event_with_sequence()
+                .map_err(|e| e.to_string())?
+            else {
+                return Ok(None);
+            };
+            match event {
+                x11rb::protocol::Event::DestroyNotify(event) => Ok(Some(is_terminal_destroy(
+                    &event, window, observed, sequence,
+                ))),
+                x11rb::protocol::Event::Error(_) if observed == sequence => {
+                    Err("X server rejected terminal destruction".into())
+                }
+                _ => Ok(Some(false)),
+            }
+        },
+        |remaining| {
+            let mut fd = libc::pollfd {
+                fd: conn.stream().as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            let millis = remaining
+                .as_millis()
+                .saturating_add(1)
+                .min(i32::MAX as u128) as i32;
+            let ready = unsafe { libc::poll(&mut fd, 1, millis) };
+            if ready < 0 {
+                let error = std::io::Error::last_os_error();
+                if error.kind() != std::io::ErrorKind::Interrupted {
+                    return Err(error.to_string());
+                }
+            }
+            if fd.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0 {
+                return Err("X connection closed before terminal fence".into());
+            }
+            Ok(())
+        },
+    )
+}
+
 fn intern(conn: &RustConnection, name: &str) -> Result<Atom, String> {
     conn.intern_atom(false, name.as_bytes())
         .map_err(|error| format!("intern {name}: {error}"))?
@@ -1422,17 +1516,45 @@ impl Watcher {
     /// Terminal overflow/disconnection path, independent of queue capacity.
     #[cfg(feature = "remote-x11")]
     fn abort_remote(&mut self) {
+        let parked = self.deferred.len();
+        // A flush only writes requests to the socket. Observe our own terminal
+        // DestroyNotify before dropping the connection so earlier refusal
+        // successfully submitted SendEvent requests have been processed by the
+        // server, not necessarily consumed by their requestors.
+        // This changes only our private owner window and the terminal path.
+        let selected = self
+            .conn
+            .change_window_attributes(
+                self.window,
+                &xproto::ChangeWindowAttributesAux::new()
+                    .event_mask(EventMask::PROPERTY_CHANGE | EventMask::STRUCTURE_NOTIFY),
+            )
+            .is_ok();
         self.answer_deferred(false);
         self.pending_offer = None;
         self.cancel_capture();
         // Destroying our owner window releases only our selection. A
         // get-owner/set-NONE pair could race with another application's copy.
         // This is terminal, so no later timestamp probe may reclaim it.
-        let _ = self.conn.destroy_window(self.window);
+        let fence = self
+            .conn
+            .destroy_window(self.window)
+            .map(|cookie| cookie.sequence_number());
         self.offered = None;
         self.ownership_time = None;
         self.outgoing_incr.clear();
-        let _ = self.conn.flush();
+        // Always attempt cleanup flush, even if selecting notifications failed.
+        let flushed = self.conn.flush().map_err(|error| error.to_string());
+        let outcome = flushed.and_then(|()| match fence {
+            Ok(sequence) if selected => terminal_destroy_fence(&self.conn, self.window, sequence),
+            Ok(_) => Err("could not select terminal destruction notification".into()),
+            Err(error) => Err(format!("could not submit terminal destruction: {error}")),
+        });
+        if let Err(error) = &outcome {
+            log::warn!("clipboard: terminal server fence failed (parked={parked}): {error}");
+        }
+        #[cfg(test)]
+        eprintln!("clipboard terminal server fence: parked={parked} outcome={outcome:?}");
     }
 
     #[cfg(feature = "remote-x11")]
@@ -4696,7 +4818,14 @@ mod tests {
         assert!(setter.is_failed());
         let notify =
             selection_notify_within(&conn, requestor, png, std::time::Duration::from_secs(3))
-                .expect("the waiting paste is refused");
+                .unwrap_or_else(|| {
+                    let finished = setter.worker.join.lock().unwrap().as_ref().is_none_or(std::thread::JoinHandle::is_finished);
+                    let captures_closed = matches!(
+                        captures.recv_timeout(std::time::Duration::ZERO),
+                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected)
+                    );
+                    panic!("the waiting paste is refused: worker_finished={finished} wake_healthy={} captures_closed={captures_closed}; see terminal server fence outcome", setter.wake.is_healthy());
+                });
         assert_eq!(notify.property, x11rb::NONE);
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         while conn
@@ -4717,6 +4846,105 @@ mod tests {
             captures
                 .recv_timeout(std::time::Duration::from_secs(3))
                 .is_err()
+        );
+    }
+}
+
+#[cfg(all(test, feature = "remote-x11"))]
+mod terminal_fence_tests {
+    use super::{is_terminal_destroy, wait_terminal_fence};
+    use std::{
+        cell::Cell,
+        time::{Duration, Instant},
+    };
+    #[test]
+    fn terminal_fence_requires_real_exact_destroy() {
+        let event = x11rb::protocol::xproto::DestroyNotifyEvent {
+            response_type: x11rb::protocol::xproto::DESTROY_NOTIFY_EVENT,
+            sequence: 7,
+            event: 42,
+            window: 42,
+        };
+        assert!(is_terminal_destroy(&event, 42, 65543, 65543));
+        assert!(!is_terminal_destroy(&event, 42, 7, 65543));
+        assert!(!is_terminal_destroy(&event, 43, 65543, 65543));
+        let mut wrong = event;
+        wrong.event = 43;
+        assert!(!is_terminal_destroy(&wrong, 42, 65543, 65543));
+        wrong = event;
+        wrong.response_type |= 0x80;
+        assert!(!is_terminal_destroy(&wrong, 42, 65543, 65543));
+    }
+
+    #[test]
+    fn terminal_fence_unrelated_event_flood_is_bounded() {
+        let start = Instant::now();
+        let calls = Cell::new(0);
+        assert!(
+            wait_terminal_fence(
+                start + Duration::from_millis(500),
+                || start,
+                || {
+                    calls.set(calls.get() + 1);
+                    Ok(Some(false))
+                },
+                |_| panic!("queued events must not wait"),
+            )
+            .is_err()
+        );
+        assert_eq!(calls.get(), 4096);
+    }
+
+    #[test]
+    fn terminal_fence_ignores_old_events_and_waits_for_exact_confirmation() {
+        let start = Instant::now();
+        let clock = Cell::new(start);
+        let calls = Cell::new(0);
+        let result = wait_terminal_fence(
+            start + Duration::from_millis(500),
+            || clock.get(),
+            || {
+                let n = calls.get();
+                calls.set(n + 1);
+                Ok(match n {
+                    0 => Some(false),
+                    1 => None,
+                    _ => Some(true),
+                })
+            },
+            |_| {
+                clock.set(start + Duration::from_millis(1));
+                Ok(())
+            },
+        );
+        assert!(result.is_ok());
+        assert_eq!(calls.get(), 3);
+    }
+    #[test]
+    fn terminal_fence_timeout_and_error_are_not_confirmation() {
+        let start = Instant::now();
+        let clock = Cell::new(start);
+        let timeout = Duration::from_millis(500);
+        assert!(
+            wait_terminal_fence(
+                start + timeout,
+                || clock.get(),
+                || Ok(None),
+                |left| {
+                    clock.set(clock.get() + left);
+                    Ok(())
+                }
+            )
+            .is_err()
+        );
+        assert!(
+            wait_terminal_fence(
+                start + timeout,
+                || start,
+                || Err("closed".into()),
+                |_| panic!("no wait after error")
+            )
+            .is_err()
         );
     }
 }
