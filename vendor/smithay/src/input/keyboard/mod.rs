@@ -6,6 +6,7 @@ use downcast_rs::{Downcast, impl_downcast};
 use std::collections::{HashMap, HashSet};
 #[cfg(feature = "wayland_frontend")]
 use std::sync::RwLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::{
     default::Default,
     fmt, io,
@@ -31,6 +32,41 @@ pub use modifiers_state::{ModifiersState, SerializedMods};
 
 mod xkb_config;
 pub use xkb_config::XkbConfig;
+
+// Saturation permanently disables new authorization rather than allowing ABA.
+pub(crate) fn invalidate_keyboard_authority(generation: &AtomicU64) {
+    // CAS preserves the repository's Rust 1.89 MSRV; try_update is newer.
+    let mut current = generation.load(Ordering::Acquire);
+    while current != u64::MAX {
+        match generation.compare_exchange_weak(current, current + 1, Ordering::AcqRel, Ordering::Acquire) {
+            Ok(_) => return,
+            Err(observed) => current = observed,
+        }
+    }
+}
+
+/// Compositor-owned snapshot for narrowly scoped keyboard delivery.
+///
+/// This is not a client capability. The compositor must additionally enforce
+/// its connection, surface lifetime, lock, and local-input revocation policy.
+#[cfg(feature = "wayland_frontend")]
+#[derive(Debug)]
+pub struct AuthorizedKeyboardSnapshot {
+    target: wayland_server::protocol::wl_surface::WlSurface,
+    focus_serial: Serial,
+    generation: u64,
+    keymap_id: KeymapFileId,
+    keymap_text: String,
+    receivers: Vec<wayland_server::protocol::wl_keyboard::WlKeyboard>,
+}
+
+#[cfg(feature = "wayland_frontend")]
+impl AuthorizedKeyboardSnapshot {
+    /// Fixed seat keymap used to construct the lease's independent XKB state.
+    pub fn keymap_text(&self) -> &str {
+        &self.keymap_text
+    }
+}
 
 /// Trait representing object that can receive keyboard interactions
 pub trait KeyboardTarget<D>: IsAlive + fmt::Debug + Send
@@ -233,6 +269,7 @@ impl KeyboardSource {
 }
 
 pub(crate) struct KbdInternal<D: SeatHandler> {
+    pub(crate) authority_generation: Arc<AtomicU64>,
     pub(crate) focus: Option<(<D as SeatHandler>::KeyboardFocus, Serial)>,
     pending_focus: Option<<D as SeatHandler>::KeyboardFocus>,
     pub(crate) pressed_keys: HashSet<Keycode>,
@@ -286,6 +323,7 @@ impl<D: SeatHandler + 'static> KbdInternal<D> {
         let led_mapping = LedMapping::from_keymap(&keymap);
         let led_state = LedState::from_state(&state, &led_mapping);
         Ok(KbdInternal {
+            authority_generation: Arc::new(AtomicU64::new(0)),
             focus: None,
             pending_focus: None,
             pressed_keys: HashSet::new(),
@@ -388,6 +426,7 @@ impl<D: SeatHandler + 'static> KbdInternal<D> {
                 if let Some(ref surface) = handler.start_data().focus {
                     if !surface.alive() {
                         handler.unset(data);
+                        invalidate_keyboard_authority(&self.authority_generation);
                         self.grab = GrabStatus::None;
                         f(
                             data,
@@ -431,6 +470,8 @@ pub enum Error {
 }
 
 pub(crate) struct KbdRc<D: SeatHandler> {
+    #[cfg(feature = "wayland_frontend")]
+    pub(crate) authority_generation: Arc<AtomicU64>,
     pub(crate) internal: Mutex<KbdInternal<D>>,
     #[cfg(feature = "wayland_frontend")]
     pub(crate) keymap: Mutex<KeymapFile>,
@@ -801,6 +842,8 @@ impl<D: SeatHandler + 'static> KeyboardHandle<D> {
         Ok(Self {
             arc: Arc::new(KbdRc {
                 #[cfg(feature = "wayland_frontend")]
+                authority_generation: internal.authority_generation.clone(),
+                #[cfg(feature = "wayland_frontend")]
                 keymap: Mutex::new(keymap_file),
                 internal: Mutex::new(internal),
                 #[cfg(feature = "wayland_frontend")]
@@ -850,6 +893,7 @@ impl<D: SeatHandler + 'static> KeyboardHandle<D> {
         if new_id == *self.arc.active_keymap.read().unwrap() {
             return false;
         }
+        invalidate_keyboard_authority(&self.arc.authority_generation);
         *self.arc.active_keymap.write().unwrap() = new_id;
 
         // Update keymap for every wl_keyboard.
@@ -917,8 +961,204 @@ impl<D: SeatHandler + 'static> KeyboardHandle<D> {
         }
     }
 
+    /// Snapshot an already-focused native surface without changing seat state.
+    /// No grabbed or physically held keyboard is eligible. A compositor must
+    /// reject competing virtual sources and revoke on every local input edge.
+    #[cfg(feature = "wayland_frontend")]
+    pub fn snapshot_authorized_keyboard(
+        &self,
+        expected: &wayland_server::protocol::wl_surface::WlSurface,
+    ) -> Option<AuthorizedKeyboardSnapshot>
+    where
+        D::KeyboardFocus: crate::wayland::seat::WaylandFocus,
+    {
+        use crate::wayland::seat::WaylandFocus;
+        // Match normal input/keymap updates: internal -> keymap -> receivers.
+        let internal = self.arc.internal.lock().unwrap();
+        let keymap = self.arc.keymap.lock().unwrap();
+        let generation = internal.authority_generation.load(Ordering::Acquire);
+        let (focus, serial) = internal.focus.as_ref()?;
+        if generation == u64::MAX
+            || !expected.is_alive()
+            || focus.wl_surface().as_deref() != Some(expected)
+            || !matches!(internal.grab, GrabStatus::None)
+            || !internal.pressed_keys.is_empty()
+            || internal.mods_state.serialized.depressed != 0
+            || internal.mods_state.serialized.latched != 0
+            || internal.mods_state.serialized.locked != 0
+            || internal.mods_state.serialized.layout_effective != 0
+            || keymap.id() != *self.arc.active_keymap.read().unwrap()
+        {
+            return None;
+        }
+        let client = expected.client()?;
+        let receivers: Vec<_> = self
+            .arc
+            .known_kbds
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|kbd| kbd.upgrade().ok())
+            .filter(|kbd| kbd.is_alive() && kbd.client().is_some_and(|c| c.id() == client.id()))
+            .collect();
+        if receivers.is_empty() {
+            return None;
+        }
+        let keymap_text = internal.xkb.lock().unwrap().keymap_as_string();
+        Some(AuthorizedKeyboardSnapshot {
+            target: expected.clone(),
+            focus_serial: *serial,
+            generation,
+            keymap_id: keymap.id(),
+            keymap_text,
+            receivers,
+        })
+    }
+
+    /// Deliver only to the snapshot's unchanged focused receiver set.
+    /// Does not run grabs, IME, shortcuts, broadcast a keymap, or mutate physical
+    /// key/XKB state. The compositor owns independent held-key pairing/modifiers.
+    #[cfg(feature = "wayland_frontend")]
+    pub fn deliver_authorized_keyboard(
+        &self,
+        snapshot: &AuthorizedKeyboardSnapshot,
+        modifiers: ModifiersState,
+        key: (Keycode, KeyState, Serial, InputTime),
+    ) -> bool
+    where
+        D::KeyboardFocus: crate::wayland::seat::WaylandFocus,
+    {
+        let (code, state, serial, time) = key;
+        if !(8..=775).contains(&code.raw()) {
+            return false;
+        }
+        self.with_authorized_keyboard(snapshot, |receivers| {
+            let mods = modifiers.serialized;
+            for kbd in receivers {
+                kbd.modifiers(
+                    serial.into(),
+                    mods.depressed,
+                    mods.latched,
+                    mods.locked,
+                    mods.layout_effective,
+                );
+                kbd.key(serial.into(), time.millis(), code.raw() - 8, state.into());
+            }
+        })
+    }
+
+    /// Recheck a lease without generating any protocol input.
+    #[cfg(feature = "wayland_frontend")]
+    pub fn authorized_keyboard_snapshot_is_current(&self, snapshot: &AuthorizedKeyboardSnapshot) -> bool
+    where
+        D::KeyboardFocus: crate::wayland::seat::WaylandFocus,
+    {
+        self.with_authorized_keyboard(snapshot, |_| {})
+    }
+
+    #[cfg(feature = "wayland_frontend")]
+    fn with_authorized_keyboard(
+        &self,
+        snapshot: &AuthorizedKeyboardSnapshot,
+        send: impl FnOnce(&[wayland_server::protocol::wl_keyboard::WlKeyboard]),
+    ) -> bool
+    where
+        D::KeyboardFocus: crate::wayland::seat::WaylandFocus,
+    {
+        use crate::wayland::seat::WaylandFocus;
+        // Match normal input/keymap updates: internal -> keymap -> receivers.
+        let internal = self.arc.internal.lock().unwrap();
+        let keymap = self.arc.keymap.lock().unwrap();
+        let generation = internal.authority_generation.load(Ordering::Acquire);
+        let Some((focus, focus_serial)) = internal.focus.as_ref() else {
+            return false;
+        };
+        if generation == u64::MAX
+            || generation != snapshot.generation
+            || !snapshot.target.is_alive()
+            || focus.wl_surface().as_deref() != Some(&snapshot.target)
+            || *focus_serial != snapshot.focus_serial
+            || !matches!(internal.grab, GrabStatus::None)
+            || !internal.pressed_keys.is_empty()
+            || internal.mods_state.serialized.depressed != 0
+            || internal.mods_state.serialized.latched != 0
+            || internal.mods_state.serialized.locked != 0
+            || internal.mods_state.serialized.layout_effective != 0
+            || keymap.id() != snapshot.keymap_id
+            || *self.arc.active_keymap.read().unwrap() != snapshot.keymap_id
+        {
+            return false;
+        }
+        let Some(client) = snapshot.target.client() else {
+            return false;
+        };
+        let known = self.arc.known_kbds.lock().unwrap();
+        let receivers: Vec<_> = known
+            .iter()
+            .filter_map(|kbd| kbd.upgrade().ok())
+            .filter(|kbd| kbd.is_alive() && kbd.client().is_some_and(|c| c.id() == client.id()))
+            .collect();
+        if receivers.len() != snapshot.receivers.len()
+            || snapshot.receivers.iter().any(|kbd| !receivers.contains(kbd))
+        {
+            return false;
+        }
+        send(&snapshot.receivers);
+        true
+    }
+
+    /// Balance only the lease's old receivers while they retain the original
+    /// focus. Newly bound keyboards never receive these releases. A grab may
+    /// exist, but cannot redirect cleanup. Physical keys are never released.
+    /// Call before handling a local input event, or before changing focus.
+    #[cfg(feature = "wayland_frontend")]
+    pub fn cleanup_authorized_keyboard(
+        &self,
+        snapshot: &AuthorizedKeyboardSnapshot,
+        held: &[Keycode],
+        serial: Serial,
+        time: InputTime,
+    ) -> bool
+    where
+        D::KeyboardFocus: crate::wayland::seat::WaylandFocus,
+    {
+        use crate::wayland::seat::WaylandFocus;
+        let internal = self.arc.internal.lock().unwrap();
+        let Some((focus, focus_serial)) = internal.focus.as_ref() else {
+            return false;
+        };
+        if !snapshot.target.is_alive()
+            || focus.wl_surface().as_deref() != Some(&snapshot.target)
+            || *focus_serial != snapshot.focus_serial
+        {
+            return false;
+        }
+        let mods = internal.mods_state.serialized;
+        for kbd in snapshot.receivers.iter().filter(|kbd| kbd.is_alive()) {
+            for code in held {
+                if (8..=775).contains(&code.raw()) && !internal.pressed_keys.contains(code) {
+                    kbd.key(
+                        serial.into(),
+                        time.millis(),
+                        code.raw() - 8,
+                        KeyState::Released.into(),
+                    );
+                }
+            }
+            kbd.modifiers(
+                serial.into(),
+                mods.depressed,
+                mods.latched,
+                mods.locked,
+                mods.layout_effective,
+            );
+        }
+        true
+    }
+
     fn update_xkb_state(&self, data: &mut D, keymap: xkb::Keymap) {
         let mut internal = self.arc.internal.lock().unwrap();
+        invalidate_keyboard_authority(&internal.authority_generation);
 
         let mut state = xkb::State::new(&keymap);
         for key in &internal.pressed_keys {
@@ -1010,6 +1250,7 @@ impl<D: SeatHandler + 'static> KeyboardHandle<D> {
             let result = callback(state);
 
             if mods_changed {
+                invalidate_keyboard_authority(&internal.authority_generation);
                 if let Some((focus, _)) = internal.focus.as_mut() {
                     let seat = self.get_seat(data);
                     focus.modifiers(&seat, data, internal.mods_state, SERIAL_COUNTER.next_serial());
@@ -1035,6 +1276,7 @@ impl<D: SeatHandler + 'static> KeyboardHandle<D> {
         if let GrabStatus::Active(_, handler) = &mut inner.grab {
             handler.unset(data);
         }
+        invalidate_keyboard_authority(&inner.authority_generation);
         inner.grab = GrabStatus::Active(serial, Box::new(grab));
     }
 
@@ -1044,6 +1286,7 @@ impl<D: SeatHandler + 'static> KeyboardHandle<D> {
         if let GrabStatus::Active(_, handler) = &mut inner.grab {
             handler.unset(data);
         }
+        invalidate_keyboard_authority(&inner.authority_generation);
         inner.grab = GrabStatus::None;
     }
 
@@ -1403,6 +1646,7 @@ impl<D: SeatHandler + 'static> KeyboardHandle<D> {
             (leds_changed, led_state, modifiers_changed, serialized)
         };
 
+        invalidate_keyboard_authority(&internal.authority_generation);
         internal.mods_state = mods_state;
         internal.mods_state.serialized = serialized;
 
@@ -1613,6 +1857,7 @@ impl<D: SeatHandler + 'static> KeyboardInnerHandle<'_, D> {
         grab: G,
     ) {
         handler.unset(data);
+        invalidate_keyboard_authority(&self.inner.authority_generation);
         self.inner.grab = GrabStatus::Active(serial, Box::new(grab));
     }
 
@@ -1628,6 +1873,7 @@ impl<D: SeatHandler + 'static> KeyboardInnerHandle<'_, D> {
         restore_focus: bool,
     ) {
         handler.unset(data);
+        invalidate_keyboard_authority(&self.inner.authority_generation);
         self.inner.grab = GrabStatus::None;
         // restore the focus
         if restore_focus {
@@ -1799,4 +2045,26 @@ impl<D: SeatHandler + 'static> KeyboardGrab<D> for DefaultGrab {
     }
 
     fn unset(&mut self, _data: &mut D) {}
+}
+
+#[cfg(test)]
+mod authorized_keyboard_generation_tests {
+    use super::{AtomicU64, Ordering, invalidate_keyboard_authority};
+
+    #[test]
+    fn keyboard_authority_history_never_reuses_a_generation() {
+        let generation = AtomicU64::new(0);
+        invalidate_keyboard_authority(&generation);
+        assert_eq!(generation.load(Ordering::Acquire), 1);
+        invalidate_keyboard_authority(&generation);
+        assert_eq!(generation.load(Ordering::Acquire), 2);
+    }
+
+    #[test]
+    fn keyboard_authority_generation_saturates_permanently() {
+        let generation = AtomicU64::new(u64::MAX - 1);
+        invalidate_keyboard_authority(&generation);
+        invalidate_keyboard_authority(&generation);
+        assert_eq!(generation.load(Ordering::Acquire), u64::MAX);
+    }
 }

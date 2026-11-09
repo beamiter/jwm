@@ -57,6 +57,7 @@ const RECEIVER_JOIN_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Debug)]
 pub struct ClientOptions {
+    pub wayland_keyboard: bool,
     /// One explicit source-size operation; never replayed or saved in a profile.
     pub resize_source: Option<super::window_size::WindowSize>,
     /// Explicit local client-area startup size; None preserves automatic sizing.
@@ -276,7 +277,7 @@ pub fn run_client(options: ClientOptions) -> RemoteResult<()> {
 /// single-session entry point. The budget counts additional sessions and never
 /// resets, even when a replacement session runs successfully for a long time.
 pub fn run_client_reconnecting(options: ClientOptions, attempts: u8) -> RemoteResult<()> {
-    if options.resize_source.is_some() && attempts != 0 {
+    if (options.resize_source.is_some() || options.wayland_keyboard) && attempts != 0 {
         return Err(invalid_data("explicit source resize cannot automatically reconnect").into());
     }
     if attempts > 5 {
@@ -387,7 +388,16 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
     }
     validate_escape_key(&options.escape_key)?;
     let key = options.key.load()?;
-    let request_input = !options.view_only;
+    if options.wayland_keyboard
+        && (!cfg!(feature = "remote-wayland")
+            || options.view_only
+            || options.clipboard
+            || options.grab_input
+            || options.resize_source.is_some())
+    {
+        return Err(invalid_data("Wayland keyboard requires compiled support and excludes legacy input, clipboard, resize and grabs").into());
+    }
+    let request_input = !options.view_only && !options.wayland_keyboard;
     let keymap = if request_input {
         read_display(options.display.as_deref())?
     } else {
@@ -407,6 +417,7 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
     eprintln!("jwm-remote: connection opened; authenticating and negotiating permissions");
     let (mut reader, writer, hello) = negotiate_session(
         options.resize_source.is_some(),
+        options.wayland_keyboard,
         stream,
         &key,
         request_input,
@@ -562,6 +573,11 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
         &options.escape_key,
         &options.peer_label,
     )?;
+    #[cfg(feature = "remote-wayland")]
+    if options.wayland_keyboard {
+        let digest = viewer.enable_wayland_keyboard(options.display.as_deref())?;
+        state.wayland_keyboard.lock().unwrap().enable(digest);
+    }
     viewer.set_clipboard_status(hello.clipboard_enabled);
     viewer.enable_clipboard_narrowing(hello.clipboard_enabled);
     viewer.set_clipboard_policy(clipboard_policy::label(
@@ -856,6 +872,7 @@ fn finish_session(
 
 fn negotiate_session(
     request_window_resize: bool,
+    request_wayland_keyboard: bool,
     mut stream: TcpStream,
     key: &[u8],
     request_input: bool,
@@ -901,6 +918,7 @@ fn negotiate_session(
         &ClientHello {
             stream: super::messages::StreamCapabilities {
                 window_resize: request_window_resize,
+                wayland_keyboard: request_wayland_keyboard,
                 frame_limits,
                 clipboard_content: requested_policy.0,
                 clipboard_directions: requested_policy.1,
@@ -927,6 +945,20 @@ fn negotiate_session(
     writer.flush()?;
     let hello = read_server_hello(&mut reader)?;
     validate_server_frame_limits(&hello, frame_limits)?;
+    if hello.stream.wayland_keyboard != request_wayland_keyboard {
+        return Err(invalid_data("Wayland keyboard permission was not mutually negotiated").into());
+    }
+    if request_wayland_keyboard
+        && (hello.pointer_enabled
+            || hello.keyboard_enabled
+            || hello.clipboard_enabled
+            || hello.stream.window_resize)
+    {
+        return Err(invalid_data(
+            "Wayland keyboard cannot include legacy input or other permissions",
+        )
+        .into());
+    }
     if hello.stream.cursor == super::messages::CursorMode::Independent && !request_cursor_plane {
         return Err(invalid_data("host enabled independent cursor without viewer support").into());
     }
@@ -1152,8 +1184,25 @@ fn viewer_loop(
     loop {
         wake.drain()?;
         state.resize.lock().unwrap().check_timeout(Instant::now())?;
+        {
+            let mut keyboard = state.wayland_keyboard.lock().unwrap();
+            keyboard.check_timeout(Instant::now())?;
+            if keyboard.configured() && keyboard.ended {
+                #[cfg(feature = "remote-wayland")]
+                viewer.disable_wayland_keyboard();
+            } else if keyboard.epoch.is_some() && !keyboard.activated {
+                #[cfg(feature = "remote-wayland")]
+                viewer.check_wayland_keyboard(true)?;
+                keyboard.activated = true;
+            }
+        }
         let received_epoch = state.source_epoch.load(Ordering::Acquire);
         if received_epoch != source_epoch {
+            state
+                .wayland_keyboard
+                .lock()
+                .unwrap()
+                .check_scope((received_epoch, presented_scope.1))?;
             source_epoch = received_epoch;
             requested_epoch = None;
             switching = true;
@@ -1168,6 +1217,46 @@ fn viewer_loop(
                 error
             }
         })?;
+        {
+            let mut keyboard = state.wayland_keyboard.lock().unwrap();
+            if keyboard.configured() {
+                #[cfg(feature = "remote-wayland")]
+                if !keyboard.ended {
+                    viewer.check_wayland_keyboard(false)?;
+                }
+                let revoke = events.iter().any(|event| {
+                    matches!(
+                        event,
+                        ViewerEvent::ReleaseAll | ViewerEvent::Close | ViewerEvent::CycleSource
+                    )
+                });
+                if revoke {
+                    if let Some(record) = keyboard.revoke() {
+                        writer
+                            .write_message(MessageKind::WaylandKeyboardRevoke, &record.encode()?)?;
+                        writer.flush()?;
+                    } else if keyboard.request.is_some() && keyboard.epoch.is_none() {
+                        return Err(invalid_data(
+                            "keyboard lease cancelled while grant was pending",
+                        )
+                        .into());
+                    }
+                    #[cfg(feature = "remote-wayland")]
+                    viewer.disable_wayland_keyboard();
+                } else {
+                    for event in &events {
+                        if let ViewerEvent::Key { keycode, pressed } = event
+                            && let Some(key) = keyboard.key(*keycode, *pressed)?
+                        {
+                            writer
+                                .write_message(MessageKind::WaylandKeyboardKey, &key.encode()?)?;
+                        }
+                    }
+                }
+                // These events never enter legacy InputBatch or pointer paths.
+                events.retain(|event| matches!(event, ViewerEvent::Close));
+            }
+        }
         if events.contains(&ViewerEvent::NarrowClipboard) && !events.contains(&ViewerEvent::Close) {
             let mut restriction = state.clipboard_restriction.lock().unwrap();
             if let Some(restriction) = restriction.as_mut()
@@ -1305,6 +1394,24 @@ fn viewer_loop(
                 presented_scope = (timing.source_epoch, timing.geometry_epoch);
             }
             acknowledge_presentation(writer, sequence, pending_presentations, &state.telemetry)?;
+            {
+                let mut keyboard = state.wayland_keyboard.lock().unwrap();
+                keyboard.check_scope(presented_scope)?;
+                if keyboard.needs_request() {
+                    #[cfg(feature = "remote-wayland")]
+                    viewer.check_wayland_keyboard(true)?;
+                    if let Some(request) =
+                        keyboard.after_presentation(presented_scope, sequence, Instant::now())
+                    {
+                        writer.write_message(
+                            MessageKind::WaylandKeyboardRequest,
+                            &request.encode()?,
+                        )?;
+                        writer.flush()?;
+                    }
+                }
+            }
+
             if let Some(request) = state
                 .resize
                 .lock()
@@ -1323,6 +1430,11 @@ fn viewer_loop(
                 if frame.frame.source_epoch() == source_epoch
                     && requested_epoch != Some(source_epoch)
                 {
+                    state
+                        .wayland_keyboard
+                        .lock()
+                        .unwrap()
+                        .check_scope((frame.frame.source_epoch(), frame.frame.geometry_epoch()))?;
                     if viewer.prepare_frame_geometry(frame.frame.geometry_epoch())? {
                         write_source_release(
                             writer,
@@ -2068,6 +2180,165 @@ fn average_millis(duration: Duration, count: u64) -> f64 {
 }
 
 #[derive(Default)]
+struct ClientKeyboard {
+    digest: Option<[u8; 32]>,
+    request: Option<(super::wayland_keyboard_wire::LeaseRequest, Instant)>,
+    epoch: Option<u64>,
+    sequence: u64,
+    held: std::collections::BTreeSet<u16>,
+    activated: bool,
+    ended: bool,
+    terminal_received: bool,
+}
+impl ClientKeyboard {
+    #[cfg(feature = "remote-wayland")]
+    fn enable(&mut self, digest: [u8; 32]) {
+        self.digest = Some(digest);
+    }
+    fn configured(&self) -> bool {
+        self.digest.is_some()
+    }
+    fn needs_request(&self) -> bool {
+        self.configured() && self.request.is_none() && !self.ended
+    }
+    fn after_presentation(
+        &mut self,
+        scope: (u64, u64),
+        sequence: u64,
+        now: Instant,
+    ) -> Option<super::wayland_keyboard_wire::LeaseRequest> {
+        if !self.needs_request() {
+            return None;
+        }
+        let request = super::wayland_keyboard_wire::LeaseRequest {
+            source_epoch: scope.0,
+            geometry_epoch: scope.1,
+            frame_sequence: sequence,
+            keymap_digest: self.digest.unwrap(),
+        };
+        self.request = Some((request, now));
+        Some(request)
+    }
+    fn receive(&mut self, result: super::wayland_keyboard_wire::LeaseStatus) -> RemoteResult<()> {
+        use super::wayland_keyboard_wire::LeaseStatusKind;
+        let (request, _) = self
+            .request
+            .ok_or_else(|| invalid_data("unsolicited keyboard lease status"))?;
+        if self.terminal_received
+            || (
+                result.source_epoch,
+                result.geometry_epoch,
+                result.frame_sequence,
+            ) != (
+                request.source_epoch,
+                request.geometry_epoch,
+                request.frame_sequence,
+            )
+        {
+            return Err(invalid_data("keyboard lease status scope mismatch or replay").into());
+        }
+        match result.status {
+            LeaseStatusKind::Granted
+                if !self.ended && self.epoch.is_none() && result.lease_epoch != 0 =>
+            {
+                self.check_timeout(Instant::now())?;
+                self.epoch = Some(result.lease_epoch);
+                eprintln!(
+                    "jwm-remote: Wayland keyboard lease granted (fixed source; no automatic renewal)"
+                );
+            }
+            LeaseStatusKind::Denied if !self.ended && self.epoch.is_none() => {
+                self.ended = true;
+                self.terminal_received = true;
+            }
+            LeaseStatusKind::Revoked if self.epoch == Some(result.lease_epoch) => {
+                self.ended = true;
+                self.terminal_received = true;
+            }
+            _ => return Err(invalid_data("invalid keyboard lease status transition").into()),
+        }
+        if self.ended {
+            self.held.clear();
+            eprintln!("jwm-remote: Wayland keyboard lease ended; read-only viewing continues");
+        }
+        Ok(())
+    }
+    fn check_timeout(&self, now: Instant) -> RemoteResult<()> {
+        if self.ended {
+            return Ok(());
+        }
+        if let Some((_, started)) = self.request {
+            let limit = if self.epoch.is_some() {
+                super::wayland_keyboard_wire::LEASE_DURATION
+            } else {
+                Duration::from_secs(5)
+            };
+            if now.saturating_duration_since(started) >= limit {
+                return Err(invalid_data("keyboard lease deadline expired; not renewed").into());
+            }
+        }
+        Ok(())
+    }
+    fn check_scope(&self, scope: (u64, u64)) -> RemoteResult<()> {
+        if !self.ended
+            && let Some((request, _)) = self.request
+            && scope != (request.source_epoch, request.geometry_epoch)
+        {
+            return Err(invalid_data("keyboard lease geometry/source changed").into());
+        }
+        Ok(())
+    }
+    fn key(
+        &mut self,
+        keycode: u8,
+        pressed: bool,
+    ) -> RemoteResult<Option<super::wayland_keyboard_wire::Key>> {
+        if self.ended || self.epoch.is_none() {
+            return Ok(None);
+        }
+        self.check_timeout(Instant::now())?;
+        let code = keycode
+            .checked_sub(8)
+            .filter(|code| *code != 0)
+            .ok_or_else(|| invalid_data("invalid XKB keyboard keycode"))?;
+        #[cfg(feature = "remote-wayland")]
+        if !crate::remote_keyboard_protocol::keyboard_key_allowed(u32::from(code)) {
+            return Err(invalid_data("key is outside the native keyboard lease allowlist").into());
+        }
+        let code = u16::from(code);
+        if (pressed && (self.held.len() >= 32 || !self.held.insert(code)))
+            || (!pressed && !self.held.remove(&code))
+        {
+            return Err(invalid_data("keyboard lease key state mismatch").into());
+        }
+        self.sequence = self
+            .sequence
+            .checked_add(1)
+            .filter(|seq| *seq <= 60000)
+            .ok_or_else(|| invalid_data("keyboard lease sequence exhausted"))?;
+        let (request, _) = self.request.unwrap();
+        Ok(Some(super::wayland_keyboard_wire::Key {
+            lease_epoch: self.epoch.unwrap(),
+            sequence: self.sequence,
+            source_epoch: request.source_epoch,
+            geometry_epoch: request.geometry_epoch,
+            frame_sequence: request.frame_sequence,
+            keycode: code,
+            pressed,
+        }))
+    }
+    fn revoke(&mut self) -> Option<super::wayland_keyboard_wire::KeyboardRevoke> {
+        if self.ended {
+            return None;
+        }
+        self.ended = true;
+        self.held.clear();
+        self.epoch
+            .map(|lease_epoch| super::wayland_keyboard_wire::KeyboardRevoke { lease_epoch })
+    }
+}
+
+#[derive(Default)]
 struct ClientResize {
     requested: Option<super::window_size::WindowSize>,
     pending: Option<(super::window_resize::ResizeRequest, Instant)>,
@@ -2128,6 +2399,7 @@ impl ClientResize {
 
 struct ReceiveState {
     resize: Mutex<ClientResize>,
+    wayland_keyboard: Mutex<ClientKeyboard>,
     clipboard_restriction: Mutex<Option<RestrictionState>>,
     catalog: Mutex<Option<SourceCatalog>>,
     source_epoch: AtomicU64,
@@ -2146,6 +2418,7 @@ impl ReceiveState {
     fn new() -> Self {
         Self {
             resize: Mutex::new(ClientResize::default()),
+            wayland_keyboard: Mutex::new(ClientKeyboard::default()),
             clipboard_restriction: Mutex::new(None),
             catalog: Mutex::new(None),
             source_epoch: AtomicU64::new(1),
@@ -2372,6 +2645,14 @@ fn receive_frame_records(
             })?;
         let kind = read_record(&mut payload, remaining)?;
         match kind {
+            MessageKind::WaylandKeyboardStatus => {
+                state
+                    .wayland_keyboard
+                    .lock()
+                    .unwrap()
+                    .receive(super::wayland_keyboard_wire::LeaseStatus::decode(&payload)?)?;
+                completion.signal()?;
+            }
             MessageKind::WindowResizeResult => {
                 state
                     .resize
@@ -2480,6 +2761,9 @@ fn receive_frame_records(
             | MessageKind::SourceCatalog
             | MessageKind::SourceRequest
             | MessageKind::WindowResizeRequest
+            | MessageKind::WaylandKeyboardRequest
+            | MessageKind::WaylandKeyboardKey
+            | MessageKind::WaylandKeyboardRevoke
             | MessageKind::ClipboardRestrict => {
                 return Err(invalid_data(format!("unexpected host message: {kind:?}")).into());
             }
@@ -2538,6 +2822,66 @@ fn invalid_data(message: impl Into<String>) -> io::Error {
 
 #[cfg(test)]
 pub(super) mod tests {
+    #[test]
+    fn wayland_keyboard_status_requires_exact_drawn_scope_and_single_grant() {
+        use super::super::wayland_keyboard_wire::{LeaseStatus, LeaseStatusKind};
+        let mut keyboard = super::ClientKeyboard {
+            digest: Some([7; 32]),
+            ..Default::default()
+        };
+        let request = keyboard
+            .after_presentation((2, 3), 0, std::time::Instant::now())
+            .unwrap();
+        assert!(
+            keyboard
+                .after_presentation((2, 3), 1, std::time::Instant::now())
+                .is_none()
+        );
+        let granted = LeaseStatus {
+            lease_epoch: 9,
+            source_epoch: request.source_epoch,
+            geometry_epoch: request.geometry_epoch,
+            frame_sequence: request.frame_sequence,
+            status: LeaseStatusKind::Granted,
+        };
+        assert!(
+            keyboard
+                .receive(LeaseStatus {
+                    frame_sequence: 1,
+                    ..granted
+                })
+                .is_err()
+        );
+        keyboard.receive(granted).unwrap();
+        assert!(keyboard.receive(granted).is_err());
+        assert!(keyboard.check_scope((2, 3)).is_ok());
+        assert!(keyboard.check_scope((2, 4)).is_err());
+        assert_eq!(keyboard.revoke().unwrap().lease_epoch, 9);
+        assert!(keyboard.revoke().is_none());
+        assert!(keyboard.key(38, true).unwrap().is_none());
+    }
+    #[test]
+    fn wayland_keyboard_never_replays_pregrant_keys_and_deadlines_do_not_renew() {
+        let now = std::time::Instant::now();
+        let mut keyboard = super::ClientKeyboard {
+            digest: Some([7; 32]),
+            ..Default::default()
+        };
+        assert!(keyboard.key(38, true).unwrap().is_none());
+        assert!(keyboard.held.is_empty());
+        keyboard.after_presentation((1, 1), 0, now).unwrap();
+        assert!(
+            keyboard
+                .check_timeout(now + std::time::Duration::from_secs(5))
+                .is_err()
+        );
+        keyboard.epoch = Some(4);
+        assert!(
+            keyboard
+                .check_timeout(now + super::super::wayland_keyboard_wire::LEASE_DURATION)
+                .is_err()
+        );
+    }
     use super::*;
     use crate::remote::frame::{DecodedFrame, decode_pool_snapshot};
     use crate::remote::messages::decode_source_frame_ack;
@@ -2857,6 +3201,7 @@ pub(super) mod tests {
     #[test]
     fn invalid_startup_size_fails_before_reading_key_or_display() {
         let options = ClientOptions {
+            wayland_keyboard: false,
             resize_source: None,
             window_position: None,
             window_size: Some(super::super::window_size::WindowSize {
@@ -4835,6 +5180,7 @@ pub(super) mod tests {
         let started = Instant::now();
         let result = negotiate_session(
             false,
+            false,
             stream,
             &TEST_PSK,
             false,
@@ -4893,6 +5239,7 @@ pub(super) mod tests {
         let started = Instant::now();
         let result = negotiate_session(
             false,
+            false,
             stream,
             &TEST_PSK,
             false,
@@ -4945,6 +5292,7 @@ pub(super) mod tests {
         });
         let stream = TcpStream::connect(address).unwrap();
         let result = negotiate_session(
+            false,
             false,
             stream,
             &TEST_PSK,
@@ -5001,6 +5349,7 @@ pub(super) mod tests {
         });
         let stream = TcpStream::connect(address).unwrap();
         let result = negotiate_session(
+            false,
             false,
             stream,
             &TEST_PSK,
@@ -5065,6 +5414,7 @@ pub(super) mod tests {
             });
             let stream = TcpStream::connect(address).unwrap();
             let result = negotiate_session(
+                false,
                 false,
                 stream,
                 &TEST_PSK,
@@ -5153,6 +5503,7 @@ pub(super) mod tests {
         let stream = TcpStream::connect(address).unwrap();
         let (mut reader, _writer, hello) = negotiate_session(
             true,
+            false,
             stream,
             &TEST_PSK,
             false,

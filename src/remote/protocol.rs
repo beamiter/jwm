@@ -176,6 +176,10 @@ pub enum MessageKind {
     ClipboardRestricted = 22,
     WindowResizeRequest = 23,
     WindowResizeResult = 24,
+    WaylandKeyboardRequest = 25,
+    WaylandKeyboardStatus = 26,
+    WaylandKeyboardKey = 27,
+    WaylandKeyboardRevoke = 28,
 }
 
 impl TryFrom<u8> for MessageKind {
@@ -205,6 +209,10 @@ impl TryFrom<u8> for MessageKind {
             20 => Ok(Self::SessionClose),
             23 => Ok(Self::WindowResizeRequest),
             24 => Ok(Self::WindowResizeResult),
+            25 => Ok(Self::WaylandKeyboardRequest),
+            26 => Ok(Self::WaylandKeyboardStatus),
+            27 => Ok(Self::WaylandKeyboardKey),
+            28 => Ok(Self::WaylandKeyboardRevoke),
             21 => Ok(Self::ClipboardRestrict),
             22 => Ok(Self::ClipboardRestricted),
             other => Err(ProtocolError::UnknownMessageKind(other)),
@@ -876,11 +884,15 @@ mod tests {
             (22, MessageKind::ClipboardRestricted),
             (23, MessageKind::WindowResizeRequest),
             (24, MessageKind::WindowResizeResult),
+            (25, MessageKind::WaylandKeyboardRequest),
+            (26, MessageKind::WaylandKeyboardStatus),
+            (27, MessageKind::WaylandKeyboardKey),
+            (28, MessageKind::WaylandKeyboardRevoke),
         ] {
             assert_eq!(MessageKind::try_from(tag).unwrap(), kind);
             assert_eq!(u8::from(kind), tag);
         }
-        for tag in (0..=u8::MAX).filter(|tag| !(1..=24).contains(tag)) {
+        for tag in (0..=u8::MAX).filter(|tag| !(1..=28).contains(tag)) {
             assert!(
                 matches!(MessageKind::try_from(tag), Err(ProtocolError::UnknownMessageKind(rejected)) if rejected == tag),
                 "unallocated application message kind {tag} must be rejected"

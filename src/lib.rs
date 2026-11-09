@@ -24,6 +24,8 @@ pub mod ipc_server;
 pub mod jwm;
 #[cfg(feature = "remote-x11")]
 pub mod remote;
+#[cfg(any(feature = "remote-wayland", feature = "wayland-backends"))]
+pub mod remote_keyboard_protocol;
 pub mod renderer;
 pub mod sync_ext;
 pub mod terminal_prober;

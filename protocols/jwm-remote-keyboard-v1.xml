@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<protocol name="jwm_remote_keyboard_v1">
+  <copyright>Copyright 2026 JWM contributors. MIT license.</copyright>
+  <interface name="jwm_remote_keyboard_manager_v1" version="1">
+    <description summary="trusted local single-surface keyboard lease">This private protocol is not a desktop portal. A trusted local host must obtain explicit keyboard consent, select a source on this connection, and authenticate its remote peer. It cannot switch focus or authorize pointer or clipboard access.</description>
+    <request name="destroy" type="destructor"/>
+    <request name="create_lease"><arg name="id" type="new_id" interface="jwm_remote_keyboard_lease_v1"/><arg name="source" type="object" interface="ext_image_capture_source_v1"/></request>
+  </interface>
+  <interface name="jwm_remote_keyboard_lease_v1" version="1">
+    <description summary="non-renewable keyboard capability">A lease expires after 30 seconds and never revives. Each capture source permits exactly one keyboard attempt, including failed admission; a fresh explicit local source selection is required to attempt another lease. The host must compare the full viewer and native XKB maps, then arm using its first genuinely ready image-copy frame only after the authenticated viewer reports drawing it. The compositor cannot prove physical display. This gates a fixed surface geometry, not the latest visual content for every key.</description>
+    <request name="destroy" type="destructor"/>
+    <request name="arm"><arg name="epoch" type="uint"/><arg name="frame" type="object" interface="ext_image_copy_capture_frame_v1"/></request>
+    <request name="key"><arg name="epoch" type="uint"/><arg name="sequence" type="uint"/><arg name="key" type="uint" summary="Linux evdev code, bounded allowlist"/><arg name="state" type="uint" summary="0 released, 1 pressed"/></request>
+    <event name="keymap"><arg name="format" type="uint" summary="1 XKB text v1"/><arg name="fd" type="fd"/><arg name="size" type="uint"/></event>
+    <event name="granted"><arg name="id" type="uint"/><arg name="epoch" type="uint"/><arg name="ttl_ms" type="uint"/></event>
+    <event name="armed"><arg name="epoch" type="uint"/></event>
+    <event name="accepted"><arg name="epoch" type="uint"/><arg name="sequence" type="uint"/></event>
+    <event name="revoked"><arg name="reason" type="uint" summary="1 denied, 2 source, 3 focus or seat, 4 local takeover, 5 timeout, 6 malformed sequence, 7 quota"/></event>
+  </interface>
+</protocol>

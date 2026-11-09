@@ -6,6 +6,10 @@
 use super::RemoteResult;
 use super::messages::FrameLimits;
 use super::x11_capture::{CaptureImageRecycler, CaptureOutcome, CapturedFrame, frame_dimensions};
+use crate::remote_keyboard_protocol::client::{
+    jwm_remote_keyboard_lease_v1::{self as keyboard_lease, JwmRemoteKeyboardLeaseV1},
+    jwm_remote_keyboard_manager_v1::JwmRemoteKeyboardManagerV1,
+};
 use image::{RgbImage, imageops::FilterType};
 use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 use nix::sys::memfd::{MFdFlags, memfd_create};
@@ -50,7 +54,24 @@ struct Toplevel {
 }
 
 #[derive(Default)]
+struct NativeKeyboard {
+    manager: Option<JwmRemoteKeyboardManagerV1>,
+    global: Option<u32>,
+    enabled: bool,
+    revoked: bool,
+    requested: bool,
+    digest: Option<[u8; 32]>,
+    epoch: Option<u32>,
+    armed: bool,
+    arm_sent: bool,
+    accepted: u32,
+    expected: Option<u32>,
+    deadline: Option<Instant>,
+}
+
+#[derive(Default)]
 struct State {
+    keyboard: NativeKeyboard,
     shm: Option<wl_shm::WlShm>,
     list: Option<ExtForeignToplevelListV1>,
     source_manager: Option<ExtForeignToplevelImageCaptureSourceManagerV1>,
@@ -130,6 +151,9 @@ pub(super) struct WaylandCapture {
     limits: FrameLimits,
     epoch: u64,
     recycler: CaptureImageRecycler,
+    keyboard_lease: Option<JwmRemoteKeyboardLeaseV1>,
+    retained_frame: Option<ExtImageCopyCaptureFrameV1>,
+    arm_deadline: Option<Instant>,
 }
 
 impl WaylandCapture {
@@ -184,6 +208,9 @@ impl WaylandCapture {
             limits: FrameLimits::default(),
             epoch: 1,
             recycler: CaptureImageRecycler::default(),
+            keyboard_lease: None,
+            retained_frame: None,
+            arm_deadline: None,
         };
         let deadline = Instant::now() + PROTOCOL_TIMEOUT;
         // First sync obtains globals. Binds issued by their callbacks precede
@@ -252,6 +279,155 @@ impl WaylandCapture {
         capture.create_buffer()?;
         capture.sync_until(deadline)?;
         Ok(capture)
+    }
+
+    /// Must be enabled before the first frame and only after wire negotiation.
+    pub(super) fn enable_keyboard(&mut self) -> RemoteResult<()> {
+        if self.state.frame_serial != 0
+            || self.state.keyboard.enabled
+            || self.state.keyboard.revoked
+            || self.state.keyboard.manager.is_none()
+        {
+            return Err(invalid("native keyboard manager unavailable or enable too late").into());
+        }
+        self.state.keyboard.enabled = true;
+        Ok(())
+    }
+
+    pub(super) fn keyboard_revoked(&self) -> bool {
+        self.state.keyboard.enabled
+            && (self.state.keyboard.revoked
+                || self
+                    .arm_deadline
+                    .is_some_and(|deadline| Instant::now() >= deadline)
+                || self
+                    .state
+                    .keyboard
+                    .deadline
+                    .is_some_and(|deadline| Instant::now() >= deadline))
+    }
+
+    pub(super) fn revoke_keyboard(&mut self) {
+        self.state.keyboard.revoked = true;
+        if let Some(lease) = self.keyboard_lease.take() {
+            lease.destroy();
+        }
+        if let Some(frame) = self.retained_frame.take() {
+            frame.destroy();
+        }
+        self.arm_deadline = None;
+        let _ = self.conn.backend().flush();
+    }
+
+    fn expire_keyboard(&mut self) {
+        if self.keyboard_revoked() {
+            self.revoke_keyboard();
+        }
+    }
+
+    fn await_keyboard(
+        &mut self,
+        deadline: Instant,
+        done: impl Fn(&NativeKeyboard) -> bool,
+    ) -> RemoteResult<()> {
+        loop {
+            self.expire_keyboard();
+            self.state.check()?;
+            if self.state.keyboard.revoked {
+                return Err(invalid("native keyboard lease revoked").into());
+            }
+            if done(&self.state.keyboard) {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                return Err(invalid("native keyboard response timed out").into());
+            }
+            self.pump(deadline)?;
+        }
+    }
+
+    pub(super) fn arm_keyboard(&mut self, digest: [u8; 32]) -> RemoteResult<u64> {
+        let result = self.arm_keyboard_inner(digest);
+        if result.is_err() {
+            self.revoke_keyboard();
+        }
+        result
+    }
+    fn arm_keyboard_inner(&mut self, digest: [u8; 32]) -> RemoteResult<u64> {
+        self.expire_keyboard();
+        if !self.state.keyboard.enabled
+            || self.state.keyboard.revoked
+            || self.state.keyboard.requested
+            || self.retained_frame.is_none()
+            || digest == [0; 32]
+        {
+            return Err(invalid("native keyboard arm not permitted").into());
+        }
+        self.state.keyboard.requested = true;
+        let deadline = (Instant::now() + PROTOCOL_TIMEOUT).min(self.arm_deadline.unwrap());
+        let lease = self.state.keyboard.manager.as_ref().unwrap().create_lease(
+            self.source.as_ref().unwrap(),
+            &self.queue.handle(),
+            (),
+        );
+        self.keyboard_lease = Some(lease);
+        self.await_keyboard(deadline, |state| {
+            state.digest.is_some() && state.epoch.is_some()
+        })?;
+        if self.state.keyboard.digest != Some(digest) {
+            return Err(invalid("native and viewer full keymaps differ").into());
+        }
+        let epoch = self.state.keyboard.epoch.unwrap();
+        self.state.keyboard.arm_sent = true;
+        self.keyboard_lease
+            .as_ref()
+            .unwrap()
+            .arm(epoch, self.retained_frame.as_ref().unwrap());
+        self.await_keyboard(deadline, |state| state.armed)?;
+        self.retained_frame.take().unwrap().destroy();
+        self.arm_deadline = None;
+        Ok(u64::from(epoch))
+    }
+
+    pub(super) fn keyboard_key(
+        &mut self,
+        key: &super::wayland_keyboard_wire::Key,
+    ) -> RemoteResult<()> {
+        let result = self.keyboard_key_inner(key);
+        if result.is_err() {
+            self.revoke_keyboard();
+        }
+        result
+    }
+    fn keyboard_key_inner(&mut self, key: &super::wayland_keyboard_wire::Key) -> RemoteResult<()> {
+        self.expire_keyboard();
+        let epoch = u32::try_from(key.lease_epoch)?;
+        let sequence = u32::try_from(key.sequence)?;
+        if self.state.keyboard.revoked
+            || !self.state.keyboard.armed
+            || self.state.keyboard.epoch != Some(epoch)
+            || sequence == 0
+            || sequence > 60_000
+            || self.state.keyboard.accepted.checked_add(1) != Some(sequence)
+            || !crate::remote_keyboard_protocol::keyboard_key_allowed(u32::from(key.keycode))
+        {
+            return Err(invalid("native keyboard edge not permitted").into());
+        }
+        self.state.keyboard.expected = Some(sequence);
+        self.keyboard_lease
+            .as_ref()
+            .ok_or_else(|| invalid("missing native keyboard lease"))?
+            .key(
+                epoch,
+                sequence,
+                u32::from(key.keycode),
+                u32::from(key.pressed),
+            );
+        let deadline =
+            (Instant::now() + PROTOCOL_TIMEOUT).min(self.state.keyboard.deadline.unwrap());
+        self.await_keyboard(deadline, |state| state.accepted == sequence)?;
+        self.state.keyboard.expected = None;
+        Ok(())
     }
 
     fn create_buffer(&mut self) -> RemoteResult<()> {
@@ -410,6 +586,7 @@ impl WaylandCapture {
     pub(super) fn frame(&mut self) -> RemoteResult<CaptureOutcome> {
         let result = self.read_frame();
         if result.is_err() {
+            self.revoke_keyboard();
             self.state
                 .fail("Wayland capture failed; local authorization is required again");
             if let Some(frame) = self.inflight.take() {
@@ -421,6 +598,12 @@ impl WaylandCapture {
 
     fn read_frame(&mut self) -> RemoteResult<CaptureOutcome> {
         self.state.check()?;
+        self.expire_keyboard();
+        if self.retained_frame.is_some() {
+            self.pump(Instant::now() + Duration::from_millis(1))?;
+            self.expire_keyboard();
+            return Ok(CaptureOutcome::NoChange);
+        }
         if self.inflight.is_some() {
             return Err(invalid("duplicate Wayland capture frame").into());
         }
@@ -445,7 +628,16 @@ impl WaylandCapture {
         frame.capture();
         self.inflight = Some(frame);
         self.drive_until(deadline, |state| state.frame_ready)?;
-        self.inflight.take().unwrap().destroy();
+        let ready_frame = self.inflight.take().unwrap();
+        if self.state.keyboard.enabled
+            && !self.state.keyboard.revoked
+            && self.state.frame_serial == 1
+        {
+            self.retained_frame = Some(ready_frame);
+            self.arm_deadline = Some(Instant::now() + PROTOCOL_TIMEOUT);
+        } else {
+            ready_frame.destroy();
+        }
         // Ready permits buffer reuse (wl_buffer.release is explicitly unused).
         // A final ordered barrier catches already-issued closed/stopped events.
         self.sync_until(deadline)?;
@@ -485,6 +677,9 @@ impl WaylandCapture {
     }
 
     fn advance_epoch(&mut self) -> bool {
+        if self.state.frame_serial > 0 && self.state.keyboard.enabled {
+            self.revoke_keyboard();
+        }
         if let Some(epoch) = self.epoch.checked_add(1) {
             self.epoch = epoch;
             true
@@ -527,7 +722,14 @@ impl WaylandCapture {
         let deadline = Instant::now()
             .checked_add(timeout)
             .ok_or_else(|| invalid("invalid Wayland wait timeout"))?;
+        self.expire_keyboard();
+        let deadline = self
+            .arm_deadline
+            .into_iter()
+            .chain(self.state.keyboard.deadline)
+            .fold(deadline, |a, b| a.min(b));
         let result = self.pump(deadline);
+        self.expire_keyboard();
         if result.is_err() {
             self.state.fail("Wayland capture connection failed");
         }
@@ -537,6 +739,7 @@ impl WaylandCapture {
 
 impl Drop for WaylandCapture {
     fn drop(&mut self) {
+        self.revoke_keyboard();
         if let Some(frame) = self.inflight.take() {
             frame.destroy();
         }
@@ -569,6 +772,11 @@ impl Dispatch<wl_registry::WlRegistry, ()> for State {
                 version,
             } if version >= 1 => {
                 let bound = match interface.as_str() {
+                    "jwm_remote_keyboard_manager_v1" if state.keyboard.manager.is_none() => {
+                        state.keyboard.manager = Some(proxy.bind(name, 1, qh, ()));
+                        state.keyboard.global = Some(name);
+                        false
+                    }
                     "wl_shm" if state.shm.is_none() => {
                         state.shm = Some(proxy.bind(name, 1, qh, ()));
                         true
@@ -592,6 +800,10 @@ impl Dispatch<wl_registry::WlRegistry, ()> for State {
                 if bound {
                     state.globals.push(name);
                 }
+            }
+            wl_registry::Event::GlobalRemove { name } if state.keyboard.global == Some(name) => {
+                state.keyboard.revoked = true;
+                state.keyboard.manager = None;
             }
             wl_registry::Event::GlobalRemove { name } if state.globals.contains(&name) => {
                 state.fail("required Wayland global was removed")
@@ -916,5 +1128,82 @@ mod tests {
         state.frame_ready = true;
         assert_eq!(state.failed, Some("selected Wayland window closed"));
         assert!(state.check().is_err());
+    }
+}
+
+wayland_client::delegate_noop!(State: ignore JwmRemoteKeyboardManagerV1);
+impl Dispatch<JwmRemoteKeyboardLeaseV1, ()> for State {
+    fn event(
+        state: &mut Self,
+        _: &JwmRemoteKeyboardLeaseV1,
+        event: keyboard_lease::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        let keyboard = &mut state.keyboard;
+        if keyboard.revoked {
+            return;
+        }
+        match event {
+            keyboard_lease::Event::Keymap { format, fd, size } => {
+                let read = || -> RemoteResult<[u8; 32]> {
+                    if format != 1 || size == 0 || size > 1024 * 1024 {
+                        return Err(invalid("invalid native keyboard map size or format").into());
+                    }
+                    let file = File::from(fd);
+                    if !file.metadata()?.is_file() {
+                        return Err(invalid("native keyboard map is not a regular file").into());
+                    }
+                    let mut bytes = vec![0; size as usize];
+                    file.read_exact_at(&mut bytes, 0)?;
+                    super::keyboard_keymap::canonical_digest(&bytes)
+                };
+                if keyboard.digest.is_some() {
+                    keyboard.revoked = true;
+                    return;
+                }
+                match read() {
+                    Ok(digest) => keyboard.digest = Some(digest),
+                    Err(_) => keyboard.revoked = true,
+                }
+            }
+            keyboard_lease::Event::Granted { id, epoch, ttl_ms } => {
+                if id == 0
+                    || epoch == 0
+                    || ttl_ms == 0
+                    || ttl_ms > 30_000
+                    || keyboard.epoch.is_some()
+                {
+                    keyboard.revoked = true;
+                    return;
+                }
+                keyboard.epoch = Some(epoch);
+                keyboard.deadline = Some(Instant::now() + Duration::from_millis(u64::from(ttl_ms)));
+            }
+            keyboard_lease::Event::Armed { epoch } => {
+                if keyboard.epoch != Some(epoch)
+                    || !keyboard.arm_sent
+                    || keyboard.armed
+                    || keyboard.digest.is_none()
+                {
+                    keyboard.revoked = true;
+                } else {
+                    keyboard.armed = true;
+                }
+            }
+            keyboard_lease::Event::Accepted { epoch, sequence } => {
+                if !keyboard.armed
+                    || keyboard.epoch != Some(epoch)
+                    || keyboard.expected != Some(sequence)
+                    || keyboard.accepted.checked_add(1) != Some(sequence)
+                {
+                    keyboard.revoked = true;
+                } else {
+                    keyboard.accepted = sequence;
+                }
+            }
+            keyboard_lease::Event::Revoked { .. } => keyboard.revoked = true,
+        }
     }
 }

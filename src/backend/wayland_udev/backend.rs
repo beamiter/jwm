@@ -3066,6 +3066,7 @@ impl UdevBackend {
             event_loop
                 .handle()
                 .insert_source(libinput_backend, move |event, _, state| {
+                    crate::backend::wayland_udev::remote_keyboard::revoke(state, crate::backend::wayland_udev::remote_keyboard::LOCAL);
                     reconcile_touch_routes(state, &shared);
                     let (gesture_modal, wm_swipe_allowed) = {
                         let s = shared.lock_safe();

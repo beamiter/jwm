@@ -25,6 +25,10 @@ use super::source_wire::{
 };
 use super::tile::{TileEncodeRequest, TileEncoder, TilePlan};
 use super::usability::listener_bind_error;
+use super::wayland_keyboard_wire::{
+    DrawnScope, HostKeyboardState, Key as KeyboardKey, KeyboardRevoke, LeaseRequest, LeaseStatus,
+    LeaseStatusKind,
+};
 use super::window_resize::{HostResizeState, ResizeRequest, ResizeResult};
 use super::x11_capture::{
     CaptureArea, CaptureImageRecycler, CaptureMode, CaptureOutcome, CaptureSource, CapturedFrame,
@@ -36,7 +40,7 @@ use super::{host_capture::HostCapture, window_capture::WindowCapture};
 use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 use signal_hook::consts::{SIGINT, SIGTERM};
 use signal_hook::flag;
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 use std::io;
 use std::net::{IpAddr, Shutdown, TcpListener, TcpStream};
 use std::os::fd::AsFd;
@@ -1602,6 +1606,7 @@ pub struct HostOptions {
     pub allow_lan: bool,
     pub allow_input: bool,
     pub allow_window_resize: bool,
+    pub allow_wayland_keyboard: bool,
     pub allow_clipboard: bool,
     pub clipboard_mode: ClipboardMode,
     pub clipboard_direction: ClipboardDirection,
@@ -1651,6 +1656,7 @@ struct HostSourceState {
     input_area: InputArea,
     geometry_epoch: u64,
     presented_geometry: Option<u64>,
+    presented_frame: Option<DrawnScope>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1696,11 +1702,19 @@ fn refresh_input_geometry<E>(
     Ok(())
 }
 
+enum KeyboardCommand {
+    Request(LeaseRequest),
+    Key(KeyboardKey),
+}
+
 struct SourceControl {
     state: Mutex<HostSourceState>,
     changed: Condvar,
     resize_enabled: AtomicBool,
     resize_request: Mutex<Option<ResizeRequest>>,
+    keyboard_enabled: AtomicBool,
+    keyboard_revoke: AtomicBool,
+    keyboard_queue: Mutex<VecDeque<KeyboardCommand>>,
 }
 
 impl SourceControl {
@@ -1716,10 +1730,14 @@ impl SourceControl {
                 input_area: area,
                 geometry_epoch,
                 presented_geometry: None,
+                presented_frame: None,
             }),
             changed: Condvar::new(),
             resize_enabled: AtomicBool::new(false),
             resize_request: Mutex::new(None),
+            keyboard_enabled: AtomicBool::new(false),
+            keyboard_revoke: AtomicBool::new(false),
+            keyboard_queue: Mutex::new(VecDeque::new()),
         })
     }
 
@@ -1805,9 +1823,15 @@ fn validate_window_policy(options: &HostOptions) -> RemoteResult<()> {
             || !matches!(options.capture_source, CaptureSource::Auto)
             || matches!(options.key, KeySource::Stdin)
         {
-            return Err(permission_denied("Wayland selection requires remote-wayland support, --once, file key, read-only and no X11/source options").into());
+            return Err(permission_denied("Wayland selection requires remote-wayland support, --once, file key, no legacy input/clipboard/resize and no X11/source options").into());
         }
         return Ok(());
+    }
+    if options.allow_wayland_keyboard {
+        return Err(permission_denied(
+            "Wayland keyboard requires explicit native Wayland selection",
+        )
+        .into());
     }
     if options.wayland_display.is_some() {
         return Err(invalid_data("--wayland-display requires --wayland-select").into());
@@ -2315,6 +2339,17 @@ fn serve_authenticated(
     let mut negotiated_stream = hello.stream;
     negotiated_stream.frame_limits = frame_limits;
     negotiated_stream.window_resize = hello.stream.window_resize && options.allow_window_resize;
+    negotiated_stream.wayland_keyboard =
+        hello.stream.wayland_keyboard && options.allow_wayland_keyboard;
+    if negotiated_stream.wayland_keyboard {
+        if hello.request_input || hello.request_clipboard || hello.stream.window_resize {
+            return Err(
+                invalid_data("Wayland keyboard cannot combine other remote capabilities").into(),
+            );
+        }
+        capture.enable_keyboard()?;
+    }
+
     if !negotiated_stream.window_resize {
         capture.disable_native_resize();
     }
@@ -2438,6 +2473,9 @@ fn serve_authenticated(
         sources
             .resize_enabled
             .store(negotiated_stream.window_resize, Ordering::Release);
+        sources
+            .keyboard_enabled
+            .store(negotiated_stream.wayland_keyboard, Ordering::Release);
         writer.write_message(
             MessageKind::HelloAck,
             &ServerHello {
@@ -2934,6 +2972,105 @@ fn send_resize_result(writer: &SharedWriter, result: ResizeResult) -> RemoteResu
     Ok(())
 }
 
+fn send_keyboard_status(writer: &SharedWriter, status: LeaseStatus) -> RemoteResult<()> {
+    write_session_record(
+        &mut lock_writer(writer),
+        MessageKind::WaylandKeyboardStatus,
+        &status.encode()?,
+        FRAME_WRITE_DEADLINE,
+    )?;
+    Ok(())
+}
+fn stop_keyboard(
+    sources: &SourceControl,
+    capture: &mut HostCapture,
+    writer: &SharedWriter,
+    state: &mut HostKeyboardState,
+) -> RemoteResult<()> {
+    sources.keyboard_enabled.store(false, Ordering::Release);
+    sources.keyboard_revoke.store(true, Ordering::Release);
+    sources.keyboard_queue.lock().unwrap().clear();
+    let _ = state.revoke(); // Native lease owns cleanup; never global key-up.
+    capture.revoke_keyboard();
+    if let Some(mut status) = state.status() {
+        if status.lease_epoch == 0 {
+            status.status = LeaseStatusKind::Denied;
+        }
+        send_keyboard_status(writer, status)?;
+    }
+    Ok(())
+}
+fn process_keyboard(
+    sources: &SourceControl,
+    capture: &mut HostCapture,
+    writer: &SharedWriter,
+    state: &mut HostKeyboardState,
+) -> RemoteResult<()> {
+    if !sources.keyboard_enabled.load(Ordering::Acquire) {
+        return Ok(());
+    }
+    let current = {
+        let source = sources.state.lock().unwrap();
+        DrawnScope {
+            source_epoch: source.policy.current().epoch,
+            geometry_epoch: capture.geometry_epoch(),
+            frame_sequence: 0,
+        }
+    };
+    if sources.keyboard_revoke.load(Ordering::Acquire)
+        || capture.keyboard_revoked()
+        || (state.status().is_some_and(|s| s.lease_epoch != 0)
+            && state.check_scope(current, Instant::now()).is_err())
+    {
+        return stop_keyboard(sources, capture, writer, state);
+    }
+    // One native edge per capture tick bounds work and lets revocations dispatch.
+    let command = sources.keyboard_queue.lock().unwrap().pop_front();
+    let Some(command) = command else {
+        return Ok(());
+    };
+    let result = match command {
+        KeyboardCommand::Request(request) => {
+            let drawn = sources.state.lock().unwrap().presented_frame;
+            (|| -> RemoteResult<()> {
+                let drawn = drawn.ok_or_else(|| invalid_data("keyboard source was not drawn"))?;
+                if drawn.source_epoch != current.source_epoch
+                    || drawn.geometry_epoch != current.geometry_epoch
+                {
+                    return Err(invalid_data("keyboard drawn geometry is stale").into());
+                }
+                state.request(request, drawn)?;
+                let epoch = capture.arm_keyboard(request.keymap_digest)?;
+                if sources.keyboard_revoke.load(Ordering::Acquire) {
+                    return Err(invalid_data("keyboard canceled while arming").into());
+                }
+                let status = state.grant(epoch, Instant::now())?;
+                send_keyboard_status(writer, status)
+            })()
+        }
+        KeyboardCommand::Key(key) => (|| -> RemoteResult<()> {
+            state.key(key, current, &keyboard_allowlist(), Instant::now())?;
+            capture.keyboard_key(&key)
+        })(),
+    };
+    if result.is_err() {
+        stop_keyboard(sources, capture, writer, state)?;
+    }
+    Ok(())
+}
+fn keyboard_allowlist() -> BTreeSet<u16> {
+    #[cfg(feature = "remote-wayland")]
+    {
+        (1..=247)
+            .filter(|key| crate::remote_keyboard_protocol::keyboard_key_allowed(u32::from(*key)))
+            .collect()
+    }
+    #[cfg(not(feature = "remote-wayland"))]
+    {
+        BTreeSet::new()
+    }
+}
+
 fn stream_frames(
     sources: &Arc<SourceControl>,
     viewport: &ViewportRequest,
@@ -3046,6 +3183,7 @@ fn stream_frames(
     let mut cursor_sender = CursorSender::default();
     let mut next_cursor_poll = Instant::now();
     let cursor_interval = Duration::from_millis(16);
+    let mut keyboard = HostKeyboardState::new();
     let mut resize = HostResizeState::new(sources.resize_enabled.load(Ordering::Acquire));
     let mut source_size = (0u16, 0u16);
     let capture_result = (|| -> RemoteResult<()> {
@@ -3119,6 +3257,7 @@ fn stream_frames(
                     eprintln!("jwm-remote: encoding to fit {width}x{height} for this viewer");
                 }
             }
+            process_keyboard(sources, capture, &writer, &mut keyboard)?;
             let mode = capture.mode();
             // Record every tick: the telemetry window resets on each report, so
             // recording only on change left later windows claiming a fully
@@ -4097,6 +4236,37 @@ fn receive_input_scoped(
                         }
                     }
                 }
+                MessageKind::WaylandKeyboardRequest | MessageKind::WaylandKeyboardKey => {
+                    let sources =
+                        sources.ok_or_else(|| invalid_data("Wayland keyboard unavailable"))?;
+                    if !sources.keyboard_enabled.load(Ordering::Acquire)
+                        || sources.keyboard_revoke.load(Ordering::Acquire)
+                    {
+                        return Err(invalid_data(
+                            "Wayland keyboard was not negotiated or was revoked",
+                        )
+                        .into());
+                    }
+                    let command = if kind == MessageKind::WaylandKeyboardRequest {
+                        KeyboardCommand::Request(LeaseRequest::decode(&payload)?)
+                    } else {
+                        KeyboardCommand::Key(KeyboardKey::decode(&payload)?)
+                    };
+                    let mut queue = sources.keyboard_queue.lock().unwrap();
+                    if queue.len() >= 32 {
+                        sources.keyboard_revoke.store(true, Ordering::Release);
+                        queue.clear();
+                        return Err(invalid_data("Wayland keyboard command budget exceeded").into());
+                    }
+                    queue.push_back(command);
+                }
+                MessageKind::WaylandKeyboardRevoke => {
+                    let _ = KeyboardRevoke::decode(&payload)?;
+                    let sources =
+                        sources.ok_or_else(|| invalid_data("Wayland keyboard unavailable"))?;
+                    sources.keyboard_revoke.store(true, Ordering::Release);
+                    sources.keyboard_queue.lock().unwrap().clear();
+                }
                 MessageKind::WindowResizeRequest => {
                     let sources =
                         sources.ok_or_else(|| invalid_data("window resize unavailable"))?;
@@ -4164,6 +4334,11 @@ fn receive_input_scoped(
                                 state.policy.acknowledge_presentation(version, sequence)?;
                             }
                             state.presented_geometry = Some(ack.geometry_epoch);
+                            state.presented_frame = Some(DrawnScope {
+                                source_epoch: ack.source_epoch,
+                                geometry_epoch: ack.geometry_epoch,
+                                frame_sequence: sequence,
+                            });
                             sources.changed.notify_all();
                         }
                         telemetry.record_ack(ack);
@@ -4178,7 +4353,8 @@ fn receive_input_scoped(
                 | MessageKind::SourceChanged
                 | MessageKind::SessionClose
                 | MessageKind::ClipboardRestricted
-                | MessageKind::WindowResizeResult => {
+                | MessageKind::WindowResizeResult
+                | MessageKind::WaylandKeyboardStatus => {
                     return Err(invalid_data(format!("unexpected client message: {kind:?}")).into());
                 }
             }
@@ -5079,6 +5255,24 @@ mod tests {
         assert!(validate_window_policy(&options).is_err());
     }
 
+    #[test]
+    fn keyboard_lease_requires_explicit_native_wayland_host() {
+        let mut options = test_host_source_options();
+        options.allow_wayland_keyboard = true;
+        assert!(validate_window_policy(&options).is_err());
+        options.wayland_select = true;
+        options.capture_area = CaptureArea::Root;
+        assert_eq!(
+            validate_window_policy(&options).is_ok(),
+            cfg!(feature = "remote-wayland")
+        );
+        options.allow_input = true;
+        assert!(validate_window_policy(&options).is_err());
+        options.allow_input = false;
+        options.allow_window_resize = true;
+        assert!(validate_window_policy(&options).is_err());
+    }
+
     fn test_host_source_options() -> HostOptions {
         HostOptions {
             frame_limits: super::super::messages::FrameLimits::default(),
@@ -5099,6 +5293,7 @@ mod tests {
             allow_lan: false,
             allow_input: false,
             allow_window_resize: false,
+            allow_wayland_keyboard: false,
             allow_clipboard: false,
             clipboard_mode: Default::default(),
             clipboard_direction: Default::default(),
@@ -7660,6 +7855,7 @@ mod tests {
             allow_lan: false,
             allow_input: false,
             allow_window_resize: false,
+            allow_wayland_keyboard: false,
             allow_clipboard: false,
             clipboard_mode: Default::default(),
             clipboard_direction: Default::default(),

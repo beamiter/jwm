@@ -57,7 +57,7 @@ jobs:
             libpango1.0-dev libasound2-dev libdbus-1-dev libudev-dev \
             libinput-dev libseat-dev libdrm-dev libgbm-dev \
             libegl1-mesa-dev libgl1-mesa-dev libwayland-dev \
-            libxkbcommon-dev libx11-dev libx11-xcb-dev libxext-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev libx11-dev libx11-xcb-dev libxext-dev \
             libxxf86vm-dev libxcb1-dev libxcb-composite0-dev \
             libxcb-damage0-dev libxcb-present-dev libxcb-randr0-dev \
             libxcb-shape0-dev libxcb-xfixes0-dev libxcursor-dev \

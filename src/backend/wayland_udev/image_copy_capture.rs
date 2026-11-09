@@ -128,6 +128,17 @@ pub struct CaptureAuthority {
         smithay::reexports::wayland_server::protocol::wl_output::Transform,
     ),
     revoked: AtomicBool,
+    keyboard_consumed: AtomicBool,
+}
+impl CaptureAuthority {
+    /// A source authorizes at most one keyboard attempt. Failed admission,
+    /// revoke, timeout and resource destruction never make it renewable.
+    /// Read-only capture does not consume or reset this bit.
+    pub(crate) fn consume_keyboard_attempt(&self) -> bool {
+        self.keyboard_consumed
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
 }
 #[derive(Default)]
 pub(crate) struct ToplevelCaptureAuthorities {
@@ -177,7 +188,7 @@ pub(crate) fn toplevel_capture_surface_committed(
         }
     }
 }
-fn authority_is_current(state: &JwmWaylandState, authority: &CaptureAuthority) -> bool {
+pub(crate) fn authority_is_current(state: &JwmWaylandState, authority: &CaptureAuthority) -> bool {
     let current = !authority.revoked.load(Ordering::Acquire)
         && !state.session_locked
         && state.toplevel_capture_authorities.blocked == 0
@@ -236,6 +247,7 @@ fn create_toplevel_source(
         owner,
         lock_epoch: state.session_lock_epoch,
         revoked: AtomicBool::new(false),
+        keyboard_consumed: AtomicBool::new(false),
     });
     registry
         .by_window
@@ -343,6 +355,7 @@ impl CaptureSessionData {
 pub struct CaptureFrameData {
     /// A frame accepts one capture; afterwards only destroy is legal.
     pub captured: AtomicBool,
+    pub(crate) ready: AtomicBool,
     /// `None` for a frame of a stopped session; capturing it fails.
     pub source: Option<CaptureSource>,
     /// The session that created this frame, stopped once the frame shows
@@ -376,6 +389,11 @@ pub struct PendingImageCapture {
 unsafe impl Send for PendingImageCapture {}
 
 impl PendingImageCapture {
+    pub(crate) fn mark_ready(&self) {
+        if let Some(data) = self.frame.data::<CaptureFrameData>() {
+            data.ready.store(true, Ordering::Release);
+        }
+    }
     pub(crate) fn authorized(&self, state: &JwmWaylandState) -> bool {
         if !self.frame.is_alive() {
             return false;
@@ -525,6 +543,7 @@ pub fn stop_output_capture_sessions(output: &Output) -> bool {
 /// The caller drops the window's `window_geometry` first, so frames created
 /// or captured afterwards fail through `source_is_gone`.
 pub(crate) fn stop_toplevel_capture_sessions(state: &mut JwmWaylandState, win: WindowId) -> bool {
+    super::remote_keyboard::revoke_for_window(state, win);
     if let Some(authorities) = state.toplevel_capture_authorities.by_window.remove(&win) {
         for authority in authorities.into_iter().filter_map(|weak| weak.upgrade()) {
             authority.revoked.store(true, Ordering::Release);
@@ -963,6 +982,7 @@ impl Dispatch<ExtImageCopyCaptureSessionV1, CaptureSessionData> for JwmWaylandSt
                     frame,
                     CaptureFrameData {
                         captured: AtomicBool::new(false),
+                        ready: AtomicBool::new(false),
                         source,
                         session: resource.downgrade(),
                         paint_cursors: data.paint_cursors,
@@ -1227,6 +1247,14 @@ pub(crate) mod wire_test_client {
                 .dispatch_clients(&mut self.state)
                 .expect("dispatch client requests");
             self.display.flush_clients().expect("flush client events");
+        }
+
+        /// Exercise production calloop timers in owned protocol fixtures.
+        pub(crate) fn dispatch_timers(&mut self, duration: std::time::Duration) {
+            self._event_loop
+                .dispatch(duration, &mut self.state)
+                .expect("dispatch test timers");
+            self.roundtrip();
         }
 
         /// Connect a raw client and collect the globals it is advertised.

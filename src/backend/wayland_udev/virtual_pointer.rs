@@ -84,6 +84,10 @@ impl Dispatch<ZwlrVirtualPointerV1, VirtualPointerData> for JwmWaylandState {
         _dh: &DisplayHandle,
         _data_init: &mut DataInit<'_, Self>,
     ) {
+        crate::backend::wayland_udev::remote_keyboard::revoke(
+            state,
+            crate::backend::wayland_udev::remote_keyboard::LOCAL,
+        );
         match request {
             zwlr_virtual_pointer_v1::Request::Motion { time: _, dx, dy } => {
                 state.pointer_location.x += dx;

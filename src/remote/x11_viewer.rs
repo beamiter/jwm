@@ -605,6 +605,8 @@ pub struct Viewer {
     presented_geometry: Option<u64>,
     pointer_enabled: bool,
     forward_keyboard: bool,
+    #[cfg(feature = "remote-wayland")]
+    wayland_keymap: Option<super::keyboard_keymap::KeyboardKeymap>,
     verified_keymap: Option<super::x11_keymap::KeymapTable>,
     grabbed: bool,
     escape_keycodes: Vec<u8>,
@@ -1169,6 +1171,8 @@ impl Viewer {
             pointer_enabled,
             forward_keyboard,
             verified_keymap,
+            #[cfg(feature = "remote-wayland")]
+            wayland_keymap: None,
             grabbed: false,
             escape_keycodes,
             escape_keysym,
@@ -1222,8 +1226,46 @@ impl Viewer {
     /// keyboard and pointer. Ctrl+Super plus the escape key releases both
     /// grabs and emits
     /// `ReleaseAll` so the remote host cannot retain a half-finished chord.
+    #[cfg(feature = "remote-wayland")]
+    pub(super) fn enable_wayland_keyboard(
+        &mut self,
+        display: Option<&str>,
+    ) -> RemoteResult<[u8; 32]> {
+        if self.pointer_enabled || self.grab_input || self.forward_keyboard {
+            return Err(invalid_data(
+                "Wayland keyboard lease cannot share legacy input permission",
+            )
+            .into());
+        }
+        let guard =
+            super::keyboard_keymap::KeyboardKeymap::connect(display, &self.conn, self.window)?;
+        let digest = guard.digest();
+        self.wayland_keymap = Some(guard);
+        self.forward_keyboard = true;
+        self.forward_input = true;
+        Ok(digest)
+    }
+    #[cfg(feature = "remote-wayland")]
+    pub(super) fn check_wayland_keyboard(&mut self, initial: bool) -> RemoteResult<()> {
+        self.wayland_keymap
+            .as_mut()
+            .ok_or_else(|| invalid_data("Wayland keyboard lease is disabled"))?
+            .check(initial)
+    }
+    #[cfg(feature = "remote-wayland")]
+    pub(super) fn disable_wayland_keyboard(&mut self) {
+        self.wayland_keymap = None;
+        self.forward_keyboard = false;
+        self.forward_input = false;
+        self.keyboard = ViewerKeyboardState::default();
+    }
+
     pub fn poll_events(&mut self) -> RemoteResult<Vec<ViewerEvent>> {
         let mut result = Vec::new();
+        #[cfg(feature = "remote-wayland")]
+        if let Some(guard) = self.wayland_keymap.as_mut() {
+            guard.check(false)?;
+        }
         if self.closed {
             self.report_close(&mut result)?;
             return Ok(result);
@@ -1412,6 +1454,12 @@ impl Viewer {
                         .defer_release(event.detail, event.time, Instant::now());
                 }
                 Event::MappingNotify(event) if event.request != Mapping::POINTER => {
+                    #[cfg(feature = "remote-wayland")]
+                    if self.wayland_keymap.is_some() {
+                        return Err(
+                            invalid_data("local keyboard map changed; lease revoked").into()
+                        );
+                    }
                     if self.forward_keyboard {
                         let expected = self.verified_keymap.as_ref().ok_or_else(|| {
                             invalid_data("keyboard input has no verified X11 keymap")

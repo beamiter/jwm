@@ -35,7 +35,11 @@ fn shm_buffer(server: &mut Server, client: &mut Client) -> u32 {
     shm_buffer_file(server, client, [0, 0, 255, 255]).0
 }
 
-fn shm_buffer_file(server: &mut Server, client: &mut Client, pixel: [u8; 4]) -> (u32, File) {
+pub(crate) fn shm_buffer_file(
+    server: &mut Server,
+    client: &mut Client,
+    pixel: [u8; 4],
+) -> (u32, File) {
     let shm = client.bind("wl_shm", 1);
     let fd = nix::sys::memfd::memfd_create(
         c"capture-authority-wire",
@@ -55,7 +59,7 @@ fn shm_buffer_file(server: &mut Server, client: &mut Client, pixel: [u8; 4]) -> 
 }
 
 pub(crate) struct App {
-    client: Client,
+    pub(crate) client: Client,
     surface: u32,
     xdg: u32,
     toplevel: u32,
@@ -143,16 +147,16 @@ impl App {
     }
 }
 
-struct Capture {
-    client: Client,
-    manager: u32,
-    sources: u32,
-    handle: u32,
-    source: u32,
-    session: u32,
+pub(crate) struct Capture {
+    pub(crate) client: Client,
+    pub(crate) manager: u32,
+    pub(crate) sources: u32,
+    pub(crate) handle: u32,
+    pub(crate) source: u32,
+    pub(crate) session: u32,
 }
 impl Capture {
-    fn new(server: &mut Server) -> Self {
+    pub(crate) fn new(server: &mut Server) -> Self {
         let mut client = server.connect();
         let list = client.bind("ext_foreign_toplevel_list_v1", 1);
         let sources = client.bind("ext_foreign_toplevel_image_capture_source_manager_v1", 1);

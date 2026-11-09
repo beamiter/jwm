@@ -603,6 +603,7 @@ pub struct JwmWaylandState {
         Option<crate::backend::wayland_udev::image_copy_capture::PendingImageCaptureQueue>,
     /// Live ext-image-copy-capture sessions of each captured window, stopped
     /// when the window is retired (see `retire_window_geometry`).
+    pub(crate) remote_keyboard: crate::backend::wayland_udev::remote_keyboard::RemoteKeyboardState,
     pub(crate) toplevel_capture_authorities:
         crate::backend::wayland_udev::image_copy_capture::ToplevelCaptureAuthorities,
     pub(crate) toplevel_capture_sessions:
@@ -1602,7 +1603,40 @@ impl JwmWaylandState {
 
     /// Centralize compositor focus changes so late window/popup callbacks
     /// cannot replace the locker's focus with an ordinary client.
+    pub(crate) fn remote_keyboard_target_eligible(
+        &self,
+        authority: &crate::backend::wayland_udev::image_copy_capture::CaptureAuthority,
+    ) -> bool {
+        // XWayland is one Wayland keyboard client for many X windows. Native
+        // surface focus cannot constrain its separate internal X focus.
+        self.toplevels
+            .get(&authority.window)
+            .is_some_and(|toplevel| toplevel.wl_surface() == &authority.surface)
+            && PopupManager::popups_for_surface(&authority.surface)
+                .next()
+                .is_none()
+    }
+    pub(crate) fn remote_keyboard_seat_eligible(&self) -> bool {
+        !self.session_locked
+            && !self.virtual_input_blocked
+            && self
+                .virtual_keyboards
+                .values()
+                .all(|delivery| !delivery.has_held())
+            && self.im_popups.iter().all(|popup| !popup.alive())
+    }
     pub(crate) fn set_keyboard_focus(&mut self, focus: Option<WlSurface>, serial: Serial) {
+        if self
+            .seat
+            .get_keyboard()
+            .and_then(|keyboard| keyboard.current_focus())
+            != focus
+        {
+            crate::backend::wayland_udev::remote_keyboard::revoke(
+                self,
+                crate::backend::wayland_udev::remote_keyboard::SEAT,
+            );
+        }
         if self.session_locked
             && focus
                 .as_ref()
@@ -3369,6 +3403,7 @@ impl JwmWaylandState {
                 None
             };
 
+        crate::backend::wayland_udev::remote_keyboard::init(dh);
         let image_capture_pending = if frame_capture_supported
             && optional_global_enabled(
                 behavior.wayland_enable_image_copy_capture,
@@ -3634,6 +3669,7 @@ impl JwmWaylandState {
                 image_capture_pending,
                 toplevel_capture_sessions: HashMap::new(),
                 toplevel_capture_authorities: Default::default(),
+                remote_keyboard: Default::default(),
 
                 capture_counters: Arc::new(Mutex::new(CaptureCounters::default())),
 
@@ -5013,6 +5049,7 @@ impl SeatHandler for JwmWaylandState {
     }
 
     fn focus_changed(&mut self, seat: &Seat<Self>, focused: Option<&Self::KeyboardFocus>) {
+        crate::backend::wayland_udev::remote_keyboard::focus_changed(self);
         for delivery in self.virtual_keyboards.values_mut() {
             delivery.clear_held();
         }
@@ -5024,6 +5061,10 @@ impl SeatHandler for JwmWaylandState {
 
 impl InputMethodHandler for JwmWaylandState {
     fn new_popup(&mut self, surface: ImPopupSurface) {
+        crate::backend::wayland_udev::remote_keyboard::revoke(
+            self,
+            crate::backend::wayland_udev::remote_keyboard::SEAT,
+        );
         // Drop any popups whose role/surface fcitx5 already destroyed: smithay's
         // ZwpInputPopupSurfaceV2 destructor only flips the alive tracker, it never
         // calls `dismiss_popup`, so stale dead entries would otherwise pile up here.
@@ -5738,6 +5779,10 @@ impl XdgShellHandler for JwmWaylandState {
     }
 
     fn new_popup(&mut self, surface: PopupSurface, positioner: PositionerState) {
+        crate::backend::wayland_udev::remote_keyboard::revoke(
+            self,
+            crate::backend::wayland_udev::remote_keyboard::SEAT,
+        );
         // Store the initial positioner state and compute a constrained geometry.
         surface.with_pending_state(|state| {
             state.positioner = positioner;

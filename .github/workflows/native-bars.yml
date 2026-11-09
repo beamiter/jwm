@@ -147,7 +147,7 @@ jobs:
             libfreetype-dev \
             libudev-dev \
             libwayland-dev \
-            libxkbcommon-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev \
             libxkbcommon-x11-dev \
             libx11-dev \
             libx11-xcb-dev \
@@ -261,7 +261,7 @@ jobs:
             libfreetype-dev \
             libudev-dev \
             libwayland-dev \
-            libxkbcommon-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev \
             libxkbcommon-x11-dev \
             libx11-dev \
             libx11-xcb-dev \
@@ -383,7 +383,7 @@ jobs:
             libfreetype-dev \
             libudev-dev \
             libwayland-dev \
-            libxkbcommon-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev \
             libxkbcommon-x11-dev \
             libx11-dev \
             libx11-xcb-dev \

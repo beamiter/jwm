@@ -280,6 +280,10 @@ enum Command {
         #[arg(long, requires = "once", conflicts_with_all = ["display", "window", "monitor", "region", "share_monitor", "share_region", "share_root", "allow_input", "allow_clipboard", "allow_window_resize", "key_stdin", "capture_source"])]
         wayland_select: bool,
 
+        /// Permit a single explicitly requested, scoped Wayland keyboard lease.
+        #[arg(long, requires_all = ["wayland_select", "once"], conflicts_with_all = ["allow_input", "allow_clipboard", "allow_window_resize"])]
+        allow_wayland_keyboard: bool,
+
         /// Native Wayland socket for local selection (defaults to WAYLAND_DISPLAY).
         #[arg(long, value_name = "SOCKET", requires = "wayland_select")]
         wayland_display: Option<String>,
@@ -421,6 +425,11 @@ enum Command {
         /// Explicitly resize the authorized source once, after first presentation.
         #[arg(long, value_name = "WIDTHxHEIGHT", requires = "view_only", conflicts_with_all = ["reconnect_attempts", "clipboard", "grab_input"])]
         resize_source: Option<WindowSize>,
+
+        /// Request keyboard-only control of the locally selected Wayland surface.
+        /// No pointer, clipboard, input grab, reconnect, or saved authorization.
+        #[arg(long, conflicts_with_all = ["view_only", "resize_source", "clipboard", "grab_input", "reconnect_attempts"])]
+        wayland_keyboard: bool,
 
         /// Best-effort local client origin X,Y; off-screen positions fall back.
         #[arg(long, value_name = "X,Y", allow_hyphen_values = true)]
@@ -608,6 +617,7 @@ fn profile_from_command(command: Command) -> RemoteResult<Profile> {
             display,
             window_size,
             resize_source,
+            wayland_keyboard,
             window_position,
             view_only,
             grab_input,
@@ -618,6 +628,12 @@ fn profile_from_command(command: Command) -> RemoteResult<Profile> {
             clipboard_file_limit,
             frame_limits,
         } => {
+            if wayland_keyboard {
+                return Err(profile_error(
+                    "Wayland keyboard authorization cannot be saved in a profile",
+                )
+                .into());
+            }
             if resize_source.is_some() {
                 return Err(
                     profile_error("explicit source resize cannot be saved in a profile").into(),
@@ -1103,6 +1119,7 @@ fn run(command: Command) -> RemoteResult<()> {
             allow_input,
             allow_window_resize,
             wayland_select,
+            allow_wayland_keyboard,
             wayland_display,
             allow_clipboard,
             clipboard_mode,
@@ -1147,6 +1164,7 @@ fn run(command: Command) -> RemoteResult<()> {
                 allow_input,
                 allow_window_resize,
                 wayland_select,
+                allow_wayland_keyboard,
                 wayland_display,
                 allow_clipboard,
                 clipboard_mode,
@@ -1211,6 +1229,7 @@ fn run(command: Command) -> RemoteResult<()> {
             display,
             window_size,
             resize_source,
+            wayland_keyboard,
             window_position,
             view_only,
             grab_input,
@@ -1228,6 +1247,7 @@ fn run(command: Command) -> RemoteResult<()> {
                 display,
                 window_size,
                 resize_source,
+                wayland_keyboard,
                 window_position,
                 view_only,
                 grab_input,
@@ -2787,5 +2807,82 @@ mod wayland_source_cli_tests {
             ])
             .is_ok()
         );
+    }
+}
+
+#[cfg(test)]
+mod wayland_keyboard_cli_tests {
+    use super::*;
+
+    #[test]
+    fn keyboard_lease_requires_explicit_native_host_and_scoped_viewer() {
+        assert!(
+            Cli::try_parse_from([
+                "jwm-remote",
+                "host",
+                "--wayland-select",
+                "--once",
+                "--allow-wayland-keyboard"
+            ])
+            .is_ok()
+        );
+        assert!(
+            Cli::try_parse_from(["jwm-remote", "host", "--allow-wayland-keyboard", "--once"])
+                .is_err()
+        );
+        for denied in [
+            "--allow-input",
+            "--allow-clipboard",
+            "--allow-window-resize",
+        ] {
+            assert!(
+                Cli::try_parse_from([
+                    "jwm-remote",
+                    "host",
+                    "--wayland-select",
+                    "--once",
+                    "--allow-wayland-keyboard",
+                    denied
+                ])
+                .is_err()
+            );
+        }
+        assert!(
+            Cli::try_parse_from(["jwm-remote", "connect", "127.0.0.1", "--wayland-keyboard"])
+                .is_ok()
+        );
+        for denied in ["--view-only", "--clipboard", "--grab-input"] {
+            assert!(
+                Cli::try_parse_from([
+                    "jwm-remote",
+                    "connect",
+                    "127.0.0.1",
+                    "--wayland-keyboard",
+                    denied
+                ])
+                .is_err()
+            );
+        }
+        for (flag, value) in [
+            ("--resize-source", "800x600"),
+            ("--reconnect-attempts", "1"),
+        ] {
+            assert!(
+                Cli::try_parse_from([
+                    "jwm-remote",
+                    "connect",
+                    "127.0.0.1",
+                    "--wayland-keyboard",
+                    flag,
+                    value
+                ])
+                .is_err()
+            );
+        }
+        let command =
+            Cli::try_parse_from(["jwm-remote", "connect", "127.0.0.1", "--wayland-keyboard"])
+                .unwrap()
+                .command;
+        assert!(profile_from_command(command).is_err());
     }
 }

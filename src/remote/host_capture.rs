@@ -15,6 +15,46 @@ pub(super) enum HostCapture {
 }
 
 impl HostCapture {
+    pub(super) fn enable_keyboard(&mut self) -> RemoteResult<()> {
+        #[cfg(feature = "remote-wayland")]
+        if let Self::Wayland(c) = self {
+            return c.enable_keyboard();
+        }
+        Err(std::io::Error::other("keyboard lease requires a native Wayland source").into())
+    }
+    pub(super) fn arm_keyboard(&mut self, digest: [u8; 32]) -> RemoteResult<u64> {
+        #[cfg(feature = "remote-wayland")]
+        if let Self::Wayland(c) = self {
+            return c.arm_keyboard(digest);
+        }
+        let _ = digest;
+        Err(std::io::Error::other("native keyboard lease unavailable").into())
+    }
+    pub(super) fn keyboard_key(
+        &mut self,
+        key: &super::wayland_keyboard_wire::Key,
+    ) -> RemoteResult<()> {
+        #[cfg(feature = "remote-wayland")]
+        if let Self::Wayland(c) = self {
+            return c.keyboard_key(key);
+        }
+        let _ = key;
+        Err(std::io::Error::other("native keyboard lease unavailable").into())
+    }
+    pub(super) fn revoke_keyboard(&mut self) {
+        #[cfg(feature = "remote-wayland")]
+        if let Self::Wayland(c) = self {
+            c.revoke_keyboard();
+        }
+    }
+    pub(super) fn keyboard_revoked(&self) -> bool {
+        #[cfg(feature = "remote-wayland")]
+        if let Self::Wayland(c) = self {
+            return c.keyboard_revoked();
+        }
+        true
+    }
+
     pub(super) fn disable_native_resize(&mut self) {
         if let Self::Window(c) = self {
             c.disable_native_resize();

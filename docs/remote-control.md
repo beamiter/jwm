@@ -376,14 +376,14 @@ gives each complete authenticated video record, including its final flush, one
 budget; a partial or timed-out record closes the whole session so its wire
 sequence can never be retried out of sync.
 
-The current application protocol is version 15. Versions 2 to 14 are
+The current application protocol is version 16. Versions 2 to 15 are
 deliberately incompatible, so update `jwm-remote` on both machines together;
 negotiation rejects an older peer before screen or input data is exchanged.
 Version 7 introduced initial viewport and explicit stream selectors. Version 8
 adds an independently negotiated cursor plane and a video geometry epoch;
 it does not silently reinterpret v7 video or cursor selector semantics.
 
-The v15 hello prefix is the existing 8-byte magic, big-endian `u16` version,
+The v16 hello prefix is the existing 8-byte magic, big-endian `u16` version,
 and capability flags. Both hellos append three one-byte selectors in order:
 codec `1` (JPEG tiles), cursor `1` (composited) or `2` (independent), input `1`
 (X11 keycodes). A viewer advertises independent cursor only after verifying local XRender
@@ -443,14 +443,14 @@ See [window viewing](remote-window-view.md) for lease and confirmation semantics
 
 The client then appends big-endian `u16` viewport width and height, followed
 by the existing bounded keymap table. `(0, 0)` means no initial size; exactly
-one zero dimension is invalid. The server hello is exactly 37 bytes. Unknown
+one zero dimension is invalid. The server hello is exactly 38 bytes. Unknown
 selectors, trailing bytes and incomplete keymaps are rejected. Input and
 clipboard permission flags remain independent of the stream profile.
 
-Compatibility: v15 viewer/v15 host works; v6/v7/v8/v9/v10/v11/v12/v13/v14 with v15 in either direction is
+Compatibility: v16 viewer/v16 host works; v6/v7/v8/v9/v10/v11/v12/v13/v14/v15 with v16 in either direction is
 rejected during negotiation. There is no automatic legacy-version fallback.
 Keep both binaries on the same release; this change does not alter transport
-crypto. Within v15, unsupported independent-cursor capability falls back to
+crypto. Within v16, unsupported independent-cursor capability falls back to
 composited video explicitly in HelloAck.
 
 Version 14 adds viewer-to-host `ClipboardRestrict` (kind 21) and host-to-viewer

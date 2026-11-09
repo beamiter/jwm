@@ -8,9 +8,9 @@ use super::x11_keymap::{KeymapTable, MAX_ENCODED_KEYMAP_LEN};
 use std::io;
 
 const APPLICATION_MAGIC: &[u8; 8] = b"JWMREM01";
-pub const APPLICATION_VERSION: u16 = 15;
+pub const APPLICATION_VERSION: u16 = 16;
 const HELLO_PREFIX_LEN: usize = 11;
-const STREAM_CAPABILITIES_LEN: usize = 26;
+const STREAM_CAPABILITIES_LEN: usize = 27;
 const SERVER_HELLO_LEN: usize = HELLO_PREFIX_LEN + STREAM_CAPABILITIES_LEN;
 const CLIENT_HELLO_HEADER_LEN: usize = SERVER_HELLO_LEN + 4;
 /// Largest client hello: the shared prefix plus a full keymap table.
@@ -110,6 +110,8 @@ pub struct StreamCapabilities {
     pub clipboard_directions: u8,
     /// Explicit native window resize, independent of input and viewport.
     pub window_resize: bool,
+    /// Independent source-bound Wayland keyboard lease; never global input.
+    pub wayland_keyboard: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -159,6 +161,7 @@ impl StreamCapabilities {
         payload[23] = self.clipboard_content;
         payload[24] = self.clipboard_directions;
         payload[25] = u8::from(self.window_resize);
+        payload[26] = u8::from(self.wayland_keyboard);
         payload
     }
 
@@ -174,6 +177,7 @@ impl StreamCapabilities {
         if !matches!(payload[23], 0 | 1 | 3 | 7)
             || payload[24] > 3
             || payload[25] > 1
+            || payload[26] > 1
             || (payload[23] == 0) != (payload[24] == 0)
         {
             return Err(invalid_data("invalid clipboard content or direction policy").into());
@@ -191,6 +195,7 @@ impl StreamCapabilities {
             clipboard_content: payload[23],
             clipboard_directions: payload[24],
             window_resize: payload[25] == 1,
+            wayland_keyboard: payload[26] == 1,
             ..Self::default()
         })
     }
@@ -723,6 +728,19 @@ fn invalid_data(message: impl Into<String>) -> io::Error {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn wayland_keyboard_capability_is_independent_and_strict() {
+        let stream = super::StreamCapabilities {
+            wayland_keyboard: true,
+            ..Default::default()
+        };
+        let mut bytes = stream.encode();
+        assert_eq!(super::StreamCapabilities::decode(&bytes).unwrap(), stream);
+        assert_eq!(bytes[25], 0, "keyboard must not enable resize");
+        bytes[26] = 2;
+        assert!(super::StreamCapabilities::decode(&bytes).is_err());
+    }
+
+    #[test]
     fn explicit_window_resize_capability_is_bounded() {
         let stream = super::StreamCapabilities {
             window_resize: true,
@@ -1089,7 +1107,7 @@ mod tests {
     }
 
     #[test]
-    fn hello_uses_version_fifteen_and_rejects_neighbouring_versions() {
+    fn hello_uses_version_sixteen_and_rejects_neighbouring_versions() {
         let payload = ServerHello {
             stream: Default::default(),
             pointer_enabled: false,
@@ -1098,24 +1116,24 @@ mod tests {
             clipboard_files_enabled: false,
         }
         .encode();
-        assert_eq!(&payload[8..10], &15_u16.to_be_bytes());
+        assert_eq!(&payload[8..10], &16_u16.to_be_bytes());
 
         // Version 5 had no clipboard transfer records: a version-5 peer
         // would end the session on the first copied image or file. It must
         // fail on its version instead. Version 4 sent one digest of the whole
         // keymap where later versions send a per-keycode table.
-        for older in [4_u16, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14] {
+        for older in [4_u16, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15] {
             let mut previous = payload;
             previous[8..10].copy_from_slice(&older.to_be_bytes());
             let error = ServerHello::decode(&previous).unwrap_err();
             assert!(
                 error
                     .to_string()
-                    .contains(&format!("application version {older}; expected 15"))
+                    .contains(&format!("application version {older}; expected 16"))
             );
         }
 
-        for rejected in [0_u16, 2, 3, 16, u16::MAX] {
+        for rejected in [0_u16, 2, 3, 17, u16::MAX] {
             let mut other = payload;
             other[8..10].copy_from_slice(&rejected.to_be_bytes());
             assert!(

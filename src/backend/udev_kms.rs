@@ -7678,6 +7678,7 @@ impl KmsState {
                         (tv_sec & 0xFFFFFFFF) as u32,
                         now.subsec_nanos(),
                     );
+                    frame_info.mark_ready();
                     frame_info.frame.ready();
                     Self::note_image_capture_fulfilled(counters);
                 } else {
@@ -7804,6 +7805,7 @@ impl KmsState {
                         (tv_sec & 0xFFFFFFFF) as u32,
                         now.subsec_nanos(),
                     );
+                    frame_info.mark_ready();
                     frame_info.frame.ready();
                     Self::note_image_capture_fulfilled(counters);
                 }

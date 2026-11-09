@@ -105,12 +105,20 @@ impl Queue {
             MessageKind::FrameAck => Some(16),
             MessageKind::Viewport => Some(4),
             MessageKind::WindowResizeRequest => Some(28),
+            MessageKind::WaylandKeyboardRequest => Some(56),
+            MessageKind::WaylandKeyboardKey => Some(43),
+            MessageKind::WaylandKeyboardRevoke => Some(8),
             _ => None,
         };
         if expected.is_some_and(|length| payload.len() != length) {
             return Err(
                 io::Error::new(io::ErrorKind::InvalidInput, "invalid control record size").into(),
             );
+        }
+        if kind == MessageKind::WaylandKeyboardRevoke {
+            self.control
+                .retain(|r| r.kind != MessageKind::WaylandKeyboardKey);
+            self.control_bytes = self.control.iter().map(|r| r.payload.len()).sum();
         }
         // ReleaseAll is a fence: discard unsent input before the last release,
         // while preserving subsequent edges in this batch. A record already
@@ -528,6 +536,34 @@ impl Drop for Sender {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn wayland_keyboard_revoke_discards_queued_key_edges_only() {
+        let mut queue = super::Queue::default();
+        queue
+            .push(super::MessageKind::WaylandKeyboardKey, &[1; 43])
+            .unwrap();
+        queue.push(super::MessageKind::Heartbeat, &[]).unwrap();
+        queue
+            .push(super::MessageKind::WaylandKeyboardRevoke, &[1; 8])
+            .unwrap();
+        assert!(
+            queue
+                .control
+                .iter()
+                .all(|record| record.kind != super::MessageKind::WaylandKeyboardKey)
+        );
+        assert!(
+            queue
+                .control
+                .iter()
+                .any(|record| record.kind == super::MessageKind::Heartbeat)
+        );
+        assert!(
+            queue
+                .push(super::MessageKind::WaylandKeyboardKey, &[0; 42])
+                .is_err()
+        );
+    }
     use super::*;
 
     fn test_encode_input(events: &[InputEvent], bytes: &mut Vec<u8>) -> RemoteResult<()> {

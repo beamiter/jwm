@@ -2421,6 +2421,7 @@ dependencies = [
  "udev",
  "wayland-client",
  "wayland-protocols",
+ "wayland-scanner",
  "winit 0.30.13",
  "x11",
  "x11rb 0.14.0",
@@ -6389,6 +6390,7 @@ version = "1.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a6c2ad15e0e922856ee89afe862b8992334bbe7953adad56cd1199358cb30566"
 dependencies = [
+ "as-raw-xcb-connection",
  "bitflags 2.13.2",
  "libc 0.2.191",
  "quick-xml",
@@ -6406,6 +6408,7 @@ version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a7a974f48060a14e95705c01f24ad9c3345022f4d97441b8a36beb7ed5c4a02d"
 dependencies = [
+ "as-raw-xcb-connection",
  "libc 0.2.191",
  "memmap2",
  "xkeysym",

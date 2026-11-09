@@ -23,7 +23,7 @@ jobs:
       - name: Install compiler and private X11 dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends build-essential pkg-config libxkbcommon-dev libxcb1-dev xvfb xauth \
+          sudo apt-get install -y --no-install-recommends build-essential pkg-config libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev xvfb xauth \
             libudev-dev libinput-dev libx11-dev libx11-xcb-dev libxext-dev libxxf86vm-dev libxcursor-dev \
             libxfixes-dev libxi-dev libxrandr-dev libxrender-dev libgl1-mesa-dev libegl1-mesa-dev \
             libxcb-composite0-dev libxcb-damage0-dev libxcb-present-dev libxcb-randr0-dev \
