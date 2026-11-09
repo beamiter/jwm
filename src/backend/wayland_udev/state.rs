@@ -603,6 +603,7 @@ pub struct JwmWaylandState {
         Option<crate::backend::wayland_udev::image_copy_capture::PendingImageCaptureQueue>,
     /// Live ext-image-copy-capture sessions of each captured window, stopped
     /// when the window is retired (see `retire_window_geometry`).
+    pub(crate) remote_pointer: crate::backend::wayland_udev::remote_pointer::RemotePointerState,
     pub(crate) remote_keyboard: crate::backend::wayland_udev::remote_keyboard::RemoteKeyboardState,
     pub(crate) toplevel_capture_authorities:
         crate::backend::wayland_udev::image_copy_capture::ToplevelCaptureAuthorities,
@@ -1370,6 +1371,10 @@ delegate_dispatch2!(JwmWaylandState);
 // ---------------------------------------------------------------------------
 impl PointerConstraintsHandler for JwmWaylandState {
     fn new_constraint(&mut self, surface: &WlSurface, pointer: &PointerHandle<Self>) {
+        crate::backend::wayland_udev::remote_pointer::revoke(
+            self,
+            crate::backend::wayland_udev::remote_pointer::SEAT,
+        );
         if self.session_locked {
             return;
         }
@@ -1400,6 +1405,10 @@ impl PointerConstraintsHandler for JwmWaylandState {
         _pointer: &PointerHandle<Self>,
         location: Point<f64, Logical>,
     ) {
+        crate::backend::wayland_udev::remote_pointer::revoke(
+            self,
+            crate::backend::wayland_udev::remote_pointer::SEAT,
+        );
         if self.session_locked {
             return;
         }
@@ -3404,6 +3413,7 @@ impl JwmWaylandState {
             };
 
         crate::backend::wayland_udev::remote_keyboard::init(dh);
+        crate::backend::wayland_udev::remote_pointer::init(dh);
         let image_capture_pending = if frame_capture_supported
             && optional_global_enabled(
                 behavior.wayland_enable_image_copy_capture,
@@ -3670,6 +3680,7 @@ impl JwmWaylandState {
                 toplevel_capture_sessions: HashMap::new(),
                 toplevel_capture_authorities: Default::default(),
                 remote_keyboard: Default::default(),
+                remote_pointer: Default::default(),
 
                 capture_counters: Arc::new(Mutex::new(CaptureCounters::default())),
 
@@ -4674,7 +4685,11 @@ impl CompositorHandler for JwmWaylandState {
         );
     }
 
+    fn new_subsurface(&mut self, _surface: &WlSurface, parent: &WlSurface) {
+        crate::backend::wayland_udev::remote_pointer::new_subsurface(self, parent);
+    }
     fn commit(&mut self, surface: &WlSurface) {
+        crate::backend::wayland_udev::remote_pointer::surface_committed(self, surface);
         crate::backend::wayland_udev::image_copy_capture::toplevel_capture_surface_committed(
             self, surface,
         );
@@ -4733,6 +4748,7 @@ impl CompositorHandler for JwmWaylandState {
         // Without this, WaylandSurfaceRenderElement will often have no view/texture and nothing
         // will be drawn even though windows are managed and receive input.
         on_commit_buffer_handler::<JwmWaylandState>(surface);
+        crate::backend::wayland_udev::remote_pointer::surface_committed(self, surface);
 
         // Legacy XWayland (< 23.1) associates content via the WL_SURFACE_ID atom. smithay records
         // it as `wl_surface_id` but, unlike the modern xwayland_shell path, never calls

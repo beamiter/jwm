@@ -29,6 +29,10 @@ use super::wayland_keyboard_wire::{
     DrawnScope, HostKeyboardState, Key as KeyboardKey, KeyboardRevoke, LeaseRequest, LeaseStatus,
     LeaseStatusKind,
 };
+use super::wayland_pointer_wire::{
+    FRAME_MAX_AGE, HostPointerState, PointerAction, PointerRequest, PointerRevoke, PointerStatus,
+    PointerStatusKind,
+};
 use super::window_resize::{HostResizeState, ResizeRequest, ResizeResult};
 use super::x11_capture::{
     CaptureArea, CaptureImageRecycler, CaptureMode, CaptureOutcome, CaptureSource, CapturedFrame,
@@ -118,18 +122,33 @@ const CAPTURE_RATE_LIMIT_SLICE: Duration = Duration::from_millis(20);
 struct ViewportRequest {
     /// Packed `width << 16 | height`, or zero while nothing has been asked.
     size: AtomicU32,
+    /// Last requested bounds survive take(); lifecycle checks cannot forget history.
+    requested: AtomicU32,
 }
 
 impl ViewportRequest {
     fn new() -> Self {
         Self {
             size: AtomicU32::new(0),
+            requested: AtomicU32::new(0),
         }
     }
 
-    fn request(&self, width: u16, height: u16) {
+    fn seed(&self, initial: Option<(u16, u16)>) {
+        if let Some((width, height)) = initial {
+            self.requested.store(
+                (u32::from(width) << 16) | u32::from(height),
+                Ordering::Relaxed,
+            );
+        }
+    }
+
+    /// Return whether these bounds differ, independently of capture consumption.
+    fn request(&self, width: u16, height: u16) -> bool {
         let packed = (u32::from(width) << 16) | u32::from(height);
+        let changed = self.requested.swap(packed, Ordering::Relaxed) != packed;
         self.size.store(packed, Ordering::Relaxed);
+        changed
     }
 
     fn take(&self) -> Option<(u16, u16)> {
@@ -372,6 +391,7 @@ fn poisoned_writer() -> io::Error {
 }
 
 struct PendingFrame {
+    pointer_serial: Option<u64>,
     source_version: SourceVersion,
     frame: CapturedFrame,
     captured_at: Instant,
@@ -1607,6 +1627,7 @@ pub struct HostOptions {
     pub allow_input: bool,
     pub allow_window_resize: bool,
     pub allow_wayland_keyboard: bool,
+    pub allow_wayland_pointer: bool,
     pub allow_clipboard: bool,
     pub clipboard_mode: ClipboardMode,
     pub clipboard_direction: ClipboardDirection,
@@ -1707,7 +1728,22 @@ enum KeyboardCommand {
     Key(KeyboardKey),
 }
 
+enum PointerCommand {
+    Request(PointerRequest),
+    Action(PointerAction),
+}
+#[derive(Clone, Copy)]
+struct PointerFrame {
+    serial: u64,
+    at: Instant,
+    scope: Option<DrawnScope>,
+    announced: bool,
+}
 struct SourceControl {
+    pointer_enabled: AtomicBool,
+    pointer_revoke: AtomicBool,
+    pointer_queue: Mutex<VecDeque<PointerCommand>>,
+    pointer_frame: Mutex<Option<PointerFrame>>,
     state: Mutex<HostSourceState>,
     changed: Condvar,
     resize_enabled: AtomicBool,
@@ -1724,6 +1760,10 @@ impl SourceControl {
         geometry_epoch: u64,
     ) -> RemoteResult<Self> {
         Ok(Self {
+            pointer_enabled: AtomicBool::new(false),
+            pointer_revoke: AtomicBool::new(false),
+            pointer_queue: Mutex::new(VecDeque::new()),
+            pointer_frame: Mutex::new(None),
             state: Mutex::new(HostSourceState {
                 policy: SourceSession::new(grants, SourceId(1))?,
                 pending: None,
@@ -1811,6 +1851,9 @@ fn listener_security_notice(address: IpAddr) -> Option<&'static str> {
 }
 
 fn validate_window_policy(options: &HostOptions) -> RemoteResult<()> {
+    if options.allow_wayland_keyboard && options.allow_wayland_pointer {
+        return Err(invalid_data("native leases are mutually exclusive").into());
+    }
     if options.wayland_select {
         if !cfg!(feature = "remote-wayland")
             || !options.once
@@ -1827,7 +1870,7 @@ fn validate_window_policy(options: &HostOptions) -> RemoteResult<()> {
         }
         return Ok(());
     }
-    if options.allow_wayland_keyboard {
+    if options.allow_wayland_keyboard || options.allow_wayland_pointer {
         return Err(permission_denied(
             "Wayland keyboard requires explicit native Wayland selection",
         )
@@ -2341,6 +2384,18 @@ fn serve_authenticated(
     negotiated_stream.window_resize = hello.stream.window_resize && options.allow_window_resize;
     negotiated_stream.wayland_keyboard =
         hello.stream.wayland_keyboard && options.allow_wayland_keyboard;
+    negotiated_stream.wayland_pointer =
+        hello.stream.wayland_pointer && options.allow_wayland_pointer;
+    if negotiated_stream.wayland_pointer {
+        if hello.request_input
+            || hello.request_clipboard
+            || hello.stream.window_resize
+            || hello.stream.wayland_keyboard
+        {
+            return Err(invalid_data("native pointer cannot combine other capabilities").into());
+        }
+        capture.enable_pointer()?;
+    }
     if negotiated_stream.wayland_keyboard {
         if hello.request_input || hello.request_clipboard || hello.stream.window_resize {
             return Err(
@@ -2476,6 +2531,9 @@ fn serve_authenticated(
         sources
             .keyboard_enabled
             .store(negotiated_stream.wayland_keyboard, Ordering::Release);
+        sources
+            .pointer_enabled
+            .store(negotiated_stream.wayland_pointer, Ordering::Release);
         writer.write_message(
             MessageKind::HelloAck,
             &ServerHello {
@@ -2531,6 +2589,7 @@ fn serve_authenticated(
         let input_telemetry = Arc::clone(&telemetry);
         let input_jpeg_quality = Arc::clone(&jpeg_quality);
         let viewport = Arc::new(ViewportRequest::new());
+        viewport.seed(hello.initial_viewport);
         let input_viewport = Arc::clone(&viewport);
         let input_sources = Arc::clone(&sources);
         let input_thread = thread::Builder::new()
@@ -2972,6 +3031,137 @@ fn send_resize_result(writer: &SharedWriter, result: ResizeResult) -> RemoteResu
     Ok(())
 }
 
+fn send_pointer_status(writer: &SharedWriter, status: PointerStatus) -> RemoteResult<()> {
+    write_session_record(
+        &mut lock_writer(writer),
+        MessageKind::WaylandPointerStatus,
+        &status.encode()?,
+        FRAME_WRITE_DEADLINE,
+    )?;
+    Ok(())
+}
+fn stop_pointer(
+    sources: &SourceControl,
+    capture: &mut HostCapture,
+    writer: &SharedWriter,
+    state: &mut HostPointerState,
+) -> RemoteResult<()> {
+    sources.pointer_enabled.store(false, Ordering::Release);
+    sources.pointer_revoke.store(true, Ordering::Release);
+    sources.pointer_queue.lock().unwrap().clear();
+    let frame = sources.pointer_frame.lock().unwrap().take();
+    state.revoke();
+    capture.revoke_pointer();
+    if let Some(scope) = frame.and_then(|frame| frame.scope).or(state.scope()) {
+        send_pointer_status(
+            writer,
+            PointerStatus {
+                lease_epoch: state.epoch().unwrap_or(0),
+                scope,
+                status: PointerStatusKind::Revoked,
+            },
+        )?;
+    }
+    Ok(())
+}
+fn process_pointer(
+    sources: &SourceControl,
+    capture: &mut HostCapture,
+    writer: &SharedWriter,
+    state: &mut HostPointerState,
+    size: (u16, u16),
+) -> RemoteResult<()> {
+    if !sources.pointer_enabled.load(Ordering::Acquire) {
+        return Ok(());
+    }
+    let now = Instant::now();
+    if sources.pointer_revoke.load(Ordering::Acquire)
+        || capture.pointer_revoked()
+        || (state.epoch().is_some() && !state.active(now))
+    {
+        return stop_pointer(sources, capture, writer, state);
+    }
+    let tracked = *sources.pointer_frame.lock().unwrap();
+    let drawn = sources.state.lock().unwrap().presented_frame;
+    let command = sources.pointer_queue.lock().unwrap().pop_front();
+    if let Some(command) = command {
+        let result = (|| -> RemoteResult<()> {
+            let frame = tracked.ok_or_else(|| invalid_data("missing pointer capture proof"))?;
+            let scope = frame
+                .scope
+                .ok_or_else(|| invalid_data("pointer frame not published"))?;
+            if drawn != Some(scope)
+                || capture.pointer_frame().map(|f| f.0) != Some(frame.serial)
+                || now.saturating_duration_since(frame.at) >= FRAME_MAX_AGE
+            {
+                return Err(invalid_data("pointer action lacks a fresh drawn frame").into());
+            }
+            match command {
+                PointerCommand::Request(request) => {
+                    state.request(request, scope)?;
+                    let epoch = capture.grant_pointer()?;
+                    state.grant(epoch, Instant::now())?;
+                    let ready = state.ready(scope, frame.serial, frame.at, Instant::now())?;
+                    if let Some(frame) = sources.pointer_frame.lock().unwrap().as_mut() {
+                        frame.announced = true;
+                    }
+                    send_pointer_status(writer, ready)?;
+                }
+                PointerCommand::Action(action) => {
+                    if !frame.announced {
+                        return Err(invalid_data("pointer frame is not ready").into());
+                    }
+                    let serial = state.consume(action, size, Instant::now())?;
+                    capture.pointer_action(&action, serial)?;
+                    sources.pointer_frame.lock().unwrap().take();
+                    send_pointer_status(
+                        writer,
+                        PointerStatus {
+                            lease_epoch: action.lease_epoch,
+                            scope,
+                            status: PointerStatusKind::Waiting,
+                        },
+                    )?;
+                }
+            }
+            Ok(())
+        })();
+        if let Err(error) = result {
+            stop_pointer(sources, capture, writer, state)?;
+            return Err(error);
+        }
+        return Ok(());
+    }
+    if let Some(frame) = tracked {
+        if now.saturating_duration_since(frame.at) >= FRAME_MAX_AGE {
+            if let (Some(epoch), Some(scope)) = (state.epoch(), frame.scope) {
+                send_pointer_status(
+                    writer,
+                    PointerStatus {
+                        lease_epoch: epoch,
+                        scope,
+                        status: PointerStatusKind::Waiting,
+                    },
+                )?;
+            }
+            state.clear_ready();
+            sources.pointer_frame.lock().unwrap().take();
+            capture.discard_pointer_frame();
+        } else if state.active(now)
+            && !frame.announced
+            && frame.scope.is_some()
+            && drawn == frame.scope
+        {
+            let status = state.ready(frame.scope.unwrap(), frame.serial, frame.at, now)?;
+            if let Some(frame) = sources.pointer_frame.lock().unwrap().as_mut() {
+                frame.announced = true;
+            }
+            send_pointer_status(writer, status)?;
+        }
+    }
+    Ok(())
+}
+
 fn send_keyboard_status(writer: &SharedWriter, status: LeaseStatus) -> RemoteResult<()> {
     write_session_record(
         &mut lock_writer(writer),
@@ -3205,6 +3395,7 @@ fn stream_frames(
     let mut next_cursor_poll = Instant::now();
     let cursor_interval = Duration::from_millis(16);
     let mut keyboard = HostKeyboardState::new();
+    let mut pointer = HostPointerState::default();
     let mut resize = HostResizeState::new(sources.resize_enabled.load(Ordering::Acquire));
     let mut source_size = (0u16, 0u16);
     let capture_result = (|| -> RemoteResult<()> {
@@ -3279,6 +3470,7 @@ fn stream_frames(
                 }
             }
             process_keyboard(sources, capture, &writer, &mut keyboard)?;
+            process_pointer(sources, capture, &writer, &mut pointer, source_size)?;
             let mode = capture.mode();
             // Record every tick: the telemetry window resets on each report, so
             // recording only on change left later windows claiming a fully
@@ -3380,7 +3572,17 @@ fn stream_frames(
                 state.geometry_epoch = frame.geometry_epoch;
                 state.input_area = capture.input_area();
             }
+            let pointer_serial = capture.pointer_frame().map(|(serial, at)| {
+                *sources.pointer_frame.lock().unwrap() = Some(PointerFrame {
+                    serial,
+                    at,
+                    scope: None,
+                    announced: false,
+                });
+                serial
+            });
             let pending = PendingFrame {
+                pointer_serial,
                 source_version,
                 frame,
                 captured_at: capture_started,
@@ -3570,6 +3772,11 @@ fn send_frames_with_encoder_scoped<W: std::io::Write + SetWriteTimeout>(
                 source_epoch = Some(pending.source_version.epoch);
             }
         }
+        // The retained native frame must receive its own authenticated sequence,
+        // including a static scene. Never suppress a pointer proof as unchanged.
+        if pending.pointer_serial.is_some() {
+            *sender = FrameSender::new();
+        }
         let planned_at = Instant::now();
         let mut plan = sender
             .plan_at(&pending.frame, planned_at)
@@ -3649,6 +3856,20 @@ fn send_frames_with_encoder_scoped<W: std::io::Write + SetWriteTimeout>(
             {
                 sender.discard();
                 continue;
+            }
+            if let (Some(sources), Some(serial)) = (sources, pending.pointer_serial) {
+                let mut retained = sources.pointer_frame.lock().unwrap();
+                let Some(frame) = retained.as_mut().filter(|frame| frame.serial == serial) else {
+                    // Capture-age expiry can retire a frame while JPEG encoding
+                    // runs. Drop it before reserving credit, never reuse its proof.
+                    sender.discard();
+                    continue;
+                };
+                frame.scope = Some(DrawnScope {
+                    source_epoch: pending.source_version.epoch,
+                    geometry_epoch: pending.frame.geometry_epoch,
+                    frame_sequence: sequence,
+                });
             }
             let sent_at = Instant::now();
             let outstanding = credits.mark_sent_scoped(
@@ -4257,6 +4478,33 @@ fn receive_input_scoped(
                         }
                     }
                 }
+                MessageKind::WaylandPointerRequest | MessageKind::WaylandPointerAction => {
+                    let sources =
+                        sources.ok_or_else(|| invalid_data("native pointer unavailable"))?;
+                    if !sources.pointer_enabled.load(Ordering::Acquire)
+                        || sources.pointer_revoke.load(Ordering::Acquire)
+                    {
+                        return Err(invalid_data("native pointer not negotiated or revoked").into());
+                    }
+                    let command = if kind == MessageKind::WaylandPointerRequest {
+                        PointerCommand::Request(PointerRequest::decode(&payload)?)
+                    } else {
+                        PointerCommand::Action(PointerAction::decode(&payload)?)
+                    };
+                    let mut queue = sources.pointer_queue.lock().unwrap();
+                    if !queue.is_empty() {
+                        sources.pointer_revoke.store(true, Ordering::Release);
+                        return Err(invalid_data("pointer inflight budget exceeded").into());
+                    }
+                    queue.push_back(command);
+                }
+                MessageKind::WaylandPointerRevoke => {
+                    let _ = PointerRevoke::decode(&payload)?;
+                    let sources =
+                        sources.ok_or_else(|| invalid_data("native pointer unavailable"))?;
+                    sources.pointer_revoke.store(true, Ordering::Release);
+                    sources.pointer_queue.lock().unwrap().clear();
+                }
                 MessageKind::WaylandKeyboardRequest | MessageKind::WaylandKeyboardKey => {
                     let sources =
                         sources.ok_or_else(|| invalid_data("Wayland keyboard unavailable"))?;
@@ -4303,7 +4551,14 @@ fn receive_input_scoped(
                 }
                 MessageKind::Viewport => {
                     let (width, height) = decode_viewport(&payload)?;
-                    viewport.request(width, height);
+                    let changed = viewport.request(width, height);
+                    if let Some(sources) = sources {
+                        if changed && sources.pointer_enabled.load(Ordering::Acquire) {
+                            // Never clear this latch: change then restore cannot
+                            // rehabilitate the prior native pointer authorization.
+                            sources.pointer_revoke.store(true, Ordering::Release);
+                        }
+                    }
                 }
                 MessageKind::SourceRequest => {
                     let request = SourceRequest::decode(&payload)?;
@@ -4375,7 +4630,8 @@ fn receive_input_scoped(
                 | MessageKind::SessionClose
                 | MessageKind::ClipboardRestricted
                 | MessageKind::WindowResizeResult
-                | MessageKind::WaylandKeyboardStatus => {
+                | MessageKind::WaylandKeyboardStatus
+                | MessageKind::WaylandPointerStatus => {
                     return Err(invalid_data(format!("unexpected client message: {kind:?}")).into());
                 }
             }
@@ -5364,6 +5620,7 @@ mod tests {
             allow_input: false,
             allow_window_resize: false,
             allow_wayland_keyboard: false,
+            allow_wayland_pointer: false,
             allow_clipboard: false,
             clipboard_mode: Default::default(),
             clipboard_direction: Default::default(),
@@ -7430,6 +7687,25 @@ mod tests {
     }
 
     #[test]
+    fn pointer_duplicate_initial_viewport_preserves_gate_but_changes_latch() {
+        let viewport = ViewportRequest::new();
+        viewport.seed(Some((800, 600)));
+        assert!(!viewport.request(800, 600));
+        assert_eq!(viewport.take(), Some((800, 600)));
+        assert!(!viewport.request(800, 600), "take must not erase history");
+        let mut revoked = viewport.request(640, 480);
+        assert!(revoked);
+        revoked |= viewport.request(800, 600);
+        revoked |= viewport.request(800, 600);
+        assert!(revoked, "restore or duplicate must not reauthorize");
+        let unknown = ViewportRequest::new();
+        assert!(
+            unknown.request(800, 600),
+            "no initial bounds is not proof of equivalence"
+        );
+    }
+
+    #[test]
     fn viewport_requests_are_idempotent_and_consumed_once() {
         let viewport = ViewportRequest::new();
         assert_eq!(viewport.take(), None, "nothing requested yet");
@@ -7504,6 +7780,7 @@ mod tests {
 
     fn test_pending_frame(red: u8) -> PendingFrame {
         PendingFrame {
+            pointer_serial: None,
             source_version: SourceVersion {
                 source: SourceId(1),
                 epoch: 1,
@@ -7756,7 +8033,7 @@ mod tests {
             let (kind, reason) = reader.read_message().unwrap();
             assert_eq!(kind, MessageKind::Close);
             let reason = String::from_utf8(reason).unwrap();
-            assert!(reason.contains("version 4; expected 16"), "{reason}");
+            assert!(reason.contains("version 4; expected 17"), "{reason}");
             assert!(
                 reason.contains("update jwm-remote on both machines"),
                 "{reason}"
@@ -7786,7 +8063,7 @@ mod tests {
             for (hello, expected) in [
                 (
                     prior_version,
-                    "unsupported JWM remote application version 13; expected 16",
+                    "unsupported JWM remote application version 13; expected 17",
                 ),
                 (malformed, "peer advertised unknown remote capabilities"),
             ] {
@@ -7926,6 +8203,7 @@ mod tests {
             allow_input: false,
             allow_window_resize: false,
             allow_wayland_keyboard: false,
+            allow_wayland_pointer: false,
             allow_clipboard: false,
             clipboard_mode: Default::default(),
             clipboard_direction: Default::default(),
@@ -8851,6 +9129,7 @@ mod tests {
     fn capture_start_ack_latency_includes_readback_but_queue_age_does_not() {
         let base = Instant::now();
         let pending = PendingFrame {
+            pointer_serial: None,
             source_version: SourceVersion {
                 source: SourceId(1),
                 epoch: 1,
@@ -9993,3 +10272,7 @@ mod tests {
 #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
 #[path = "host_keyboard_integration.rs"]
 mod host_keyboard_integration;
+
+#[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+#[path = "host_pointer_integration.rs"]
+mod host_pointer_integration;

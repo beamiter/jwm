@@ -8,9 +8,9 @@ use super::x11_keymap::{KeymapTable, MAX_ENCODED_KEYMAP_LEN};
 use std::io;
 
 const APPLICATION_MAGIC: &[u8; 8] = b"JWMREM01";
-pub const APPLICATION_VERSION: u16 = 16;
+pub const APPLICATION_VERSION: u16 = 17;
 const HELLO_PREFIX_LEN: usize = 11;
-const STREAM_CAPABILITIES_LEN: usize = 27;
+const STREAM_CAPABILITIES_LEN: usize = 28;
 const SERVER_HELLO_LEN: usize = HELLO_PREFIX_LEN + STREAM_CAPABILITIES_LEN;
 const CLIENT_HELLO_HEADER_LEN: usize = SERVER_HELLO_LEN + 4;
 /// Largest client hello: the shared prefix plus a full keymap table.
@@ -112,6 +112,8 @@ pub struct StreamCapabilities {
     pub window_resize: bool,
     /// Independent source-bound Wayland keyboard lease; never global input.
     pub wayland_keyboard: bool,
+    /// Independent single-action, frame-gated native pointer lease.
+    pub wayland_pointer: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -162,6 +164,7 @@ impl StreamCapabilities {
         payload[24] = self.clipboard_directions;
         payload[25] = u8::from(self.window_resize);
         payload[26] = u8::from(self.wayland_keyboard);
+        payload[27] = u8::from(self.wayland_pointer);
         payload
     }
 
@@ -178,6 +181,8 @@ impl StreamCapabilities {
             || payload[24] > 3
             || payload[25] > 1
             || payload[26] > 1
+            || payload[27] > 1
+            || (payload[26] == 1 && payload[27] == 1)
             || (payload[23] == 0) != (payload[24] == 0)
         {
             return Err(invalid_data("invalid clipboard content or direction policy").into());
@@ -196,6 +201,7 @@ impl StreamCapabilities {
             clipboard_directions: payload[24],
             window_resize: payload[25] == 1,
             wayland_keyboard: payload[26] == 1,
+            wayland_pointer: payload[27] == 1,
             ..Self::default()
         })
     }
@@ -994,7 +1000,7 @@ mod tests {
             ClientHello::decode(&legacy).unwrap_err(),
             ServerHello::decode(&legacy).unwrap_err(),
         ] {
-            assert!(error.to_string().contains("version 6; expected 16"));
+            assert!(error.to_string().contains("version 6; expected 17"));
         }
     }
 
@@ -1116,7 +1122,7 @@ mod tests {
             clipboard_files_enabled: false,
         }
         .encode();
-        assert_eq!(&payload[8..10], &16_u16.to_be_bytes());
+        assert_eq!(&payload[8..10], &17_u16.to_be_bytes());
 
         // Version 5 had no clipboard transfer records: a version-5 peer
         // would end the session on the first copied image or file. It must
@@ -1129,7 +1135,7 @@ mod tests {
             assert!(
                 error
                     .to_string()
-                    .contains(&format!("application version {older}; expected 16"))
+                    .contains(&format!("application version {older}; expected 17"))
             );
         }
 

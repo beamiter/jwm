@@ -376,14 +376,14 @@ gives each complete authenticated video record, including its final flush, one
 budget; a partial or timed-out record closes the whole session so its wire
 sequence can never be retried out of sync.
 
-The current application protocol is version 16. Versions 2 to 15 are
+The current application protocol is version 17. Versions 2 to 16 are
 deliberately incompatible, so update `jwm-remote` on both machines together;
 negotiation rejects an older peer before screen or input data is exchanged.
 Version 7 introduced initial viewport and explicit stream selectors. Version 8
 adds an independently negotiated cursor plane and a video geometry epoch;
 it does not silently reinterpret v7 video or cursor selector semantics.
 
-The v16 hello prefix is the existing 8-byte magic, big-endian `u16` version,
+The v17 hello prefix is the existing 8-byte magic, big-endian `u16` version,
 and capability flags. Both hellos append three one-byte selectors in order:
 codec `1` (JPEG tiles), cursor `1` (composited) or `2` (independent), input `1`
 (X11 keycodes). A viewer advertises independent cursor only after verifying local XRender
@@ -441,16 +441,25 @@ width/height (u16), and status byte Applied=1, Unchanged=2, Denied=3,
 Stale=4, Busy=5, Failed=6. All IDs/epochs are nonzero and dimensions bounded.
 See [window viewing](remote-window-view.md) for lease and confirmation semantics.
 
+Version 16 adds the independent Wayland keyboard lease selector and records
+25–28. Version 17 appends another boolean selector for the independent
+Wayland pointer lease. It is not the legacy pointer permission: it admits only
+single-surface, fresh-frame-gated absolute motion and atomic left clicks.
+Pointer request/status/action/revoke records (kinds 29–32) are respectively
+24/33/45/8 bytes. Keyboard and pointer lease modes are mutually exclusive.
+See [Wayland source safety](remote-wayland-source.md) for explicit opt-in,
+recipient restrictions, frame lifetime and unsupported mapping arrangements.
+
 The client then appends big-endian `u16` viewport width and height, followed
 by the existing bounded keymap table. `(0, 0)` means no initial size; exactly
-one zero dimension is invalid. The server hello is exactly 38 bytes. Unknown
+one zero dimension is invalid. The server hello is exactly 39 bytes. Unknown
 selectors, trailing bytes and incomplete keymaps are rejected. Input and
 clipboard permission flags remain independent of the stream profile.
 
-Compatibility: v16 viewer/v16 host works; v6/v7/v8/v9/v10/v11/v12/v13/v14/v15 with v16 in either direction is
+Compatibility: v17 viewer/v17 host works; v6/v7/v8/v9/v10/v11/v12/v13/v14/v15/v16 with v17 in either direction is
 rejected during negotiation. There is no automatic legacy-version fallback.
 Keep both binaries on the same release; this change does not alter transport
-crypto. Within v16, unsupported independent-cursor capability falls back to
+crypto. Within v17, unsupported independent-cursor capability falls back to
 composited video explicitly in HelloAck.
 
 Version 14 adds viewer-to-host `ClipboardRestrict` (kind 21) and host-to-viewer

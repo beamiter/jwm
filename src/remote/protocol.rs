@@ -180,6 +180,10 @@ pub enum MessageKind {
     WaylandKeyboardStatus = 26,
     WaylandKeyboardKey = 27,
     WaylandKeyboardRevoke = 28,
+    WaylandPointerRequest = 29,
+    WaylandPointerStatus = 30,
+    WaylandPointerAction = 31,
+    WaylandPointerRevoke = 32,
 }
 
 impl TryFrom<u8> for MessageKind {
@@ -213,6 +217,10 @@ impl TryFrom<u8> for MessageKind {
             26 => Ok(Self::WaylandKeyboardStatus),
             27 => Ok(Self::WaylandKeyboardKey),
             28 => Ok(Self::WaylandKeyboardRevoke),
+            29 => Ok(Self::WaylandPointerRequest),
+            30 => Ok(Self::WaylandPointerStatus),
+            31 => Ok(Self::WaylandPointerAction),
+            32 => Ok(Self::WaylandPointerRevoke),
             21 => Ok(Self::ClipboardRestrict),
             22 => Ok(Self::ClipboardRestricted),
             other => Err(ProtocolError::UnknownMessageKind(other)),

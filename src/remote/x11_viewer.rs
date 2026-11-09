@@ -58,6 +58,21 @@ const RENDER_FILTER_BILINEAR: &[u8] = b"bilinear";
 /// source/root coordinate space, even when the viewer window is letterboxed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ViewerEvent {
+    WaylandPointer {
+        frame_sequence: u64,
+        geometry_epoch: u64,
+        x: u16,
+        y: u16,
+        local_x: i16,
+        local_y: i16,
+        kind: WaylandPointerEventKind,
+    },
+    WaylandPointerCancel,
+    /// An unmappable local left-button edge; never a remote action.
+    WaylandPointerButtonCancel {
+        pressed: bool,
+    },
+    WaylandPointerRevoke,
     CycleSource,
     NarrowClipboard,
     Close,
@@ -75,6 +90,13 @@ pub enum ViewerEvent {
     },
     /// Release every key and button held by the remote input injector.
     ReleaseAll,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WaylandPointerEventKind {
+    Motion,
+    LeftDown,
+    LeftUp,
 }
 
 #[derive(Default)]
@@ -604,6 +626,9 @@ pub struct Viewer {
     source_label: Option<String>,
     presented_geometry: Option<u64>,
     pointer_enabled: bool,
+    wayland_pointer: bool,
+    pointer_presented: Option<u64>,
+    pointer_status: Option<&'static str>,
     forward_keyboard: bool,
     #[cfg(feature = "remote-wayland")]
     wayland_keymap: Option<super::keyboard_keymap::KeyboardKeymap>,
@@ -1169,6 +1194,9 @@ impl Viewer {
             source_label: None,
             presented_geometry: None,
             pointer_enabled,
+            wayland_pointer: false,
+            pointer_presented: None,
+            pointer_status: None,
             forward_keyboard,
             verified_keymap,
             #[cfg(feature = "remote-wayland")]
@@ -1260,6 +1288,68 @@ impl Viewer {
         self.keyboard = ViewerKeyboardState::default();
     }
 
+    pub(super) fn enable_wayland_pointer(&mut self) -> RemoteResult<()> {
+        if self.pointer_enabled || self.forward_keyboard || self.grab_input {
+            return Err(
+                invalid_data("scoped pointer cannot share legacy input or keyboard").into(),
+            );
+        }
+        self.wayland_pointer = true;
+        self.set_wayland_pointer_status("Pointer: Waiting for authorization");
+        Ok(())
+    }
+    pub(super) fn set_wayland_pointer_status(&mut self, status: &'static str) {
+        if self.pointer_status != Some(status) {
+            self.pointer_status = Some(status);
+            self.update_title();
+        }
+    }
+    pub(super) fn wayland_pointer_presented(&mut self, sequence: u64) {
+        self.pointer_presented = Some(sequence);
+    }
+    fn scoped_pointer_event(&self, x: i16, y: i16, kind: WaylandPointerEventKind) -> ViewerEvent {
+        let cancelled = match kind {
+            WaylandPointerEventKind::Motion => ViewerEvent::WaylandPointerCancel,
+            WaylandPointerEventKind::LeftDown => {
+                ViewerEvent::WaylandPointerButtonCancel { pressed: true }
+            }
+            WaylandPointerEventKind::LeftUp => {
+                ViewerEvent::WaylandPointerButtonCancel { pressed: false }
+            }
+        };
+        let Some(frame) = self.last_frame.as_ref() else {
+            return cancelled;
+        };
+        if self.pending_resize
+            || self.pointer_presented != Some(frame.sequence)
+            || self.presented_geometry != Some(frame.geometry_epoch)
+            || !self.pointer_is_inside_image(x, y)
+        {
+            return cancelled;
+        }
+        let Some((sx, sy)) = map_scoped_pointer_to_source(
+            x,
+            y,
+            self.width,
+            self.height,
+            frame.image().width() as u16,
+            frame.image().height() as u16,
+            frame.source_width,
+            frame.source_height,
+        ) else {
+            return cancelled;
+        };
+        ViewerEvent::WaylandPointer {
+            frame_sequence: frame.sequence,
+            geometry_epoch: frame.geometry_epoch,
+            x: sx,
+            y: sy,
+            local_x: x,
+            local_y: y,
+            kind,
+        }
+    }
+
     pub fn poll_events(&mut self) -> RemoteResult<Vec<ViewerEvent>> {
         let mut result = Vec::new();
         #[cfg(feature = "remote-wayland")]
@@ -1339,6 +1429,39 @@ impl Viewer {
                     self.clipboard_shortcut = ViewerKeyboardState::default();
                     self.release_local_grab()?;
                     self.release_all_input(&mut result);
+                }
+                Event::MotionNotify(event)
+                    if event.event == self.window && self.wayland_pointer =>
+                {
+                    result.push(self.scoped_pointer_event(
+                        event.event_x,
+                        event.event_y,
+                        WaylandPointerEventKind::Motion,
+                    ));
+                }
+                Event::ButtonPress(event) if event.event == self.window && self.wayland_pointer => {
+                    result.push(if event.detail == 1 {
+                        self.scoped_pointer_event(
+                            event.event_x,
+                            event.event_y,
+                            WaylandPointerEventKind::LeftDown,
+                        )
+                    } else {
+                        ViewerEvent::WaylandPointerCancel
+                    });
+                }
+                Event::ButtonRelease(event)
+                    if event.event == self.window && self.wayland_pointer =>
+                {
+                    result.push(if event.detail == 1 {
+                        self.scoped_pointer_event(
+                            event.event_x,
+                            event.event_y,
+                            WaylandPointerEventKind::LeftUp,
+                        )
+                    } else {
+                        ViewerEvent::WaylandPointerCancel
+                    });
                 }
                 Event::MotionNotify(event)
                     if event.event == self.window && self.forwarding_input() =>
@@ -2117,6 +2240,10 @@ impl Viewer {
             self.clipboard_activity.as_deref(),
             &self.escape_name,
         );
+        if let Some(status) = self.pointer_status {
+            title.push_str("; ");
+            title.push_str(status);
+        }
         if self.clipboard_enabled {
             title.push_str("; sharing ");
             title.push_str(&self.clipboard_policy);
@@ -2252,6 +2379,9 @@ impl Viewer {
     }
 
     fn release_all_input(&mut self, events: &mut Vec<ViewerEvent>) {
+        if self.wayland_pointer {
+            events.push(ViewerEvent::WaylandPointerRevoke);
+        }
         clear_forwarded_input(&mut self.keyboard, &mut self.held_buttons, events);
     }
 
@@ -4172,9 +4302,26 @@ fn letterbox(
     })
 }
 
-/// Map local window coordinates through the fitted image rectangle into the
-/// original remote source space.  Coordinates in the black bars clamp to the
-/// nearest source edge, making pointer motion continuous at the image border.
+/// Scoped grants reject black bars and outside coordinates before mapping.
+/// They never inherit the legacy drag-friendly clamping policy.
+fn map_scoped_pointer_to_source(
+    x: i16,
+    y: i16,
+    ww: u16,
+    wh: u16,
+    iw: u16,
+    ih: u16,
+    sw: u16,
+    sh: u16,
+) -> Option<(u16, u16)> {
+    let bounds = letterbox(ww, wh, iw, ih)?;
+    if !pointer_inside_letterbox(x, y, bounds) {
+        return None;
+    }
+    map_pointer_to_source(x, y, ww, wh, iw, ih, sw, sh)
+}
+
+/// Legacy pointer mapping clamps outside coordinates for held drags.
 fn map_pointer_to_source(
     x: i16,
     y: i16,
@@ -6535,5 +6682,25 @@ mod tests {
             true,
             false
         ));
+    }
+}
+
+#[cfg(test)]
+mod scoped_pointer_coordinate_tests {
+    use super::*;
+    #[test]
+    fn scoped_pointer_rejects_black_bars_and_outside_without_clamping() {
+        assert!(map_scoped_pointer_to_source(-1, 50, 100, 100, 100, 50, 200, 100).is_none());
+        assert!(map_scoped_pointer_to_source(50, 0, 100, 100, 100, 50, 200, 100).is_none());
+        assert!(map_scoped_pointer_to_source(50, 99, 100, 100, 100, 50, 200, 100).is_none());
+        assert!(map_scoped_pointer_to_source(100, 50, 100, 100, 100, 50, 200, 100).is_none());
+        assert_eq!(
+            map_scoped_pointer_to_source(0, 25, 100, 100, 100, 50, 200, 100),
+            Some((0, 0))
+        );
+        assert_eq!(
+            map_scoped_pointer_to_source(99, 74, 100, 100, 100, 50, 200, 100),
+            Some((199, 99))
+        );
     }
 }

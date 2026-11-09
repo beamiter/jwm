@@ -15,6 +15,60 @@ pub(super) enum HostCapture {
 }
 
 impl HostCapture {
+    pub(super) fn enable_pointer(&mut self) -> RemoteResult<()> {
+        #[cfg(feature = "remote-wayland")]
+        if let Self::Wayland(c) = self {
+            return c.enable_pointer();
+        }
+        Err(std::io::Error::other("native pointer unavailable").into())
+    }
+    pub(super) fn grant_pointer(&mut self) -> RemoteResult<u64> {
+        #[cfg(feature = "remote-wayland")]
+        if let Self::Wayland(c) = self {
+            return c.grant_pointer();
+        }
+        Err(std::io::Error::other("native pointer unavailable").into())
+    }
+    pub(super) fn pointer_revoked(&self) -> bool {
+        #[cfg(feature = "remote-wayland")]
+        if let Self::Wayland(c) = self {
+            return c.pointer_revoked();
+        }
+        true
+    }
+    pub(super) fn pointer_frame(&self) -> Option<(u64, std::time::Instant)> {
+        #[cfg(feature = "remote-wayland")]
+        if let Self::Wayland(c) = self {
+            return c.pointer_frame();
+        }
+        None
+    }
+    pub(super) fn pointer_action(
+        &mut self,
+        action: &super::wayland_pointer_wire::PointerAction,
+        serial: u64,
+    ) -> RemoteResult<()> {
+        #[cfg(feature = "remote-wayland")]
+        if let Self::Wayland(c) = self {
+            return c.pointer_action(action, serial);
+        }
+        {
+            let _ = (action, serial);
+            Err(std::io::Error::other("native pointer unavailable").into())
+        }
+    }
+    pub(super) fn revoke_pointer(&mut self) {
+        #[cfg(feature = "remote-wayland")]
+        if let Self::Wayland(c) = self {
+            c.revoke_pointer();
+        }
+    }
+    pub(super) fn discard_pointer_frame(&mut self) {
+        #[cfg(feature = "remote-wayland")]
+        if let Self::Wayland(c) = self {
+            c.discard_pointer_frame();
+        }
+    }
     pub(super) fn enable_keyboard(&mut self) -> RemoteResult<()> {
         #[cfg(feature = "remote-wayland")]
         if let Self::Wayland(c) = self {

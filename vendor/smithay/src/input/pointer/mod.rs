@@ -12,6 +12,9 @@ use crate::{
     utils::{IsAlive, Logical, Point},
 };
 
+#[cfg(feature = "wayland_frontend")]
+pub use crate::wayland::seat::pointer::AuthorizedPointerSnapshot;
+
 mod cursor_image;
 pub use cursor_icon::CursorIcon;
 pub use cursor_image::{CursorImageAttributes, CursorImageStatus, CursorImageSurfaceData};
@@ -703,8 +706,10 @@ pub(crate) struct PointerInternal<D: SeatHandler> {
     pub(crate) focus: Option<(<D as SeatHandler>::PointerFocus, Point<f64, Logical>)>,
     pending_focus: Option<(<D as SeatHandler>::PointerFocus, Point<f64, Logical>)>,
     pub(crate) location: Point<f64, Logical>,
-    grab: GrabStatus<dyn PointerGrab<D>>,
-    pressed_buttons: Vec<u32>,
+    pub(crate) grab: GrabStatus<dyn PointerGrab<D>>,
+    pub(crate) pressed_buttons: Vec<u32>,
+    // Saturation permanently disables scoped authority instead of wrapping.
+    pub(crate) authority_generation: u64,
 }
 
 // image_callback does not implement debug, so we have to impl Debug manually
@@ -729,6 +734,7 @@ impl<D: SeatHandler + 'static> PointerInternal<D> {
             location: (0.0, 0.0).into(),
             grab: GrabStatus::None,
             pressed_buttons: Vec::new(),
+            authority_generation: 0,
         }
     }
 
@@ -740,6 +746,7 @@ impl<D: SeatHandler + 'static> PointerInternal<D> {
         grab: G,
         focus: Focus,
     ) {
+        self.authority_generation = self.authority_generation.saturating_add(1);
         if let GrabStatus::Active(_, handler) = &mut self.grab {
             handler.unset(data);
         }
@@ -768,6 +775,7 @@ impl<D: SeatHandler + 'static> PointerInternal<D> {
         time: InputTime,
         restore_focus: bool,
     ) {
+        self.authority_generation = self.authority_generation.saturating_add(1);
         if let GrabStatus::Active(_, handler) = &mut self.grab {
             handler.unset(data);
         }
@@ -796,6 +804,7 @@ impl<D: SeatHandler + 'static> PointerInternal<D> {
         focus: Option<(<D as SeatHandler>::PointerFocus, Point<f64, Logical>)>,
         event: &MotionEvent,
     ) {
+        self.authority_generation = self.authority_generation.saturating_add(1);
         self.location = event.location;
         if let Some((focus, loc)) = focus {
             let event = MotionEvent {
@@ -888,6 +897,7 @@ impl<D: SeatHandler + 'static> PointerInternal<D> {
     where
         F: FnOnce(&mut D, &mut PointerInnerHandle<'_, D>, &mut dyn PointerGrab<D>),
     {
+        self.authority_generation = self.authority_generation.saturating_add(1);
         let mut grab = std::mem::replace(&mut self.grab, GrabStatus::Borrowed);
         match grab {
             GrabStatus::Borrowed => panic!("Accessed a pointer grab from within a pointer grab access."),

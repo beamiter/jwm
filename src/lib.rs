@@ -26,6 +26,8 @@ pub mod jwm;
 pub mod remote;
 #[cfg(any(feature = "remote-wayland", feature = "wayland-backends"))]
 pub mod remote_keyboard_protocol;
+#[cfg(any(feature = "remote-wayland", feature = "wayland-backends"))]
+pub mod remote_pointer_protocol;
 pub mod renderer;
 pub mod sync_ext;
 pub mod terminal_prober;

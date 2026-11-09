@@ -27,6 +27,7 @@ pub mod workspace_protocol;
 
 pub mod image_copy_capture;
 pub(crate) mod remote_keyboard;
+pub(crate) mod remote_pointer;
 
 pub mod gamma_control;
 

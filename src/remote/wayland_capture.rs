@@ -10,6 +10,10 @@ use crate::remote_keyboard_protocol::client::{
     jwm_remote_keyboard_lease_v1::{self as keyboard_lease, JwmRemoteKeyboardLeaseV1},
     jwm_remote_keyboard_manager_v1::JwmRemoteKeyboardManagerV1,
 };
+use crate::remote_pointer_protocol::client::{
+    jwm_remote_pointer_lease_v1::{self as pointer_lease, JwmRemotePointerLeaseV1},
+    jwm_remote_pointer_manager_v1::JwmRemotePointerManagerV1,
+};
 use image::{RgbImage, imageops::FilterType};
 use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 use nix::sys::memfd::{MFdFlags, memfd_create};
@@ -70,7 +74,20 @@ struct NativeKeyboard {
 }
 
 #[derive(Default)]
+struct NativePointer {
+    manager: Option<JwmRemotePointerManagerV1>,
+    global: Option<u32>,
+    enabled: bool,
+    revoked: bool,
+    requested: bool,
+    epoch: Option<u32>,
+    accepted: u32,
+    expected: Option<u32>,
+    deadline: Option<Instant>,
+}
+#[derive(Default)]
 struct State {
+    pointer: NativePointer,
     keyboard: NativeKeyboard,
     shm: Option<wl_shm::WlShm>,
     list: Option<ExtForeignToplevelListV1>,
@@ -151,6 +168,8 @@ pub(super) struct WaylandCapture {
     limits: FrameLimits,
     epoch: u64,
     recycler: CaptureImageRecycler,
+    pointer_lease: Option<JwmRemotePointerLeaseV1>,
+    pointer_ready_at: Option<Instant>,
     keyboard_lease: Option<JwmRemoteKeyboardLeaseV1>,
     retained_frame: Option<ExtImageCopyCaptureFrameV1>,
     arm_deadline: Option<Instant>,
@@ -208,6 +227,8 @@ impl WaylandCapture {
             limits: FrameLimits::default(),
             epoch: 1,
             recycler: CaptureImageRecycler::default(),
+            pointer_lease: None,
+            pointer_ready_at: None,
             keyboard_lease: None,
             retained_frame: None,
             arm_deadline: None,
@@ -282,6 +303,144 @@ impl WaylandCapture {
     }
 
     /// Must be enabled before the first frame and only after wire negotiation.
+    pub(super) fn enable_pointer(&mut self) -> RemoteResult<()> {
+        if self.state.frame_serial != 0
+            || self.state.keyboard.enabled
+            || self.state.pointer.enabled
+            || self.state.pointer.manager.is_none()
+        {
+            return Err(invalid("native pointer unavailable or enable too late").into());
+        }
+        self.state.pointer.enabled = true;
+        Ok(())
+    }
+    pub(super) fn pointer_revoked(&self) -> bool {
+        self.state.pointer.revoked
+            || self
+                .state
+                .pointer
+                .deadline
+                .is_some_and(|at| Instant::now() >= at)
+    }
+    pub(super) fn pointer_frame(&self) -> Option<(u64, Instant)> {
+        if !self.state.pointer.enabled || self.retained_frame.is_none() {
+            return None;
+        }
+        self.pointer_ready_at
+            .map(|at| (self.state.frame_serial, at))
+    }
+    pub(super) fn discard_pointer_frame(&mut self) {
+        if self.state.pointer.enabled {
+            if let Some(frame) = self.retained_frame.take() {
+                frame.destroy();
+            }
+            self.pointer_ready_at = None;
+        }
+    }
+    pub(super) fn revoke_pointer(&mut self) {
+        self.state.pointer.revoked = true;
+        if let Some(lease) = self.pointer_lease.take() {
+            lease.destroy();
+        }
+        self.discard_pointer_frame();
+        let _ = self.conn.flush();
+    }
+    pub(super) fn grant_pointer(&mut self) -> RemoteResult<u64> {
+        if !self.state.pointer.enabled
+            || self.pointer_revoked()
+            || self.state.pointer.requested
+            || self.retained_frame.is_none()
+        {
+            return Err(invalid("native pointer grant not permitted").into());
+        }
+        self.state.pointer.requested = true;
+        self.state.pointer.deadline =
+            Some(Instant::now() + super::wayland_pointer_wire::LEASE_DURATION);
+        self.pointer_lease = Some(self.state.pointer.manager.as_ref().unwrap().create_lease(
+            self.source.as_ref().unwrap(),
+            &self.queue.handle(),
+            (),
+        ));
+        let deadline = Instant::now() + PROTOCOL_TIMEOUT;
+        loop {
+            self.state.check()?;
+            if self.pointer_revoked() {
+                self.revoke_pointer();
+                return Err(invalid("native pointer revoked").into());
+            }
+            if let Some(epoch) = self.state.pointer.epoch {
+                return Ok(u64::from(epoch));
+            }
+            if Instant::now() >= deadline {
+                self.revoke_pointer();
+                return Err(invalid("native pointer grant timed out").into());
+            }
+            self.pump(deadline)?;
+        }
+    }
+    pub(super) fn pointer_action(
+        &mut self,
+        action: &super::wayland_pointer_wire::PointerAction,
+        serial: u64,
+    ) -> RemoteResult<()> {
+        let result = self.pointer_action_inner(action, serial);
+        if result.is_err() {
+            self.revoke_pointer();
+        }
+        result
+    }
+    fn pointer_action_inner(
+        &mut self,
+        action: &super::wayland_pointer_wire::PointerAction,
+        serial: u64,
+    ) -> RemoteResult<()> {
+        self.sync_until(Instant::now() + PROTOCOL_TIMEOUT)?;
+        let epoch = u32::try_from(action.lease_epoch)?;
+        let sequence = u32::try_from(action.sequence)?;
+        let (actual_serial, at) = self
+            .pointer_frame()
+            .ok_or_else(|| invalid("missing native pointer frame"))?;
+        if self.pointer_revoked()
+            || self.state.pointer.epoch != Some(epoch)
+            || actual_serial != serial
+            || at.elapsed() >= super::wayland_pointer_wire::FRAME_MAX_AGE
+            || self.state.pointer.accepted.checked_add(1) != Some(sequence)
+            || sequence > 60000
+        {
+            return Err(invalid("stale native pointer action").into());
+        }
+        self.state.pointer.expected = Some(sequence);
+        self.pointer_lease
+            .as_ref()
+            .ok_or_else(|| invalid("missing pointer lease"))?
+            .action(
+                epoch,
+                sequence,
+                self.retained_frame.as_ref().unwrap(),
+                action.kind as u32,
+                u32::from(action.x),
+                u32::from(action.y),
+            );
+        let deadline =
+            (Instant::now() + PROTOCOL_TIMEOUT).min(self.state.pointer.deadline.unwrap());
+        loop {
+            self.state.check()?;
+            if self.pointer_revoked() {
+                return Err(invalid("native pointer revoked").into());
+            }
+            if self.state.pointer.accepted == sequence {
+                break;
+            }
+            if Instant::now() >= deadline {
+                return Err(invalid("native pointer action timed out").into());
+            }
+            self.pump(deadline)?;
+        }
+        self.state.pointer.expected = None;
+        self.discard_pointer_frame();
+        Ok(())
+    }
+
     pub(super) fn enable_keyboard(&mut self) -> RemoteResult<()> {
         if self.state.frame_serial != 0
             || self.state.keyboard.enabled
@@ -599,6 +758,9 @@ impl WaylandCapture {
     fn read_frame(&mut self) -> RemoteResult<CaptureOutcome> {
         self.state.check()?;
         self.expire_keyboard();
+        if self.state.pointer.enabled && self.pointer_revoked() {
+            self.revoke_pointer();
+        }
         if self.retained_frame.is_some() {
             self.pump(Instant::now() + Duration::from_millis(1))?;
             self.expire_keyboard();
@@ -629,7 +791,10 @@ impl WaylandCapture {
         self.inflight = Some(frame);
         self.drive_until(deadline, |state| state.frame_ready)?;
         let ready_frame = self.inflight.take().unwrap();
-        if self.state.keyboard.enabled
+        if self.state.pointer.enabled && !self.pointer_revoked() {
+            self.retained_frame = Some(ready_frame);
+            self.pointer_ready_at = Some(Instant::now());
+        } else if self.state.keyboard.enabled
             && !self.state.keyboard.revoked
             && self.state.frame_serial == 1
         {
@@ -739,6 +904,7 @@ impl WaylandCapture {
 
 impl Drop for WaylandCapture {
     fn drop(&mut self) {
+        self.revoke_pointer();
         self.revoke_keyboard();
         if let Some(frame) = self.inflight.take() {
             frame.destroy();
@@ -772,6 +938,11 @@ impl Dispatch<wl_registry::WlRegistry, ()> for State {
                 version,
             } if version >= 1 => {
                 let bound = match interface.as_str() {
+                    "jwm_remote_pointer_manager_v1" if state.pointer.manager.is_none() => {
+                        state.pointer.manager = Some(proxy.bind(name, 1, qh, ()));
+                        state.pointer.global = Some(name);
+                        false
+                    }
                     "jwm_remote_keyboard_manager_v1" if state.keyboard.manager.is_none() => {
                         state.keyboard.manager = Some(proxy.bind(name, 1, qh, ()));
                         state.keyboard.global = Some(name);
@@ -800,6 +971,10 @@ impl Dispatch<wl_registry::WlRegistry, ()> for State {
                 if bound {
                     state.globals.push(name);
                 }
+            }
+            wl_registry::Event::GlobalRemove { name } if state.pointer.global == Some(name) => {
+                state.pointer.revoked = true;
+                state.pointer.manager = None;
             }
             wl_registry::Event::GlobalRemove { name } if state.keyboard.global == Some(name) => {
                 state.keyboard.revoked = true;
@@ -1204,6 +1379,50 @@ impl Dispatch<JwmRemoteKeyboardLeaseV1, ()> for State {
                 }
             }
             keyboard_lease::Event::Revoked { .. } => keyboard.revoked = true,
+        }
+    }
+}
+
+wayland_client::delegate_noop!(State: ignore JwmRemotePointerManagerV1);
+impl Dispatch<JwmRemotePointerLeaseV1, ()> for State {
+    fn event(
+        state: &mut Self,
+        _: &JwmRemotePointerLeaseV1,
+        event: pointer_lease::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        let pointer = &mut state.pointer;
+        if pointer.revoked {
+            return;
+        }
+        match event {
+            pointer_lease::Event::Granted { epoch, ttl_ms } => {
+                if !pointer.requested
+                    || pointer.epoch.is_some()
+                    || epoch == 0
+                    || ttl_ms == 0
+                    || ttl_ms > 30000
+                {
+                    pointer.revoked = true;
+                    return;
+                }
+                pointer.epoch = Some(epoch);
+                let deadline = Instant::now() + Duration::from_millis(u64::from(ttl_ms));
+                pointer.deadline = Some(pointer.deadline.map_or(deadline, |old| old.min(deadline)));
+            }
+            pointer_lease::Event::Accepted { epoch, sequence } => {
+                if pointer.epoch != Some(epoch)
+                    || pointer.expected != Some(sequence)
+                    || pointer.accepted.checked_add(1) != Some(sequence)
+                {
+                    pointer.revoked = true;
+                    return;
+                }
+                pointer.accepted = sequence;
+            }
+            pointer_lease::Event::Revoked { .. } => pointer.revoked = true,
         }
     }
 }

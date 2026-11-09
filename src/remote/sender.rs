@@ -108,12 +108,24 @@ impl Queue {
             MessageKind::WaylandKeyboardRequest => Some(56),
             MessageKind::WaylandKeyboardKey => Some(43),
             MessageKind::WaylandKeyboardRevoke => Some(8),
+            MessageKind::WaylandPointerRequest => Some(24),
+            MessageKind::WaylandPointerAction => Some(45),
+            MessageKind::WaylandPointerRevoke => Some(8),
             _ => None,
         };
         if expected.is_some_and(|length| payload.len() != length) {
             return Err(
                 io::Error::new(io::ErrorKind::InvalidInput, "invalid control record size").into(),
             );
+        }
+        if kind == MessageKind::WaylandPointerRevoke {
+            self.control.retain(|r| {
+                !matches!(
+                    r.kind,
+                    MessageKind::WaylandPointerRequest | MessageKind::WaylandPointerAction
+                )
+            });
+            self.control_bytes = self.control.iter().map(|r| r.payload.len()).sum();
         }
         if kind == MessageKind::WaylandKeyboardRevoke {
             self.control
@@ -536,6 +548,35 @@ impl Drop for Sender {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn scoped_pointer_revoke_clears_pending_request_and_actions() {
+        let mut queue = super::Queue::default();
+        queue
+            .push(super::MessageKind::WaylandPointerRequest, &[1; 24])
+            .unwrap();
+        queue
+            .push(super::MessageKind::WaylandPointerAction, &[1; 45])
+            .unwrap();
+        queue.push(super::MessageKind::Heartbeat, &[]).unwrap();
+        queue
+            .push(super::MessageKind::WaylandPointerRevoke, &[1; 8])
+            .unwrap();
+        assert!(queue.control.iter().all(|record| !matches!(
+            record.kind,
+            super::MessageKind::WaylandPointerRequest | super::MessageKind::WaylandPointerAction
+        )));
+        assert!(
+            queue
+                .control
+                .iter()
+                .any(|record| record.kind == super::MessageKind::Heartbeat)
+        );
+        assert!(
+            queue
+                .push(super::MessageKind::WaylandPointerAction, &[0; 44])
+                .is_err()
+        );
+    }
     #[test]
     fn wayland_keyboard_revoke_discards_queued_key_edges_only() {
         let mut queue = super::Queue::default();

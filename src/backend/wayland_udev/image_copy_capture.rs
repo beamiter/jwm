@@ -4,8 +4,9 @@
 /// tools (OBS, portals, grim v2) to capture output and toplevel content.
 use crate::sync_ext::MutexExt;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use log::{debug, info, warn};
 
@@ -129,8 +130,15 @@ pub struct CaptureAuthority {
     ),
     revoked: AtomicBool,
     keyboard_consumed: AtomicBool,
+    pointer_consumed: AtomicBool,
+    ready_serial: AtomicU64,
 }
 impl CaptureAuthority {
+    pub(crate) fn consume_pointer_attempt(&self) -> bool {
+        self.pointer_consumed
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
     /// A source authorizes at most one keyboard attempt. Failed admission,
     /// revoke, timeout and resource destruction never make it renewable.
     /// Read-only capture does not consume or reset this bit.
@@ -248,6 +256,8 @@ fn create_toplevel_source(
         lock_epoch: state.session_lock_epoch,
         revoked: AtomicBool::new(false),
         keyboard_consumed: AtomicBool::new(false),
+        pointer_consumed: AtomicBool::new(false),
+        ready_serial: AtomicU64::new(0),
     });
     registry
         .by_window
@@ -356,6 +366,7 @@ pub struct CaptureFrameData {
     /// A frame accepts one capture; afterwards only destroy is legal.
     pub captured: AtomicBool,
     pub(crate) ready: AtomicBool,
+    pub(crate) ready_stamp: Mutex<Option<(u64, Instant)>>,
     /// `None` for a frame of a stopped session; capturing it fails.
     pub source: Option<CaptureSource>,
     /// The session that created this frame, stopped once the frame shows
@@ -391,6 +402,26 @@ unsafe impl Send for PendingImageCapture {}
 impl PendingImageCapture {
     pub(crate) fn mark_ready(&self) {
         if let Some(data) = self.frame.data::<CaptureFrameData>() {
+            if data.ready.load(Ordering::Acquire) {
+                return;
+            }
+            if let CaptureSource::Toplevel(authority) = &self.source {
+                let mut old = authority.ready_serial.load(Ordering::Acquire);
+                while let Some(next) = old.checked_add(1) {
+                    match authority.ready_serial.compare_exchange(
+                        old,
+                        next,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    ) {
+                        Ok(_) => {
+                            *data.ready_stamp.lock().unwrap() = Some((next, Instant::now()));
+                            break;
+                        }
+                        Err(actual) => old = actual,
+                    }
+                }
+            }
             data.ready.store(true, Ordering::Release);
         }
     }
@@ -829,6 +860,14 @@ impl Dispatch<ExtImageCaptureSourceV1, ImageCaptureSourceData> for JwmWaylandSta
             _ => {}
         }
     }
+    fn destroyed(
+        state: &mut Self,
+        _client: ClientId,
+        resource: &ExtImageCaptureSourceV1,
+        _data: &ImageCaptureSourceData,
+    ) {
+        super::remote_pointer::source_destroyed(state, resource);
+    }
 }
 
 // =============================================================================
@@ -983,6 +1022,7 @@ impl Dispatch<ExtImageCopyCaptureSessionV1, CaptureSessionData> for JwmWaylandSt
                     CaptureFrameData {
                         captured: AtomicBool::new(false),
                         ready: AtomicBool::new(false),
+                        ready_stamp: Mutex::new(None),
                         source,
                         session: resource.downgrade(),
                         paint_cursors: data.paint_cursors,

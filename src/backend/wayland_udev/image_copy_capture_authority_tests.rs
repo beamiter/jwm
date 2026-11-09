@@ -60,9 +60,9 @@ pub(crate) fn shm_buffer_file(
 
 pub(crate) struct App {
     pub(crate) client: Client,
-    surface: u32,
-    xdg: u32,
-    toplevel: u32,
+    pub(crate) surface: u32,
+    pub(crate) xdg: u32,
+    pub(crate) toplevel: u32,
     buffer: u32,
     pub(crate) window: WindowId,
 }

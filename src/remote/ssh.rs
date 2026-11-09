@@ -148,6 +148,7 @@ pub fn run_ssh(options: SshOptions) -> RemoteResult<()> {
         .and_then(|()| {
             run_client(ClientOptions {
                 wayland_keyboard: false,
+                wayland_pointer: false,
                 resize_source: None,
                 window_size: options.window_size,
                 window_position: options.window_position,

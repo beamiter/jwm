@@ -52,6 +52,9 @@ mod wayland_capture_integration;
 #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
 mod wayland_keyboard_integration;
 pub mod wayland_keyboard_wire;
+#[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+mod wayland_pointer_integration;
+pub mod wayland_pointer_wire;
 mod window_capture;
 #[cfg(test)]
 mod window_capture_integration;

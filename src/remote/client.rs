@@ -58,6 +58,7 @@ const RECEIVER_JOIN_TIMEOUT: Duration = Duration::from_secs(2);
 #[derive(Clone, Debug)]
 pub struct ClientOptions {
     pub wayland_keyboard: bool,
+    pub wayland_pointer: bool,
     /// One explicit source-size operation; never replayed or saved in a profile.
     pub resize_source: Option<super::window_size::WindowSize>,
     /// Explicit local client-area startup size; None preserves automatic sizing.
@@ -277,7 +278,9 @@ pub fn run_client(options: ClientOptions) -> RemoteResult<()> {
 /// single-session entry point. The budget counts additional sessions and never
 /// resets, even when a replacement session runs successfully for a long time.
 pub fn run_client_reconnecting(options: ClientOptions, attempts: u8) -> RemoteResult<()> {
-    if (options.resize_source.is_some() || options.wayland_keyboard) && attempts != 0 {
+    if (options.resize_source.is_some() || options.wayland_keyboard || options.wayland_pointer)
+        && attempts != 0
+    {
         return Err(invalid_data("explicit source resize cannot automatically reconnect").into());
     }
     if attempts > 5 {
@@ -397,7 +400,17 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
     {
         return Err(invalid_data("Wayland keyboard requires compiled support and excludes legacy input, clipboard, resize and grabs").into());
     }
-    let request_input = !options.view_only && !options.wayland_keyboard;
+    if options.wayland_pointer
+        && (!cfg!(feature = "remote-wayland")
+            || options.wayland_keyboard
+            || options.view_only
+            || options.clipboard
+            || options.grab_input
+            || options.resize_source.is_some())
+    {
+        return Err(invalid_data("scoped pointer requires exclusive explicit permission without clipboard, resize, grabs or other input").into());
+    }
+    let request_input = !options.view_only && !options.wayland_keyboard && !options.wayland_pointer;
     let keymap = if request_input {
         read_display(options.display.as_deref())?
     } else {
@@ -418,6 +431,7 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
     let (mut reader, writer, hello) = negotiate_session(
         options.resize_source.is_some(),
         options.wayland_keyboard,
+        options.wayland_pointer,
         stream,
         &key,
         request_input,
@@ -577,6 +591,10 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
     if options.wayland_keyboard {
         let digest = viewer.enable_wayland_keyboard(options.display.as_deref())?;
         state.wayland_keyboard.lock().unwrap().enable(digest);
+    }
+    if options.wayland_pointer {
+        viewer.enable_wayland_pointer()?;
+        state.wayland_pointer.lock().unwrap().enabled = true;
     }
     viewer.set_clipboard_status(hello.clipboard_enabled);
     viewer.enable_clipboard_narrowing(hello.clipboard_enabled);
@@ -873,6 +891,7 @@ fn finish_session(
 fn negotiate_session(
     request_window_resize: bool,
     request_wayland_keyboard: bool,
+    request_wayland_pointer: bool,
     mut stream: TcpStream,
     key: &[u8],
     request_input: bool,
@@ -919,6 +938,7 @@ fn negotiate_session(
             stream: super::messages::StreamCapabilities {
                 window_resize: request_window_resize,
                 wayland_keyboard: request_wayland_keyboard,
+                wayland_pointer: request_wayland_pointer,
                 frame_limits,
                 clipboard_content: requested_policy.0,
                 clipboard_directions: requested_policy.1,
@@ -945,6 +965,19 @@ fn negotiate_session(
     writer.flush()?;
     let hello = read_server_hello(&mut reader)?;
     validate_server_frame_limits(&hello, frame_limits)?;
+    if hello.stream.wayland_pointer != request_wayland_pointer
+        || (request_wayland_pointer
+            && (hello.stream.wayland_keyboard
+                || hello.keyboard_enabled
+                || hello.pointer_enabled
+                || hello.clipboard_enabled
+                || hello.stream.window_resize))
+    {
+        return Err(invalid_data(
+            "scoped pointer permission mismatch or unsafe combined permissions",
+        )
+        .into());
+    }
     if hello.stream.wayland_keyboard != request_wayland_keyboard {
         return Err(invalid_data("Wayland keyboard permission was not mutually negotiated").into());
     }
@@ -1196,8 +1229,35 @@ fn viewer_loop(
                 keyboard.activated = true;
             }
         }
+        {
+            let mut pointer = state.wayland_pointer.lock().unwrap();
+            if pointer.enabled {
+                if pointer.expired(Instant::now()) {
+                    if let Some(revoke) = pointer.revoke() {
+                        writer
+                            .write_message(MessageKind::WaylandPointerRevoke, &revoke.encode()?)?;
+                        writer.flush()?;
+                    } else {
+                        return Err(
+                            invalid_data("pointer lease expired before authorization").into()
+                        );
+                    }
+                }
+                viewer.set_wayland_pointer_status(pointer.label(Instant::now()));
+            }
+        }
         let received_epoch = state.source_epoch.load(Ordering::Acquire);
         if received_epoch != source_epoch {
+            let mut pointer = state.wayland_pointer.lock().unwrap();
+            if pointer.enabled && !pointer.ended {
+                if let Some(revoke) = pointer.revoke() {
+                    writer.write_message(MessageKind::WaylandPointerRevoke, &revoke.encode()?)?;
+                    writer.flush()?;
+                } else {
+                    return Err(invalid_data("pointer source changed before grant").into());
+                }
+            }
+            drop(pointer);
             state
                 .wayland_keyboard
                 .lock()
@@ -1217,6 +1277,20 @@ fn viewer_loop(
                 error
             }
         })?;
+        if reported_viewport.is_some_and(|previous| previous != viewer.viewport()) {
+            let mut pointer = state.wayland_pointer.lock().unwrap();
+            if pointer.enabled && !pointer.ended {
+                if let Some(revoke) = pointer.revoke() {
+                    writer.write_message(MessageKind::WaylandPointerRevoke, &revoke.encode()?)?;
+                    writer.flush()?;
+                } else if pointer.requested.is_some() {
+                    return Err(invalid_data(
+                        "pointer viewport changed while authorization pending",
+                    )
+                    .into());
+                }
+            }
+        }
         {
             let mut keyboard = state.wayland_keyboard.lock().unwrap();
             if keyboard.configured() {
@@ -1254,6 +1328,42 @@ fn viewer_loop(
                     }
                 }
                 // These events never enter legacy InputBatch or pointer paths.
+                events.retain(|event| matches!(event, ViewerEvent::Close));
+            }
+        }
+        {
+            let mut pointer = state.wayland_pointer.lock().unwrap();
+            if pointer.enabled {
+                if events.iter().any(|e| {
+                    matches!(
+                        e,
+                        ViewerEvent::WaylandPointerRevoke
+                            | ViewerEvent::Close
+                            | ViewerEvent::ReleaseAll
+                            | ViewerEvent::CycleSource
+                    )
+                }) {
+                    if let Some(revoke) = pointer.revoke() {
+                        writer
+                            .write_message(MessageKind::WaylandPointerRevoke, &revoke.encode()?)?;
+                        writer.flush()?;
+                    } else if pointer.requested.is_some() && pointer.epoch.is_none() {
+                        return Err(
+                            invalid_data("pointer authorization cancelled while pending").into(),
+                        );
+                    }
+                } else {
+                    for event in &events {
+                        if let Some(action) = pointer.event(event, Instant::now())? {
+                            writer.write_message(
+                                MessageKind::WaylandPointerAction,
+                                &action.encode()?,
+                            )?;
+                            writer.flush()?;
+                        }
+                    }
+                }
+                viewer.set_wayland_pointer_status(pointer.label(Instant::now()));
                 events.retain(|event| matches!(event, ViewerEvent::Close));
             }
         }
@@ -1420,6 +1530,36 @@ fn viewer_loop(
             {
                 writer.write_message(MessageKind::WindowResizeRequest, &request.encode()?)?;
                 writer.flush()?;
+            }
+            {
+                let mut pointer = state.wayland_pointer.lock().unwrap();
+                if pointer.requested.is_some_and(|(initial, _)| {
+                    (initial.source_epoch, initial.geometry_epoch) != presented_scope
+                }) && !pointer.ended
+                {
+                    if let Some(revoke) = pointer.revoke() {
+                        writer
+                            .write_message(MessageKind::WaylandPointerRevoke, &revoke.encode()?)?;
+                        writer.flush()?;
+                    } else {
+                        return Err(invalid_data("pointer geometry changed before grant").into());
+                    }
+                }
+                if let Some(request) = pointer.presented(
+                    super::wayland_pointer_wire::DrawnScope {
+                        source_epoch: presented_scope.0,
+                        geometry_epoch: presented_scope.1,
+                        frame_sequence: sequence,
+                    },
+                    Instant::now(),
+                ) {
+                    writer.write_message(MessageKind::WaylandPointerRequest, &request.encode()?)?;
+                    writer.flush()?;
+                }
+                if pointer.enabled {
+                    viewer.wayland_pointer_presented(sequence);
+                    viewer.set_wayland_pointer_status(pointer.label(Instant::now()));
+                }
             }
             viewer.source_presented(presented_scope.1);
             viewer.enable_source_cycle(source_cycle_available);
@@ -1605,6 +1745,14 @@ fn for_each_input_batch(
             }
             ViewerEvent::Pointer { .. } => continue,
             ViewerEvent::CycleSource | ViewerEvent::NarrowClipboard => continue,
+            // Scoped Wayland records must never become global legacy input.
+            ViewerEvent::WaylandPointer { .. }
+            | ViewerEvent::WaylandPointerCancel
+            | ViewerEvent::WaylandPointerButtonCancel { .. }
+            | ViewerEvent::WaylandPointerRevoke => {
+                pointer_run_open = false;
+                continue;
+            }
             ViewerEvent::Close => unreachable!(),
         };
 
@@ -2180,6 +2328,228 @@ fn average_millis(duration: Duration, count: u64) -> f64 {
 }
 
 #[derive(Default)]
+struct ClientPointer {
+    enabled: bool,
+    requested: Option<(super::wayland_pointer_wire::DrawnScope, Instant)>,
+    presented: Option<(super::wayland_pointer_wire::DrawnScope, Instant)>,
+    ready: Option<super::wayland_pointer_wire::DrawnScope>,
+    consumed: Option<super::wayland_pointer_wire::DrawnScope>,
+    epoch: Option<u64>,
+    sequence: u64,
+    ended: bool,
+    terminal_seen: bool,
+    newer_frame: bool,
+    left_down: bool,
+    click: Option<(super::wayland_pointer_wire::DrawnScope, i16, i16, Instant)>,
+}
+impl ClientPointer {
+    fn before_frame(&mut self) {
+        self.ready = None;
+        self.click = None;
+        self.newer_frame = true;
+    }
+    fn presented(
+        &mut self,
+        scope: super::wayland_pointer_wire::DrawnScope,
+        now: Instant,
+    ) -> Option<super::wayland_pointer_wire::PointerRequest> {
+        if !self.enabled || self.ended {
+            return None;
+        }
+        self.ready = None;
+        self.click = None;
+        self.newer_frame = false;
+        self.presented = Some((scope, now));
+        if self.requested.is_none() {
+            self.requested = Some((scope, now));
+            Some(super::wayland_pointer_wire::PointerRequest { scope })
+        } else {
+            None
+        }
+    }
+    fn receive(&mut self, value: super::wayland_pointer_wire::PointerStatus) -> RemoteResult<()> {
+        use super::wayland_pointer_wire::PointerStatusKind as S;
+        let (initial, _) = self
+            .requested
+            .ok_or_else(|| invalid_data("unsolicited pointer status"))?;
+        if self.terminal_seen
+            || (value.scope.source_epoch, value.scope.geometry_epoch)
+                != (initial.source_epoch, initial.geometry_epoch)
+        {
+            return Err(invalid_data("pointer status scope mismatch or replay").into());
+        }
+        if let Some(epoch) = self.epoch
+            && epoch != value.lease_epoch
+        {
+            return Err(invalid_data("pointer lease epoch changed").into());
+        }
+        if matches!(value.status, S::Denied | S::Revoked) {
+            self.ended = true;
+            self.terminal_seen = true;
+            self.ready = None;
+            self.click = None;
+            return Ok(());
+        }
+        if self.ended {
+            return Err(invalid_data("pointer status revived ended grant").into());
+        }
+        self.epoch = Some(value.lease_epoch);
+        let Some((presented, at)) = self.presented else {
+            return Err(invalid_data("pointer status before presentation").into());
+        };
+        if value.scope.frame_sequence > presented.frame_sequence {
+            return Err(invalid_data("pointer Ready precedes actual presentation").into());
+        }
+        if value.scope != presented {
+            return Ok(());
+        } // stale status never changes current gate
+        match value.status {
+            S::Ready => {
+                if self.consumed == Some(value.scope) || self.ready == Some(value.scope) {
+                    return Err(invalid_data("pointer Ready replay").into());
+                }
+                if !self.newer_frame && at.elapsed() < super::wayland_pointer_wire::FRAME_MAX_AGE {
+                    self.ready = Some(value.scope);
+                }
+            }
+            S::Waiting => {
+                self.ready = None;
+                self.click = None;
+            }
+            _ => unreachable!(),
+        }
+        Ok(())
+    }
+    fn fresh(&self, now: Instant) -> bool {
+        !self.ended
+            && !self.newer_frame
+            && self.ready.is_some()
+            && self.presented.is_some_and(|(scope, at)| {
+                Some(scope) == self.ready
+                    && now.saturating_duration_since(at)
+                        < super::wayland_pointer_wire::FRAME_MAX_AGE
+            })
+            && self.requested.is_some_and(|(_, at)| {
+                now.saturating_duration_since(at) < super::wayland_pointer_wire::LEASE_DURATION
+            })
+    }
+    fn label(&self, now: Instant) -> &'static str {
+        if self.ended {
+            "Pointer: Revoked"
+        } else if self.fresh(now) {
+            "Pointer: Ready (one action)"
+        } else {
+            "Pointer: Waiting for fresh presented frame"
+        }
+    }
+    fn expired(&self, now: Instant) -> bool {
+        !self.ended
+            && self.requested.is_some_and(|(_, at)| {
+                now.saturating_duration_since(at) >= super::wayland_pointer_wire::LEASE_DURATION
+            })
+    }
+    fn revoke(&mut self) -> Option<super::wayland_pointer_wire::PointerRevoke> {
+        if self.ended {
+            return None;
+        }
+        self.ended = true;
+        self.ready = None;
+        self.click = None;
+        self.left_down = false;
+        self.epoch
+            .map(|lease_epoch| super::wayland_pointer_wire::PointerRevoke { lease_epoch })
+    }
+    fn event(
+        &mut self,
+        event: &ViewerEvent,
+        now: Instant,
+    ) -> RemoteResult<Option<super::wayland_pointer_wire::PointerAction>> {
+        use super::wayland_pointer_wire::PointerActionKind as A;
+        use super::x11_viewer::WaylandPointerEventKind as E;
+        if let ViewerEvent::WaylandPointerButtonCancel { pressed } = event {
+            self.click = None;
+            self.left_down = *pressed;
+            return Ok(None);
+        }
+        if matches!(event, ViewerEvent::WaylandPointerCancel) {
+            self.click = None;
+            return Ok(None);
+        }
+        let ViewerEvent::WaylandPointer {
+            frame_sequence,
+            geometry_epoch,
+            x,
+            y,
+            local_x,
+            local_y,
+            kind,
+        } = *event
+        else {
+            return Ok(None);
+        };
+        let Some((scope, _)) = self.presented else {
+            return Ok(None);
+        };
+        if scope.frame_sequence != frame_sequence
+            || scope.geometry_epoch != geometry_epoch
+            || !self.fresh(now)
+        {
+            self.click = None;
+            if kind == E::LeftUp {
+                self.left_down = false;
+            }
+            return Ok(None);
+        }
+        let action = match kind {
+            E::LeftDown => {
+                self.left_down = true;
+                self.click = Some((scope, local_x, local_y, now));
+                return Ok(None);
+            }
+            E::LeftUp => {
+                self.left_down = false;
+                let Some((clicked, cx, cy, at)) = self.click.take() else {
+                    return Ok(None);
+                };
+                if clicked != scope
+                    || local_x.abs_diff(cx) > 3
+                    || local_y.abs_diff(cy) > 3
+                    || now.saturating_duration_since(at) > Duration::from_millis(250)
+                {
+                    return Ok(None);
+                }
+                A::ClickLeft
+            }
+            E::Motion if self.left_down => {
+                if self.click.is_some_and(|(_, cx, cy, _)| {
+                    local_x.abs_diff(cx) > 3 || local_y.abs_diff(cy) > 3
+                }) {
+                    self.click = None;
+                }
+                return Ok(None);
+            }
+            E::Motion => A::Motion,
+        };
+        self.sequence = self
+            .sequence
+            .checked_add(1)
+            .filter(|v| *v <= super::wayland_pointer_wire::MAX_SEQUENCE)
+            .ok_or_else(|| invalid_data("pointer sequence exhausted"))?;
+        self.ready = None;
+        self.consumed = Some(scope);
+        self.click = None;
+        Ok(Some(super::wayland_pointer_wire::PointerAction {
+            lease_epoch: self.epoch.unwrap(),
+            sequence: self.sequence,
+            scope,
+            kind: action,
+            x,
+            y,
+        }))
+    }
+}
+
+#[derive(Default)]
 struct ClientKeyboard {
     digest: Option<[u8; 32]>,
     request: Option<(super::wayland_keyboard_wire::LeaseRequest, Instant)>,
@@ -2400,6 +2770,7 @@ impl ClientResize {
 struct ReceiveState {
     resize: Mutex<ClientResize>,
     wayland_keyboard: Mutex<ClientKeyboard>,
+    wayland_pointer: Mutex<ClientPointer>,
     clipboard_restriction: Mutex<Option<RestrictionState>>,
     catalog: Mutex<Option<SourceCatalog>>,
     source_epoch: AtomicU64,
@@ -2419,6 +2790,7 @@ impl ReceiveState {
         Self {
             resize: Mutex::new(ClientResize::default()),
             wayland_keyboard: Mutex::new(ClientKeyboard::default()),
+            wayland_pointer: Mutex::new(ClientPointer::default()),
             clipboard_restriction: Mutex::new(None),
             catalog: Mutex::new(None),
             source_epoch: AtomicU64::new(1),
@@ -2645,6 +3017,12 @@ fn receive_frame_records(
             })?;
         let kind = read_record(&mut payload, remaining)?;
         match kind {
+            MessageKind::WaylandPointerStatus => {
+                state.wayland_pointer.lock().unwrap().receive(
+                    super::wayland_pointer_wire::PointerStatus::decode(&payload)?,
+                )?;
+                completion.signal()?;
+            }
             MessageKind::WaylandKeyboardStatus => {
                 state
                     .wayland_keyboard
@@ -2730,6 +3108,7 @@ fn receive_frame_records(
                 }
                 last_sequence = queued.frame.sequence();
                 last_video_at = Instant::now();
+                state.wayland_pointer.lock().unwrap().before_frame();
                 let replaced = replace_latest(&state.latest, queued);
                 if replaced.is_some() {
                     state.telemetry.record_replaced();
@@ -2764,6 +3143,9 @@ fn receive_frame_records(
             | MessageKind::WaylandKeyboardRequest
             | MessageKind::WaylandKeyboardKey
             | MessageKind::WaylandKeyboardRevoke
+            | MessageKind::WaylandPointerRequest
+            | MessageKind::WaylandPointerAction
+            | MessageKind::WaylandPointerRevoke
             | MessageKind::ClipboardRestrict => {
                 return Err(invalid_data(format!("unexpected host message: {kind:?}")).into());
             }
@@ -2822,6 +3204,198 @@ fn invalid_data(message: impl Into<String>) -> io::Error {
 
 #[cfg(test)]
 pub(super) mod tests {
+    fn pointer_fixture(now: std::time::Instant) -> super::ClientPointer {
+        use super::super::wayland_pointer_wire::*;
+        let mut pointer = super::ClientPointer {
+            enabled: true,
+            ..Default::default()
+        };
+        let scope = DrawnScope {
+            source_epoch: 1,
+            geometry_epoch: 2,
+            frame_sequence: 0,
+        };
+        pointer.presented(scope, now).unwrap();
+        pointer
+            .receive(PointerStatus {
+                lease_epoch: 7,
+                scope,
+                status: PointerStatusKind::Ready,
+            })
+            .unwrap();
+        pointer
+    }
+    fn pointer_event(
+        kind: super::super::x11_viewer::WaylandPointerEventKind,
+        x: i16,
+    ) -> super::ViewerEvent {
+        super::ViewerEvent::WaylandPointer {
+            frame_sequence: 0,
+            geometry_epoch: 2,
+            x: 20,
+            y: 30,
+            local_x: x,
+            local_y: 10,
+            kind,
+        }
+    }
+    #[test]
+    fn scoped_pointer_motion_consumes_exactly_one_presented_gate() {
+        use super::super::x11_viewer::WaylandPointerEventKind as E;
+        let now = std::time::Instant::now();
+        let mut pointer = pointer_fixture(now);
+        assert!(
+            pointer
+                .event(&pointer_event(E::Motion, 10), now)
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            pointer
+                .event(&pointer_event(E::Motion, 11), now)
+                .unwrap()
+                .is_none()
+        );
+        assert!(!pointer.fresh(now));
+        assert!(
+            pointer
+                .event(&pointer_event(E::LeftDown, 10), now)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            pointer
+                .event(&pointer_event(E::LeftUp, 10), now)
+                .unwrap()
+                .is_none()
+        );
+    }
+    #[test]
+    fn scoped_pointer_outside_release_cancels_click_but_restores_hover() {
+        use super::super::x11_viewer::WaylandPointerEventKind as E;
+        let now = std::time::Instant::now();
+        let mut pointer = pointer_fixture(now);
+        pointer.event(&pointer_event(E::LeftDown, 10), now).unwrap();
+        pointer
+            .event(&super::ViewerEvent::WaylandPointerCancel, now)
+            .unwrap();
+        assert!(
+            pointer
+                .event(&pointer_event(E::Motion, 10), now)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            pointer
+                .event(
+                    &super::ViewerEvent::WaylandPointerButtonCancel { pressed: false },
+                    now
+                )
+                .unwrap()
+                .is_none()
+        );
+        assert!(pointer.click.is_none());
+        assert!(!pointer.left_down);
+        assert!(
+            pointer
+                .event(&pointer_event(E::Motion, 10), now)
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn scoped_pointer_click_requires_same_frame_small_motion_and_short_hold() {
+        use super::super::x11_viewer::WaylandPointerEventKind as E;
+        let now = std::time::Instant::now();
+        let mut pointer = pointer_fixture(now);
+        assert!(
+            pointer
+                .event(&pointer_event(E::LeftDown, 10), now)
+                .unwrap()
+                .is_none()
+        );
+        let click = pointer
+            .event(
+                &pointer_event(E::LeftUp, 12),
+                now + std::time::Duration::from_millis(100),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            click.kind,
+            super::super::wayland_pointer_wire::PointerActionKind::ClickLeft
+        );
+        for cancel in 0..4 {
+            let mut pointer = pointer_fixture(now);
+            pointer.event(&pointer_event(E::LeftDown, 10), now).unwrap();
+            match cancel {
+                0 => pointer.before_frame(),
+                1 => {
+                    pointer.event(&pointer_event(E::Motion, 20), now).unwrap();
+                }
+                2 => {
+                    pointer
+                        .event(&super::ViewerEvent::WaylandPointerCancel, now)
+                        .unwrap();
+                }
+                _ => {
+                    pointer.revoke();
+                }
+            }
+            assert!(
+                pointer
+                    .event(
+                        &pointer_event(E::LeftUp, 10),
+                        now + std::time::Duration::from_millis(100)
+                    )
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        let mut pointer = pointer_fixture(now);
+        pointer.event(&pointer_event(E::LeftDown, 10), now).unwrap();
+        assert!(
+            pointer
+                .event(
+                    &pointer_event(E::LeftUp, 10),
+                    now + std::time::Duration::from_millis(251)
+                )
+                .unwrap()
+                .is_none()
+        );
+    }
+    #[test]
+    fn scoped_pointer_ready_never_refreshes_presentation_age_or_allows_future_frame() {
+        use super::super::wayland_pointer_wire::*;
+        let now = std::time::Instant::now();
+        let mut pointer = pointer_fixture(now);
+        assert!(!pointer.fresh(now + FRAME_MAX_AGE));
+        let scope = DrawnScope {
+            source_epoch: 1,
+            geometry_epoch: 2,
+            frame_sequence: 1,
+        };
+        assert!(
+            pointer
+                .receive(PointerStatus {
+                    lease_epoch: 7,
+                    scope,
+                    status: PointerStatusKind::Ready
+                })
+                .is_err()
+        );
+        pointer.before_frame();
+        pointer.presented(scope, now + std::time::Duration::from_millis(20));
+        pointer
+            .receive(PointerStatus {
+                lease_epoch: 7,
+                scope,
+                status: PointerStatusKind::Ready,
+            })
+            .unwrap();
+        assert!(pointer.fresh(now + std::time::Duration::from_millis(30)));
+    }
     #[test]
     fn wayland_keyboard_status_requires_exact_drawn_scope_and_single_grant() {
         use super::super::wayland_keyboard_wire::{LeaseStatus, LeaseStatusKind};
@@ -3202,6 +3776,7 @@ pub(super) mod tests {
     fn invalid_startup_size_fails_before_reading_key_or_display() {
         let options = ClientOptions {
             wayland_keyboard: false,
+            wayland_pointer: false,
             resize_source: None,
             window_position: None,
             window_size: Some(super::super::window_size::WindowSize {
@@ -3947,6 +4522,25 @@ pub(super) mod tests {
         .unwrap();
         assert!(scratch.is_empty());
         (batches, outcome)
+    }
+
+    #[test]
+    fn scoped_pointer_events_never_enter_legacy_input_batches() {
+        use super::super::x11_viewer::WaylandPointerEventKind as E;
+        let (batches, outcome) = collect_input_batches(
+            [
+                pointer_event(E::Motion, 10),
+                pointer_event(E::LeftDown, 10),
+                pointer_event(E::LeftUp, 10),
+                ViewerEvent::WaylandPointerCancel,
+                ViewerEvent::WaylandPointerButtonCancel { pressed: false },
+                ViewerEvent::WaylandPointerRevoke,
+            ],
+            true,
+            true,
+        );
+        assert!(batches.is_empty());
+        assert!(!outcome.wrote_input);
     }
 
     #[test]
@@ -5181,6 +5775,7 @@ pub(super) mod tests {
         let result = negotiate_session(
             false,
             false,
+            false,
             stream,
             &TEST_PSK,
             false,
@@ -5240,6 +5835,7 @@ pub(super) mod tests {
         let result = negotiate_session(
             false,
             false,
+            false,
             stream,
             &TEST_PSK,
             false,
@@ -5292,6 +5888,7 @@ pub(super) mod tests {
         });
         let stream = TcpStream::connect(address).unwrap();
         let result = negotiate_session(
+            false,
             false,
             false,
             stream,
@@ -5349,6 +5946,7 @@ pub(super) mod tests {
         });
         let stream = TcpStream::connect(address).unwrap();
         let result = negotiate_session(
+            false,
             false,
             false,
             stream,
@@ -5414,6 +6012,7 @@ pub(super) mod tests {
             });
             let stream = TcpStream::connect(address).unwrap();
             let result = negotiate_session(
+                false,
                 false,
                 false,
                 stream,
@@ -5503,6 +6102,7 @@ pub(super) mod tests {
         let stream = TcpStream::connect(address).unwrap();
         let (mut reader, _writer, hello) = negotiate_session(
             true,
+            false,
             false,
             stream,
             &TEST_PSK,

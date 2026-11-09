@@ -77,7 +77,7 @@ source switching or automatic input grab. A saved profile cannot grant it.
 The default remains view-only. The selected target must already have exact
 native keyboard focus: the remote path never changes focus to obtain access.
 
-Protocol v16 negotiates an independent keyboard capability. After the first
+Protocol v17 retains the independent keyboard capability introduced in v16. After the first
 frame is actually reported presented by the viewer, it requests one lease for
 that source epoch, encoded geometry epoch and frame sequence. The host checks
 its acknowledged-frame metadata and arms the native lease with the retained,
@@ -118,3 +118,60 @@ All are independently validated; legacy InputBatch cannot bypass the lease.
 Real recipient and revocation-negative tests must pass against the native
 protocol before this capability is described as verified. Compilation, state
 unit tests or the earlier read-only CI do not establish keyboard safety.
+
+## Optional single-surface pointer lease (experimental)
+
+The separately negotiated pointer mode requires explicit local
+`host --wayland-select --once --allow-wayland-pointer` and viewer
+`connect ... --wayland-pointer`. It is off by default and cannot be combined
+with the keyboard lease, legacy input, clipboard, resize or input grabs. It
+never enables XTEST. Saved profiles and automatic reconnect cannot grant it.
+
+This deliberately narrow first stage supports surface-local absolute motion
+and an atomic left click only. It does not support dragging, separate button
+down/up, scrolling, relative motion, remote focus changes or remote pointer
+enter. Both native pointer and keyboard focus must already be the selected
+surface. The compositor sends only to the captured receiver set and does not
+change the physical seat's coordinates, held buttons, grab or enter serial.
+Remote clicks are not authority to move/resize windows, grab popups or start
+window-manager drag-and-drop operations.
+
+Coordinates are checked against the captured source and the viewer's actual
+presented-image rectangle. Black bars and out-of-bounds coordinates are not
+clamped onto the application. The initial native implementation intentionally
+rejects unsupported mapping arrangements rather than guessing: transformed or
+scaled buffers, viewport/cropping offsets and subsurface layouts require a
+separate supported mapping implementation. Input-region exclusion also denies
+an action. Changes to the admitted mapping revoke the lease.
+
+Each action consumes a fresh, genuinely ready capture frame that the
+authenticated viewer has reported presenting. A frame captured before the
+previous action cannot authorize the next one. A matching source, geometry,
+frame and lease scope is required throughout; rejected or stale actions are
+never silently retargeted to a newer frame. This trusts the authenticated
+viewer's presentation report, not proof of physical display, and cannot prove
+that an application has not changed its content since capture.
+
+The viewer uses a short click-ready interval rather than continuously changing
+the picture underneath a pending click. After presentation and host
+confirmation, the frame can remain held only while its native capture age is
+at most one second, not for an additional second after the reply arrives. A
+delayed action can therefore be denied even if the viewer just displayed Ready.
+A motion or
+click consumes that opportunity and requires a new capture/presentation cycle.
+Consequently this conservative mode may briefly pause video and cannot click
+immediately while moving. A new frame, focus loss or viewport change cancels a
+pending local button candidate. No remote button is left pressed while waiting
+for a frame or network reply.
+
+The lease is limited to 30 seconds, is not renewable, and each selected capture
+authority allows only one attempt. Local input, lock, focus/receiver changes,
+unmap, source or geometry invalidation, malformed sequences and disconnect
+permanently revoke it. Starting again requires fresh explicit local selection;
+it never reconnects or replays actions automatically.
+
+Acceptance requires actual `wl_pointer` receiver and serial-authority negative
+tests, native production-renderer frame tests, adapter tests and the
+authenticated transport path. Pure coordinate tests or successful compilation
+alone are not evidence of safe pointer delivery. These cloud/offscreen checks
+are not physical DRM, dual-machine or real desktop-viewer acceptance.
