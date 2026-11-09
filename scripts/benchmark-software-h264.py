@@ -15,6 +15,7 @@ import sys
 import time
 
 CAP = 64 * 1024 * 1024
+MANIFEST_CAP = 4 * 1024 * 1024
 SCENES = ('idle', 'sparse_change', 'scroll', 'full_change', 'resize')
 
 def require(ok, message):
@@ -33,15 +34,32 @@ def bounded_read(path, limit):
     finally:
         os.close(fd)
 
+def strict_json(data):
+    def object_pairs(pairs):
+        value = {}
+        for key, item in pairs:
+            require(key not in value, 'duplicate JSON key')
+            value[key] = item
+        return value
+    def number(text):
+        value = float(text)
+        require(math.isfinite(value), 'non-finite JSON number')
+        return value
+    def constant(_):
+        raise ValueError('non-finite JSON constant')
+    return json.loads(data, object_pairs_hook=object_pairs, parse_float=number, parse_constant=constant)
+
 def load_fixture(root):
     root = root.resolve(strict=True)
     path = root / 'manifest.json'
-    require(not path.is_symlink() and path.stat().st_size <= 1024 * 1024, 'invalid manifest file')
-    manifest = json.loads(bounded_read(path, 1024 * 1024))
+    require(not path.is_symlink() and path.stat().st_size <= MANIFEST_CAP, 'invalid manifest file')
+    manifest_bytes = bounded_read(path, MANIFEST_CAP)
+    manifest = strict_json(manifest_bytes)
     require(manifest.get('schema_version') == 1 and manifest.get('workload_version') == 1
             and manifest.get('producer') == 'jwm-production-replay'
             and manifest.get('pixel_format') == 'rgb24', 'not a production replay fixture')
     config = manifest['config']
+    require(all(type(config[k]) is int for k in ('width', 'height', 'frames', 'warmup', 'seed', 'quality')), 'noninteger config')
     require(1 <= config['width'] <= 1920 and 1 <= config['height'] <= 1080
             and 1 <= config['frames'] <= 300 and config['warmup'] == 0, 'invalid replay config')
     baseline = manifest['tile_baseline']
@@ -49,6 +67,8 @@ def load_fixture(root):
             and baseline.get('scope') == 'offline_synthetic_tile_codec_only', 'tile baseline/config mismatch')
     entries = manifest['frames']
     require(len(entries) == config['frames'] * 5, 'fixture frame count mismatch')
+    require([(e['scene'], e['index']) for e in entries] ==
+            [(scene, index) for scene in SCENES for index in range(config['frames'])], 'noncanonical frame order')
     total = 0
     seen = set()
     for item in entries:
@@ -58,6 +78,7 @@ def load_fixture(root):
         resized = scene == 'resize' and (index // 3) % 2 == 1
         w = max(1, config['width'] - 17) if resized else config['width']
         h = max(1, config['height'] - 9) if resized else config['height']
+        require(all(type(item[k]) is int for k in ('width', 'height', 'geometry_epoch')), 'noninteger geometry')
         require((item['width'], item['height'], item['geometry_epoch']) ==
                 (w, h, index // 3 if scene == 'resize' else 0), 'unexpected frame geometry/epoch')
         name = item['file']
@@ -68,12 +89,12 @@ def load_fixture(root):
         total += size
         require(total <= CAP, 'RGB fixture exceeds 64 MiB')
         require(hashlib.sha256(bounded_read(file, size)).hexdigest() == item['sha256'], 'RGB checksum mismatch')
-    return manifest
+    return manifest, hashlib.sha256(manifest_bytes).hexdigest()
 
 def segments(entries):
     groups = []
     for scene in SCENES:
-        for item in sorted((e for e in entries if e['scene'] == scene), key=lambda e: e['index']):
+        for item in (e for e in entries if e['scene'] == scene):
             scope = (scene, item['width'], item['height'], item['geometry_epoch'])
             if not groups or groups[-1][0] != scope:
                 groups.append((scope, []))
@@ -133,18 +154,33 @@ def run_process(command, stderr_path, timeout=30):
                 [b['observed_ns'] - a['observed_ns'] for a, b in zip(samples, samples[1:])],
             'observation_warning': 'pipe/muxer/process buffering and scheduling included; these are NOT frame encode or end-to-end latency'}
 
+def validate_packet_order(samples, frames):
+    require(len(samples) == frames, 'packet/frame count mismatch')
+    for index, sample in enumerate(samples):
+        columns = [column.strip() for column in sample['framecrc'].split(',')]
+        require(len(columns) >= 6, 'incomplete framecrc packet')
+        stream, dts, pts, duration, size = map(int, columns[:5])
+        require((stream, dts, pts, duration) == (0, index, index, 1) and size > 0,
+                'unexpected framecrc stream/PTS/DTS/duration order')
+        require(columns[5].startswith('0x') and len(columns[5]) == 10
+                and 0 <= int(columns[5], 16) <= 0xffffffff, 'invalid framecrc checksum')
+
+def frame_identity(item):
+    return {key: item[key] for key in ('scene', 'index', 'width', 'height', 'geometry_epoch', 'sha256')}
+
 def rgb_error(original, decoded):
     require(len(original) == len(decoded) and bool(original), 'decoded RGB length mismatch')
     squared, maximum, changed = 0, 0, 0
     for a, b in zip(original, decoded):
         delta = abs(a - b); squared += delta * delta; maximum = max(maximum, delta); changed += delta != 0
     mse = squared / len(original)
-    return {'rgb_mse': mse, 'rgb_psnr_db': 10 * math.log10(255 * 255 / mse) if mse else None,
+    return {'sse': squared, 'channel_samples': len(original), 'changed_count': changed,
+            'rgb_mse': mse, 'rgb_psnr_db': 10 * math.log10(255 * 255 / mse) if mse else None,
             'lossless': mse == 0, 'max_channel_error': maximum, 'changed_channel_fraction': changed / len(original)}
 
 def run(args):
     require(1 <= args.trials <= 3 and 0 <= args.warmup_runs <= 1 and 0 <= args.crf <= 51, 'invalid trial/warmup/CRF limit')
-    manifest = load_fixture(args.fixture)
+    manifest, manifest_digest = load_fixture(args.fixture)
     groups = segments(manifest['frames'])
     ffmpeg = shutil.which('ffmpeg'); require(ffmpeg is not None, 'FFmpeg must already be installed')
     require(not args.output.exists(), 'output directory must not exist')
@@ -152,11 +188,13 @@ def run(args):
     args.output.mkdir()
     version = subprocess.run([ffmpeg, '-hide_banner', '-version'], capture_output=True, text=True, check=True, timeout=5).stdout
     report = {'schema_version': 1, 'scope': 'offline_software_h264_not_gpu_or_desktop_latency',
-              'config': manifest['config'], 'fixture_manifest_sha256': hashlib.sha256(bounded_read(args.fixture / 'manifest.json', 1024 * 1024)).hexdigest(),
+              'config': manifest['config'], 'fixture_manifest_sha256': manifest_digest,
               'ffmpeg_version': version, 'machine': platform.machine(), 'python_version': platform.python_version(), 'logical_cpu_count': os.cpu_count(), 'affinity_cpu_count': len(os.sched_getaffinity(0)), 'codec': 'libx264', 'crf': args.crf, 'threads': 1,
               'warmup_runs': args.warmup_runs, 'trials': args.trials,
               'tile_baseline': manifest['tile_baseline'],
               'comparability': 'identical production RGB generator; CRF and JPEG quality are NOT matched quality; tile timings exclude RGB materialization, FFmpeg includes conversion/IPC; tile bytes include tile headers, H264 bytes include SPS/PPS/AnnexB',
+              'quality_evidence_version': 1,
+              'input_frames': [frame_identity(item) for item in manifest['frames']],
               'runs': []}
     common = [ffmpeg, '-hide_banner', '-loglevel', 'error', '-nostdin', '-n', '-protocol_whitelist', 'file,pipe', '-threads', '1', '-filter_threads', '1']
     total_start = time.monotonic()
@@ -179,13 +217,15 @@ def run(args):
                        '-x264-params', 'threads=1:rc-lookahead=0:sync-lookahead=0:bframes=0:repeat-headers=1:aud=1',
                        '-f', 'tee', f'[f=h264]{bitstream.resolve()}|[f=framecrc:flush_packets=1]pipe:1']
             timing = run_process(command, prefix.with_suffix('.encode.log'))
-            require(len(timing['packet_observations']) == len(entries), 'packet/frame count mismatch')
+            validate_packet_order(timing['packet_observations'], len(entries))
             decoded = prefix.with_suffix('.decoded.rgb')
             decode_command = common + ['-i', str(bitstream.resolve()), '-threads', '1', '-vf', f'format=rgb24,crop={width}:{height}:0:0', '-f', 'rawvideo', str(decoded.resolve())]
             decode_timing = run_process(decode_command, prefix.with_suffix('.decode.log'))
             decoded_rgb = bounded_read(decoded, CAP)
-            errors = [rgb_error(raw[i:i+width*height*3], decoded_rgb[i:i+width*height*3]) for i in range(0,len(raw),width*height*3)]
             require(len(decoded_rgb) == len(raw), 'decoded frame count mismatch')
+            errors = [rgb_error(raw[i:i+width*height*3], decoded_rgb[i:i+width*height*3]) for i in range(0,len(raw),width*height*3)]
+            for error, entry in zip(errors, entries):
+                error['frame_identity'] = frame_identity(entry)
             report['runs'].append({'scene':scene, 'geometry_epoch':epoch, 'width':width,'height':height,
                 'frames':len(entries), 'trial':trial, 'warmup':trial<0,'encode_command':command,'decode_command':decode_command,
                 'encoded_bytes':bitstream.stat().st_size,'encode_process':timing,'decode_process':decode_timing,'per_frame_quality':errors})
@@ -200,10 +240,13 @@ def run(args):
 
 def self_test():
     require(rgb_error(b'abc',b'abc')['lossless'], 'equal RGB')
+    require(rgb_error(b'abc', b'abc')['channel_samples'] == 3, 'sample count')
+    require(rgb_error(b'\x00', b'\xff')['sse'] == 65025 and rgb_error(b'\x00', b'\xff')['changed_count'] == 1, 'exact integer evidence')
     require(rgb_error(b'\x00',b'\xff')['rgb_mse'] == 65025, 'RGB error')
+    validate_packet_order([{'framecrc':'0, 0, 0, 1, 10, 0x12345678'}], 1)
     e = [{'scene':'resize','index':i,'width':33 if i<3 else 16,'height':25 if i<3 else 16,'geometry_epoch':i//3} for i in range(4)]
     require([len(group[1]) for group in segments(e)] == [3,1], 'resize segmentation')
-    for action in (lambda: require(False, 'expected'), lambda: rgb_error(b'a', b'bc'), lambda: segments([{'scene':'resize','index':i,'width':1,'height':1,'geometry_epoch':i} for i in range(26)])):
+    for action in (lambda: strict_json('{"x":1,"x":2}'), lambda: strict_json('{"x":NaN}'), lambda: strict_json('{"x":1e999}'), lambda: validate_packet_order([{'framecrc':'0, 1, 0, 1, 10, 0x12345678'}], 1), lambda: require(False, 'expected'), lambda: rgb_error(b'a', b'bc'), lambda: segments([{'scene':'resize','index':i,'width':1,'height':1,'geometry_epoch':i} for i in range(26)])):
         try: action()
         except ValueError: pass
         else: raise AssertionError('expected validation rejection')

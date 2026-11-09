@@ -76,8 +76,10 @@ jobs:
           export XDG_RUNTIME_DIR="$(mktemp -d)"
           python3 scripts/test-remote-viewer-e2e.py --self-test
           python3 scripts/test-remote-viewer-e2e.py
-      - name: Offline software codec benchmark self-test
-        run: python3 scripts/benchmark-software-h264.py --self-test
+      - name: Offline software codec evidence self-tests
+        run: |
+          python3 scripts/benchmark-software-h264.py --self-test
+          python3 scripts/remote-codec-rate-distortion.py --self-test
       - name: Native source adapter, transport, and CLI regressions
         run: |
           export XDG_RUNTIME_DIR="$(mktemp -d)"

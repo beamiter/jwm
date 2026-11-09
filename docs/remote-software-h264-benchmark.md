@@ -111,3 +111,87 @@ Pure script self-test (no subprocess/files/sockets):
 ```sh
 python3 scripts/benchmark-software-h264.py --self-test
 ```
+
+## Bounded rate-distortion comparison
+
+`remote-codec-rate-distortion.py` analyzes explicitly supplied evidence. It
+never starts encoders, performs an automatic sweep, opens a display/socket or
+changes the production codec. Export up to three fixtures with different JPEG
+qualities but identical dimensions, frame count and seed. Run the existing
+H.264 experiment explicitly for up to three CRFs against those inputs. Example
+paths below must already contain these completed runs:
+
+```sh
+python3 scripts/remote-codec-rate-distortion.py \
+  --fixture-manifest /explicit/workspace/jpeg50/manifest.json \
+  --fixture-manifest /explicit/workspace/jpeg85/manifest.json \
+  --h264-report /explicit/workspace/crf18/report.json \
+  --h264-report /explicit/workspace/crf28/report.json \
+  --max-mse 100 --max-bytes 100000 \
+  --output /explicit/workspace/rate-distortion.json
+```
+
+Both thresholds are optional and apply independently to each scene. The output
+file must be new; its parent must exist. Inputs are regular files with leaf
+symlinks rejected, not protection against malicious replacement of shared
+parent directories. Each manifest is at most 4 MiB, each H.264 report 8 MiB,
+and aggregate input/output JSON is bounded at 36 MiB each. There are at most
+three manifests, three H.264 reports, three measured trials and one warmup run
+per H.264 report, 25 geometry segments, and 1500 offered frames per fixture.
+The existing 64 MiB input-RGB bound remains. JSON parsing rejects duplicate keys
+and non-finite numbers. Unknown evidence schemas, incomplete or repeated runs,
+noncanonical frame order and mismatched identities are errors, not repaired by
+sorting or silently omitting samples.
+
+New additive evidence is required:
+
+- Fixture `tile_quality` version 1 records every offered frame from an independent
+  fresh production tile encoder/decoder pass, separate from the timed baseline.
+  Each record carries source identity/hash, emitted/payload bytes and displayed
+  sequence, integer squared-error sum (`sse`), `channel_samples`, `changed_count`
+  and `max_channel_error`. Suppressed frames use the previous decoded picture;
+  their error is measured, not presumed zero. `changed_count` counts RGB channels,
+  not pixels. Baseline byte/emission totals must agree with the quality pass.
+- H.264 reports retain schema 1 and add `quality_evidence_version: 1`, the complete
+  `input_frames` identity list and exact integer metrics plus `frame_identity`
+  for every decoded frame. Existing floating-point quality fields remain.
+  The manifest digest is computed from the same bytes validated at load time.
+  With this fixed no-B-frame, 60-fps profile, framecrc stream/PTS/DTS/duration must
+  match the expected ordered packet sequence. Decode length is checked before
+  joining quality metrics. The analyzer also checks the recorded encode/decode
+  commands against the fixed profile, including the selected CRF.
+
+Old reports remain useful for their original measurements, but the analyzer
+rejects old fixtures/reports lacking complete new evidence. All candidates
+must have identical scene/index order, dimensions, geometry epochs and source
+RGB hashes. Each H.264 report must reference the exact digest of a supplied
+fixture, including its original config. This is a consistency check of trusted
+local evidence, not authentication or independent re-reading of all RGB files.
+
+For each scene the result includes every measured candidate/trial point and
+its per-frame evidence, pooled SSE/channel count/MSE, worst-frame MSE, maximum
+channel error, encoded bytes and the measured Pareto frontier. H.264 trials
+remain separate points; timing is never a ranking criterion. Equal points are
+retained rather than silently selecting a winner. `--max-mse` selects the
+smallest measured byte count meeting that distortion limit; `--max-bytes`
+selects the lowest measured MSE within that byte budget. Ties remain explicit.
+No eligible point produces `no_measured_match`, never an interpolated result.
+MSE is pooled from exact sums, not an average of PSNR values.
+
+This matches an **objective RGB distortion criterion**, not visual or textual
+quality. Tile bytes include tile framing, whereas H.264 includes Annex-B headers
+but neither includes transport overhead. Idle suppression and H.264's offered
+frame cadence remain intentionally different policies over the same reconstructed
+timeline. No conclusion about latency, GPU/NVENC benefit, perceptual superiority
+or real desktop performance follows from the frontier alone. Keep source/build
+provenance with the reports; tiny synthetic/debug runs establish the evidence
+pipeline, not general performance rankings.
+
+```sh
+python3 scripts/remote-codec-rate-distortion.py --self-test
+```
+
+The pure self-test includes complete synthetic evidence joins, malformed and
+missing evidence, packet/order/identity mismatches, boolean-as-integer rejection,
+sequence/accounting checks, Pareto/threshold cases and the 1500-frame manifest
+size bound. It does not invoke FFmpeg, files, sockets or graphics.

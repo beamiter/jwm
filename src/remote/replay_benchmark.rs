@@ -262,6 +262,99 @@ pub fn run(config: ReplayConfig) -> RemoteResult<ReplayReport> {
     })
 }
 
+#[derive(Debug, Serialize, PartialEq, Eq)]
+struct RgbDistortion {
+    sse: u64,
+    channel_samples: u64,
+    /// Number of unequal RGB channels, not pixels.
+    changed_count: u64,
+    max_channel_error: u8,
+}
+
+fn rgb_distortion(source: &RgbImage, decoded: &RgbImage) -> RemoteResult<RgbDistortion> {
+    if source.dimensions() != decoded.dimensions() {
+        return Err(std::io::Error::other("quality RGB dimensions differ").into());
+    }
+    let mut result = RgbDistortion {
+        sse: 0,
+        channel_samples: source.as_raw().len() as u64,
+        changed_count: 0,
+        max_channel_error: 0,
+    };
+    for (&expected, &actual) in source.as_raw().iter().zip(decoded.as_raw()) {
+        let error = expected.abs_diff(actual);
+        result.sse += u64::from(error) * u64::from(error);
+        result.changed_count += u64::from(error != 0);
+        result.max_channel_error = result.max_channel_error.max(error);
+    }
+    Ok(result)
+}
+
+/// Independent quality pass: no work here changes the timed replay or its pool
+/// lifetime. Export's 64 MiB source budget bounds total channel samples and SSE
+/// (at most 64 MiB * 255², well within u64). No extra RGB files are retained.
+fn fixture_tile_quality(config: &ReplayConfig) -> RemoteResult<serde_json::Value> {
+    use sha2::{Digest, Sha256};
+    let mut records = Vec::new();
+    for scene in SCENES {
+        let mut encoder = TileEncoder::new();
+        let mut decoder = TileDecoder::with_frame_limits(FrameLimits::default())?;
+        let pool = new_decode_buffer_pool();
+        let mut payload = Vec::new();
+        let mut displayed: Option<(RgbImage, u64, u64)> = None;
+        let mut sequence = 0_u64;
+        for index in 0..config.frames {
+            let frame = generate(config, scene, index);
+            let plan = encoder.plan(&frame, TileEncodeRequest::Delta)?;
+            let encoded_bytes = if plan.emit {
+                sequence += 1;
+                encoder.encode_into(&mut payload, sequence, &frame, config.quality)?;
+                encoder.commit(&frame);
+                let decoded = decoder.decode_into(&payload, pool.clone())?;
+                if decoded.sequence() != sequence
+                    || decoded.source_width() != frame.source_width
+                    || decoded.source_height() != frame.source_height
+                    || decoded.geometry_epoch() != frame.geometry_epoch
+                {
+                    return Err(std::io::Error::other("quality decoded scope mismatch").into());
+                }
+                displayed = Some((decoded.image().clone(), frame.geometry_epoch, sequence));
+                payload.len() as u64
+            } else {
+                0
+            };
+            let (image, epoch, displayed_sequence) = displayed
+                .as_ref()
+                .ok_or_else(|| std::io::Error::other("quality suppression before first decode"))?;
+            if *epoch != frame.geometry_epoch {
+                return Err(
+                    std::io::Error::other("quality suppression across geometry epoch").into(),
+                );
+            }
+            let distortion = rgb_distortion(&frame.image, image)?;
+            let sha256: String = Sha256::digest(frame.image.as_raw())
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect();
+            records.push(serde_json::json!({
+                "scene": scene, "index": index,
+                "width": frame.source_width, "height": frame.source_height,
+                "geometry_epoch": frame.geometry_epoch, "sha256": sha256,
+                "emitted": plan.emit, "encoded_bytes": encoded_bytes,
+                "displayed_sequence": displayed_sequence,
+                "sse": distortion.sse, "channel_samples": distortion.channel_samples,
+                "changed_count": distortion.changed_count,
+                "max_channel_error": distortion.max_channel_error
+            }));
+        }
+    }
+    Ok(serde_json::json!({
+        "schema_version": 1,
+        "scope": "offline_production_tile_rgb_distortion",
+        "frames": records
+    }))
+}
+
 /// Export the exact production replay generator, not a second implementation.
 /// Creates a new directory only, bounds all RGB files to 64 MiB, and writes the
 /// manifest last. A failed export may leave partial files; it never overwrites.
@@ -299,7 +392,8 @@ pub fn export_fixture(config: ReplayConfig, output: &std::path::Path) -> RemoteR
         }
     }
     let baseline = run(config.clone())?;
-    let manifest = serde_json::json!({"schema_version":1,"workload_version":1,"producer":"jwm-production-replay","pixel_format":"rgb24","config":config,"frames":entries,"tile_baseline":baseline,"baseline_order":"fixture export followed by fresh production tile replay; no warmup"});
+    let tile_quality = fixture_tile_quality(&config)?;
+    let manifest = serde_json::json!({"schema_version":1,"workload_version":1,"producer":"jwm-production-replay","pixel_format":"rgb24","config":config,"frames":entries,"tile_baseline":baseline,"tile_quality":tile_quality,"quality_order":"independent fresh production codec pass after timed baseline; all offered frames; no warmup","baseline_order":"fixture export followed by fresh production tile replay; no warmup"});
     let file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -359,6 +453,22 @@ mod tests {
                 assert_eq!(entry["sha256"], hex);
             }
         }
+        let quality = manifest["tile_quality"]["frames"].as_array().unwrap();
+        let inputs = manifest["frames"].as_array().unwrap();
+        assert_eq!(quality.len(), inputs.len());
+        assert_eq!(manifest["tile_quality"]["schema_version"], 1);
+        for (actual, input) in quality.iter().zip(inputs) {
+            for field in [
+                "scene",
+                "index",
+                "width",
+                "height",
+                "geometry_epoch",
+                "sha256",
+            ] {
+                assert_eq!(actual[field], input[field]);
+            }
+        }
         let original = std::fs::read(output.join("manifest.json")).unwrap();
         assert!(export_fixture(config.clone(), &output).is_err());
         assert_eq!(
@@ -398,6 +508,129 @@ mod tests {
             4
         );
     }
+    #[test]
+    fn quality_rgb_integer_metrics_are_exact() {
+        let source = RgbImage::from_raw(1, 1, vec![0, 10, 255]).unwrap();
+        assert_eq!(
+            rgb_distortion(&source, &source).unwrap(),
+            RgbDistortion {
+                sse: 0,
+                channel_samples: 3,
+                changed_count: 0,
+                max_channel_error: 0,
+            }
+        );
+        let changed = RgbImage::from_raw(1, 1, vec![255, 13, 254]).unwrap();
+        assert_eq!(
+            rgb_distortion(&source, &changed).unwrap(),
+            RgbDistortion {
+                sse: 65035,
+                channel_samples: 3,
+                changed_count: 3,
+                max_channel_error: 255,
+            }
+        );
+        assert!(rgb_distortion(&source, &RgbImage::new(2, 1)).is_err());
+    }
+
+    #[test]
+    fn quality_records_include_suppressed_idle_and_resize_scopes() {
+        let config = ReplayConfig {
+            width: 33,
+            height: 25,
+            frames: 7,
+            warmup: 0,
+            ..Default::default()
+        };
+        let value = fixture_tile_quality(&config).unwrap();
+        let records = value["frames"].as_array().unwrap();
+        assert_eq!(records.len(), 35);
+        for index in 1..7 {
+            assert_eq!(records[index]["emitted"], false);
+            assert_eq!(records[index]["encoded_bytes"], 0);
+            for field in [
+                "sse",
+                "channel_samples",
+                "changed_count",
+                "max_channel_error",
+                "displayed_sequence",
+            ] {
+                assert_eq!(records[index][field], records[0][field]);
+            }
+        }
+        for index in [0, 3, 6] {
+            let record = &records[28 + index];
+            assert_eq!(record["emitted"], true);
+            assert_eq!(record["geometry_epoch"], (index / 3) as u64);
+            let frame = generate(&config, Scene::Resize, index as u32);
+            assert_eq!(record["channel_samples"], frame.image.as_raw().len() as u64);
+        }
+    }
+
+    #[test]
+    fn quality_rate_totals_match_independent_timed_replay() {
+        let config = ReplayConfig {
+            width: 33,
+            height: 25,
+            frames: 7,
+            warmup: 0,
+            ..Default::default()
+        };
+        let quality = fixture_tile_quality(&config).unwrap();
+        let records = quality["frames"].as_array().unwrap();
+        let baseline = run(config).unwrap();
+        for (scene, frames) in baseline.scenes.iter().zip(records.chunks_exact(7)) {
+            let bytes: u64 = frames
+                .iter()
+                .map(|frame| frame["encoded_bytes"].as_u64().unwrap())
+                .sum();
+            let emitted = frames
+                .iter()
+                .filter(|frame| frame["emitted"].as_bool().unwrap())
+                .count();
+            assert_eq!(bytes, scene.encoded_bytes);
+            assert_eq!(emitted, scene.emitted_frames as usize);
+            assert!(
+                frames
+                    .iter()
+                    .all(|frame| frame["scene"] == serde_json::to_value(scene.scene).unwrap())
+            );
+        }
+    }
+
+    #[test]
+    fn quality_one_pixel_resize_still_emits_new_geometry_scopes() {
+        let config = ReplayConfig {
+            width: 1,
+            height: 1,
+            frames: 7,
+            warmup: 0,
+            ..Default::default()
+        };
+        let quality = fixture_tile_quality(&config).unwrap();
+        let records = quality["frames"].as_array().unwrap();
+        let resize = &records[28..35];
+        for (index, record) in resize.iter().enumerate() {
+            assert_eq!(record["width"], 1);
+            assert_eq!(record["height"], 1);
+            assert_eq!(record["geometry_epoch"], (index / 3) as u64);
+            assert_eq!(record["channel_samples"], 3);
+            if index % 3 == 0 {
+                assert_eq!(record["emitted"], true);
+                assert_eq!(record["displayed_sequence"], (index / 3 + 1) as u64);
+                assert!(record["encoded_bytes"].as_u64().unwrap() > 0);
+            } else {
+                assert_eq!(record["emitted"], false);
+                assert_eq!(
+                    record["displayed_sequence"],
+                    resize[index - 1]["displayed_sequence"]
+                );
+            }
+        }
+        // fixture_tile_quality validates the actual decoder geometry epoch on
+        // every emitted frame, even when dimensions and RGB are unchanged.
+    }
+
     #[test]
     fn deterministic_seeded_scenes() {
         let config = ReplayConfig {
