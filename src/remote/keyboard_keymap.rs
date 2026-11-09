@@ -125,7 +125,13 @@ impl KeyboardKeymap {
             revoked: false,
         };
         guard.digest = guard.snapshot(true)?;
+        #[cfg(test)]
+        eprintln!(
+            "XKB guard initialization selected device={device}; starting initial history check"
+        );
         guard.check(true)?;
+        #[cfg(test)]
+        eprintln!("XKB guard initialization complete device={device}");
         Ok(guard)
     }
     pub(super) fn digest(&self) -> [u8; 32] {
@@ -192,6 +198,66 @@ impl KeyboardKeymap {
             let Some(event) = self.conn.poll_for_event()? else {
                 return Ok(());
             };
+            #[cfg(test)]
+            match &event {
+                xcb::Event::Xkb(xcb_xkb::Event::NewKeyboardNotify(e)) => {
+                    eprintln!(
+                        "XKB history initial={initial} guard_device={} NewKeyboardNotify: device={} old_device={} seq={} time={} request_major={} request_minor={} changed={:?}; full={e:?}",
+                        self.device,
+                        e.device_id(),
+                        e.old_device_id(),
+                        e.sequence(),
+                        e.time(),
+                        e.request_major(),
+                        e.request_minor(),
+                        e.changed()
+                    );
+                }
+                xcb::Event::Xkb(xcb_xkb::Event::MapNotify(e)) => {
+                    eprintln!(
+                        "XKB history initial={initial} guard_device={} MapNotify: device={} seq={} time={} changed={:?}; full={e:?}",
+                        self.device,
+                        e.device_id(),
+                        e.sequence(),
+                        e.time(),
+                        e.changed()
+                    );
+                }
+                xcb::Event::Xkb(xcb_xkb::Event::NamesNotify(e)) => {
+                    eprintln!(
+                        "XKB history initial={initial} guard_device={} NamesNotify: device={} seq={} time={} changed={:?}; full={e:?}",
+                        self.device,
+                        e.device_id(),
+                        e.sequence(),
+                        e.time(),
+                        e.changed()
+                    );
+                }
+                xcb::Event::Xkb(xcb_xkb::Event::CompatMapNotify(e)) => {
+                    eprintln!(
+                        "XKB history initial={initial} guard_device={} CompatMapNotify: device={} seq={} time={} groups={:?}; full={e:?}",
+                        self.device,
+                        e.device_id(),
+                        e.sequence(),
+                        e.time(),
+                        e.changed_groups()
+                    );
+                }
+                xcb::Event::Xkb(xcb_xkb::Event::StateNotify(e)) => {
+                    eprintln!(
+                        "XKB history initial={initial} guard_device={} StateNotify: device={} seq={} time={} request_major={} request_minor={} changed={:?}; full={e:?}",
+                        self.device,
+                        e.device_id(),
+                        e.sequence(),
+                        e.time(),
+                        e.request_major(),
+                        e.request_minor(),
+                        e.changed()
+                    );
+                }
+                xcb::Event::Xkb(e) => eprintln!("XKB history initial={initial} other={e:?}"),
+                _ => {}
+            }
             match event {
                 xcb::Event::Xkb(xcb_xkb::Event::StateNotify(state)) => {
                     if !state.locked_mods().is_empty()

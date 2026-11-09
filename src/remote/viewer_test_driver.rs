@@ -76,6 +76,13 @@ impl ViewerTestDriver {
         super::keyboard_keymap::canonical_digest(text.as_bytes())?;
         Ok(text)
     }
+    pub(super) fn assert_keys_released(&self) -> RemoteResult<()> {
+        let reply = self.conn.query_keymap()?.reply()?;
+        if reply.keys.iter().any(|byte| *byte != 0) {
+            return Err("owned XTEST keyboard still has pressed keys before authorization".into());
+        }
+        Ok(())
+    }
     pub(super) fn key_press(&self, evdev: u16) -> RemoteResult<()> {
         self.key(evdev, true)
     }

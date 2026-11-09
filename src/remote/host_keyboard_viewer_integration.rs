@@ -101,7 +101,9 @@ struct Probe {
     failures: mpsc::Receiver<String>,
 }
 fn note(trace: &Trace, message: impl Into<String>) {
-    trace.lock().unwrap().push(message.into());
+    let message = message.into();
+    eprintln!("actual keyboard viewer phase: {message}");
+    trace.lock().unwrap().push(message);
 }
 fn pump_until(
     server: &mut Server,
@@ -169,18 +171,32 @@ fn client_options(
     }
 }
 fn drive(label: &str, case: Case, steps: mpsc::Receiver<()>, trace: &Trace) -> RemoteResult<()> {
+    note(trace, "driver connecting owned X server");
     let driver = ViewerTestDriver::connect()?;
+    note(
+        trace,
+        format!("driver waiting actual viewer window {label}"),
+    );
     let window = driver.wait_window(label)?;
+    note(trace, "driver focusing actual viewer");
     driver.focus(window)?;
+    note(trace, "driver waiting actual red pixels");
     driver.wait_red(window)?;
     if matches!(case, Case::MapMismatch) {
+        note(trace, "driver waiting full-map mismatch terminal observer");
         driver.wait_keyboard_revoked(window)?;
         note(trace, "full-map mismatch actually denied");
         driver.key_press(30)?;
         driver.key_release(30)?;
     } else {
+        note(
+            trace,
+            "driver waiting actual native-granted and activated observer",
+        );
         driver.wait_keyboard_armed(window)?;
+        note(trace, "driver injecting first owned XTEST key press");
         driver.key_press(30)?;
+        note(trace, "driver waiting original native recipient press");
         steps.recv_timeout(Duration::from_secs(5))?;
         note(
             trace,
@@ -223,10 +239,16 @@ fn actual_viewer_tcp_keyboard_presented_scope_and_revocation() {
     let Some(mut gl) = HeadlessSmithayGles::new() else {
         panic!("actual viewer test requires production offscreen GL");
     };
-    let owned_map = ViewerTestDriver::connect()
-        .unwrap()
-        .snapshot_keymap()
-        .unwrap();
+    // Activate the test's real XTEST keyboard *before* taking the map evidence.
+    // First use can switch the master to this slave and legitimately change XKB
+    // history. Never exempt that event once production authorization starts.
+    let fixture_driver = ViewerTestDriver::connect().unwrap();
+    fixture_driver.initialize_outside_focus().unwrap();
+    fixture_driver.key_press(30).unwrap();
+    fixture_driver.key_release(30).unwrap();
+    fixture_driver.assert_keys_released().unwrap();
+    eprintln!("owned XTEST keyboard warmed and released before complete-map snapshot");
+    let owned_map = fixture_driver.snapshot_keymap().unwrap();
     let owned_digest = canonical_digest(owned_map.as_bytes()).unwrap();
     for case in [Case::Positive, Case::Focus, Case::MapMismatch] {
         let mut server = Server::new();
@@ -431,10 +453,12 @@ fn actual_viewer_tcp_keyboard_presented_scope_and_revocation() {
                 driver.is_finished()
             },
         );
-        driver
-            .join()
-            .expect("driver thread panicked")
-            .expect("real viewer driver failed");
+        if let Err(error) = driver.join().expect("driver thread panicked") {
+            panic!(
+                "actual keyboard driver failed: {error}; case={case:?}; trace={:?}",
+                trace.lock().unwrap()
+            );
+        }
         pump_until(
             &mut server,
             &mut gl,
