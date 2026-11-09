@@ -360,6 +360,14 @@ impl Viewer {
         }
     }
     #[cfg(test)]
+    pub(super) fn observe_scroll(&self, count: u64) -> RemoteResult<()> {
+        match self {
+            Self::X11(viewer) => viewer.observe_scroll(count),
+            #[cfg(feature = "remote-wayland")]
+            Self::Wayland(_) => Ok(()),
+        }
+    }
+    #[cfg(test)]
     pub(super) fn observe_pointer_ready(&self, sequence: Option<u64>) -> RemoteResult<()> {
         match self {
             Self::X11(v) => v.observe_pointer_ready(sequence),

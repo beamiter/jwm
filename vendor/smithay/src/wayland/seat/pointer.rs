@@ -151,6 +151,47 @@ where
         self.with_authorized_pointer(snapshot, |_| {})
     }
 
+    /// Deliver exactly one vertical wheel detent to the original authorized
+    /// receivers. No global pointer coordinates, axis accumulators, buttons,
+    /// serials, implicit grabs or seat dispatch routes are mutated. The caller
+    /// must separately authorize scroll and validate a fresh frame and bounds.
+    pub fn send_authorized_scroll(
+        &self,
+        snapshot: &AuthorizedPointerSnapshot,
+        x: f64,
+        y: f64,
+        step: i32,
+        time: InputTime,
+    ) -> bool {
+        if !matches!(step, -1 | 1)
+            || !x.is_finite()
+            || !y.is_finite()
+            || x < 0.0
+            || y < 0.0
+            || x > 16384.0
+            || y > 16384.0
+        {
+            return false;
+        }
+        self.with_authorized_pointer(snapshot, |receivers| {
+            for pointer in receivers {
+                pointer.motion(time.millis(), x, y);
+                if pointer.version() >= 5 {
+                    pointer.axis_source(WlAxisSource::Wheel);
+                }
+                if pointer.version() >= 8 {
+                    pointer.axis_value120(WlAxis::VerticalScroll, step * 120);
+                } else if pointer.version() >= 5 {
+                    pointer.axis_discrete(WlAxis::VerticalScroll, step);
+                }
+                pointer.axis(time.millis(), WlAxis::VerticalScroll, f64::from(step) * 10.0);
+                if pointer.version() >= 5 {
+                    pointer.frame();
+                }
+            }
+        })
+    }
+
     /// Send one surface-local motion and optionally an indivisible left click.
     /// Does not mutate seat coordinates, held buttons, grabs, enter serials or
     /// shortcuts. The serial is deliberately not registered as a seat grab,

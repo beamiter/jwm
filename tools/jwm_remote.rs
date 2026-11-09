@@ -304,6 +304,10 @@ enum Command {
         #[arg(long, requires_all = ["wayland_select", "once"], conflicts_with_all = ["allow_wayland_keyboard", "allow_input", "allow_clipboard", "allow_window_resize"])]
         allow_wayland_pointer: bool,
 
+        /// Separately permit discrete vertical scroll on the scoped pointer lease.
+        #[arg(long, requires = "allow_wayland_pointer")]
+        allow_wayland_scroll: bool,
+
         /// Native Wayland socket for local selection (defaults to WAYLAND_DISPLAY).
         #[arg(long, value_name = "SOCKET", requires = "wayland_select")]
         wayland_display: Option<String>,
@@ -466,6 +470,10 @@ enum Command {
         /// Request a fresh-frame scoped pointer lease, not legacy pointer input.
         #[arg(long, conflicts_with_all = ["wayland_keyboard", "view_only", "resize_source", "clipboard", "grab_input", "reconnect_attempts"])]
         wayland_pointer: bool,
+
+        /// Separately request single-notch vertical scroll; never smooth or horizontal.
+        #[arg(long, requires = "wayland_pointer")]
+        wayland_scroll: bool,
 
         /// Best-effort local client origin X,Y; off-screen positions fall back.
         #[arg(long, value_name = "X,Y", allow_hyphen_values = true)]
@@ -659,6 +667,7 @@ fn profile_from_command(command: Command) -> RemoteResult<Profile> {
             follow_source_size,
             wayland_keyboard,
             wayland_pointer,
+            wayland_scroll,
             window_position,
             view_only,
             grab_input,
@@ -675,7 +684,7 @@ fn profile_from_command(command: Command) -> RemoteResult<Profile> {
                 )
                 .into());
             }
-            if wayland_keyboard || wayland_pointer {
+            if wayland_keyboard || wayland_pointer || wayland_scroll {
                 return Err(profile_error(
                     "Wayland input authorization cannot be saved in a profile",
                 )
@@ -1208,6 +1217,7 @@ fn run(command: Command) -> RemoteResult<()> {
             wayland_select,
             allow_wayland_keyboard,
             allow_wayland_pointer,
+            allow_wayland_scroll,
             wayland_display,
             allow_clipboard,
             clipboard_mode,
@@ -1254,6 +1264,7 @@ fn run(command: Command) -> RemoteResult<()> {
                 wayland_select,
                 allow_wayland_keyboard,
                 allow_wayland_pointer,
+                allow_wayland_scroll,
                 wayland_display,
                 allow_clipboard,
                 clipboard_mode,
@@ -1323,6 +1334,7 @@ fn run(command: Command) -> RemoteResult<()> {
             follow_source_size,
             wayland_keyboard,
             wayland_pointer,
+            wayland_scroll,
             window_position,
             view_only,
             grab_input,
@@ -1351,6 +1363,7 @@ fn run(command: Command) -> RemoteResult<()> {
                     follow_source_size,
                     wayland_keyboard,
                     wayland_pointer,
+                    wayland_scroll,
                     window_position,
                     view_only,
                     grab_input,
@@ -3232,5 +3245,65 @@ mod wayland_pointer_cli_tests {
         let cli = Cli::try_parse_from(["jwm-remote", "connect", "127.0.0.1", "--wayland-pointer"])
             .unwrap();
         assert!(profile_from_command(cli.command).is_err());
+    }
+}
+
+#[cfg(test)]
+mod wayland_scroll_cli_tests {
+    use super::*;
+    #[test]
+    fn scroll_requires_explicit_pointer_and_cannot_be_saved() {
+        assert!(
+            Cli::try_parse_from([
+                "jwm-remote",
+                "host",
+                "--wayland-select",
+                "--once",
+                "--allow-wayland-scroll"
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "jwm-remote",
+                "host",
+                "--wayland-select",
+                "--once",
+                "--allow-wayland-pointer",
+                "--allow-wayland-scroll"
+            ])
+            .is_ok()
+        );
+        assert!(
+            Cli::try_parse_from(["jwm-remote", "connect", "127.0.0.1", "--wayland-scroll"])
+                .is_err()
+        );
+        let cli = Cli::try_parse_from([
+            "jwm-remote",
+            "connect",
+            "127.0.0.1",
+            "--wayland-pointer",
+            "--wayland-scroll",
+        ])
+        .unwrap();
+        assert!(profile_from_command(cli.command).is_err());
+        for restricted in [
+            "--view-only",
+            "--wayland-keyboard",
+            "--clipboard",
+            "--grab-input",
+        ] {
+            assert!(
+                Cli::try_parse_from([
+                    "jwm-remote",
+                    "connect",
+                    "127.0.0.1",
+                    "--wayland-pointer",
+                    "--wayland-scroll",
+                    restricted
+                ])
+                .is_err()
+            );
+        }
     }
 }

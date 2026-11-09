@@ -1628,6 +1628,7 @@ pub struct HostOptions {
     pub allow_window_resize: bool,
     pub allow_wayland_keyboard: bool,
     pub allow_wayland_pointer: bool,
+    pub allow_wayland_scroll: bool,
     pub allow_clipboard: bool,
     pub clipboard_mode: ClipboardMode,
     pub clipboard_direction: ClipboardDirection,
@@ -1741,6 +1742,7 @@ struct PointerFrame {
 }
 struct SourceControl {
     pointer_enabled: AtomicBool,
+    scroll_enabled: AtomicBool,
     pointer_revoke: AtomicBool,
     pointer_queue: Mutex<VecDeque<PointerCommand>>,
     pointer_frame: Mutex<Option<PointerFrame>>,
@@ -1761,6 +1763,7 @@ impl SourceControl {
     ) -> RemoteResult<Self> {
         Ok(Self {
             pointer_enabled: AtomicBool::new(false),
+            scroll_enabled: AtomicBool::new(false),
             pointer_revoke: AtomicBool::new(false),
             pointer_queue: Mutex::new(VecDeque::new()),
             pointer_frame: Mutex::new(None),
@@ -1851,6 +1854,9 @@ fn listener_security_notice(address: IpAddr) -> Option<&'static str> {
 }
 
 fn validate_window_policy(options: &HostOptions) -> RemoteResult<()> {
+    if options.allow_wayland_scroll && !options.allow_wayland_pointer {
+        return Err(invalid_data("Wayland scroll requires explicit pointer permission").into());
+    }
     if options.allow_wayland_keyboard && options.allow_wayland_pointer {
         return Err(invalid_data("native leases are mutually exclusive").into());
     }
@@ -2386,6 +2392,9 @@ fn serve_authenticated(
         hello.stream.wayland_keyboard && options.allow_wayland_keyboard;
     negotiated_stream.wayland_pointer =
         hello.stream.wayland_pointer && options.allow_wayland_pointer;
+    negotiated_stream.wayland_scroll = hello.stream.wayland_scroll
+        && options.allow_wayland_scroll
+        && negotiated_stream.wayland_pointer;
     if negotiated_stream.wayland_pointer {
         if hello.request_input
             || hello.request_clipboard
@@ -2395,6 +2404,9 @@ fn serve_authenticated(
             return Err(invalid_data("native pointer cannot combine other capabilities").into());
         }
         capture.enable_pointer()?;
+        if negotiated_stream.wayland_scroll {
+            capture.enable_scroll()?;
+        }
     }
     if negotiated_stream.wayland_keyboard {
         if hello.request_input || hello.request_clipboard || hello.stream.window_resize {
@@ -2534,6 +2546,9 @@ fn serve_authenticated(
         sources
             .pointer_enabled
             .store(negotiated_stream.wayland_pointer, Ordering::Release);
+        sources
+            .scroll_enabled
+            .store(negotiated_stream.wayland_scroll, Ordering::Release);
         writer.write_message(
             MessageKind::HelloAck,
             &ServerHello {
@@ -4506,7 +4521,17 @@ fn receive_input_scoped(
                     let command = if kind == MessageKind::WaylandPointerRequest {
                         PointerCommand::Request(PointerRequest::decode(&payload)?)
                     } else {
-                        PointerCommand::Action(PointerAction::decode(&payload)?)
+                        let action = PointerAction::decode(&payload)?;
+                        if action.kind.is_scroll()
+                            && !sources.scroll_enabled.load(Ordering::Acquire)
+                        {
+                            sources.pointer_revoke.store(true, Ordering::Release);
+                            return Err(invalid_data(
+                                "Wayland scroll was not separately negotiated",
+                            )
+                            .into());
+                        }
+                        PointerCommand::Action(action)
                     };
                     let mut queue = sources.pointer_queue.lock().unwrap();
                     if !queue.is_empty() {
@@ -5646,6 +5671,7 @@ mod tests {
             allow_window_resize: false,
             allow_wayland_keyboard: false,
             allow_wayland_pointer: false,
+            allow_wayland_scroll: false,
             allow_clipboard: false,
             clipboard_mode: Default::default(),
             clipboard_direction: Default::default(),
@@ -8229,6 +8255,7 @@ mod tests {
             allow_window_resize: false,
             allow_wayland_keyboard: false,
             allow_wayland_pointer: false,
+            allow_wayland_scroll: false,
             allow_clipboard: false,
             clipboard_mode: Default::default(),
             clipboard_direction: Default::default(),

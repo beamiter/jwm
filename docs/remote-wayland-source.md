@@ -77,8 +77,10 @@ source switching or automatic input grab. A saved profile cannot grant it.
 The default remains view-only. The selected target must already have exact
 native keyboard focus: the remote path never changes focus to obtain access.
 
-Protocol v17 retains the independent keyboard capability introduced in v16. After the first
-frame is actually reported presented by the viewer, it requests one lease for
+Current protocol v18 retains the independent keyboard capability introduced
+in v16 and the pointer capability introduced in v17; scrolling has its own v18
+opt-in. After the first frame is actually reported presented by the viewer, it
+requests one keyboard lease for
 that source epoch, encoded geometry epoch and frame sequence. The host checks
 its acknowledged-frame metadata and arms the native lease with the retained,
 ready image-copy frame resource on the same Wayland connection. A native
@@ -127,10 +129,11 @@ The separately negotiated pointer mode requires explicit local
 with the keyboard lease, legacy input, clipboard, resize or input grabs. It
 never enables XTEST. Saved profiles and automatic reconnect cannot grant it.
 
-This deliberately narrow first stage supports surface-local absolute motion
-and an atomic left click only. It does not support dragging, separate button
-down/up, scrolling, relative motion, remote focus changes or remote pointer
-enter. Both native pointer and keyboard focus must already be the selected
+The base pointer grant supports surface-local absolute motion and an atomic
+left click. Optional discrete vertical scrolling requires the separate explicit
+grant below; a pointer grant alone does not permit scrolling. Dragging, separate
+button down/up, relative motion, remote focus changes and remote pointer enter
+remain unsupported. Both native pointer and keyboard focus must already be the selected
 surface. The compositor sends only to the captured receiver set and does not
 change the physical seat's coordinates, held buttons, grab or enter serial.
 Remote clicks are not authority to move/resize windows, grab popups or start
@@ -175,6 +178,46 @@ tests, native production-renderer frame tests, adapter tests and the
 authenticated transport path. Pure coordinate tests or successful compilation
 alone are not evidence of safe pointer delivery. These cloud/offscreen checks
 are not physical DRM, dual-machine or real desktop-viewer acceptance.
+
+### Optional discrete vertical scrolling
+
+Scrolling is off by default and requires both local opt-ins, in addition to the
+existing pointer flags:
+
+```sh
+jwm-remote host --wayland-select --once --allow-wayland-pointer --allow-wayland-scroll ...
+jwm-remote connect HOST:48221 --wayland-pointer --wayland-scroll ...
+```
+
+The independent scroll capability does not extend an old pointer grant. Both
+sides must explicitly enable it; permission cannot be inferred from incoming
+actions. The stream protocol version is 18, and older versions are rejected
+rather than silently downgrading. No profile, reconnect, keyboard, clipboard or
+legacy input permission is enabled by these flags.
+
+Only a single vertical wheel notch up or down is supported per action. There
+are no arbitrary axis magnitudes, horizontal scrolling, smooth/continuous
+scrolling or inertia. The native compositor delivers the fixed wheel sequence
+to the same authorized surface/receiver snapshot at the validated surface-local
+coordinates; it does not change physical seat position or global focus. The
+application decides what one notch means, so equal line or pixel movement
+across applications is not promised.
+
+Each notch consumes its own fresh capture/presentation ticket under the existing
+source, geometry, receiver, focus and one-second capture-age checks. Waiting
+notches are dropped, never accumulated, batched or replayed when Ready returns.
+A new physical notch after a new Ready frame is required for another action.
+The existing 30-second nonrenewable lease and every local-takeover/lifecycle
+revocation still apply. This conservative interaction is not touchpad-like
+continuous scrolling and does not increase the input authority of a read-only
+session.
+
+The actual viewer regression includes an owned application that changes its
+buffer only after receiving a real native axis event. Its changed pixels must
+then traverse production capture, authenticated TCP, viewer drawing and a new
+presented-frame acknowledgement. It also covers an unrequested scroll grant,
+Waiting bursts and a non-target receiver. These are test requirements, not
+physical-display, dual-machine or general application compatibility claims.
 
 ### Actual viewer interaction regression
 

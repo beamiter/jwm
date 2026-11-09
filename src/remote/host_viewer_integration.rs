@@ -6,7 +6,9 @@ use crate::backend::wayland::state::JwmClientState;
 use crate::backend::wayland_udev::backend::fulfill_test_toplevel_capture;
 use crate::backend::wayland_udev::compositor::headless_render::HeadlessSmithayGles;
 use crate::backend::wayland_udev::image_copy_capture::{
-    authority_tests::App, init_image_copy_capture, wire_test_client::Server,
+    authority_tests::{App, shm_buffer_file},
+    init_image_copy_capture,
+    wire_test_client::Server,
 };
 use crate::remote::wayland_capture::WaylandCapture;
 use crate::remote::{
@@ -50,6 +52,8 @@ enum Case {
     ResizeRestore,
     Focus,
     ReadOnly,
+    Scroll,
+    ScrollNotRequested,
 }
 struct ShutdownGuard(Arc<AtomicBool>);
 impl Drop for ShutdownGuard {
@@ -80,6 +84,7 @@ fn options() -> HostOptions {
         allow_window_resize: false,
         allow_wayland_keyboard: false,
         allow_wayland_pointer: true,
+        allow_wayland_scroll: false,
         allow_clipboard: false,
         clipboard_mode: Default::default(),
         clipboard_direction: Default::default(),
@@ -133,6 +138,7 @@ struct Probe {
     case: Case,
     trace: Trace,
     failures: mpsc::Receiver<String>,
+    capture_hold: Arc<AtomicBool>,
 }
 fn note(trace: &Trace, message: impl Into<String>) {
     let message = message.into();
@@ -145,11 +151,11 @@ fn pump_until(
     cache: &mut Option<(i32, i32, smithay::backend::renderer::gles::GlesRenderbuffer)>,
     probe: &Probe,
     phase: &str,
-    mut done: impl FnMut() -> bool,
+    mut done: impl FnMut(&mut Server) -> bool,
 ) {
     eprintln!("actual viewer pointer case={:?} phase={phase}", probe.case);
     let deadline = Instant::now() + Duration::from_secs(20);
-    while !done() {
+    while !done(server) {
         if let Ok(error) = probe.failures.try_recv() {
             panic!(
                 "case={:?} phase={phase}: {error}; trace={:?}",
@@ -164,12 +170,14 @@ fn pump_until(
             probe.trace.lock().unwrap()
         );
         server.roundtrip();
-        fulfill_test_toplevel_capture(
-            &mut gl.renderer,
-            cache,
-            &server.state,
-            server.state.image_capture_pending.as_ref().unwrap(),
-        );
+        if !probe.capture_hold.load(Ordering::Acquire) {
+            fulfill_test_toplevel_capture(
+                &mut gl.renderer,
+                cache,
+                &server.state,
+                server.state.image_capture_pending.as_ref().unwrap(),
+            );
+        }
         server.roundtrip();
         std::thread::sleep(Duration::from_millis(1));
     }
@@ -186,6 +194,7 @@ fn client_options(
         viewer_wayland_display: None,
         wayland_keyboard: false,
         wayland_pointer: !matches!(case, Case::ReadOnly),
+        wayland_scroll: matches!(case, Case::Scroll),
         resize_source: None,
         follow_source_size: false,
         // A small real viewport keeps the controlled short-hold regression
@@ -224,6 +233,7 @@ fn drive(
     trace: &Trace,
     refresh: Arc<Mutex<Option<Instant>>>,
     cancel_checkpoint: Arc<AtomicBool>,
+    capture_hold: Arc<AtomicBool>,
 ) -> RemoteResult<()> {
     note(trace, "driver connecting owned Xvfb");
     let driver = ViewerTestDriver::connect()?;
@@ -273,6 +283,59 @@ fn drive(
     );
     let ready = driver.wait_ready_after(window, Some(ready))?;
     note(trace, format!("driver post-motion Ready seq={ready}"));
+    if matches!(case, Case::ScrollNotRequested) {
+        driver.wheel_notches(true, 3)?;
+        driver.wait_scroll_observed(window, 3)?;
+        let observed = driver
+            .pointer_observation(window)?
+            .expect("pointer observation");
+        assert_eq!(
+            observed.action_sequence, 1,
+            "unrequested scroll must not send an action"
+        );
+        driver.close(window)?;
+        return Ok(());
+    }
+    if matches!(case, Case::Scroll) {
+        // Hold only new capture fulfillment, never forge Ready or relax native
+        // freshness. This makes the Waiting burst a deterministic negative case.
+        capture_hold.store(true, Ordering::Release);
+        driver.wheel_notches(true, 1)?;
+        steps.recv_timeout(Duration::from_secs(5))?;
+        driver.wait_title(window, "Pointer: Waiting")?;
+        driver.wheel_notches(false, 3)?;
+        driver.wait_scroll_observed(window, 4)?;
+        let observed = driver
+            .pointer_observation(window)?
+            .expect("pointer observation");
+        assert_eq!(
+            observed.action_sequence, 2,
+            "Waiting notches cannot queue/batch actions"
+        );
+        capture_hold.store(false, Ordering::Release);
+        driver.wait_green(window)?;
+        let green_ready = driver.wait_ready_after(window, Some(ready))?;
+        assert_eq!(
+            driver.pointer_observation(window)?.unwrap().action_sequence,
+            2,
+            "Waiting wheel burst must not replay when Ready returns"
+        );
+        // A new physical notch, not a queued old one, consumes the new ticket.
+        driver.wheel_notches(false, 1)?;
+        steps.recv_timeout(Duration::from_secs(5))?;
+        driver.wait_red(window)?;
+        driver.wait_ready_after(window, Some(green_ready))?;
+        assert_eq!(
+            driver.pointer_observation(window)?.unwrap().action_sequence,
+            3
+        );
+        note(
+            trace,
+            "actual scroll recipient repainted green then red through capture/TCP/draw/ACK",
+        );
+        driver.close(window)?;
+        return Ok(());
+    }
     driver.click_at_current()?;
     steps.recv_timeout(Duration::from_secs(5))?; // balanced native click, not a UI claim
     note(
@@ -387,7 +450,7 @@ fn drive(
             driver.wait_title(window, "Pointer: Revoked")?;
         }
         Case::BlackBar => {}
-        Case::ReadOnly => unreachable!(),
+        Case::ReadOnly | Case::Scroll | Case::ScrollNotRequested => unreachable!(),
     }
     std::thread::sleep(Duration::from_millis(100));
     driver.close(window)?;
@@ -420,6 +483,8 @@ fn actual_viewer_tcp_pointer_presented_scope_and_revocation() {
         Case::ResizeRestore,
         Case::Focus,
         Case::ReadOnly,
+        Case::Scroll,
+        Case::ScrollNotRequested,
     ] {
         let mut server = Server::new();
         server.state.image_capture_pending =
@@ -446,10 +511,12 @@ fn actual_viewer_tcp_pointer_presented_scope_and_revocation() {
         let (ready_tx, ready_rx) = mpsc::channel();
         let trace: Trace = Arc::new(Mutex::new(Vec::new()));
         let (failed_tx, failed_rx) = mpsc::channel();
+        let capture_hold = Arc::new(AtomicBool::new(false));
         let probe = Probe {
             case,
             trace: Arc::clone(&trace),
             failures: failed_rx,
+            capture_hold: Arc::clone(&capture_hold),
         };
         let refresh = Arc::new(Mutex::new(None));
         let cancel_checkpoint = Arc::new(AtomicBool::new(false));
@@ -484,9 +551,12 @@ fn actual_viewer_tcp_pointer_presented_scope_and_revocation() {
                     };
                     let peer = authenticate_peer(stream, &TEST_KEY)?;
                     note(&host_trace, "host authenticated");
+                    let mut opts = options();
+                    opts.allow_wayland_scroll =
+                        matches!(case, Case::Scroll | Case::ScrollNotRequested);
                     serve_authenticated(
                         peer,
-                        &options(),
+                        &opts,
                         &shutdown,
                         &Mutex::new(Some(GrantedCapture::Wayland(Box::new(capture)))),
                     )
@@ -508,7 +578,7 @@ fn actual_viewer_tcp_pointer_presented_scope_and_revocation() {
             &mut cache,
             &probe,
             "native selection",
-            || match ready_rx.try_recv() {
+            |_| match ready_rx.try_recv() {
                 Ok(()) => true,
                 Err(mpsc::TryRecvError::Empty) => false,
                 Err(mpsc::TryRecvError::Disconnected) => {
@@ -563,6 +633,7 @@ fn actual_viewer_tcp_pointer_presented_scope_and_revocation() {
                     &driver_trace,
                     refresh,
                     driver_checkpoint,
+                    capture_hold,
                 )
             }));
             let result = match result {
@@ -579,13 +650,14 @@ fn actual_viewer_tcp_pointer_presented_scope_and_revocation() {
         let mut unexpected = Vec::new();
         let mut notified = 0;
         let mut cancellation_checked = false;
+        let mut scroll_notified = 0;
         pump_until(
             &mut server,
             &mut gl,
             &mut cache,
             &probe,
             "real viewer actions",
-            || {
+            |server| {
                 events.extend(received(&mut app, app_pointer));
                 unexpected.extend(received(&mut other, other_pointer));
                 let motion = events.iter().any(|(op, _)| *op == 2);
@@ -593,6 +665,28 @@ fn actual_viewer_tcp_pointer_presented_scope_and_revocation() {
                 if notified == 0 && motion {
                     steps.send(()).unwrap();
                     notified = 1;
+                }
+                let scrolls = events.iter().filter(|(op, _)| *op == 4).count();
+                if matches!(case, Case::Scroll) && scrolls > scroll_notified {
+                    assert_eq!(scrolls, scroll_notified + 1, "wheel notches must not batch");
+                    assert!(
+                        scrolls <= 2,
+                        "Waiting notches must not reach native recipient"
+                    );
+                    // This owned app responds only to a genuinely received axis
+                    // event. New buffer/damage/commit then traverses real capture.
+                    let color = if scrolls == 1 {
+                        [0, 255, 0, 255]
+                    } else {
+                        [0, 0, 255, 255]
+                    };
+                    let (buffer, _file) = shm_buffer_file(server, &mut app.client, color);
+                    app.client.request(app.surface, 1, &[buffer, 0, 0]);
+                    app.client.request(app.surface, 2, &[0, 0, 800, 600]);
+                    app.client.request(app.surface, 6, &[]);
+                    sync(server);
+                    scroll_notified = scrolls;
+                    steps.send(()).unwrap();
                 }
                 if notified == 1 && edges >= 2 {
                     steps.send(()).unwrap();
@@ -630,7 +724,7 @@ fn actual_viewer_tcp_pointer_presented_scope_and_revocation() {
             &mut cache,
             &probe,
             "actual client teardown",
-            || client.is_finished(),
+            |_| client.is_finished(),
         );
         client
             .join()
@@ -643,7 +737,7 @@ fn actual_viewer_tcp_pointer_presented_scope_and_revocation() {
             &mut cache,
             &probe,
             "host teardown",
-            || {
+            |_| {
                 if let Ok(result) = host_rx.try_recv() {
                     assert_ne!(
                         result.as_ref().err().map(String::as_str),
@@ -664,13 +758,36 @@ fn actual_viewer_tcp_pointer_presented_scope_and_revocation() {
             .filter(|(op, _)| *op == 3)
             .map(|(_, args)| (args[2], args[3]))
             .collect();
-        let clicks = if matches!(case, Case::ReadOnly) {
+        let clicks = if matches!(
+            case,
+            Case::ReadOnly | Case::Scroll | Case::ScrollNotRequested
+        ) {
             0
         } else if matches!(case, Case::Positive | Case::NewFrameCancel) {
             2
         } else {
             1
         };
+        let axes: Vec<_> = events
+            .iter()
+            .filter(|(op, _)| *op == 4)
+            .map(|(_, args)| (args[1], args[2] as i32))
+            .collect();
+        let discrete: Vec<_> = events
+            .iter()
+            .filter(|(op, _)| *op == 8)
+            .map(|(_, args)| (args[0], args[1] as i32))
+            .collect();
+        if matches!(case, Case::Scroll) {
+            assert_eq!(axes.len(), 2);
+            assert_eq!((axes[0].0, axes[1].0), (0, 0));
+            assert!(axes[0].1 < 0 && axes[1].1 > 0);
+            assert_eq!(discrete, [(0, -1), (0, 1)]);
+            assert_eq!(scroll_notified, 2);
+        } else {
+            assert!(axes.is_empty(), "no scroll grant/action in case={case:?}");
+            assert!(discrete.is_empty());
+        }
         if matches!(case, Case::NewFrameCancel) {
             assert!(cancellation_checked);
         }

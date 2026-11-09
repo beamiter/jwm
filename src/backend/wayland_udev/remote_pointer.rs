@@ -43,6 +43,7 @@ struct Lease {
     source: Weak<ExtImageCaptureSourceV1>,
     resource: JwmRemotePointerLeaseV1,
     epoch: u32,
+    allow_scroll: bool,
     authority: Arc<CaptureAuthority>,
     pointer: AuthorizedPointerSnapshot,
     keyboard: AuthorizedKeyboardSnapshot,
@@ -133,6 +134,9 @@ fn mapping(authority: &CaptureAuthority) -> Option<Mapping> {
         Some(Mapping { geometry, region })
     })
 }
+fn action_allowed(kind: u32, allow_scroll: bool) -> bool {
+    matches!(kind, 0 | 1) || (allow_scroll && matches!(kind, 2 | 3))
+}
 fn point_allowed(mapping: &Mapping, x: u32, y: u32) -> bool {
     let Some(region) = &mapping.region else {
         return true;
@@ -150,7 +154,7 @@ fn point_allowed(mapping: &Mapping, x: u32, y: u32) -> bool {
     inside
 }
 pub(crate) fn init(dh: &DisplayHandle) {
-    dh.create_global::<JwmWaylandState, JwmRemotePointerManagerV1, _>(1, ManagerData);
+    dh.create_global::<JwmWaylandState, JwmRemotePointerManagerV1, _>(2, ManagerData);
 }
 pub(crate) fn active(state: &JwmWaylandState) -> bool {
     state.remote_pointer.active.is_some()
@@ -270,7 +274,18 @@ impl Dispatch<JwmRemotePointerManagerV1, ManagerData> for JwmWaylandState {
         _dh: &DisplayHandle,
         init: &mut DataInit<'_, Self>,
     ) {
-        if let jwm_remote_pointer_manager_v1::Request::CreateLease { id, source } = request {
+        // A v2 bind is not permission. The original request remains strictly
+        // motion/click-only, even when issued on a version-two manager.
+        let (id, source, allow_scroll) = match request {
+            jwm_remote_pointer_manager_v1::Request::CreateLease { id, source } => {
+                (id, source, false)
+            }
+            jwm_remote_pointer_manager_v1::Request::CreateLeaseWithScroll { id, source } => {
+                (id, source, true)
+            }
+            _ => return,
+        };
+        {
             let epoch = state.remote_pointer.next_epoch.checked_add(1).unwrap_or(0);
             let resource = init.init(id, LeaseData { epoch });
             if epoch == 0 {
@@ -323,6 +338,7 @@ impl Dispatch<JwmRemotePointerManagerV1, ManagerData> for JwmWaylandState {
                 source: source.downgrade(),
                 resource: resource.clone(),
                 epoch,
+                allow_scroll,
                 authority,
                 pointer,
                 keyboard,
@@ -397,7 +413,7 @@ impl Dispatch<JwmRemotePointerLeaseV1, LeaseData> for JwmWaylandState {
             if epoch != lease.epoch
                 || sequence != lease.sequence.saturating_add(1)
                 || sequence > 60000
-                || kind > 1
+                || !action_allowed(kind, lease.allow_scroll)
                 || x >= lease.authority.width
                 || y >= lease.authority.height
                 || !point_allowed(&lease.mapping, x, y)
@@ -434,14 +450,24 @@ impl Dispatch<JwmRemotePointerLeaseV1, LeaseData> for JwmWaylandState {
             // vendor's exact-receiver atomic event group. Serial is never
             // installed as a compositor implicit grab or popup key.
             if !state.seat.get_pointer().is_some_and(|p| {
-                p.send_authorized_pointer(
-                    &lease.pointer,
-                    f64::from(x),
-                    f64::from(y),
-                    kind == 1,
-                    SERIAL_COUNTER.next_serial(),
-                    InputTime::now(),
-                )
+                if kind >= 2 {
+                    p.send_authorized_scroll(
+                        &lease.pointer,
+                        f64::from(x),
+                        f64::from(y),
+                        if kind == 2 { -1 } else { 1 },
+                        InputTime::now(),
+                    )
+                } else {
+                    p.send_authorized_pointer(
+                        &lease.pointer,
+                        f64::from(x),
+                        f64::from(y),
+                        kind == 1,
+                        SERIAL_COUNTER.next_serial(),
+                        InputTime::now(),
+                    )
+                }
             }) {
                 reject(state, SEAT);
                 return;
@@ -494,6 +520,18 @@ pub(crate) fn source_destroyed(state: &mut JwmWaylandState, source: &ExtImageCap
 #[cfg(test)]
 mod coordinate_tests {
     use super::*;
+    #[test]
+    fn scroll_requires_explicit_grant_and_only_two_discrete_kinds_exist() {
+        for allow in [false, true] {
+            assert!(action_allowed(0, allow));
+            assert!(action_allowed(1, allow));
+            assert_eq!(action_allowed(2, allow), allow);
+            assert_eq!(action_allowed(3, allow), allow);
+            for kind in [4, 5, 120, u32::MAX] {
+                assert!(!action_allowed(kind, allow));
+            }
+        }
+    }
     #[test]
     fn region_membership_uses_half_open_bounds_and_ordered_subtraction() {
         let mut mapping = Mapping {

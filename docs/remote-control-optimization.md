@@ -40,9 +40,11 @@ It is not completion of the entire remote-control roadmap.
   reuse while X11 consumes a segment; input polling continues while completion
   and server-copy fences are pending. Frame ACK follows both conditions, never
   receipt alone. Geometry setup and initial resource allocation may still block.
-- Protocol v15 negotiates an explicit supported stream profile and sends initial
-  viewport before capture. v6/v7/v8/v9/v10/v11/v12/v13/v14/v15 peers must update together; there is no silent
-  downgrade. Tile video and cursor state carry a geometry epoch.
+- Current protocol v18 negotiates an explicit supported stream profile and sends
+  initial viewport before capture. Both peers must use v18; prior versions are
+  rejected without silent downgrade. Tile video and cursor state carry a
+  geometry epoch. Explicit source resize was introduced in v15; the subsequent
+  v16 keyboard, v17 pointer and v18 scroll capabilities are separately negotiated.
 - Independent bounded cursor shape/position records are negotiated when host
   XFixes and viewer XRender formats support them. Cursor movement avoids video
   readback/encoding and uses a cached ARGB overlay without per-motion GetImage.
@@ -71,7 +73,7 @@ It is not completion of the entire remote-control roadmap.
   in view-only mode. A scoped initial selection never implicitly grants root.
   Source changes release input and reset frame/cursor state; unsafe transitions
   fail closed. Extra grants are explicit on host/SSH CLI and cannot be saved in
-  profiles yet. Both peers require a coordinated v15 upgrade.
+  profiles yet. Both peers now require a coordinated v18 upgrade.
 - This source-switching work is covered by offline tests only in this checkout;
   no new live-X11, hardware timing, or benchmark result is claimed here.
 
@@ -186,7 +188,7 @@ this cloud workspace; live-X11 results remain pending until it runs.
 
 ## Compatibility note for Rust callers
 
-Wire v15 is intentionally incompatible with prior application protocol versions.
+Current wire v18 is intentionally incompatible with prior application protocol versions.
 The public `DecodedFrame` and synchronous `Viewer::draw` behavior remain usable.
 `HostOptions`, `ClientOptions` and `SshOptions` now require `frame_limits`;
 `StreamCapabilities` also adds that field. `FrameLimits::default()` retains the

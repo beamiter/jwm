@@ -382,14 +382,14 @@ gives each complete authenticated video record, including its final flush, one
 budget; a partial or timed-out record closes the whole session so its wire
 sequence can never be retried out of sync.
 
-The current application protocol is version 17. Versions 2 to 16 are
+The current application protocol is version 18. Versions 2 to 17 are
 deliberately incompatible, so update `jwm-remote` on both machines together;
 negotiation rejects an older peer before screen or input data is exchanged.
 Version 7 introduced initial viewport and explicit stream selectors. Version 8
 adds an independently negotiated cursor plane and a video geometry epoch;
 it does not silently reinterpret v7 video or cursor selector semantics.
 
-The v17 hello prefix is the existing 8-byte magic, big-endian `u16` version,
+The v18 hello prefix is the existing 8-byte magic, big-endian `u16` version,
 and capability flags. Both hellos append three one-byte selectors in order:
 codec `1` (JPEG tiles), cursor `1` (composited) or `2` (independent), input `1`
 (X11 keycodes). A viewer advertises independent cursor only after verifying local XRender
@@ -462,10 +462,10 @@ one zero dimension is invalid. The server hello is exactly 39 bytes. Unknown
 selectors, trailing bytes and incomplete keymaps are rejected. Input and
 clipboard permission flags remain independent of the stream profile.
 
-Compatibility: v17 viewer/v17 host works; v6/v7/v8/v9/v10/v11/v12/v13/v14/v15/v16 with v17 in either direction is
+Compatibility: v18 viewer/v18 host works; v6/v7/v8/v9/v10/v11/v12/v13/v14/v15/v16/v17 with v18 in either direction is
 rejected during negotiation. There is no automatic legacy-version fallback.
 Keep both binaries on the same release; this change does not alter transport
-crypto. Within v17, unsupported independent-cursor capability falls back to
+crypto. Within v18, unsupported independent-cursor capability falls back to
 composited video explicitly in HelloAck.
 
 Version 14 adds viewer-to-host `ClipboardRestrict` (kind 21) and host-to-viewer
@@ -1784,3 +1784,16 @@ format for untrusted third parties. A crash before atomic rename can leave a
 temporary filename format are ignored under the directory lock, not deleted.
 Other unexpected or unsafe entries fail closed. `profile init` explicitly creates
 missing directories privately and never changes existing directory permissions.
+
+### Explicit discrete Wayland scroll (v18)
+
+The stream profile is now 29 bytes. Byte 28 is a strict boolean scroll capability,
+independent of byte 27's pointer permission. It must be false unless pointer is
+also true. Both `host --allow-wayland-pointer --allow-wayland-scroll` and
+`connect --wayland-pointer --wayland-scroll` are required. A missing or unsolicited
+scroll grant terminates negotiation, with no fallback to older peers or a native
+v1 lease. Native manager v2 creates an explicitly scroll-enabled lease; the old
+lease request remains motion/click only. Action kinds 2 and 3 are one up/down
+notch respectively, keeping the 45-byte scoped action format. Each consumes a
+fresh presented frame; waiting/held-click wheel input is discarded, never queued.
+No horizontal/smooth scroll, drag, new input permission, or lease extension is added.

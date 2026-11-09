@@ -15,6 +15,13 @@ pub(super) enum HostCapture {
 }
 
 impl HostCapture {
+    pub(super) fn enable_scroll(&mut self) -> RemoteResult<()> {
+        #[cfg(feature = "remote-wayland")]
+        if let Self::Wayland(c) = self {
+            return c.enable_scroll();
+        }
+        Err(std::io::Error::other("native scroll unavailable").into())
+    }
     pub(super) fn enable_pointer(&mut self) -> RemoteResult<()> {
         #[cfg(feature = "remote-wayland")]
         if let Self::Wayland(c) = self {

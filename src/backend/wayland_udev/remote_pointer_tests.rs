@@ -25,7 +25,10 @@ fn events(client: &mut Client) -> Vec<Event> {
     events
 }
 fn bind_pointer(server: &mut Server, app: &mut App) -> (u32, u32) {
-    let seat = app.client.bind("wl_seat", 7);
+    bind_pointer_version(server, app, 7)
+}
+fn bind_pointer_version(server: &mut Server, app: &mut App, version: u32) -> (u32, u32) {
+    let seat = app.client.bind("wl_seat", version);
     let pointer = app.client.new_id();
     app.client.request(seat, 0, &[pointer]);
     let keyboard = app.client.new_id();
@@ -72,20 +75,27 @@ struct Fixture {
 }
 impl Fixture {
     fn new() -> Self {
+        Self::new_with_scroll(7, false)
+    }
+    fn new_with_scroll(version: u32, scroll: bool) -> Self {
         let mut server = Server::new();
         server.state.image_capture_pending =
             Some(init_image_copy_capture(&server.display.handle()));
         let mut app = App::new(&mut server);
-        let (seat, pointer) = bind_pointer(&mut server, &mut app);
+        let (seat, pointer) = bind_pointer_version(&mut server, &mut app, version);
         let mut capture = Capture::new(&mut server);
         let mut other = App::with_color(&mut server, [255, 0, 0, 255]);
         let (_, other_pointer) = bind_pointer(&mut server, &mut other);
         focus(&mut server, &app);
         events(&mut app.client);
         events(&mut other.client);
-        let manager = capture.client.bind("jwm_remote_pointer_manager_v1", 1);
+        let manager = capture.client.bind("jwm_remote_pointer_manager_v1", 2);
         let lease = capture.client.new_id();
-        capture.client.request(manager, 1, &[lease, capture.source]);
+        capture.client.request(
+            manager,
+            if scroll { 2 } else { 1 },
+            &[lease, capture.source],
+        );
         sync(&mut server);
         let grant = events(&mut capture.client)
             .into_iter()
@@ -547,3 +557,6 @@ fn wire_pointer_constraint_creation_and_destruction_cannot_restore_lease() {
     let ev = f.action(1, frame, 1, 10, 10);
     f.denied(&ev);
 }
+
+#[path = "remote_pointer_scroll_tests.rs"]
+mod scroll_tests;

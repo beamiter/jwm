@@ -28,7 +28,7 @@ use wayland_client::backend::WaylandError;
 use wayland_client::protocol::{
     wl_buffer, wl_callback, wl_output, wl_registry, wl_shm, wl_shm_pool,
 };
-use wayland_client::{Connection, Dispatch, EventQueue, QueueHandle, WEnum};
+use wayland_client::{Connection, Dispatch, EventQueue, Proxy, QueueHandle, WEnum};
 use wayland_protocols::ext::foreign_toplevel_list::v1::client::{
     ext_foreign_toplevel_handle_v1::{self as handle, ExtForeignToplevelHandleV1},
     ext_foreign_toplevel_list_v1::{self as list, ExtForeignToplevelListV1},
@@ -75,6 +75,7 @@ struct NativeKeyboard {
 
 #[derive(Default)]
 struct NativePointer {
+    scroll_enabled: bool,
     manager: Option<JwmRemotePointerManagerV1>,
     global: Option<u32>,
     enabled: bool,
@@ -314,6 +315,22 @@ impl WaylandCapture {
         self.state.pointer.enabled = true;
         Ok(())
     }
+    pub(super) fn enable_scroll(&mut self) -> RemoteResult<()> {
+        if self.state.frame_serial != 0
+            || !self.state.pointer.enabled
+            || self.state.pointer.requested
+            || self
+                .state
+                .pointer
+                .manager
+                .as_ref()
+                .is_none_or(|manager| manager.version() < 2)
+        {
+            return Err(invalid("native scroll requires explicit pointer v2 permission").into());
+        }
+        self.state.pointer.scroll_enabled = true;
+        Ok(())
+    }
     pub(super) fn pointer_revoked(&self) -> bool {
         self.state.pointer.revoked
             || self
@@ -356,11 +373,16 @@ impl WaylandCapture {
         self.state.pointer.requested = true;
         self.state.pointer.deadline =
             Some(Instant::now() + super::wayland_pointer_wire::LEASE_DURATION);
-        self.pointer_lease = Some(self.state.pointer.manager.as_ref().unwrap().create_lease(
-            self.source.as_ref().unwrap(),
-            &self.queue.handle(),
-            (),
-        ));
+        let manager = self.state.pointer.manager.as_ref().unwrap();
+        self.pointer_lease = Some(if self.state.pointer.scroll_enabled {
+            manager.create_lease_with_scroll(
+                self.source.as_ref().unwrap(),
+                &self.queue.handle(),
+                (),
+            )
+        } else {
+            manager.create_lease(self.source.as_ref().unwrap(), &self.queue.handle(), ())
+        });
         let deadline = Instant::now() + PROTOCOL_TIMEOUT;
         loop {
             self.state.check()?;
@@ -401,6 +423,7 @@ impl WaylandCapture {
             .pointer_frame()
             .ok_or_else(|| invalid("missing native pointer frame"))?;
         if self.pointer_revoked()
+            || (action.kind.is_scroll() && !self.state.pointer.scroll_enabled)
             || self.state.pointer.epoch != Some(epoch)
             || actual_serial != serial
             || at.elapsed() >= super::wayland_pointer_wire::FRAME_MAX_AGE
@@ -939,7 +962,7 @@ impl Dispatch<wl_registry::WlRegistry, ()> for State {
             } if version >= 1 => {
                 let bound = match interface.as_str() {
                     "jwm_remote_pointer_manager_v1" if state.pointer.manager.is_none() => {
-                        state.pointer.manager = Some(proxy.bind(name, 1, qh, ()));
+                        state.pointer.manager = Some(proxy.bind(name, version.min(2), qh, ()));
                         state.pointer.global = Some(name);
                         false
                     }

@@ -62,6 +62,7 @@ pub struct ClientOptions {
     pub viewer_wayland_display: Option<String>,
     pub wayland_keyboard: bool,
     pub wayland_pointer: bool,
+    pub wayland_scroll: bool,
     /// One explicit source-size operation; never replayed or saved in a profile.
     pub resize_source: Option<super::window_size::WindowSize>,
     pub follow_source_size: bool,
@@ -286,6 +287,7 @@ pub fn run_client_reconnecting(options: ClientOptions, attempts: u8) -> RemoteRe
         || options.resize_source.is_some()
         || options.wayland_keyboard
         || options.wayland_pointer
+        || options.wayland_scroll
         || options.viewer_backend == ViewerBackend::Wayland)
         && attempts != 0
     {
@@ -385,6 +387,9 @@ fn suppress_reconnect(result: RemoteResult<()>, suppress: bool) -> RemoteResult<
 }
 
 fn validate_viewer_backend(options: &ClientOptions) -> RemoteResult<()> {
+    if options.wayland_scroll && !options.wayland_pointer {
+        return Err(invalid_data("Wayland scroll requires explicit pointer mode").into());
+    }
     if options.follow_source_size
         && (options.viewer_backend != ViewerBackend::X11
             || !options.view_only
@@ -406,6 +411,7 @@ fn validate_viewer_backend(options: &ClientOptions) -> RemoteResult<()> {
             || !options.view_only
             || options.wayland_keyboard
             || options.wayland_pointer
+            || options.wayland_scroll
             || options.clipboard
             || options.resize_source.is_some()
             || options.grab_input
@@ -519,6 +525,7 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
         options.resize_source.is_some() || options.follow_source_size,
         options.wayland_keyboard,
         options.wayland_pointer,
+        options.wayland_scroll,
         stream,
         &key,
         request_input,
@@ -683,7 +690,9 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
     }
     if options.wayland_pointer {
         viewer.enable_wayland_pointer()?;
-        state.wayland_pointer.lock().unwrap().enabled = true;
+        let mut pointer = state.wayland_pointer.lock().unwrap();
+        pointer.enabled = true;
+        pointer.scroll_enabled = options.wayland_scroll;
     }
     viewer.set_clipboard_status(hello.clipboard_enabled);
     viewer.enable_clipboard_narrowing(hello.clipboard_enabled);
@@ -991,10 +1000,22 @@ fn finish_session(
     }
 }
 
+fn validate_scroll_negotiation(
+    pointer_requested: bool,
+    scroll_requested: bool,
+    scroll_granted: bool,
+) -> RemoteResult<()> {
+    if (scroll_requested && !pointer_requested) || scroll_granted != scroll_requested {
+        return Err(invalid_data("Wayland scroll permission was not mutually negotiated").into());
+    }
+    Ok(())
+}
+
 fn negotiate_session(
     request_window_resize: bool,
     request_wayland_keyboard: bool,
     request_wayland_pointer: bool,
+    request_wayland_scroll: bool,
     mut stream: TcpStream,
     key: &[u8],
     request_input: bool,
@@ -1042,6 +1063,7 @@ fn negotiate_session(
                 window_resize: request_window_resize,
                 wayland_keyboard: request_wayland_keyboard,
                 wayland_pointer: request_wayland_pointer,
+                wayland_scroll: request_wayland_scroll,
                 frame_limits,
                 clipboard_content: requested_policy.0,
                 clipboard_directions: requested_policy.1,
@@ -1068,6 +1090,11 @@ fn negotiate_session(
     writer.flush()?;
     let hello = read_server_hello(&mut reader)?;
     validate_server_frame_limits(&hello, frame_limits)?;
+    validate_scroll_negotiation(
+        request_wayland_pointer,
+        request_wayland_scroll,
+        hello.stream.wayland_scroll,
+    )?;
     if hello.stream.wayland_pointer != request_wayland_pointer
         || (request_wayland_pointer
             && (hello.stream.wayland_keyboard
@@ -1369,6 +1396,8 @@ fn viewer_loop(
                     pointer.sequence,
                 )?;
                 #[cfg(test)]
+                viewer.observe_scroll(pointer.scroll_observed)?;
+                #[cfg(test)]
                 viewer.observe_pointer_ready(if pointer.fresh(Instant::now()) {
                     pointer.ready.map(|scope| scope.frame_sequence)
                 } else {
@@ -1516,6 +1545,8 @@ fn viewer_loop(
                     pointer.left_down,
                     pointer.sequence,
                 )?;
+                #[cfg(test)]
+                viewer.observe_scroll(pointer.scroll_observed)?;
                 #[cfg(test)]
                 viewer.observe_pointer_ready(if pointer.fresh(Instant::now()) {
                     pointer.ready.map(|scope| scope.frame_sequence)
@@ -1736,6 +1767,8 @@ fn viewer_loop(
                         pointer.left_down,
                         pointer.sequence,
                     )?;
+                    #[cfg(test)]
+                    viewer.observe_scroll(pointer.scroll_observed)?;
                     #[cfg(test)]
                     viewer.observe_pointer_ready(if pointer.fresh(Instant::now()) {
                         pointer.ready.map(|scope| scope.frame_sequence)
@@ -2550,6 +2583,9 @@ fn average_millis(duration: Duration, count: u64) -> f64 {
 
 #[derive(Default)]
 struct ClientPointer {
+    scroll_enabled: bool,
+    #[cfg(test)]
+    scroll_observed: u64,
     enabled: bool,
     requested: Option<(super::wayland_pointer_wire::DrawnScope, Instant)>,
     presented: Option<(super::wayland_pointer_wire::DrawnScope, Instant)>,
@@ -2710,6 +2746,24 @@ impl ClientPointer {
         else {
             return Ok(None);
         };
+        // Track physical state even while no frame is authorized. It must not
+        // turn into permission, or disappear when a later Ready arrives.
+        if kind == E::LeftDown {
+            self.left_down = true;
+            self.click = None;
+        } else if kind == E::LeftUp {
+            self.left_down = false;
+        }
+        if matches!(kind, E::ScrollUp | E::ScrollDown) {
+            #[cfg(test)]
+            {
+                self.scroll_observed += 1;
+            }
+            if !self.scroll_enabled || self.left_down || self.click.is_some() {
+                self.click = None;
+                return Ok(None);
+            }
+        }
         let Some((scope, _)) = self.presented else {
             return Ok(None);
         };
@@ -2752,6 +2806,8 @@ impl ClientPointer {
                 return Ok(None);
             }
             E::Motion => A::Motion,
+            E::ScrollUp => A::ScrollUp,
+            E::ScrollDown => A::ScrollDown,
         };
         self.sequence = self
             .sequence
@@ -3482,6 +3538,137 @@ pub(super) mod tests {
         }
     }
     #[test]
+    fn scoped_scroll_requires_both_permissions_and_consumes_one_fresh_gate() {
+        use super::super::{
+            wayland_pointer_wire::PointerActionKind as A, x11_viewer::WaylandPointerEventKind as E,
+        };
+        let now = std::time::Instant::now();
+        let mut pointer = pointer_fixture(now);
+        assert!(
+            pointer
+                .event(&pointer_event(E::ScrollUp, 0), now)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(pointer.sequence, 0);
+        pointer.scroll_enabled = true;
+        let action = pointer
+            .event(&pointer_event(E::ScrollUp, 0), now)
+            .unwrap()
+            .unwrap();
+        assert_eq!(action.kind, A::ScrollUp);
+        for _ in 0..3 {
+            assert!(
+                pointer
+                    .event(&pointer_event(E::ScrollDown, 0), now)
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        assert_eq!(pointer.sequence, 1);
+        assert!(
+            pointer
+                .event(&pointer_event(E::LeftUp, 0), now)
+                .unwrap()
+                .is_none()
+        );
+    }
+    #[test]
+    fn scoped_scroll_during_left_hold_cancels_candidate_without_emitting() {
+        use super::super::x11_viewer::WaylandPointerEventKind as E;
+        let now = std::time::Instant::now();
+        let mut pointer = pointer_fixture(now);
+        pointer.scroll_enabled = true;
+        assert!(
+            pointer
+                .event(&pointer_event(E::LeftDown, 0), now)
+                .unwrap()
+                .is_none()
+        );
+        assert!(pointer.click.is_some());
+        assert!(
+            pointer
+                .event(&pointer_event(E::ScrollDown, 0), now)
+                .unwrap()
+                .is_none()
+        );
+        assert!(pointer.click.is_none());
+        assert!(
+            pointer
+                .event(&pointer_event(E::LeftUp, 0), now)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(pointer.sequence, 0);
+    }
+    #[test]
+    fn scoped_scroll_waiting_left_down_stays_held_across_ready() {
+        use super::super::{
+            wayland_pointer_wire::{PointerStatus, PointerStatusKind},
+            x11_viewer::WaylandPointerEventKind as E,
+        };
+        let now = std::time::Instant::now();
+        for no_presentation in [false, true] {
+            let mut pointer = pointer_fixture(now);
+            pointer.scroll_enabled = true;
+            let scope = pointer.presented.unwrap().0;
+            pointer
+                .receive(PointerStatus {
+                    lease_epoch: 7,
+                    scope,
+                    status: PointerStatusKind::Waiting,
+                })
+                .unwrap();
+            if no_presentation {
+                pointer.presented = None;
+            }
+            assert!(
+                pointer
+                    .event(&pointer_event(E::LeftDown, 0), now)
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(pointer.left_down);
+            assert!(pointer.click.is_none());
+            pointer.presented(scope, now);
+            pointer
+                .receive(PointerStatus {
+                    lease_epoch: 7,
+                    scope,
+                    status: PointerStatusKind::Ready,
+                })
+                .unwrap();
+            assert!(pointer.fresh(now));
+            assert!(
+                pointer
+                    .event(&pointer_event(E::ScrollUp, 0), now)
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(
+                pointer
+                    .event(&pointer_event(E::LeftUp, 0), now)
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(!pointer.left_down);
+            assert_eq!(pointer.sequence, 0);
+        }
+    }
+    #[test]
+    fn scroll_negotiation_rejects_unsolicited_missing_or_pointerless_grants() {
+        assert!(super::validate_scroll_negotiation(true, false, false).is_ok());
+        assert!(super::validate_scroll_negotiation(true, true, true).is_ok());
+        for (pointer, request, grant) in [
+            (true, false, true),
+            (true, true, false),
+            (false, true, true),
+            (false, true, false),
+        ] {
+            assert!(super::validate_scroll_negotiation(pointer, request, grant).is_err());
+        }
+    }
+    #[test]
     fn scoped_pointer_motion_consumes_exactly_one_presented_gate() {
         use super::super::x11_viewer::WaylandPointerEventKind as E;
         let now = std::time::Instant::now();
@@ -4084,6 +4271,7 @@ pub(super) mod tests {
             viewer_wayland_display: None,
             wayland_keyboard: false,
             wayland_pointer: false,
+            wayland_scroll: false,
             resize_source: None,
             follow_source_size: false,
             window_position: None,
@@ -6088,6 +6276,7 @@ pub(super) mod tests {
             false,
             false,
             false,
+            false,
             stream,
             &TEST_PSK,
             false,
@@ -6148,6 +6337,7 @@ pub(super) mod tests {
             false,
             false,
             false,
+            false,
             stream,
             &TEST_PSK,
             false,
@@ -6200,6 +6390,7 @@ pub(super) mod tests {
         });
         let stream = TcpStream::connect(address).unwrap();
         let result = negotiate_session(
+            false,
             false,
             false,
             false,
@@ -6258,6 +6449,7 @@ pub(super) mod tests {
         });
         let stream = TcpStream::connect(address).unwrap();
         let result = negotiate_session(
+            false,
             false,
             false,
             false,
@@ -6324,6 +6516,7 @@ pub(super) mod tests {
             });
             let stream = TcpStream::connect(address).unwrap();
             let result = negotiate_session(
+                false,
                 false,
                 false,
                 false,
@@ -6414,6 +6607,7 @@ pub(super) mod tests {
         let stream = TcpStream::connect(address).unwrap();
         let (mut reader, _writer, hello) = negotiate_session(
             true,
+            false,
             false,
             false,
             stream,
@@ -6661,6 +6855,7 @@ mod native_viewer_permission_tests {
             viewer_wayland_display: None,
             wayland_keyboard: false,
             wayland_pointer: false,
+            wayland_scroll: false,
             resize_source: None,
             follow_source_size: false,
             window_position: None,

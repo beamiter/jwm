@@ -104,6 +104,13 @@ impl PointerStatus {
 pub enum PointerActionKind {
     Motion = 0,
     ClickLeft = 1,
+    ScrollUp = 2,
+    ScrollDown = 3,
+}
+impl PointerActionKind {
+    pub(super) fn is_scroll(self) -> bool {
+        matches!(self, Self::ScrollUp | Self::ScrollDown)
+    }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PointerAction {
@@ -138,6 +145,8 @@ impl PointerAction {
         let kind = match b[40] {
             0 => PointerActionKind::Motion,
             1 => PointerActionKind::ClickLeft,
+            2 => PointerActionKind::ScrollUp,
+            3 => PointerActionKind::ScrollDown,
             _ => return Err(invalid().into()),
         };
         Ok(Self {
@@ -193,7 +202,17 @@ mod tests {
         for n in 0..b.len() {
             assert!(PointerAction::decode(&b[..n]).is_err());
         }
-        b[40] = 2;
+        for (byte, kind) in [
+            (2, PointerActionKind::ScrollUp),
+            (3, PointerActionKind::ScrollDown),
+        ] {
+            b[40] = byte;
+            let parsed = PointerAction::decode(&b).unwrap();
+            assert_eq!(parsed.kind, kind);
+            assert!(parsed.kind.is_scroll());
+            assert_eq!(parsed.encode().unwrap(), b);
+        }
+        b[40] = 4;
         assert!(PointerAction::decode(&b).is_err());
         b[40] = 1;
         b[8..16].fill(0);

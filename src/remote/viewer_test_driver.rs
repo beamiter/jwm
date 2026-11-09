@@ -230,7 +230,13 @@ impl ViewerTestDriver {
     }
     /// Read the real X drawable, not the decoded frame or an acknowledgement.
     pub(super) fn wait_red(&self, window: Window) -> RemoteResult<()> {
-        self.until("red framebuffer", || {
+        self.wait_color(window, [true, false, false])
+    }
+    pub(super) fn wait_green(&self, window: Window) -> RemoteResult<()> {
+        self.wait_color(window, [false, true, false])
+    }
+    fn wait_color(&self, window: Window, high: [bool; 3]) -> RemoteResult<()> {
+        self.until("expected actual framebuffer color", || {
             let geometry = self.conn.get_geometry(window)?.reply()?;
             let image = self
                 .conn
@@ -277,10 +283,8 @@ impl ViewerTestDriver {
                 }
             };
             *self.last_observed.borrow_mut() = format!("window={window:#x}, size={}x{}, depth={}, bpp={}, pixel={pixel:#010x}, masks=({:#x},{:#x},{:#x}), rgb=({},{},{})", geometry.width, geometry.height, image.depth, format.bits_per_pixel, visual.red_mask, visual.green_mask, visual.blue_mask, channel(visual.red_mask), channel(visual.green_mask), channel(visual.blue_mask));
-            Ok((channel(visual.red_mask) >= 220
-                && channel(visual.green_mask) <= 30
-                && channel(visual.blue_mask) <= 30)
-                .then_some(()))
+            let rgb = [channel(visual.red_mask), channel(visual.green_mask), channel(visual.blue_mask)];
+            Ok(rgb.into_iter().zip(high).all(|(value, high)| if high { value >= 220 } else { value <= 30 }).then_some(()))
         })
     }
     pub(super) fn motion(&self, window: Window, x: i16, y: i16) -> RemoteResult<()> {
@@ -379,6 +383,59 @@ impl ViewerTestDriver {
             )?
             .check()?;
         Ok(())
+    }
+    /// Balanced wheel edges only on the explicitly owned Xvfb connection.
+    pub(super) fn wheel_notches(&self, up: bool, count: u8) -> RemoteResult<()> {
+        if !(1..=8).contains(&count) {
+            return Err("owned wheel batch must contain 1..8 notches".into());
+        }
+        let mut cookies = Vec::new();
+        for _ in 0..count {
+            for pressed in [true, false] {
+                cookies.push(self.conn.xtest_fake_input(
+                    if pressed {
+                        xproto::BUTTON_PRESS_EVENT
+                    } else {
+                        xproto::BUTTON_RELEASE_EVENT
+                    },
+                    if up { 4 } else { 5 },
+                    CURRENT_TIME,
+                    self.root,
+                    0,
+                    0,
+                    0,
+                )?);
+            }
+        }
+        self.conn.flush()?;
+        for cookie in cookies {
+            cookie.check()?;
+        }
+        Ok(())
+    }
+    pub(super) fn wait_scroll_observed(&self, window: Window, minimum: u64) -> RemoteResult<u64> {
+        let atom = self
+            .conn
+            .intern_atom(false, b"_JWM_TEST_SCROLL_OBSERVED")?
+            .reply()?
+            .atom;
+        self.until("viewer processed wheel notches", || {
+            let reply = self
+                .conn
+                .get_property(false, window, atom, AtomEnum::CARDINAL, 0, 2)?
+                .reply()?;
+            if reply.type_ == u32::from(AtomEnum::NONE) {
+                return Ok(None);
+            }
+            if reply.format != 32 || reply.value.len() != 8 || reply.bytes_after != 0 {
+                return Err("invalid scroll observation".into());
+            }
+            let words: Vec<_> = reply.value32().ok_or("missing scroll words")?.collect();
+            let count = u64::from(words[0]) | (u64::from(words[1]) << 32);
+            *self.last_observed.borrow_mut() =
+                format!("scroll observed={count}, minimum={minimum}");
+            Ok((count >= minimum).then_some(count))
+        })
     }
     pub(super) fn click_at_current(&self) -> RemoteResult<()> {
         self.button_down()?;

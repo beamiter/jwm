@@ -27,6 +27,7 @@ enum Case {
     StaticTwice,
     Viewport,
     Disconnect,
+    UnnegotiatedScroll,
 }
 struct ShutdownGuard(Arc<AtomicBool>);
 impl Drop for ShutdownGuard {
@@ -57,6 +58,7 @@ fn options() -> HostOptions {
         allow_window_resize: false,
         allow_wayland_keyboard: false,
         allow_wayland_pointer: true,
+        allow_wayland_scroll: false,
         allow_clipboard: false,
         clipboard_mode: Default::default(),
         clipboard_direction: Default::default(),
@@ -195,6 +197,10 @@ fn peer(address: std::net::SocketAddr, case: Case, trace: &Trace) -> RemoteResul
     assert_eq!(kind, MessageKind::HelloAck);
     let hello = ServerHello::decode(&payload)?;
     assert!(hello.stream.wayland_pointer);
+    assert!(
+        !hello.stream.wayland_scroll,
+        "this peer negotiates pointer only"
+    );
     assert!(!hello.pointer_enabled && !hello.keyboard_enabled);
     let mut decoder = TileDecoder::with_frame_limits(hello.stream.frame_limits)?;
     let mut first: Option<DrawnScope> = None;
@@ -208,13 +214,15 @@ fn peer(address: std::net::SocketAddr, case: Case, trace: &Trace) -> RemoteResul
         let (kind, payload) = match record {
             Ok(record) => record,
             Err(ProtocolError::Io(error))
-                if matches!(case, Case::BadAck | Case::StaleScope | Case::Viewport)
-                    && matches!(
-                        error.kind(),
-                        io::ErrorKind::UnexpectedEof
-                            | io::ErrorKind::ConnectionReset
-                            | io::ErrorKind::ConnectionAborted
-                    ) =>
+                if matches!(
+                    case,
+                    Case::BadAck | Case::StaleScope | Case::Viewport | Case::UnnegotiatedScroll
+                ) && matches!(
+                    error.kind(),
+                    io::ErrorKind::UnexpectedEof
+                        | io::ErrorKind::ConnectionReset
+                        | io::ErrorKind::ConnectionAborted
+                ) =>
             {
                 assert!(
                     negative_sent,
@@ -303,14 +311,27 @@ fn peer(address: std::net::SocketAddr, case: Case, trace: &Trace) -> RemoteResul
                             lease_epoch: status.lease_epoch,
                             sequence: actions,
                             scope,
-                            kind: PointerActionKind::ClickLeft,
+                            kind: if actions == 2 && matches!(case, Case::UnnegotiatedScroll) {
+                                // A successful click and a second actual Ready
+                                // establish the live lease, next sequence, fresh
+                                // drawn scope and valid target coordinates. Only
+                                // this independent capability is unauthorized.
+                                assert_eq!(scope, status.scope);
+                                assert_eq!(Some(scope), expected_scope);
+                                assert!(scope.frame_sequence > first.unwrap().frame_sequence);
+                                PointerActionKind::ScrollUp
+                            } else {
+                                PointerActionKind::ClickLeft
+                            },
                             x: 12,
                             y: 14,
                         };
                         writer
                             .write_message(MessageKind::WaylandPointerAction, &action.encode()?)?;
                         writer.flush()?;
-                        if actions == 2 && matches!(case, Case::StaleScope) {
+                        if actions == 2
+                            && matches!(case, Case::StaleScope | Case::UnnegotiatedScroll)
+                        {
                             negative_sent = true;
                         }
                         note(trace, format!("action={actions} scope={scope:?}"));
@@ -318,7 +339,13 @@ fn peer(address: std::net::SocketAddr, case: Case, trace: &Trace) -> RemoteResul
                     PointerStatusKind::Waiting => {}
                     PointerStatusKind::Revoked | PointerStatusKind::Denied => {
                         assert!(
-                            matches!(case, Case::BadAck | Case::StaleScope | Case::Viewport),
+                            matches!(
+                                case,
+                                Case::BadAck
+                                    | Case::StaleScope
+                                    | Case::Viewport
+                                    | Case::UnnegotiatedScroll
+                            ),
                             "unexpected denial {status:?}"
                         );
                         assert!(
@@ -331,7 +358,10 @@ fn peer(address: std::net::SocketAddr, case: Case, trace: &Trace) -> RemoteResul
             }
             MessageKind::SessionClose | MessageKind::Close => {
                 assert!(
-                    matches!(case, Case::BadAck | Case::StaleScope | Case::Viewport),
+                    matches!(
+                        case,
+                        Case::BadAck | Case::StaleScope | Case::Viewport | Case::UnnegotiatedScroll
+                    ),
                     "unexpected close"
                 );
                 assert!(
@@ -364,6 +394,7 @@ fn actual_tcp_pointer_host_requires_new_drawn_frame_for_every_action() {
         Case::StaleScope,
         Case::Viewport,
         Case::Disconnect,
+        Case::UnnegotiatedScroll,
     ] {
         let mut server = Server::new();
         server.state.image_capture_pending =
@@ -521,6 +552,11 @@ fn actual_tcp_pointer_host_requires_new_drawn_frame_for_every_action() {
             buttons,
             [(0x110, 1), (0x110, 0)].repeat(clicks),
             "case={case:?} {trace:?}"
+        );
+        assert!(
+            ev.iter()
+                .all(|(op, _)| !matches!(*op, 4 | 6 | 7 | 8 | 9 | 10)),
+            "pointer-only session delivered native axis metadata/events: case={case:?} {ev:?}"
         );
         for (_, args) in ev.iter().filter(|(op, _)| *op == 2) {
             assert_eq!((args[1], args[2]), (12 * 256, 14 * 256));

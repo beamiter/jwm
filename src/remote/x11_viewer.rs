@@ -94,6 +94,8 @@ pub enum ViewerEvent {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WaylandPointerEventKind {
+    ScrollUp,
+    ScrollDown,
     Motion,
     LeftDown,
     LeftUp,
@@ -1328,6 +1330,24 @@ impl Viewer {
     }
     /// Test observation only: never read by the authorization or ACK path.
     #[cfg(test)]
+    pub(super) fn observe_scroll(&self, count: u64) -> RemoteResult<()> {
+        let atom = self
+            .conn
+            .intern_atom(false, b"_JWM_TEST_SCROLL_OBSERVED")?
+            .reply()?
+            .atom;
+        self.conn
+            .change_property32(
+                PropMode::REPLACE,
+                self.window,
+                atom,
+                AtomEnum::CARDINAL,
+                &[count as u32, (count >> 32) as u32],
+            )?
+            .check()?;
+        Ok(())
+    }
+    #[cfg(test)]
     pub(super) fn observe_pointer_ready(&self, sequence: Option<u64>) -> RemoteResult<()> {
         let atom = intern_atom(&self.conn, b"_JWM_TEST_POINTER_READY")?;
         if let Some(sequence) = sequence {
@@ -1378,7 +1398,9 @@ impl Viewer {
     }
     fn scoped_pointer_event(&self, x: i16, y: i16, kind: WaylandPointerEventKind) -> ViewerEvent {
         let cancelled = match kind {
-            WaylandPointerEventKind::Motion => ViewerEvent::WaylandPointerCancel,
+            WaylandPointerEventKind::Motion
+            | WaylandPointerEventKind::ScrollUp
+            | WaylandPointerEventKind::ScrollDown => ViewerEvent::WaylandPointerCancel,
             WaylandPointerEventKind::LeftDown => {
                 ViewerEvent::WaylandPointerButtonCancel { pressed: true }
             }
@@ -1544,6 +1566,16 @@ impl Viewer {
                             event.event_x,
                             event.event_y,
                             WaylandPointerEventKind::LeftDown,
+                        )
+                    } else if event.detail == 4 || event.detail == 5 {
+                        self.scoped_pointer_event(
+                            event.event_x,
+                            event.event_y,
+                            if event.detail == 4 {
+                                WaylandPointerEventKind::ScrollUp
+                            } else {
+                                WaylandPointerEventKind::ScrollDown
+                            },
                         )
                     } else {
                         ViewerEvent::WaylandPointerCancel

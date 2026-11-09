@@ -1,15 +1,16 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <protocol name="jwm_remote_pointer_v1">
 <copyright>Copyright 2026 JWM contributors. MIT license.</copyright>
-<interface name="jwm_remote_pointer_manager_v1" version="1">
+<interface name="jwm_remote_pointer_manager_v1" version="2">
 <description summary="trusted local scoped pointer">Private opt-in, not a portal or unrestricted virtual pointer. The existing pointer and keyboard focus must both be the exact native selected surface.</description>
 <request name="destroy" type="destructor"/>
 <request name="create_lease"><arg name="id" type="new_id" interface="jwm_remote_pointer_lease_v1"/><arg name="source" type="object" interface="ext_image_capture_source_v1"/></request>
+<request name="create_lease_with_scroll" since="2"><description summary="explicitly authorize discrete vertical wheel">Like create_lease, but explicitly grants one-notch vertical scroll actions in addition to motion and click. Binding version two alone never grants scroll. The original create_lease always excludes scroll.</description><arg name="id" type="new_id" interface="jwm_remote_pointer_lease_v1"/><arg name="source" type="object" interface="ext_image_capture_source_v1"/></request>
 </interface>
-<interface name="jwm_remote_pointer_lease_v1" version="1">
-<description summary="single attempt, nonrenewable 30 second lease">Every action consumes a newly ready same-source frame, no older than one second and rendered after the prior action. A trusted host must verify the authenticated viewer drew that frame. Only absolute motion and atomic left click are supported. No enter, drag, wheel, independent down/up, global seat mutation or privileged grab serial is produced.</description>
+<interface name="jwm_remote_pointer_lease_v1" version="2">
+<description summary="single attempt, nonrenewable 30 second lease">Every action consumes a newly ready same-source frame, no older than one second and rendered after the prior action. A trusted host must verify the authenticated viewer drew that frame. Absolute motion and atomic left click are supported. Only leases explicitly created with create_lease_with_scroll also permit one-notch vertical wheel actions. No enter, drag, horizontal or continuous scroll, independent down/up, global seat mutation or privileged grab serial is produced.</description>
 <request name="destroy" type="destructor"/>
-<request name="action"><arg name="epoch" type="uint"/><arg name="sequence" type="uint"/><arg name="frame" type="object" interface="ext_image_copy_capture_frame_v1"/><arg name="kind" type="uint" summary="0 motion, 1 atomic left click"/><arg name="x" type="uint"/><arg name="y" type="uint"/></request>
+<request name="action"><arg name="epoch" type="uint"/><arg name="sequence" type="uint"/><arg name="frame" type="object" interface="ext_image_copy_capture_frame_v1"/><arg name="kind" type="uint" summary="0 motion, 1 atomic left click, 2 wheel up, 3 wheel down; wheel requires explicit v2 grant"/><arg name="x" type="uint"/><arg name="y" type="uint"/></request>
 <event name="granted"><arg name="epoch" type="uint"/><arg name="ttl_ms" type="uint"/></event>
 <event name="accepted"><arg name="epoch" type="uint"/><arg name="sequence" type="uint"/></event>
 <event name="revoked"><arg name="reason" type="uint"/></event>
