@@ -5,7 +5,7 @@ use x11rb::CURRENT_TIME;
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::{
     self, AtomEnum, ClientMessageEvent, ConfigureWindowAux, ConnectionExt as _, EventMask,
-    ImageFormat, InputFocus, Window,
+    ImageFormat, InputFocus, MapState, Window,
 };
 use x11rb::protocol::xtest::ConnectionExt as _;
 use x11rb::rust_connection::RustConnection;
@@ -385,6 +385,17 @@ impl ViewerTestDriver {
         self.button_up()
     }
     pub(super) fn focus(&self, window: Window) -> RemoteResult<()> {
+        // Discovery observes WM_NAME before viewer initialization necessarily
+        // reaches MapWindow (for example while XKB is still initializing).
+        // Focus only the exact discovered owned window after the X server
+        // confirms it and its ancestors are Viewable. Never rediscover another
+        // target, swallow BadWindow, or retry a failed SetInputFocus request.
+        self.until("exact owned window Viewable before focus", || {
+            let attrs = self.conn.get_window_attributes(window)?.reply()?;
+            *self.last_observed.borrow_mut() =
+                format!("window={window:#x}, map_state={:?}", attrs.map_state);
+            Ok((attrs.map_state == MapState::VIEWABLE).then_some(()))
+        })?;
         let pointer = self.conn.query_pointer(self.root)?.reply()?;
         let focus = self.conn.get_input_focus()?.reply()?;
         eprintln!(
