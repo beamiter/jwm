@@ -3,7 +3,7 @@
 
 Supply prebuilt binaries. No builds, dependency installs, user display or user
 IPC are used. Host uses real JWM x11rb plus xcompmgr and a private generated
-configuration with appearance.border_px=0. This explicit initial-backend test
+configuration with appearance.border_px=0 and animations disabled. This explicit initial-backend test
 restriction is NOT proof of default/decorated window support. --self-test opens
 no sockets and starts no processes. Actual E2E belongs in permitted CI only.
 """
@@ -223,7 +223,7 @@ def run(args):
     work = Path(tempfile.mkdtemp(prefix="jwm-window-resize-e2e-"))
     work.chmod(0o700)
     children, connections = FIXTURE.Children(), []
-    report = dict(status="failed", directory=str(work), checks=[], backend="x11rb", test_config_border_px=0,
+    report = dict(status="failed", directory=str(work), checks=[], backend="x11rb", test_config_border_px=0, test_config_animations=False,
                   limitations=["borderless 24-bit floating clients only", "not default-config acceptance"])
     try:
         env = private_environment(work)
@@ -236,7 +236,12 @@ def run(args):
         for config in configs:
             text = config.read_text()
             for section, key, literal, required in (
-                ("appearance", "border_px", "0", True), ("status_bar", "show_bar", "false", True),
+                ("appearance", "border_px", "0", True),
+                # Native resize refuses intermediate geometry by design. This
+                # fixture tests authorization, not WM appearance animations.
+                ("animation", "enabled", "false", True),
+                ("behavior", "window_animation", "false", True),
+                ("status_bar", "show_bar", "false", True),
                 ("status_bar", "name", '"/bin/true"', True), ("desktop_shell", "enabled", "false", False),
                 ("behavior", "compositor", "false", True), ("behavior", "wallpaper_effect", '"off"', False)):
                 text = FIXTURE.edit_setting(text, section, key, literal, required)
@@ -268,7 +273,26 @@ def run(args):
                 grant = client.command("remote_resize_grant", dict(window=target, challenge=list(challenge)))
                 client.command("remote_resize_revoke", dict(grant=grant["grant"]))
                 return grant
-        wait(managed, "managed floating target")
+        # A single matching sample can occur inside an opening animation.
+        # Require successful grant/revoke AND unchanged geometry for both
+        # clients throughout a settling interval, with every probe rechecking
+        # the production native-vs-model geometry guard. Never relax that guard.
+        settled = {"geometry": None, "since": None}
+        def managed_and_settled():
+            try:
+                grant = managed()
+                current = (host_x.geometry(target), host_x.geometry(other))
+                require(size(current[0]) == (grant["width"], grant["height"]),
+                        "native geometry changed after readiness probe")
+            except (OSError, ValueError, RuntimeError):
+                settled.update(geometry=None, since=None)
+                raise
+            now = time.monotonic()
+            if current != settled["geometry"]:
+                settled.update(geometry=current, since=now)
+                return False
+            return now - settled["since"] >= 0.3
+        wait(managed_and_settled, "managed floating clients settled")
         geometry = host_x.geometry(target)
         require(geometry["border"] == 0 and geometry["depth"] == 24, "unsupported fixture border/depth")
         foreign = secrets.token_bytes(32)
