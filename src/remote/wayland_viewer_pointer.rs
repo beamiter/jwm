@@ -55,7 +55,26 @@ fn map_point(map: Mapping, x: f64, y: f64) -> Option<(u16, u16, i16, i16)> {
     ))
 }
 #[derive(Default)]
+struct ScrollFrame {
+    active: bool,
+    source: Option<wl_pointer::AxisSource>,
+    axis: Option<f64>,
+    discrete: Option<i32>,
+    mapping: Option<Mapping>,
+    confirmed: Option<u64>,
+    ready: Option<u64>,
+}
+#[derive(Default)]
 pub(super) struct Pointer {
+    pub(super) scroll_enabled: bool,
+    ready: Option<u64>,
+    frame_axis: bool,
+    #[cfg(test)]
+    pub(super) scroll_frames_observed: u64,
+    scroll: ScrollFrame,
+    frame_count: usize,
+    frame_button: bool,
+    discard_frame: bool,
     pub(super) fence: u64,
     pub(super) fence_done: u64,
     pub(super) requested: bool,
@@ -86,10 +105,41 @@ impl Pointer {
         self.revoked.get_or_insert(reason);
         self.mapping = None;
         self.confirmed = None;
+        self.ready = None;
         self.observed_down = None;
         self.frame_events.clear();
         self.completed.clear();
         self.frame_started = None;
+        self.scroll = ScrollFrame::default();
+        self.frame_count = 0;
+        self.frame_axis = false;
+        self.frame_button = false;
+        self.discard_frame = false;
+    }
+    pub(super) fn ready(&self) -> Option<u64> {
+        self.ready
+    }
+    pub(super) fn mapping(&self) -> Option<Mapping> {
+        self.mapping
+    }
+    pub(super) fn set_ready(&mut self, ready: Option<u64>) {
+        if self.ready == ready {
+            return;
+        }
+        if self.frame_started.is_some() {
+            self.discard_frame = true;
+            self.scroll = ScrollFrame::default();
+        }
+        self.completed.retain(|event| {
+            !matches!(
+                event,
+                ViewerEvent::WaylandPointer {
+                    kind: Kind::ScrollUp | Kind::ScrollDown,
+                    ..
+                }
+            )
+        });
+        self.ready = ready;
     }
     pub(super) fn locally_ready(&self) -> bool {
         self.requested
@@ -132,11 +182,17 @@ impl Pointer {
     pub(super) fn invalidate_mapping(&mut self) {
         self.mapping = None;
         self.confirmed = None;
+        self.ready = None;
         self.observed_down = None;
         // Cancel any old-frame local candidate without inventing a release.
         self.frame_events.clear();
         self.completed.clear();
-        self.frame_started = None;
+        // Preserve the open group boundary and deadline: later axis fragments
+        // must never attach to a new frame's mapping or fresh Ready ticket.
+        if self.frame_started.is_some() {
+            self.discard_frame = true;
+        }
+        self.scroll = ScrollFrame::default();
         if self.requested && self.revoked.is_none() {
             self.completed
                 .push(ViewerEvent::WaylandPointerButtonCancel {
@@ -146,8 +202,14 @@ impl Pointer {
     }
     pub(super) fn presented(&mut self, mapping: Mapping) {
         if self.requested && self.revoked.is_none() {
+            if self.frame_started.is_some() {
+                self.discard_frame = true;
+                self.frame_events.clear();
+                self.scroll = ScrollFrame::default();
+            }
             self.mapping = Some(mapping);
             self.confirmed = None;
+            self.ready = None;
         }
     }
     pub(super) fn confirm(&mut self, sequence: u64) {
@@ -207,14 +269,22 @@ impl Pointer {
         if self.revoked.is_some() {
             return;
         }
-        if self.frame_events.len() + self.completed.len() >= MAX_EVENTS {
+        if self.frame_count + self.completed.len() >= MAX_EVENTS {
             self.revoke("Wayland pointer queue overflow");
             return;
         }
         self.frame_started.get_or_insert_with(Instant::now);
-        self.frame_events.push(event);
+        self.frame_count += 1;
+        if !self.discard_frame {
+            self.frame_events.push(event);
+        }
     }
     fn button(&mut self, pressed: bool) {
+        self.frame_button = true;
+        if self.scroll.active {
+            self.revoke("Wayland scroll cannot share a button frame");
+            return;
+        }
         if pressed {
             if self.left_down {
                 self.observed_down = None;
@@ -241,6 +311,135 @@ impl Pointer {
                 ViewerEvent::WaylandPointerButtonCancel { pressed: false }
             });
         }
+    }
+    fn begin_axis(&mut self) -> bool {
+        if !self.scroll_enabled || self.left_down || self.frame_button {
+            self.revoke("Wayland scroll lacks permission or conflicts with held button");
+            return false;
+        }
+        if self.frame_count + self.completed.len() >= MAX_EVENTS {
+            self.revoke("Wayland pointer axis queue overflow");
+            return false;
+        }
+        self.frame_count += 1;
+        self.frame_axis = true;
+        self.frame_started.get_or_insert_with(Instant::now);
+        if self.discard_frame {
+            return false;
+        }
+        if !self.scroll.active {
+            self.scroll.active = true;
+            self.scroll.mapping = self.mapping;
+            self.scroll.confirmed = self.confirmed;
+            self.scroll.ready = self.ready;
+        }
+        true
+    }
+    fn axis_source(&mut self, source: WEnum<wl_pointer::AxisSource>) {
+        if source != WEnum::Value(wl_pointer::AxisSource::Wheel) {
+            self.revoke("Wayland scroll requires discrete wheel source");
+            return;
+        }
+        if !self.begin_axis() {
+            return;
+        }
+        if self
+            .scroll
+            .source
+            .replace(wl_pointer::AxisSource::Wheel)
+            .is_some()
+        {
+            self.revoke("duplicate Wayland wheel source");
+        }
+    }
+    fn axis_value(&mut self, axis: WEnum<wl_pointer::Axis>, value: f64) {
+        if axis != WEnum::Value(wl_pointer::Axis::VerticalScroll)
+            || !value.is_finite()
+            || value == 0.0
+        {
+            self.revoke("invalid or horizontal Wayland wheel axis");
+            return;
+        }
+        if !self.begin_axis() {
+            return;
+        }
+        if self.scroll.axis.replace(value).is_some() {
+            self.revoke("duplicate Wayland wheel axis");
+        }
+    }
+    fn axis_discrete(&mut self, axis: WEnum<wl_pointer::Axis>, discrete: i32) {
+        if axis != WEnum::Value(wl_pointer::Axis::VerticalScroll) || !matches!(discrete, -1 | 1) {
+            self.revoke("Wayland wheel must contain exactly one vertical notch");
+            return;
+        }
+        if !self.begin_axis() {
+            return;
+        }
+        if self.scroll.discrete.replace(discrete).is_some() {
+            self.revoke("duplicate Wayland wheel notch");
+        }
+    }
+    fn finish_frame(&mut self) {
+        self.check();
+        if self.revoked.is_some() {
+            return;
+        }
+        #[cfg(test)]
+        if self.frame_axis {
+            self.scroll_frames_observed += 1;
+        }
+        if self.discard_frame {
+            self.frame_events.clear();
+            if self.completed.len() >= MAX_EVENTS {
+                self.revoke("Wayland pointer queue overflow");
+                return;
+            }
+            self.completed
+                .push(ViewerEvent::WaylandPointerButtonCancel {
+                    pressed: self.left_down,
+                });
+        } else if self.scroll.active {
+            let scroll = std::mem::take(&mut self.scroll);
+            let valid = scroll.source == Some(wl_pointer::AxisSource::Wheel)
+                && matches!((scroll.axis, scroll.discrete), (Some(axis),Some(notch)) if axis.is_sign_positive() == (notch > 0));
+            if !valid || self.frame_button || self.left_down {
+                self.revoke("incomplete or inconsistent Wayland wheel frame");
+                return;
+            }
+            // Motion belongs to this same logical input frame. It must not
+            // consume the sole Ready gate before its wheel action does.
+            self.frame_events.clear();
+            let event = if scroll.mapping == self.mapping
+                && scroll.confirmed == self.confirmed
+                && scroll.ready.is_some()
+                && scroll.ready == self.ready
+                && self
+                    .mapping
+                    .is_some_and(|map| scroll.ready == Some(map.sequence))
+                && self.locally_ready()
+            {
+                self.scoped(if scroll.discrete == Some(-1) {
+                    Kind::ScrollUp
+                } else {
+                    Kind::ScrollDown
+                })
+            } else {
+                ViewerEvent::WaylandPointerCancel
+            };
+            if self.completed.len() >= MAX_EVENTS {
+                self.revoke("Wayland pointer queue overflow");
+                return;
+            }
+            self.completed.push(event);
+        } else {
+            self.completed.append(&mut self.frame_events);
+        }
+        self.scroll = ScrollFrame::default();
+        self.frame_count = 0;
+        self.frame_axis = false;
+        self.frame_button = false;
+        self.discard_frame = false;
+        self.frame_started = None;
     }
     pub(super) fn take_events(&mut self) -> Vec<ViewerEvent> {
         self.check();
@@ -362,10 +561,12 @@ impl Dispatch<wl_pointer::WlPointer, ()> for State {
                 state: WEnum::Value(wl_pointer::ButtonState::Released),
                 ..
             } => pointer.button(false),
-            wl_pointer::Event::Frame => {
-                pointer.frame_started = None;
-                pointer.completed.append(&mut pointer.frame_events);
+            wl_pointer::Event::Axis { axis, value, .. } => pointer.axis_value(axis, value),
+            wl_pointer::Event::AxisSource { axis_source } => pointer.axis_source(axis_source),
+            wl_pointer::Event::AxisDiscrete { axis, discrete } => {
+                pointer.axis_discrete(axis, discrete)
             }
+            wl_pointer::Event::Frame => pointer.finish_frame(),
             _ => pointer.revoke("unsupported Wayland pointer button or axis"),
         }
     }
@@ -396,6 +597,179 @@ mod tests {
         pointer.presented(mapping());
         pointer.confirm(1);
         pointer
+    }
+    fn scroll_pointer() -> Pointer {
+        let mut p = pointer();
+        p.scroll_enabled = true;
+        p.set_ready(Some(1));
+        p
+    }
+    fn wheel(p: &mut Pointer, notch: i32) {
+        p.axis_value(
+            WEnum::Value(wl_pointer::Axis::VerticalScroll),
+            f64::from(notch) * 10.0,
+        );
+        p.axis_discrete(WEnum::Value(wl_pointer::Axis::VerticalScroll), notch);
+        p.axis_source(WEnum::Value(wl_pointer::AxisSource::Wheel));
+    }
+    #[test]
+    fn scroll_late_source_and_motion_emit_one_action_only_at_frame() {
+        for notch in [-1, 1] {
+            let mut p = scroll_pointer();
+            p.queue(p.scoped(Kind::Motion));
+            wheel(&mut p, notch);
+            p.position = Some((60.0, 40.0));
+            p.queue(p.scoped(Kind::Motion));
+            assert!(p.take_events().is_empty());
+            p.finish_frame();
+            let events = p.take_events();
+            assert_eq!(events.len(), 1);
+            assert!(
+                matches!(events[0],ViewerEvent::WaylandPointer { kind,local_x:60,.. } if kind == if notch<0 {Kind::ScrollUp} else {Kind::ScrollDown})
+            );
+        }
+    }
+    #[test]
+    fn scroll_strict_permission_shape_direction_and_button_fail_closed() {
+        for case in 0..16 {
+            let mut p = scroll_pointer();
+            match case {
+                0 => {
+                    p.scroll_enabled = false;
+                    wheel(&mut p, 1);
+                }
+                1 => {
+                    p.axis_source(WEnum::Value(wl_pointer::AxisSource::Finger));
+                }
+                2 => {
+                    p.axis_value(WEnum::Value(wl_pointer::Axis::HorizontalScroll), 10.0);
+                }
+                3 => {
+                    p.axis_discrete(WEnum::Value(wl_pointer::Axis::VerticalScroll), 2);
+                }
+                4 => {
+                    p.axis_value(WEnum::Value(wl_pointer::Axis::VerticalScroll), f64::NAN);
+                }
+                5 => {
+                    p.axis_value(WEnum::Value(wl_pointer::Axis::VerticalScroll), 0.0);
+                }
+                6 => {
+                    wheel(&mut p, 1);
+                    p.axis_source(WEnum::Value(wl_pointer::AxisSource::Wheel));
+                }
+                7 => {
+                    p.axis_value(WEnum::Value(wl_pointer::Axis::VerticalScroll), -1.0);
+                    p.axis_discrete(WEnum::Value(wl_pointer::Axis::VerticalScroll), 1);
+                    p.axis_source(WEnum::Value(wl_pointer::AxisSource::Wheel));
+                }
+                8 => {
+                    p.axis_source(WEnum::Value(wl_pointer::AxisSource::Wheel));
+                }
+                9 => {
+                    p.button(true);
+                    p.button(false);
+                    wheel(&mut p, 1);
+                }
+                10 => {
+                    wheel(&mut p, 1);
+                    p.button(true);
+                }
+                11 => p.axis_source(WEnum::Unknown(99)),
+                12 => p.axis_value(WEnum::Unknown(99), 1.0),
+                13 => p.axis_value(
+                    WEnum::Value(wl_pointer::Axis::VerticalScroll),
+                    f64::INFINITY,
+                ),
+                14 => {
+                    wheel(&mut p, 1);
+                    p.axis_discrete(WEnum::Value(wl_pointer::Axis::VerticalScroll), 1);
+                }
+                _ => {
+                    wheel(&mut p, 1);
+                    p.axis_value(WEnum::Value(wl_pointer::Axis::VerticalScroll), 10.0);
+                }
+            }
+            p.finish_frame();
+            assert!(p.revoked.is_some(), "case {case}");
+            assert_eq!(p.take_events(), vec![ViewerEvent::WaylandPointerRevoke]);
+        }
+    }
+    #[test]
+    fn scroll_old_fragments_never_bind_new_mapping_or_cross_frames() {
+        let mut p = scroll_pointer();
+        p.axis_value(WEnum::Value(wl_pointer::Axis::VerticalScroll), 10.0);
+        p.invalidate_mapping();
+        p.presented(Mapping {
+            sequence: 2,
+            ..mapping()
+        });
+        p.confirm(2);
+        p.set_ready(Some(2));
+        p.axis_discrete(WEnum::Value(wl_pointer::Axis::VerticalScroll), 1);
+        p.axis_source(WEnum::Value(wl_pointer::AxisSource::Wheel));
+        p.finish_frame();
+        assert!(
+            p.take_events()
+                .iter()
+                .all(|e| !matches!(e, ViewerEvent::WaylandPointer { .. }))
+        );
+        assert!(p.revoked.is_none());
+        wheel(&mut p, -1);
+        p.finish_frame();
+        assert!(matches!(
+            p.take_events().as_slice(),
+            [ViewerEvent::WaylandPointer {
+                frame_sequence: 2,
+                kind: Kind::ScrollUp,
+                ..
+            }]
+        ));
+        p.axis_source(WEnum::Value(wl_pointer::AxisSource::Wheel));
+        p.finish_frame();
+        assert!(p.revoked.is_some());
+    }
+    #[test]
+    fn scroll_deadline_and_unready_input_do_not_accumulate() {
+        let mut p = scroll_pointer();
+        p.confirmed = None;
+        wheel(&mut p, 1);
+        p.finish_frame();
+        assert_eq!(p.take_events(), vec![ViewerEvent::WaylandPointerCancel]);
+        p.confirm(1);
+        p.finish_frame();
+        assert!(p.take_events().is_empty());
+        p.axis_source(WEnum::Value(wl_pointer::AxisSource::Wheel));
+        p.frame_started = Some(Instant::now() - TIMEOUT);
+        p.finish_frame();
+        assert!(p.revoked.is_some());
+    }
+    #[test]
+    fn scroll_ready_transition_discards_old_fragments_and_preserves_deadline() {
+        let mut p = scroll_pointer();
+        p.set_ready(None);
+        p.axis_source(WEnum::Value(wl_pointer::AxisSource::Wheel));
+        let start = p.frame_started;
+        p.set_ready(Some(1));
+        p.set_ready(None);
+        p.set_ready(Some(1));
+        assert_eq!(p.frame_started, start);
+        p.axis_value(WEnum::Value(wl_pointer::Axis::VerticalScroll), 10.0);
+        p.axis_discrete(WEnum::Value(wl_pointer::Axis::VerticalScroll), 1);
+        p.finish_frame();
+        assert!(
+            p.take_events()
+                .iter()
+                .all(|e| !matches!(e, ViewerEvent::WaylandPointer { .. }))
+        );
+        wheel(&mut p, 1);
+        p.finish_frame();
+        assert!(matches!(
+            p.take_events().as_slice(),
+            [ViewerEvent::WaylandPointer {
+                kind: Kind::ScrollDown,
+                ..
+            }]
+        ));
     }
     #[test]
     fn pointer_fence_rejects_stale_duplicate_and_exhaustion() {
@@ -454,9 +828,19 @@ mod tests {
         });
         pointer.confirm(2);
         pointer.button(false);
+        // A generation change discards the entire unfinished input group.
+        // Its Frame still delivers the actual release state, never a click.
+        assert!(pointer.frame_events.is_empty());
+        pointer.finish_frame();
+        let events = pointer.take_events();
         assert_eq!(
-            pointer.frame_events.pop(),
-            Some(ViewerEvent::WaylandPointerButtonCancel { pressed: false })
+            events.last(),
+            Some(&ViewerEvent::WaylandPointerButtonCancel { pressed: false })
+        );
+        assert!(
+            events
+                .iter()
+                .all(|event| matches!(event, ViewerEvent::WaylandPointerButtonCancel { .. }))
         );
         assert!(!pointer.left_down);
     }

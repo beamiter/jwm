@@ -245,11 +245,25 @@ impl Viewer {
             }
         }
     }
-    pub(super) fn enable_wayland_pointer(&mut self) -> RemoteResult<()> {
+    pub(super) fn enable_wayland_pointer(&mut self, scroll_enabled: bool) -> RemoteResult<()> {
         match self {
-            Self::X11(v) => v.enable_wayland_pointer(),
+            Self::X11(v) => {
+                let _ = scroll_enabled;
+                v.enable_wayland_pointer()
+            }
             #[cfg(feature = "remote-wayland")]
-            Self::Wayland(v) => v.enable_wayland_pointer(),
+            Self::Wayland(v) => v.enable_wayland_pointer(scroll_enabled),
+        }
+    }
+    /// Native scroll admission fence; legacy X11 input keeps its existing gate.
+    pub(super) fn wayland_pointer_ready(&mut self, sequence: Option<u64>) -> RemoteResult<()> {
+        match self {
+            Self::X11(_) => {
+                let _ = sequence;
+                Ok(())
+            }
+            #[cfg(feature = "remote-wayland")]
+            Self::Wayland(v) => v.wayland_pointer_ready(sequence),
         }
     }
     pub(super) fn enable_source_cycle(&mut self, enabled: bool) {
@@ -370,7 +384,10 @@ impl Viewer {
         match self {
             Self::X11(v) => v.observe_pointer_ready(sequence),
             #[cfg(feature = "remote-wayland")]
-            Self::Wayland(_) => {
+            Self::Wayland(viewer) => {
+                let sequence = sequence.filter(|sequence| viewer.local_scroll_ready(*sequence));
+                #[cfg(not(feature = "backend-wayland-udev"))]
+                let _ = sequence;
                 #[cfg(feature = "backend-wayland-udev")]
                 TEST_WAYLAND_POINTER_OBSERVER.with(|slot| {
                     if let Some(observer) = slot.borrow().as_ref() {

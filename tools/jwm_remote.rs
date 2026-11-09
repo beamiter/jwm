@@ -1837,8 +1837,28 @@ mod tests {
         ] {
             assert!(Cli::try_parse_from(base.into_iter().chain(extra)).is_err());
         }
-        // Scroll is legal for the X11 viewer, so the backend-specific rejection
-        // lives in validate_viewer_backend, before any connection or input IO.
+        let scroll = Cli::try_parse_from(base.into_iter().chain(["--wayland-scroll"])).unwrap();
+        assert!(matches!(
+            &scroll.command,
+            Command::Connect {
+                wayland_pointer: true,
+                wayland_scroll: true,
+                wayland_keyboard: false,
+                ..
+            }
+        ));
+        assert!(profile_from_command(scroll.command).is_err());
+        assert!(
+            Cli::try_parse_from([
+                "jwm-remote",
+                "connect",
+                "host",
+                "--viewer-backend",
+                "wayland",
+                "--wayland-scroll"
+            ])
+            .is_err()
+        );
     }
     #[test]
     fn staging_limit_parser_is_exact_nonzero_and_checked() {

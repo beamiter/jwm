@@ -1848,7 +1848,7 @@ permits legacy input.
 Keyboard admission retains full keymap compatibility and the exact selected
 surface/receiver identity. It lasts at most 30 seconds without renewal and is
 revoked on the existing focus, local takeover, lock and lifecycle boundaries.
-The native viewer does not accept scroll control, clipboard, grabs,
+The native viewer does not accept clipboard, grabs,
 source resize/follow, automatic reconnect or saved-profile authorization.
 `--viewer-wayland-display` names a native socket; there is no X11 fallback.
 See [native Wayland source safety](remote-wayland-source.md) for limits and
@@ -1869,9 +1869,14 @@ Native pointer mode observes a new local left-button press followed by its relea
 before emitting an atomic click. An unmatched release cancels the candidate; it
 never synthesizes a press. Wayland enter events do not report an initial held-button
 snapshot, so this is not proof that all buttons were initially released. Non-left
-buttons, axis events or leaving the viewer surface permanently revoke the pointer
+buttons, unsupported axis events or leaving the viewer surface permanently revoke the pointer
 lease, while video may continue read-only. Returning does not automatically
 regrant input. Unlike native keyboard focus loss, this need not close the session. There is no
-scroll, drag or button chord support. Every motion/click still needs the matching
+drag or button chord support. Optional native scrolling requires both viewer
+`--wayland-scroll` and host `--allow-wayland-scroll` in addition to pointer consent.
+Only protocol-v5–7 Wheel-source vertical axis_discrete ±1, with a matching finite
+nonzero axis and a complete frame, is accepted. No v8 value120, smooth/finger or
+horizontal scrolling, multi-notch batches or mixed button/axis input is enabled.
+Waiting scroll is discarded, not queued for a later Ready. Every motion/click still needs the matching
 fresh, genuinely presented frame and host Ready ticket; the 30-second lease is
 not renewed. Default read-only viewing does not bind input devices.

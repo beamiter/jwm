@@ -8,14 +8,17 @@ use smithay::reexports::wayland_server::protocol::wl_pointer::{ButtonState, WlPo
 #[derive(Debug)]
 enum Answer {
     Connected,
+    ScrollCount(u64),
     Done,
     Poll(Vec<ViewerEvent>, Vec<u64>),
     Failed(String),
 }
 enum Request {
-    Enable,
+    Enable(bool),
+    ScrollCount,
     Draw(u64, u16, u16),
     Confirm(u64),
+    Ready(Option<u64>),
     Poll,
     FencePoll(mpsc::Sender<()>, mpsc::Receiver<()>),
     Stop,
@@ -47,8 +50,8 @@ impl PointerPeer {
                     output.send(Answer::Connected)?;
                     loop {
                         match input.recv_timeout(Duration::from_secs(12))? {
-                            Request::Enable => {
-                                v.enable_wayland_pointer()?;
+                            Request::Enable(scroll) => {
+                                v.enable_wayland_pointer(scroll)?;
                                 output.send(Answer::Done)?;
                             }
                             Request::Draw(seq, w, h) => {
@@ -64,6 +67,15 @@ impl PointerPeer {
                             }
                             Request::Confirm(seq) => {
                                 v.wayland_pointer_presented(seq);
+                                output.send(Answer::Done)?;
+                            }
+                            Request::ScrollCount => {
+                                output.send(Answer::ScrollCount(
+                                    v.scroll_frames_observed_for_test(),
+                                ))?;
+                            }
+                            Request::Ready(sequence) => {
+                                v.wayland_pointer_ready(sequence)?;
                                 output.send(Answer::Done)?;
                             }
                             Request::Poll => {
@@ -209,7 +221,10 @@ fn fixture() -> (Server, PointerPeer) {
     (s, p)
 }
 fn enable(s: &mut Server, p: &PointerPeer) -> WlPointer {
-    p.command(s, Request::Enable);
+    enable_scroll(s, p, false)
+}
+fn enable_scroll(s: &mut Server, p: &PointerPeer, scroll: bool) -> WlPointer {
+    p.command(s, Request::Enable(scroll));
     let surface = viewer_surface(s);
     let client = surface.client().unwrap();
     assert_eq!(
@@ -317,6 +332,7 @@ fn enter(s: &mut Server, p: &PointerPeer, ptr: &WlPointer) {
     ptr.enter(1, &viewer_surface(s), 400.0, 300.0);
     ptr.frame();
     let _ = p.poll(s);
+    p.command(s, Request::Ready(Some(1)));
 }
 fn motion(ptr: &WlPointer, x: f64, y: f64) {
     ptr.motion(2, x, y);
@@ -611,6 +627,232 @@ fn actual_wayland_pointer_viewer_completed_frame_fences_later_lifecycle_batch() 
                 .iter()
                 .any(|event| matches!(event, ViewerEvent::WaylandPointer { .. })),
             "old completed input escaped cross-protocol fence: {events:?}"
+        );
+        p.stop(&mut s);
+    }
+}
+
+fn wheel(ptr: &WlPointer, steps: i32, source_first: bool) {
+    use smithay::reexports::wayland_server::protocol::wl_pointer::{Axis, AxisSource};
+    if source_first {
+        ptr.axis_source(AxisSource::Wheel);
+    }
+    ptr.axis_discrete(Axis::VerticalScroll, steps);
+    ptr.axis(20, Axis::VerticalScroll, f64::from(steps) * 10.0);
+    if !source_first {
+        ptr.axis_source(AxisSource::Wheel);
+    }
+}
+
+#[test]
+fn actual_wayland_pointer_scroll_one_notch_order_and_motion_coalesce() {
+    use smithay::reexports::wayland_server::Resource;
+    let Some(mut gl) = HeadlessSmithayGles::new() else {
+        return;
+    };
+    for (steps, first) in [(-1, true), (1, true), (-1, false), (1, false)] {
+        let (mut s, p) = fixture();
+        let ptr = enable_scroll(&mut s, &p, true);
+        assert!((5..=7).contains(&ptr.version()));
+        mapped(&mut s, &p, &mut gl, 1, 800, 600);
+        enter(&mut s, &p, &ptr);
+        ptr.motion(19, 420.0, 310.0);
+        wheel(&ptr, steps, first);
+        ptr.frame();
+        let events = p.wait_events(&mut s);
+        let actions: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                ViewerEvent::WaylandPointer {
+                    frame_sequence,
+                    x,
+                    y,
+                    kind,
+                    ..
+                } => Some((*frame_sequence, *x, *y, *kind)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            actions,
+            [(
+                1,
+                420,
+                310,
+                if steps < 0 {
+                    Kind::ScrollUp
+                } else {
+                    Kind::ScrollDown
+                }
+            )],
+            "source_first={first}: {events:?}"
+        );
+        assert!(!events.contains(&ViewerEvent::WaylandPointerRevoke));
+        p.stop(&mut s);
+    }
+}
+
+#[test]
+fn actual_wayland_pointer_scroll_malformed_frame_is_terminal() {
+    use smithay::reexports::wayland_server::protocol::wl_pointer::{Axis, AxisSource};
+    let Some(mut gl) = HeadlessSmithayGles::new() else {
+        return;
+    };
+    for case in 0..15 {
+        let (mut s, p) = fixture();
+        let ptr = enable_scroll(&mut s, &p, true);
+        mapped(&mut s, &p, &mut gl, 1, 800, 600);
+        enter(&mut s, &p, &ptr);
+        match case {
+            0 => {
+                ptr.axis_discrete(Axis::VerticalScroll, 1);
+                ptr.axis(20, Axis::VerticalScroll, 10.0);
+            }
+            1 => {
+                ptr.axis_source(AxisSource::Wheel);
+                ptr.axis(20, Axis::VerticalScroll, 10.0);
+            }
+            2 => {
+                ptr.axis_source(AxisSource::Wheel);
+                ptr.axis_discrete(Axis::VerticalScroll, 1);
+            }
+            3 => {
+                ptr.axis_source(AxisSource::Finger);
+                ptr.axis_discrete(Axis::VerticalScroll, 1);
+                ptr.axis(20, Axis::VerticalScroll, 10.0);
+            }
+            4 => {
+                ptr.axis_source(AxisSource::Wheel);
+                ptr.axis_discrete(Axis::HorizontalScroll, 1);
+                ptr.axis(20, Axis::HorizontalScroll, 10.0);
+            }
+            5 => {
+                wheel(&ptr, 1, true);
+                ptr.axis_discrete(Axis::VerticalScroll, 1);
+            }
+            6 => {
+                ptr.axis_source(AxisSource::Wheel);
+                ptr.axis_discrete(Axis::VerticalScroll, -1);
+                ptr.axis(20, Axis::VerticalScroll, 10.0);
+            }
+            7 => wheel(&ptr, 2, true),
+            8 => {
+                wheel(&ptr, 1, true);
+                ptr.axis_stop(21, Axis::VerticalScroll);
+            }
+            9 => {
+                ptr.button(19, 19, 0x110, ButtonState::Pressed);
+                wheel(&ptr, 1, true);
+            }
+            10 => {
+                wheel(&ptr, 1, true);
+                ptr.axis_source(AxisSource::Wheel);
+            }
+            11 => {
+                wheel(&ptr, 1, true);
+                ptr.axis(21, Axis::VerticalScroll, 10.0);
+            }
+            12 => {
+                ptr.axis_source(AxisSource::Wheel);
+                ptr.axis_discrete(Axis::VerticalScroll, 1);
+                ptr.axis(20, Axis::VerticalScroll, 0.0);
+            }
+            13 => {
+                ptr.axis_source(AxisSource::WheelTilt);
+                ptr.axis_discrete(Axis::VerticalScroll, 1);
+                ptr.axis(20, Axis::VerticalScroll, 10.0);
+            }
+            _ => {
+                ptr.button(18, 18, 0x110, ButtonState::Pressed);
+                ptr.frame();
+                let held = p.wait_events(&mut s);
+                assert!(held.iter().any(|e| matches!(
+                    e,
+                    ViewerEvent::WaylandPointer {
+                        kind: Kind::LeftDown,
+                        ..
+                    }
+                )));
+                wheel(&ptr, 1, true);
+            }
+        }
+        ptr.frame();
+        eprintln!("malformed actual scroll case={case}");
+        p.revoked(&mut s);
+        p.stop(&mut s);
+    }
+}
+
+#[test]
+fn actual_wayland_pointer_scroll_waiting_groups_never_upgrade_to_ready() {
+    use smithay::reexports::wayland_server::protocol::wl_pointer::{Axis, AxisSource};
+    let Some(mut gl) = HeadlessSmithayGles::new() else {
+        return;
+    };
+    for partial in [false, true] {
+        let (mut s, p) = fixture();
+        let ptr = enable_scroll(&mut s, &p, true);
+        mapped(&mut s, &p, &mut gl, 1, 800, 600);
+        enter(&mut s, &p, &ptr);
+        p.command(&mut s, Request::Ready(None));
+        if partial {
+            ptr.axis(20, Axis::VerticalScroll, 10.0);
+            let (events, _) = p.poll(&mut s);
+            assert!(
+                !events
+                    .iter()
+                    .any(|e| matches!(e, ViewerEvent::WaylandPointer { .. }))
+            );
+        } else {
+            wheel(&ptr, 1, true);
+            ptr.frame();
+        }
+        // The real ready setter performs display.sync under Waiting, so even
+        // a complete group already flushed but not yet read cannot be upgraded.
+        p.command(&mut s, Request::Ready(Some(1)));
+        if partial {
+            ptr.axis_source(AxisSource::Wheel);
+            ptr.axis_discrete(Axis::VerticalScroll, 1);
+            ptr.frame();
+        }
+        let end = Instant::now() + Duration::from_secs(5);
+        loop {
+            let (events, _) = p.poll(&mut s);
+            assert!(
+                !events
+                    .iter()
+                    .any(|e| matches!(e, ViewerEvent::WaylandPointer { .. })),
+                "Waiting group leaked: {events:?}"
+            );
+            assert!(
+                !events.contains(&ViewerEvent::WaylandPointerRevoke),
+                "valid Waiting group revoked: {events:?}"
+            );
+            p.tx.send(Request::ScrollCount).unwrap();
+            match p.receive(&mut s) {
+                Answer::ScrollCount(1) => break,
+                Answer::ScrollCount(0) => {}
+                other => panic!("unexpected wheel dispatch observation: {other:?}"),
+            }
+            assert!(
+                Instant::now() < end,
+                "Waiting group was never actually dispatched"
+            );
+        }
+        wheel(&ptr, -1, false);
+        ptr.frame();
+        let events = p.wait_events(&mut s);
+        let kinds: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                ViewerEvent::WaylandPointer { kind, .. } => Some(*kind),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            [Kind::ScrollUp],
+            "fresh complete group required: {events:?}"
         );
         p.stop(&mut s);
     }

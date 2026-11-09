@@ -135,18 +135,29 @@ never enables XTEST. Saved profiles and automatic reconnect cannot grant it.
 
 The native viewer may explicitly select this mode with
 `connect ... --viewer-backend wayland --wayland-pointer`. Choose exactly one
-of native read-only, keyboard or pointer mode. Native scroll is not supported;
-`--wayland-scroll` remains limited to the X11 viewer. Native pointer input accepts
+of native read-only, keyboard or pointer mode. Native scrolling additionally
+requires `--wayland-scroll` and the host's separate `--allow-wayland-scroll`
+permission. Native pointer input accepts
 only observed LeftDown→LeftUp pairs for atomic clicks. An unmatched release
 cancels, never creates a click. Since `wl_pointer.enter` provides no held-button
 snapshot, this does not establish that all buttons were initially released.
-Non-left button or axis input, or leaving the viewer surface, permanently revokes
+Non-left button input, unsupported axis input, or leaving the viewer surface permanently revokes
 the pointer lease. Video may continue read-only; returning to the surface does
 not automatically recreate permission. This differs from native keyboard focus
 loss, which terminates the session.
 No drag, chords, implicit input grab or automatic renewal is enabled. The same
 fresh actual-presentation/Ready gate and 30-second lease apply. Default read-only
 native viewing does not bind input devices.
+
+The native scroll adapter binds pointer protocol versions 5–7, not version 8.
+It accepts only explicit `axis_source=wheel`, vertical `axis_discrete` of exactly
++1 or -1 and matching finite, nonzero continuous-axis direction in one complete
+`wl_pointer.frame`. Source/discrete ordering is not assumed. Missing or unknown
+source, horizontal axes, smooth/finger/continuous scrolling, multiple notches,
+and mixed button/axis input are not supported. It does not accumulate fractional
+steps, batch notches or replay scrolling received while Waiting. Each accepted
+notch still consumes a fresh actual-presented frame/Ready ticket. This reuses the
+existing scroll protocol and host permission without extending the input lease.
 
 The base pointer grant supports surface-local absolute motion and an atomic
 left click. Optional discrete vertical scrolling requires the separate explicit
@@ -312,9 +323,9 @@ jwm-remote connect HOST --viewer-backend wayland --wayland-keyboard --key-file /
 ```
 
 Use `--viewer-wayland-display SOCKET` to select the local native display, not
-`--display`. `--view-only` and `--wayland-keyboard` are mutually exclusive;
-omitting both with `--viewer-backend wayland` is rejected rather than enabling
-legacy input. No host authorization is inferred from choosing a viewer backend.
+`--display`. Exactly one of `--view-only`, `--wayland-keyboard` and
+`--wayland-pointer` is required with `--viewer-backend wayland`; these modes are
+mutually exclusive and omitting all three is rejected rather than enabling legacy input. No host authorization is inferred from choosing a viewer backend.
 
 This mode reuses the existing exact-surface keyboard authority, full keymap
 compatibility check, and nonrenewable 30-second lease. A mismatched keymap or
@@ -326,7 +337,8 @@ Native presentation does not grant pointer or wheel input, clipboard access,
 input grabs, source resizing/following, automatic reconnect, or a saved profile.
 Those combinations remain rejected. This addition does not change the network
 protocol or relax host input permission. It is distinct from the X11 viewer's
-separately authorized pointer and discrete-scroll modes.
+separately authorized pointer and discrete-scroll modes, also available through
+the native viewer with the narrower wheel-event limits described above.
 
 Tests must verify actual native keyboard recipients and presentation feedback;
 compilation or protocol fixtures alone do not demonstrate physical DRM display,

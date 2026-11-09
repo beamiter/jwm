@@ -534,7 +534,7 @@ impl WaylandViewer {
             .keyboard
             .revoke("Wayland keyboard permanently disabled");
     }
-    pub(super) fn enable_wayland_pointer(&mut self) -> RemoteResult<()> {
+    pub(super) fn enable_wayland_pointer(&mut self, scroll_enabled: bool) -> RemoteResult<()> {
         if self.state.pointer.requested || self.state.keyboard.requested {
             return Err("Wayland pointer cannot be re-enabled or combined with keyboard".into());
         }
@@ -548,6 +548,7 @@ impl WaylandViewer {
             return Err("Wayland pointer requires frame-capable seat".into());
         }
         self.state.pointer.requested = true;
+        self.state.pointer.scroll_enabled = scroll_enabled;
         self.state.pointer.surface = Some(self.surface.clone());
         self.toplevel.set_app_id("jwm-remote-pointer".into());
         self.state.pointer.seat = Some(self.registry.bind(
@@ -573,14 +574,75 @@ impl WaylandViewer {
             std::thread::sleep(Duration::from_millis(1));
         }
     }
+    pub(super) fn wayland_pointer_ready(&mut self, sequence: Option<u64>) -> RemoteResult<()> {
+        if !self.state.pointer.requested
+            || !self.state.pointer.scroll_enabled
+            || self.state.pointer.revoked.is_some()
+            || self.state.pointer.ready() == sequence
+        {
+            return Ok(());
+        }
+        // A rising Ready gate must not promote scroll already queued by the
+        // compositor while Waiting. Keep admission closed through a real sync.
+        self.state.pointer.set_ready(None);
+        if sequence.is_none() || self.state.pointer.revoked.is_some() {
+            return Ok(());
+        }
+        let snapshot = (
+            self.state.generation,
+            self.viewport(),
+            self.state.scope,
+            self.state.pointer.mapping(),
+        );
+        self.fence_pointer_events_inner(true)?;
+        if self.state.pointer.revoked.is_none()
+            && !self.state.closed
+            && snapshot
+                == (
+                    self.state.generation,
+                    self.viewport(),
+                    self.state.scope,
+                    self.state.pointer.mapping(),
+                )
+            && snapshot.3.is_some_and(|map| Some(map.sequence) == sequence)
+            && self.state.pointer.locally_ready()
+        {
+            self.state.pointer.set_ready(sequence);
+        }
+        Ok(())
+    }
+    #[cfg(all(test, feature = "backend-wayland-udev"))]
+    pub(crate) fn scroll_frames_observed_for_test(&self) -> u64 {
+        self.state.pointer.scroll_frames_observed
+    }
     pub(super) fn wayland_pointer_presented(&mut self, sequence: u64) {
         self.state.pointer.confirm(sequence);
+    }
+    /// A host Ready is not local scroll readiness until the event-history fence
+    /// completed for this exact currently presented mapping.
+    pub(super) fn local_scroll_ready(&self, sequence: u64) -> bool {
+        !self.state.pointer.scroll_enabled
+            || (self.state.pointer.ready() == Some(sequence)
+                && self
+                    .state
+                    .pointer
+                    .mapping()
+                    .is_some_and(|map| map.sequence == sequence)
+                && self.state.pointer.locally_ready())
     }
     pub(super) fn set_wayland_pointer_status(&mut self, status: &'static str) {
         let status = if self.state.pointer.revoked.is_some() {
             "Pointer: Revoked"
         } else if !self.state.pointer.locally_ready() {
             "Pointer: Waiting for local focus/presentation"
+        } else if self.state.pointer.scroll_enabled
+            && !self
+                .state
+                .pointer
+                .mapping()
+                .is_some_and(|map| self.local_scroll_ready(map.sequence))
+        {
+            "Pointer: Waiting for local scroll synchronization"
         } else {
             status
         };
@@ -590,11 +652,16 @@ impl WaylandViewer {
         }
     }
     fn fence_pointer_events(&mut self) -> RemoteResult<()> {
-        if !self.state.pointer.needs_fence() {
+        self.fence_pointer_events_inner(false)
+    }
+    fn fence_pointer_events_inner(&mut self, force: bool) -> RemoteResult<()> {
+        if !force && !self.state.pointer.needs_fence() {
             return Ok(());
         }
         #[cfg(all(test, feature = "backend-wayland-udev"))]
-        run_pointer_fence_hook();
+        if !force {
+            run_pointer_fence_hook();
+        }
         let Some(id) = self.state.pointer.begin_fence() else {
             return Ok(());
         };

@@ -412,14 +412,13 @@ fn validate_viewer_backend(options: &ClientOptions) -> RemoteResult<()> {
                 + usize::from(options.wayland_keyboard)
                 + usize::from(options.wayland_pointer)
                 != 1
-            || options.wayland_scroll
             || options.clipboard
             || options.resize_source.is_some()
             || options.grab_input
             || options.window_position.is_some()
             || options.display.is_some()
         {
-            return Err(invalid_data("Wayland viewer requires exactly one of view-only, scoped Wayland keyboard or scoped Wayland pointer, without scroll, clipboard, source resize, grab, X11 display or window positioning").into());
+            return Err(invalid_data("Wayland viewer requires exactly one of view-only, scoped Wayland keyboard or scoped Wayland pointer, without clipboard, source resize, grab, X11 display or window positioning").into());
         }
     }
     Ok(())
@@ -691,7 +690,7 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
         state.wayland_keyboard.lock().unwrap().enable(digest);
     }
     if options.wayland_pointer {
-        viewer.enable_wayland_pointer()?;
+        viewer.enable_wayland_pointer(options.wayland_scroll)?;
         let mut pointer = state.wayland_pointer.lock().unwrap();
         pointer.enabled = true;
         pointer.scroll_enabled = options.wayland_scroll;
@@ -1439,6 +1438,23 @@ fn viewer_loop(
             pending_presentations.clear();
             viewer.invalidate_source(current_source_label(state))?;
             write_source_release(writer, presented_scope, pointer_enabled || keyboard_enabled)?;
+        }
+        // Snapshot only: the native Ready transition may synchronize with the
+        // local compositor. Never hold the receive-thread lease mutex across it.
+        let scroll_ready = {
+            let pointer = state.wayland_pointer.lock().unwrap();
+            if pointer.enabled && pointer.scroll_enabled {
+                Some(if pointer.fresh(Instant::now()) {
+                    pointer.ready.map(|scope| scope.frame_sequence)
+                } else {
+                    None
+                })
+            } else {
+                None
+            }
+        };
+        if let Some(ready) = scroll_ready {
+            viewer.wayland_pointer_ready(ready)?;
         }
         let mut events = viewer.poll_events().map_err(|error| {
             if viewer.user_close_requested() {
@@ -7043,7 +7059,10 @@ mod native_viewer_permission_tests {
                 0 => changed.view_only = true,
                 1 => changed.wayland_pointer = false,
                 2 => changed.wayland_keyboard = true,
-                3 => changed.wayland_scroll = true,
+                3 => {
+                    changed.wayland_scroll = true;
+                    changed.wayland_pointer = false;
+                }
                 4 => changed.clipboard = true,
                 5 => changed.grab_input = true,
                 6 => changed.display = Some(":never-open".into()),
@@ -7061,6 +7080,11 @@ mod native_viewer_permission_tests {
             }
             assert!(validate_viewer_backend(&changed).is_err());
         }
+        pointer.wayland_scroll = true;
+        assert_eq!(
+            validate_viewer_backend(&pointer).is_ok(),
+            cfg!(feature = "remote-wayland")
+        );
         assert!(run_client_reconnecting(pointer, 1).is_err());
 
         for mode in 0..4 {
