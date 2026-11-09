@@ -4820,10 +4820,8 @@ mod tests {
             selection_notify_within(&conn, requestor, png, std::time::Duration::from_secs(3))
                 .unwrap_or_else(|| {
                     let finished = setter.worker.join.lock().unwrap().as_ref().is_none_or(std::thread::JoinHandle::is_finished);
-                    let captures_closed = matches!(
-                        captures.recv_timeout(std::time::Duration::ZERO),
-                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected)
-                    );
+                    // This wrapper maps timeout to Ok(None), disconnect to Err.
+                    let captures_closed = captures.recv_timeout(std::time::Duration::ZERO).is_err();
                     panic!("the waiting paste is refused: worker_finished={finished} wake_healthy={} captures_closed={captures_closed}; see terminal server fence outcome", setter.wake.is_healthy());
                 });
         assert_eq!(notify.property, x11rb::NONE);
