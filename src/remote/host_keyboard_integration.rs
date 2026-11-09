@@ -85,9 +85,11 @@ fn bind_keyboard(server: &mut Server, app: &mut App) -> u32 {
 }
 fn collect_keys(app: &mut App, keyboard: u32, keys: &mut Vec<(u32, u32)>) {
     let events = app.client.events();
-    assert!(events
-        .iter()
-        .all(|event| !(event.sender == 1 && event.opcode == 0)));
+    assert!(
+        events
+            .iter()
+            .all(|event| !(event.sender == 1 && event.opcode == 0))
+    );
     keys.extend(
         events
             .into_iter()
