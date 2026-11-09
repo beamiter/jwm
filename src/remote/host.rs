@@ -3079,6 +3079,13 @@ fn process_pointer(
         || capture.pointer_revoked()
         || (state.epoch().is_some() && !state.active(now))
     {
+        #[cfg(test)]
+        eprintln!(
+            "pointer host stop: remote_revoke={}, native_revoke={}, expired={}",
+            sources.pointer_revoke.load(Ordering::Acquire),
+            capture.pointer_revoked(),
+            state.epoch().is_some() && !state.active(now)
+        );
         return stop_pointer(sources, capture, writer, state);
     }
     let tracked = *sources.pointer_frame.lock().unwrap();
@@ -4561,7 +4568,15 @@ fn receive_input_scoped(
                 }
                 MessageKind::Viewport => {
                     let (width, height) = decode_viewport(&payload)?;
+                    #[cfg(test)]
+                    let previous = viewport.requested.load(Ordering::Relaxed);
                     let changed = viewport.request(width, height);
+                    #[cfg(test)]
+                    eprintln!(
+                        "host viewport previous={}x{}, requested={width}x{height}, changed={changed}",
+                        previous >> 16,
+                        previous & 0xffff
+                    );
                     if let Some(sources) = sources {
                         if changed && sources.pointer_enabled.load(Ordering::Acquire) {
                             // Never clear this latch: change then restore cannot

@@ -492,6 +492,14 @@ fn actual_viewer_tcp_pointer_presented_scope_and_revocation() {
         app.client.events();
         other.client.events();
 
+        // Establish a real, deterministic owned-server focus before mapping the
+        // viewer. PointerRoot -> explicit focus can itself generate FocusOut;
+        // do not weaken the production historical revocation guard to hide it.
+        ViewerTestDriver::connect().unwrap().unfocus().unwrap();
+        note(
+            &trace,
+            "owned X focus initialized to explicit root before client map",
+        );
         let label = format!("owned-viewer-{}-{case:?}", std::process::id());
         let opts = client_options(address, display.clone(), label.clone(), case);
         let client_trace = Arc::clone(&trace);

@@ -1463,6 +1463,15 @@ impl Viewer {
                 Event::ConfigureNotify(event) if event.window == self.window => {
                     let (new_width, new_height) =
                         configured_viewer_dimensions(event.width, event.height)?;
+                    #[cfg(test)]
+                    if self.wayland_pointer && (new_width, new_height) != (self.width, self.height)
+                    {
+                        eprintln!(
+                            "viewer pointer revoke: ConfigureNotify {:?} -> {:?}",
+                            (self.width, self.height),
+                            (new_width, new_height)
+                        );
+                    }
                     revoke_scoped_pointer_on_resize(
                         self.wayland_pointer,
                         (self.width, self.height),
@@ -1493,6 +1502,8 @@ impl Viewer {
                     break;
                 }
                 Event::UnmapNotify(event) if event.window == self.window => {
+                    #[cfg(test)]
+                    eprintln!("viewer input revoke: UnmapNotify {event:?}");
                     self.clipboard_shortcut = ViewerKeyboardState::default();
                     self.release_local_grab()?;
                     self.release_all_input(&mut result);
@@ -1501,6 +1512,11 @@ impl Viewer {
                     if event.event == self.window
                         && focus_out_releases_input(event.mode, self.grabbed) =>
                 {
+                    #[cfg(test)]
+                    eprintln!(
+                        "viewer input revoke: FocusOut {event:?}; current focus={:?}",
+                        self.conn.get_input_focus()?.reply()?
+                    );
                     self.clipboard_shortcut = ViewerKeyboardState::default();
                     self.release_local_grab()?;
                     self.release_all_input(&mut result);

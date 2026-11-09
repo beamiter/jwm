@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - master
+      - dot/remote-window-plan
   pull_request:
     branches:
       - master

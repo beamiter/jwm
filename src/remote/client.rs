@@ -1243,6 +1243,8 @@ fn viewer_loop(
             let mut pointer = state.wayland_pointer.lock().unwrap();
             if pointer.enabled {
                 if pointer.expired(Instant::now()) {
+                    #[cfg(test)]
+                    eprintln!("viewer pointer revoke: lease expiry");
                     if let Some(revoke) = pointer.revoke() {
                         writer
                             .write_message(MessageKind::WaylandPointerRevoke, &revoke.encode()?)?;
@@ -1272,6 +1274,8 @@ fn viewer_loop(
         if received_epoch != source_epoch {
             let mut pointer = state.wayland_pointer.lock().unwrap();
             if pointer.enabled && !pointer.ended {
+                #[cfg(test)]
+                eprintln!("viewer pointer revoke: source epoch change");
                 if let Some(revoke) = pointer.revoke() {
                     writer.write_message(MessageKind::WaylandPointerRevoke, &revoke.encode()?)?;
                     writer.flush()?;
@@ -1302,6 +1306,12 @@ fn viewer_loop(
         if reported_viewport.is_some_and(|previous| previous != viewer.viewport()) {
             let mut pointer = state.wayland_pointer.lock().unwrap();
             if pointer.enabled && !pointer.ended {
+                #[cfg(test)]
+                eprintln!(
+                    "viewer pointer revoke: viewport change {:?} -> {:?}",
+                    reported_viewport,
+                    viewer.viewport()
+                );
                 if let Some(revoke) = pointer.revoke() {
                     writer.write_message(MessageKind::WaylandPointerRevoke, &revoke.encode()?)?;
                     writer.flush()?;
@@ -1373,6 +1383,8 @@ fn viewer_loop(
                             | ViewerEvent::CycleSource
                     )
                 }) {
+                    #[cfg(test)]
+                    eprintln!("viewer pointer revoke: local event batch {events:?}");
                     if let Some(revoke) = pointer.revoke() {
                         writer
                             .write_message(MessageKind::WaylandPointerRevoke, &revoke.encode()?)?;
@@ -1579,6 +1591,8 @@ fn viewer_loop(
                     (initial.source_epoch, initial.geometry_epoch) != presented_scope
                 }) && !pointer.ended
                 {
+                    #[cfg(test)]
+                    eprintln!("viewer pointer revoke: presented geometry change");
                     if let Some(revoke) = pointer.revoke() {
                         writer
                             .write_message(MessageKind::WaylandPointerRevoke, &revoke.encode()?)?;
@@ -2438,6 +2452,8 @@ impl ClientPointer {
             return Err(invalid_data("pointer lease epoch changed").into());
         }
         if matches!(value.status, S::Denied | S::Revoked) {
+            #[cfg(test)]
+            eprintln!("viewer pointer terminal host status: {value:?}");
             self.ended = true;
             self.terminal_seen = true;
             self.ready = None;

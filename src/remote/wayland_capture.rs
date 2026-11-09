@@ -1422,7 +1422,12 @@ impl Dispatch<JwmRemotePointerLeaseV1, ()> for State {
                 }
                 pointer.accepted = sequence;
             }
-            pointer_lease::Event::Revoked { .. } => pointer.revoked = true,
+            pointer_lease::Event::Revoked { reason } => {
+                #[cfg(test)]
+                eprintln!("native pointer revoked reason={reason}");
+                let _ = reason;
+                pointer.revoked = true;
+            }
         }
     }
 }
