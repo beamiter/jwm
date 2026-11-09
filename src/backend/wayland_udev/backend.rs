@@ -8,6 +8,18 @@ use crate::sync_ext::MutexExt;
 #[path = "../udev_kms.rs"]
 mod kms;
 use self::kms::KmsState;
+
+/// Test-only entry to the production single-surface renderer, without exposing
+/// the KMS state or duplicating capture logic in the protocol fixtures.
+#[cfg(test)]
+pub(crate) fn fulfill_test_toplevel_capture(
+    renderer: &mut smithay::backend::renderer::gles::GlesRenderer,
+    cache: &mut Option<(i32, i32, smithay::backend::renderer::gles::GlesRenderbuffer)>,
+    state: &JwmWaylandState,
+    pending: &super::image_copy_capture::PendingImageCaptureQueue,
+) {
+    KmsState::fulfill_image_capture_toplevel_frames(renderer, cache, state, pending, None);
+}
 use super::compositor::{CompositorOutputTextureOwnership, WaylandCompositor};
 use super::output_management::proposed_output_framebuffer_size;
 use crate::backend::api::{
@@ -1114,6 +1126,7 @@ impl WindowOps for WaylandWindowOps {
     ) -> Result<(), BackendError> {
         unsafe {
             self.with_state_mut(|state| {
+                crate::backend::wayland_udev::image_copy_capture::toplevel_capture_geometry_changing(state,win,w,h);
                 state.pending_initial_configure.remove(&win);
                 let bw = border as i32;
                 state.window_geometry.insert(
@@ -4133,6 +4146,7 @@ impl UdevBackend {
                 .handle()
                 .insert_source(notifier, move |event, &mut (), state| match event {
                     SessionEvent::PauseSession => {
+                        crate::backend::wayland_udev::image_copy_capture::set_toplevel_capture_block(state,crate::backend::wayland_udev::image_copy_capture::CAPTURE_BLOCK_INACTIVE,true);
                         cancel_native_swipe(state);
                         state.gesture_swipe_device = None;
                         input_devices_for_session.borrow_mut().set_active(false);
@@ -5215,6 +5229,11 @@ impl CompositorWorkspaceEffects for UdevBackend {
     fn compositor_set_system_ui(&mut self, overlay: Option<SystemUiOverlay>) {
         self.compositor_desired.set_system_ui(overlay.clone());
         let locked = overlay.as_ref().is_some_and(|overlay| overlay.locked);
+        crate::backend::wayland_udev::image_copy_capture::set_toplevel_capture_block(
+            &mut self.state,
+            crate::backend::wayland_udev::image_copy_capture::CAPTURE_BLOCK_BUILTIN_LOCK,
+            locked,
+        );
         if locked {
             cancel_key_repeat_timer(&self.state.loop_handle, &self.shared);
             self.pending_events
@@ -8059,6 +8078,12 @@ impl Backend for UdevBackend {
                     || shared.scroll_capture_active
                     || !shared.session_active
             };
+            let capture_inactive = !self.shared.lock_safe().session_active;
+            crate::backend::wayland_udev::image_copy_capture::set_toplevel_capture_block(
+                &mut self.state,
+                crate::backend::wayland_udev::image_copy_capture::CAPTURE_BLOCK_INACTIVE,
+                capture_inactive,
+            );
             self.event_loop
                 .dispatch(timeout, &mut *self.state)
                 .map_err(|e| BackendError::Other(Box::new(e)))?;

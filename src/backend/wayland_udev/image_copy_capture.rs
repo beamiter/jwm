@@ -110,7 +110,188 @@ fn record_damage_rect(damage: &mut Vec<CaptureDamageRect>, rect: CaptureDamageRe
 #[derive(Clone)]
 pub enum CaptureSource {
     Output(Output),
-    Toplevel(WindowId),
+    Toplevel(Arc<CaptureAuthority>),
+}
+
+/// A source is a capability for one mapped surface lifetime, not a name
+/// that can resolve to another window after unmap, lock, or size changes.
+#[derive(Debug)]
+pub struct CaptureAuthority {
+    pub(crate) window: WindowId,
+    pub(crate) surface: smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    owner: ClientId,
+    lock_epoch: u64,
+    buffer_layout: (
+        i32,
+        smithay::reexports::wayland_server::protocol::wl_output::Transform,
+    ),
+    revoked: AtomicBool,
+}
+#[derive(Default)]
+pub(crate) struct ToplevelCaptureAuthorities {
+    by_window: HashMap<WindowId, Vec<std::sync::Weak<CaptureAuthority>>>,
+    blocked: u8,
+}
+pub(crate) const CAPTURE_BLOCK_BUILTIN_LOCK: u8 = 1;
+pub(crate) const CAPTURE_BLOCK_MONITOR_LOCK: u8 = 2;
+pub(crate) const CAPTURE_BLOCK_INACTIVE: u8 = 4;
+const MAX_TOPLEVEL_SOURCES: usize = 256;
+const MAX_TOPLEVEL_SESSIONS: usize = 512;
+
+fn surface_buffer_layout(
+    surface: &smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
+) -> (
+    i32,
+    smithay::reexports::wayland_server::protocol::wl_output::Transform,
+) {
+    smithay::wayland::compositor::with_states(surface, |states| {
+        let mut cached = states
+            .cached_state
+            .get::<smithay::wayland::compositor::SurfaceAttributes>();
+        let attributes = cached.current();
+        (attributes.buffer_scale, attributes.buffer_transform)
+    })
+}
+pub(crate) fn toplevel_capture_surface_committed(
+    state: &mut JwmWaylandState,
+    surface: &smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
+) {
+    let layout = surface_buffer_layout(surface);
+    let changed: Vec<_> = state
+        .toplevel_capture_authorities
+        .by_window
+        .iter()
+        .filter_map(|(window, guards)| {
+            guards
+                .iter()
+                .filter_map(std::sync::Weak::upgrade)
+                .any(|guard| guard.surface == *surface && guard.buffer_layout != layout)
+                .then_some(*window)
+        })
+        .collect();
+    for window in changed {
+        if stop_toplevel_capture_sessions(state, window) {
+            state.request_client_flush();
+        }
+    }
+}
+fn authority_is_current(state: &JwmWaylandState, authority: &CaptureAuthority) -> bool {
+    let current = !authority.revoked.load(Ordering::Acquire)
+        && !state.session_locked
+        && state.toplevel_capture_authorities.blocked == 0
+        && state.session_lock_epoch == authority.lock_epoch
+        && state.mapped_windows.contains(&authority.window)
+        && authority.surface.is_alive()
+        && surface_buffer_layout(&authority.surface) == authority.buffer_layout
+        && state.surface_for_window(authority.window).as_ref() == Some(&authority.surface)
+        && state
+            .window_geometry
+            .get(&authority.window)
+            .is_some_and(|g| (g.w, g.h) == (authority.width, authority.height));
+    if !current {
+        authority.revoked.store(true, Ordering::Release);
+    }
+    current
+}
+fn create_toplevel_source(
+    state: &mut JwmWaylandState,
+    window: WindowId,
+    owner: ClientId,
+) -> Option<CaptureSource> {
+    if state.session_locked
+        || state.toplevel_capture_authorities.blocked != 0
+        || !state.mapped_windows.contains(&window)
+    {
+        return None;
+    }
+    let surface = state
+        .surface_for_window(window)
+        .filter(Resource::is_alive)?;
+    let geometry = state.window_geometry.get(&window)?;
+    let (width, height) = (geometry.w, geometry.h);
+    if width == 0
+        || height == 0
+        || width > 16384
+        || height > 16384
+        || u64::from(width) * u64::from(height) > 64 * 1024 * 1024
+    {
+        return None;
+    }
+    let registry = &mut state.toplevel_capture_authorities;
+    registry.by_window.retain(|_, grants| {
+        grants.retain(|grant| grant.strong_count() != 0);
+        !grants.is_empty()
+    });
+    if registry.by_window.values().map(Vec::len).sum::<usize>() >= MAX_TOPLEVEL_SOURCES {
+        return None;
+    }
+    let authority = Arc::new(CaptureAuthority {
+        window,
+        buffer_layout: surface_buffer_layout(&surface),
+        surface,
+        width,
+        height,
+        owner,
+        lock_epoch: state.session_lock_epoch,
+        revoked: AtomicBool::new(false),
+    });
+    registry
+        .by_window
+        .entry(window)
+        .or_default()
+        .push(Arc::downgrade(&authority));
+    Some(CaptureSource::Toplevel(authority))
+}
+/// Lock transitions revoke all existing sources, including idle sources that
+/// have not created a session yet. Clearing a block never revives those guards.
+pub(crate) fn set_toplevel_capture_block(state: &mut JwmWaylandState, bit: u8, blocked: bool) {
+    let was = state.toplevel_capture_authorities.blocked;
+    if blocked {
+        state.toplevel_capture_authorities.blocked |= bit;
+    } else {
+        state.toplevel_capture_authorities.blocked &= !bit;
+    }
+    if blocked && was & bit == 0 {
+        stop_all_toplevel_capture_sessions(state);
+    }
+}
+pub(crate) fn stop_all_toplevel_capture_sessions(state: &mut JwmWaylandState) {
+    let windows: Vec<_> = state
+        .toplevel_capture_authorities
+        .by_window
+        .keys()
+        .chain(state.toplevel_capture_sessions.keys())
+        .copied()
+        .collect();
+    let mut sent = false;
+    for window in windows {
+        sent |= stop_toplevel_capture_sessions(state, window);
+    }
+    if sent {
+        state.request_client_flush();
+    }
+}
+pub(crate) fn toplevel_capture_geometry_changing(
+    state: &mut JwmWaylandState,
+    window: WindowId,
+    width: u32,
+    height: u32,
+) {
+    let changes = state
+        .toplevel_capture_authorities
+        .by_window
+        .get(&window)
+        .is_some_and(|grants| {
+            grants
+                .iter()
+                .filter_map(std::sync::Weak::upgrade)
+                .any(|guard| (guard.width, guard.height) != (width, height))
+        });
+    if changes && stop_toplevel_capture_sessions(state, window) {
+        state.request_client_flush();
+    }
 }
 
 pub struct ImageCaptureSourceData {
@@ -194,6 +375,35 @@ pub struct PendingImageCapture {
 }
 unsafe impl Send for PendingImageCapture {}
 
+impl PendingImageCapture {
+    pub(crate) fn authorized(&self, state: &JwmWaylandState) -> bool {
+        if !self.frame.is_alive() {
+            return false;
+        }
+        let Some(data) = self.frame.data::<CaptureFrameData>() else {
+            return false;
+        };
+        let session_live = data.session.upgrade().ok().is_some_and(|session| {
+            session.is_alive()
+                && session
+                    .data::<CaptureSessionData>()
+                    .is_some_and(|data| !data.stopped.load(Ordering::Acquire))
+        });
+        let owner_matches = match &self.source {
+            CaptureSource::Toplevel(authority) => self
+                .frame
+                .client()
+                .is_some_and(|client| client.id() == authority.owner),
+            CaptureSource::Output(_) => true,
+        };
+        let valid = session_live && owner_matches && !source_is_gone(state, &self.source);
+        if !valid {
+            stop_frame_session(data);
+        }
+        valid
+    }
+}
+
 pub type PendingImageCaptureQueue = Arc<Mutex<Vec<PendingImageCapture>>>;
 
 pub fn new_pending_image_capture_queue() -> PendingImageCaptureQueue {
@@ -226,7 +436,7 @@ fn stop_session(session: &ExtImageCopyCaptureSessionV1) -> bool {
 fn source_is_gone(state: &JwmWaylandState, source: &CaptureSource) -> bool {
     match source {
         CaptureSource::Output(output) => !state.outputs.contains(output),
-        CaptureSource::Toplevel(win) => !state.window_geometry.contains_key(win),
+        CaptureSource::Toplevel(authority) => !authority_is_current(state, authority),
     }
 }
 
@@ -263,8 +473,11 @@ fn track_session(
         }
         // Only a live window: a session on a closed one is stopped at
         // creation, and nothing would ever remove its entry.
-        Some(CaptureSource::Toplevel(win)) if state.window_geometry.contains_key(win) => {
-            let sessions = state.toplevel_capture_sessions.entry(*win).or_default();
+        Some(CaptureSource::Toplevel(authority)) if authority_is_current(state, authority) => {
+            let sessions = state
+                .toplevel_capture_sessions
+                .entry(authority.window)
+                .or_default();
             sessions.retain(Weak::is_alive);
             sessions.push(session.downgrade());
         }
@@ -312,6 +525,11 @@ pub fn stop_output_capture_sessions(output: &Output) -> bool {
 /// The caller drops the window's `window_geometry` first, so frames created
 /// or captured afterwards fail through `source_is_gone`.
 pub(crate) fn stop_toplevel_capture_sessions(state: &mut JwmWaylandState, win: WindowId) -> bool {
+    if let Some(authorities) = state.toplevel_capture_authorities.by_window.remove(&win) {
+        for authority in authorities.into_iter().filter_map(|weak| weak.upgrade()) {
+            authority.revoked.store(true, Ordering::Release);
+        }
+    }
     let Some(sessions) = state.toplevel_capture_sessions.remove(&win) else {
         return false;
     };
@@ -367,11 +585,9 @@ fn send_session_constraints(
             .current_mode()
             .map(|mode| (mode.size.w as u32, mode.size.h as u32)),
         Some(CaptureSource::Output(_)) => None,
-        Some(CaptureSource::Toplevel(win)) => state
-            .window_geometry
-            .get(win)
-            .filter(|geo| geo.w > 0 && geo.h > 0)
-            .map(|geo| (geo.w, geo.h)),
+        Some(CaptureSource::Toplevel(authority)) => {
+            authority_is_current(state, authority).then_some((authority.width, authority.height))
+        }
         None => None,
     };
     let Some((w, h)) = size else {
@@ -391,8 +607,11 @@ fn send_session_constraints(
                 output.name()
             );
         }
-        Some(CaptureSource::Toplevel(win)) => {
-            debug!("[image-capture] session created: toplevel={win:?} size={w}x{h}");
+        Some(CaptureSource::Toplevel(authority)) => {
+            debug!(
+                "[image-capture] session created: toplevel={:?} size={w}x{h}",
+                authority.window
+            );
         }
         None => {}
     }
@@ -513,7 +732,7 @@ impl Dispatch<ExtForeignToplevelImageCaptureSourceManagerV1, ToplevelSourceManag
 {
     fn request(
         state: &mut Self,
-        _client: &Client,
+        client: &Client,
         _resource: &ExtForeignToplevelImageCaptureSourceManagerV1,
         request: ext_foreign_toplevel_image_capture_source_manager_v1::Request,
         _data: &ToplevelSourceManagerData,
@@ -561,7 +780,8 @@ impl Dispatch<ExtForeignToplevelImageCaptureSourceManagerV1, ToplevelSourceManag
                 data_init.init(
                     source,
                     ImageCaptureSourceData {
-                        source: win.map(CaptureSource::Toplevel),
+                        source: win
+                            .and_then(|window| create_toplevel_source(state, window, client.id())),
                     },
                 );
             }
@@ -635,6 +855,24 @@ impl Dispatch<ExtImageCopyCaptureManagerV1, CaptureManagerData> for JwmWaylandSt
                 let capture_source = source
                     .data::<ImageCaptureSourceData>()
                     .and_then(|d| d.source.clone());
+
+                let capture_source = capture_source.filter(|source| !source_is_gone(state, source));
+                state.toplevel_capture_sessions.retain(|_, sessions| {
+                    sessions.retain(Weak::is_alive);
+                    !sessions.is_empty()
+                });
+                let capture_source = if matches!(capture_source, Some(CaptureSource::Toplevel(_)))
+                    && state
+                        .toplevel_capture_sessions
+                        .values()
+                        .map(Vec::len)
+                        .sum::<usize>()
+                        >= MAX_TOPLEVEL_SESSIONS
+                {
+                    None
+                } else {
+                    capture_source
+                };
 
                 let paint_cursors = options
                     .into_result()
@@ -794,7 +1032,13 @@ impl Dispatch<ExtImageCopyCaptureFrameV1, CaptureFrameData> for JwmWaylandState 
                 // Move the attached buffer into the pending queue; the render
                 // loop fulfills it on the next frame for the source output.
                 let buffer = data.buffer.lock_safe().take();
-                let source = match data.source.clone() {
+                let session_live = data.session.upgrade().ok().is_some_and(|session| {
+                    session.is_alive()
+                        && session
+                            .data::<CaptureSessionData>()
+                            .is_some_and(|data| !data.stopped.load(Ordering::Acquire))
+                });
+                let source = match data.source.clone().filter(|_| session_live) {
                     Some(source) if source_is_gone(state, &source) => {
                         // The output or window went away after this frame
                         // was created: its session is over as well.
@@ -1198,7 +1442,6 @@ mod tests {
         FULL_BUFFER_DAMAGE, MAX_DAMAGE_RECTS_PER_FRAME, init_image_copy_capture,
         record_damage_rect, stop_output_capture_sessions, stop_toplevel_capture_sessions,
     };
-    use crate::backend::api::Geometry;
     use crate::backend::common_define::WindowId;
     use crate::backend::wayland::state::JwmWaylandState;
     use smithay::output::Output;
@@ -1229,6 +1472,21 @@ mod tests {
         client: &mut Client,
         window: WindowId,
     ) -> u32 {
+        // Real App fixtures already publish handles. Limit this legacy helper's
+        // list to the explicitly requested window rather than select the first
+        // of unrelated handles.
+        let handles: Vec<_> = server
+            .state
+            .foreign_toplevel_handles
+            .drain()
+            .map(|(_, handle)| handle)
+            .collect();
+        for handle in handles {
+            server
+                .state
+                .foreign_toplevel_list_state
+                .remove_toplevel(&handle);
+        }
         let handle = server
             .state
             .foreign_toplevel_list_state
@@ -1510,17 +1768,8 @@ mod tests {
     #[test]
     fn a_closed_windows_capture_session_stops_and_its_next_frame_fails() {
         let mut server = capture_server();
-        let window = WindowId::from_raw(0x52);
-        server.state.window_geometry.insert(
-            window,
-            Geometry {
-                x: 0,
-                y: 0,
-                w: 32,
-                h: 24,
-                border: 0,
-            },
-        );
+        let _app = super::authority_tests::App::new(&mut server);
+        let window = _app.window;
         let mut client = server.connect();
         let sources = client.bind("ext_foreign_toplevel_image_capture_source_manager_v1", 1);
         let capture = client.bind("ext_image_copy_capture_manager_v1", 1);
@@ -1534,7 +1783,7 @@ mod tests {
         let session_events = object_events(&events, session);
         assert_eq!(
             session_events.first(),
-            Some(&(SESSION_BUFFER_SIZE, vec![32, 24])),
+            Some(&(SESSION_BUFFER_SIZE, vec![800, 600])),
             "a live window's session advertises the window size"
         );
         assert_eq!(
@@ -1575,17 +1824,8 @@ mod tests {
     #[test]
     fn destroying_a_frame_of_a_closed_window_stops_its_session() {
         let mut server = capture_server();
-        let window = WindowId::from_raw(0x53);
-        server.state.window_geometry.insert(
-            window,
-            Geometry {
-                x: 0,
-                y: 0,
-                w: 32,
-                h: 24,
-                border: 0,
-            },
-        );
+        let _app = super::authority_tests::App::new(&mut server);
+        let window = _app.window;
         let mut client = server.connect();
         let sources = client.bind("ext_foreign_toplevel_image_capture_source_manager_v1", 1);
         let capture = client.bind("ext_image_copy_capture_manager_v1", 1);
@@ -1615,16 +1855,6 @@ mod tests {
     /// unpublished again once the session exists (the session keeps the
     /// window), so a later client's list announces only its own window.
     fn toplevel_session(server: &mut Server, client: &mut Client, window: WindowId) -> u32 {
-        server.state.window_geometry.insert(
-            window,
-            Geometry {
-                x: 0,
-                y: 0,
-                w: 32,
-                h: 24,
-                border: 0,
-            },
-        );
         let sources = client.bind("ext_foreign_toplevel_image_capture_source_manager_v1", 1);
         let capture = client.bind("ext_image_copy_capture_manager_v1", 1);
         let toplevel = published_toplevel_handle(server, client, window);
@@ -1653,8 +1883,10 @@ mod tests {
     #[test]
     fn closing_a_window_stops_its_idle_capture_session_at_once() {
         let mut server = capture_server();
-        let closed = WindowId::from_raw(0x54);
-        let kept = WindowId::from_raw(0x55);
+        let _closed_app = super::authority_tests::App::new(&mut server);
+        let closed = _closed_app.window;
+        let _kept_app = super::authority_tests::App::new(&mut server);
+        let kept = _kept_app.window;
         let mut closed_client = server.connect();
         let closed_session = toplevel_session(&mut server, &mut closed_client, closed);
         let mut kept_client = server.connect();
@@ -1825,3 +2057,7 @@ mod tests {
         assert_eq!(damage, [(1, 2, 3, 4)]);
     }
 }
+
+#[cfg(test)]
+#[path = "image_copy_capture_authority_tests.rs"]
+pub(crate) mod authority_tests;

@@ -275,6 +275,15 @@ enum Command {
         #[arg(long, requires_all = ["window", "once"])]
         allow_window_resize: bool,
 
+        /// Select a live Wayland toplevel locally on one persistent connection.
+        /// Read-only source; requires a remote-wayland build and one session.
+        #[arg(long, requires = "once", conflicts_with_all = ["display", "window", "monitor", "region", "share_monitor", "share_region", "share_root", "allow_input", "allow_clipboard", "allow_window_resize", "key_stdin", "capture_source"])]
+        wayland_select: bool,
+
+        /// Native Wayland socket for local selection (defaults to WAYLAND_DISPLAY).
+        #[arg(long, value_name = "SOCKET", requires = "wayland_select")]
+        wayland_display: Option<String>,
+
         /// Share the clipboard with the authenticated peer, both directions:
         /// text, images, and files copied in a file manager.
         ///
@@ -1093,6 +1102,8 @@ fn run(command: Command) -> RemoteResult<()> {
             allow_lan,
             allow_input,
             allow_window_resize,
+            wayland_select,
+            wayland_display,
             allow_clipboard,
             clipboard_mode,
             clipboard_direction,
@@ -1106,7 +1117,11 @@ fn run(command: Command) -> RemoteResult<()> {
             } else {
                 KeySource::File(resolve_key_path(key_file)?)
             };
-            let display = resolve_host_display(display)?;
+            let display = if wayland_select {
+                None
+            } else {
+                resolve_host_display(display)?
+            };
             let jpeg_quality_floor = resolve_quality_floor(jpeg_quality, jpeg_quality_floor)?;
             let capture_area = match (window, monitor, region) {
                 (Some(id), _, _) => CaptureArea::Window(id),
@@ -1131,6 +1146,8 @@ fn run(command: Command) -> RemoteResult<()> {
                 allow_lan,
                 allow_input,
                 allow_window_resize,
+                wayland_select,
+                wayland_display,
                 allow_clipboard,
                 clipboard_mode,
                 clipboard_direction,
@@ -2710,6 +2727,63 @@ mod explicit_resize_tests {
                 "0x200001",
                 "--once",
                 "--allow-window-resize"
+            ])
+            .is_ok()
+        );
+    }
+}
+
+#[cfg(test)]
+mod wayland_source_cli_tests {
+    use super::*;
+    #[test]
+    fn wayland_selection_is_local_single_use_and_has_no_x11_permissions() {
+        assert!(Cli::try_parse_from(["jwm-remote", "host", "--wayland-select", "--once"]).is_ok());
+        assert!(Cli::try_parse_from(["jwm-remote", "host", "--wayland-select"]).is_err());
+        assert!(
+            Cli::try_parse_from(["jwm-remote", "host", "--wayland-display", "wayland-1"]).is_err()
+        );
+        for denied in [
+            "--allow-input",
+            "--allow-clipboard",
+            "--allow-window-resize",
+            "--key-stdin",
+            "--share-root",
+        ] {
+            assert!(
+                Cli::try_parse_from(["jwm-remote", "host", "--wayland-select", "--once", denied])
+                    .is_err(),
+                "{denied}"
+            );
+        }
+        for denied in [
+            "--display",
+            "--window",
+            "--monitor",
+            "--region",
+            "--capture-source",
+        ] {
+            assert!(
+                Cli::try_parse_from([
+                    "jwm-remote",
+                    "host",
+                    "--wayland-select",
+                    "--once",
+                    denied,
+                    "1"
+                ])
+                .is_err(),
+                "{denied}"
+            );
+        }
+        assert!(
+            Cli::try_parse_from([
+                "jwm-remote",
+                "host",
+                "--wayland-select",
+                "--once",
+                "--wayland-display",
+                "wayland-private"
             ])
             .is_ok()
         );

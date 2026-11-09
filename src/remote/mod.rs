@@ -43,6 +43,10 @@ pub mod ssh;
 mod tile;
 mod triangle_patch;
 pub mod usability;
+#[cfg(feature = "remote-wayland")]
+mod wayland_capture;
+#[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+mod wayland_capture_integration;
 mod window_capture;
 #[cfg(test)]
 mod window_capture_integration;

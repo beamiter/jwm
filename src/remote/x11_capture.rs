@@ -77,6 +77,8 @@ bitflags::bitflags! {
         const OVERLAY = 1 << 0;
         /// Capturing only an explicitly authorized application pixmap.
         const WINDOW = 1 << 7;
+        /// Native Wayland single-surface SHM capture (never an X drawable).
+        const WAYLAND = 1 << 8;
         /// Downscaling in the X server instead of on the CPU.
         const XRENDER = 1 << 1;
         /// Reading back through MIT-SHM rather than core `GetImage`.
@@ -98,7 +100,9 @@ impl CaptureMode {
     #[must_use]
     pub fn describe(self) -> String {
         let mut parts = Vec::with_capacity(5);
-        parts.push(if self.contains(Self::WINDOW) {
+        parts.push(if self.contains(Self::WAYLAND) {
+            "wayland-surface"
+        } else if self.contains(Self::WINDOW) {
             "window-pixmap"
         } else if self.contains(Self::OVERLAY) {
             "overlay"
@@ -120,7 +124,7 @@ impl CaptureMode {
         } else {
             "no-damage"
         });
-        parts.push(if self.contains(Self::WINDOW) {
+        parts.push(if self.intersects(Self::WINDOW | Self::WAYLAND) {
             "no-cursor"
         } else if self.contains(Self::CURSOR_EVENTS) {
             "cursor-events"
@@ -130,7 +134,7 @@ impl CaptureMode {
         if !self.contains(Self::GEOMETRY_EVENTS) {
             parts.push("geometry-poll");
         }
-        if !self.contains(Self::COMPOSITOR_EVENTS) {
+        if !self.intersects(Self::COMPOSITOR_EVENTS | Self::WAYLAND) {
             parts.push("compositor-poll");
         }
         parts.join("/")

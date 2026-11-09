@@ -525,28 +525,54 @@ fn queued_capture_disposition<'a>(
     }
 }
 
-/// Resolve a queued toplevel capture to the window's surface and size, or to
-/// the reason its frame fails. `size` is the window's `window_geometry`
-/// entry, the liveness key session setup uses too; `None` means the window
-/// closed after the frame was queued.
-///
-/// A closed window is gone for good: its frame fails `stopped`, and the
-/// session's `stopped` follows once the client destroys the frame. `unknown`
-/// told the client to retry, so a window-capture stream of a closed window
-/// looped through capture, a forced render and failure until the client gave
-/// up. A live window without a surface or a size yet may recover, so it fails
-/// retryably.
-fn toplevel_capture_target<S>(
-    surface: Option<S>,
-    size: Option<(i32, i32)>,
-) -> Result<(S, (i32, i32)), ImageCaptureFailureReason> {
-    let Some((width, height)) = size else {
-        return Err(ImageCaptureFailureReason::Stopped);
-    };
-    match surface {
-        Some(surface) if width > 0 && height > 0 => Ok((surface, (width, height))),
-        _ => Err(ImageCaptureFailureReason::Unknown),
+/// Validate the entire destination before writing any captured pixel.
+#[derive(Debug)]
+struct ToplevelShmLayout {
+    offset: usize,
+    stride: usize,
+    row_bytes: usize,
+    height: usize,
+    opaque: bool,
+}
+
+fn toplevel_shm_layout(
+    size: (i32, i32),
+    data: &smithay::wayland::shm::BufferData,
+    pool_len: usize,
+) -> Option<ToplevelShmLayout> {
+    use smithay::reexports::wayland_server::protocol::wl_shm::Format;
+    let (width, height) = size;
+    if width <= 0
+        || height <= 0
+        || width > 16384
+        || height > 16384
+        || i64::from(width) * i64::from(height) > 64 * 1024 * 1024
+        || data.width != width
+        || data.height != height
+        || !matches!(data.format, Format::Argb8888 | Format::Xrgb8888)
+    {
+        return None;
     }
+    let offset = usize::try_from(data.offset).ok()?;
+    let stride = usize::try_from(data.stride).ok()?;
+    let height = usize::try_from(height).ok()?;
+    let row_bytes = usize::try_from(width).ok()?.checked_mul(4)?;
+    if stride < row_bytes {
+        return None;
+    }
+    let end = offset
+        .checked_add((height - 1).checked_mul(stride)?)?
+        .checked_add(row_bytes)?;
+    if end > pool_len {
+        return None;
+    }
+    Some(ToplevelShmLayout {
+        offset,
+        stride,
+        row_bytes,
+        height,
+        opaque: data.format == Format::Xrgb8888,
+    })
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -7009,10 +7035,7 @@ impl KmsState {
         let phys: Size<i32, Physical> = (width, height).into();
         let mut dt = OutputDamageTracker::new(phys, Scale::from(1.0f64), Transform::Normal);
         match dt.render_output(renderer, &mut target, 0, elements, clear) {
-            Ok(res) => {
-                let _ = res.sync.wait();
-                true
-            }
+            Ok(res) => res.sync.wait().is_ok(),
             Err(e) => {
                 log::error!("{}: {e:?}", renderer_ctx("capture/dmabuf: render_output"));
                 false
@@ -7547,7 +7570,7 @@ impl KmsState {
     /// Unlike output capture, this renders only one window's surface tree into a
     /// window-sized offscreen buffer and reads it back into the client buffer.
     /// Runs once per render cycle since toplevel frames are not tied to an output.
-    fn fulfill_image_capture_toplevel_frames(
+    pub(crate) fn fulfill_image_capture_toplevel_frames(
         renderer: &mut GlesRenderer,
         offscreen_cache: &mut Option<(i32, i32, GlesRenderbuffer)>,
         state: &crate::backend::wayland::state::JwmWaylandState,
@@ -7580,27 +7603,20 @@ impl KmsState {
         }
 
         for frame_info in frames {
-            let CaptureSource::Toplevel(win) = frame_info.source else {
+            let CaptureSource::Toplevel(authority) = &frame_info.source else {
                 continue;
             };
-
-            let size = state
-                .window_geometry
-                .get(&win)
-                .map(|geo| (geo.w as i32, geo.h as i32));
-            let (surface, (width, height)) =
-                match toplevel_capture_target(state.surface_for_window(win), size) {
-                    Ok(target) => target,
-                    Err(reason) => {
-                        Self::note_image_capture_frame_failed(counters, reason);
-                        frame_info.frame.failed(reason);
-                        continue;
-                    }
-                };
+            if !frame_info.authorized(state) {
+                Self::note_image_capture_frame_failed(counters, FailureReason::Stopped);
+                frame_info.frame.failed(FailureReason::Stopped);
+                continue;
+            }
+            let surface = &authority.surface;
+            let (width, height) = (authority.width as i32, authority.height as i32);
 
             // Shift the surface buffer origin by -window_geometry.loc so client-side
             // shadow/CSD margins don't push the content off the capture buffer.
-            let (off_x, off_y) = with_states(&surface, |states| {
+            let (off_x, off_y) = with_states(surface, |states| {
                 let mut cached = states.cached_state.get::<SurfaceCachedState>();
                 cached
                     .current()
@@ -7610,18 +7626,47 @@ impl KmsState {
             });
 
             let scale = Scale::from(1.0f64);
-            let location: Point<i32, Physical> = (-off_x, -off_y).into();
-            let tree = SurfaceTree::from_surface(&surface);
+            let (Some(x), Some(y)) = (off_x.checked_neg(), off_y.checked_neg()) else {
+                Self::note_image_capture_frame_failed(counters, FailureReason::BufferConstraints);
+                frame_info.frame.failed(FailureReason::BufferConstraints);
+                continue;
+            };
+            let location: Point<i32, Physical> = (x, y).into();
+            let tree = SurfaceTree::from_surface(surface);
             let elements: Vec<KmsRenderElement> = AsRenderElements::<GlesRenderer>::render_elements(
                 &tree, renderer, location, scale, 1.0,
             );
 
             // dmabuf fast path: render the window straight into the client buffer.
             if let Some(dmabuf) = get_dmabuf(&frame_info.buffer).ok().cloned() {
+                use smithay::backend::allocator::Buffer as _;
+                if dmabuf.size() != (width, height).into()
+                    || !renderer
+                        .egl_context()
+                        .dmabuf_render_formats()
+                        .contains(&dmabuf.format())
+                {
+                    Self::note_image_capture_frame_failed(
+                        counters,
+                        FailureReason::BufferConstraints,
+                    );
+                    frame_info.frame.failed(FailureReason::BufferConstraints);
+                    continue;
+                }
+                if !frame_info.authorized(state) {
+                    Self::note_image_capture_frame_failed(counters, FailureReason::Stopped);
+                    frame_info.frame.failed(FailureReason::Stopped);
+                    continue;
+                }
                 let clear = smithay::backend::renderer::Color32F::new(0.0, 0.0, 0.0, 0.0);
                 if Self::render_into_client_dmabuf(
                     renderer, &dmabuf, width, height, &elements, clear,
                 ) {
+                    if !frame_info.authorized(state) {
+                        Self::note_image_capture_frame_failed(counters, FailureReason::Stopped);
+                        frame_info.frame.failed(FailureReason::Stopped);
+                        continue;
+                    }
                     frame_info.frame.transform(wl_output::Transform::Normal);
                     frame_info.frame.damage(0, 0, width, height);
                     let now = std::time::SystemTime::now()
@@ -7711,39 +7756,43 @@ impl KmsState {
 
             let copy_result =
                 with_buffer_contents_mut(&frame_info.buffer, |ptr, pool_len, buf_data| {
-                    let buf_offset = buf_data.offset as usize;
-                    let buf_stride = buf_data.stride as usize;
-                    let buf_h = buf_data.height as usize;
-                    let buf_w = buf_data.width as usize;
-                    let src_stride = width as usize * 4;
-                    let copy_h = buf_h.min(height as usize);
-                    let copy_w = buf_w.min(width as usize);
-
-                    for row in 0..copy_h {
-                        let src_row_start = row * src_stride;
-                        let dst_row_start = buf_offset + row * buf_stride;
-                        if dst_row_start + copy_w * 4 > pool_len {
-                            break;
-                        }
-                        for col in 0..copy_w {
-                            let si = src_row_start + col * 4;
-                            let di = dst_row_start + col * 4;
-                            if si + 3 >= pixels.len() {
-                                break;
-                            }
-                            // GL ABGR8888 [R,G,B,A] → shm ARGB8888 [B,G,R,A].
+                    if !frame_info.authorized(state) {
+                        return Err(FailureReason::Stopped);
+                    }
+                    let layout = toplevel_shm_layout((width, height), &buf_data, pool_len)
+                        .ok_or(FailureReason::BufferConstraints)?;
+                    let source_len = layout
+                        .row_bytes
+                        .checked_mul(layout.height)
+                        .ok_or(FailureReason::BufferConstraints)?;
+                    if pixels.len() < source_len {
+                        return Err(FailureReason::Unknown);
+                    }
+                    for row in 0..layout.height {
+                        let src = row * layout.row_bytes;
+                        let dst = layout.offset + row * layout.stride;
+                        for col in (0..layout.row_bytes).step_by(4) {
+                            let si = src + col;
+                            let di = dst + col;
+                            // Complete source/destination ranges were checked before the first write.
                             unsafe {
                                 *ptr.add(di) = pixels[si + 2];
                                 *ptr.add(di + 1) = pixels[si + 1];
                                 *ptr.add(di + 2) = pixels[si];
-                                *ptr.add(di + 3) = pixels[si + 3];
+                                *ptr.add(di + 3) = if layout.opaque { 255 } else { pixels[si + 3] };
                             }
                         }
                     }
+                    Ok(())
                 });
 
             match copy_result {
-                Ok(()) => {
+                Ok(Ok(())) => {
+                    if !frame_info.authorized(state) {
+                        Self::note_image_capture_frame_failed(counters, FailureReason::Stopped);
+                        frame_info.frame.failed(FailureReason::Stopped);
+                        continue;
+                    }
                     frame_info.frame.transform(wl_output::Transform::Normal);
                     frame_info.frame.damage(0, 0, width, height);
                     let now = std::time::SystemTime::now()
@@ -7757,6 +7806,10 @@ impl KmsState {
                     );
                     frame_info.frame.ready();
                     Self::note_image_capture_fulfilled(counters);
+                }
+                Ok(Err(reason)) => {
+                    Self::note_image_capture_frame_failed(counters, reason);
+                    frame_info.frame.failed(reason);
                 }
                 Err(e) => {
                     log::warn!(
@@ -11633,61 +11686,54 @@ mod compositor_texture_ownership_tests {
     }
 
     #[test]
-    fn a_capture_of_a_closed_window_fails_stopped_instead_of_retryably() {
-        use super::{ImageCaptureFailureReason, toplevel_capture_target};
-
-        // A live, sized window with a surface renders at its geometry size.
-        assert_eq!(
-            toplevel_capture_target(Some("surface"), Some((640, 480))),
-            Ok(("surface", (640, 480)))
+    fn toplevel_capture_shm_requires_exact_complete_supported_buffer() {
+        use smithay::reexports::wayland_server::protocol::wl_shm::Format;
+        use smithay::wayland::shm::BufferData;
+        let data = BufferData {
+            offset: 8,
+            width: 4,
+            height: 2,
+            stride: 20,
+            format: Format::Xrgb8888,
+        };
+        let layout = super::toplevel_shm_layout((4, 2), &data, 44).unwrap();
+        assert!(layout.opaque);
+        assert!(super::toplevel_shm_layout((4, 2), &data, 43).is_none());
+        assert!(super::toplevel_shm_layout((3, 2), &data, 100).is_none());
+        assert!(super::toplevel_shm_layout((5, 2), &data, 100).is_none());
+        assert!(
+            super::toplevel_shm_layout((4, 2), &BufferData { offset: -1, ..data }, 100).is_none()
         );
-        // The window closed after the frame was queued: its source is gone
-        // for good, so the client must not be told to retry.
-        assert_eq!(
-            toplevel_capture_target(Some("surface"), None),
-            Err(ImageCaptureFailureReason::Stopped)
+        assert!(
+            super::toplevel_shm_layout((4, 2), &BufferData { stride: -1, ..data }, 100).is_none()
         );
-        assert_eq!(
-            toplevel_capture_target(None::<&str>, None),
-            Err(ImageCaptureFailureReason::Stopped)
+        assert!(
+            super::toplevel_shm_layout((4, 2), &BufferData { stride: 15, ..data }, 100).is_none()
         );
-        // A live window without a surface or a size yet may recover.
-        assert_eq!(
-            toplevel_capture_target(None::<&str>, Some((640, 480))),
-            Err(ImageCaptureFailureReason::Unknown)
+        assert!(
+            super::toplevel_shm_layout(
+                (4, 2),
+                &BufferData {
+                    format: Format::Rgb565,
+                    ..data
+                },
+                100
+            )
+            .is_none()
         );
-        assert_eq!(
-            toplevel_capture_target(Some("surface"), Some((0, 480))),
-            Err(ImageCaptureFailureReason::Unknown)
+        assert!(
+            !super::toplevel_shm_layout(
+                (4, 2),
+                &BufferData {
+                    format: Format::Argb8888,
+                    ..data
+                },
+                44
+            )
+            .unwrap()
+            .opaque
         );
-
-        // The renderer resolves every queued toplevel frame through it.
-        const SOURCE: &str = include_str!("udev_kms.rs");
-        let fulfill = SOURCE
-            .split_once("fn fulfill_image_capture_toplevel_frames(")
-            .expect("the toplevel capture pass exists")
-            .1
-            .split_once("with_states(&surface")
-            .expect("the pass reads the surface geometry after resolving it")
-            .0;
-        assert!(fulfill.contains("toplevel_capture_target(state.surface_for_window(win), size)"));
-        assert!(fulfill.contains("frame_info.frame.failed(reason);"));
-        // The failure is counted by its reason, not as a render fault.
-        let counted = format!(
-            "Self::{}(counters, reason);",
-            "note_image_capture_frame_failed"
-        );
-        assert!(fulfill.contains(&counted));
-        let drain = SOURCE
-            .split_once("fn fail_unservable_output_captures(")
-            .expect("the unservable-capture drain exists")
-            .1
-            .split_once("\n    fn ")
-            .expect("the drain ends")
-            .0;
-        assert!(drain.contains(&format!(
-            "{counted}\n                frame.frame.failed(reason);"
-        )));
+        assert!(super::toplevel_shm_layout((0, 2), &data, 100).is_none());
     }
 
     #[test]

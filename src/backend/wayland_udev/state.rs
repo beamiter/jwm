@@ -603,6 +603,8 @@ pub struct JwmWaylandState {
         Option<crate::backend::wayland_udev::image_copy_capture::PendingImageCaptureQueue>,
     /// Live ext-image-copy-capture sessions of each captured window, stopped
     /// when the window is retired (see `retire_window_geometry`).
+    pub(crate) toplevel_capture_authorities:
+        crate::backend::wayland_udev::image_copy_capture::ToplevelCaptureAuthorities,
     pub(crate) toplevel_capture_sessions:
         crate::backend::wayland_udev::image_copy_capture::ToplevelCaptureSessions,
 
@@ -759,6 +761,13 @@ where
 impl JwmWaylandState {
     #[allow(dead_code)]
     pub(crate) fn set_manager_window_mapped(&mut self, win: WindowId, mapped: bool) {
+        if !mapped
+            && crate::backend::wayland_udev::image_copy_capture::stop_toplevel_capture_sessions(
+                self, win,
+            )
+        {
+            self.request_client_flush();
+        }
         apply_manager_mapping_state(
             &mut self.mapped_windows,
             &mut self.manager_unmapped_windows,
@@ -773,6 +782,11 @@ impl JwmWaylandState {
     }
 
     fn take_window_mapping(&mut self, win: WindowId) -> bool {
+        if crate::backend::wayland_udev::image_copy_capture::stop_toplevel_capture_sessions(
+            self, win,
+        ) {
+            self.request_client_flush();
+        }
         take_window_mapping_state(
             &mut self.mapped_windows,
             &mut self.manager_unmapped_windows,
@@ -1432,6 +1446,7 @@ impl SessionLockHandler for JwmWaylandState {
         self.active_session_lock = None;
         self.lock_surfaces.clear();
         self.session_locked = true;
+        crate::backend::wayland_udev::image_copy_capture::stop_all_toplevel_capture_sessions(self);
         self.session_lock_epoch = self.session_lock_epoch.wrapping_add(1);
         self.revoke_unlocked_input();
         self.discard_locked_wm_input();
@@ -2828,6 +2843,12 @@ impl XwmHandler for JwmWaylandState {
                 .window_geometry
                 .get(&win_id)
                 .map_or(0, |prior| prior.border);
+            crate::backend::wayland_udev::image_copy_capture::toplevel_capture_geometry_changing(
+                self,
+                win_id,
+                geometry.size.w.max(1) as u32,
+                geometry.size.h.max(1) as u32,
+            );
             self.window_geometry.insert(
                 win_id,
                 Geometry {
@@ -3612,6 +3633,7 @@ impl JwmWaylandState {
 
                 image_capture_pending,
                 toplevel_capture_sessions: HashMap::new(),
+                toplevel_capture_authorities: Default::default(),
 
                 capture_counters: Arc::new(Mutex::new(CaptureCounters::default())),
 
@@ -3779,6 +3801,11 @@ impl JwmWaylandState {
     // compiles this module through `backend::wayland::state` without a caller.
     #[allow(dead_code)]
     pub(crate) fn set_monitor_shades(&mut self, shades: &[crate::backend::api::MonitorShade]) {
+        crate::backend::wayland_udev::image_copy_capture::set_toplevel_capture_block(
+            self,
+            crate::backend::wayland_udev::image_copy_capture::CAPTURE_BLOCK_MONITOR_LOCK,
+            !shades.is_empty(),
+        );
         self.monitor_shades = shades
             .iter()
             .filter(|shade| shade.width > 0 && shade.height > 0)
@@ -4612,6 +4639,9 @@ impl CompositorHandler for JwmWaylandState {
     }
 
     fn commit(&mut self, surface: &WlSurface) {
+        crate::backend::wayland_udev::image_copy_capture::toplevel_capture_surface_committed(
+            self, surface,
+        );
         self.popup_manager.commit(surface);
         self.popup_manager.cleanup();
         // wp-color-management double-buffer latch: move the image description
@@ -4744,6 +4774,7 @@ impl CompositorHandler for JwmWaylandState {
                                 .map(|geo| geo.w != new_w || geo.h != new_h)
                                 .unwrap_or(false);
                             if should_update {
+                                crate::backend::wayland_udev::image_copy_capture::toplevel_capture_geometry_changing(self,win,new_w,new_h);
                                 if let Some(geo) = self.window_geometry.get_mut(&win) {
                                     geo.w = new_w;
                                     geo.h = new_h;

@@ -2419,6 +2419,8 @@ dependencies = [
  "toml_edit",
  "tracing",
  "udev",
+ "wayland-client",
+ "wayland-protocols",
  "winit 0.30.13",
  "x11",
  "x11rb 0.14.0",

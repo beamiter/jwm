@@ -174,8 +174,8 @@ impl Drop for HeadlessGl {
 /// [`HEADLESS_GL_LOCK`] for its whole life and honours
 /// `JWM_REQUIRE_HEADLESS_GL`.
 #[cfg(feature = "backend-wayland-udev")]
-struct HeadlessSmithayGles {
-    renderer: smithay::backend::renderer::gles::GlesRenderer,
+pub(crate) struct HeadlessSmithayGles {
+    pub(crate) renderer: smithay::backend::renderer::gles::GlesRenderer,
     /// Released only once the renderer above, and with it its context and
     /// display, is gone. Declared last so it drops last.
     _serialized: std::sync::MutexGuard<'static, ()>,
@@ -183,7 +183,7 @@ struct HeadlessSmithayGles {
 
 #[cfg(feature = "backend-wayland-udev")]
 impl HeadlessSmithayGles {
-    fn new() -> Option<Self> {
+    pub(crate) fn new() -> Option<Self> {
         let result = Self::try_new();
         if result.is_none()
             && std::env::var_os("JWM_REQUIRE_HEADLESS_GL").is_some_and(|value| value != "0")

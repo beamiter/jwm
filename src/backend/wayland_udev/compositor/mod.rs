@@ -21,7 +21,7 @@ mod frame_rate;
 #[allow(dead_code, unreachable_pub)]
 mod gpu_fence_sync;
 #[cfg(test)]
-mod headless_render;
+pub(crate) mod headless_render;
 mod minimized_thumbnail;
 mod overview;
 #[allow(dead_code, unreachable_pub)]

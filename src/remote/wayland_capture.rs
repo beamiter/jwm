@@ -1,0 +1,920 @@
+//! One local, interactive Wayland toplevel grant, retained on one connection.
+//!
+//! No X11 access, output fallback, identifier lookup, reconnection, cursor,
+//! input, clipboard, or native resize. Protocol globals are not a per-client
+//! permission boundary: this host must itself be a trusted local client.
+use super::RemoteResult;
+use super::messages::FrameLimits;
+use super::x11_capture::{CaptureImageRecycler, CaptureOutcome, CapturedFrame, frame_dimensions};
+use image::{RgbImage, imageops::FilterType};
+use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
+use nix::sys::memfd::{MFdFlags, memfd_create};
+use std::fs::File;
+use std::io::{self, Write};
+use std::os::fd::AsFd;
+use std::os::unix::fs::FileExt;
+use std::os::unix::net::UnixStream;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
+use wayland_client::backend::WaylandError;
+use wayland_client::protocol::{
+    wl_buffer, wl_callback, wl_output, wl_registry, wl_shm, wl_shm_pool,
+};
+use wayland_client::{Connection, Dispatch, EventQueue, QueueHandle, WEnum};
+use wayland_protocols::ext::foreign_toplevel_list::v1::client::{
+    ext_foreign_toplevel_handle_v1::{self as handle, ExtForeignToplevelHandleV1},
+    ext_foreign_toplevel_list_v1::{self as list, ExtForeignToplevelListV1},
+};
+use wayland_protocols::ext::image_capture_source::v1::client::{
+    ext_foreign_toplevel_image_capture_source_manager_v1::ExtForeignToplevelImageCaptureSourceManagerV1,
+    ext_image_capture_source_v1::ExtImageCaptureSourceV1,
+};
+use wayland_protocols::ext::image_copy_capture::v1::client::{
+    ext_image_copy_capture_frame_v1::{self as frame, ExtImageCopyCaptureFrameV1},
+    ext_image_copy_capture_manager_v1::{self as manager, ExtImageCopyCaptureManagerV1},
+    ext_image_copy_capture_session_v1::{self as session, ExtImageCopyCaptureSessionV1},
+};
+
+const PROTOCOL_TIMEOUT: Duration = Duration::from_secs(5);
+const SELECTION_TIMEOUT: Duration = Duration::from_secs(60);
+const MAX_TOPLEVELS: usize = 256;
+const MAX_LABEL_BYTES: usize = 256;
+const MAX_SELECTION_BYTES: usize = 32;
+
+struct Toplevel {
+    handle: ExtForeignToplevelHandleV1,
+    title: String,
+    app_id: String,
+    complete: bool,
+    closed: bool,
+}
+
+#[derive(Default)]
+struct State {
+    shm: Option<wl_shm::WlShm>,
+    list: Option<ExtForeignToplevelListV1>,
+    source_manager: Option<ExtForeignToplevelImageCaptureSourceManagerV1>,
+    capture_manager: Option<ExtImageCopyCaptureManagerV1>,
+    globals: Vec<u32>,
+    toplevels: Vec<Toplevel>,
+    selected: Option<ExtForeignToplevelHandleV1>,
+    failed: Option<&'static str>,
+    sync_count: u64,
+    shm_xrgb: bool,
+    size: Option<(u16, u16)>,
+    batch_size: Option<(u16, u16)>,
+    batch_xrgb: bool,
+    constraints_done: bool,
+    frame_serial: u64,
+    frame_ready: bool,
+    normal_transform: bool,
+}
+
+impl State {
+    fn fail(&mut self, message: &'static str) {
+        self.failed.get_or_insert(message);
+    }
+    fn check(&self) -> RemoteResult<()> {
+        if let Some(message) = self.failed {
+            return Err(invalid(message).into());
+        }
+        if let Some(selected) = &self.selected {
+            if !self
+                .toplevels
+                .iter()
+                .any(|item| &item.handle == selected && item.complete && !item.closed)
+            {
+                return Err(invalid("selected Wayland toplevel is no longer live").into());
+            }
+        }
+        Ok(())
+    }
+    fn advertise_size(&mut self, width: u32, height: u32) {
+        self.begin_constraints();
+        if buffer_layout(width, height).is_err() {
+            self.fail("invalid Wayland source size");
+            return;
+        }
+        let size = (width as u16, height as u16);
+        if self.size.is_some_and(|original| original != size) {
+            self.fail("Wayland source size changed; select again locally");
+            return;
+        }
+        // Freeze even before Done, so initial resize/restore cannot replace
+        // the grant while format constraints are still arriving.
+        self.size = Some(size);
+        self.batch_size = Some(size);
+    }
+
+    fn begin_constraints(&mut self) {
+        if self.constraints_done {
+            self.constraints_done = false;
+            self.batch_size = None;
+            self.batch_xrgb = false;
+        }
+    }
+}
+
+pub(super) struct WaylandCapture {
+    conn: Connection,
+    queue: EventQueue<State>,
+    state: State,
+    source: Option<ExtImageCaptureSourceV1>,
+    session: Option<ExtImageCopyCaptureSessionV1>,
+    inflight: Option<ExtImageCopyCaptureFrameV1>,
+    buffer: Option<wl_buffer::WlBuffer>,
+    file: Option<File>,
+    host_width_limit: u16,
+    max_width: u16,
+    max_height: u16,
+    limits: FrameLimits,
+    epoch: u64,
+    recycler: CaptureImageRecycler,
+}
+
+impl WaylandCapture {
+    pub(super) fn connect(display: Option<&str>, max_width: u16) -> RemoteResult<Self> {
+        let path = socket_path(display)?;
+        let stream = jwm_ipc_transport::connect(&path, PROTOCOL_TIMEOUT)?;
+        Self::connect_stream(stream, max_width, |capture| {
+            eprint!("jwm-remote: select Wayland window index: ");
+            io::stderr().flush()?;
+            capture.read_selection(Instant::now() + SELECTION_TIMEOUT)
+        })
+    }
+
+    /// Exercise the production protocol path against a private test server.
+    /// Only local selection is replaced; index is one-based, as in the CLI.
+    #[cfg(all(test, feature = "backend-wayland-udev"))]
+    pub(crate) fn connect_test_stream(
+        stream: UnixStream,
+        index: usize,
+        max_width: u16,
+    ) -> RemoteResult<Self> {
+        Self::connect_stream(stream, max_width, |_| {
+            index
+                .checked_sub(1)
+                .filter(|index| *index < MAX_TOPLEVELS)
+                .ok_or_else(|| invalid("invalid Wayland test selection index").into())
+        })
+    }
+
+    fn connect_stream(
+        stream: UnixStream,
+        max_width: u16,
+        select: impl FnOnce(&mut Self) -> RemoteResult<usize>,
+    ) -> RemoteResult<Self> {
+        stream.set_nonblocking(true)?;
+        let conn = Connection::from_socket(stream)?;
+        let queue = conn.new_event_queue();
+        let qh = queue.handle();
+        conn.display().get_registry(&qh, ());
+        let mut capture = Self {
+            conn,
+            queue,
+            state: State::default(),
+            source: None,
+            session: None,
+            inflight: None,
+            buffer: None,
+            file: None,
+            host_width_limit: max_width,
+            max_width,
+            max_height: 0,
+            limits: FrameLimits::default(),
+            epoch: 1,
+            recycler: CaptureImageRecycler::default(),
+        };
+        let deadline = Instant::now() + PROTOCOL_TIMEOUT;
+        // First sync obtains globals. Binds issued by their callbacks precede
+        // the second sync, which obtains initial handles and metadata batches.
+        capture.sync_until(deadline)?;
+        capture.sync_until(deadline)?;
+        if capture.state.shm.is_none()
+            || !capture.state.shm_xrgb
+            || capture.state.list.is_none()
+            || capture.state.source_manager.is_none()
+            || capture.state.capture_manager.is_none()
+        {
+            return Err(invalid(
+                "Wayland compositor lacks required toplevel, image-copy, or XRGB SHM support",
+            )
+            .into());
+        }
+        let mut listed = Vec::new();
+        for (index, item) in capture.state.toplevels.iter().enumerate() {
+            if item.complete && !item.closed {
+                eprintln!(
+                    "jwm-remote: Wayland window [{}]: title={} app_id={}",
+                    index + 1,
+                    item.title,
+                    item.app_id
+                );
+                listed.push(index);
+            }
+        }
+        if listed.is_empty() {
+            return Err(invalid("no live Wayland toplevels are available").into());
+        }
+        let index = select(&mut capture)?;
+        if !listed.contains(&index) {
+            return Err(invalid("Wayland index was not in the displayed selection list").into());
+        }
+        let selected = capture
+            .state
+            .toplevels
+            .get(index)
+            .filter(|item| item.complete && !item.closed)
+            .ok_or_else(|| invalid("selected Wayland index is not a live listed window"))?
+            .handle
+            .clone();
+        capture.state.selected = Some(selected.clone());
+        // A closed handle during local selection can never become an output,
+        // a replacement identifier, or a second interactive selection.
+        let deadline = Instant::now() + PROTOCOL_TIMEOUT;
+        capture.sync_until(deadline)?;
+        capture.state.check()?;
+        let source = capture
+            .state
+            .source_manager
+            .as_ref()
+            .unwrap()
+            .create_source(&selected, &qh, ());
+        let session = capture
+            .state
+            .capture_manager
+            .as_ref()
+            .unwrap()
+            .create_session(&source, manager::Options::empty(), &qh, ());
+        capture.source = Some(source);
+        capture.session = Some(session);
+        capture.drive_until(deadline, |state| state.constraints_done)?;
+        capture.create_buffer()?;
+        capture.sync_until(deadline)?;
+        Ok(capture)
+    }
+
+    fn create_buffer(&mut self) -> RemoteResult<()> {
+        let size = self
+            .state
+            .size
+            .ok_or_else(|| invalid("missing Wayland buffer dimensions"))?;
+        let (stride, bytes) = buffer_layout(u32::from(size.0), u32::from(size.1))?;
+        let file = File::from(memfd_create("jwm-remote-wayland", MFdFlags::MFD_CLOEXEC)?);
+        file.set_len(bytes as u64)?;
+        let qh = self.queue.handle();
+        let pool = self.state.shm.as_ref().unwrap().create_pool(
+            file.as_fd(),
+            i32::try_from(bytes)?,
+            &qh,
+            (),
+        );
+        let buffer = pool.create_buffer(
+            0,
+            i32::from(size.0),
+            i32::from(size.1),
+            stride,
+            wl_shm::Format::Xrgb8888,
+            &qh,
+            (),
+        );
+        pool.destroy();
+        self.file = Some(file);
+        self.buffer = Some(buffer);
+        Ok(())
+    }
+
+    fn read_selection(&mut self, deadline: Instant) -> RemoteResult<usize> {
+        let stdin = io::stdin();
+        let mut bytes = Vec::with_capacity(MAX_SELECTION_BYTES);
+        loop {
+            self.state.check()?;
+            if Instant::now() >= deadline {
+                return Err(invalid("Wayland window selection timed out").into());
+            }
+            // Continue lifecycle dispatch while waiting for local authorization.
+            self.pump(deadline.min(Instant::now() + Duration::from_millis(25)))?;
+            let mut fds = [PollFd::new(
+                stdin.as_fd(),
+                PollFlags::POLLIN | PollFlags::POLLHUP | PollFlags::POLLERR,
+            )];
+            if poll(&mut fds, 0_u16)? == 0 {
+                continue;
+            }
+            let mut byte = [0_u8; 1];
+            if nix::unistd::read(stdin.as_fd(), &mut byte)? != 1 {
+                return Err(invalid("Wayland window selection cancelled").into());
+            }
+            bytes.push(byte[0]);
+            if bytes.len() > MAX_SELECTION_BYTES {
+                return Err(invalid("Wayland window selection exceeds 32 bytes").into());
+            }
+            if byte[0] == b'\n' {
+                return parse_selection(&bytes);
+            }
+            if bytes.len() == MAX_SELECTION_BYTES {
+                return Err(invalid("Wayland window selection exceeds 32 bytes").into());
+            }
+        }
+    }
+
+    fn sync_until(&mut self, deadline: Instant) -> RemoteResult<()> {
+        let expected = self
+            .state
+            .sync_count
+            .checked_add(1)
+            .ok_or_else(|| invalid("Wayland sync counter exhausted"))?;
+        self.conn.display().sync(&self.queue.handle(), ());
+        self.drive_until(deadline, |state| state.sync_count >= expected)
+    }
+
+    fn drive_until(
+        &mut self,
+        deadline: Instant,
+        done: impl Fn(&State) -> bool,
+    ) -> RemoteResult<()> {
+        loop {
+            self.state.check()?;
+            if done(&self.state) {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                return Err(invalid("Wayland protocol deadline exceeded").into());
+            }
+            self.pump(deadline)?;
+        }
+    }
+
+    /// Never use blocking_dispatch or roundtrip: both allow an unbounded wait.
+    fn pump(&mut self, deadline: Instant) -> RemoteResult<bool> {
+        let dispatched = self.queue.dispatch_pending(&mut self.state)?;
+        self.state.check()?;
+        if dispatched > 0 {
+            return Ok(true);
+        }
+        let backend = self.conn.backend();
+        if backend.dispatch_inner_queue()? > 0 {
+            self.queue.dispatch_pending(&mut self.state)?;
+            self.state.check()?;
+            return Ok(true);
+        }
+        let Some(guard) = backend.prepare_read() else {
+            self.queue.dispatch_pending(&mut self.state)?;
+            self.state.check()?;
+            return Ok(true);
+        };
+        let needs_write = match backend.flush() {
+            Ok(()) => false,
+            Err(WaylandError::Io(error)) if error.kind() == io::ErrorKind::WouldBlock => true,
+            Err(error) => return Err(error.into()),
+        };
+        let mut flags = PollFlags::POLLIN | PollFlags::POLLERR | PollFlags::POLLHUP;
+        if needs_write {
+            flags |= PollFlags::POLLOUT;
+        }
+        let mut fds = [PollFd::new(backend.poll_fd(), flags)];
+        loop {
+            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                return Ok(false);
+            };
+            let millis = remaining
+                .as_millis()
+                .saturating_add(1)
+                .min(i32::MAX as u128) as i32;
+            let timeout = PollTimeout::try_from(millis).unwrap_or(PollTimeout::MAX);
+            match poll(&mut fds, timeout) {
+                Ok(0) => return Ok(false),
+                Ok(_) => break,
+                Err(nix::errno::Errno::EINTR) => continue,
+                Err(error) => return Err(error.into()),
+            }
+        }
+        let ready = fds[0].revents().unwrap_or(PollFlags::empty());
+        if ready.intersects(PollFlags::POLLERR | PollFlags::POLLHUP | PollFlags::POLLNVAL) {
+            return Err(invalid("Wayland compositor disconnected").into());
+        }
+        if ready.contains(PollFlags::POLLIN) {
+            match guard.read() {
+                Ok(_) => {}
+                Err(WaylandError::Io(error)) if error.kind() == io::ErrorKind::WouldBlock => {}
+                Err(error) => return Err(error.into()),
+            }
+        } else {
+            drop(guard);
+        }
+        self.queue.dispatch_pending(&mut self.state)?;
+        self.state.check()?;
+        Ok(true)
+    }
+
+    pub(super) fn frame(&mut self) -> RemoteResult<CaptureOutcome> {
+        let result = self.read_frame();
+        if result.is_err() {
+            self.state
+                .fail("Wayland capture failed; local authorization is required again");
+            if let Some(frame) = self.inflight.take() {
+                frame.destroy();
+            }
+        }
+        result
+    }
+
+    fn read_frame(&mut self) -> RemoteResult<CaptureOutcome> {
+        self.state.check()?;
+        if self.inflight.is_some() {
+            return Err(invalid("duplicate Wayland capture frame").into());
+        }
+        let deadline = Instant::now() + PROTOCOL_TIMEOUT;
+        self.sync_until(deadline)?;
+        self.drive_until(deadline, |state| state.constraints_done)?;
+        self.state.frame_serial = self
+            .state
+            .frame_serial
+            .checked_add(1)
+            .ok_or_else(|| invalid("Wayland frame sequence exhausted"))?;
+        self.state.frame_ready = false;
+        self.state.normal_transform = false;
+        let frame = self
+            .session
+            .as_ref()
+            .unwrap()
+            .create_frame(&self.queue.handle(), self.state.frame_serial);
+        let (width, height) = self.state.size.unwrap();
+        frame.attach_buffer(self.buffer.as_ref().unwrap());
+        frame.damage_buffer(0, 0, i32::from(width), i32::from(height));
+        frame.capture();
+        self.inflight = Some(frame);
+        self.drive_until(deadline, |state| state.frame_ready)?;
+        self.inflight.take().unwrap().destroy();
+        // Ready permits buffer reuse (wl_buffer.release is explicitly unused).
+        // A final ordered barrier catches already-issued closed/stopped events.
+        self.sync_until(deadline)?;
+        self.state.check()?;
+        if !self.state.constraints_done {
+            return Err(invalid("Wayland buffer constraints changed during capture").into());
+        }
+        let (_, bytes) = buffer_layout(u32::from(width), u32::from(height))?;
+        let mut pixels = Vec::new();
+        pixels.try_reserve_exact(bytes)?;
+        pixels.resize(bytes, 0);
+        self.file.as_ref().unwrap().read_exact_at(&mut pixels, 0)?;
+        let rgb = decode_xrgb(&pixels, width, height)?;
+        let (out_width, out_height) =
+            frame_dimensions(width, height, self.max_width, self.max_height, self.limits);
+        self.limits.validate_dimensions(out_width, out_height)?;
+        let image = if (out_width, out_height) == (width, height) {
+            rgb
+        } else {
+            let resized = image::imageops::resize(
+                &rgb,
+                out_width.into(),
+                out_height.into(),
+                FilterType::Triangle,
+            );
+            self.recycler.recycle_image(rgb);
+            resized
+        };
+        self.sync_until(deadline)?;
+        self.state.check()?;
+        Ok(CaptureOutcome::Frame(CapturedFrame {
+            geometry_epoch: self.epoch,
+            image,
+            source_width: width,
+            source_height: height,
+        }))
+    }
+
+    fn advance_epoch(&mut self) -> bool {
+        if let Some(epoch) = self.epoch.checked_add(1) {
+            self.epoch = epoch;
+            true
+        } else {
+            self.state.fail("Wayland geometry epoch exhausted");
+            false
+        }
+    }
+    pub(super) fn set_frame_limits(&mut self, limits: FrameLimits) -> bool {
+        let limits = self.limits.intersect(limits);
+        if limits.validate().is_err() {
+            self.state.fail("invalid Wayland frame limits");
+            return false;
+        }
+        if limits == self.limits {
+            return false;
+        }
+        self.limits = limits;
+        self.advance_epoch()
+    }
+    pub(super) fn set_encoded_bounds(&mut self, width: u16, height: u16) -> bool {
+        let width = match (self.host_width_limit, width) {
+            (0, n) | (n, 0) => n,
+            (a, b) => a.min(b),
+        };
+        if (width, height) == (self.max_width, self.max_height) {
+            return false;
+        }
+        self.max_width = width;
+        self.max_height = height;
+        self.advance_epoch()
+    }
+    pub(super) fn geometry_epoch(&self) -> u64 {
+        self.epoch
+    }
+    pub(crate) fn image_recycler(&self) -> CaptureImageRecycler {
+        self.recycler.clone()
+    }
+    pub(super) fn wait_for_activity(&mut self, timeout: Duration) -> RemoteResult<bool> {
+        let deadline = Instant::now()
+            .checked_add(timeout)
+            .ok_or_else(|| invalid("invalid Wayland wait timeout"))?;
+        let result = self.pump(deadline);
+        if result.is_err() {
+            self.state.fail("Wayland capture connection failed");
+        }
+        result
+    }
+}
+
+impl Drop for WaylandCapture {
+    fn drop(&mut self) {
+        if let Some(frame) = self.inflight.take() {
+            frame.destroy();
+        }
+        if let Some(session) = self.session.take() {
+            session.destroy();
+        }
+        if let Some(source) = self.source.take() {
+            source.destroy();
+        }
+        if let Some(buffer) = self.buffer.take() {
+            buffer.destroy();
+        }
+        let _ = self.conn.backend().flush();
+    }
+}
+
+impl Dispatch<wl_registry::WlRegistry, ()> for State {
+    fn event(
+        state: &mut Self,
+        proxy: &wl_registry::WlRegistry,
+        event: wl_registry::Event,
+        _: &(),
+        _: &Connection,
+        qh: &QueueHandle<Self>,
+    ) {
+        match event {
+            wl_registry::Event::Global {
+                name,
+                interface,
+                version,
+            } if version >= 1 => {
+                let bound = match interface.as_str() {
+                    "wl_shm" if state.shm.is_none() => {
+                        state.shm = Some(proxy.bind(name, 1, qh, ()));
+                        true
+                    }
+                    "ext_foreign_toplevel_list_v1" if state.list.is_none() => {
+                        state.list = Some(proxy.bind(name, 1, qh, ()));
+                        true
+                    }
+                    "ext_foreign_toplevel_image_capture_source_manager_v1"
+                        if state.source_manager.is_none() =>
+                    {
+                        state.source_manager = Some(proxy.bind(name, 1, qh, ()));
+                        true
+                    }
+                    "ext_image_copy_capture_manager_v1" if state.capture_manager.is_none() => {
+                        state.capture_manager = Some(proxy.bind(name, 1, qh, ()));
+                        true
+                    }
+                    _ => false,
+                };
+                if bound {
+                    state.globals.push(name);
+                }
+            }
+            wl_registry::Event::GlobalRemove { name } if state.globals.contains(&name) => {
+                state.fail("required Wayland global was removed")
+            }
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<wl_callback::WlCallback, ()> for State {
+    fn event(
+        state: &mut Self,
+        _: &wl_callback::WlCallback,
+        _: wl_callback::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let Some(next) = state.sync_count.checked_add(1) {
+            state.sync_count = next;
+        } else {
+            state.fail("Wayland sync counter exhausted");
+        }
+    }
+}
+impl Dispatch<wl_shm::WlShm, ()> for State {
+    fn event(
+        state: &mut Self,
+        _: &wl_shm::WlShm,
+        event: wl_shm::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let wl_shm::Event::Format {
+            format: WEnum::Value(wl_shm::Format::Xrgb8888),
+        } = event
+        {
+            state.shm_xrgb = true;
+        }
+    }
+}
+impl Dispatch<ExtForeignToplevelListV1, ()> for State {
+    fn event(
+        state: &mut Self,
+        _: &ExtForeignToplevelListV1,
+        event: list::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match event {
+            list::Event::Toplevel { toplevel } => {
+                if state.toplevels.len() >= MAX_TOPLEVELS {
+                    state.fail("Wayland toplevel list exceeds 256 entries");
+                    return;
+                }
+                state.toplevels.push(Toplevel {
+                    handle: toplevel,
+                    title: String::new(),
+                    app_id: String::new(),
+                    complete: false,
+                    closed: false,
+                });
+            }
+            list::Event::Finished => state.fail("Wayland toplevel list stopped"),
+            _ => {}
+        }
+    }
+    wayland_client::event_created_child!(State, ExtForeignToplevelListV1, [0 => (ExtForeignToplevelHandleV1, ())]);
+}
+impl Dispatch<ExtForeignToplevelHandleV1, ()> for State {
+    fn event(
+        state: &mut Self,
+        proxy: &ExtForeignToplevelHandleV1,
+        event: handle::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        let Some(item) = state
+            .toplevels
+            .iter_mut()
+            .find(|item| &item.handle == proxy)
+        else {
+            state.fail("unknown Wayland toplevel resource");
+            return;
+        };
+        match event {
+            handle::Event::Title { title } => item.title = safe_label(&title),
+            handle::Event::AppId { app_id } => item.app_id = safe_label(&app_id),
+            handle::Event::Done => item.complete = true,
+            handle::Event::Closed => {
+                item.closed = true;
+                if state.selected.as_ref() == Some(proxy) {
+                    state.fail("selected Wayland window closed");
+                }
+            }
+            // Identifier is deliberately never stored or used for selection.
+            _ => {}
+        }
+    }
+}
+impl Dispatch<ExtImageCopyCaptureSessionV1, ()> for State {
+    fn event(
+        state: &mut Self,
+        _: &ExtImageCopyCaptureSessionV1,
+        event: session::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match event {
+            session::Event::BufferSize { width, height } => state.advertise_size(width, height),
+            session::Event::ShmFormat { format } => {
+                state.begin_constraints();
+                state.batch_xrgb |= format == WEnum::Value(wl_shm::Format::Xrgb8888);
+            }
+            session::Event::DmabufDevice { .. } | session::Event::DmabufFormat { .. } => {
+                state.begin_constraints()
+            }
+            session::Event::Done => {
+                if let Some(size) = state.batch_size.filter(|_| state.batch_xrgb) {
+                    state.size = Some(size);
+                    state.constraints_done = true;
+                } else {
+                    state.fail("Wayland session requires bounded XRGB8888 SHM constraints");
+                }
+            }
+            session::Event::Stopped => state.fail("Wayland image capture session stopped"),
+            _ => state.fail("unknown Wayland capture session event"),
+        }
+    }
+}
+impl Dispatch<ExtImageCopyCaptureFrameV1, u64> for State {
+    fn event(
+        state: &mut Self,
+        _: &ExtImageCopyCaptureFrameV1,
+        event: frame::Event,
+        serial: &u64,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if *serial != state.frame_serial {
+            state.fail("stale Wayland capture frame");
+            return;
+        }
+        match event {
+            frame::Event::Transform {
+                transform: WEnum::Value(wl_output::Transform::Normal),
+            } => state.normal_transform = true,
+            frame::Event::Transform { .. } => state.fail("unsupported Wayland buffer transform"),
+            frame::Event::Ready if state.normal_transform && !state.frame_ready => {
+                state.frame_ready = true
+            }
+            frame::Event::Ready => {
+                state.fail("Wayland frame missing normal transform or duplicated ready")
+            }
+            frame::Event::Failed { .. } => state.fail("Wayland compositor rejected capture frame"),
+            frame::Event::Damage { .. } | frame::Event::PresentationTime { .. } => {}
+            _ => state.fail("unknown Wayland frame event"),
+        }
+    }
+}
+wayland_client::delegate_noop!(State: ignore wl_buffer::WlBuffer);
+wayland_client::delegate_noop!(State: ignore wl_shm_pool::WlShmPool);
+wayland_client::delegate_noop!(State: ignore ExtForeignToplevelImageCaptureSourceManagerV1);
+wayland_client::delegate_noop!(State: ignore ExtImageCaptureSourceV1);
+wayland_client::delegate_noop!(State: ignore ExtImageCopyCaptureManagerV1);
+
+fn socket_path(display: Option<&str>) -> RemoteResult<PathBuf> {
+    let name = display
+        .map(str::to_owned)
+        .or_else(|| std::env::var("WAYLAND_DISPLAY").ok())
+        .unwrap_or_else(|| "wayland-0".to_owned());
+    if name.is_empty() || name.as_bytes().contains(&0) {
+        return Err(invalid("invalid Wayland socket name").into());
+    }
+    let path = Path::new(&name);
+    if path.is_absolute() {
+        return Ok(path.to_owned());
+    }
+    if path.components().count() != 1 {
+        return Err(invalid("relative Wayland socket must be a single name").into());
+    }
+    let runtime = std::env::var_os("XDG_RUNTIME_DIR")
+        .ok_or_else(|| invalid("XDG_RUNTIME_DIR is required for Wayland"))?;
+    let runtime = PathBuf::from(runtime);
+    if !runtime.is_absolute() {
+        return Err(invalid("XDG_RUNTIME_DIR must be absolute").into());
+    }
+    Ok(runtime.join(path))
+}
+fn parse_selection(bytes: &[u8]) -> RemoteResult<usize> {
+    if bytes.is_empty() || bytes.len() > MAX_SELECTION_BYTES || bytes.last() != Some(&b'\n') {
+        return Err(invalid("invalid Wayland window selection line").into());
+    }
+    let digits = bytes
+        .strip_suffix(b"\n")
+        .unwrap()
+        .strip_suffix(b"\r")
+        .unwrap_or(&bytes[..bytes.len() - 1]);
+    if digits.is_empty() || !digits.iter().all(u8::is_ascii_digit) {
+        return Err(invalid("Wayland window selection must be a decimal index").into());
+    }
+    let mut number = 0_usize;
+    for digit in digits {
+        number = number
+            .checked_mul(10)
+            .and_then(|n| n.checked_add(usize::from(digit - b'0')))
+            .ok_or_else(|| invalid("Wayland window index overflow"))?;
+    }
+    if number == 0 || number > MAX_TOPLEVELS {
+        return Err(invalid("Wayland window index out of range").into());
+    }
+    Ok(number - 1)
+}
+fn safe_label(value: &str) -> String {
+    let mut output = String::new();
+    for character in value.chars() {
+        let escaped = character.escape_default().to_string();
+        if output.len() + escaped.len() > MAX_LABEL_BYTES - 3 {
+            output.push_str("...");
+            break;
+        }
+        output.push_str(&escaped);
+    }
+    output
+}
+fn buffer_layout(width: u32, height: u32) -> RemoteResult<(i32, usize)> {
+    let width = u16::try_from(width)?;
+    let height = u16::try_from(height)?;
+    super::frame::validate_dimensions(width, height)?;
+    let stride = u32::from(width)
+        .checked_mul(4)
+        .ok_or_else(|| invalid("Wayland stride overflow"))?;
+    let bytes = u64::from(stride)
+        .checked_mul(u64::from(height))
+        .ok_or_else(|| invalid("Wayland SHM size overflow"))?;
+    let bytes = usize::try_from(bytes)?;
+    i32::try_from(bytes)?;
+    Ok((i32::try_from(stride)?, bytes))
+}
+fn decode_xrgb(bytes: &[u8], width: u16, height: u16) -> RemoteResult<RgbImage> {
+    let (_, expected) = buffer_layout(u32::from(width), u32::from(height))?;
+    if bytes.len() != expected {
+        return Err(invalid("Wayland SHM buffer length changed").into());
+    }
+    let mut rgb = Vec::new();
+    rgb.try_reserve_exact(expected / 4 * 3)?;
+    for pixel in bytes.chunks_exact(4) {
+        let value = u32::from_ne_bytes(pixel.try_into().unwrap());
+        rgb.extend_from_slice(&[(value >> 16) as u8, (value >> 8) as u8, value as u8]);
+    }
+    RgbImage::from_raw(u32::from(width), u32::from(height), rgb)
+        .ok_or_else(|| invalid("invalid decoded Wayland image").into())
+}
+fn invalid(message: &str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, message)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn selection_is_bounded_decimal_and_never_a_title_or_identifier() {
+        assert_eq!(parse_selection(b"1\n").unwrap(), 0);
+        assert_eq!(parse_selection(b"256\r\n").unwrap(), 255);
+        for line in [
+            b"0\n".as_slice(),
+            b"257\n",
+            b"1;quit\n",
+            b" 1\n",
+            b"\n",
+            b"1",
+            b"-1\n",
+        ] {
+            assert!(parse_selection(line).is_err());
+        }
+        assert!(parse_selection(&[b'1'; 33]).is_err());
+    }
+    #[test]
+    fn labels_escape_terminal_control_and_are_bounded() {
+        let label = safe_label("title\x1b[2J\n\r\t\0\x7f");
+        assert!(!label.chars().any(char::is_control));
+        assert!(label.contains("\\u{1b}"));
+        assert!(safe_label(&"\x1b".repeat(1000)).len() <= MAX_LABEL_BYTES);
+        assert!(safe_label(&"文".repeat(1000)).len() <= MAX_LABEL_BYTES);
+    }
+    #[test]
+    fn shm_bounds_reject_zero_oversize_and_pixel_budget_overflow() {
+        assert_eq!(buffer_layout(16, 8).unwrap(), (64, 512));
+        for (width, height) in [(0, 1), (1, 0), (16_385, 1), (u32::MAX, 1), (16_384, 16_384)] {
+            assert!(buffer_layout(width, height).is_err());
+        }
+    }
+    #[test]
+    fn xrgb_decoding_uses_native_endian_masks_not_cursor_or_alpha() {
+        let bytes = [0x12ff0000_u32.to_ne_bytes(), 0xab00ff00_u32.to_ne_bytes()].concat();
+        let image = decode_xrgb(&bytes, 2, 1).unwrap();
+        assert_eq!(image.as_raw(), &[255, 0, 0, 0, 255, 0]);
+        assert!(decode_xrgb(&bytes[..7], 2, 1).is_err());
+    }
+    #[test]
+    fn initial_resize_restore_is_terminal_even_before_constraints_done() {
+        let mut state = State::default();
+        state.advertise_size(800, 600);
+        assert!(state.check().is_ok());
+        state.advertise_size(801, 600);
+        assert!(state.check().is_err());
+        state.advertise_size(800, 600);
+        assert!(state.check().is_err());
+        assert_eq!(state.size, Some((800, 600)));
+    }
+    #[test]
+    fn stop_or_failure_latches_cannot_be_cleared_by_later_metadata() {
+        let mut state = State::default();
+        state.fail("selected Wayland window closed");
+        state.fail("later event");
+        state.advertise_size(640, 480);
+        state.constraints_done = true;
+        state.frame_ready = true;
+        assert_eq!(state.failed, Some("selected Wayland window closed"));
+        assert!(state.check().is_err());
+    }
+}

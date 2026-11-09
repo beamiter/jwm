@@ -1585,6 +1585,8 @@ pub struct HostOptions {
     pub listen: String,
     pub key: KeySource,
     pub display: Option<String>,
+    pub wayland_select: bool,
+    pub wayland_display: Option<String>,
     pub fps: u16,
     pub jpeg_quality: u8,
     pub jpeg_quality_floor: u8,
@@ -1791,6 +1793,25 @@ fn listener_security_notice(address: IpAddr) -> Option<&'static str> {
 }
 
 fn validate_window_policy(options: &HostOptions) -> RemoteResult<()> {
+    if options.wayland_select {
+        if !cfg!(feature = "remote-wayland")
+            || !options.once
+            || options.allow_input
+            || options.allow_clipboard
+            || options.allow_window_resize
+            || !options.shared_sources.is_empty()
+            || options.display.is_some()
+            || !matches!(options.capture_area, CaptureArea::Root)
+            || !matches!(options.capture_source, CaptureSource::Auto)
+            || matches!(options.key, KeySource::Stdin)
+        {
+            return Err(permission_denied("Wayland selection requires remote-wayland support, --once, file key, read-only and no X11/source options").into());
+        }
+        return Ok(());
+    }
+    if options.wayland_display.is_some() {
+        return Err(invalid_data("--wayland-display requires --wayland-select").into());
+    }
     let window = matches!(options.capture_area, CaptureArea::Window(_));
     if (options.allow_window_resize && !window)
         || options
@@ -1811,6 +1832,23 @@ fn validate_window_policy(options: &HostOptions) -> RemoteResult<()> {
     Ok(())
 }
 
+// Only pre-authorized single-instance sources cross the accept-worker boundary.
+// Desktop X11Capture contains thread-affine SHM mappings and stays local.
+enum GrantedCapture {
+    Window(Box<WindowCapture>),
+    #[cfg(feature = "remote-wayland")]
+    Wayland(Box<super::wayland_capture::WaylandCapture>),
+}
+impl GrantedCapture {
+    fn into_capture(self) -> HostCapture {
+        match self {
+            Self::Window(capture) => HostCapture::Window(capture),
+            #[cfg(feature = "remote-wayland")]
+            Self::Wayland(capture) => HostCapture::Wayland(capture),
+        }
+    }
+}
+
 pub fn run_host(options: HostOptions) -> RemoteResult<()> {
     options.frame_limits.validate()?;
     JpegQualityController::new_at(
@@ -1820,18 +1858,32 @@ pub fn run_host(options: HostOptions) -> RemoteResult<()> {
         target_frame_interval(options.fps),
         Instant::now(),
     )?;
-    let key = options.key.load()?;
     validate_window_policy(&options)?;
+    let key = options.key.load()?;
     let grants = host_source_grants(&options)?;
     // Bind the instance before announcing readiness, not on viewer arrival.
     // Keep its X connection and pixmap alive throughout the waiting period.
-    let window_capture = if let CaptureArea::Window(id) = options.capture_area {
+    let window_capture = if options.wayland_select {
+        #[cfg(feature = "remote-wayland")]
+        {
+            Some(GrantedCapture::Wayland(Box::new(
+                super::wayland_capture::WaylandCapture::connect(
+                    options.wayland_display.as_deref(),
+                    options.max_width,
+                )?,
+            )))
+        }
+        #[cfg(not(feature = "remote-wayland"))]
+        {
+            return Err(invalid_data("remote-wayland support is not compiled in").into());
+        }
+    } else if let CaptureArea::Window(id) = options.capture_area {
         let mut capture =
             WindowCapture::connect(options.display.as_deref(), id, options.max_width)?;
         if options.allow_window_resize {
             capture.enable_native_resize()?;
         }
-        Some(capture)
+        Some(GrantedCapture::Window(Box::new(capture)))
     } else {
         for (_, area) in &grants {
             validate_capture_area(options.display.as_deref(), area)?;
@@ -2199,7 +2251,7 @@ fn serve_authenticated(
     peer: AuthenticatedPeer,
     options: &HostOptions,
     shutdown: &Arc<AtomicBool>,
-    window_capture: &Mutex<Option<WindowCapture>>,
+    window_capture: &Mutex<Option<GrantedCapture>>,
 ) -> RemoteResult<()> {
     let AuthenticatedPeer {
         mut reader,
@@ -2226,23 +2278,24 @@ fn serve_authenticated(
         .stream
         .negotiate_file_limit(options.clipboard_file_limit);
     let files_enabled = clipboard_policy.0 & 4 != 0 && file_limit > 0;
-    let capture_result = if matches!(options.capture_area, CaptureArea::Window(_)) {
-        window_capture
-            .lock()
-            .unwrap()
-            .take()
-            .map(|capture| HostCapture::Window(Box::new(capture)))
-            .ok_or_else(|| permission_denied("window instance grant already consumed").into())
-    } else {
-        X11Capture::connect(
-            options.display.as_deref(),
-            options.capture_source,
-            options.max_width,
-            options.capture_area.clone(),
-            options.scaling,
-        )
-        .map(|capture| HostCapture::Desktop(Box::new(capture)))
-    };
+    let capture_result =
+        if options.wayland_select || matches!(options.capture_area, CaptureArea::Window(_)) {
+            window_capture
+                .lock()
+                .unwrap()
+                .take()
+                .map(GrantedCapture::into_capture)
+                .ok_or_else(|| permission_denied("window instance grant already consumed").into())
+        } else {
+            X11Capture::connect(
+                options.display.as_deref(),
+                options.capture_source,
+                options.max_width,
+                options.capture_area.clone(),
+                options.scaling,
+            )
+            .map(|capture| HostCapture::Desktop(Box::new(capture)))
+        };
     let mut capture = match capture_result {
         Ok(capture) => capture,
         Err(error) => {
@@ -2369,7 +2422,11 @@ fn serve_authenticated(
                 .iter()
                 .map(|(id, area)| SourceEntry {
                     id: *id,
-                    label: source_label(area),
+                    label: if options.wayland_select {
+                        "Authorized Wayland surface".into()
+                    } else {
+                        source_label(area)
+                    },
                 })
                 .collect(),
         };
@@ -4994,12 +5051,42 @@ mod tests {
         assert!(validate_window_policy(&options).is_err());
     }
 
+    #[test]
+    fn wayland_selection_is_exclusive_local_and_never_accepts_stdin_key() {
+        let mut options = test_host_source_options();
+        options.capture_area = CaptureArea::Root;
+        options.wayland_select = true;
+        assert_eq!(
+            validate_window_policy(&options).is_ok(),
+            cfg!(feature = "remote-wayland")
+        );
+        for case in 0..8 {
+            let mut denied = options.clone();
+            match case {
+                0 => denied.key = KeySource::Stdin,
+                1 => denied.display = Some(":0".into()),
+                2 => denied.allow_window_resize = true,
+                3 => denied.allow_input = true,
+                4 => denied.allow_clipboard = true,
+                5 => denied.once = false,
+                6 => denied.capture_area = CaptureArea::Window(7),
+                _ => denied.shared_sources.push(CaptureArea::Root),
+            }
+            assert!(validate_window_policy(&denied).is_err());
+        }
+        options.wayland_select = false;
+        options.wayland_display = Some("wayland-0".into());
+        assert!(validate_window_policy(&options).is_err());
+    }
+
     fn test_host_source_options() -> HostOptions {
         HostOptions {
             frame_limits: super::super::messages::FrameLimits::default(),
             listen: "127.0.0.1:0".into(),
             key: KeySource::File("/unused".into()),
             display: None,
+            wayland_select: false,
+            wayland_display: None,
             fps: 12,
             jpeg_quality: 70,
             jpeg_quality_floor: 30,
@@ -7559,6 +7646,8 @@ mod tests {
             listen: "127.0.0.1:48221".into(),
             key: KeySource::File(std::path::PathBuf::from("key")),
             display: None,
+            wayland_select: false,
+            wayland_display: None,
             fps: 30,
             jpeg_quality: 85,
             jpeg_quality_floor: 40,

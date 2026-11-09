@@ -91,6 +91,7 @@ default = [
     "backend-wayland-nested",
     "media-audio",
     "remote-x11",
+    "remote-wayland",
 ]
 # Internal: shared X11 transport helpers and the GLX/EGL compositor.
 # Enabled through the per-transport features; not selected directly.
@@ -107,6 +108,8 @@ backend-x11rb = ["x11-backends", "dep:x11rb"]
 # independent x11rb connection, so it works while JWM itself uses either the
 # x11rb or xcb backend.
 remote-x11 = ["dep:rayon", "dep:x11rb", "x11rb/image", "dep:sha2", "dep:chacha20poly1305", "xbar_core/x11-connection"]
+# Native Wayland single-surface source; the shared viewer remains X11.
+remote-wayland = ["remote-x11", "dep:wayland-client", "dep:wayland-protocols"]
 # XCB transport + shared X11 compositor.
 backend-xcb = ["x11-backends", "dep:xcb"]
 # Direct Wayland DRM/KMS session backend.
@@ -159,6 +162,8 @@ path = "tools/jwm_remote.rs"
 required-features = ["remote-x11"]
 
 [dependencies]
+wayland-client = { version = "0.31.15", optional = true }
+wayland-protocols = { version = "0.32.13", features = ["client", "staging"], optional = true }
 desktop_visual = { path = "crates/desktop_visual" }
 companion-client = { git = "https://github.com/beamiter/jcompanion.git", rev = "9aa569540091524d637a7115b64c587b9177a55b" }
 companion-protocol = { git = "https://github.com/beamiter/jcompanion.git", rev = "9aa569540091524d637a7115b64c587b9177a55b" }
