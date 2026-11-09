@@ -63,7 +63,13 @@ export PATH="/usr/local/lib/jwm/current/bin:$PATH"
 
 If you can already SSH to the other machine as the user logged in to its JWM
 session, nothing needs to be set up there beyond installing the same
-`jwm-remote` version:
+`jwm-remote` version.
+
+Both helpers must also use the same application protocol. Builds can both print
+`jwm-remote 0.2.0` while speaking different protocols; compare the `Local protocol`
+line from `jwm-remote doctor` on each machine. An older host may report
+`client hello has an invalid length` for a newer viewer with a full keymap.
+Update both helpers together in that case.
 
 ```bash
 jwm-remote ssh user@desktop --grab-input

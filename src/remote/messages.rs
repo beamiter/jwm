@@ -257,12 +257,16 @@ impl ClientHello {
     }
 
     pub fn decode(payload: &[u8]) -> RemoteResult<Self> {
-        if payload.len() < HELLO_PREFIX_LEN || payload.len() > MAX_CLIENT_HELLO_LEN {
+        if payload.len() < HELLO_PREFIX_LEN {
             return Err(invalid_data("client hello has an invalid length").into());
         }
-        // The version is checked before the keymap, so an older viewer is
-        // told its version is unsupported rather than that its table is bad.
+        // Check the stable prefix before version-specific size limits. A newer
+        // viewer's larger capabilities header can exceed this version's maximum
+        // when it sends a full keymap; report the version mismatch in that case.
         let flags = decode_prefix(&payload[..HELLO_PREFIX_LEN])?;
+        if payload.len() > MAX_CLIENT_HELLO_LEN {
+            return Err(invalid_data("client hello has an invalid length").into());
+        }
         if payload.len() < CLIENT_HELLO_HEADER_LEN {
             return Err(invalid_data("client hello header is truncated").into());
         }
@@ -1002,6 +1006,42 @@ mod tests {
         ] {
             assert!(error.to_string().contains("version 6; expected 17"));
         }
+    }
+
+    #[test]
+    fn oversized_client_hello_reports_version_mismatch_before_length() {
+        let mut payload = ClientHello {
+            stream: Default::default(),
+            initial_viewport: None,
+            request_input: false,
+            request_clipboard: false,
+            request_clipboard_files: false,
+            keymap: KeymapTable::empty(),
+        }
+        .encode();
+        // Versions 15-17 each added one capability byte. With a full keymap,
+        // their hellos exceed version 14's maximum even though the prefix fits.
+        payload.resize(MAX_CLIENT_HELLO_LEN + 3, 0);
+        for version in [APPLICATION_VERSION - 1, APPLICATION_VERSION + 1] {
+            payload[8..10].copy_from_slice(&version.to_be_bytes());
+            assert_eq!(
+                ClientHello::decode(&payload).unwrap_err().to_string(),
+                format!(
+                    "unsupported JWM remote application version {version}; expected {APPLICATION_VERSION}"
+                )
+            );
+        }
+        // Moving the check must not admit oversized messages of our version.
+        payload[8..10].copy_from_slice(&APPLICATION_VERSION.to_be_bytes());
+        assert_eq!(
+            ClientHello::decode(&payload).unwrap_err().to_string(),
+            "client hello has an invalid length"
+        );
+        payload[0] ^= 1;
+        assert_eq!(
+            ClientHello::decode(&payload).unwrap_err().to_string(),
+            "peer is not using the JWM remote protocol"
+        );
     }
 
     #[test]
