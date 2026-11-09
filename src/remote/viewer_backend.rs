@@ -323,10 +323,7 @@ impl Viewer {
         match self {
             Self::X11(v) => v.enable_wayland_keyboard(display),
             #[cfg(feature = "remote-wayland")]
-            Self::Wayland(_) => {
-                let _ = display;
-                Err(std::io::Error::other("Wayland viewer is read-only").into())
-            }
+            Self::Wayland(v) => v.enable_wayland_keyboard(display),
         }
     }
     #[cfg(feature = "remote-wayland")]
@@ -334,10 +331,7 @@ impl Viewer {
         match self {
             Self::X11(v) => v.check_wayland_keyboard(initial),
             #[cfg(feature = "remote-wayland")]
-            Self::Wayland(_) => {
-                let _ = initial;
-                Err(std::io::Error::other("Wayland viewer is read-only").into())
-            }
+            Self::Wayland(v) => v.check_wayland_keyboard(initial),
         }
     }
     #[cfg(feature = "remote-wayland")]
@@ -345,7 +339,7 @@ impl Viewer {
         match self {
             Self::X11(v) => v.disable_wayland_keyboard(),
             #[cfg(feature = "remote-wayland")]
-            Self::Wayland(_) => (),
+            Self::Wayland(v) => v.disable_wayland_keyboard(),
         }
     }
     #[cfg(test)]
@@ -354,7 +348,14 @@ impl Viewer {
             Self::X11(v) => v.observe_keyboard_state(armed, ended),
             #[cfg(feature = "remote-wayland")]
             Self::Wayland(_) => {
-                let _ = (armed, ended);
+                TEST_WAYLAND_KEYBOARD_OBSERVER.with(|slot| {
+                    if let Some(observer) = slot.borrow().as_ref() {
+                        observer.store(
+                            if ended { 2 } else { u8::from(armed) },
+                            std::sync::atomic::Ordering::Release,
+                        );
+                    }
+                });
                 Ok(())
             }
         }
@@ -415,6 +416,30 @@ pub(crate) fn with_wayland_test_stream<T>(
     TEST_WAYLAND_STREAM.with(|slot| {
         assert!(slot.borrow().is_none());
         *slot.borrow_mut() = Some(stream);
+    });
+    let _reset = Reset;
+    run()
+}
+
+// Test-only observation of real client lease state, never an authorization input.
+#[cfg(all(test, feature = "remote-wayland"))]
+thread_local! { static TEST_WAYLAND_KEYBOARD_OBSERVER: std::cell::RefCell<Option<Arc<std::sync::atomic::AtomicU8>>> = const { std::cell::RefCell::new(None) }; }
+#[cfg(all(test, feature = "remote-wayland"))]
+pub(crate) fn with_wayland_keyboard_observer<T>(
+    observer: Arc<std::sync::atomic::AtomicU8>,
+    run: impl FnOnce() -> T,
+) -> T {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            TEST_WAYLAND_KEYBOARD_OBSERVER.with(|slot| {
+                slot.borrow_mut().take();
+            });
+        }
+    }
+    TEST_WAYLAND_KEYBOARD_OBSERVER.with(|slot| {
+        assert!(slot.borrow().is_none());
+        *slot.borrow_mut() = Some(observer);
     });
     let _reset = Reset;
     run()

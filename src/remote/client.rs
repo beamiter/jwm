@@ -408,8 +408,7 @@ fn validate_viewer_backend(options: &ClientOptions) -> RemoteResult<()> {
     }
     if options.viewer_backend == ViewerBackend::Wayland {
         if !cfg!(feature = "remote-wayland")
-            || !options.view_only
-            || options.wayland_keyboard
+            || options.view_only == options.wayland_keyboard
             || options.wayland_pointer
             || options.wayland_scroll
             || options.clipboard
@@ -418,7 +417,7 @@ fn validate_viewer_backend(options: &ClientOptions) -> RemoteResult<()> {
             || options.window_position.is_some()
             || options.display.is_some()
         {
-            return Err(invalid_data("Wayland viewer requires explicit view-only without input, clipboard, source resize, grab or window positioning").into());
+            return Err(invalid_data("Wayland viewer requires exactly one of view-only or scoped Wayland keyboard, without pointer, clipboard, source resize, grab, X11 display or window positioning").into());
         }
     }
     Ok(())
@@ -2944,7 +2943,19 @@ impl ClientKeyboard {
         keycode: u8,
         pressed: bool,
     ) -> RemoteResult<Option<super::wayland_keyboard_wire::Key>> {
-        if self.ended || self.epoch.is_none() {
+        if self.ended {
+            return Ok(None);
+        }
+        if self.epoch.is_none() || !self.activated {
+            if self.configured() {
+                // Even balanced edges consumed while waiting must invalidate
+                // consent. They cannot silently disappear and allow a later grant.
+                self.ended = true;
+                return Err(invalid_data(
+                    "keyboard input before lease activation; authorization cancelled",
+                )
+                .into());
+            }
             return Ok(None);
         }
         self.check_timeout(Instant::now())?;
@@ -3838,6 +3849,69 @@ pub(super) mod tests {
         assert!(pointer.fresh(now + std::time::Duration::from_millis(30)));
     }
     #[test]
+    fn wayland_keyboard_balanced_pregrant_edges_permanently_cancel() {
+        use super::super::wayland_keyboard_wire::{LeaseStatus, LeaseStatusKind};
+        for requested in [false, true] {
+            let mut keyboard = super::ClientKeyboard {
+                digest: Some([7; 32]),
+                ..Default::default()
+            };
+            let request = requested.then(|| {
+                keyboard
+                    .after_presentation((2, 3), 1, std::time::Instant::now())
+                    .unwrap()
+            });
+            assert!(keyboard.key(38, true).is_err());
+            assert!(keyboard.key(38, false).unwrap().is_none());
+            assert!(keyboard.ended);
+            assert!(keyboard.held.is_empty());
+            assert!(!keyboard.needs_request());
+            assert!(
+                keyboard
+                    .after_presentation((2, 3), 2, std::time::Instant::now())
+                    .is_none()
+            );
+            if let Some(request) = request {
+                assert!(
+                    keyboard
+                        .receive(LeaseStatus {
+                            lease_epoch: 9,
+                            source_epoch: request.source_epoch,
+                            geometry_epoch: request.geometry_epoch,
+                            frame_sequence: request.frame_sequence,
+                            status: LeaseStatusKind::Granted,
+                        })
+                        .is_err()
+                );
+            }
+        }
+    }
+    #[test]
+    fn wayland_keyboard_grant_without_local_focus_activation_rejects_keys() {
+        use super::super::wayland_keyboard_wire::{LeaseStatus, LeaseStatusKind};
+        let mut keyboard = super::ClientKeyboard {
+            digest: Some([7; 32]),
+            ..Default::default()
+        };
+        keyboard
+            .after_presentation((2, 3), 1, std::time::Instant::now())
+            .unwrap();
+        keyboard
+            .receive(LeaseStatus {
+                lease_epoch: 9,
+                source_epoch: 2,
+                geometry_epoch: 3,
+                frame_sequence: 1,
+                status: LeaseStatusKind::Granted,
+            })
+            .unwrap();
+        assert!(!keyboard.activated);
+        assert!(keyboard.key(38, true).is_err());
+        assert!(keyboard.ended);
+        assert!(keyboard.held.is_empty());
+        assert!(keyboard.key(38, false).unwrap().is_none());
+    }
+    #[test]
     fn wayland_keyboard_status_requires_exact_drawn_scope_and_single_grant() {
         use super::super::wayland_keyboard_wire::{LeaseStatus, LeaseStatusKind};
         let mut keyboard = super::ClientKeyboard {
@@ -3945,8 +4019,13 @@ pub(super) mod tests {
             digest: Some([7; 32]),
             ..Default::default()
         };
-        assert!(keyboard.key(38, true).unwrap().is_none());
+        assert!(keyboard.key(38, true).is_err());
         assert!(keyboard.held.is_empty());
+        assert!(keyboard.ended);
+        let mut keyboard = super::ClientKeyboard {
+            digest: Some([7; 32]),
+            ..Default::default()
+        };
         keyboard.after_presentation((1, 1), 0, now).unwrap();
         assert!(
             keyboard
@@ -6913,6 +6992,39 @@ mod native_viewer_permission_tests {
             }
             assert!(validate_viewer_backend(&changed).is_err());
         }
+        // Native keyboard is a distinct scoped lease, not legacy input.
+        let mut keyboard = options.clone();
+        keyboard.view_only = false;
+        keyboard.wayland_keyboard = true;
+        assert_eq!(
+            validate_viewer_backend(&keyboard).is_ok(),
+            cfg!(feature = "remote-wayland")
+        );
+        for mutation in 0..10 {
+            let mut changed = keyboard.clone();
+            match mutation {
+                0 => changed.view_only = true,
+                1 => changed.wayland_keyboard = false,
+                2 => changed.wayland_pointer = true,
+                3 => changed.wayland_scroll = true,
+                4 => changed.clipboard = true,
+                5 => changed.grab_input = true,
+                6 => changed.display = Some(":never-open".into()),
+                7 => {
+                    changed.resize_source = Some(super::super::window_size::WindowSize {
+                        width: 10,
+                        height: 10,
+                    })
+                }
+                8 => changed.follow_source_size = true,
+                _ => {
+                    changed.window_position =
+                        Some(super::super::window_position::WindowPosition { x: 0, y: 0 })
+                }
+            }
+            assert!(validate_viewer_backend(&changed).is_err());
+        }
+        assert!(run_client_reconnecting(keyboard, 1).is_err());
         for mode in 0..4 {
             let mut restricted = options.clone();
             restricted.viewer_backend = ViewerBackend::X11;

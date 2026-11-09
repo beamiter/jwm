@@ -1831,3 +1831,34 @@ not guarantee lower image error than a fresh JPEG update. The experiment is
 software-only; no GPU acceleration, physical presentation latency, network
 latency or general bandwidth improvement is promised. Bounded offline A/B
 measurements compare the same deterministic RGB frames and JPEG quality.
+
+### Explicit native Wayland viewer keyboard mode
+
+With a `remote-wayland` build, native viewing remains an explicit choice:
+`connect HOST --viewer-backend wayland --view-only`. The alternative
+`connect HOST --viewer-backend wayland --wayland-keyboard` requests only the
+existing scoped keyboard lease, and requires the host's separate
+`--wayland-select --once --allow-wayland-keyboard` consent. Use the same private
+session key at both endpoints. The two viewer modes cannot be combined, and
+omitting both native modes is rejected; choosing Wayland never implicitly
+permits legacy input.
+
+Keyboard admission retains full keymap compatibility and the exact selected
+surface/receiver identity. It lasts at most 30 seconds without renewal and is
+revoked on the existing focus, local takeover, lock and lifecycle boundaries.
+The native viewer does not accept pointer/scroll control, clipboard, grabs,
+source resize/follow, automatic reconnect or saved-profile authorization.
+`--viewer-wayland-display` names a native socket; there is no X11 fallback.
+See [native Wayland source safety](remote-wayland-source.md) for limits and
+commands. This does not change the network protocol or imply physical-display,
+two-computer or latency acceptance.
+
+While scoped keyboard authorization is waiting for the host grant, do not type
+into the viewer. Any actual key edge during that interval, even a balanced
+press/release pair, cancels the attempt and terminates the session rather than
+being silently dropped and later granting control. This safety rule applies to
+both the X11 and native Wayland scoped-keyboard viewers.
+
+In the native Wayland keyboard viewer, local keyboard focus loss is fail-closed:
+the session terminates rather than reusing the lease after focus returns. Start
+a new explicitly authorized session to regain control.

@@ -1,9 +1,10 @@
 # Native Wayland single-surface source (experimental)
 
-This slice adds a native Wayland **source** to `jwm-remote`; the existing viewer
-still uses X11. Building the helper with `remote-wayland` also enables its shared
-`remote-x11` code, but selecting a Wayland source must not connect to X11.
-It is not a production-complete remote desktop or a native Wayland viewer.
+This document describes the native Wayland **source** and explicitly selected
+native Wayland viewer. The X11 viewer remains available. Building the helper with
+`remote-wayland` also enables shared `remote-x11` code, but selecting native
+Wayland capture or presentation does not authorize an X11 fallback. These are
+experimental scoped features, not a production-complete remote desktop.
 
 ## Local, single-use selection
 
@@ -275,3 +276,50 @@ Older peers are rejected, and profiles/SSH do not implicitly persist this flag.
 This CPU experiment does not establish GPU, physical-display or WAN latency
 improvements; copying existing decoded pixels also does not guarantee better
 quality than re-encoding them.
+
+### Native Wayland viewer: explicit keyboard-only mode
+
+The native viewer still requires an explicit mode. Read-only remains:
+
+```sh
+jwm-remote connect HOST --viewer-backend wayland --view-only
+```
+
+For keyboard-only control, the trusted host must separately allow its existing
+single-surface keyboard lease, and the viewer must explicitly request it:
+
+```sh
+jwm-remote host --wayland-select --once --allow-wayland-keyboard --key-file /path/to/session.key
+jwm-remote connect HOST --viewer-backend wayland --wayland-keyboard --key-file /path/to/session.key
+```
+
+Use `--viewer-wayland-display SOCKET` to select the local native display, not
+`--display`. `--view-only` and `--wayland-keyboard` are mutually exclusive;
+omitting both with `--viewer-backend wayland` is rejected rather than enabling
+legacy input. No host authorization is inferred from choosing a viewer backend.
+
+This mode reuses the existing exact-surface keyboard authority, full keymap
+compatibility check, and nonrenewable 30-second lease. A mismatched keymap or
+missing capability fails closed, without an X11 fallback. Focus/lifecycle loss,
+local host takeover, lock or disconnect revoke the lease and apply the existing
+held-key cleanup; the old lease is never resumed automatically.
+
+Native presentation does not grant pointer or wheel input, clipboard access,
+input grabs, source resizing/following, automatic reconnect, or a saved profile.
+Those combinations remain rejected. This addition does not change the network
+protocol or relax host input permission. It is distinct from the X11 viewer's
+separately authorized pointer and discrete-scroll modes.
+
+Tests must verify actual native keyboard recipients and presentation feedback;
+compilation or protocol fixtures alone do not demonstrate physical DRM display,
+real desktop keymap compatibility, two-machine networking or interactive latency.
+
+While scoped keyboard authorization is waiting for the host grant, do not type
+into the viewer. Any actual key edge during that interval, even a balanced
+press/release pair, cancels the attempt and terminates the session rather than
+being silently dropped and later granting control. This safety rule applies to
+both the X11 and native Wayland scoped-keyboard viewers.
+
+In the native Wayland keyboard viewer, local keyboard focus loss is fail-closed:
+the session terminates rather than reusing the lease after focus returns. Start
+a new explicitly authorized session to regain control.

@@ -431,10 +431,12 @@ enum Command {
         #[arg(long = "ssh-option", value_name = "OPTION")]
         ssh_options: Vec<String>,
     },
-    /// Open a remote JWM desktop in a window on this JWM X11 session.
+    /// Open a remote JWM desktop in an explicitly selected local viewer.
+    #[command(group(clap::ArgGroup::new("native_viewer_mode")
+        .args(["view_only", "wayland_keyboard"]).multiple(false)))]
     Connect {
-        /// Explicit local presentation backend; Wayland is read-only.
-        #[arg(long, default_value_t=ViewerBackend::X11, requires_if("wayland", "view_only"))]
+        /// Local backend; Wayland requires explicit view-only or scoped keyboard-only.
+        #[arg(long, default_value_t=ViewerBackend::X11, requires_if("wayland", "native_viewer_mode"))]
         viewer_backend: ViewerBackend,
 
         /// Native viewer Wayland socket; never an X11 display.
@@ -1674,7 +1676,7 @@ mod tests {
     }
 
     #[test]
-    fn native_viewer_backend_is_explicit_read_only_and_not_profile_saved() {
+    fn native_viewer_backend_requires_explicit_mode_and_is_not_profile_saved() {
         let cli = Cli::try_parse_from(["jwm-remote", "connect", "host"]).unwrap();
         assert!(matches!(
             cli.command,
@@ -1726,6 +1728,76 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    #[test]
+    fn native_wayland_keyboard_is_explicit_narrow_and_never_profile_saved() {
+        let base = [
+            "jwm-remote",
+            "connect",
+            "host",
+            "--viewer-backend",
+            "wayland",
+            "--wayland-keyboard",
+        ];
+        let cli = Cli::try_parse_from(base).unwrap();
+        assert!(matches!(
+            &cli.command,
+            Command::Connect {
+                viewer_backend: ViewerBackend::Wayland,
+                wayland_keyboard: true,
+                view_only: false,
+                wayland_pointer: false,
+                wayland_scroll: false,
+                grab_input: false,
+                clipboard: false,
+                reconnect_attempts: 0,
+                ..
+            }
+        ));
+        assert!(profile_from_command(cli.command).is_err());
+        let explicit_socket = Cli::try_parse_from(
+            base.into_iter()
+                .chain(["--viewer-wayland-display", "owned-wayland"]),
+        )
+        .unwrap();
+        assert!(profile_from_command(explicit_socket.command).is_err());
+        for extra in [
+            vec!["--view-only"],
+            vec!["--wayland-pointer"],
+            vec!["--wayland-pointer", "--wayland-scroll"],
+            vec!["--clipboard"],
+            vec!["--grab-input"],
+            vec!["--resize-source", "640x480"],
+            vec!["--follow-source-size"],
+            vec!["--reconnect-attempts", "1"],
+        ] {
+            let args = base.into_iter().chain(extra).collect::<Vec<_>>();
+            assert!(
+                Cli::try_parse_from(&args).is_err(),
+                "unsafe native keyboard CLI accepted: {args:?}"
+            );
+        }
+        // Profile save captures trailing arguments before validation. Exercise
+        // its real construction boundary without writing a profile or dialing.
+        let outer = Cli::try_parse_from(
+            ["jwm-remote", "profile", "save", "native", "--"]
+                .into_iter()
+                .chain(base.into_iter().skip(1)),
+        )
+        .unwrap();
+        let Command::Profile {
+            action: ProfileAction::Save { connection, .. },
+            ..
+        } = outer.command
+        else {
+            panic!("profile save expected")
+        };
+        let command =
+            Cli::try_parse_from(std::iter::once("jwm-remote".to_owned()).chain(connection))
+                .unwrap()
+                .command;
+        assert!(profile_from_command(command).is_err());
     }
 
     #[test]

@@ -1,4 +1,5 @@
-//! Native, read-only Wayland viewer. No seat, input, clipboard or X11 binding.
+//! Native Wayland viewer, read-only unless keyboard-only mode is explicitly enabled.
+//! No pointer, clipboard, grab or X11 binding.
 //! A buffer release only frees storage. Only wp_presentation.presented earns ACK.
 use super::RemoteResult;
 use super::frame::RecyclableDecodedFrame;
@@ -19,6 +20,9 @@ use wayland_client::protocol::{
 use wayland_client::{Connection, Dispatch, EventQueue, QueueHandle, WEnum};
 use wayland_protocols::wp::presentation_time::client::{wp_presentation, wp_presentation_feedback};
 use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
+
+#[path = "wayland_viewer_keyboard.rs"]
+mod keyboard;
 
 const TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_PIXELS: u64 = 16 * 1024 * 1024;
@@ -197,6 +201,7 @@ struct Retirement {
     started: Instant,
 }
 struct State {
+    keyboard: keyboard::Keyboard,
     compositor: Option<wl_compositor::WlCompositor>,
     shm: Option<wl_shm::WlShm>,
     wm: Option<xdg_wm_base::XdgWmBase>,
@@ -248,6 +253,9 @@ impl State {
         Ok(())
     }
     fn advance_generation(&mut self) {
+        if self.keyboard.requested {
+            self.keyboard.revoke("Wayland viewer geometry changed");
+        }
         self.generation = match self.generation.checked_add(1) {
             Some(next) => next,
             None => {
@@ -265,6 +273,7 @@ impl State {
 }
 
 pub(super) struct WaylandViewer {
+    registry: wl_registry::WlRegistry,
     conn: Connection,
     queue: EventQueue<State>,
     state: State,
@@ -313,8 +322,9 @@ impl WaylandViewer {
         let conn = Connection::from_socket(stream)?;
         let mut queue = conn.new_event_queue();
         let qh = queue.handle();
-        let _registry = conn.display().get_registry(&qh, ());
+        let registry = conn.display().get_registry(&qh, ());
         let mut state = State {
+            keyboard: keyboard::Keyboard::default(),
             compositor: None,
             shm: None,
             wm: None,
@@ -374,6 +384,7 @@ impl WaylandViewer {
             std::thread::sleep(Duration::from_millis(1));
         }
         Ok(Self {
+            registry,
             conn,
             queue,
             state,
@@ -407,13 +418,120 @@ impl WaylandViewer {
         }
         Ok(work)
     }
+    fn keyboard_fence(&mut self, deadline: Instant) -> RemoteResult<()> {
+        let id = self
+            .state
+            .keyboard
+            .fence
+            .checked_add(1)
+            .ok_or("keyboard fence exhausted")?;
+        self.state.keyboard.fence = id;
+        self.conn
+            .display()
+            .sync(&self.queue.handle(), keyboard::KeyboardFence(id));
+        while self.state.keyboard.fence_done != id {
+            self.pump()?;
+            self.state.keyboard.check()?;
+            if self.state.closed || Instant::now() >= deadline {
+                self.state
+                    .keyboard
+                    .revoke("Wayland keyboard fence closed or expired");
+                return self.state.keyboard.check();
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        Ok(())
+    }
+    pub(super) fn enable_wayland_keyboard(
+        &mut self,
+        _display: Option<&str>,
+    ) -> RemoteResult<[u8; 32]> {
+        if self.state.keyboard.requested {
+            return Err("Wayland keyboard cannot be re-enabled".into());
+        }
+        // Enumerate without binding any seat in the default read-only path.
+        let deadline = Instant::now() + TIMEOUT;
+        self.keyboard_fence(deadline)?;
+        if self.state.keyboard.ambiguous || self.state.keyboard.seats.len() != 1 {
+            return Err("Wayland keyboard requires exactly one unambiguous seat".into());
+        }
+        let (name, version) = self.state.keyboard.seats[0];
+        if version < 4 {
+            return Err("Wayland keyboard requires repeat-info capable seat".into());
+        }
+        self.state.keyboard.requested = true;
+        self.toplevel.set_app_id("jwm-remote-keyboard".into());
+        self.state.keyboard.surface = Some(self.surface.clone());
+        self.state.keyboard.seat = Some(
+            self.registry
+                .bind::<wayland_client::protocol::wl_seat::WlSeat, _, _>(
+                    name,
+                    version.min(7),
+                    &self.queue.handle(),
+                    (),
+                ),
+        );
+        loop {
+            self.pump()?;
+            self.state.keyboard.check()?;
+            if self.state.closed || Instant::now() >= deadline {
+                self.state
+                    .keyboard
+                    .revoke("Wayland keyboard initialization expired");
+                return Err("Wayland keyboard initialization expired".into());
+            }
+            if let Some(digest) = self.state.keyboard.digest {
+                return Ok(digest);
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+    pub(super) fn check_wayland_keyboard(&mut self, initial: bool) -> RemoteResult<()> {
+        if !self.state.keyboard.requested {
+            return Err("Wayland keyboard is disabled".into());
+        }
+        let deadline = Instant::now() + TIMEOUT;
+        self.keyboard_fence(deadline)?;
+        if initial {
+            if self.state.keyboard.pending_keys() {
+                self.state
+                    .keyboard
+                    .revoke("local keyboard input preceded lease activation");
+                return self.state.keyboard.check();
+            }
+            while !self.state.keyboard.clean_ready() {
+                self.pump()?;
+                self.state.keyboard.check()?;
+                if self.state.keyboard.pending_keys() {
+                    self.state
+                        .keyboard
+                        .revoke("local keyboard input preceded lease activation");
+                    return self.state.keyboard.check();
+                }
+                if self.state.closed || Instant::now() >= deadline {
+                    self.state
+                        .keyboard
+                        .revoke("Wayland keyboard did not acquire clean own-surface focus");
+                    return self.state.keyboard.check();
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+        self.state.keyboard.check()
+    }
+    pub(super) fn disable_wayland_keyboard(&mut self) {
+        self.state
+            .keyboard
+            .revoke("Wayland keyboard permanently disabled");
+    }
     pub(super) fn poll_events(&mut self) -> RemoteResult<Vec<ViewerEvent>> {
         self.pump()?;
-        Ok(if self.state.closed {
-            vec![ViewerEvent::Close]
-        } else {
-            Vec::new()
-        })
+        let mut events = self.state.keyboard.take_events();
+        if self.state.closed {
+            events.clear();
+            events.push(ViewerEvent::Close);
+        }
+        Ok(events)
     }
     pub(super) fn viewport(&self) -> (u16, u16) {
         (self.state.width, self.state.height)
@@ -712,6 +830,10 @@ impl Dispatch<wl_registry::WlRegistry, ()> for State {
                 version,
             } => {
                 match interface.as_str() {
+                    "wl_seat" => {
+                        state.keyboard.global(name, version);
+                        return;
+                    }
                     "wl_compositor" if state.compositor.is_none() && version >= 4 => {
                         state.compositor = Some(registry.bind(name, version.min(6), qh, ()))
                     }
@@ -732,8 +854,11 @@ impl Dispatch<wl_registry::WlRegistry, ()> for State {
                     state.globals.push(name);
                 }
             }
-            wl_registry::Event::GlobalRemove { name } if state.globals.contains(&name) => {
-                state.failure = Some("required Wayland global removed".into())
+            wl_registry::Event::GlobalRemove { name } => {
+                state.keyboard.removed(name);
+                if state.globals.contains(&name) {
+                    state.failure = Some("required Wayland global removed".into());
+                }
             }
             _ => {}
         }

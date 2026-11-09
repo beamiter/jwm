@@ -992,3 +992,9 @@ fn actual_wayland_viewer_nested_registry_does_not_advertise_unfulfilled_presenta
         "nested backend must not advertise feedback it cannot complete"
     );
 }
+
+#[path = "wayland_viewer_keyboard_integration.rs"]
+mod keyboard_integration;
+
+#[path = "host_wayland_keyboard_viewer_integration.rs"]
+mod host_keyboard_integration;

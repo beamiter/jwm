@@ -387,3 +387,10 @@ impl Dispatch<JwmRemoteKeyboardLeaseV1, LeaseData> for JwmWaylandState {
 #[cfg(test)]
 #[path = "remote_keyboard_tests.rs"]
 mod tests;
+
+/// Read-only evidence of create-lease requests, including rejected attempts.
+/// The production handler increments next_epoch before checking source/admission.
+#[cfg(all(test, feature = "backend-wayland-udev"))]
+pub(crate) fn attempts_for_test(state: &JwmWaylandState) -> u32 {
+    state.remote_keyboard.next_epoch
+}
