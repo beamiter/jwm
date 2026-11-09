@@ -418,6 +418,43 @@ fn validate_viewer_backend(options: &ClientOptions) -> RemoteResult<()> {
     Ok(())
 }
 
+/// Immutable for the entire connection, including after following stops.
+/// Native resize owns geometry in follow mode: viewport-fit encoding would be
+/// a second asynchronous geometry writer with no revision proof on the wire.
+#[derive(Clone, Copy)]
+enum ViewportPolicy {
+    Fit,
+    NativeSizeFollow,
+}
+impl ViewportPolicy {
+    fn for_follow(follow: bool) -> Self {
+        if follow {
+            Self::NativeSizeFollow
+        } else {
+            Self::Fit
+        }
+    }
+    fn initial(self, size: (u16, u16)) -> Option<(u16, u16)> {
+        match self {
+            Self::Fit => Some(size),
+            Self::NativeSizeFollow => None,
+        }
+    }
+    fn report(
+        self,
+        writer: &mut impl RecordWriter,
+        previous: &mut Option<(u16, u16)>,
+        size: (u16, u16),
+    ) -> RemoteResult<bool> {
+        if matches!(self, Self::NativeSizeFollow) || *previous == Some(size) {
+            return Ok(false);
+        }
+        writer.write_message(MessageKind::Viewport, &encode_viewport(size.0, size.1))?;
+        *previous = Some(size);
+        Ok(true)
+    }
+}
+
 fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> RemoteResult<()> {
     if let Some(size) = options.window_size {
         size.validate()?;
@@ -490,7 +527,7 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
         options.clipboard_mode,
         options.clipboard_direction,
         &keymap,
-        Some(initial_viewport),
+        ViewportPolicy::for_follow(options.follow_source_size).initial(initial_viewport),
         request_cursor_plane,
         options.frame_limits,
         HANDSHAKE_TIMEOUT,
@@ -1270,6 +1307,9 @@ fn viewer_loop(
     // host encodes to a fixed width forever, so a small window receives detail
     // it immediately throws away.
     let mut reported_viewport = None;
+    // Follow state is retained even when terminal; never restore dynamic
+    // Viewport records after stop and race the final native request.
+    let viewport_policy = ViewportPolicy::for_follow(state.resize.lock().unwrap().follow.is_some());
     let mut source_epoch = 1;
     let mut presented_scope = (1, 1);
     let mut switching = false;
@@ -1559,11 +1599,8 @@ fn viewer_loop(
         if let Some(follow) = state.resize.lock().unwrap().follow.as_mut() {
             follow.viewport(viewport);
         }
-        if reported_viewport != Some(viewport) && !outcome.close {
-            let (width, height) = viewport;
-            writer.write_message(MessageKind::Viewport, &encode_viewport(width, height))?;
-            reported_viewport = Some(viewport);
-            wrote = true;
+        if !outcome.close {
+            wrote |= viewport_policy.report(writer, &mut reported_viewport, viewport)?;
         }
         if let Some(clipboard) = clipboard {
             // Closing the viewer wins over a simultaneous local worker exit.
@@ -6714,5 +6751,70 @@ mod native_viewer_permission_tests {
             }
             assert!(validate_viewer_backend(&changed).is_err());
         }
+    }
+}
+
+#[cfg(test)]
+mod follow_viewport_policy_tests {
+    use super::*;
+    #[derive(Default)]
+    struct Records(Vec<(MessageKind, Vec<u8>)>);
+    impl RecordWriter for Records {
+        fn write_message(&mut self, kind: MessageKind, payload: &[u8]) -> RemoteResult<()> {
+            self.0.push((kind, payload.to_vec()));
+            Ok(())
+        }
+        fn flush(&mut self) -> RemoteResult<()> {
+            Ok(())
+        }
+    }
+    #[test]
+    fn follow_hello_and_entire_session_have_no_viewport_geometry_writer() {
+        let mut follow = super::super::follow_source_size::FollowSourceSize::default();
+        let policy = ViewportPolicy::for_follow(true);
+        assert_eq!(policy.initial((400, 300)), None);
+        let mut records = Records::default();
+        let mut previous = None;
+        for size in [(400, 300), (480, 320), (580, 400), (640, 400), (400, 300)] {
+            follow.viewport(size);
+            assert!(!policy.report(&mut records, &mut previous, size).unwrap());
+        }
+        follow.stop("resize Stale");
+        for size in [(720, 460), (800, 600)] {
+            follow.viewport(size);
+            assert!(!policy.report(&mut records, &mut previous, size).unwrap());
+        }
+        assert!(records.0.is_empty());
+        assert_eq!(previous, None);
+    }
+    #[test]
+    fn ordinary_and_one_shot_sessions_keep_viewport_fit_updates() {
+        // One-shot resize does not set the follow opt-in.
+        let policy = ViewportPolicy::for_follow(false);
+        assert_eq!(policy.initial((400, 300)), Some((400, 300)));
+        let mut records = Records::default();
+        let mut previous = None;
+        assert!(
+            policy
+                .report(&mut records, &mut previous, (400, 300))
+                .unwrap()
+        );
+        assert!(
+            !policy
+                .report(&mut records, &mut previous, (400, 300))
+                .unwrap()
+        );
+        assert!(
+            policy
+                .report(&mut records, &mut previous, (640, 400))
+                .unwrap()
+        );
+        assert_eq!(
+            records.0,
+            vec![
+                (MessageKind::Viewport, encode_viewport(400, 300).to_vec()),
+                (MessageKind::Viewport, encode_viewport(640, 400).to_vec())
+            ]
+        );
     }
 }

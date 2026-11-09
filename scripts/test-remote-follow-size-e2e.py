@@ -257,6 +257,15 @@ def run(args):
         require(viewer.poll() is None, 'stopped follow should retain read-only session')
         report['checks'].append('maximum_hints_unchanged_stop_without_retry_and_keep_view_only')
         BASE.stop(viewer); host.wait(timeout=15)
+        # Production follow sessions use native-size encoding (bounded by the
+        # unchanged host max-width/frame caps). A second viewport-driven
+        # geometry writer previously raced these real burst resize requests.
+        # This log proves no encoded-bounds adjustment occurred, not that an
+        # identical/no-op Viewport record was absent; the writer policy tests
+        # cover zero Viewport emission, including after follow has stopped.
+        require('encoding to fit' not in (work / 'allowed-host.log').read_text(errors='replace'),
+                'follow session unexpectedly adjusted encoding viewport')
+        report['checks'].append('no_viewport_driven_encoded_bounds_changes_entire_session')
         host, address = start_host('denied', False)
         denied_log = work / 'denied-viewer.log'
         denied = children.spawn([args.remote, 'connect', address, '--key-file', str(key), '--view-only', '--follow-source-size'], view_env, denied_log)
