@@ -4649,9 +4649,47 @@ mod tests {
         wait_for_selection_owner(&conn, selection);
         conn.convert_selection(requestor, selection, png, property, x11rb::CURRENT_TIME)
             .unwrap();
+        // No reply for a fixed interval does not prove the owner has parked
+        // the PNG request. A subsequent TARGETS conversion on this same X
+        // connection is ordered after it; its successful reply is a positive
+        // fence that the owner has processed the earlier request before abort.
+        let targets = intern(&conn, "TARGETS").unwrap();
+        let barrier_property = intern(&conn, "JWM_TEST_OVERLOAD_BARRIER").unwrap();
+        conn.convert_selection(
+            requestor,
+            selection,
+            targets,
+            barrier_property,
+            x11rb::CURRENT_TIME,
+        )
+        .unwrap();
         conn.flush().unwrap();
-        let wait = std::time::Duration::from_millis(150);
-        assert!(selection_notify_within(&conn, requestor, png, wait).is_none());
+        let barrier_deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        loop {
+            assert!(
+                std::time::Instant::now() < barrier_deadline,
+                "owner did not confirm processing the waiting paste"
+            );
+            match conn.poll_for_event().unwrap() {
+                Some(x11rb::protocol::Event::SelectionNotify(event))
+                    if event.requestor == requestor && event.selection == selection =>
+                {
+                    assert_ne!(
+                        event.target, png,
+                        "pending PNG paste answered before overload"
+                    );
+                    if event.target == targets {
+                        assert_eq!(
+                            event.property, barrier_property,
+                            "TARGETS fence was refused"
+                        );
+                        break;
+                    }
+                }
+                Some(_) => {}
+                None => std::thread::yield_now(),
+            }
+        }
         assert!(!setter.send(RemoteServe::Text(String::with_capacity(
             crate::backend::clipboard_offer::MAX_TEXT_BYTES + 1,
         ))));
