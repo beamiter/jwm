@@ -994,7 +994,7 @@ mod tests {
             ClientHello::decode(&legacy).unwrap_err(),
             ServerHello::decode(&legacy).unwrap_err(),
         ] {
-            assert!(error.to_string().contains("version 6; expected 15"));
+            assert!(error.to_string().contains("version 6; expected 16"));
         }
     }
 

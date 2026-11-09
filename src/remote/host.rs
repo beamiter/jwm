@@ -7686,7 +7686,7 @@ mod tests {
             let (kind, reason) = reader.read_message().unwrap();
             assert_eq!(kind, MessageKind::Close);
             let reason = String::from_utf8(reason).unwrap();
-            assert!(reason.contains("version 4; expected 15"), "{reason}");
+            assert!(reason.contains("version 4; expected 16"), "{reason}");
             assert!(
                 reason.contains("update jwm-remote on both machines"),
                 "{reason}"
@@ -7716,7 +7716,7 @@ mod tests {
             for (hello, expected) in [
                 (
                     prior_version,
-                    "unsupported JWM remote application version 13; expected 15",
+                    "unsupported JWM remote application version 13; expected 16",
                 ),
                 (malformed, "peer advertised unknown remote capabilities"),
             ] {
@@ -9919,3 +9919,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+#[path = "host_keyboard_integration.rs"]
+mod host_keyboard_integration;
