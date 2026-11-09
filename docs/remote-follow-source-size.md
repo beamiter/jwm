@@ -66,7 +66,9 @@ source remain healthy, the viewer continues receiving read-only frames. The
 already-authorized host's lifecycle policy can still end capture/session itself
 on unmap, lock, destruction or disconnect; this option cannot promise to keep a
 revoked source visible. Starting a new explicit session is required to opt in
-again. Already applied remote geometry is left in place.
+again. A request already sent to the host can still complete after the client
+stops following; stopping is not cancellation or rollback. Already applied remote
+geometry is left in place.
 
 If the host does not advertise the required resize grant, startup fails explicitly
 instead of pretending following was enabled. Logs distinguish enabled, requested,

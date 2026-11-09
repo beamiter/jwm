@@ -111,6 +111,15 @@ def request_count(text):
     return len(re.findall(r'follow request [1-9][0-9]* ', text))
 
 
+def logical_window_for_native(context, xid):
+    matches = [window for window in context.get('windows', [])
+               if type(window.get('native_window_id')) is int and window['native_window_id'] == xid]
+    require(len(matches) == 1, 'owned native XID must map to exactly one JWM window')
+    logical = int(matches[0]['id'])
+    require(logical > 0, 'invalid JWM logical window identity')
+    return logical
+
+
 def run(args):
     work = Path(tempfile.mkdtemp(prefix='jwm-follow-size-e2e-'))
     work.chmod(0o700)
@@ -215,10 +224,18 @@ def run(args):
         confirm(640, 400, 0xcc33cc)
         report['checks'].append('rapid_viewport_changes_converge_to_latest')
         hx.maximum_size(target, 640, 400)
+        target_logical = [None]
         def hints_cached():
             with BASE.IPC(ipc) as query:
-                query.sock.sendall(json.dumps({'query': 'get_window', 'args': {'id': target}}).encode() + b'\n')
+                query.sock.sendall(json.dumps({'query': 'get_execution_context'}).encode() + b'\n')
+                context = query.response('get_execution_context')
+                logical = logical_window_for_native(context, target)
+                if target_logical[0] is None:
+                    target_logical[0] = logical
+                require(logical == target_logical[0], 'owned target logical instance changed')
+                query.sock.sendall(json.dumps({'query': 'get_window', 'args': {'id': logical}}).encode() + b'\n')
                 info = query.response('get_window')
+                require(info.get('id') == logical, 'JWM query identity mismatch')
             hints = info.get('size_hints') or {}
             return (info.get('is_fixed') is False and hints.get('min_w') == 100
                     and hints.get('min_h') == 100 and hints.get('max_w') == 640
@@ -276,6 +293,15 @@ def main():
         require(not similar_pixel(0xff0000, 0x0000ff), 'pixel distinction')
         require(request_count('follow request 1 400x300 geometry 1\nfollow stopped: resize Unchanged\n') == 1, 'request record count')
         require(C.sizeof(Hints) == C.sizeof(C.c_long) + 18 * C.sizeof(C.c_int), 'XSizeHints ABI')
+        context = {'windows': [{'id': '7', 'native_window_id': 0x200001}, {'id': '8', 'native_window_id': 0x200002}]}
+        require(logical_window_for_native(context, 0x200001) == 7, 'native XID is not logical ID')
+        for invalid in ({'windows': []}, {'windows': [context['windows'][0], context['windows'][0]]}):
+            try:
+                logical_window_for_native(invalid, 0x200001)
+            except RuntimeError:
+                pass
+            else:
+                raise AssertionError('missing/ambiguous native identity was accepted')
         print('self-test passed (no sockets/processes/files)')
         return 0
     require(args.jwm and args.remote, 'prebuilt --jwm and --remote required')
