@@ -32,6 +32,38 @@ fn private_file(path: &Path, bytes: &[u8]) {
         .unwrap();
     file.write_all(bytes).unwrap();
 }
+// Publish result payloads atomically: exists() must mean the complete result
+// is readable, not merely that create_new ran before write_all.
+fn publish_result(path: &Path, bytes: &[u8]) {
+    let staged = path.with_extension("pending");
+    private_file(&staged, bytes);
+    fs::rename(&staged, path).unwrap();
+}
+
+#[test]
+fn staged_result_is_invisible_until_complete_publication() {
+    let temp = Temp::new();
+    let final_path = temp.0.join("result");
+    let staged = final_path.with_extension("pending");
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&staged)
+        .unwrap();
+    file.write_all(b"y").unwrap();
+    assert!(!final_path.exists());
+    file.write_all(b"es").unwrap();
+    drop(file);
+    assert!(!final_path.exists());
+    fs::rename(&staged, &final_path).unwrap();
+    assert_eq!(fs::read(&final_path).unwrap(), b"yes");
+    let helper_path = temp.0.join("helper-result");
+    publish_result(&helper_path, b"no");
+    assert_eq!(fs::read(&helper_path).unwrap(), b"no");
+    assert!(!helper_path.with_extension("pending").exists());
+}
+
 fn private_dir(path: &Path) {
     fs::DirBuilder::new()
         .recursive(true)
@@ -543,7 +575,7 @@ fn subprocess_helper() {
         Err(error) if error.kind() == io::ErrorKind::StorageFull => Ok(false),
         Err(error) => Err(error),
     });
-    private_file(
+    publish_result(
         &control.join(format!("result-{tag}")),
         if admitted { b"yes" } else { b"no" },
     );
@@ -613,6 +645,12 @@ fn competing_process_admissions_never_exceed_cap() {
         fs::read(temp.0.join("result-a")).unwrap(),
         fs::read(temp.0.join("result-b")).unwrap(),
     ];
+    for (tag, result) in ["a", "b"].into_iter().zip(&results) {
+        assert!(
+            matches!(result.as_slice(), b"yes" | b"no"),
+            "child {tag} published an invalid admission result: {result:?}"
+        );
+    }
     assert_eq!(results.iter().filter(|v| v.as_slice() == b"yes").count(), 1);
     assert_eq!(results.iter().filter(|v| v.as_slice() == b"no").count(), 1);
     assert_eq!(status(&temp.root()).unwrap().reserved_bytes, 60);
