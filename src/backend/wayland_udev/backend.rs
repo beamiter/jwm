@@ -10,6 +10,11 @@ pub(crate) mod fbo_presentation;
 #[path = "../udev_kms.rs"]
 mod kms;
 use self::kms::KmsState;
+#[cfg(test)]
+pub(crate) use self::kms::{
+    KmsRenderElement, composite_fbo_elements_for_test, compositor_frame_element_for_test,
+    fbo_cursor_composition_for_test,
+};
 
 use super::compositor::{CompositorOutputTextureOwnership, WaylandCompositor};
 use super::output_management::proposed_output_framebuffer_size;

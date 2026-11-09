@@ -3081,6 +3081,77 @@ fn fbo_output_domain_is_exact(
         && transform == Transform::Normal
 }
 
+// Half-open pixel rectangles. Empty/overflowing domains are unknown, not
+// evidence of separation. i64 arithmetic avoids wrapping at hostile edges.
+fn fbo_cursor_rect_is_disjoint(
+    target: (i32, i32, u32, u32),
+    cursor: Rectangle<i32, Physical>,
+) -> bool {
+    let (tx, ty, tw, th) = target;
+    if tx < 0 || ty < 0 || tw == 0 || th == 0 || cursor.size.w <= 0 || cursor.size.h <= 0 {
+        return false;
+    }
+    let tr = i64::from(tx) + i64::from(tw);
+    let tb = i64::from(ty) + i64::from(th);
+    let cr = i64::from(cursor.loc.x) + i64::from(cursor.size.w);
+    let cb = i64::from(cursor.loc.y) + i64::from(cursor.size.h);
+    if [tr, tb, cr, cb]
+        .into_iter()
+        .any(|edge| edge > i64::from(i32::MAX) || edge < i64::from(i32::MIN))
+    {
+        return false;
+    }
+    cr <= i64::from(tx)
+        || cb <= i64::from(ty)
+        || i64::from(cursor.loc.x) >= tr
+        || i64::from(cursor.loc.y) >= tb
+}
+
+fn fbo_proof_frame_flags(mut flags: FrameFlags, has_proof: bool) -> FrameFlags {
+    if has_proof {
+        // Smithay's cursor-copy fast path may leave hardware plane padding
+        // uninitialized. Only software primary composition has the exact
+        // element bounds proven here; do not widen this into a vendor fix.
+        flags.remove(
+            FrameFlags::ALLOW_CURSOR_PLANE_SCANOUT | FrameFlags::ALLOW_OVERLAY_PLANE_SCANOUT,
+        );
+    }
+    flags
+}
+
+fn fbo_cursor_composition_is_safe(
+    elements: &[KmsRenderElement],
+    cursor_prefix_len: usize,
+    compositor_index: Option<usize>,
+    target: (i32, i32, u32, u32),
+) -> bool {
+    if compositor_index != Some(cursor_prefix_len)
+        || cursor_prefix_len.checked_add(1) != Some(elements.len())
+    {
+        return false;
+    }
+    // Only the actual cursor assembly prefix is trusted, not an arbitrary
+    // external element that happens to advertise Kind::Cursor. Later code only
+    // appends elements; the screenshot texture swap touches the FBO index alone.
+    elements[..cursor_prefix_len].iter().all(|element| {
+        matches!(
+            element,
+            KmsRenderElement::Memory(_) | KmsRenderElement::Solid(_)
+        ) && element.kind() == Kind::Cursor
+            && fbo_cursor_rect_is_disjoint(target, element.geometry(Scale::from(1.0)))
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn fbo_cursor_composition_for_test(
+    elements: &[KmsRenderElement],
+    cursor_prefix_len: usize,
+    compositor_index: Option<usize>,
+    target: (i32, i32, u32, u32),
+) -> bool {
+    fbo_cursor_composition_is_safe(elements, cursor_prefix_len, compositor_index, target)
+}
+
 fn take_rendered_presentation_callbacks(
     roots: &[WlSurface],
     render_states: &smithay::backend::renderer::element::RenderElementStates,
@@ -8901,6 +8972,10 @@ impl KmsState {
                 }
             }
 
+            // Provenance is the exact prefix assembled above, including every
+            // fallback body and shadow rectangle. Do not derive it from Kind.
+            let cursor_prefix_len = elements.len();
+
             let out = &mut self.outputs[out_idx];
 
             #[allow(
@@ -9871,10 +9946,13 @@ impl KmsState {
                 // guarantees a real replacement queue/vblank observation.
                 out.drm_output.reset_buffers();
             }
-            let frame_flags = frame_flags_for_color_delivery(
-                color_delivery_retry_required,
-                manual_surface_path,
-                direct_scanout_eligible,
+            let frame_flags = fbo_proof_frame_flags(
+                frame_flags_for_color_delivery(
+                    color_delivery_retry_required,
+                    manual_surface_path,
+                    direct_scanout_eligible,
+                ),
+                fbo_presentation.is_some(),
             );
 
             match out.drm_output.render_frame(
@@ -9894,11 +9972,14 @@ impl KmsState {
                         unambiguous_presentation_output && !use_compositor && !res.is_empty,
                     );
                     if use_compositor && unambiguous_presentation_output && !res.is_empty
-                        && elements.len() == 1 && compositor_element_index == Some(0)
+                        && fbo_presentation.as_ref().is_some_and(|proof|
+                            fbo_cursor_composition_is_safe(&elements, cursor_prefix_len,
+                                compositor_element_index, proof.target_rect()))
                         && compositor.is_some_and(|comp| fbo_output_domain_is_exact(
                             (ox, oy), (out_w, out_h), comp.screen_size(),
                             out.output.current_scale().fractional_scale(), out.output.current_transform()))
-                        && res.states.element_render_state(elements[0].id().clone()).is_some_and(|r|
+                        && compositor_element_index.and_then(|index| elements.get(index))
+                            .and_then(|element| res.states.element_render_state(element.id().clone())).is_some_and(|r|
                             r.visible_area > 0 && r.presentation_state != smithay::backend::renderer::element::RenderElementPresentationState::Skipped)
                         && let (Some(proof), Some(comp)) = (fbo_presentation.take(), compositor)
                     {
@@ -14517,5 +14598,110 @@ mod fbo_output_domain_tests {
             1.0,
             Transform::Normal
         ));
+    }
+}
+
+#[cfg(test)]
+mod fbo_cursor_rect_tests {
+    use super::{Physical, Rectangle, fbo_cursor_rect_is_disjoint};
+    fn rect(x: i32, y: i32, w: i32, h: i32) -> Rectangle<i32, Physical> {
+        Rectangle::new((x, y).into(), (w, h).into())
+    }
+    const TARGET: (i32, i32, u32, u32) = (20, 20, 40, 30);
+    #[test]
+    fn cursor_outside_and_exact_edge_are_disjoint() {
+        for r in [
+            rect(0, 0, 8, 8),
+            rect(0, 20, 20, 10),
+            rect(60, 20, 10, 10),
+            rect(20, 50, 10, 10),
+            rect(-8, 20, 8, 12),
+        ] {
+            assert!(fbo_cursor_rect_is_disjoint(TARGET, r));
+        }
+    }
+    #[test]
+    fn one_pixel_and_shadow_overlap_are_not_disjoint() {
+        for r in [
+            rect(19, 20, 2, 10),
+            rect(59, 20, 10, 10),
+            rect(20, 49, 10, 10),
+            rect(25, 25, 2, 2),
+        ] {
+            assert!(!fbo_cursor_rect_is_disjoint(TARGET, r));
+        }
+        assert!(fbo_cursor_rect_is_disjoint(TARGET, rect(0, 10, 20, 10)));
+        assert!(
+            !fbo_cursor_rect_is_disjoint(TARGET, rect(1, 11, 20, 10)),
+            "shadow alone overlaps"
+        );
+    }
+    #[test]
+    fn malformed_or_overflowing_rectangles_fail_closed() {
+        for r in [
+            rect(0, 0, 0, 4),
+            rect(0, 0, -1, 4),
+            rect(i32::MAX, 0, 1, 4),
+            rect(0, i32::MAX, 4, 1),
+        ] {
+            assert!(!fbo_cursor_rect_is_disjoint(TARGET, r));
+        }
+        for t in [(0, 0, 0, 1), (0, 0, u32::MAX, 1), (-1, 0, 1, 1)] {
+            assert!(!fbo_cursor_rect_is_disjoint(t, rect(100, 100, 1, 1)));
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn compositor_frame_element_for_test(
+    renderer: &GlesRenderer,
+    texture: GlesTexture,
+) -> KmsRenderElement {
+    KmsState::compositor_frame_element(renderer, texture, (0, 0))
+}
+
+#[cfg(test)]
+pub(crate) fn composite_fbo_elements_for_test(
+    renderer: &mut GlesRenderer,
+    elements: &[KmsRenderElement],
+    size: (i32, i32),
+) -> Option<Vec<u8>> {
+    let texture = KmsState::composite_elements_to_texture(renderer, elements, size, 1.0)?;
+    let mapping = renderer
+        .copy_texture(
+            &texture,
+            Rectangle::from_size(size.into()),
+            Fourcc::Abgr8888,
+        )
+        .ok()?;
+    Some(renderer.map_texture(&mapping).ok()?.to_vec())
+}
+
+#[cfg(test)]
+mod fbo_cursor_frame_flag_tests {
+    use super::{FrameFlags, fbo_proof_frame_flags};
+    #[test]
+    fn proof_forces_cursor_and_overlay_software_without_changing_other_flags() {
+        let input = FrameFlags::all();
+        let actual = fbo_proof_frame_flags(input, true);
+        assert!(!actual.intersects(
+            FrameFlags::ALLOW_CURSOR_PLANE_SCANOUT | FrameFlags::ALLOW_OVERLAY_PLANE_SCANOUT
+        ));
+        assert_eq!(
+            actual,
+            input
+                & !(FrameFlags::ALLOW_CURSOR_PLANE_SCANOUT
+                    | FrameFlags::ALLOW_OVERLAY_PLANE_SCANOUT)
+        );
+        assert_eq!(
+            fbo_proof_frame_flags(FrameFlags::empty(), true),
+            FrameFlags::empty()
+        );
+    }
+    #[test]
+    fn ordinary_frames_retain_original_plane_policy() {
+        for flags in [FrameFlags::empty(), FrameFlags::DEFAULT, FrameFlags::all()] {
+            assert_eq!(fbo_proof_frame_flags(flags, false), flags);
+        }
     }
 }

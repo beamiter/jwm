@@ -68,6 +68,11 @@ pub(crate) struct Proof {
     receipt: FboPresentationReceipt,
 }
 impl Proof {
+    /// Rectangle actually sampled by the compositor receipt, in the identity
+    /// output pixel domain. Never substitute the current window position.
+    pub(crate) fn target_rect(&self) -> (i32, i32, u32, u32) {
+        self.prepared.candidate.rect
+    }
     pub(crate) fn consume(
         mut self,
         state: &JwmWaylandState,

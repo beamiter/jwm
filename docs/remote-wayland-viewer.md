@@ -82,15 +82,28 @@ The candidate FBO integration admits only a deliberately narrow case:
 - The single output has origin `(0, 0)`, a positive mode size exactly equal to
   the entire FBO, scale `1`, and `Normal` output transform.
 - The scene contains one opaque native root surface, fully inside the FBO,
-  without subsurfaces, viewport cropping/scaling, effects, overlays or
-  occlusion. Surface buffer scale/transform and window geometry must also
+  without subsurfaces, viewport cropping/scaling, effects, overlays inside the
+  FBO or occlusion. Surface buffer scale/transform and window geometry must also
   satisfy the implementation's exact, untransformed layout checks.
+- Outside the FBO, only the actual external-cursor assembly prefix may precede
+  the one FBO element. Every cursor element's final bounding box must be
+  disjoint from the source rectangle, including bitmap hotspot offsets and
+  every fallback body/shadow rectangle. Pointer coordinates or a `Cursor`
+  label alone are not proof. Any overlap, unknown/extra element or invalid
+  geometry fails closed. These candidate proof frames require software cursor
+  composition into the primary output, with cursor-plane and overlay-plane
+  scanout disabled: element bounds do not establish that unused hardware
+  cursor-plane padding is clear. This trades away hardware-plane offloading
+  for the narrow proof; it is not hardware cursor/plane validation. Ordinary
+  frames retain their existing plane flags. A cursor already drawn into the
+  FBO remains outside this supported case.
 - Successful import is followed by an actual full redraw of that exact input
   texture and rectangle. The proof owns the candidate commit's callbacks;
   cached FBO content or an allocation identity alone cannot qualify.
 - An independent FBO content serial, allocation identity and live surface
   generation must still match. Final output render-element states must confirm
-  the sole FBO element was not skipped and is visible before the proof is
+  the FBO element (after any proven disjoint cursor prefix) was not skipped
+  and is visible before the proof is
   consumed for one output submission.
 
 Anything outside the provable paths is discarded, including multi-output

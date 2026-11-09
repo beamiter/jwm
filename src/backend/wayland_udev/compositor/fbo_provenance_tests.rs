@@ -513,4 +513,238 @@ mod native {
                 .unwrap();
         }
     }
+    #[test]
+    fn fbo_provenance_actual_software_cursor_geometry_preserves_or_denies_source_proof() {
+        use crate::backend::wayland_udev::backend::{
+            KmsRenderElement, composite_fbo_elements_for_test, compositor_frame_element_for_test,
+            fbo_cursor_composition_for_test,
+        };
+        use smithay::backend::allocator::Fourcc;
+        use smithay::backend::renderer::Color32F;
+        use smithay::backend::renderer::element::memory::{
+            MemoryRenderBuffer, MemoryRenderBufferRenderElement,
+        };
+        use smithay::backend::renderer::element::solid::SolidColorRenderElement;
+        use smithay::backend::renderer::element::{Id, Kind};
+        use smithay::backend::renderer::gles::GlesTexture;
+        use smithay::utils::{Physical, Point, Rectangle, Transform};
+        let Some(mut gl) = HeadlessSmithayGles::new() else {
+            return;
+        };
+        for case in [
+            "memory-outside",
+            "solid-outside",
+            "memory-inside",
+            "hotspot-overlap",
+            "shadow-overlap",
+            "unknown-kind",
+            "untrusted-extra",
+        ] {
+            let (mut server, mut app) = setup();
+            let feedback = commit(&mut server, &mut app, [0, 0, 255, 255], 1);
+            let scene = [(app.window.raw(), 8, 6, 16, 12)];
+            let prepared = fbo_presentation::prepare(&server.state, &mut gl.renderer, &scene)
+                .expect("actual native XRGB import");
+            let c = prepared.candidate();
+            let (mut comp, receipt) = gl
+                .renderer
+                .with_context(|raw| {
+                    let mut comp = unsafe { WaylandCompositor::new(raw, 64, 48, false) }.unwrap();
+                    plain(&mut comp);
+                    insert_opaque_test_window(&mut comp, c.window, c.texture, 16, 12);
+                    comp.set_presentation_candidate(Some(c));
+                    assert!(comp.render_frame(
+                        raw,
+                        &scene,
+                        Some(c.window),
+                        false,
+                        false,
+                        false,
+                        None,
+                        false
+                    ));
+                    let receipt = comp.take_presentation_receipt().unwrap();
+                    (comp, receipt)
+                })
+                .unwrap();
+            let proof = prepared.finish(receipt, &server.state).unwrap();
+            let target = proof.target_rect();
+            assert_eq!(target, (8, 6, 16, 12));
+            // Transfer this output allocation's deletion to Smithay, matching
+            // the production FBO element factory and teardown ownership mode.
+            let texture = unsafe {
+                GlesTexture::from_raw(
+                    &gl.renderer,
+                    Some(comp.output_texture_internal_format()),
+                    false,
+                    comp.output_texture,
+                    (64, 48).into(),
+                )
+            };
+            let background = compositor_frame_element_for_test(&gl.renderer, texture.clone());
+            let baseline =
+                composite_fbo_elements_for_test(&mut gl.renderer, &[background], (64, 48)).unwrap();
+            let source_is_red = |pixels: &[u8]| {
+                (6..18).all(|y| {
+                    (8..24).all(|x| {
+                        let offset = (y * 64 + x) * 4;
+                        pixels[offset..offset + 4] == [255, 0, 0, 255]
+                    })
+                })
+            };
+            assert!(
+                source_is_red(&baseline),
+                "actual FBO source must reach software composition at its physical rectangle"
+            );
+            let solid = |x, y, width, height, color, kind| {
+                KmsRenderElement::Solid(SolidColorRenderElement::new(
+                    Id::new(),
+                    Rectangle::new((x, y).into(), (width, height).into()),
+                    0usize,
+                    color,
+                    kind,
+                ))
+            };
+            let mut elements = Vec::new();
+            if case == "solid-outside" || case == "shadow-overlap" {
+                let (x, y) = if case == "solid-outside" {
+                    (40, 20)
+                } else {
+                    (4, 6)
+                };
+                elements.push(solid(
+                    x,
+                    y,
+                    4,
+                    4,
+                    Color32F::new(0.0, 1.0, 0.0, 1.0),
+                    Kind::Cursor,
+                ));
+                // In shadow-overlap the body only touches the source's left
+                // edge; its actual +1 shadow geometry overlaps by one pixel.
+                elements.push(solid(
+                    x + 1,
+                    y + 1,
+                    4,
+                    4,
+                    Color32F::new(0.0, 0.0, 0.0, 0.55),
+                    Kind::Cursor,
+                ));
+            } else {
+                let location = match case {
+                    "memory-inside" => (12.0, 10.0),
+                    // Pointer would be at x=27 with hotspot x=4. Only the
+                    // actual element's x=23 bitmap rectangle is authoritative.
+                    "hotspot-overlap" => (23.0, 8.0),
+                    _ => (40.0, 20.0),
+                };
+                let memory = MemoryRenderBuffer::from_slice(
+                    &[0u8, 255, 0, 255].repeat(4 * 4),
+                    Fourcc::Abgr8888,
+                    (4, 4),
+                    1,
+                    Transform::Normal,
+                    None,
+                );
+                let kind = if case == "unknown-kind" {
+                    Kind::Unspecified
+                } else {
+                    Kind::Cursor
+                };
+                let element = MemoryRenderBufferRenderElement::from_buffer(
+                    &mut gl.renderer,
+                    Point::<f64, Physical>::from(location),
+                    &memory,
+                    None,
+                    None,
+                    None,
+                    kind,
+                )
+                .unwrap();
+                elements.push(KmsRenderElement::Memory(element));
+            }
+            let cursor_prefix = elements.len();
+            elements.push(compositor_frame_element_for_test(
+                &gl.renderer,
+                texture.clone(),
+            ));
+            if case == "untrusted-extra" {
+                elements.push(solid(
+                    50,
+                    30,
+                    3,
+                    3,
+                    Color32F::new(0.0, 0.0, 1.0, 1.0),
+                    Kind::Cursor,
+                ));
+            }
+            let allowed = fbo_cursor_composition_for_test(
+                &elements,
+                cursor_prefix,
+                Some(cursor_prefix),
+                target,
+            );
+            assert_eq!(
+                allowed,
+                matches!(case, "memory-outside" | "solid-outside"),
+                "production actual-element gate: {case}"
+            );
+            let pixels = composite_fbo_elements_for_test(&mut gl.renderer, &elements, (64, 48))
+                .expect("actual software composition");
+            assert_eq!(
+                source_is_red(&pixels),
+                !matches!(case, "memory-inside" | "hotspot-overlap" | "shadow-overlap"),
+                "actual source pixel coverage: {case}"
+            );
+            if matches!(case, "memory-outside" | "solid-outside") {
+                let offset = (21 * 64 + 41) * 4;
+                assert_eq!(
+                    &pixels[offset..offset + 4],
+                    &[0, 255, 0, 255],
+                    "cursor must really draw outside source"
+                );
+            }
+            if allowed {
+                let callbacks = proof.consume(
+                    &server.state,
+                    comp.output_texture,
+                    comp.output_texture_generation(),
+                    comp.output_content_serial(),
+                );
+                assert_eq!(callbacks.len(), 1);
+                // This is software offscreen verification, not a completed DRM
+                // frame. Discard rather than invent a presented timestamp.
+                for callback in callbacks {
+                    callback.discarded();
+                }
+            } else {
+                drop(proof);
+            }
+            server.roundtrip();
+            let events = app.client.events();
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| event.sender == feedback && event.opcode == 2)
+                    .count(),
+                1,
+                "single feedback ownership: {case}"
+            );
+            assert!(
+                events
+                    .iter()
+                    .all(|event| !(event.sender == feedback && event.opcode == 1))
+            );
+            drop(elements);
+            gl.renderer
+                .with_context(|raw| unsafe {
+                    comp.release_gpu_resources(
+                        raw,
+                        CompositorOutputTextureOwnership::SmithayRenderer,
+                    )
+                })
+                .unwrap();
+            drop(texture);
+        }
+    }
 }
