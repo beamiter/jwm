@@ -13,7 +13,7 @@ import time
 
 def launch():
     child = subprocess.Popen(
-        ["Xvfb", "-displayfd", "1", "-screen", "0", "1280x800x24", "-nolisten", "tcp", "-ac"],
+        ["Xvfb", "-displayfd", "1", "-screen", "0", "1280x800x24", "-nolisten", "tcp", "-ac", "-noreset"],
         stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=None,
     )
     try:

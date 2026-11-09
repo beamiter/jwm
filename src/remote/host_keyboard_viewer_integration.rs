@@ -367,10 +367,10 @@ fn actual_viewer_tcp_keyboard_presented_scope_and_revocation() {
         // Establish a real, deterministic owned-server focus before mapping the
         // viewer. PointerRoot -> explicit focus can itself generate FocusOut;
         // do not weaken the production historical revocation guard to hide it.
-        ViewerTestDriver::connect()
-            .unwrap()
-            .initialize_outside_focus()
-            .unwrap();
+        // Keep this connection alive until every session worker has joined.
+        // Otherwise Xvfb's last-client reset can silently undo this setup.
+        let startup_driver = ViewerTestDriver::connect().unwrap();
+        startup_driver.initialize_outside_focus().unwrap();
         note(
             &trace,
             "owned X pointer outside viewer and focus explicit root before client map",
@@ -466,6 +466,7 @@ fn actual_viewer_tcp_keyboard_presented_scope_and_revocation() {
             },
         );
         host.join().expect("host thread panicked");
+        drop(startup_driver);
         sync(&mut server);
         collect_keys(&mut app, app_keyboard, &mut events);
         collect_keys(&mut other, other_keyboard, &mut unexpected);

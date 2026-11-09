@@ -378,6 +378,12 @@ impl ViewerTestDriver {
         self.button_up()
     }
     pub(super) fn focus(&self, window: Window) -> RemoteResult<()> {
+        let pointer = self.conn.query_pointer(self.root)?.reply()?;
+        let focus = self.conn.get_input_focus()?.reply()?;
+        eprintln!(
+            "owned focus before request window={window:#x}: pointer=({},{}), pointer_child={:#x}, focus={:#x}, revert_to={:?}",
+            pointer.root_x, pointer.root_y, pointer.child, focus.focus, focus.revert_to
+        );
         self.conn
             .set_input_focus(InputFocus::POINTER_ROOT, window, CURRENT_TIME)?
             .check()?;
