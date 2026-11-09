@@ -4046,7 +4046,37 @@ mod tests {
 
     #[test]
     fn legacy_guarded_close_is_single_focused_active_target_only() {
+        let config = crate::config::Config::default();
+        let font = config.system_ui_font();
+        let _font = crate::backend::compositor_common::eva_overlay::ConfirmationTestFont::new(font);
         let (mut jwm, mut backend) = setup();
+        let review_and_confirm = |jwm: &mut Jwm| {
+            // Simulate trusted local review of every actual detail page, rather
+            // than assuming this plan happens to fit the current font/viewport.
+            jwm.eva_refresh_confirmation_layout();
+            let pages = jwm.eva.confirmation_ui.confirmation_page_count_cached();
+            assert!(pages > 0);
+            jwm.eva.confirmation_seen_pages = (0..pages).collect();
+            jwm.eva.confirmation_detail_page = Some(pages - 1);
+            let confirmed = jwm.eva_confirm();
+            let now = Instant::now();
+            assert!(
+                confirmed,
+                "trusted review failed: active={} state={} font={font:?} pages={pages} seen={:?} signature={:?} lease_remaining={:?} confirmation_remaining={:?} reviewable={}",
+                jwm.eva_active(),
+                jwm.eva.state,
+                jwm.eva.confirmation_seen_pages,
+                jwm.eva.confirmation_layout_signature,
+                jwm.eva
+                    .lease_until
+                    .map(|until| until.saturating_duration_since(now)),
+                jwm.eva
+                    .confirmation
+                    .as_ref()
+                    .map(|c| c.expires.saturating_duration_since(now)),
+                jwm.eva.confirmation_ui.confirmation_reviewable()
+            );
+        };
         let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         backend.window_ops = Box::new(CloseSpy(calls.clone()));
         let m = jwm.state.sel_mon.unwrap();
@@ -4065,7 +4095,7 @@ mod tests {
         let action = json!({"name":"killclient","arguments":{"window_token":token,"monitor_token":mt,"tag_mask":1}});
         let status = json!({"assistant_permit":jwm.eva.permit,"state":"confirming","confirmation":{"plan_hash":"legacy-single","targets":[action]}});
         assert!(jwm.eva_set_status(&mut backend, &status).success);
-        assert!(jwm.eva_confirm());
+        review_and_confirm(&mut jwm);
         let mut req = request(&jwm, "legacy-single", action.clone());
         req["confirmation_token"] = json!(jwm.eva.confirmation.as_ref().unwrap().token);
         req["expected_context"] =
@@ -4123,7 +4153,7 @@ mod tests {
         let prefix = json!({"name":"switch_tag","arguments":{"monitor_token":mt,"tag_mask":2}});
         let status = json!({"assistant_permit":jwm.eva.permit,"state":"confirming","confirmation":{"plan_hash":"legacy-mixed","targets":[prefix,action]}});
         assert!(jwm.eva_set_status(&mut backend, &status).success);
-        assert!(jwm.eva_confirm());
+        review_and_confirm(&mut jwm);
         let prefix = request(&jwm, "legacy-prefix", prefix);
         assert!(!jwm.eva_guarded_execute(&mut backend, &prefix).success);
         assert_eq!(jwm.state.monitors[m].get_active_tags(), 1);
@@ -5463,13 +5493,11 @@ mod tests {
     }
     #[test]
     fn confirmation_review_pages_are_bound_to_layout_but_not_late_captions() {
-        struct RestoreConfig(std::sync::Arc<crate::config::Config>);
-        impl Drop for RestoreConfig {
-            fn drop(&mut self) {
-                CONFIG.store(self.0.clone());
-            }
-        }
-        let _restore = RestoreConfig(CONFIG.load_full());
+        let initial_config = crate::config::Config::default();
+        let _initial_font =
+            crate::backend::compositor_common::eva_overlay::ConfirmationTestFont::new(
+                initial_config.system_ui_font(),
+            );
         let (mut jwm, mut backend) = setup();
         let monitor = jwm.state.sel_mon.unwrap();
         jwm.state.monitors[monitor].geometry.w_h = 240;
@@ -5508,8 +5536,8 @@ mod tests {
         let pages = repaged;
         jwm.eva.confirmation_seen_pages = (0..pages).collect();
         jwm.eva.confirmation_detail_page = Some(0);
-        // Fonts change through configuration reload, rather than the scalar
-        // runtime setter; exercise that real path without touching user files.
+        // Load a real config fixture, then isolate only its layout font input
+        // to this test thread. Never publish a temporary font to other tests.
         struct FontFixture(std::path::PathBuf);
         impl Drop for FontFixture {
             fn drop(&mut self) {
@@ -5529,14 +5557,17 @@ mod tests {
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
         let _fixture = FontFixture(dir.clone());
         let path = dir.join("font.toml");
-        CONFIG.load().save_to_file(&path).unwrap();
+        initial_config.save_to_file(&path).unwrap();
         let mut tree: toml::Value =
             toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         tree["appearance"]["system_ui_font"] = toml::Value::String("Sans 18".into());
         std::fs::write(&path, toml::to_string(&tree).unwrap()).unwrap();
-        CONFIG.store(std::sync::Arc::new(
-            crate::config::Config::load_from_file(&path).unwrap(),
-        ));
+        let loaded = crate::config::Config::load_from_file(&path).unwrap();
+        assert_eq!(loaded.system_ui_font(), "Sans 18");
+        let _loaded_font =
+            crate::backend::compositor_common::eva_overlay::ConfirmationTestFont::new(
+                loaded.system_ui_font(),
+            );
         jwm.eva_refresh_confirmation_layout();
         assert!(
             jwm.eva.confirmation_seen_pages.is_empty(),
