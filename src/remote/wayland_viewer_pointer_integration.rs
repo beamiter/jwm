@@ -222,15 +222,42 @@ fn enable(s: &mut Server, p: &PointerPeer) -> WlPointer {
         0,
         "pointer optin must not bind keyboard"
     );
-    let pointers: Vec<_> = s
-        .state
-        .seat
-        .get_pointer()
-        .unwrap()
-        .client_pointers(&client)
-        .collect();
-    assert_eq!(pointers.len(), 1);
-    pointers[0].clone()
+    // Enable means the client has allocated a pointer proxy. The get_pointer
+    // request can still be buffered until its next I/O pump; a server-only
+    // dispatch cannot create a resource it has not received. Drive both ends
+    // and require the actual server resource before emitting protocol events.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let (events, presented) = p.poll(s);
+        assert!(events.is_empty(), "input before pointer focus: {events:?}");
+        assert!(presented.is_empty(), "presentation before any draw");
+        s.roundtrip();
+        assert_eq!(
+            s.state
+                .seat
+                .get_keyboard()
+                .unwrap()
+                .client_keyboards(&client)
+                .count(),
+            0,
+            "pointer initialization must never bind keyboard"
+        );
+        let pointers: Vec<_> = s
+            .state
+            .seat
+            .get_pointer()
+            .unwrap()
+            .client_pointers(&client)
+            .collect();
+        assert!(pointers.len() <= 1, "multiple owned pointer resources");
+        if let Some(pointer) = pointers.into_iter().next() {
+            return pointer;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "get_pointer did not reach the owned compositor"
+        );
+    }
 }
 fn mapped(s: &mut Server, p: &PointerPeer, gl: &mut HeadlessSmithayGles, seq: u64, w: u16, h: u16) {
     p.command(s, Request::Draw(seq, w, h));
