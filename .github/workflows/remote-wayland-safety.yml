@@ -59,6 +59,10 @@ jobs:
         run: |
           python3 scripts/test-remote-keyboard-keymap.py --self-test
           python3 scripts/test-remote-keyboard-keymap.py
+      - name: Native Wayland read-only viewer protocol and pixel contract
+        run: |
+          export XDG_RUNTIME_DIR="$(mktemp -d)"
+          env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib remote::host::wayland_viewer_integration -- --test-threads=1 --nocapture
       - name: Actual owned X11 viewer presentation and scoped pointer interaction
         run: |
           export XDG_RUNTIME_DIR="$(mktemp -d)"

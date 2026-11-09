@@ -148,6 +148,8 @@ fn client_options(
     _case: Case,
 ) -> ClientOptions {
     ClientOptions {
+        viewer_backend: crate::remote::viewer_backend::ViewerBackend::X11,
+        viewer_wayland_display: None,
         wayland_keyboard: true,
         wayland_pointer: false,
         resize_source: None,

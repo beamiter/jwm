@@ -14,6 +14,7 @@ use jwm::remote::ssh::{SshOptions, run_ssh};
 use jwm::remote::usability::{
     default_key_path, key_metadata, normalize_address, normalize_listen_address,
 };
+use jwm::remote::viewer_backend::ViewerBackend;
 use jwm::remote::window_position::WindowPosition;
 use jwm::remote::window_size::WindowSize;
 use jwm::remote::x11_capture::{CaptureArea, CaptureRegion, CaptureSource, ScalingPolicy};
@@ -408,6 +409,13 @@ enum Command {
     },
     /// Open a remote JWM desktop in a window on this JWM X11 session.
     Connect {
+        /// Explicit local presentation backend; Wayland is read-only.
+        #[arg(long, default_value_t=ViewerBackend::X11, requires_if("wayland", "view_only"))]
+        viewer_backend: ViewerBackend,
+
+        /// Native viewer Wayland socket; never an X11 display.
+        #[arg(long, value_name = "SOCKET")]
+        viewer_wayland_display: Option<String>,
         /// Hostname/IP, optionally with port (default 48221). Use [IPv6]:PORT.
         #[arg(value_name = "HOST[:PORT]", value_parser = normalize_address)]
         address: String,
@@ -619,6 +627,8 @@ fn profile_error(message: &str) -> std::io::Error {
 fn profile_from_command(command: Command) -> RemoteResult<Profile> {
     let (connection, viewer) = match command {
         Command::Connect {
+            viewer_backend,
+            viewer_wayland_display,
             reconnect_attempts,
             address,
             key_file,
@@ -637,6 +647,12 @@ fn profile_from_command(command: Command) -> RemoteResult<Profile> {
             clipboard_file_limit,
             frame_limits,
         } => {
+            if viewer_backend == ViewerBackend::Wayland || viewer_wayland_display.is_some() {
+                return Err(profile_error(
+                    "native Wayland viewer selection cannot be saved in a profile",
+                )
+                .into());
+            }
             if wayland_keyboard || wayland_pointer {
                 return Err(profile_error(
                     "Wayland input authorization cannot be saved in a profile",
@@ -1234,6 +1250,8 @@ fn run(command: Command) -> RemoteResult<()> {
             })
         }
         Command::Connect {
+            viewer_backend,
+            viewer_wayland_display,
             reconnect_attempts,
             address,
             key_file,
@@ -1253,6 +1271,8 @@ fn run(command: Command) -> RemoteResult<()> {
             escape_key,
         } => run_client_reconnecting(
             ClientOptions {
+                viewer_backend,
+                viewer_wayland_display,
                 peer_label: address.clone(),
                 address,
                 key: KeySource::File(resolve_key_path(key_file)?),
@@ -1444,6 +1464,61 @@ fn parse_window_id(value: &str) -> Result<u32, String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn native_viewer_backend_is_explicit_read_only_and_not_profile_saved() {
+        let cli = Cli::try_parse_from(["jwm-remote", "connect", "host"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Connect {
+                viewer_backend: ViewerBackend::X11,
+                ..
+            }
+        ));
+        assert!(
+            Cli::try_parse_from([
+                "jwm-remote",
+                "connect",
+                "host",
+                "--viewer-backend",
+                "wayland"
+            ])
+            .is_err()
+        );
+        let cli = Cli::try_parse_from([
+            "jwm-remote",
+            "connect",
+            "host",
+            "--viewer-backend",
+            "wayland",
+            "--view-only",
+            "--viewer-wayland-display",
+            "wayland-owned",
+        ])
+        .unwrap();
+        assert!(profile_from_command(cli.command).is_err());
+        assert!(
+            Cli::try_parse_from([
+                "jwm-remote",
+                "connect",
+                "host",
+                "--viewer-backend",
+                "unknown"
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "jwm-remote",
+                "ssh",
+                "host",
+                "--viewer-backend",
+                "wayland",
+                "--view-only"
+            ])
+            .is_err()
+        );
+    }
+
     #[test]
     fn staging_limit_parser_is_exact_nonzero_and_checked() {
         for (text, expected) in [

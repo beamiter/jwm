@@ -23,9 +23,10 @@ use super::source_wire::{
 };
 use super::tile::TileDecoder;
 use super::usability::{ClientStage, failure_hint, session_mode};
+use super::viewer_backend::{Viewer, ViewerBackend};
 use super::x11_input::InputEvent;
 use super::x11_keymap::{KeymapTable, read_display};
-use super::x11_viewer::{Viewer, ViewerEvent, validate_escape_key};
+use super::x11_viewer::{ViewerEvent, validate_escape_key};
 use super::{RemoteError, RemoteResult, VIDEO_FRAME_IDLE_TIMEOUT};
 use nix::errno::Errno;
 use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
@@ -57,6 +58,8 @@ const RECEIVER_JOIN_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Debug)]
 pub struct ClientOptions {
+    pub viewer_backend: ViewerBackend,
+    pub viewer_wayland_display: Option<String>,
     pub wayland_keyboard: bool,
     pub wayland_pointer: bool,
     /// One explicit source-size operation; never replayed or saved in a profile.
@@ -278,10 +281,13 @@ pub fn run_client(options: ClientOptions) -> RemoteResult<()> {
 /// single-session entry point. The budget counts additional sessions and never
 /// resets, even when a replacement session runs successfully for a long time.
 pub fn run_client_reconnecting(options: ClientOptions, attempts: u8) -> RemoteResult<()> {
-    if (options.resize_source.is_some() || options.wayland_keyboard || options.wayland_pointer)
+    if (options.resize_source.is_some()
+        || options.wayland_keyboard
+        || options.wayland_pointer
+        || options.viewer_backend == ViewerBackend::Wayland)
         && attempts != 0
     {
-        return Err(invalid_data("explicit source resize cannot automatically reconnect").into());
+        return Err(invalid_data("automatic reconnect is unavailable for source resize, scoped input leases or the Wayland viewer").into());
     }
     if attempts > 5 {
         return Err(io::Error::new(
@@ -376,6 +382,29 @@ fn suppress_reconnect(result: RemoteResult<()>, suppress: bool) -> RemoteResult<
     })
 }
 
+fn validate_viewer_backend(options: &ClientOptions) -> RemoteResult<()> {
+    if options.viewer_backend == ViewerBackend::X11 && options.viewer_wayland_display.is_some() {
+        return Err(
+            invalid_data("--viewer-wayland-display requires Wayland viewer backend").into(),
+        );
+    }
+    if options.viewer_backend == ViewerBackend::Wayland {
+        if !cfg!(feature = "remote-wayland")
+            || !options.view_only
+            || options.wayland_keyboard
+            || options.wayland_pointer
+            || options.clipboard
+            || options.resize_source.is_some()
+            || options.grab_input
+            || options.window_position.is_some()
+            || options.display.is_some()
+        {
+            return Err(invalid_data("Wayland viewer requires explicit view-only without input, clipboard, source resize, grab or window positioning").into());
+        }
+    }
+    Ok(())
+}
+
 fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> RemoteResult<()> {
     if let Some(size) = options.window_size {
         size.validate()?;
@@ -389,6 +418,7 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
             .into());
         }
     }
+    validate_viewer_backend(&options)?;
     validate_escape_key(&options.escape_key)?;
     let key = options.key.load()?;
     if options.wayland_keyboard
@@ -416,13 +446,20 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
     } else {
         KeymapTable::empty()
     };
-    let initial_viewport = super::x11_viewer::initial_viewport_with_position(
-        options.display.as_deref(),
-        options.window_size,
-        options.window_position,
-    )?;
-    let request_cursor_plane =
-        super::x11_viewer::supports_cursor_plane(options.display.as_deref())?;
+    let (initial_viewport, request_cursor_plane) = match options.viewer_backend {
+        ViewerBackend::X11 => (
+            super::x11_viewer::initial_viewport_with_position(
+                options.display.as_deref(),
+                options.window_size,
+                options.window_position,
+            )?,
+            super::x11_viewer::supports_cursor_plane(options.display.as_deref())?,
+        ),
+        ViewerBackend::Wayland => (
+            super::viewer_backend::wayland_initial_size(options.window_size).dimensions(),
+            false,
+        ),
+    };
     *stage = ClientStage::Connect;
     eprintln!("jwm-remote: connecting to {}", options.peer_label);
     let stream = connect_with_timeout(&options.address, CONNECT_TIMEOUT)?;
@@ -574,18 +611,13 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
         .map_err(|_| invalid_data("initial frame is taller than an X11 window"))?;
     let last_sequence = first_frame.frame.sequence();
     *stage = ClientStage::Display;
-    let mut viewer = Viewer::connect_with_window_geometry(
-        options.display.as_deref(),
+    let mut viewer = Viewer::connect(
+        &options,
         initial_width,
         initial_height,
-        options.window_size,
-        options.window_position,
         hello.pointer_enabled,
         hello.keyboard_enabled,
         hello.keyboard_enabled.then_some(keymap),
-        options.grab_input && (hello.pointer_enabled || hello.keyboard_enabled),
-        &options.escape_key,
-        &options.peer_label,
     )?;
     #[cfg(feature = "remote-wayland")]
     if options.wayland_keyboard {
@@ -3918,6 +3950,8 @@ pub(super) mod tests {
     #[test]
     fn invalid_startup_size_fails_before_reading_key_or_display() {
         let options = ClientOptions {
+            viewer_backend: crate::remote::viewer_backend::ViewerBackend::X11,
+            viewer_wayland_display: None,
             wayland_keyboard: false,
             wayland_pointer: false,
             resize_source: None,
@@ -6478,5 +6512,85 @@ mod explicit_resize_tests {
         state.receive(result).unwrap();
         assert!(state.pending.is_none());
         assert!(state.receive(result).is_err());
+    }
+}
+
+#[cfg(test)]
+mod native_viewer_permission_tests {
+    use super::*;
+    #[test]
+    fn native_wayland_viewer_permissions_are_checked_before_any_io() {
+        let mut options = ClientOptions {
+            viewer_backend: crate::remote::viewer_backend::ViewerBackend::Wayland,
+            viewer_wayland_display: None,
+            wayland_keyboard: false,
+            wayland_pointer: false,
+            resize_source: None,
+            window_position: None,
+            window_size: None,
+            frame_limits: super::super::messages::FrameLimits::default(),
+            address: "invalid address".into(),
+            peer_label: "test".into(),
+            key: KeySource::File(std::path::PathBuf::from(
+                "/nonexistent/window-size-test.key",
+            )),
+            display: None,
+            view_only: true,
+            grab_input: false,
+            clipboard: false,
+            clipboard_mode: Default::default(),
+            clipboard_direction: Default::default(),
+            clipboard_file_limit: 0,
+            escape_key: "F12".into(),
+        };
+        assert_eq!(
+            validate_viewer_backend(&options).is_ok(),
+            cfg!(feature = "remote-wayland")
+        );
+        for mutation in 0..8 {
+            let mut changed = options.clone();
+            match mutation {
+                0 => changed.view_only = false,
+                1 => changed.wayland_keyboard = true,
+                2 => changed.wayland_pointer = true,
+                3 => changed.clipboard = true,
+                4 => changed.grab_input = true,
+                5 => changed.display = Some(":not-to-be-opened".into()),
+                6 => {
+                    changed.resize_source = Some(super::super::window_size::WindowSize {
+                        width: 10,
+                        height: 10,
+                    })
+                }
+                _ => {
+                    changed.window_position =
+                        Some(super::super::window_position::WindowPosition { x: 0, y: 0 })
+                }
+            }
+            assert!(validate_viewer_backend(&changed).is_err());
+        }
+        for mode in 0..4 {
+            let mut restricted = options.clone();
+            restricted.viewer_backend = ViewerBackend::X11;
+            match mode {
+                0 => restricted.viewer_backend = ViewerBackend::Wayland,
+                1 => restricted.wayland_keyboard = true,
+                2 => restricted.wayland_pointer = true,
+                _ => {
+                    restricted.resize_source = Some(super::super::window_size::WindowSize {
+                        width: 10,
+                        height: 10,
+                    })
+                }
+            }
+            let error = run_client_reconnecting(restricted, 1).unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                "automatic reconnect is unavailable for source resize, scoped input leases or the Wayland viewer"
+            );
+        }
+        options.viewer_backend = ViewerBackend::X11;
+        options.viewer_wayland_display = Some("wayland-test".into());
+        assert!(validate_viewer_backend(&options).is_err());
     }
 }

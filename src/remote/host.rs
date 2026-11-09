@@ -10309,3 +10309,7 @@ mod host_viewer_integration;
 #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
 #[path = "host_keyboard_viewer_integration.rs"]
 mod host_keyboard_viewer_integration;
+
+#[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+#[path = "wayland_viewer_integration.rs"]
+mod wayland_viewer_integration;

@@ -1,0 +1,427 @@
+//! Thin presentation dispatch; authentication, decoding and ACKs stay in client.rs.
+use super::{
+    RemoteResult,
+    client::ClientOptions,
+    cursor::{CursorPosition, CursorShape},
+    frame::RecyclableDecodedFrame,
+    x11_keymap::KeymapTable,
+    x11_viewer::{self, ViewerEvent},
+};
+use std::{os::fd::BorrowedFd, sync::Arc, time::Instant};
+pub(super) fn wayland_initial_size(
+    size: Option<super::window_size::WindowSize>,
+) -> super::window_size::WindowSize {
+    size.unwrap_or(super::window_size::WindowSize {
+        width: 800,
+        height: 600,
+    })
+}
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ViewerBackend {
+    #[default]
+    X11,
+    Wayland,
+}
+impl std::str::FromStr for ViewerBackend {
+    type Err = String;
+    fn from_str(value: &str) -> Result<Self, String> {
+        match value {
+            "x11" => Ok(Self::X11),
+            "wayland" => Ok(Self::Wayland),
+            _ => Err("viewer backend must be x11 or wayland".into()),
+        }
+    }
+}
+impl std::fmt::Display for ViewerBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::X11 => "x11",
+            Self::Wayland => "wayland",
+        })
+    }
+}
+pub(super) enum Viewer {
+    X11(Box<x11_viewer::Viewer>),
+    #[cfg(feature = "remote-wayland")]
+    Wayland(Box<super::wayland_viewer::WaylandViewer>),
+}
+impl Viewer {
+    pub(super) fn connect(
+        options: &ClientOptions,
+        width: u16,
+        height: u16,
+        pointer: bool,
+        keyboard: bool,
+        keymap: Option<KeymapTable>,
+    ) -> RemoteResult<Self> {
+        match options.viewer_backend {
+            ViewerBackend::X11 => Ok(Self::X11(Box::new(
+                x11_viewer::Viewer::connect_with_window_geometry(
+                    options.display.as_deref(),
+                    width,
+                    height,
+                    options.window_size,
+                    options.window_position,
+                    pointer,
+                    keyboard,
+                    keymap,
+                    options.grab_input && (pointer || keyboard),
+                    &options.escape_key,
+                    &options.peer_label,
+                )?,
+            ))),
+            ViewerBackend::Wayland => {
+                #[cfg(feature = "remote-wayland")]
+                {
+                    #[cfg(test)]
+                    if let Some(stream) = TEST_WAYLAND_STREAM.with(|slot| slot.borrow_mut().take())
+                    {
+                        return Ok(Self::Wayland(Box::new(
+                            super::wayland_viewer::WaylandViewer::connect_test_stream(
+                                stream,
+                                width,
+                                height,
+                                Some(wayland_initial_size(options.window_size)),
+                                &options.peer_label,
+                            )?,
+                        )));
+                    }
+                    Ok(Self::Wayland(Box::new(
+                        super::wayland_viewer::WaylandViewer::connect(
+                            options.viewer_wayland_display.as_deref(),
+                            width,
+                            height,
+                            Some(wayland_initial_size(options.window_size)),
+                            &options.peer_label,
+                        )?,
+                    )))
+                }
+                #[cfg(not(feature = "remote-wayland"))]
+                {
+                    Err(std::io::Error::other("Wayland viewer support is not compiled").into())
+                }
+            }
+        }
+    }
+    pub(super) fn poll_events(&mut self) -> RemoteResult<Vec<ViewerEvent>> {
+        match self {
+            Self::X11(v) => v.poll_events(),
+            #[cfg(feature = "remote-wayland")]
+            Self::Wayland(v) => v.poll_events(),
+        }
+    }
+    pub(super) fn viewport(&self) -> (u16, u16) {
+        match self {
+            Self::X11(v) => v.viewport(),
+            #[cfg(feature = "remote-wayland")]
+            Self::Wayland(v) => v.viewport(),
+        }
+    }
+    pub(super) fn draw_recyclable(&mut self, frame: RecyclableDecodedFrame) -> RemoteResult<bool> {
+        match self {
+            Self::X11(v) => v.draw_recyclable(frame),
+            #[cfg(feature = "remote-wayland")]
+            Self::Wayland(v) => v.draw_recyclable(frame),
+        }
+    }
+    pub(super) fn can_submit_frame(&self) -> bool {
+        match self {
+            Self::X11(v) => v.can_submit_frame(),
+            #[cfg(feature = "remote-wayland")]
+            Self::Wayland(v) => v.can_submit_frame(),
+        }
+    }
+    pub(super) fn take_presented_sequences(&mut self) -> RemoteResult<Vec<u64>> {
+        match self {
+            Self::X11(v) => v.take_presented_sequences(),
+            #[cfg(feature = "remote-wayland")]
+            Self::Wayland(v) => v.take_presented_sequences(),
+        }
+    }
+    pub(super) fn prepare_wait(&mut self) -> RemoteResult<()> {
+        match self {
+            Self::X11(v) => v.prepare_wait(),
+            #[cfg(feature = "remote-wayland")]
+            Self::Wayland(v) => v.prepare_wait(),
+        }
+    }
+    pub(super) fn has_pending_events(&mut self) -> RemoteResult<bool> {
+        match self {
+            Self::X11(v) => v.has_pending_events(),
+            #[cfg(feature = "remote-wayland")]
+            Self::Wayland(v) => v.has_pending_events(),
+        }
+    }
+    pub(super) fn connection_fd(&self) -> BorrowedFd<'_> {
+        match self {
+            Self::X11(v) => v.connection_fd(),
+            #[cfg(feature = "remote-wayland")]
+            Self::Wayland(v) => v.connection_fd(),
+        }
+    }
+    pub(super) fn next_event_deadline(&self) -> Option<Instant> {
+        match self {
+            Self::X11(v) => v.next_event_deadline(),
+            #[cfg(feature = "remote-wayland")]
+            Self::Wayland(v) => v.next_event_deadline(),
+        }
+    }
+    pub(super) fn user_close_requested(&self) -> bool {
+        match self {
+            Self::X11(v) => v.user_close_requested(),
+            #[cfg(feature = "remote-wayland")]
+            Self::Wayland(v) => v.user_close_requested(),
+        }
+    }
+    pub(super) fn prepare_frame_geometry(&mut self, epoch: u64) -> RemoteResult<bool> {
+        match self {
+            Self::X11(v) => v.prepare_frame_geometry(epoch),
+            #[cfg(feature = "remote-wayland")]
+            Self::Wayland(v) => v.prepare_frame_geometry(epoch),
+        }
+    }
+    pub(super) fn refresh_pending_redraw(&mut self) -> RemoteResult<()> {
+        match self {
+            Self::X11(v) => v.refresh_pending_redraw(),
+            #[cfg(feature = "remote-wayland")]
+            Self::Wayland(v) => v.refresh_pending_redraw(),
+        }
+    }
+    pub(super) fn invalidate_source(&mut self, label: String) -> RemoteResult<()> {
+        match self {
+            Self::X11(v) => v.invalidate_source(label),
+            #[cfg(feature = "remote-wayland")]
+            Self::Wayland(v) => v.invalidate_source(label),
+        }
+    }
+    pub(super) fn set_source_label(&mut self, label: String) {
+        match self {
+            Self::X11(v) => v.set_source_label(label),
+            #[cfg(feature = "remote-wayland")]
+            Self::Wayland(v) => v.set_source_label(label),
+        }
+    }
+    pub(super) fn source_presented(&mut self, epoch: u64) {
+        match self {
+            Self::X11(v) => v.source_presented(epoch),
+            #[cfg(feature = "remote-wayland")]
+            Self::Wayland(v) => v.source_presented(epoch),
+        }
+    }
+    pub(super) fn user_released_grab(&self) -> bool {
+        match self {
+            Self::X11(v) => v.user_released_grab(),
+            #[cfg(feature = "remote-wayland")]
+            Self::Wayland(_) => false,
+        }
+    }
+    pub(super) fn reconnect_allowed_after_cleanup(&mut self) -> RemoteResult<bool> {
+        match self {
+            Self::X11(v) => v.reconnect_allowed_after_cleanup(),
+            #[cfg(feature = "remote-wayland")]
+            Self::Wayland(_) => Ok(false),
+        }
+    }
+    pub(super) fn enable_cursor_plane(&mut self) -> RemoteResult<()> {
+        match self {
+            Self::X11(v) => v.enable_cursor_plane(),
+            #[cfg(feature = "remote-wayland")]
+            Self::Wayland(_) => {
+                Err(std::io::Error::other("Wayland viewer cursor plane is unsupported").into())
+            }
+        }
+    }
+    pub(super) fn set_cursor_update(
+        &mut self,
+        shape: Arc<CursorShape>,
+        position: CursorPosition,
+    ) -> RemoteResult<()> {
+        match self {
+            Self::X11(v) => v.set_cursor_update(shape, position),
+            #[cfg(feature = "remote-wayland")]
+            Self::Wayland(_) => {
+                let _ = (shape, position);
+                Err(std::io::Error::other("Wayland viewer cursor plane is unsupported").into())
+            }
+        }
+    }
+    pub(super) fn enable_wayland_pointer(&mut self) -> RemoteResult<()> {
+        match self {
+            Self::X11(v) => v.enable_wayland_pointer(),
+            #[cfg(feature = "remote-wayland")]
+            Self::Wayland(_) => Err(std::io::Error::other("Wayland viewer is read-only").into()),
+        }
+    }
+    pub(super) fn enable_source_cycle(&mut self, enabled: bool) {
+        match self {
+            Self::X11(v) => v.enable_source_cycle(enabled),
+            #[cfg(feature = "remote-wayland")]
+            Self::Wayland(_) => {
+                let _ = enabled;
+            }
+        }
+    }
+    pub(super) fn enable_clipboard_narrowing(&mut self, enabled: bool) {
+        match self {
+            Self::X11(v) => v.enable_clipboard_narrowing(enabled),
+            #[cfg(feature = "remote-wayland")]
+            Self::Wayland(_) => {
+                let _ = enabled;
+            }
+        }
+    }
+    pub(super) fn set_clipboard_status(&mut self, enabled: bool) {
+        match self {
+            Self::X11(v) => v.set_clipboard_status(enabled),
+            #[cfg(feature = "remote-wayland")]
+            Self::Wayland(_) => {
+                let _ = enabled;
+            }
+        }
+    }
+    pub(super) fn set_clipboard_policy(&mut self, policy: String) {
+        match self {
+            Self::X11(v) => v.set_clipboard_policy(policy),
+            #[cfg(feature = "remote-wayland")]
+            Self::Wayland(_) => {
+                let _ = policy;
+            }
+        }
+    }
+    pub(super) fn set_clipboard_activity(&mut self, activity: Option<String>) {
+        match self {
+            Self::X11(v) => v.set_clipboard_activity(activity),
+            #[cfg(feature = "remote-wayland")]
+            Self::Wayland(_) => {
+                let _ = activity;
+            }
+        }
+    }
+    pub(super) fn set_wayland_pointer_status(&mut self, status: &'static str) {
+        match self {
+            Self::X11(v) => v.set_wayland_pointer_status(status),
+            #[cfg(feature = "remote-wayland")]
+            Self::Wayland(_) => {
+                let _ = status;
+            }
+        }
+    }
+    pub(super) fn wayland_pointer_presented(&mut self, sequence: u64) {
+        match self {
+            Self::X11(v) => v.wayland_pointer_presented(sequence),
+            #[cfg(feature = "remote-wayland")]
+            Self::Wayland(_) => {
+                let _ = sequence;
+            }
+        }
+    }
+    #[cfg(feature = "remote-wayland")]
+    pub(super) fn enable_wayland_keyboard(
+        &mut self,
+        display: Option<&str>,
+    ) -> RemoteResult<[u8; 32]> {
+        match self {
+            Self::X11(v) => v.enable_wayland_keyboard(display),
+            #[cfg(feature = "remote-wayland")]
+            Self::Wayland(_) => {
+                let _ = display;
+                Err(std::io::Error::other("Wayland viewer is read-only").into())
+            }
+        }
+    }
+    #[cfg(feature = "remote-wayland")]
+    pub(super) fn check_wayland_keyboard(&mut self, initial: bool) -> RemoteResult<()> {
+        match self {
+            Self::X11(v) => v.check_wayland_keyboard(initial),
+            #[cfg(feature = "remote-wayland")]
+            Self::Wayland(_) => {
+                let _ = initial;
+                Err(std::io::Error::other("Wayland viewer is read-only").into())
+            }
+        }
+    }
+    #[cfg(feature = "remote-wayland")]
+    pub(super) fn disable_wayland_keyboard(&mut self) {
+        match self {
+            Self::X11(v) => v.disable_wayland_keyboard(),
+            #[cfg(feature = "remote-wayland")]
+            Self::Wayland(_) => (),
+        }
+    }
+    #[cfg(test)]
+    pub(super) fn observe_keyboard_state(&self, armed: bool, ended: bool) -> RemoteResult<()> {
+        match self {
+            Self::X11(v) => v.observe_keyboard_state(armed, ended),
+            #[cfg(feature = "remote-wayland")]
+            Self::Wayland(_) => {
+                let _ = (armed, ended);
+                Ok(())
+            }
+        }
+    }
+    #[cfg(test)]
+    pub(super) fn observe_pointer_ready(&self, sequence: Option<u64>) -> RemoteResult<()> {
+        match self {
+            Self::X11(v) => v.observe_pointer_ready(sequence),
+            #[cfg(feature = "remote-wayland")]
+            Self::Wayland(_) => {
+                let _ = sequence;
+                Ok(())
+            }
+        }
+    }
+    #[cfg(test)]
+    pub(super) fn observe_pointer_candidate(
+        &self,
+        candidate: Option<u64>,
+        left_down: bool,
+        sequence: u64,
+    ) -> RemoteResult<()> {
+        match self {
+            Self::X11(v) => v.observe_pointer_candidate(candidate, left_down, sequence),
+            #[cfg(feature = "remote-wayland")]
+            Self::Wayland(_) => {
+                let _ = (candidate, left_down, sequence);
+                Ok(())
+            }
+        }
+    }
+}
+
+#[cfg(all(test, feature = "remote-wayland"))]
+thread_local! { static TEST_WAYLAND_STREAM: std::cell::RefCell<Option<std::os::unix::net::UnixStream>> = const { std::cell::RefCell::new(None) }; }
+/// A once-only test transport. Never selected from production environment state.
+#[cfg(all(test, feature = "remote-wayland"))]
+pub(crate) fn with_wayland_test_stream<T>(
+    stream: std::os::unix::net::UnixStream,
+    run: impl FnOnce() -> T,
+) -> T {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            TEST_WAYLAND_STREAM.with(|slot| {
+                slot.borrow_mut().take();
+            });
+        }
+    }
+    TEST_WAYLAND_STREAM.with(|slot| {
+        assert!(slot.borrow().is_none());
+        *slot.borrow_mut() = Some(stream);
+    });
+    let _reset = Reset;
+    run()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn wayland_initial_size_is_shared_by_hello_and_window() {
+        assert_eq!(wayland_initial_size(None).dimensions(), (800, 600));
+        let explicit = super::super::window_size::WindowSize {
+            width: 640,
+            height: 480,
+        };
+        assert_eq!(wayland_initial_size(Some(explicit)), explicit);
+    }
+}
