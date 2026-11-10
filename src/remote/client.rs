@@ -2835,16 +2835,23 @@ impl ClientPointer {
             self.click = None;
             return Ok(());
         }
-        if self.ended {
-            return Err(invalid_data("pointer status revived ended grant").into());
-        }
-        self.epoch = Some(value.lease_epoch);
         let Some((presented, at)) = self.presented else {
             return Err(invalid_data("pointer status before presentation").into());
         };
         if value.scope.frame_sequence > presented.frame_sequence {
             return Err(invalid_data("pointer Ready precedes actual presentation").into());
         }
+        if self.ended {
+            // Local revoke and the peer's already-sent Ready/Waiting cross on
+            // the full-duplex stream. Until its terminal acknowledgment, drain
+            // only this known lease's previously presented statuses. Never
+            // reopen a gate, replace the epoch or accept a new grant here.
+            if self.epoch == Some(value.lease_epoch) {
+                return Ok(());
+            }
+            return Err(invalid_data("pointer status revived ended grant").into());
+        }
+        self.epoch = Some(value.lease_epoch);
         if value.scope != presented {
             return Ok(());
         } // stale status never changes current gate
@@ -3742,6 +3749,101 @@ pub(super) mod tests {
             })
             .unwrap();
         pointer
+    }
+    #[test]
+    fn pointer_local_revoke_drains_only_known_inflight_status_without_reviving() {
+        use super::super::wayland_pointer_wire::*;
+        use super::super::x11_viewer::WaylandPointerEventKind as E;
+        let now = std::time::Instant::now();
+        for status in [PointerStatusKind::Ready, PointerStatusKind::Waiting] {
+            let mut pointer = pointer_fixture(now);
+            let scope = pointer.presented.unwrap().0;
+            pointer.event(&pointer_event(E::LeftDown, 0), now).unwrap();
+            assert!(pointer.click.is_some());
+            assert_eq!(pointer.revoke().unwrap().lease_epoch, 7);
+            assert!(!pointer.terminal_seen);
+            pointer
+                .receive(PointerStatus {
+                    lease_epoch: 7,
+                    scope,
+                    status,
+                })
+                .unwrap();
+            assert!(pointer.ended);
+            assert_eq!(pointer.epoch, Some(7));
+            assert!(pointer.ready.is_none() && pointer.click.is_none());
+            assert!(!pointer.left_down && !pointer.fresh(now));
+            assert!(
+                pointer
+                    .event(&pointer_event(E::Motion, 0), now)
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(pointer.presented(scope, now).is_none());
+            assert!(pointer.revoke().is_none());
+            pointer
+                .receive(PointerStatus {
+                    lease_epoch: 7,
+                    scope,
+                    status: PointerStatusKind::Revoked,
+                })
+                .unwrap();
+            assert!(pointer.terminal_seen);
+            assert!(
+                pointer
+                    .receive(PointerStatus {
+                        lease_epoch: 7,
+                        scope,
+                        status
+                    })
+                    .unwrap_err()
+                    .to_string()
+                    .contains("scope mismatch or replay")
+            );
+        }
+    }
+    #[test]
+    fn pointer_local_revoke_still_rejects_unknown_or_unpresented_status() {
+        use super::super::wayland_pointer_wire::*;
+        let now = std::time::Instant::now();
+        for case in 0..5 {
+            let mut pointer = pointer_fixture(now);
+            let mut scope = pointer.presented.unwrap().0;
+            let mut epoch = 7;
+            pointer.revoke().unwrap();
+            let expected = match case {
+                0 => {
+                    epoch = 8;
+                    "lease epoch changed"
+                }
+                1 => {
+                    scope.source_epoch += 1;
+                    "scope mismatch or replay"
+                }
+                2 => {
+                    scope.geometry_epoch += 1;
+                    "scope mismatch or replay"
+                }
+                3 => {
+                    scope.frame_sequence += 1;
+                    "precedes actual presentation"
+                }
+                _ => {
+                    pointer.epoch = None;
+                    "revived ended grant"
+                }
+            };
+            let error = pointer
+                .receive(PointerStatus {
+                    lease_epoch: epoch,
+                    scope,
+                    status: PointerStatusKind::Ready,
+                })
+                .unwrap_err();
+            assert!(error.to_string().contains(expected), "{case}: {error}");
+            assert!(pointer.ended && pointer.ready.is_none() && pointer.click.is_none());
+            assert!(!pointer.fresh(now));
+        }
     }
     fn pointer_event(
         kind: super::super::x11_viewer::WaylandPointerEventKind,
