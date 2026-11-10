@@ -484,6 +484,9 @@ jobs:
         working-directory: bridge
         run: cargo clippy --locked --all-targets --no-deps
 
+      - name: Player Lua modern and legacy theme contracts
+        run: timeout 20s mpv --no-config --vo=null --ao=null --idle=yes --script=bridge/src/player/ui_test.lua
+
       - name: Test
         working-directory: bridge
         env:

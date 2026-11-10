@@ -662,7 +662,12 @@ mp.register_script_message('jwm-theme',function(encoded)
     surface_opacity=opacity
     C.panel,C.hover,C.line,C.white,C.muted,C.blue=colors[2],colors[3],colors[4],colors[5],colors[6],colors[7]
     draw()
-    utils.shared_script_property_set('jwm-theme-revision',revision)
+    -- mpv >= 0.38 removed shared-script-properties and its Lua helpers.
+    -- Publish only after draw; IPC command acceptance is not theme completion.
+    local published=mp.set_property_native('user-data/jwm-player/theme-revision',revision)
+    if not published and type(utils.shared_script_property_set)=='function' then
+        utils.shared_script_property_set('jwm-theme-revision',revision)
+    end
 end)
 mp.register_script_message('jwm-queue',function() toggle('Queue') end)
 mp.register_script_message('jwm-subtitles',function() toggle('Subtitles') end)

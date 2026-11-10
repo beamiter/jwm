@@ -642,13 +642,26 @@ impl Mpv {
             .map(|_| ())
     }
 
+    fn theme_revision(&mut self) -> Result<Value, String> {
+        // mpv >= 0.38 removed shared-script-properties. Read the modern native
+        // leaf first; legacy versions without user-data retain their old map.
+        match self.get("user-data/jwm-player/theme-revision") {
+            Ok(revision) => Ok(revision),
+            Err(error)
+                if error == "mpv: property not found" || error == "mpv: property unavailable" =>
+            {
+                self.get("shared-script-properties")
+                    .map(|properties| properties["jwm-theme-revision"].clone())
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     fn action(&mut self, action: Action, deadline: Instant) -> Result<(), String> {
         match action {
             Action::Theme(theme) => {
                 self.command(json!(["script-message", "jwm-theme", theme.to_string()]))?;
-                if self.get("shared-script-properties")?["jwm-theme-revision"]
-                    != theme["config_revision"]
-                {
+                if self.theme_revision()? != theme["config_revision"] {
                     return Err("player theme is awaiting its Lua readback".into());
                 }
                 Ok(())
@@ -1269,13 +1282,14 @@ mod tests {
         let theme = json!({"protocol_version":1,"native_colors":vec![[0.2,0.3,0.4,1.0];8],"font":"Sans 18","surface_opacity":0.85,"config_revision":"style-1"});
         let deadline = Instant::now() + Duration::from_secs(3);
         loop {
-            if mpv.action(Action::Theme(theme.clone()), deadline).is_ok() {
-                break;
+            match mpv.action(Action::Theme(theme.clone()), deadline) {
+                Ok(()) => break,
+                Err(error) => assert!(
+                    Instant::now() < deadline,
+                    "real mpv never applied a valid theme: {error}; revision={:?}",
+                    mpv.theme_revision()
+                ),
             }
-            assert!(
-                Instant::now() < deadline,
-                "real mpv never applied a valid theme"
-            );
             std::thread::sleep(Duration::from_millis(10));
         }
         let invalid = json!({"protocol_version":1,"native_colors":[],"font":"Sans 11","config_revision":"invalid"});
@@ -1286,10 +1300,7 @@ mod tests {
             )
             .is_err()
         );
-        assert_eq!(
-            mpv.get("shared-script-properties").unwrap()["jwm-theme-revision"],
-            "style-1"
-        );
+        assert_eq!(mpv.theme_revision().unwrap(), "style-1");
     }
     #[test]
     fn real_mpv_crash_reaps_child_and_removes_ui() {
