@@ -289,11 +289,21 @@ fn exercise(host_permission: bool, client_permission: bool) {
     let mut phase = 0;
     let mut host_result = None;
     let mut client_result = None;
+    let mut phase_started = Instant::now();
+    let mut last_sse = None;
+    let mut minimum_sse = u64::MAX;
+    let mut first_difference = None;
     loop {
-        assert!(
-            Instant::now() < deadline,
-            "bounded static-lossless TCP/GL completion"
-        );
+        if Instant::now() >= deadline {
+            let encoded = codecs.lock().unwrap();
+            let png_count = encoded.iter().filter(|(_, png)| *png).count();
+            panic!(
+                "bounded static-lossless TCP/GL completion: phase={phase} phase_elapsed={:?} last_gl_sequence={last:?} exact_sequence={exact:?} committed_presented={:?} decoded_frames={} png_frames={png_count} last_sse={last_sse:?} minimum_sse={minimum_sse} first_difference={first_difference:?} host={host_result:?} client={client_result:?}",
+                phase_started.elapsed(),
+                *frames.lock().unwrap(),
+                encoded.len()
+            );
+        }
         pump(&mut native, &mut local, &mut gl);
         if let Some(top) = local.state.toplevels.values().next() {
             feedback.extend(take_feedback(top.wl_surface()));
@@ -310,15 +320,25 @@ fn exercise(host_permission: bool, client_permission: bool) {
                 .find(|(s, _)| *s == seq)
                 .expect("actual decoded frame codec evidence")
                 .1;
+            let error = sse(&pixels, &expected);
+            last_sse = Some(error);
+            minimum_sse = minimum_sse.min(error);
+            first_difference = pixels
+                .iter()
+                .zip(&expected)
+                .enumerate()
+                .find(|(_, (actual, expected))| actual != expected)
+                .map(|(index, (&actual, &expected))| (index, actual, expected));
+            eprintln!(
+                "static-lossless GL phase={phase} elapsed={:?} sequence={seq} png={is_png} sse={error} first_difference={first_difference:?}",
+                phase_started.elapsed()
+            );
             if first.is_none() {
                 assert!(!is_png, "initial frame must remain JPEG");
-                assert!(
-                    sse(&pixels, &expected) > 0,
-                    "workload must expose real JPEG loss"
-                );
+                assert!(error > 0, "workload must expose real JPEG loss");
                 first = Some(Instant::now());
             }
-            if sse(&pixels, &expected) == 0 {
+            if error == 0 {
                 assert!(host_permission && client_permission);
                 assert!(
                     encoded.iter().any(|(_, png)| *png),
@@ -336,6 +356,10 @@ fn exercise(host_permission: bool, client_permission: bool) {
                     phase = 1;
                     expected = pattern(true);
                     repaint(&mut native, &mut target, &expected);
+                    phase_started = Instant::now();
+                    last_sse = None;
+                    minimum_sse = u64::MAX;
+                    first_difference = None;
                     exact = None;
                 } else {
                     break;

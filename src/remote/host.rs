@@ -519,6 +519,8 @@ struct FrameSender {
     committed_at: Option<Instant>,
     last_content_change: Option<Instant>,
     last_refinement: Option<Instant>,
+    lossless_retry_after: Option<Instant>,
+    lossless_next_batch: Option<Instant>,
     pending_refinement: bool,
     pending_refinement_at: Option<Instant>,
 }
@@ -545,6 +547,8 @@ impl FrameSender {
             committed_at: None,
             last_content_change: None,
             last_refinement: None,
+            lossless_retry_after: None,
+            lossless_next_batch: None,
             pending_refinement: false,
             pending_refinement_at: None,
         }
@@ -591,9 +595,11 @@ impl FrameSender {
             let stable = self
                 .last_content_change
                 .is_some_and(|at| now.saturating_duration_since(at) >= STATIC_REFINEMENT_INTERVAL);
-            let retry = self
-                .last_refinement
-                .is_none_or(|at| now.saturating_duration_since(at) >= STATIC_REFINEMENT_INTERVAL);
+            // Stability is paid once per raw change. Failed PNG attempts wait two seconds;
+            // successful batches wait only 100ms after actual flush, and still
+            // require a real capture, FPS scheduling and transport credit.
+            let retry = self.lossless_retry_after.is_none_or(|at| now >= at)
+                && self.lossless_next_batch.is_none_or(|at| now >= at);
             if !plan.keyframe && stable && retry && self.encoder.has_exact_debt() {
                 plan = self
                     .encoder
@@ -631,7 +637,14 @@ impl FrameSender {
         self.encoder.commit(frame);
         self.committed_at = Some(committed_at);
         if let Some(planned_at) = self.pending_refinement_at.take() {
-            self.last_refinement = Some(refinement_clock_after_commit(planned_at, committed_at));
+            if self.static_lossless {
+                // Anchor to completed flush: a delayed writer never catches up
+                // by bursting through missed batch deadlines.
+                self.lossless_next_batch = Some(committed_at + Duration::from_millis(100));
+            } else {
+                self.last_refinement =
+                    Some(refinement_clock_after_commit(planned_at, committed_at));
+            }
         }
         self.pending_refinement = false;
     }
@@ -4404,7 +4417,7 @@ fn send_frames_with_encoder_scoped<W: std::io::Write + SetWriteTimeout>(
         {
             if sender.static_lossless && sender.encoder.lossless_encode_rejected() {
                 sender.discard();
-                sender.last_refinement = Some(Instant::now());
+                sender.lossless_retry_after = Some(Instant::now() + STATIC_REFINEMENT_INTERVAL);
                 continue;
             }
             return Err(LocalRuntimeFailure::encoding(error));
@@ -5576,6 +5589,63 @@ mod tests {
                 .plan_record_at(&frame, at + Duration::from_secs(4), true, false)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn stable_lossless_batches_do_not_restart_idle_delay_but_failures_back_off() {
+        let at = Instant::now();
+        let mut frame = CapturedFrame {
+            geometry_epoch: 1,
+            source_width: 272,
+            source_height: 256,
+            image: RgbImage::from_pixel(272, 256, Rgb([90, 110, 130])),
+        };
+        let mut sender = FrameSender::with_codecs(false, true);
+        let mut bytes = Vec::new();
+        sender.plan_at(&frame, at).unwrap();
+        sender
+            .encoder
+            .encode_into(&mut bytes, 0, &frame, 70)
+            .unwrap();
+        sender.commit_at(&frame, at);
+        let stable = at + STATIC_REFINEMENT_INTERVAL;
+        let first = sender.plan_at(&frame, stable).unwrap();
+        assert_eq!(first.dirty_tiles, 256);
+        sender
+            .encoder
+            .encode_into(&mut bytes, 1, &frame, 70)
+            .unwrap();
+        let flushed = stable + Duration::from_millis(700);
+        sender.commit_at(&frame, flushed);
+        assert!(sender.encoder.has_exact_debt());
+        sender
+            .plan_at(&frame, flushed + Duration::from_millis(99))
+            .unwrap();
+        assert!(sender.pending_refinement_at.is_none());
+        let next = flushed + Duration::from_millis(100);
+        let second = sender.plan_at(&frame, next).unwrap();
+        assert_eq!(second.dirty_tiles, 16);
+        assert!(sender.pending_refinement_at.is_some());
+        // Simulate the production typed-rejection path; it cannot discharge debt.
+        sender.discard();
+        sender.lossless_retry_after = Some(next + STATIC_REFINEMENT_INTERVAL);
+        sender
+            .plan_at(&frame, next + Duration::from_millis(34))
+            .unwrap();
+        assert!(sender.pending_refinement_at.is_none());
+        // A raw change must not erase failed-encode backoff.
+        frame.image.as_mut()[0] += 1;
+        sender
+            .plan_at(&frame, next + Duration::from_millis(50))
+            .unwrap();
+        assert_eq!(
+            sender.lossless_retry_after,
+            Some(next + STATIC_REFINEMENT_INTERVAL)
+        );
+        assert!(sender.pending_refinement_at.is_none());
+        let recovered = next + STATIC_REFINEMENT_INTERVAL + Duration::from_millis(50);
+        sender.plan_at(&frame, recovered).unwrap();
+        assert!(sender.pending_refinement_at.is_some());
     }
 
     fn proof_test_frame() -> CapturedFrame {

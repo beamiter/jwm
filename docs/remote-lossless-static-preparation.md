@@ -37,7 +37,12 @@ never selects another source or grants access to previously hidden surfaces.
 
 Initial frames and moving content continue using JPEG. After two seconds of
 **exact** observed RGB stability, bounded round-robin PNG repair batches can
-replace lossy tiles. Any subsequent raw change, including a single channel
+replace lossy tiles. The two-second stability gate is paid once per raw change,
+not once per repair batch. Successful batches are separated by at least 100 ms
+from the preceding record's completed flush, and still require capture/FPS and
+transport credit; a delayed writer never causes catch-up bursts. A failed PNG
+encode instead backs off for two seconds without clearing exactness debt.
+Any subsequent raw change, including a single channel
 changing by one, restarts stability and makes the affected pixels owe an exact
 repair again. Backpressure and batch limits can delay completion beyond two
 seconds; this is not a two-second convergence guarantee. Only successful
