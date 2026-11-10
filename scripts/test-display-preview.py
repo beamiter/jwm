@@ -19,12 +19,20 @@ FAKE = r"""#!/usr/bin/env python3
 import json,os,sys
 from pathlib import Path
 root=Path(os.environ['FAKE_DISPLAY_ROOT']); state=root/'state.json'; calls=root/'calls.jsonl'
+# CLI calls are serial; observers may read counters concurrently. Publish only
+# complete decimal values, never the truncate/write window of write_text().
+def increment(path):
+ n=int(path.read_text())+1 if path.exists() else 1
+ pending=path.with_name(path.name+'.pending')
+ pending.write_text(str(n))
+ os.replace(pending,path)
+ return n
 args=sys.argv[1:]
 with calls.open('a') as f:f.write(json.dumps(args)+'\n')
 heads=json.loads(state.read_text())
 scenario=os.environ.get('FAKE_SCENARIO','')
 if args==['--json']:
- count=root/'reads'; n=int(count.read_text())+1 if count.exists() else1; count.write_text(str(n))
+ n=increment(root/'reads')
  if scenario in ('concurrent','disconnect','replaced') and n==4:
   if scenario=='disconnect':heads=heads[:1]
   elif scenario=='replaced':heads[0]['serial']='new-device'
@@ -32,7 +40,7 @@ if args==['--json']:
   state.write_text(json.dumps(heads))
  print(json.dumps(heads));sys.exit(0)
 if '--dryrun' in args:sys.exit(0)
-mutations=root/'mutations'; n=int(mutations.read_text())+1 if mutations.exists() else1;mutations.write_text(str(n))
+n=increment(root/'mutations')
 if scenario=='apply-fail' and n==1:sys.exit(1)
 if scenario=='restore-fail' and n==2:sys.exit(1)
 head=None;i=0
@@ -50,7 +58,7 @@ while i<len(args):
  elif flag=='--adaptive-sync':head['adaptive_sync']=args[i]=='enabled';i+=1
  else:raise AssertionError(flag)
 state.write_text(json.dumps(heads))
-""".replace("else1", "else 1")
+"""
 
 
 def original():
@@ -153,6 +161,77 @@ class PreviewTests(unittest.TestCase):
                 json.loads(v) for v in (root / "calls.jsonl").read_text().splitlines()
             ]
             return child.returncode, result, json.loads(state.read_text()), calls
+
+    def test_fake_counters_publish_complete_values_atomically(self):
+        # Pause the real fake CLI immediately before rename. A concurrent
+        # observer must see either the previous complete value or no file on
+        # first publication, never an empty/partially written public counter.
+        publish = " os.replace(pending,path)"
+        self.assertEqual(FAKE.count(publish), 1)
+        paused = FAKE.replace(
+            publish,
+            """ import time
+ (root/'ready').write_text('ready')
+ deadline=time.monotonic()+5
+ while not (root/'release').exists():
+  if time.monotonic()>=deadline:raise RuntimeError('publication test timed out')
+  time.sleep(0.001)
+ os.replace(pending,path)""",
+        )
+        for counter, args in (
+            ("reads", ["--json"]),
+            ("mutations", ["--output", "DP-1", "--off"]),
+        ):
+            for previous in (None, 3):
+                with self.subTest(counter=counter, previous=previous):
+                    with tempfile.TemporaryDirectory(prefix="jwm-counter-") as directory:
+                        root = Path(directory)
+                        fake = root / "fake.py"
+                        fake.write_text(paused)
+                        (root / "state.json").write_text(json.dumps(original()))
+                        path = root / counter
+                        if previous is not None:
+                            path.write_text(str(previous))
+                        child = subprocess.Popen(
+                            [sys.executable, str(fake), *args],
+                            env=dict(
+                                os.environ,
+                                FAKE_DISPLAY_ROOT=str(root),
+                                FAKE_SCENARIO="",
+                            ),
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE,
+                            text=True,
+                        )
+                        try:
+                            deadline = time.monotonic() + 5
+                            while not (root / "ready").exists():
+                                self.assertIsNone(
+                                    child.poll(), "fake exited before publication"
+                                )
+                                self.assertLess(time.monotonic(), deadline)
+                                time.sleep(0.001)
+                            self.assertEqual(path.exists(), previous is not None)
+                            if previous is not None:
+                                self.assertEqual(path.read_text(), str(previous))
+                            self.assertEqual(
+                                (root / (counter + ".pending")).read_text(),
+                                str(1 if previous is None else previous + 1),
+                            )
+                        finally:
+                            (root / "release").write_text("release")
+                            try:
+                                stdout, stderr = child.communicate(timeout=8)
+                            except subprocess.TimeoutExpired:
+                                child.kill()
+                                child.communicate()
+                                raise
+                        self.assertEqual(child.returncode, 0, (stdout, stderr))
+                        self.assertEqual(
+                            int(path.read_text()),
+                            1 if previous is None else previous + 1,
+                        )
+                        self.assertFalse((root / (counter + ".pending")).exists())
 
     def test_timeout_restores_exact_mode_rate_geometry_and_only_owned_outputs(self):
         code, report, state, calls = self.run_preview()
