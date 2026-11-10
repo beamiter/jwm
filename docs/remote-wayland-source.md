@@ -562,7 +562,8 @@ video format is unchanged and still grants no input authority.
 xdg-popup descendants of the selected application in a read-only stream.
 The default still captures only the selected root's surface tree. The popup
 mode requires its separate native compositor capability and is incompatible
-with input, clipboard, remote resizing and resize-follow permissions.
+with input, clipboard and remote resizing. Combining it with resize following
+requires the additional explicit capability described below.
 
 Every included popup must belong to the root application's client and have an
 exact live parent chain ending at that selected surface. Titles and application
@@ -582,3 +583,37 @@ reconnect or permission renewal occurs.
 Verification separates native protocol/production offscreen pixel tests from
 an authenticated TCP and owned native viewer presentation path. Neither is
 physical DRM/GPU, two-machine or input-to-visible latency acceptance.
+
+
+### Read-only popups with size following
+
+Use both `--wayland-popups --wayland-resize-follow` with
+`host --wayland-select --once` to capture the same application's popup family
+while following local root-window size changes. This combination requires
+version 2 of `jwm_readonly_resize_capture_manager_v1`; its single atomic
+`create_source_with_popups` request consumes the original input authorization
+attempts and creates one read-only family. A version-1 compositor is rejected.
+The version-1 request remains root-only even when bound at version 2, and
+separate popup-only capture still uses a fixed original-size canvas.
+
+Each new layout has an immutable capture-session size, crop origin and epoch.
+A suspended layout invalidates pending old sessions, including a resize back
+to the same dimensions. Initial xdg and effective crop origins may differ,
+but each is frozen: changing either origin permanently ends the combined
+source, even if it later returns. Popups are positioned relative to the committed root
+window geometry and clipped to the current root canvas. This does not expand
+the canvas beyond the application window, enable popup interaction, or permit
+root subsurface trees in resize-follow mode. Existing tree/count/coordinate
+budgets remain in force. Popup movement never grants input or renews authority.
+
+The adapter rebuilds sessions only on the original source and connection.
+All original and derived authorities remain unable to grant keyboard, pointer
+or unified control. Lock, unmap/remap, destruction, disconnect and buffer
+scale/transform changes remain terminal. Existing old-epoch queue barriers
+apply; already transmitted socket bytes cannot be recalled. No desktop capture,
+title-based reselection, reconnect or capability downgrade is used.
+
+Verification covers actual native dispatch and production offscreen composition,
+old pending-buffer non-writes, resize-back epochs and an authenticated TCP viewer
+with exact presented-frame pixel checks. These remain owned software-rendered
+tests, not physical DRM/GPU or two-machine latency acceptance.

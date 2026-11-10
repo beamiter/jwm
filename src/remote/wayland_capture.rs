@@ -320,6 +320,19 @@ impl WaylandCapture {
                 .ok_or_else(|| invalid("invalid Wayland test selection index").into())
         })
     }
+    #[cfg(all(test, feature = "backend-wayland-udev"))]
+    pub(crate) fn connect_test_stream_popups_follow(
+        stream: UnixStream,
+        index: usize,
+        max_width: u16,
+    ) -> RemoteResult<Self> {
+        Self::connect_stream(stream, max_width, true, true, |_| {
+            index
+                .checked_sub(1)
+                .filter(|index| *index < MAX_TOPLEVELS)
+                .ok_or_else(|| invalid("invalid Wayland test selection index").into())
+        })
+    }
     fn connect_stream(
         stream: UnixStream,
         max_width: u16,
@@ -327,9 +340,6 @@ impl WaylandCapture {
         popups: bool,
         select: impl FnOnce(&mut Self) -> RemoteResult<usize>,
     ) -> RemoteResult<Self> {
-        if resize_follow && popups {
-            return Err(invalid("popup capture and resize-follow are mutually exclusive").into());
-        }
         stream.set_nonblocking(true)?;
         let conn = Connection::from_socket(stream)?;
         let queue = conn.new_event_queue();
@@ -418,7 +428,7 @@ impl WaylandCapture {
             .as_ref()
             .unwrap()
             .create_source(&selected, &qh, ());
-        let source = if popups {
+        let source = if popups && !resize_follow {
             let manager = capture.state.popup_manager.as_ref().ok_or_else(|| {
                 invalid("Wayland compositor lacks explicit read-only popup capture capability")
             })?;
@@ -433,7 +443,12 @@ impl WaylandCapture {
             let manager = capture.state.resize_manager.as_ref().ok_or_else(|| {
                 invalid("Wayland compositor lacks explicit read-only resize-follow capability")
             })?;
-            let derived = manager.create_source(&source, &qh, ());
+            require_resize_capability(manager.version(), popups)?;
+            let derived = if popups {
+                manager.create_source_with_popups(&source, &qh, ())
+            } else {
+                manager.create_source(&source, &qh, ())
+            };
             source.destroy();
             derived
         } else {
@@ -467,7 +482,7 @@ impl WaylandCapture {
                 invalid("Wayland resize-follow constraints disagree with native layout").into(),
             );
         }
-        if popups && capture.state.size != capture.state.popup_layout {
+        if popups && !resize_follow && capture.state.size != capture.state.popup_layout {
             return Err(
                 invalid("Wayland popup constraints disagree with fixed root canvas").into(),
             );
@@ -1308,7 +1323,9 @@ impl Dispatch<wl_registry::WlRegistry, ()> for State {
             } if version >= 1 => {
                 let bound = match interface.as_str() {
                     "jwm_readonly_popup_capture_manager_v1"
-                        if state.popups && state.popup_manager.is_none() =>
+                        if state.popups
+                            && !state.resize_follow
+                            && state.popup_manager.is_none() =>
                     {
                         state.popup_manager = Some(proxy.bind(name, 1, qh, ()));
                         true
@@ -1316,7 +1333,7 @@ impl Dispatch<wl_registry::WlRegistry, ()> for State {
                     "jwm_readonly_resize_capture_manager_v1"
                         if state.resize_follow && state.resize_manager.is_none() =>
                     {
-                        state.resize_manager = Some(proxy.bind(name, 1, qh, ()));
+                        state.resize_manager = Some(proxy.bind(name, version.min(2), qh, ()));
                         true
                     }
                     "jwm_remote_control_manager_v1" if state.control.manager.is_none() => {
@@ -1956,5 +1973,50 @@ mod popup_state_tests {
         state.fail("stopped");
         state.popup_ready(320, 240);
         assert!(state.popup_layout.is_none());
+    }
+}
+
+fn require_resize_capability(version: u32, popups: bool) -> RemoteResult<()> {
+    if version < if popups { 2 } else { 1 } {
+        return Err(invalid(
+            "Wayland popup resize-follow requires explicit native version 2 capability",
+        )
+        .into());
+    }
+    Ok(())
+}
+#[cfg(test)]
+mod popup_follow_state_tests {
+    use super::*;
+    #[test]
+    fn combined_mode_requires_explicit_v2_without_fallback() {
+        assert!(require_resize_capability(1, false).is_ok());
+        assert!(require_resize_capability(1, true).is_err());
+        assert!(require_resize_capability(2, true).is_ok());
+        assert!(require_resize_capability(0, false).is_err());
+    }
+    #[test]
+    fn combined_mode_preserves_popup_scope_across_layout_epochs_and_terminal() {
+        let mut state = State {
+            resize_follow: true,
+            popups: true,
+            ..Default::default()
+        };
+        for (epoch, width, height) in [(1, 320, 240), (2, 640, 360), (3, 320, 240)] {
+            state.follow_event(resize_manager::Event::Suspended { epoch });
+            assert!(state.follow_suspended && state.session_stopped && state.popups);
+            assert!(state.follow_layout.is_none());
+            state.follow_event(resize_manager::Event::Layout {
+                epoch,
+                width,
+                height,
+            });
+            assert_eq!(state.follow_layout, Some((width as u16, height as u16)));
+            assert!(state.popups && state.failed.is_none());
+        }
+        state.follow_event(resize_manager::Event::Stopped);
+        state.follow_event(resize_manager::Event::Suspended { epoch: 4 });
+        assert!(state.failed.is_some());
+        assert_eq!(state.follow_epoch, 3);
     }
 }

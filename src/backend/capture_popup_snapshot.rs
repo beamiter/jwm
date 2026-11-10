@@ -74,6 +74,10 @@ pub(super) fn snapshot(
     root_origin: (i32, i32),
 ) -> Option<Vec<CaptureTree>> {
     let owner = root.client()?.id();
+    // Positioner locations are relative to the root xdg window geometry,
+    // whereas follow sessions may crop its intersection with the actual buffer.
+    // Keep that distinction even when the intersection moves without resizing.
+    let popup_canvas_offset = add(geometry_origin(root), root_origin)?;
     // Also bound traversal of unrelated popup entries, not only emitted ones.
     if state.popup_order.len() > 512 {
         return None;
@@ -149,7 +153,10 @@ pub(super) fn snapshot(
             continue;
         }
         let local = geometry_origin(surface);
-        let origin = add(offset, (local.0.checked_neg()?, local.1.checked_neg()?))?;
+        let origin = add(
+            add(offset, (local.0.checked_neg()?, local.1.checked_neg()?))?,
+            popup_canvas_offset,
+        )?;
         let mapped = validate_tree(surface, origin, &mut budget)?;
         if mapped != 0 {
             trees.push(CaptureTree {
@@ -174,6 +181,16 @@ pub(super) fn snapshot(
 #[cfg(test)]
 mod tests {
     use super::add;
+    #[test]
+    fn popup_window_coordinates_follow_the_frozen_crop_not_buffer_origin() {
+        // A window geometry beginning at 10 is clipped by an actual view at 14.
+        // Its popup at x=7 therefore appears at canvas x=3, not x=7.
+        let canvas_offset = add((10, 20), (-14, -25)).unwrap();
+        assert_eq!(add((7, 9), canvas_offset), Some((3, 4)));
+        // Default fixed-popup capture retains the old window-relative placement.
+        assert_eq!(add((10, 20), (-10, -20)), Some((0, 0)));
+        assert_eq!(add((65_536, 0), (1, 0)), None);
+    }
     #[test]
     fn root_relative_coordinates_are_checked_not_wrapped() {
         assert_eq!(add((-12, 8), (3, -20)), Some((-9, -12)));

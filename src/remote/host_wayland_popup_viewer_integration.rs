@@ -1,7 +1,9 @@
 //! Opt-in readonly popup family -> authenticated TCP -> actual Wayland viewer pixels.
 //! Controlled feedback follows production GL readback, not DRM presentation.
 use super::*;
-use crate::backend::wayland_udev::image_copy_capture::popup_tests::Popup;
+use crate::backend::wayland_udev::image_copy_capture::{
+    self, popup_tests::Popup, wire_test_client::Client,
+};
 use crate::remote::{
     client::{ClientOptions, run_client},
     host,
@@ -14,6 +16,7 @@ use std::sync::{
     Mutex,
     atomic::{AtomicBool, Ordering},
 };
+use std::{fs::File, io::Write, os::fd::AsRawFd};
 
 const KEY: [u8; 32] = [0x7f; 32];
 const VW: u32 = 800;
@@ -24,7 +27,7 @@ impl Drop for Stop {
         self.0.store(true, Ordering::Release);
     }
 }
-fn options(popups: bool) -> host::HostOptions {
+fn options(popups: bool, follow: bool) -> host::HostOptions {
     host::HostOptions {
         frame_limits: Default::default(),
         listen: "127.0.0.1:0".into(),
@@ -32,7 +35,7 @@ fn options(popups: bool) -> host::HostOptions {
         display: None,
         wayland_select: true,
         wayland_display: None,
-        wayland_resize_follow: false,
+        wayland_resize_follow: follow,
         wayland_popups: popups,
         fps: 30,
         jpeg_quality: 90,
@@ -60,11 +63,33 @@ fn options(popups: bool) -> host::HostOptions {
         stats_json: false,
     }
 }
+fn pixels(s: &mut Server, c: &mut Client, w: u32, h: u32, color: [u8; 4]) -> (u32, File) {
+    let shm = c.bind("wl_shm", 1);
+    let fd = nix::sys::memfd::memfd_create(
+        c"owned-resize-pixels",
+        nix::sys::memfd::MFdFlags::MFD_CLOEXEC,
+    )
+    .unwrap();
+    nix::unistd::ftruncate(&fd, i64::from(w * h * 4)).unwrap();
+    let mut file = File::from(fd);
+    file.write_all(&color.repeat((w * h) as usize)).unwrap();
+    let pool = c.new_id();
+    c.request_with_fd_args(shm, 0, &[pool, w * h * 4], file.as_raw_fd());
+    let buffer = c.new_id();
+    c.request(pool, 0, &[buffer, 0, w, h, w * 4, 0]);
+    s.roundtrip();
+    s.roundtrip();
+    (buffer, file)
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Pixels {
     RootOnly,
     PopupInitial,
     PopupClipped,
+    LargeInitial,
+    LargeClipped,
+    ReturnedInitial,
+    ReturnedRoot,
 }
 struct Harness {
     native: Server,
@@ -86,6 +111,9 @@ struct Harness {
 }
 impl Harness {
     fn new(gl: &mut HeadlessSmithayGles, popups: bool) -> Self {
+        Self::with_follow(gl, popups, false)
+    }
+    fn with_follow(gl: &mut HeadlessSmithayGles, popups: bool, follow: bool) -> Self {
         let mut native = Server::new();
         let mut local = Server::new();
         native.state.image_capture_pending =
@@ -143,7 +171,9 @@ impl Harness {
             let result = with_wayland_capture_frame_observer(
                 capture_observer,
                 || -> crate::remote::RemoteResult<()> {
-                    let capture = if popups {
+                    let capture = if popups && follow {
+                        WaylandCapture::connect_test_stream_popups_follow(stream, 1, 0)?
+                    } else if popups {
                         WaylandCapture::connect_test_stream_popups(stream, 1, 0)?
                     } else {
                         WaylandCapture::connect_test_stream(stream, 1, 0)?
@@ -163,7 +193,7 @@ impl Harness {
                     let peer = host::authenticate_peer(stream, &KEY)?;
                     host::serve_authenticated(
                         peer,
-                        &options(popups),
+                        &options(popups, follow),
                         &stopping,
                         &Mutex::new(Some(host::GrantedCapture::Wayland(Box::new(capture)))),
                     )
@@ -297,21 +327,35 @@ impl Harness {
             &bytes[i..i + 4]
         };
         let is_blue = |p: &[u8]| p[0] >= 220 && p[1] <= 35 && p[2] <= 35 && p[3] == 255;
-        let initial = is_blue(pixel(200, 175));
-        let clipped = is_blue(pixel(725, 525));
-        let actual = match (initial, clipped) {
-            (true, false) => Pixels::PopupInitial,
-            (false, true) => Pixels::PopupClipped,
-            (false, false) => Pixels::RootOnly,
-            (true, true) => panic!("popup movement left its old blue pixels behind"),
+        // Classify the actual committed GL canvas, never the requested native
+        // size. Queued old frames may legitimately arrive during transition.
+        let large = pixel(400, 10)[..3] == [0, 0, 0];
+        let returned = !large && pixel(400, 300)[0] >= 220;
+        let initial = is_blue(pixel(if large { 100 } else { 200 }, 175));
+        let clipped = is_blue(pixel(
+            if large { 775 } else { 725 },
+            if large { 500 } else { 525 },
+        ));
+        assert!(!(initial && clipped), "popup left stale blue pixels behind");
+        let actual = match (large, returned, initial, clipped) {
+            (true, _, true, false) => Pixels::LargeInitial,
+            (true, _, false, true) => Pixels::LargeClipped,
+            (false, true, true, false) => Pixels::ReturnedInitial,
+            (false, true, false, false) => Pixels::ReturnedRoot,
+            (false, false, true, false) => Pixels::PopupInitial,
+            (false, false, false, true) => Pixels::PopupClipped,
+            (false, false, false, false) => Pixels::RootOnly,
+            _ => panic!("unexpected popup canvas combination"),
         };
-        // Root320x240 fills viewer800x600. Check the whole content interior,
-        // excluding narrow JPEG/resampling boundary bands, not only probes.
         let rectangle = match actual {
-            Pixels::RootOnly => None,
-            Pixels::PopupInitial => Some((100i32, 100i32, 300i32, 250i32)),
-            // Popup80x60 at260,180 crosses the root right edge by20 pixels.
+            Pixels::RootOnly | Pixels::ReturnedRoot => None,
+            Pixels::PopupInitial | Pixels::ReturnedInitial => {
+                Some((100i32, 100i32, 300i32, 250i32))
+            }
             Pixels::PopupClipped => Some((650, 450, 800, 600)),
+            Pixels::LargeInitial => Some((50, 125, 150, 200)),
+            // 640x360 letterboxed at y75; popup at600,320 clips both edges.
+            Pixels::LargeClipped => Some((750, 475, 800, 525)),
         };
         for y in 2i32..598 {
             for x in 2i32..798 {
@@ -320,6 +364,12 @@ impl Harness {
                     p[1] <= 35 && p[3] == 255,
                     "green bystander/invalid alpha at{x},{y}: {p:?}"
                 );
+                if large && !(77..523).contains(&y) {
+                    if y < 73 || y > 527 {
+                        assert_eq!(&p[..3], &[0, 0, 0], "letterbox at{x},{y}");
+                    }
+                    continue;
+                }
                 if rectangle.is_some_and(|(left, top, right, bottom)| {
                     ((x - left).abs() <= 8 || (x - right).abs() <= 8)
                         && y >= top - 8
@@ -337,7 +387,7 @@ impl Harness {
                     assert!(is_blue(p), "popup pixel missing at{x},{y}: {p:?}");
                 } else {
                     assert!(
-                        p[2] >= 220 && p[0] <= 35,
+                        p[2] >= 220 && if returned { p[0] >= 220 } else { p[0] <= 35 },
                         "root pixel/residual popup at{x},{y}: {p:?}"
                     );
                 }
@@ -446,6 +496,74 @@ impl Harness {
             "popup must not expand the root canvas: {captures:?}"
         );
     }
+    fn resize(
+        &mut self,
+        width: u32,
+        height: u32,
+        returned: bool,
+        previous: Option<&image_copy_capture::PendingImageCapture>,
+    ) {
+        // This test compositor has no WM tick. Exercise the same geometry
+        // invalidation edge before its real configure/ACK/buffer commit.
+        image_copy_capture::toplevel_capture_geometry_changing(
+            &mut self.native.state,
+            self.target.window,
+            width,
+            height,
+        );
+        if let Some(previous) = previous {
+            assert!(
+                !previous.authorized(&self.native.state),
+                "old guard must fail before desired size mutation or replacement commit"
+            );
+        }
+        let geo = self
+            .native
+            .state
+            .window_geometry
+            .get_mut(&self.target.window)
+            .unwrap();
+        geo.w = width;
+        geo.h = height;
+        let top = &self.native.state.toplevels[&self.target.window];
+        top.with_pending_state(|s| s.size = Some((width as i32, height as i32).into()));
+        top.send_configure();
+        self.native.roundtrip();
+        self.native.roundtrip();
+        let serial = self
+            .target
+            .client
+            .events()
+            .into_iter()
+            .filter(|e| e.sender == self.target.xdg && e.opcode == 0)
+            .next_back()
+            .unwrap()
+            .args[0];
+        self.target.client.request(self.target.xdg, 4, &[serial]);
+        self.target
+            .client
+            .request(self.target.xdg, 3, &[0, 0, width, height]);
+        let (buffer, _file) = pixels(
+            &mut self.native,
+            &mut self.target.client,
+            width,
+            height,
+            if returned {
+                [255, 0, 255, 255]
+            } else {
+                [0, 0, 255, 255]
+            },
+        );
+        self.target
+            .client
+            .request(self.target.surface, 1, &[buffer, 0, 0]);
+        self.target
+            .client
+            .request(self.target.surface, 9, &[0, 0, width, height]);
+        self.target.client.request(self.target.surface, 6, &[]);
+        self.native.roundtrip();
+        self.native.roundtrip();
+    }
     fn finish(mut self, gl: &mut HeadlessSmithayGles, lock: bool) {
         if lock {
             self.native.state.session_lock_supported = true;
@@ -552,4 +670,97 @@ fn actual_wayland_readonly_popup_tcp_root_lock_unlock_does_not_revive_source() {
     h.wait_pixels(&mut gl, Pixels::PopupInitial, None);
     h.assert_fixed_canvas();
     h.finish(&mut gl, true);
+}
+
+#[test]
+fn actual_wayland_readonly_popup_resize_tcp_epochs_pixels_clip_return_and_revocation() {
+    let Some(mut gl) = HeadlessSmithayGles::new() else {
+        return;
+    };
+    for lock in [false, true] {
+        let mut h = Harness::with_follow(&mut gl, true, true);
+        let first = h.wait_pixels(&mut gl, Pixels::PopupInitial, None);
+        let first_capture = *h.captures.lock().unwrap().last().unwrap();
+        assert_eq!((first_capture.0, first_capture.1), (320, 240));
+        // Hold a real native frame across resize. A later viewer sequence alone
+        // cannot prove the geometry changed: actual letterbox/popup pixels and
+        // the new native epoch must independently agree.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let old = loop {
+            h.native.roundtrip();
+            if let Some(frame) = h
+                .native
+                .state
+                .image_capture_pending
+                .as_ref()
+                .unwrap()
+                .lock()
+                .unwrap()
+                .pop()
+            {
+                break frame;
+            }
+            h.local.roundtrip();
+            assert!(Instant::now() < deadline, "host must queue native frame");
+            thread::sleep(Duration::from_millis(1));
+        };
+        assert!(old.authorized(&h.native.state));
+        let old_authority = match &old.source {
+            image_copy_capture::CaptureSource::Toplevel(authority) => authority.clone(),
+            _ => panic!("popup capture must remain selected toplevel, never output"),
+        };
+        h.resize(640, 360, false, Some(&old));
+        assert!(!old.authorized(&h.native.state));
+        h.native
+            .state
+            .image_capture_pending
+            .as_ref()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .push(old);
+        let large = h.wait_pixels(&mut gl, Pixels::LargeInitial, Some(first));
+        let large_capture = *h.captures.lock().unwrap().last().unwrap();
+        assert_eq!((large_capture.0, large_capture.1), (640, 360));
+        assert!(large_capture.2 > first_capture.2);
+        h.popup
+            .as_mut()
+            .unwrap()
+            .reposition(&mut h.native, &mut h.target.client, (600, 320));
+        let clipped = h.wait_pixels(&mut gl, Pixels::LargeClipped, Some(large));
+        // Restore popup position while still large, then prove the restored
+        // root is a new magenta commit, not an old red 320x240 frame.
+        h.popup
+            .as_mut()
+            .unwrap()
+            .reposition(&mut h.native, &mut h.target.client, (40, 40));
+        let moved_back = h.wait_pixels(&mut gl, Pixels::LargeInitial, Some(clipped));
+        h.resize(320, 240, true, None);
+        let returned = h.wait_pixels(&mut gl, Pixels::ReturnedInitial, Some(moved_back));
+        let returned_capture = *h.captures.lock().unwrap().last().unwrap();
+        assert_eq!((returned_capture.0, returned_capture.1), (320, 240));
+        assert!(returned_capture.2 > large_capture.2);
+        assert!(
+            !image_copy_capture::authority_is_current(&h.native.state, &old_authority),
+            "same dimensions must not revive old popup authority"
+        );
+        h.destroy_popup();
+        let destroyed = h.wait_pixels(&mut gl, Pixels::ReturnedRoot, Some(returned));
+        assert!(
+            first < large
+                && large < clipped
+                && clipped < moved_back
+                && moved_back < returned
+                && returned < destroyed
+        );
+        let captures = h.captures.lock().unwrap();
+        assert!(captures.windows(2).all(|pair| pair[1].2 >= pair[0].2));
+        assert!(
+            captures
+                .iter()
+                .all(|f| matches!((f.0, f.1), (320, 240) | (640, 360)))
+        );
+        drop(captures);
+        h.finish(&mut gl, lock);
+    }
 }

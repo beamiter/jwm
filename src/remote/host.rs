@@ -1888,7 +1888,6 @@ fn validate_window_policy(options: &HostOptions) -> RemoteResult<()> {
     if options.wayland_popups
         && (!options.wayland_select
             || !options.once
-            || options.wayland_resize_follow
             || options.allow_input
             || options.allow_clipboard
             || options.allow_window_resize
@@ -1898,7 +1897,7 @@ fn validate_window_policy(options: &HostOptions) -> RemoteResult<()> {
             || options.allow_wayland_scroll
             || options.allow_wayland_horizontal_scroll)
     {
-        return Err(permission_denied("Wayland popup capture requires an explicitly selected one-session read-only source without input, clipboard, resize or resize-follow").into());
+        return Err(permission_denied("Wayland popup capture requires an explicitly selected one-session read-only source without input, clipboard or remote resize").into());
     }
 
     if options.wayland_resize_follow
@@ -5733,22 +5732,28 @@ mod tests {
             validate_window_policy(&options).is_ok(),
             cfg!(feature = "remote-wayland")
         );
-        for case in 0..11 {
-            let mut denied = options.clone();
-            match case {
-                0 => denied.wayland_select = false,
-                1 => denied.once = false,
-                2 => denied.wayland_resize_follow = true,
-                3 => denied.allow_input = true,
-                4 => denied.allow_clipboard = true,
-                5 => denied.allow_window_resize = true,
-                6 => denied.allow_wayland_keyboard = true,
-                7 => denied.allow_wayland_pointer = true,
-                8 => denied.allow_wayland_control = true,
-                9 => denied.allow_wayland_scroll = true,
-                _ => denied.allow_wayland_horizontal_scroll = true,
+        for follow in [false, true] {
+            options.wayland_resize_follow = follow;
+            assert_eq!(
+                validate_window_policy(&options).is_ok(),
+                cfg!(feature = "remote-wayland")
+            );
+            for case in 0..10 {
+                let mut denied = options.clone();
+                match case {
+                    0 => denied.wayland_select = false,
+                    1 => denied.once = false,
+                    2 => denied.allow_input = true,
+                    3 => denied.allow_clipboard = true,
+                    4 => denied.allow_window_resize = true,
+                    5 => denied.allow_wayland_keyboard = true,
+                    6 => denied.allow_wayland_pointer = true,
+                    7 => denied.allow_wayland_control = true,
+                    8 => denied.allow_wayland_scroll = true,
+                    _ => denied.allow_wayland_horizontal_scroll = true,
+                }
+                assert!(validate_window_policy(&denied).is_err(), "case {case}");
             }
-            assert!(validate_window_policy(&denied).is_err(), "case {case}");
         }
     }
     #[test]

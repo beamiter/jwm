@@ -1,9 +1,14 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <protocol name="jwm_readonly_resize_capture_v1">
-  <interface name="jwm_readonly_resize_capture_manager_v1" version="1">
+  <interface name="jwm_readonly_resize_capture_manager_v1" version="2">
     <description summary="one explicitly selected readonly resize-follow source">Trusted local capability. Exactly one source may be derived per manager. Derivation consumes all input attempts on the original source. It never follows remapping, locking or another surface. Epochs are bounded to 1024. A layout event is emitted only after a matching real surface commit; suspended invalidates all old sessions. Destroy revokes the derived family.</description>
     <request name="destroy" type="destructor"/>
     <request name="create_source">
+      <arg name="id" type="new_id" interface="ext_image_capture_source_v1"/>
+      <arg name="source" type="object" interface="ext_image_capture_source_v1"/>
+    </request>
+    <request name="create_source_with_popups" since="2">
+      <description summary="explicit readonly popup and resize-follow combination">Atomically derives one readonly source from an ordinary live source, consuming all input attempts. Includes only authorized popups clipped to each session's immutable root-sized canvas. It cannot derive from another readonly derived source. Initial effective and xdg root origins are frozen separately; later changes to either root origin stop the source permanently. Only root size follows committed layout epochs. The original create_source request remains root-only at all bind versions.</description>
       <arg name="id" type="new_id" interface="ext_image_capture_source_v1"/>
       <arg name="source" type="object" interface="ext_image_capture_source_v1"/>
     </request>

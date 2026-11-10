@@ -302,9 +302,11 @@ enum Command {
         #[arg(long, requires_all = ["wayland_select", "once"], conflicts_with_all = ["allow_input", "allow_clipboard", "allow_window_resize", "allow_wayland_keyboard", "allow_wayland_pointer", "allow_wayland_control", "allow_wayland_scroll", "allow_wayland_horizontal_scroll"])]
         wayland_resize_follow: bool,
 
-        /// Include owned descendant xdg_popups inside the fixed selected root canvas.
-        /// Explicit read-only capability; no output fallback, input or resize-follow.
-        #[arg(long, requires_all = ["wayland_select", "once"], conflicts_with_all = ["wayland_resize_follow", "allow_input", "allow_clipboard", "allow_window_resize", "allow_wayland_keyboard", "allow_wayland_pointer", "allow_wayland_control", "allow_wayland_scroll", "allow_wayland_horizontal_scroll"])]
+        /// Include owned descendant xdg_popups inside the selected root canvas.
+        /// The canvas is fixed unless --wayland-resize-follow is explicitly enabled.
+        /// Explicit read-only capability; no output fallback or input.
+        /// With --wayland-resize-follow, requires native combined capability v2.
+        #[arg(long, requires_all = ["wayland_select", "once"], conflicts_with_all = ["allow_input", "allow_clipboard", "allow_window_resize", "allow_wayland_keyboard", "allow_wayland_pointer", "allow_wayland_control", "allow_wayland_scroll", "allow_wayland_horizontal_scroll"])]
         wayland_popups: bool,
 
         /// Permit a single explicitly requested, scoped Wayland keyboard lease.
@@ -3881,29 +3883,50 @@ mod popup_cli_tests {
                 ..
             }
         ));
-        for option in [
-            "--wayland-resize-follow",
-            "--allow-input",
-            "--allow-clipboard",
-            "--allow-window-resize",
-            "--allow-wayland-keyboard",
-            "--allow-wayland-pointer",
-            "--allow-wayland-control",
-            "--allow-wayland-scroll",
-            "--allow-wayland-horizontal-scroll",
-        ] {
-            assert!(
-                Cli::try_parse_from([
+        assert!(matches!(
+            Cli::try_parse_from([
+                "jwm-remote",
+                "host",
+                "--once",
+                "--wayland-select",
+                "--wayland-popups",
+                "--wayland-resize-follow"
+            ])
+            .unwrap()
+            .command,
+            Command::Host {
+                wayland_popups: true,
+                wayland_resize_follow: true,
+                ..
+            }
+        ));
+        for follow in [false, true] {
+            for option in [
+                "--allow-input",
+                "--allow-clipboard",
+                "--allow-window-resize",
+                "--allow-wayland-keyboard",
+                "--allow-wayland-pointer",
+                "--allow-wayland-control",
+                "--allow-wayland-scroll",
+                "--allow-wayland-horizontal-scroll",
+            ] {
+                let mut args = vec![
                     "jwm-remote",
                     "host",
                     "--once",
                     "--wayland-select",
                     "--wayland-popups",
-                    option
-                ])
-                .is_err(),
-                "{option}"
-            );
+                    option,
+                ];
+                if follow {
+                    args.push("--wayland-resize-follow");
+                }
+                assert!(
+                    Cli::try_parse_from(&args).is_err(),
+                    "follow={follow}, option={option}"
+                );
+            }
         }
         for args in [
             vec!["jwm-remote", "host", "--once", "--wayland-popups"],

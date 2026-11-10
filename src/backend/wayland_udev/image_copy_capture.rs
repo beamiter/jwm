@@ -125,6 +125,7 @@ pub struct CaptureAuthority {
     pub(crate) width: u32,
     pub(crate) height: u32,
     pub(crate) include_popups: bool,
+    popup_xdg_origin: Option<(i32, i32)>,
     popup_manager: Option<PopupManager>,
     pub(crate) follow_origin: Option<(i32, i32)>,
     owner: ClientId,
@@ -219,8 +220,12 @@ pub(crate) fn toplevel_capture_surface_committed(
         .filter(|a| a.include_popups && a.surface == *surface)
         .collect();
     for root in popup_roots {
-        if popup_root_origin(state, surface) != root.follow_origin {
-            stop_popup_family(state, &root);
+        if popup_root_origin(state, surface) != root.popup_xdg_origin {
+            if root.follow.is_some() {
+                stop_follow_family(state, &root);
+            } else {
+                stop_popup_family(state, &root);
+            }
         }
     }
     let roots: Vec<_> = state
@@ -291,7 +296,7 @@ pub(crate) fn authority_is_current(state: &JwmWaylandState, authority: &CaptureA
         return false;
     }
     if authority.include_popups
-        && popup_root_origin(state, &authority.surface) != authority.follow_origin
+        && popup_root_origin(state, &authority.surface) != authority.popup_xdg_origin
     {
         revoke_authority(authority);
         return false;
@@ -363,6 +368,7 @@ fn create_toplevel_source(
         width,
         height,
         include_popups: false,
+        popup_xdg_origin: None,
         popup_manager: None,
         follow_origin: None,
         owner: _owner,
@@ -833,7 +839,7 @@ pub fn init_image_copy_capture(dh: &DisplayHandle) -> PendingImageCaptureQueue {
         ToplevelSourceManagerData,
     );
     dh.create_global::<JwmWaylandState, ExtImageCopyCaptureManagerV1, _>(1, CaptureManagerData);
-    dh.create_global::<JwmWaylandState, ResizeManager, _>(1, ());
+    dh.create_global::<JwmWaylandState, ResizeManager, _>(2, ());
     dh.create_global::<JwmWaylandState, PopupManager, _>(1, ());
     info!(
         "[udev/wayland] ext-image-copy-capture-v1 + ext-image-capture-source-v1 globals registered \
@@ -2360,7 +2366,8 @@ fn snapshot_follow_source(state: &JwmWaylandState, source: CaptureSource) -> Opt
         surface: root.surface.clone(),
         width: layout.width,
         height: layout.height,
-        include_popups: false,
+        include_popups: root.include_popups,
+        popup_xdg_origin: root.popup_xdg_origin,
         popup_manager: None,
         follow_origin: layout.origin,
         owner: root.owner.clone(),
@@ -2392,6 +2399,16 @@ pub(crate) fn readonly_resize_surface_committed(
         publish_follow_layout(state, &root);
     }
 }
+// Defensive combo boundary: ordinary resize-follow does not freeze its origin.
+// This predicate checks immutable metadata, not a claim about reachable wire layouts.
+fn popup_follow_origin_matches(
+    include_popups: bool,
+    frozen: Option<(i32, i32)>,
+    current: Option<(i32, i32)>,
+) -> bool {
+    !include_popups || frozen.is_some_and(|origin| current == Some(origin))
+}
+
 fn publish_follow_layout(state: &mut JwmWaylandState, root: &CaptureAuthority) {
     if root.revoked.load(Ordering::Acquire) {
         return;
@@ -2412,6 +2429,14 @@ fn publish_follow_layout(state: &mut JwmWaylandState, root: &CaptureAuthority) {
         stop_follow_family(state, root);
         return;
     };
+    if !popup_follow_origin_matches(
+        root.include_popups,
+        root.follow_origin,
+        Some((rect.loc.x, rect.loc.y)),
+    ) {
+        stop_follow_family(state, root);
+        return;
+    }
     let Some(geometry) = state.window_geometry.get(&root.window) else {
         return;
     };
@@ -2457,9 +2482,14 @@ impl Dispatch<ResizeManager, ResizeManagerData> for JwmWaylandState {
         _dh: &DisplayHandle,
         init: &mut DataInit<'_, Self>,
     ) {
+        let include_popups = matches!(
+            &request,
+            resize_manager::Request::CreateSourceWithPopups { .. }
+        );
         match request {
             resize_manager::Request::Destroy => {}
-            resize_manager::Request::CreateSource { id, source } => {
+            resize_manager::Request::CreateSource { id, source }
+            | resize_manager::Request::CreateSourceWithPopups { id, source } => {
                 let root = if !data.used.swap(true, Ordering::AcqRel)
                     && source
                         .client()
@@ -2473,6 +2503,7 @@ impl Dispatch<ResizeManager, ResizeManagerData> for JwmWaylandState {
                                 return None;
                             };
                             if original.owner != client.id()
+                                || original.include_popups
                                 || original.follow.is_some()
                                 || original.follow_parent.is_some()
                                 || !authority_is_current(state, original)
@@ -2480,7 +2511,14 @@ impl Dispatch<ResizeManager, ResizeManagerData> for JwmWaylandState {
                             {
                                 return None;
                             }
-                            follow_effective_geometry(state, &original.surface)?;
+                            let effective = follow_effective_geometry(state, &original.surface)?;
+                            let popup_xdg_origin = if include_popups {
+                                Some(popup_root_origin(state, &original.surface)?)
+                            } else {
+                                None
+                            };
+                            let origin =
+                                include_popups.then_some((effective.loc.x, effective.loc.y));
                             let CaptureSource::Toplevel(root) =
                                 create_toplevel_source(state, original.window, client.id())?
                             else {
@@ -2491,9 +2529,10 @@ impl Dispatch<ResizeManager, ResizeManagerData> for JwmWaylandState {
                                 surface: root.surface.clone(),
                                 width: root.width,
                                 height: root.height,
-                                include_popups: false,
+                                include_popups,
+                                popup_xdg_origin,
                                 popup_manager: None,
-                                follow_origin: None,
+                                follow_origin: origin,
                                 owner: root.owner.clone(),
                                 lock_epoch: root.lock_epoch,
                                 buffer_layout: root.buffer_layout,
@@ -2652,6 +2691,43 @@ pub(crate) fn readonly_resize_new_subsurface(
 #[cfg(test)]
 mod follow_geometry_tests {
     use super::*;
+    #[test]
+    fn popup_follow_effective_origin_defense_requires_a_present_exact_match() {
+        // Synthetic metadata exercises the defensive branch only. Real root
+        // SurfaceView offsets cannot independently move with fixed xdg origin.
+        assert!(popup_follow_origin_matches(
+            true,
+            Some((0, 0)),
+            Some((0, 0))
+        ));
+        assert!(popup_follow_origin_matches(
+            true,
+            Some((-4, 3)),
+            Some((-4, 3))
+        ));
+        assert!(!popup_follow_origin_matches(
+            true,
+            Some((0, 0)),
+            Some((1, 0))
+        ));
+        assert!(!popup_follow_origin_matches(
+            true,
+            Some((0, 0)),
+            Some((0, -1))
+        ));
+        assert!(!popup_follow_origin_matches(true, Some((0, 0)), None));
+        assert!(!popup_follow_origin_matches(true, None, Some((0, 0))));
+        assert!(!popup_follow_origin_matches(true, None, None));
+        // Root-only follow retains its existing origin policy; its separate
+        // committed-geometry validity and epoch checks remain mandatory.
+        assert!(popup_follow_origin_matches(
+            false,
+            Some((0, 0)),
+            Some((1, 2))
+        ));
+        assert!(popup_follow_origin_matches(false, None, None));
+    }
+
     fn rect(x: i32, y: i32, w: i32, h: i32) -> FollowRect {
         FollowRect::new((x, y).into(), (w, h).into())
     }
@@ -2755,6 +2831,7 @@ impl Dispatch<PopupManager, PopupManagerData> for JwmWaylandState {
                                 revoked: AtomicBool::new(false),
                                 input_consumed: AtomicU8::new(3),
                                 include_popups: true,
+                                popup_xdg_origin: Some(origin),
                                 popup_manager: Some(resource.clone()),
                                 follow_origin: Some(origin),
                                 follow: None,
