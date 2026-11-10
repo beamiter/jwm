@@ -6804,10 +6804,21 @@ pub(super) mod tests {
 
     #[test]
     fn negotiation_deadline_also_covers_a_slow_hello_ack() {
+        const BUDGET: Duration = Duration::from_secs(2);
+        const DRIP: Duration = Duration::from_millis(100);
+        let (phase_tx, phase_rx) = std::sync::mpsc::channel();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let server = thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
+            stream.set_nodelay(true).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(4)))
+                .unwrap();
+            stream
+                .set_write_timeout(Some(Duration::from_secs(4)))
+                .unwrap();
+            let _watchdog = TcpStreamDeadline::arm(&stream, Duration::from_secs(5)).unwrap();
             let keys = server_handshake(&mut stream, &TEST_PSK, [0x24; 32]).unwrap();
             let reader_stream = stream.try_clone().unwrap();
             let (receive_key, send_key) = keys.into_server();
@@ -6830,11 +6841,18 @@ pub(super) mod tests {
                     .encode(),
                 )
                 .unwrap();
-            for byte in encoded.into_inner() {
+            let bytes = encoded.into_inner();
+            assert!(DRIP * (bytes.len() as u32) > BUDGET * 2);
+            let mut sent = 0;
+            for byte in bytes {
                 if stream.write_all(&[byte]).is_err() {
                     break;
                 }
-                thread::sleep(Duration::from_millis(20));
+                sent += 1;
+                if sent == 1 {
+                    phase_tx.send(()).unwrap();
+                }
+                thread::sleep(DRIP);
             }
         });
 
@@ -6858,11 +6876,21 @@ pub(super) mod tests {
             None,
             false,
             Default::default(),
-            Duration::from_millis(100),
+            BUDGET,
         );
-        assert!(result.is_err());
-        assert!(started.elapsed() < Duration::from_millis(500));
+        let elapsed = started.elapsed();
+        // The first actual encrypted ACK byte was written only after a valid
+        // authenticated Hello. A failure in Noise setup cannot pass this test.
+        phase_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("server reached and began the real HelloAck drip");
         server.join().unwrap();
+        assert!(result.is_err());
+        assert!(elapsed >= BUDGET - Duration::from_millis(100));
+        assert!(
+            elapsed < BUDGET + Duration::from_secs(1),
+            "per-byte progress extended the phase deadline: {elapsed:?}"
+        );
     }
 
     #[test]
@@ -7067,6 +7095,7 @@ pub(super) mod tests {
 
     #[test]
     fn successful_negotiation_cancels_its_absolute_deadline() {
+        const BUDGET: Duration = Duration::from_secs(2);
         let offered = super::super::messages::FrameLimits {
             max_width: 1920,
             max_height: 1080,
@@ -7081,6 +7110,14 @@ pub(super) mod tests {
         let address = listener.local_addr().unwrap();
         let server = thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
+            stream.set_nodelay(true).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(4)))
+                .unwrap();
+            stream
+                .set_write_timeout(Some(Duration::from_secs(4)))
+                .unwrap();
+            let _watchdog = TcpStreamDeadline::arm(&stream, Duration::from_secs(6)).unwrap();
             let keys = server_handshake(&mut stream, &TEST_PSK, [0x33; 32]).unwrap();
             let reader_stream = stream.try_clone().unwrap();
             let (receive_key, send_key) = keys.into_server();
@@ -7114,12 +7151,13 @@ pub(super) mod tests {
                 )
                 .unwrap();
             writer.flush().unwrap();
-            thread::sleep(Duration::from_millis(160));
+            thread::sleep(BUDGET + Duration::from_millis(200));
             writer.write_message(MessageKind::Close, &[]).unwrap();
             writer.flush().unwrap();
         });
 
         let stream = TcpStream::connect(address).unwrap();
+        let started = Instant::now();
         let (mut reader, _writer, hello) = negotiate_session(
             true,
             false,
@@ -7138,14 +7176,22 @@ pub(super) mod tests {
             Some((1280, 720)),
             true,
             offered,
-            Duration::from_millis(80),
+            BUDGET,
         )
         .unwrap();
         assert_eq!(hello.stream.frame_limits, selected);
         assert!(hello.stream.window_resize);
         assert!(!hello.pointer_enabled);
         assert!(!hello.keyboard_enabled);
+        reader
+            .get_ref()
+            .set_read_timeout(Some(Duration::from_secs(4)))
+            .unwrap();
         let (kind, payload) = reader.read_message().unwrap();
+        assert!(
+            started.elapsed() > BUDGET,
+            "connection must survive its original phase deadline"
+        );
         assert_eq!(kind, MessageKind::Close);
         assert!(payload.is_empty());
         server.join().unwrap();
