@@ -85,6 +85,38 @@ jobs:
         run: |
           export XDG_RUNTIME_DIR="$(mktemp -d)"
           env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib remote::host::wayland_viewer_integration -- --test-threads=1 --nocapture
+      - name: Controlled input to unique visible marker benchmark
+        timeout-minutes: 3
+        env:
+          JWM_REMOTE_LATENCY_REPORT: ${{ runner.temp }}/remote-input-response.json
+        run: |
+          set -o pipefail
+          export XDG_RUNTIME_DIR="$(mktemp -d)"
+          env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib remote::host::wayland_viewer_integration::host_control_integration::latency_benchmark::controlled_input_to_unique_visible_marker_latency -- --ignored --exact --nocapture --test-threads=1 2>&1 | tail -c 1048576 | tee "${{ runner.temp }}/remote-input-response.log"
+          python3 - <<'PYREPORT'
+          import json, os
+          from pathlib import Path
+          path = Path(os.environ["JWM_REMOTE_LATENCY_REPORT"])
+          assert path.is_file() and 0 < path.stat().st_size <= 1048576, "missing, empty or oversized benchmark report"
+          report = json.loads(path.read_text())
+          assert report["schema_version"] == 1 and report["success"] is True
+          assert report["warmup_requested"] == 2 and report["measured_requested"] == 16
+          samples = report["samples"]
+          assert len(samples) == 18 and all(s["status"] == "ok" for s in samples)
+          assert sum(s["phase"] == "warmup" for s in samples) == 2
+          assert sum(s["phase"] == "measured" for s in samples) == 16
+          print("Validated complete 2-warmup / 16-measured response benchmark report")
+          PYREPORT
+      - name: Preserve bounded controlled input response evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: remote-input-response-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/remote-input-response.json
+            ${{ runner.temp }}/remote-input-response.log
+          if-no-files-found: warn
+          retention-days: 3
       - name: Actual owned X11 viewer presentation and scoped pointer interaction
         run: |
           export XDG_RUNTIME_DIR="$(mktemp -d)"

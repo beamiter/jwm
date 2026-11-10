@@ -226,7 +226,7 @@ impl Readback {
         );
         Self { client: c, session }
     }
-    fn blue(&mut self, s: &mut Server, gl: &mut HeadlessSmithayGles) -> bool {
+    fn pixels(&mut self, s: &mut Server, gl: &mut HeadlessSmithayGles) -> Vec<u8> {
         let (buffer, mut file) = shm(s, &mut self.client, [0x5a; 4], VW, VH);
         let frame = self.client.new_id();
         self.client.request(self.session, 0, &[frame]);
@@ -253,19 +253,9 @@ impl Readback {
         let mut pixels = Vec::new();
         file.read_to_end(&mut pixels).unwrap();
         assert_eq!(pixels.len(), (VW * VH * 4) as usize);
-        let blue = pixels
-            .chunks_exact(4)
-            .all(|p| p[0] >= 250 && p[1] <= 3 && p[2] <= 3 && p[3] == 255);
-        let red = pixels
-            .chunks_exact(4)
-            .all(|p| p[2] >= 250 && p[1] <= 3 && p[0] <= 3 && p[3] == 255);
-        assert!(
-            blue || red,
-            "actual viewer pixels must equal selected red/blue source"
-        );
         self.client.request(frame, 0, &[]);
         s.roundtrip();
-        blue
+        pixels
     }
 }
 struct Harness {
@@ -489,6 +479,30 @@ impl Harness {
         }
     }
     fn tick(&mut self, gl: &mut HeadlessSmithayGles, drawn: bool) {
+        self.tick_with_inspector(gl, drawn, |pixels, _sequence| {
+            let blue = pixels
+                .chunks_exact(4)
+                .all(|p| p[0] >= 250 && p[1] <= 3 && p[2] <= 3 && p[3] == 255);
+            let red = pixels
+                .chunks_exact(4)
+                .all(|p| p[2] >= 250 && p[1] <= 3 && p[0] <= 3 && p[3] == 255);
+            assert!(
+                blue || red,
+                "actual viewer pixels must equal selected red/blue source"
+            );
+            blue
+        });
+    }
+    /// Reuse the actual production GL readback and exact commit/presentation
+    /// association. The inspector may observe pixels; it cannot manufacture
+    /// feedback or alter its frame sequence. Its return value preserves the
+    /// original fixture's red/blue observation for existing tests.
+    fn tick_with_inspector(
+        &mut self,
+        gl: &mut HeadlessSmithayGles,
+        drawn: bool,
+        mut inspect: impl FnMut(&[u8], u64) -> bool,
+    ) {
         self.native.roundtrip();
         fulfill_test_toplevel_capture(
             &mut gl.renderer,
@@ -581,7 +595,8 @@ impl Harness {
             if self.readback.is_none() {
                 self.readback = Some(Readback::new(&mut self.local));
             }
-            self.blue_presented = self.readback.as_mut().unwrap().blue(&mut self.local, gl);
+            let pixels = self.readback.as_mut().unwrap().pixels(&mut self.local, gl);
+            self.blue_presented = inspect(&pixels, sequence);
             assert_eq!(
                 self.frames.lock().unwrap().0,
                 Some(sequence),
@@ -1405,3 +1420,6 @@ fn actual_wayland_control_horizontal_scroll_tcp_mixed_axis_revokes_without_input
         "duplicate or mixed Wayland wheel notch",
     );
 }
+
+#[path = "host_wayland_control_latency_benchmark.rs"]
+mod latency_benchmark;
