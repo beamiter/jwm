@@ -418,6 +418,50 @@ impl Drop for PendingFrame {
     }
 }
 
+#[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+#[derive(Clone)]
+pub(super) struct ProofFrameEvidence {
+    pub native_serial: u64,
+    pub source_epoch: u64,
+    pub geometry_epoch: u64,
+    pub sequence: u64,
+    pub keyframe: bool,
+    pub dirty_tiles: u32,
+    pub total_tiles: u32,
+    pub encoded_bytes: usize,
+    pub jpeg_ns: u64,
+}
+#[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+#[derive(Default)]
+pub(super) struct ProofDeltaProbe {
+    frames: Mutex<Vec<ProofFrameEvidence>>,
+}
+#[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+impl ProofDeltaProbe {
+    pub(super) fn snapshot(&self) -> Vec<ProofFrameEvidence> {
+        self.frames.lock().unwrap().clone()
+    }
+}
+#[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+thread_local! {
+    static PROOF_DELTA_TEST: std::cell::RefCell<Option<(bool, Arc<ProofDeltaProbe>)>> = const { std::cell::RefCell::new(None) };
+}
+#[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+pub(super) fn with_proof_delta<T>(
+    legacy: bool,
+    probe: Arc<ProofDeltaProbe>,
+    run: impl FnOnce() -> T,
+) -> T {
+    struct Restore(Option<(bool, Arc<ProofDeltaProbe>)>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            PROOF_DELTA_TEST.with(|value| *value.borrow_mut() = self.0.take());
+        }
+    }
+    let _restore = Restore(PROOF_DELTA_TEST.with(|value| value.replace(Some((legacy, probe)))));
+    run()
+}
+
 /// Chooses what each captured frame owes the viewer and encodes it.
 ///
 /// The delta encoder subsumes the previous exact-duplicate suppressor: an
@@ -454,9 +498,24 @@ impl FrameSender {
         }
     }
 
+    #[cfg(test)]
     fn plan_at(&mut self, frame: &CapturedFrame, now: Instant) -> RemoteResult<TilePlan> {
+        self.plan_record_at(frame, now, false, false)
+    }
+
+    fn plan_record_at(
+        &mut self,
+        frame: &CapturedFrame,
+        now: Instant,
+        mandatory: bool,
+        legacy_keyframe: bool,
+    ) -> RemoteResult<TilePlan> {
+        if mandatory && legacy_keyframe {
+            *self = Self::with_scroll_copy(self.scroll_copy);
+        }
         let request = match self.committed_at {
             None => TileEncodeRequest::Keyframe,
+            Some(_) if mandatory => TileEncodeRequest::FreshProof,
             Some(committed_at)
                 if now.saturating_duration_since(committed_at) >= UNCHANGED_FRAME_KEEPALIVE =>
             {
@@ -1764,6 +1823,8 @@ struct PointerFrame {
     announced: bool,
 }
 struct SourceControl {
+    #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+    proof_delta: Option<(bool, Arc<ProofDeltaProbe>)>,
     input_wake: std::sync::OnceLock<input_wake::InputWake>,
     #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
     input_wake_probe: Option<Arc<InputWakeProbe>>,
@@ -1813,6 +1874,8 @@ impl SourceControl {
         geometry_epoch: u64,
     ) -> RemoteResult<Self> {
         Ok(Self {
+            #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+            proof_delta: PROOF_DELTA_TEST.with(|value| value.borrow().clone()),
             input_wake: std::sync::OnceLock::new(),
             #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
             input_wake_probe: input_wake::test_probe(),
@@ -3988,14 +4051,22 @@ fn send_frames_with_encoder_scoped<W: std::io::Write + SetWriteTimeout>(
                 source_epoch = Some(pending.source_version.epoch);
             }
         }
-        // The retained native frame must receive its own authenticated sequence,
-        // including a static scene. Never suppress a pointer proof as unchanged.
-        if pending.pointer_serial.is_some() {
-            *sender = FrameSender::with_scroll_copy(sender.scroll_copy);
-        }
+        // A retained proof requires a fresh record/sequence/presentation, not
+        // a fresh codec reference. FreshProof forces exact damage and emission through both
+        // refinement passes, including a legitimate zero-dirty frame.
+        #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+        let legacy_keyframe =
+            sources.is_some_and(|s| s.proof_delta.as_ref().is_some_and(|(legacy, _)| *legacy));
+        #[cfg(not(all(test, feature = "remote-wayland", feature = "backend-wayland-udev")))]
+        let legacy_keyframe = false;
         let planned_at = Instant::now();
         let mut plan = sender
-            .plan_at(&pending.frame, planned_at)
+            .plan_record_at(
+                &pending.frame,
+                planned_at,
+                pending.pointer_serial.is_some(),
+                legacy_keyframe,
+            )
             .map_err(LocalRuntimeFailure::encoding)?;
         if !plan.keyframe && sender.refinement_due(planned_at) {
             let current = jpeg_quality.current_quality();
@@ -4136,6 +4207,28 @@ fn send_frames_with_encoder_scoped<W: std::io::Write + SetWriteTimeout>(
         // flush succeeded. A partial/failed write therefore cannot suppress a
         // future frame in a replacement session or test harness.
         sender.commit_at(&pending.frame, Instant::now());
+        #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+        if let (Some(serial), Some((_, probe))) = (
+            pending.pointer_serial,
+            sources.and_then(|s| s.proof_delta.as_ref()),
+        ) {
+            let mut frames = probe.frames.lock().unwrap();
+            assert!(frames.len() < 512, "proof evidence test bound");
+            frames.push(ProofFrameEvidence {
+                native_serial: serial,
+                source_epoch: pending.source_version.epoch,
+                geometry_epoch: pending.frame.geometry_epoch,
+                sequence,
+                keyframe: plan.keyframe,
+                dirty_tiles: plan.dirty_tiles,
+                total_tiles: plan.total_tiles,
+                encoded_bytes: wire_payload.len(),
+                jpeg_ns: sender
+                    .encoder
+                    .encode_timings()
+                    .map_or(0, |t| t.jpeg.as_nanos().min(u128::from(u64::MAX)) as u64),
+            });
+        }
         sequence = sequence
             .checked_add(1)
             .ok_or_else(|| io::Error::other("remote frame sequence exhausted"))?;
@@ -5084,6 +5177,148 @@ fn permission_denied(message: impl Into<String>) -> io::Error {
 
 #[cfg(test)]
 mod tests {
+    fn proof_test_frame() -> CapturedFrame {
+        CapturedFrame {
+            geometry_epoch: 1,
+            source_width: 128,
+            source_height: 96,
+            image: RgbImage::from_pixel(128, 96, Rgb([80, 100, 120])),
+        }
+    }
+    #[test]
+    fn proof_delta_static_new_sequence_exact_small_damage_and_refinement() {
+        let now = Instant::now();
+        let source = proof_test_frame();
+        let mut sender = FrameSender::new();
+        let mut decoder = TileDecoder::new();
+        let mut bytes = Vec::new();
+        assert!(
+            sender
+                .plan_record_at(&source, now, true, false)
+                .unwrap()
+                .keyframe
+        );
+        sender
+            .encoder
+            .encode_into(&mut bytes, 1, &source, 70)
+            .unwrap();
+        let (_, original) = decode_wire(&mut decoder, &bytes);
+        sender.commit_at(&source, now);
+        let static_plan = sender.plan_record_at(&source, now, true, false).unwrap();
+        assert!(static_plan.emit && !static_plan.keyframe && static_plan.dirty_tiles == 0);
+        // Both quality replans retain mandatory emission, even if debt vanishes.
+        sender.refine_at(90, now).unwrap();
+        let lower = sender.refine_at(60, now).unwrap();
+        assert!(lower.emit && lower.dirty_tiles == 0);
+        sender
+            .encoder
+            .encode_into(&mut bytes, 2, &source, 60)
+            .unwrap();
+        let (seq, identical) = decode_wire(&mut decoder, &bytes);
+        assert_eq!(seq, 2);
+        assert_eq!(identical, original);
+        sender.commit_at(&source, now);
+        let mut changed = proof_test_frame();
+        changed.image.get_pixel_mut(2, 2).0[0] += 1;
+        assert!(
+            !sender.plan_at(&changed, now).unwrap().emit,
+            "ordinary tolerance unchanged"
+        );
+        let proof = sender.plan_record_at(&changed, now, true, false).unwrap();
+        assert!(
+            proof.emit
+                && !proof.keyframe
+                && proof.dirty_tiles > 0
+                && proof.dirty_tiles < proof.total_tiles
+        );
+        sender
+            .encoder
+            .encode_into(&mut bytes, 3, &changed, 90)
+            .unwrap();
+        assert_eq!(decode_wire(&mut decoder, &bytes).0, 3);
+        sender.commit_at(&changed, now);
+        assert_eq!(
+            sender
+                .plan_record_at(&changed, now, true, false)
+                .unwrap()
+                .dirty_tiles,
+            0
+        );
+    }
+    #[test]
+    fn proof_delta_failed_flush_does_not_commit_and_resets_still_keyframe() {
+        let now = Instant::now();
+        let source = proof_test_frame();
+        let mut sender = FrameSender::new();
+        let mut bytes = Vec::new();
+        sender.plan_record_at(&source, now, true, false).unwrap();
+        sender
+            .encoder
+            .encode_into(&mut bytes, 1, &source, 70)
+            .unwrap();
+        sender.commit_at(&source, now);
+        let mut changed = proof_test_frame();
+        changed.image.get_pixel_mut(2, 2).0[0] += 1;
+        let dirty = sender
+            .plan_record_at(&changed, now, true, false)
+            .unwrap()
+            .dirty_tiles;
+        sender
+            .encoder
+            .encode_into(&mut bytes, 2, &changed, 70)
+            .unwrap();
+        let mut writer = SessionWriter::new(
+            DeadlineWriter::new(FlushFailWriter::default(), WRITE_TIMEOUT),
+            [7; 32],
+        );
+        assert!(write_frame_record(&mut writer, &bytes, WRITE_TIMEOUT).is_err());
+        sender.discard();
+        assert_eq!(sender.committed_at, Some(now));
+        assert_eq!(
+            sender
+                .plan_record_at(&changed, now, true, false)
+                .unwrap()
+                .dirty_tiles,
+            dirty
+        );
+        sender.discard();
+        changed.geometry_epoch += 1;
+        assert!(
+            sender
+                .plan_record_at(&changed, now, true, false)
+                .unwrap()
+                .keyframe
+        );
+        sender.discard();
+        let mut resized = proof_test_frame();
+        resized.image = RgbImage::from_pixel(96, 96, Rgb([80, 100, 120]));
+        resized.source_width = 96;
+        assert!(
+            sender
+                .plan_record_at(&resized, now, true, false)
+                .unwrap()
+                .keyframe
+        );
+        sender = FrameSender::with_scroll_copy(sender.scroll_copy); // source-switch reset
+        assert!(
+            sender
+                .plan_record_at(&source, now, true, false)
+                .unwrap()
+                .keyframe
+        );
+        sender
+            .encoder
+            .encode_into(&mut bytes, 3, &source, 70)
+            .unwrap();
+        sender.commit_at(&source, now);
+        assert!(
+            sender
+                .plan_record_at(&source, now, true, true)
+                .unwrap()
+                .keyframe,
+            "test-only baseline remains forced keyframe"
+        );
+    }
     #[test]
     fn input_wake_model_backlog_excludes_disabled_and_waiting_modes() {
         let sources = test_source_control();
@@ -7896,7 +8131,7 @@ mod tests {
     }
 
     #[test]
-    fn frame_sender_scroll_copy_opt_in_survives_source_and_proof_resets() {
+    fn frame_sender_scroll_copy_opt_in_survives_source_resets() {
         for enabled in [false, true] {
             let key = [0x64; 32];
             let mut writer = SessionWriter::new(
@@ -7915,9 +8150,8 @@ mod tests {
             let mut sender = FrameSender::with_scroll_copy(enabled);
             let now = Instant::now();
             let mut sequence = 1;
-            // Both source changes and retained pointer-proof frames use this
-            // same production reset expression. Each must force a keyframe,
-            // preserve immutable permission, then allow a fresh copy base.
+            // Source changes reset reference and force a keyframe while
+            // preserving immutable copy permission. Native proofs do not reset.
             for reset in 0..3 {
                 if reset != 0 {
                     sender = FrameSender::with_scroll_copy(sender.scroll_copy);

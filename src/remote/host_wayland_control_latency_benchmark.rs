@@ -30,13 +30,16 @@ fn marker_pixels(word: u32) -> Vec<u8> {
     pixels
 }
 fn decode_marker(pixels: &[u8]) -> Option<u32> {
+    decode_marker_cells(pixels, 50, 36)
+}
+fn decode_marker_cells(pixels: &[u8], cell_width: u32, cell_height: u32) -> Option<u32> {
     if pixels.len() != (VW * VH * 4) as usize {
         return None;
     }
     let mut bits = 0u64;
     for cell in 0..64u32 {
-        let cx = (cell % 8) * 50 + 25;
-        let cy = (cell / 8) * 36 + 18;
+        let cx = (cell % 8) * cell_width + cell_width / 2;
+        let cy = (cell / 8) * cell_height + cell_height / 2;
         let mut white = None;
         for y in cy - 3..=cy + 3 {
             for x in cx - 3..=cx + 3 {
@@ -71,9 +74,13 @@ fn decode_marker(pixels: &[u8]) -> Option<u32> {
     (marker_word(run, sample) == word).then_some(word)
 }
 fn commit_marker(h: &mut Harness, word: u32) -> Instant {
+    commit_pixels(h, &marker_pixels(word))
+}
+fn commit_pixels(h: &mut Harness, pixels: &[u8]) -> Instant {
+    assert_eq!(pixels.len(), (SW * SH * 4) as usize);
     let (buffer, mut file) = shm(&mut h.native, &mut h.target.client, [0, 0, 0, 255], SW, SH);
     file.seek(SeekFrom::Start(0)).unwrap();
-    file.write_all(&marker_pixels(word)).unwrap();
+    file.write_all(pixels).unwrap();
     h.target
         .client
         .request(h.target.surface, 1, &[buffer, 0, 0]);
@@ -174,6 +181,23 @@ fn run_session(
     report: &mut Report,
     make_harness: impl FnOnce(&mut HeadlessSmithayGles) -> Harness,
 ) {
+    run_session_workload(
+        report,
+        make_harness,
+        None,
+        commit_marker,
+        decode_marker,
+        |_, _, _, _, _| {},
+    );
+}
+fn run_session_workload(
+    report: &mut Report,
+    make_harness: impl FnOnce(&mut HeadlessSmithayGles) -> Harness,
+    shared_run: Option<u16>,
+    paint: impl Fn(&mut Harness, u32) -> Instant,
+    decode: impl Fn(&[u8]) -> Option<u32>,
+    after_samples: impl FnOnce(&mut Harness, &mut HeadlessSmithayGles, Instant, u32, u64),
+) {
     let started = Instant::now();
     let mut gl = HeadlessSmithayGles::new()
         .expect("explicit latency benchmark requires real headless GL, never skip");
@@ -186,7 +210,7 @@ fn run_session(
     let viewer_root = viewer_surface(&h.local);
     let viewer_window = *h.local.state.toplevels.keys().next().unwrap();
     let target_surface = h.native.state.surface_for_window(h.target.window).unwrap();
-    let run: u16 = rand::random();
+    let run: u16 = shared_run.unwrap_or_else(rand::random);
     let ms = |duration: Duration| duration.as_secs_f64() * 1000.0;
     for index in 0..WARMUP + MEASURED {
         report.failure = format!(
@@ -226,7 +250,7 @@ fn run_session(
             assert!(remote_control::active(&h.native.state));
             assert_eq!(remote_control::attempts_for_test(&h.native.state), 1);
             h.tick_with_inspector(&mut gl, verified.is_none(), |pixels, sequence| {
-                if let Some(actual) = decode_marker(pixels) {
+                if let Some(actual) = decode(pixels) {
                     if actual == word && sequence > previous && verified.is_none() {
                         assert!(
                             committed.is_some(),
@@ -252,7 +276,7 @@ fn run_session(
                 assert_eq!(&events[2].1[2..], &[0x110, 0]);
                 received = Some(Instant::now());
                 // The app responds only to its own actual native wire events.
-                committed = Some(commit_marker(&mut h, word));
+                committed = Some(paint(&mut h, word));
             }
             let client_presented = h.frames.lock().unwrap().1;
             if complete(
@@ -298,7 +322,14 @@ fn run_session(
         }
         previous = sequence;
     }
-    report.failure = "post-measurement focus revocation or cleanup failed".into();
+    report.failure = "post-measurement workload validation or cleanup failed".into();
+    after_samples(
+        &mut h,
+        &mut gl,
+        started,
+        marker_word(run, (WARMUP + MEASURED) as u8),
+        previous,
+    );
     let before = h.received.pointer_actions.clone();
     h.keyboard
         .as_ref()
@@ -372,3 +403,6 @@ fn latency_marker_rejects_stale_wrong_run_corruption_and_missing_presentation() 
 
 #[path = "host_input_wake_benchmark.rs"]
 mod input_wake_benchmark;
+
+#[path = "host_proof_delta_benchmark.rs"]
+mod proof_delta_benchmark;

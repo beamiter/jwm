@@ -135,6 +135,35 @@ jobs:
               assert session["wake_counters"]["activity_waits"] <= 100000
           print("Validated input-wake A/B/B/A: 72 samples with per-session wake counters")
           PYREPORT
+      - name: Same-input native proof delta A/B evidence
+        timeout-minutes: 4
+        env:
+          JWM_REMOTE_LATENCY_REPORT: ${{ runner.temp }}/remote-proof-delta-ab.json
+        run: |
+          set -o pipefail
+          export XDG_RUNTIME_DIR="$(mktemp -d)"
+          env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib remote::host::wayland_viewer_integration::host_control_integration::latency_benchmark::proof_delta_benchmark::controlled_proof_delta_abba_latency_and_bytes -- --ignored --exact --nocapture --test-threads=1 2>&1 | tail -c 1048576 | tee "${{ runner.temp }}/remote-proof-delta-ab.log"
+          python3 - <<'PYREPORT'
+          import json, os
+          from pathlib import Path
+          p = Path(os.environ["JWM_REMOTE_LATENCY_REPORT"])
+          assert p.is_file() and 0 < p.stat().st_size <= 1048576
+          r = json.loads(p.read_text())
+          assert r["schema_version"] == 1 and r["success"] is True
+          assert r["benchmark"] == "proof_delta_abba"
+          assert r["order"] == ["A_forced_keyframe", "B_delta", "B_delta", "A_forced_keyframe"]
+          assert len(r["sessions"]) == 4 and r["comparison"] is not None
+          for session in r["sessions"]:
+              assert session["success"] is True
+              samples = session["samples"]
+              assert len(samples) == 18 and all(s["status"] == "ok" for s in samples)
+              assert sum(s["phase"] == "warmup" for s in samples) == 2
+              assert sum(s["phase"] == "measured" for s in samples) == 16
+              assert len(session["checks"]) == 2 and all(c["status"] == "ok" for c in session["checks"])
+          for index in range(18):
+              assert len({s["samples"][index]["source_rgb_sha256"] for s in r["sessions"]}) == 1
+          print("Validated proof-delta A/B/B/A: 72 equal-input samples plus static/full-change controls")
+          PYREPORT
       - name: Preserve bounded controlled input response evidence
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
@@ -145,6 +174,8 @@ jobs:
             ${{ runner.temp }}/remote-input-response.log
             ${{ runner.temp }}/remote-input-wake-ab.json
             ${{ runner.temp }}/remote-input-wake-ab.log
+            ${{ runner.temp }}/remote-proof-delta-ab.json
+            ${{ runner.temp }}/remote-proof-delta-ab.log
           if-no-files-found: warn
           retention-days: 3
       - name: Actual owned X11 viewer presentation and scoped pointer interaction

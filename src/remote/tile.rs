@@ -96,6 +96,9 @@ pub(crate) enum TileEncodeRequest {
     /// Send a frame even with nothing dirty, to keep the session's video
     /// liveness timer fed. An empty tile frame is a few dozen bytes.
     Keepalive,
+    /// A new native input proof must get a fresh record even if identical.
+    /// Use exact raw damage, not ordinary video's small-change tolerance.
+    FreshProof,
     /// Send every tile: first frame, geometry change, or recovery.
     Keyframe,
 }
@@ -317,7 +320,11 @@ impl TileEncoder {
                 reference,
                 (grid_w, grid_h),
                 tile,
-                self.tolerance,
+                if request == TileEncodeRequest::FreshProof {
+                    0
+                } else {
+                    self.tolerance
+                },
                 &mut self.bitmap,
                 &mut self.dirty,
             );
@@ -447,7 +454,11 @@ impl TileEncoder {
         if dirty_tiles == total_tiles {
             scroll = None;
         }
-        let emit = dirty_tiles > 0 || request == TileEncodeRequest::Keepalive;
+        let emit = dirty_tiles > 0
+            || matches!(
+                request,
+                TileEncodeRequest::Keepalive | TileEncodeRequest::FreshProof
+            );
         if !emit {
             return Ok(TilePlan {
                 keyframe,

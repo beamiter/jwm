@@ -320,6 +320,7 @@ impl Harness {
             (false, false),
             7,
             Some((enabled, probe)),
+            None,
         )
     }
     fn new_with_scroll_permissions(
@@ -336,6 +337,23 @@ impl Harness {
             viewer_scroll,
             recipient_version,
             None,
+            None,
+        )
+    }
+    fn new_with_proof_keyframes(
+        gl: &mut HeadlessSmithayGles,
+        held_on_enter: bool,
+        legacy: bool,
+        probe: Arc<host::ProofDeltaProbe>,
+    ) -> Self {
+        Self::new_with_wake_config(
+            gl,
+            held_on_enter,
+            (false, false),
+            (false, false),
+            7,
+            None,
+            Some((legacy, probe)),
         )
     }
     fn new_with_wake_config(
@@ -345,6 +363,7 @@ impl Harness {
         viewer_scroll: (bool, bool),
         recipient_version: u32,
         wake_config: Option<(bool, Arc<host::InputWakeProbe>)>,
+        proof_config: Option<(bool, Arc<host::ProofDeltaProbe>)>,
     ) -> Self {
         let mut native = Server::new();
         let mut local = Server::new();
@@ -398,9 +417,13 @@ impl Harness {
                     &Mutex::new(Some(host::GrantedCapture::Wayland(Box::new(capture)))),
                 )
             };
-            let result = match wake_config {
+            let run_with_wake = || match wake_config {
                 Some((enabled, probe)) => host::with_input_wake(enabled, probe, run),
                 None => run(),
+            };
+            let result = match proof_config {
+                Some((legacy, probe)) => host::with_proof_delta(legacy, probe, run_with_wake),
+                None => run_with_wake(),
             }
             .map_err(|e| e.to_string());
             let _ = host_tx.send(result);
@@ -1456,6 +1479,90 @@ fn actual_wayland_control_horizontal_scroll_tcp_mixed_axis_revokes_without_input
         1,
         "duplicate or mixed Wayland wheel notch",
     );
+}
+
+#[test]
+fn actual_control_zero_dirty_proof_requires_new_exact_presentation() {
+    let Some(mut gl) = HeadlessSmithayGles::new() else {
+        return;
+    };
+    let probe = Arc::new(host::ProofDeltaProbe::default());
+    let mut h = Harness::new_with_proof_keyframes(&mut gl, false, false, probe.clone());
+    let first = h.activate(&mut gl);
+    h.click();
+    // Consume the old ticket without changing the application's red pixels.
+    // Keep the next real viewer commit's feedback pending.
+    h.wait(
+        &mut gl,
+        "new unchanged proof committed without presentation",
+        false,
+        |s| {
+            s.received.pointer_actions.len() == 3
+                && s.frames.lock().unwrap().0.is_some_and(|seq| {
+                    seq > first && probe.snapshot().iter().any(|frame| frame.sequence == seq)
+                })
+                && !s.feedback.is_empty()
+                && s.ready.lock().unwrap().is_none()
+        },
+    );
+    let next = h.frames.lock().unwrap().0.unwrap();
+    let sent = probe.snapshot();
+    let old = sent
+        .iter()
+        .find(|frame| frame.sequence == first)
+        .expect("first proof wire evidence");
+    let new = sent
+        .iter()
+        .find(|frame| frame.sequence == next)
+        .expect("unchanged proof wire evidence");
+    assert!(new.native_serial > old.native_serial);
+    assert_eq!(
+        (new.source_epoch, new.geometry_epoch),
+        (old.source_epoch, old.geometry_epoch)
+    );
+    assert!(!new.keyframe);
+    assert_eq!(
+        new.dirty_tiles, 0,
+        "test must exercise an actual zero-dirty record"
+    );
+    assert!(new.total_tiles > 0);
+    // The previous, legitimately acknowledged frame must not authorize this
+    // newer native proof. No replayed ACK is manufactured by the fixture.
+    let until = Instant::now() + Duration::from_millis(120);
+    while Instant::now() < until {
+        h.tick(&mut gl, false);
+        assert_eq!(h.frames.lock().unwrap().1, Some(first));
+        assert!(h.ready.lock().unwrap().is_none());
+        assert_eq!(h.received.pointer_actions.len(), 3);
+        assert!(h.received.keys.is_empty());
+        thread::sleep(Duration::from_millis(1));
+    }
+    h.wait(
+        &mut gl,
+        "unchanged pixels actually GL verified and exactly presented",
+        true,
+        |s| s.presented_sequence == Some(next),
+    );
+    h.wait(
+        &mut gl,
+        "new exact unchanged presentation earns a new ticket",
+        false,
+        |s| s.frames.lock().unwrap().1 == Some(next) && *s.ready.lock().unwrap() == Some(next),
+    );
+    assert!(!h.blue_presented);
+    h.click();
+    h.wait(
+        &mut gl,
+        "second authorized click after exact new feedback",
+        false,
+        |s| s.received.pointer_actions.len() == 6,
+    );
+    let before = h.received.pointer_actions.clone();
+    let surface = viewer_surface(&h.local);
+    h.pointer.as_ref().unwrap().leave(80, &surface);
+    h.pointer.as_ref().unwrap().frame();
+    h.local.roundtrip();
+    h.rejected(&mut gl, &[], &before, 1, "Wayland pointer left own surface");
 }
 
 #[path = "host_wayland_control_latency_benchmark.rs"]

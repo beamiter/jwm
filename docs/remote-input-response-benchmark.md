@@ -122,3 +122,38 @@ while the host is in that idle wait, not arbitrary capture/codec stalls.
 [Versioned input-wake observations](benchmarks/remote-input-wake-2026-11-10/README.md)
 include complete same-process ABBA data, its notification/drain overhead and
 limitations. They are not a comparison against a different CI run.
+
+## Fresh native proof records without forced full keyframes
+
+Every new native input proof still requires its own authenticated video record,
+new frame sequence and real viewer presentation acknowledgement. It need not
+discard an otherwise valid video reference. `FreshProof` forces a record even
+when no tiles changed, and uses exact RGB damage detection at the encoded
+resolution rather than ordinary video's tolerance of 4. A +1 channel change is
+therefore not silently treated as unchanged by this path. Scaling and JPEG remain
+lossy; this is not a promise of lossless source pixels or visible changes.
+
+Source, geometry and reference resets still require a keyframe. Changed tiles
+use the existing atlas format; a truly unchanged proof uses a zero-dirty record.
+The reference advances only after successful write and flush. Failed or expired
+proofs are discarded. Refinement cannot suppress a mandatory fresh record. No
+protocol version, input permission, FPS, lease or presentation gate changes.
+
+The opt-in test
+`latency_benchmark::proof_delta_benchmark::controlled_proof_delta_abba_latency_and_bytes`
+compares legacy forced-keyframe behavior against deltas in A/B/B/A order, with
+four independent sessions and 2 warmups plus 16 measured responses each. A shared
+run token and matched source RGB hashes make every same-index sample identical
+across arms. A small unique marker changes less than a quarter of the source;
+all other pixels remain stable. Raw frame evidence records native proof identity,
+wire frame sequence, dirty tiles, encoded payload bytes and JPEG-stage time.
+Payload bytes are not total TCP traffic.
+
+Additional static and full-change controls verify fresh proof presentation and
+full-canvas damage handling; reset keyframe requirements remain unchanged.
+The static control is not counted as causal
+input-response latency because its pixels do not identify a new application
+response. A separate fixture withholds new-frame presentation feedback and
+checks that the previously acknowledged frame cannot produce Ready; it does
+not claim to inject a malicious replayed network ACK. No runtime performance
+threshold hides negative results, and incomplete reports cannot pass CI.
