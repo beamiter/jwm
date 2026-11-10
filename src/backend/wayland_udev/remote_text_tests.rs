@@ -318,7 +318,20 @@ fn native_text_context_aba_half_ime_batch_preedit_owner_lock_unmap_fail_closed()
         let mut f = Fixture::new(&mut gl, true);
         match case {
             0 => f.context.aba(&mut f.server, &mut f.app),
-            1 => f.context.pending_ime_text(&mut f.server),
+            1 => {
+                f.context.pending_ime_text(&mut f.server);
+                // The normal IME forwards its commit_string immediately, but
+                // has deliberately not ended the batch. Establish this local
+                // prefix before testing that remote text cannot append to it
+                // or finish it with done.
+                let prefix: Vec<_> = events(&mut f.app.client)
+                    .into_iter()
+                    .filter(|e| e.sender == f.context.text)
+                    .collect();
+                assert_eq!(prefix.len(), 1, "only the known local IME prefix");
+                assert_eq!(prefix[0].opcode, 3);
+                assert_eq!(wire_string(&prefix[0].args), "pending IME");
+            }
             2 => {
                 f.context.preedit(&mut f.server);
                 let preedit = events(&mut f.app.client);
@@ -372,13 +385,23 @@ fn native_text_expired_lease_and_unrendered_frame_never_commit() {
     assert!(!reply.iter().any(|e| e.sender == f.lease && e.opcode == 1));
     f.assert_none();
     let mut f = Fixture::new(&mut gl, true);
+    // A session permits only one live frame, including completed frames.
+    // Destroy the old object before creating the legal, unsubmitted proof.
+    f.capture.client.request(f.frame, 0, &[]);
+    roundtrip(&mut f.server);
+    events(&mut f.capture.client);
     let unrendered = f.capture.client.new_id();
     f.capture
         .client
         .request(f.capture.session, 0, &[unrendered]);
     roundtrip(&mut f.server);
+    events(&mut f.capture.client); // creation itself must not be a protocol error
     let reply = f.commit(b"not-ready", false, unrendered);
     assert!(!reply.iter().any(|e| e.sender == f.lease && e.opcode == 1));
+    assert!(
+        reply.iter().any(|e| e.sender == f.lease && e.opcode == 2),
+        "legal unrendered frame must receive a lease rejection, not disconnect"
+    );
     f.assert_none();
 }
 

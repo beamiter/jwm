@@ -279,7 +279,9 @@ fn exercise(
             peer_label: "owned one-shot text".into(),
             key: crate::remote::key::KeySource::Bytes(KEY.to_vec()),
             display: None,
-            view_only: false,
+            // No text permission means an actual legal read-only session,
+            // not an invalid zero-mode client rejected before TCP connect.
+            view_only: !client_permission,
             grab_input: false,
             clipboard: false,
             clipboard_mode: Default::default(),
@@ -370,17 +372,34 @@ fn exercise(
         if !positive {
             if client_permission {
                 if host_result.is_some() && client_result.is_some() {
-                    assert!(
-                        host_result.as_ref().unwrap().is_err()
-                            || client_result.as_ref().unwrap().is_err()
+                    let error = client_result
+                        .as_ref()
+                        .unwrap()
+                        .as_ref()
+                        .expect_err("text refusal must reach the requesting client");
+                    let expected = if !host_permission {
+                        "one-shot text permission was not mutually negotiated exclusively"
+                    } else {
+                        "host closed the remote session: host cannot capture its display: native text context unavailable or refused"
+                    };
+                    assert_eq!(
+                        error, expected,
+                        "unrelated transport failure is not a permission refusal"
                     );
                     break;
                 }
-            } else if first_presented.is_some()
-                && Instant::now() > held_until + Duration::from_millis(150)
-            {
-                assert!(!remote_text::active(&native.state));
-                break;
+            } else {
+                assert!(
+                    host_result.is_none() && client_result.is_none(),
+                    "read-only negative control must remain connected"
+                );
+                if first_presented
+                    .is_some_and(|seq| frames.lock().unwrap().1.is_some_and(|seen| seen >= seq))
+                    && Instant::now() > held_until + Duration::from_millis(150)
+                {
+                    assert!(!remote_text::active(&native.state));
+                    break;
+                }
             }
         } else {
             assert!(
@@ -413,6 +432,19 @@ fn exercise(
     }
     host_thread.join().unwrap();
     client_thread.join().unwrap();
+    if !client_permission {
+        assert!(
+            host_result.as_ref().unwrap().is_ok(),
+            "read-only host must stop normally: {host_result:?}"
+        );
+        assert_eq!(
+            client_result.as_ref().unwrap().as_ref().unwrap_err(),
+            "host closed the remote session: the host stopped sharing its desktop",
+            "read-only completion must be the requested host stop, not an authorization error"
+        );
+        assert!(commits.is_empty());
+        assert!(!remote_text::active(&native.state));
+    }
 }
 #[test]
 fn actual_text_tcp_chinese_combining_emoji_commit_done_then_unique_gl_presented() {

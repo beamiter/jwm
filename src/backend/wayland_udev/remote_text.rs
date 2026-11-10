@@ -289,7 +289,7 @@ impl Dispatch<JwmRemoteTextLeaseV1, LeaseData> for JwmWaylandState {
         }
     }
 }
-#[cfg(test)]
+#[cfg(all(test, feature = "backend-wayland-udev"))]
 #[path = "remote_text_tests.rs"]
 pub(crate) mod tests;
 #[cfg(test)]
