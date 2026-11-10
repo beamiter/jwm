@@ -186,6 +186,10 @@ pub(crate) struct Capture {
 }
 impl Capture {
     pub(crate) fn new(server: &mut Server) -> Self {
+        Self::new_with_size(server, (W, H))
+    }
+
+    pub(crate) fn new_with_size(server: &mut Server, size: (u32, u32)) -> Self {
         let mut client = server.connect();
         let list = client.bind("ext_foreign_toplevel_list_v1", 1);
         let sources = client.bind("ext_foreign_toplevel_image_capture_source_manager_v1", 1);
@@ -205,7 +209,7 @@ impl Capture {
         assert!(
             events
                 .iter()
-                .any(|e| e.sender == session && e.opcode == 0 && e.args == [W, H]),
+                .any(|e| e.sender == session && e.opcode == 0 && e.args == [size.0, size.1]),
             "positive control: live source buffer size"
         );
         assert!(

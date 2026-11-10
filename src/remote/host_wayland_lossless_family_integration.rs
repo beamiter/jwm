@@ -135,7 +135,7 @@ fn wait_exact(
                 .unwrap();
                 if dimensions == size {
                     if reader.is_none() {
-                        reader = Some(Capture::new(&mut h.local));
+                        reader = Some(Capture::new_with_size(&mut h.local, size));
                     }
                     let bytes = actual_pixels(h, gl, reader.as_mut().unwrap(), size);
                     assert_eq!(h.frames.lock().unwrap().0, Some(seq));
@@ -477,7 +477,7 @@ fn actual_pending_png_resize_aba_discards_old_scope_before_write() {
                 .unwrap();
                 if dims == (320, 240) {
                     if reader.is_none() {
-                        reader = Some(Capture::new(&mut h.local));
+                        reader = Some(Capture::new_with_size(&mut h.local, (320, 240)));
                     }
                     let actual =
                         actual_pixels(&mut h, &mut gl, reader.as_mut().unwrap(), (320, 240));
