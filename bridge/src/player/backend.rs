@@ -116,6 +116,14 @@ fn enqueue_should_start(idle: bool, playlist_pos: i64) -> bool {
     idle && playlist_pos == -1
 }
 
+fn open_load_flag(enqueue: bool, start_enqueued: bool, index: usize) -> &'static str {
+    match (enqueue, start_enqueued, index) {
+        (false, _, 0) => "replace",
+        (true, true, 0) => "append-play",
+        _ => "append",
+    }
+}
+
 impl Worker {
     pub(super) fn spawn_inner(
         self,
@@ -496,7 +504,11 @@ impl Mpv {
             false
         };
         // Local normalization happens at every API boundary, not in a shell.
-        // loadfile with just replace/append works before and after mpv 0.38.
+        // These three-argument loadfile forms work before and after mpv 0.38.
+        // append-play selects and starts an unselected queue atomically. Do not
+        // append then set playlist-pos: startup prepare_playlist can select the
+        // same index between those commands, making the setter a no-op while
+        // mpv remains idle. append-play also preserves an already selected entry.
         for (index, file) in open.files.iter().enumerate() {
             if Instant::now() >= deadline {
                 return Err(
@@ -504,11 +516,7 @@ impl Mpv {
                         .into(),
                 );
             }
-            let flag = if !open.enqueue && index == 0 {
-                "replace"
-            } else {
-                "append"
-            };
+            let flag = open_load_flag(open.enqueue, start_enqueued, index);
             self.command(json!(["loadfile", file, flag]))?;
             self.last_open_command_id = Some(self.request_id);
         }
@@ -516,7 +524,6 @@ impl Mpv {
             self.resume_index = 0;
         }
         if start_enqueued {
-            self.command(json!(["set_property", "playlist-pos", count]))?;
             self.resume_index = count;
         }
         if !open.enqueue || start_enqueued {
@@ -845,6 +852,93 @@ mod tests {
         assert!(enqueue_should_start(true, -1));
         assert!(!enqueue_should_start(false, -1));
         assert!(!enqueue_should_start(true, -2));
+    }
+
+    #[test]
+    fn load_flags_start_only_the_first_unselected_enqueue_atomically() {
+        assert_eq!(open_load_flag(false, false, 0), "replace");
+        assert_eq!(open_load_flag(false, false, 1), "append");
+        assert_eq!(open_load_flag(true, true, 0), "append-play");
+        assert_eq!(open_load_flag(true, true, 1), "append");
+        assert_eq!(open_load_flag(true, false, 0), "append");
+        assert_eq!(open_load_flag(true, false, 1), "append");
+    }
+
+    #[test]
+    fn atomic_enqueue_has_no_append_select_startup_gap() {
+        // A model of mpv's documented command.c/loadfile.c transitions, not a
+        // substitute for the real concurrent-launch private-bus integration.
+        #[derive(Default)]
+        struct Queue {
+            count: usize,
+            current: Option<usize>,
+            started: bool,
+        }
+        impl Queue {
+            fn prepare(&mut self) {
+                if self.count > 0 {
+                    self.current = Some(0);
+                }
+            }
+            fn load(&mut self, flag: &str) {
+                let added = self.count;
+                self.count += 1;
+                if flag == "append-play" && self.current.is_none() {
+                    self.current = Some(added);
+                    self.started = true;
+                }
+            }
+            fn select(&mut self, index: usize) {
+                // mpv's playlist-pos setter returns immediately for same index.
+                if self.current != Some(index) {
+                    self.current = Some(index);
+                    self.started = true;
+                }
+            }
+        }
+        let mut old = Queue::default();
+        old.load("append");
+        old.prepare();
+        old.select(0);
+        assert!(!old.started, "old two-command startup can remain idle");
+        for prepare_before in [false, true] {
+            let mut queue = Queue::default();
+            if prepare_before {
+                queue.prepare();
+            }
+            queue.load(open_load_flag(true, enqueue_should_start(true, -1), 0));
+            if !prepare_before {
+                queue.prepare();
+            }
+            assert!(queue.started);
+            assert_eq!(queue.current, Some(0));
+            // A stale unselected observation must still not replace a current
+            // entry when the atomic command executes.
+            queue.load(open_load_flag(true, true, 0));
+            assert_eq!(queue.current, Some(0));
+            assert_eq!(queue.count, 2);
+        }
+        let mut unselected = Queue {
+            count: 3,
+            ..Queue::default()
+        };
+        unselected.load(open_load_flag(true, enqueue_should_start(true, -1), 0));
+        assert_eq!(unselected.current, Some(3));
+        assert_eq!(unselected.count, 4);
+        assert!(unselected.started);
+        for already_started in [false, true] {
+            let mut selected = Queue {
+                count: 5,
+                current: Some(2),
+                started: already_started,
+            };
+            // Even a stale observation that requested append-play cannot
+            // restart or replace a nonzero current selection.
+            selected.load(open_load_flag(true, true, 0));
+            assert_eq!(selected.current, Some(2));
+            assert_eq!(selected.count, 6);
+            assert_eq!(selected.started, already_started);
+        }
     }
 
     #[test]
