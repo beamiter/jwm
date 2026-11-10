@@ -68,6 +68,57 @@ fn decode_small(bytes: &[u8], blue: bool) -> Option<u32> {
 fn evidence_value(frame: &host::ProofFrameEvidence) -> Value {
     json!({"native_serial":frame.native_serial,"source_epoch":frame.source_epoch,"geometry_epoch":frame.geometry_epoch,"sequence":frame.sequence,"keyframe":frame.keyframe,"dirty_tiles":frame.dirty_tiles,"total_tiles":frame.total_tiles,"encoded_bytes":frame.encoded_bytes,"jpeg_ns":frame.jpeg_ns})
 }
+fn signed_ms(later: Instant, earlier: Instant) -> f64 {
+    if let Some(elapsed) = later.checked_duration_since(earlier) {
+        elapsed.as_secs_f64() * 1000.0
+    } else {
+        -earlier.duration_since(later).as_secs_f64() * 1000.0
+    }
+}
+fn matches_event(event: &host::ProofStageEvent, frame: &host::ProofFrameEvidence) -> bool {
+    event.native_serial == frame.native_serial
+        && event.source_epoch == frame.source_epoch
+        && event.geometry_epoch == frame.geometry_epoch
+        && event.sequence == frame.sequence
+}
+fn frame_timing(frame: &host::ProofFrameEvidence, origin: Instant) -> Value {
+    json!({"capture_started_ms":signed_ms(frame.captured_at,origin),
+        "capture_completed_ms":signed_ms(frame.capture_completed_at,origin),
+        "plan_started_ms":signed_ms(frame.planned_at,origin),"flush_completed_ms":signed_ms(frame.flushed_at,origin)})
+}
+fn sample_timing(
+    t: &SampleTimeline,
+    frame: &host::ProofFrameEvidence,
+    events: &[host::ProofStageEvent],
+    previous: Option<&host::ProofFrameEvidence>,
+    origin: Instant,
+) -> Value {
+    let ack = events
+        .iter()
+        .find(|e| matches_event(e, frame) && e.kind == host::ProofStageKind::AckReceived)
+        .map(|e| e.at);
+    let ready = events
+        .iter()
+        .find(|e| matches_event(e, frame) && e.kind == host::ProofStageKind::ReadyPublished)
+        .map(|e| e.at);
+    let previous_ready = previous
+        .and_then(|f| {
+            events
+                .iter()
+                .find(|e| matches_event(e, f) && e.kind == host::ProofStageKind::ReadyPublished)
+        })
+        .map(|e| e.at);
+    json!({"raw_offsets_ms":{"injected":signed_ms(t.injected,origin),"recipient_observed":signed_ms(t.recipient_observed,origin),"app_commit_submitted":signed_ms(t.app_committed,origin),"gl_verified":signed_ms(t.gl_verified,origin),"client_presented_observed":signed_ms(t.presented_observed,origin),"client_ready_observed":t.ready_observed.map(|at|signed_ms(at,origin)),"previous_client_ready_observed":signed_ms(t.previous_ready_observed,origin),"host_ack_received":ack.map(|at|signed_ms(at,origin)),"host_ready_published":ready.map(|at|signed_ms(at,origin)),"previous_host_ready_published":previous_ready.map(|at|signed_ms(at,origin))},
+        "app_commit_to_capture_start_ms":signed_ms(frame.captured_at,t.app_committed),
+        "capture_elapsed_ms":signed_ms(frame.capture_completed_at,frame.captured_at),
+        "capture_end_to_plan_start_ms":signed_ms(frame.planned_at,frame.capture_completed_at),
+        "plan_start_to_flush_end_ms":signed_ms(frame.flushed_at,frame.planned_at),
+        "flush_end_to_gl_verified_ms":signed_ms(t.gl_verified,frame.flushed_at),
+        "flush_end_to_host_ack_ms":ack.map(|at|signed_ms(at,frame.flushed_at)),
+        "host_ack_to_ready_published_ms":ack.zip(ready).map(|(a,r)|signed_ms(r,a)),
+        "previous_host_ready_to_inject_ms":previous_ready.map(|at|signed_ms(t.injected,at)),
+        "previous_client_ready_to_inject_ms":signed_ms(t.injected,t.previous_ready_observed)})
+}
 fn checkpoints(
     h: &mut Harness,
     gl: &mut HeadlessSmithayGles,
@@ -265,6 +316,8 @@ impl Drop for ProofReport {
             .map(|(index, s)| {
                 let mut value = s.report.value();
                 let frames = s.probe.snapshot();
+                let events = s.probe.events_snapshot();
+                let origin = frames.first().map(|f|f.captured_at).or_else(||s.report.timelines.first().map(|t|t.injected));
                 for sample in value["samples"].as_array_mut().unwrap() {
                     let id = sample["sample"].as_u64().unwrap() as u8 + 1;
                     let word = marker_word(self.run, id);
@@ -282,6 +335,9 @@ impl Drop for ProofReport {
                             interval.iter().map(|f| f.jpeg_ns).sum::<u64>() as f64 / 1_000_000.0
                         );
                         sample["encoded_frame_count"] = json!(interval.len());
+                        if let (Some(timeline), Some(frame), Some(origin)) = (s.report.timelines.get(id as usize - 1), frames.iter().find(|f|f.sequence==presented), origin) {
+                            sample["timing"] = sample_timing(timeline, frame, &events, frames.iter().find(|f|f.sequence==previous), origin);
+                        }
                     }
                 }
                 for check in &mut s.checks {
@@ -292,7 +348,13 @@ impl Drop for ProofReport {
                 value["session_order"] = json!(index);
                 value["legacy_forced_keyframe"] = json!(s.legacy);
                 value["checks"] = json!(s.checks);
-                value["frames"] = json!(frames.iter().map(evidence_value).collect::<Vec<_>>());
+                value["frames"] = json!(frames.iter().map(|f| {
+                    let mut value = evidence_value(f);
+                    if let Some(origin) = origin { value["timing_offsets_ms"] = frame_timing(f,origin); }
+                    value
+                }).collect::<Vec<_>>());
+                value["stage_events"] = json!(events.iter().map(|event|json!({"native_serial":event.native_serial,"source_epoch":event.source_epoch,"geometry_epoch":event.geometry_epoch,"sequence":event.sequence,"kind":format!("{:?}",event.kind),"offset_ms":origin.map(|origin|signed_ms(event.at,origin))})).collect::<Vec<_>>());
+                value["timeline_clock"] = json!("single-process Instant offsets from this session's first captured proof; negative app_commit_to_capture_start means overlapping outstanding capture, not clamped. plan-to-flush includes scan/encoding/writer work; flush-to-GL includes receive/decode/viewer scheduling/GL readback, not physical presentation.");
                 value
             })
             .collect();
@@ -362,6 +424,8 @@ fn controlled_proof_delta_abba_latency_and_bytes() {
         session.report.success = false;
         session.report.failure = "missing published proof or partial-delta coverage".into();
         let frames = probe.snapshot();
+        let events = probe.events_snapshot();
+        assert_eq!(session.report.timelines.len(), WARMUP + MEASURED);
         let first_proof = frames
             .first()
             .expect("session must publish native proof evidence");
@@ -384,6 +448,22 @@ fn controlled_proof_delta_abba_latency_and_bytes() {
                 prior_sample_serial.is_none_or(|prior| proof.native_serial > prior),
                 "each input response must carry a strictly newer native proof"
             );
+            assert!(
+                proof.captured_at <= proof.capture_completed_at
+                    && proof.capture_completed_at <= proof.planned_at
+                    && proof.planned_at <= proof.flushed_at
+            );
+            for kind in [
+                host::ProofStageKind::AckReceived,
+                host::ProofStageKind::ReadyPublished,
+            ] {
+                assert!(
+                    events
+                        .iter()
+                        .any(|event| matches_event(event, proof) && event.kind == kind),
+                    "successful sample requires scoped ACK/Ready timeline evidence"
+                );
+            }
             prior_sample_serial = Some(proof.native_serial);
         }
         if legacy {
@@ -460,4 +540,22 @@ fn proof_delta_comparison_rejects_different_rgb_failed_and_incomplete_sessions()
     sessions[1]["success"] = json!(true);
     sessions[1]["samples"].as_array_mut().unwrap().pop();
     assert_eq!(compare(&sessions), Value::Null);
+}
+
+#[test]
+fn proof_delta_signed_timing_keeps_capture_overlap_and_telescopes() {
+    let base = Instant::now();
+    let capture = base + Duration::from_millis(2);
+    let commit = base + Duration::from_millis(5);
+    let end = base + Duration::from_millis(8);
+    let plan = base + Duration::from_millis(10);
+    let flush = base + Duration::from_millis(12);
+    let gl = base + Duration::from_millis(16);
+    assert_eq!(signed_ms(capture, commit), -3.0);
+    let sum = signed_ms(capture, commit)
+        + signed_ms(end, capture)
+        + signed_ms(plan, end)
+        + signed_ms(flush, plan)
+        + signed_ms(gl, flush);
+    assert_eq!(sum, signed_ms(gl, commit));
 }

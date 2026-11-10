@@ -251,6 +251,15 @@ pub(super) fn process(
                 state.epoch.unwrap(),
                 ControlStatusKind::PointerReady,
             )?;
+            #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+            if let Some((_, probe)) = &sources.proof_delta {
+                probe.record_stage(
+                    frame.serial,
+                    frame.scope.unwrap(),
+                    Instant::now(),
+                    ProofStageKind::ReadyPublished,
+                );
+            }
         }
     }
     Ok(())

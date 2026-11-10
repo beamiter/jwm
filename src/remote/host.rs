@@ -430,14 +430,56 @@ pub(super) struct ProofFrameEvidence {
     pub total_tiles: u32,
     pub encoded_bytes: usize,
     pub jpeg_ns: u64,
+    pub captured_at: Instant,
+    pub capture_completed_at: Instant,
+    pub planned_at: Instant,
+    pub flushed_at: Instant,
+}
+#[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ProofStageKind {
+    AckReceived,
+    ReadyPublished,
+}
+#[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+#[derive(Clone)]
+pub(super) struct ProofStageEvent {
+    pub native_serial: u64,
+    pub source_epoch: u64,
+    pub geometry_epoch: u64,
+    pub sequence: u64,
+    pub at: Instant,
+    pub kind: ProofStageKind,
 }
 #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
 #[derive(Default)]
 pub(super) struct ProofDeltaProbe {
     frames: Mutex<Vec<ProofFrameEvidence>>,
+    events: Mutex<Vec<ProofStageEvent>>,
 }
 #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
 impl ProofDeltaProbe {
+    pub(super) fn events_snapshot(&self) -> Vec<ProofStageEvent> {
+        self.events.lock().unwrap().clone()
+    }
+    fn record_stage(
+        &self,
+        native_serial: u64,
+        scope: DrawnScope,
+        at: Instant,
+        kind: ProofStageKind,
+    ) {
+        let mut events = self.events.lock().unwrap();
+        assert!(events.len() < 512, "proof stage evidence test bound");
+        events.push(ProofStageEvent {
+            native_serial,
+            source_epoch: scope.source_epoch,
+            geometry_epoch: scope.geometry_epoch,
+            sequence: scope.frame_sequence,
+            at,
+            kind,
+        });
+    }
     pub(super) fn snapshot(&self) -> Vec<ProofFrameEvidence> {
         self.frames.lock().unwrap().clone()
     }
@@ -4200,6 +4242,8 @@ fn send_frames_with_encoder_scoped<W: std::io::Write + SetWriteTimeout>(
             sender.discard();
             return Err(error.into());
         }
+        #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+        let flushed_at = Instant::now();
         if unchanged_keepalive {
             telemetry.record_unchanged_keepalive();
         }
@@ -4215,6 +4259,10 @@ fn send_frames_with_encoder_scoped<W: std::io::Write + SetWriteTimeout>(
             let mut frames = probe.frames.lock().unwrap();
             assert!(frames.len() < 512, "proof evidence test bound");
             frames.push(ProofFrameEvidence {
+                captured_at: pending.captured_at,
+                capture_completed_at: pending.capture_completed_at,
+                planned_at,
+                flushed_at,
                 native_serial: serial,
                 source_epoch: pending.source_version.epoch,
                 geometry_epoch: pending.frame.geometry_epoch,
@@ -4987,6 +5035,34 @@ fn receive_input_scoped(
                                 frame_sequence: sequence,
                             });
                             sources.changed.notify_all();
+                            #[cfg(all(
+                                test,
+                                feature = "remote-wayland",
+                                feature = "backend-wayland-udev"
+                            ))]
+                            {
+                                let scope = state.presented_frame.unwrap();
+                                drop(state);
+                                if let Some((_, probe)) = &sources.proof_delta {
+                                    // Copy under the proof lock, then release it before
+                                    // recording: observation must add no nested lock edges.
+                                    let serial = sources
+                                        .pointer_frame
+                                        .lock()
+                                        .unwrap()
+                                        .as_ref()
+                                        .filter(|frame| frame.scope == Some(scope))
+                                        .map(|frame| frame.serial);
+                                    if let Some(serial) = serial {
+                                        probe.record_stage(
+                                            serial,
+                                            scope,
+                                            acknowledged_at,
+                                            ProofStageKind::AckReceived,
+                                        );
+                                    }
+                                }
+                            }
                         }
                         telemetry.record_ack(ack);
                     }

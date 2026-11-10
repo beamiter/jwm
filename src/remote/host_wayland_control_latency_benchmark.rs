@@ -106,16 +106,27 @@ fn quantiles(values: &[f64]) -> Value {
     let nearest = |percent: usize| sorted[(sorted.len() * percent).div_ceil(100).saturating_sub(1)];
     json!({"n": sorted.len(), "min_ms": sorted[0], "p50_ms": nearest(50), "p95_ms": nearest(95), "max_ms": sorted[sorted.len()-1], "method":"nearest-rank; small sample counts do not provide a stable tail estimate"})
 }
+struct SampleTimeline {
+    injected: Instant,
+    recipient_observed: Instant,
+    app_committed: Instant,
+    gl_verified: Instant,
+    presented_observed: Instant,
+    ready_observed: Option<Instant>,
+    previous_ready_observed: Instant,
+}
 struct Report {
     samples: Vec<Value>,
     success: bool,
     failure: String,
     emit: bool,
+    timelines: Vec<SampleTimeline>,
 }
 impl Report {
     fn new() -> Self {
         Self {
             emit: true,
+            timelines: Vec::new(),
             samples: Vec::new(),
             success: false,
             failure: "setup did not complete".into(),
@@ -203,6 +214,7 @@ fn run_session_workload(
         .expect("explicit latency benchmark requires real headless GL, never skip");
     let mut h = make_harness(&mut gl);
     let mut previous = h.activate(&mut gl);
+    let mut previous_ready_observed = Instant::now();
     assert!(
         started.elapsed() < BUDGET,
         "setup exceeded measurement budget"
@@ -313,6 +325,15 @@ fn run_session_workload(
         );
         report.samples[index] = json!({"sample":index,"phase":if index < WARMUP {"warmup"} else {"measured"},"status":"ok","run_token":run,"marker":word,"previous_sequence":previous,"presented_sequence":sequence,
             "inject_to_recipient_observed_ms":ms(recipient-injected),"recipient_observed_to_app_commit_ms":ms(commit-recipient),"app_commit_to_gl_verified_ms":ms(gl_verified-commit),"gl_verified_to_present_observed_ms":ms(presented-gl_verified),"inject_to_present_observed_ms":ms(presented-injected)});
+        report.timelines.push(SampleTimeline {
+            injected,
+            recipient_observed: recipient,
+            app_committed: commit,
+            gl_verified,
+            presented_observed: presented,
+            ready_observed: None,
+            previous_ready_observed,
+        });
         // No next sample until this exact new frame has restored control Ready.
         // Withhold further feedback so a later unrelated frame cannot replace it.
         while *h.ready.lock().unwrap() != Some(sequence) {
@@ -320,6 +341,8 @@ fn run_session_workload(
             h.tick_with_inspector(&mut gl, false, |_, _| false);
             thread::sleep(Duration::from_millis(1));
         }
+        previous_ready_observed = Instant::now();
+        report.timelines.last_mut().unwrap().ready_observed = Some(previous_ready_observed);
         previous = sequence;
     }
     report.failure = "post-measurement workload validation or cleanup failed".into();
