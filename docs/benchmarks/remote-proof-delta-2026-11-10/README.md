@@ -86,3 +86,41 @@ against the original configuration. No default promotion was justified by this
 result. The next experiment isolates the explicit retained-proof no-readback
 outcome from real capture attempts while keeping the true capture FPS limit;
 it is not the earlier blanket `NoChange` accounting experiment.
+
+## Explicit retained-proof scheduling candidate
+
+Candidate `aed00a7ba0ac427efdfceb9cd6f18ebb524d956f`,
+[Wayland run](https://github.com/beamiter/jwm/actions/runs/42837135493),
+job `129902237921`. [Complete report](final-candidate.json).
+Order is Alegacy/Blegacy/Anew/Bnew/Bnew/Anew/Blegacy/Alegacy; A is forced
+keyframe and B is exact-damage proof delta. Legacy disables ACK hints and
+charges retained-proof polls as capture attempts. New enables ACK hints and
+preserves the existing deadline only for explicit `RetainedProofBlocked`.
+Both retain input eventfd wake, FPS limits, authorization and exact presentation
+gates. This tests the combined pipeline, not each component in isolation.
+
+All 144 samples and 16 static/full-change controls succeeded with identical
+same-index source RGB hashes across all eight sessions. Comparing the original
+configuration (legacy + keyframe) to the new default (new + delta), 32 measured
+responses each:
+
+| Endpoint | Original p50 | New p50 | Original p95 | New p95 |
+| --- | ---: | ---: | ---: | ---: |
+| Input to verified presentation ms | 56.900361 | 38.634912 | 59.054010 | 40.459254 |
+| Input to actual client Ready ms | 67.743321 | 41.952107 | 69.471702 | 44.823911 |
+| Encoded payload bytes | 3142 | 1087 | 3336 | 1739 |
+| JPEG stage ms | 8.046269 | 0.343933 | 8.291493 | 1.104687 |
+
+The new pipeline with forced keyframes also improved Ready p50 to 58.844111 ms;
+its visible p50 was 55.568835 ms. Thus the result is not justified only by JPEG
+savings or by moving Ready wait outside the measured cycle. Prior negative
+experiments above remain available. The sample count, fixed symmetric order,
+small 200x150 workload and software renderer still limit generalization.
+
+Candidate gates: X11 run `42837135504` passed; Wayland run `42837135493`
+passed with 901 remote tests plus 47 CLI tests, including the actual 250 ms
+retained-proof hold/presentation regression and native ACK eventfd checks.
+General CI run `42837135662` passed on attempt 2 after retrying only an unrelated
+BlueZ confirmation-window fixture failure. No runtime authentication or safety
+assertions were relaxed. Physical GPU/DRM and real two-machine acceptance remain
+unverified. Mainline verification is recorded separately after promotion.
