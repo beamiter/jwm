@@ -307,12 +307,44 @@ impl Harness {
             recipient_version,
         )
     }
+    fn new_with_input_wake(
+        gl: &mut HeadlessSmithayGles,
+        held_on_enter: bool,
+        enabled: bool,
+        probe: Arc<host::InputWakeProbe>,
+    ) -> Self {
+        Self::new_with_wake_config(
+            gl,
+            held_on_enter,
+            (false, false),
+            (false, false),
+            7,
+            Some((enabled, probe)),
+        )
+    }
     fn new_with_scroll_permissions(
         gl: &mut HeadlessSmithayGles,
         held_on_enter: bool,
         host_scroll: (bool, bool),
         viewer_scroll: (bool, bool),
         recipient_version: u32,
+    ) -> Self {
+        Self::new_with_wake_config(
+            gl,
+            held_on_enter,
+            host_scroll,
+            viewer_scroll,
+            recipient_version,
+            None,
+        )
+    }
+    fn new_with_wake_config(
+        gl: &mut HeadlessSmithayGles,
+        held_on_enter: bool,
+        host_scroll: (bool, bool),
+        viewer_scroll: (bool, bool),
+        recipient_version: u32,
+        wake_config: Option<(bool, Arc<host::InputWakeProbe>)>,
     ) -> Self {
         let mut native = Server::new();
         let mut local = Server::new();
@@ -341,7 +373,7 @@ impl Harness {
         let (selected_tx, selected) = mpsc::channel();
         let (host_tx, host_done) = mpsc::channel();
         let host = thread::spawn(move || {
-            let result = (|| -> crate::remote::RemoteResult<()> {
+            let run = || -> crate::remote::RemoteResult<()> {
                 let capture = WaylandCapture::connect_test_stream(capture_stream, 1, 0)?;
                 selected_tx.send(())?;
                 let deadline = Instant::now() + Duration::from_secs(10);
@@ -365,7 +397,11 @@ impl Harness {
                     &stopping,
                     &Mutex::new(Some(host::GrantedCapture::Wayland(Box::new(capture)))),
                 )
-            })()
+            };
+            let result = match wake_config {
+                Some((enabled, probe)) => host::with_input_wake(enabled, probe, run),
+                None => run(),
+            }
             .map_err(|e| e.to_string());
             let _ = host_tx.send(result);
         });

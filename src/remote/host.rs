@@ -2,7 +2,11 @@
 
 #[path = "host_control.rs"]
 mod control;
+#[path = "host_input_wake.rs"]
+mod input_wake;
 use control::{ControlCommand, HostControl};
+#[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+pub(super) use input_wake::{InputWakeProbe, with_input_wake};
 
 use super::RemoteResult;
 use super::clipboard_policy::{self, ClipboardDirection, ClipboardMode};
@@ -1760,6 +1764,9 @@ struct PointerFrame {
     announced: bool,
 }
 struct SourceControl {
+    input_wake: std::sync::OnceLock<input_wake::InputWake>,
+    #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+    input_wake_probe: Option<Arc<InputWakeProbe>>,
     follow_geometry: AtomicBool,
     control_enabled: AtomicBool,
     control_revoke: AtomicBool,
@@ -1781,12 +1788,34 @@ struct SourceControl {
 }
 
 impl SourceControl {
+    fn notify_input(&self) -> io::Result<()> {
+        self.input_wake
+            .get()
+            .map_or(Ok(()), input_wake::InputWake::notify)
+    }
+    fn input_backlog(&self) -> bool {
+        // Only actionable queue entries, never held keys or waiting-for-Ready
+        // state. Disabled modes are terminal and their stale flags cannot spin.
+        (self.control_enabled.load(Ordering::Acquire)
+            && (self.control_revoke.load(Ordering::Acquire)
+                || !self.control_queue.lock().unwrap().is_empty()))
+            || (self.pointer_enabled.load(Ordering::Acquire)
+                && (self.pointer_revoke.load(Ordering::Acquire)
+                    || !self.pointer_queue.lock().unwrap().is_empty()))
+            || (self.keyboard_enabled.load(Ordering::Acquire)
+                && (self.keyboard_revoke.load(Ordering::Acquire)
+                    || !self.keyboard_queue.lock().unwrap().is_empty()))
+    }
+
     fn new(
         grants: Vec<(SourceId, CaptureArea)>,
         area: InputArea,
         geometry_epoch: u64,
     ) -> RemoteResult<Self> {
         Ok(Self {
+            input_wake: std::sync::OnceLock::new(),
+            #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+            input_wake_probe: input_wake::test_probe(),
             follow_geometry: AtomicBool::new(false),
             control_enabled: AtomicBool::new(false),
             control_revoke: AtomicBool::new(false),
@@ -2629,6 +2658,16 @@ fn serve_authenticated(
             input_area,
             capture.geometry_epoch(),
         )?);
+        if input_wake::enabled()
+            && (negotiated_stream.wayland_control
+                || negotiated_stream.wayland_keyboard
+                || negotiated_stream.wayland_pointer)
+        {
+            sources
+                .input_wake
+                .set(input_wake::InputWake::new()?)
+                .map_err(|_| io::Error::other("native input wake initialized twice"))?;
+        }
         sources
             .follow_geometry
             .store(options.wayland_resize_follow, Ordering::Release);
@@ -3538,6 +3577,9 @@ fn stream_frames(
     let mut source_size = (0u16, 0u16);
     let capture_result = (|| -> RemoteResult<()> {
         while running.load(Ordering::Acquire) && !shutdown.load(Ordering::Acquire) {
+            if let Some(wake) = sources.input_wake.get() {
+                wake.drain()?;
+            }
             let now = Instant::now();
             if let Some(result) = resize.expire(now) {
                 capture.disable_native_resize();
@@ -3654,6 +3696,12 @@ fn stream_frames(
                 next_capture_allowed,
                 CAPTURE_RATE_LIMIT_SLICE,
             ) {
+                // Drain coalesced work without sleeping, but only while a
+                // capture is rate-limited. Once due, capture retains its turn
+                // even under a continuous legal keyboard stream.
+                if sources.input_wake.get().is_some() && sources.input_backlog() {
+                    continue;
+                }
                 // X11 events may wake early, but cannot bypass the rate limit.
                 // Recheck the absolute deadline rather than adding another
                 // full wait after it. Cursor motion need not signal XDamage.
@@ -3662,8 +3710,15 @@ fn stream_frames(
                 } else {
                     wait
                 };
+                #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+                if let Some(probe) = &sources.input_wake_probe {
+                    probe.record_wait();
+                }
                 capture
-                    .wait_for_activity(wait)
+                    .wait_for_activity_with_wake(
+                        wait,
+                        sources.input_wake.get().map(input_wake::InputWake::as_fd),
+                    )
                     .map_err(LocalRuntimeFailure::capture)?;
                 continue;
             }
@@ -4663,12 +4718,15 @@ fn receive_input_scoped(
                         return Err(invalid_data("control queue exceeded").into());
                     }
                     queue.push_back(command);
+                    drop(queue);
+                    sources.notify_input()?;
                 }
                 MessageKind::WaylandControlRevoke => {
                     let _ = super::wayland_control_wire::ControlRevoke::decode(&payload)?;
                     let sources = sources.ok_or_else(|| invalid_data("control unavailable"))?;
                     sources.control_revoke.store(true, Ordering::Release);
                     sources.control_queue.lock().unwrap().clear();
+                    sources.notify_input()?;
                 }
                 MessageKind::WaylandPointerRequest | MessageKind::WaylandPointerAction => {
                     let sources =
@@ -4703,6 +4761,8 @@ fn receive_input_scoped(
                         return Err(invalid_data("pointer inflight budget exceeded").into());
                     }
                     queue.push_back(command);
+                    drop(queue);
+                    sources.notify_input()?;
                 }
                 MessageKind::WaylandPointerRevoke => {
                     let _ = PointerRevoke::decode(&payload)?;
@@ -4710,6 +4770,7 @@ fn receive_input_scoped(
                         sources.ok_or_else(|| invalid_data("native pointer unavailable"))?;
                     sources.pointer_revoke.store(true, Ordering::Release);
                     sources.pointer_queue.lock().unwrap().clear();
+                    sources.notify_input()?;
                 }
                 MessageKind::WaylandKeyboardRequest | MessageKind::WaylandKeyboardKey => {
                     let sources =
@@ -4734,6 +4795,8 @@ fn receive_input_scoped(
                         return Err(invalid_data("Wayland keyboard command budget exceeded").into());
                     }
                     queue.push_back(command);
+                    drop(queue);
+                    sources.notify_input()?;
                 }
                 MessageKind::WaylandKeyboardRevoke => {
                     let _ = KeyboardRevoke::decode(&payload)?;
@@ -4741,6 +4804,7 @@ fn receive_input_scoped(
                         sources.ok_or_else(|| invalid_data("Wayland keyboard unavailable"))?;
                     sources.keyboard_revoke.store(true, Ordering::Release);
                     sources.keyboard_queue.lock().unwrap().clear();
+                    sources.notify_input()?;
                 }
                 MessageKind::WindowResizeRequest => {
                     let sources =
@@ -4854,7 +4918,7 @@ fn receive_input_scoped(
         Ok(())
     })();
 
-    finalize_input(
+    let exit = finalize_input(
         session_result,
         injector,
         running,
@@ -4866,7 +4930,14 @@ fn receive_input_scoped(
                 .map_or(Ok(()), InputInjector::release_all)
                 .map_err(Into::into)
         },
-    )
+    );
+    // Finalize publishes stopped state and releases input before the wake.
+    // Errors/overflow use this same path. A notification failure must never
+    // skip cleanup; its health latch is checked by the bounded capture loop.
+    if let Some(sources) = sources {
+        let _ = sources.notify_input();
+    }
+    exit
 }
 
 /// This value can leave the input receiver only after its injector is gone.
@@ -5013,6 +5084,33 @@ fn permission_denied(message: impl Into<String>) -> io::Error {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn input_wake_model_backlog_excludes_disabled_and_waiting_modes() {
+        let sources = test_source_control();
+        // No descriptor is created by SourceControl::new.
+        assert!(sources.input_wake.get().is_none());
+        assert!(!sources.input_backlog());
+        sources.control_revoke.store(true, Ordering::Release);
+        assert!(
+            !sources.input_backlog(),
+            "terminal disabled mode must not spin"
+        );
+        sources.control_enabled.store(true, Ordering::Release);
+        assert!(
+            sources.input_backlog(),
+            "live revoke must be handled before waiting"
+        );
+        sources.control_revoke.store(false, Ordering::Release);
+        assert!(
+            !sources.input_backlog(),
+            "enabled but awaiting fresh frame is not queued work"
+        );
+        sources.pointer_enabled.store(true, Ordering::Release);
+        sources.pointer_revoke.store(true, Ordering::Release);
+        assert!(sources.input_backlog());
+        sources.pointer_enabled.store(false, Ordering::Release);
+        assert!(!sources.input_backlog());
+    }
     #[test]
     fn host_cleanup_clipboard_startup_failure_preserves_error_and_disables_admission() {
         let admission = Arc::new(AtomicU8::new(VIEWER_IDLE));

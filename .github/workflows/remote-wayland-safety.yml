@@ -107,6 +107,34 @@ jobs:
           assert sum(s["phase"] == "measured" for s in samples) == 16
           print("Validated complete 2-warmup / 16-measured response benchmark report")
           PYREPORT
+      - name: Same-process native input wake A/B evidence
+        timeout-minutes: 4
+        env:
+          JWM_REMOTE_LATENCY_REPORT: ${{ runner.temp }}/remote-input-wake-ab.json
+        run: |
+          set -o pipefail
+          export XDG_RUNTIME_DIR="$(mktemp -d)"
+          env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib remote::host::wayland_viewer_integration::host_control_integration::latency_benchmark::input_wake_benchmark::controlled_input_wake_abba_latency -- --ignored --exact --nocapture --test-threads=1 2>&1 | tail -c 1048576 | tee "${{ runner.temp }}/remote-input-wake-ab.log"
+          python3 - <<'PYREPORT'
+          import json, os
+          from pathlib import Path
+          p = Path(os.environ["JWM_REMOTE_LATENCY_REPORT"])
+          assert p.is_file() and 0 < p.stat().st_size <= 1048576
+          r = json.loads(p.read_text())
+          assert r["schema_version"] == 1 and r["success"] is True
+          assert r["benchmark"] == "input_wake_abba"
+          assert r["order"] == ["A_no_wake", "B_input_wake", "B_input_wake", "A_no_wake"]
+          assert len(r["sessions"]) == 4 and r["comparison"] is not None
+          for index, session in enumerate(r["sessions"]):
+              assert session["success"] is True
+              assert session["input_wake_enabled"] is (index in (1, 2))
+              samples = session["samples"]
+              assert len(samples) == 18 and all(s["status"] == "ok" for s in samples)
+              assert sum(s["phase"] == "warmup" for s in samples) == 2
+              assert sum(s["phase"] == "measured" for s in samples) == 16
+              assert session["wake_counters"]["activity_waits"] <= 100000
+          print("Validated input-wake A/B/B/A: 72 samples with per-session wake counters")
+          PYREPORT
       - name: Preserve bounded controlled input response evidence
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
@@ -115,6 +143,8 @@ jobs:
           path: |
             ${{ runner.temp }}/remote-input-response.json
             ${{ runner.temp }}/remote-input-response.log
+            ${{ runner.temp }}/remote-input-wake-ab.json
+            ${{ runner.temp }}/remote-input-wake-ab.log
           if-no-files-found: warn
           retention-days: 3
       - name: Actual owned X11 viewer presentation and scoped pointer interaction

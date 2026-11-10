@@ -29,7 +29,7 @@ use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 use nix::sys::memfd::{MFdFlags, memfd_create};
 use std::fs::File;
 use std::io::{self, Write};
-use std::os::fd::AsFd;
+use std::os::fd::{AsFd, BorrowedFd};
 use std::os::unix::fs::FileExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -934,6 +934,17 @@ impl WaylandCapture {
 
     /// Never use blocking_dispatch or roundtrip: both allow an unbounded wait.
     fn pump(&mut self, deadline: Instant) -> RemoteResult<bool> {
+        // Protocol waits must never be satisfied by host input wakeups.
+        self.pump_activity(deadline, None)
+    }
+
+    /// The optional fd is exclusive to host activity waits. It is borrowed,
+    /// never drained here, and cannot satisfy a capture/acceptance/sync wait.
+    fn pump_activity(
+        &mut self,
+        deadline: Instant,
+        wake: Option<BorrowedFd<'_>>,
+    ) -> RemoteResult<bool> {
         let dispatched = self.queue.dispatch_pending(&mut self.state)?;
         self.state.check()?;
         if dispatched > 0 {
@@ -959,7 +970,16 @@ impl WaylandCapture {
         if needs_write {
             flags |= PollFlags::POLLOUT;
         }
-        let mut fds = [PollFd::new(backend.poll_fd(), flags)];
+        // Keep ordinary protocol pumps allocation-free and single-fd. The
+        // second stack entry is outside the polled slice when no wake exists.
+        let mut storage = [
+            PollFd::new(backend.poll_fd(), flags),
+            PollFd::new(
+                wake.unwrap_or_else(|| backend.poll_fd()),
+                PollFlags::POLLIN | PollFlags::POLLERR | PollFlags::POLLHUP,
+            ),
+        ];
+        let fds = &mut storage[..if wake.is_some() { 2 } else { 1 }];
         loop {
             let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
                 return Ok(false);
@@ -969,18 +989,23 @@ impl WaylandCapture {
                 .saturating_add(1)
                 .min(i32::MAX as u128) as i32;
             let timeout = PollTimeout::try_from(millis).unwrap_or(PollTimeout::MAX);
-            match poll(&mut fds, timeout) {
+            match poll(fds, timeout) {
                 Ok(0) => return Ok(false),
                 Ok(_) => break,
                 Err(nix::errno::Errno::EINTR) => continue,
                 Err(error) => return Err(error.into()),
             }
         }
-        let ready = fds[0].revents().unwrap_or(PollFlags::empty());
-        if ready.intersects(PollFlags::POLLERR | PollFlags::POLLHUP | PollFlags::POLLNVAL) {
+        let ready = activity_readiness(
+            fds[0].revents().unwrap_or(PollFlags::empty()),
+            fds.get(1)
+                .and_then(PollFd::revents)
+                .unwrap_or(PollFlags::empty()),
+        );
+        if ready.native_failed {
             return Err(invalid("Wayland compositor disconnected").into());
         }
-        if ready.contains(PollFlags::POLLIN) {
+        if ready.read_native {
             match guard.read() {
                 Ok(_) => {}
                 Err(WaylandError::Io(error)) if error.kind() == io::ErrorKind::WouldBlock => {}
@@ -991,6 +1016,9 @@ impl WaylandCapture {
         }
         self.queue.dispatch_pending(&mut self.state)?;
         self.state.check()?;
+        if ready.wake_failed {
+            return Err(invalid("host activity wake descriptor failed").into());
+        }
         Ok(true)
     }
 
@@ -1264,7 +1292,11 @@ impl WaylandCapture {
     pub(crate) fn image_recycler(&self) -> CaptureImageRecycler {
         self.recycler.clone()
     }
-    pub(super) fn wait_for_activity(&mut self, timeout: Duration) -> RemoteResult<bool> {
+    pub(super) fn wait_for_activity_with_wake(
+        &mut self,
+        timeout: Duration,
+        wake: Option<BorrowedFd<'_>>,
+    ) -> RemoteResult<bool> {
         let deadline = Instant::now()
             .checked_add(timeout)
             .ok_or_else(|| invalid("invalid Wayland wait timeout"))?;
@@ -1275,7 +1307,7 @@ impl WaylandCapture {
             .into_iter()
             .chain(self.state.keyboard.deadline)
             .fold(deadline, |a, b| a.min(b));
-        let result = self.pump(deadline);
+        let result = self.pump_activity(deadline, wake);
         self.expire_control();
         self.expire_keyboard();
         if result.is_err() {
@@ -2018,5 +2050,44 @@ mod popup_follow_state_tests {
         state.follow_event(resize_manager::Event::Suspended { epoch: 4 });
         assert!(state.failed.is_some());
         assert_eq!(state.follow_epoch, 3);
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ActivityReadiness {
+    native_failed: bool,
+    read_native: bool,
+    wake_failed: bool,
+}
+fn activity_readiness(native: PollFlags, wake: PollFlags) -> ActivityReadiness {
+    let errors = PollFlags::POLLERR | PollFlags::POLLHUP | PollFlags::POLLNVAL;
+    ActivityReadiness {
+        native_failed: native.intersects(errors),
+        read_native: native.contains(PollFlags::POLLIN),
+        wake_failed: wake.intersects(errors),
+    }
+}
+#[cfg(test)]
+mod activity_wake_tests {
+    use super::*;
+    #[test]
+    fn wake_only_never_reads_native_guard() {
+        let ready = activity_readiness(PollFlags::empty(), PollFlags::POLLIN);
+        assert!(!ready.read_native && !ready.native_failed && !ready.wake_failed);
+    }
+    #[test]
+    fn simultaneous_native_data_is_not_skipped_by_wake() {
+        let ready = activity_readiness(PollFlags::POLLIN, PollFlags::POLLIN);
+        assert!(ready.read_native && !ready.native_failed);
+        let ready = activity_readiness(PollFlags::POLLIN, PollFlags::POLLHUP);
+        assert!(ready.read_native && ready.wake_failed);
+    }
+    #[test]
+    fn native_error_precedes_any_wakeup() {
+        for error in [PollFlags::POLLERR, PollFlags::POLLHUP, PollFlags::POLLNVAL] {
+            assert!(activity_readiness(error | PollFlags::POLLIN, PollFlags::POLLIN).native_failed);
+            assert!(activity_readiness(PollFlags::empty(), error).wake_failed);
+        }
+        assert!(!activity_readiness(PollFlags::POLLOUT, PollFlags::POLLIN).read_native);
     }
 }

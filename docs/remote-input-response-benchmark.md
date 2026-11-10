@@ -94,3 +94,27 @@ retained-proof capture-slot accounting with a 20 ms wait regressed the controlle
 workload, so that production change was reverted. The exact experimental commit
 remains linked for reproduction; it is not a shipped optimization or a general
 performance claim.
+
+## Input-queue wake experiment
+
+A separate opt-in test,
+`latency_benchmark::input_wake_benchmark::controlled_input_wake_abba_latency`,
+compares native input notification disabled/enabled in A/B/B/A order within one
+process and binary. Four fresh sessions each run 2 warmups and 16 measured
+responses. Capture-slot accounting, FPS, scopes, permissions, leases, encoding
+and workload stay unchanged. The rejected retained-slot experiment is not used.
+
+Only the test's owned host thread can disable the notification path for the
+baseline. Production has no user-facing toggle. Per-session counts record notify
+attempts/coalescing, drains and activity waits. These cover setup, warmup and
+cleanup too; they are not input-action counts or CPU utilization. Generous count
+bounds catch runaway loops, not hardware performance regressions. No latency
+threshold suppresses negative results. Reports retain all 72 samples and both
+order-block differences; a failed session prevents a successful comparison.
+
+The mechanism wakes only the host's idle activity wait after authenticated native
+input is queued or revoked. Native protocol sync, capture-ready and acceptance
+waits remain uninterruptible by this hint. The actual queue, lease, source scope,
+sequence, fresh-frame and FPS checks remain authoritative. A signal is never an
+input event or an authorization grant. The benefit is limited to input arriving
+while the host is in that idle wait, not arbitrary capture/codec stalls.

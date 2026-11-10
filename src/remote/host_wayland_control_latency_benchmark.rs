@@ -103,18 +103,18 @@ struct Report {
     samples: Vec<Value>,
     success: bool,
     failure: String,
+    emit: bool,
 }
 impl Report {
     fn new() -> Self {
         Self {
+            emit: true,
             samples: Vec::new(),
             success: false,
             failure: "setup did not complete".into(),
         }
     }
-}
-impl Drop for Report {
-    fn drop(&mut self) {
+    fn value(&mut self) -> Value {
         for sample in &mut self.samples {
             if sample["status"] == "pending" {
                 sample["status"] = json!("failed");
@@ -141,6 +141,15 @@ impl Drop for Report {
             "environment":{"os":std::env::consts::OS,"arch":std::env::consts::ARCH,"pid":std::process::id(),"libgl_always_software":std::env::var("LIBGL_ALWAYS_SOFTWARE").ok(),"mesa_driver_override":std::env::var("MESA_LOADER_DRIVER_OVERRIDE").ok(),"gl_renderer":"production headless Smithay GLES; driver identity not queried", "topology":"single-process owned dual Wayland displays and loopback authenticated TCP", "source_size":[SW,SH],"viewer_size":[VW,VH],"fps":30,"jpeg_quality":90,"poll_sleep_ms":1},
             "clock":"one process monotonic Instant", "scope":"one fixed selected native root identity and geometry; no source requests or shared sources; one control lease. Wire source/geometry epoch fields are not separately observed.", "endpoints":"injection before click wire requests; recipient observed after fixture dispatch; app commit request submitted; actual GL readback marker verified; exact client presentation feedback observed. Includes polling/readback/test feedback overhead, not physical input or scanout; no cross-machine claim.",
             "budget":"25s checked including setup and after each sample; synchronous fixture operations and teardown have their own bounded waits, so this is not a strict wall-clock process cap", "warmup_requested":WARMUP,"measured_requested":MEASURED,"samples":self.samples,"quantiles":distributions});
+        report
+    }
+}
+impl Drop for Report {
+    fn drop(&mut self) {
+        if !self.emit {
+            return;
+        }
+        let report = self.value();
         let encoded = serde_json::to_string_pretty(&report).unwrap();
         eprintln!("JWM_REMOTE_LATENCY_REPORT\n{encoded}");
         if let Ok(path) = std::env::var("JWM_REMOTE_LATENCY_REPORT") {
@@ -158,10 +167,17 @@ impl Drop for Report {
 #[ignore = "owned TCP/Wayland/production GL latency benchmark; explicit CI only"]
 fn controlled_input_to_unique_visible_marker_latency() {
     let mut report = Report::new();
+    run_session(&mut report, |gl| Harness::new(gl, false));
+}
+
+fn run_session(
+    report: &mut Report,
+    make_harness: impl FnOnce(&mut HeadlessSmithayGles) -> Harness,
+) {
     let started = Instant::now();
     let mut gl = HeadlessSmithayGles::new()
         .expect("explicit latency benchmark requires real headless GL, never skip");
-    let mut h = Harness::new(&mut gl, false);
+    let mut h = make_harness(&mut gl);
     let mut previous = h.activate(&mut gl);
     assert!(
         started.elapsed() < BUDGET,
@@ -353,3 +369,6 @@ fn latency_marker_rejects_stale_wrong_run_corruption_and_missing_presentation() 
     assert_eq!(decode_marker(&scaled), None);
     assert_eq!(quantiles(&[1.0, 2.0, 3.0, 4.0])["p50_ms"], 2.0);
 }
+
+#[path = "host_input_wake_benchmark.rs"]
+mod input_wake_benchmark;

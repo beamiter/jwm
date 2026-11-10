@@ -248,12 +248,19 @@ impl HostCapture {
             Self::Wayland(c) => c.image_recycler(),
         }
     }
-    pub(super) fn wait_for_activity(&mut self, timeout: Duration) -> RemoteResult<bool> {
+    pub(super) fn wait_for_activity_with_wake(
+        &mut self,
+        timeout: Duration,
+        wake: Option<std::os::fd::BorrowedFd<'_>>,
+    ) -> RemoteResult<bool> {
+        #[cfg(not(feature = "remote-wayland"))]
+        let _ = wake;
+
         match self {
             Self::Desktop(c) => c.wait_for_activity(timeout),
             Self::Window(c) => c.wait_for_activity(timeout),
             #[cfg(feature = "remote-wayland")]
-            Self::Wayland(c) => c.wait_for_activity(timeout),
+            Self::Wayland(c) => c.wait_for_activity_with_wake(timeout, wake),
         }
     }
     pub(super) fn mode(&self) -> CaptureMode {
