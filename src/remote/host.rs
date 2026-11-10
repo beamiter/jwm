@@ -2155,13 +2155,22 @@ fn retained_proof_deadline(
 }
 
 #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct SuccessfulLosslessCapture {
+    pub source_epoch: u64,
+    pub geometry_epoch: u64,
+    pub source_size: (u16, u16),
+    pub encoded_size: (u32, u32),
+    pub rgb_sha256: [u8; 32],
+}
+#[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
 #[derive(Default)]
 pub(crate) struct PendingLosslessProbe {
     blocked: Mutex<Option<(u64, u64, u64)>>,
     released: Mutex<bool>,
     changed: Condvar,
     once: AtomicBool,
-    publication: std::sync::atomic::AtomicU64,
+    successful_capture: Mutex<Option<SuccessfulLosslessCapture>>,
     written: Mutex<Vec<(u64, u64, u64, bool, bool)>>,
 }
 #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
@@ -2179,8 +2188,10 @@ impl PendingLosslessProbe {
         *self.released.lock().unwrap() = true;
         self.changed.notify_all();
     }
-    pub(crate) fn publication_epoch(&self) -> u64 {
-        self.publication.load(Ordering::Acquire)
+    /// Actual normalized RGB accepted into the mailbox, not a layout invalidation.
+    /// Only one snapshot is retained; no pixels or growing frame history are kept.
+    pub(crate) fn successful_capture(&self) -> Option<SuccessfulLosslessCapture> {
+        *self.successful_capture.lock().unwrap()
     }
     pub(crate) fn written(&self) -> Vec<(u64, u64, u64, bool, bool)> {
         self.written.lock().unwrap().clone()
@@ -4206,12 +4217,6 @@ fn stream_frames(
                     let mut state = sources.state.lock().unwrap();
                     state.input_area = capture.input_area();
                     state.geometry_epoch = capture.geometry_epoch();
-                    #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
-                    if let Some(probe) = &sources.pending_lossless_probe {
-                        probe
-                            .publication
-                            .store(state.geometry_epoch, Ordering::Release);
-                    }
                     state.presented_geometry = None;
                     state.presented_frame = None;
                     state.presented_native_proof = None;
@@ -4238,12 +4243,6 @@ fn stream_frames(
                 let mut state = sources.state.lock().unwrap();
                 if state.geometry_epoch != capture.geometry_epoch() {
                     state.geometry_epoch = capture.geometry_epoch();
-                    #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
-                    if let Some(probe) = &sources.pending_lossless_probe {
-                        probe
-                            .publication
-                            .store(state.geometry_epoch, Ordering::Release);
-                    }
                     state.presented_geometry = None;
                     state.presented_frame = None;
                     state.presented_native_proof = None;
@@ -4374,12 +4373,6 @@ fn stream_frames(
                 let mut state = sources.state.lock().unwrap();
                 if state.geometry_epoch != capture.geometry_epoch() {
                     state.geometry_epoch = capture.geometry_epoch();
-                    #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
-                    if let Some(probe) = &sources.pending_lossless_probe {
-                        probe
-                            .publication
-                            .store(state.geometry_epoch, Ordering::Release);
-                    }
                     state.presented_geometry = None;
                     state.presented_frame = None;
                     state.presented_native_proof = None;
@@ -4436,12 +4429,29 @@ fn stream_frames(
                 capture_completed_at,
                 recycler: Some(capture.image_recycler()),
             };
+            #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+            let successful_capture = sources.pending_lossless_probe.as_ref().map(|_| {
+                use sha2::{Digest, Sha256};
+                SuccessfulLosslessCapture {
+                    source_epoch: pending.source_version.epoch,
+                    geometry_epoch: pending.frame.geometry_epoch,
+                    source_size: (pending.frame.source_width, pending.frame.source_height),
+                    encoded_size: pending.frame.image.dimensions(),
+                    rgb_sha256: Sha256::digest(pending.frame.image.as_raw()).into(),
+                }
+            });
             let Some(replaced) = mailbox.publish(pending) else {
                 if !running.load(Ordering::Acquire) || shutdown.load(Ordering::Acquire) {
                     break;
                 }
                 return Err(io::Error::other("remote frame sender stopped unexpectedly").into());
             };
+            #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+            if let (Some(probe), Some(captured)) =
+                (&sources.pending_lossless_probe, successful_capture)
+            {
+                *probe.successful_capture.lock().unwrap() = Some(captured);
+            }
             telemetry.record_published(replaced);
         }
         Ok(())

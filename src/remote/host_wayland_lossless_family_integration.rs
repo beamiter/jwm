@@ -444,6 +444,11 @@ fn family_oracle_clips_popup_and_distinguishes_returned_geometry() {
     let initial = expected(320, 240, 0, None);
     let returned = expected(320, 240, 2, None);
     assert_ne!(initial, returned);
+    assert_ne!(rgb_digest(&initial), rgb_digest(&returned));
+    assert_eq!(rgb_digest(&[3, 2, 1, 255]), {
+        use sha2::{Digest, Sha256};
+        <[u8; 32]>::from(Sha256::digest([1, 2, 3]))
+    });
     let clipped = expected(320, 240, 0, Some((300, 220)));
     let changed = initial
         .chunks_exact(4)
@@ -451,6 +456,15 @@ fn family_oracle_clips_popup_and_distinguishes_returned_geometry() {
         .filter(|(a, b)| a != b)
         .count();
     assert_eq!(changed, 20 * 20);
+}
+
+fn rgb_digest(bgra: &[u8]) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    let mut digest = Sha256::new();
+    for pixel in bgra.chunks_exact(4) {
+        digest.update([pixel[2], pixel[1], pixel[0]]);
+    }
+    digest.finalize().into()
 }
 
 #[test]
@@ -518,33 +532,46 @@ fn actual_pending_png_resize_aba_discards_old_scope_before_write() {
     let old_count = probe.written().len();
     eprintln!("pending PNG blocked seq/source/geometry={blocked:?}, already_written={old_count}");
     let transition_deadline = Instant::now() + Duration::from_secs(4);
+    // This case isolates source ABA from independent viewer viewport epochs.
+    // The other family test covers a viewer that follows the source dimensions.
+    // Keep the actual viewer at 320x240 while the source really resizes twice.
     h.resize(640, 360, false, None);
-    while probe.publication_epoch() <= blocked.2 {
-        pump(&mut h, &mut gl, (640, 360));
-        assert!(
-            Instant::now() < transition_deadline,
-            "host must publish G2 while sender is paused"
-        );
-        thread::sleep(Duration::from_millis(1));
-    }
-    let large_epoch = probe.publication_epoch();
-    h.resize(320, 240, true, None);
-    paint(
-        &mut h.native,
-        &mut h.target,
-        320,
-        240,
-        &root_pixels(320, 240, 3),
-    );
-    while probe.publication_epoch() <= large_epoch {
+    let large_epoch = loop {
         pump(&mut h, &mut gl, (320, 240));
+        if let Some(frame) = probe.successful_capture() {
+            if frame.source_size == (640, 360) && frame.geometry_epoch > blocked.2 {
+                assert_eq!(frame.source_epoch, blocked.1);
+                break frame.geometry_epoch;
+            }
+        }
         assert!(
             Instant::now() < transition_deadline,
-            "host must publish G3 before releasing old PNG"
+            "host must successfully publish the actual large source while sender is paused"
         );
         thread::sleep(Duration::from_millis(1));
-    }
-    let returned_epoch = probe.publication_epoch();
+    };
+    h.resize(320, 240, true, None);
+    let final_pixels = root_pixels(320, 240, 3);
+    paint(&mut h.native, &mut h.target, 320, 240, &final_pixels);
+    let final_digest = rgb_digest(&final_pixels);
+    let returned_epoch = loop {
+        pump(&mut h, &mut gl, (320, 240));
+        if let Some(frame) = probe.successful_capture() {
+            if frame.source_size == (320, 240)
+                && frame.encoded_size == (320, 240)
+                && frame.rgb_sha256 == final_digest
+                && frame.geometry_epoch > large_epoch
+            {
+                assert_eq!(frame.source_epoch, blocked.1);
+                break frame.geometry_epoch;
+            }
+        }
+        assert!(
+            Instant::now() < transition_deadline,
+            "host must publish the complete final root RGB before releasing old PNG"
+        );
+        thread::sleep(Duration::from_millis(1));
+    };
     eprintln!(
         "pending PNG before release old_geometry={} large_publication={large_epoch} returned_publication={returned_epoch} last_capture={:?}",
         blocked.2,
