@@ -184,6 +184,7 @@ enum Command {
         display: Option<String>,
     },
     /// Share the current JWM X11 desktop.
+    #[command(group(clap::ArgGroup::new("host_scroll_lease").args(["allow_wayland_pointer", "allow_wayland_control"]).multiple(false)))]
     Host {
         /// Local host IP/name, optionally with port (default 48221).
         ///
@@ -305,7 +306,7 @@ enum Command {
         allow_wayland_pointer: bool,
 
         /// Permit one unified single-surface keyboard and pointer lease.
-        #[arg(long, requires_all = ["wayland_select", "once"], conflicts_with_all = ["allow_wayland_keyboard", "allow_wayland_pointer", "allow_wayland_scroll", "allow_input", "allow_clipboard", "allow_window_resize"])]
+        #[arg(long, requires_all = ["wayland_select", "once"], conflicts_with_all = ["allow_wayland_keyboard", "allow_wayland_pointer", "allow_input", "allow_clipboard", "allow_window_resize"])]
         allow_wayland_control: bool,
 
         /// Experimentally encode exact bounded vertical screen shifts as copy plus changed pixels.
@@ -313,8 +314,8 @@ enum Command {
         #[arg(long)]
         scroll_copy: bool,
 
-        /// Separately permit discrete vertical scroll on the scoped pointer lease.
-        #[arg(long, requires = "allow_wayland_pointer")]
+        /// Separately permit discrete vertical scroll on a pointer or unified lease.
+        #[arg(long, requires = "host_scroll_lease")]
         allow_wayland_scroll: bool,
 
         /// Native Wayland socket for local selection (defaults to WAYLAND_DISPLAY).
@@ -438,6 +439,7 @@ enum Command {
     /// Open a remote JWM desktop in an explicitly selected local viewer.
     #[command(group(clap::ArgGroup::new("native_viewer_mode")
         .args(["view_only", "wayland_keyboard", "wayland_pointer", "wayland_control"]).multiple(false)))]
+    #[command(group(clap::ArgGroup::new("viewer_scroll_lease").args(["wayland_pointer", "wayland_control"]).multiple(false)))]
     Connect {
         /// Local backend; Wayland requires an explicit read-only or scoped input mode.
         #[arg(long, default_value_t=ViewerBackend::X11, requires_if("wayland", "native_viewer_mode"))]
@@ -483,12 +485,12 @@ enum Command {
         wayland_pointer: bool,
 
         /// Request one native single-surface keyboard and pointer lease.
-        /// No wheel, drag, modifier-click, clipboard, reconnect or saved authorization.
-        #[arg(long, requires = "viewer_backend", conflicts_with_all = ["wayland_keyboard", "wayland_pointer", "wayland_scroll", "view_only", "resize_source", "follow_source_size", "clipboard", "grab_input", "reconnect_attempts"])]
+        /// No drag, modifier-click, clipboard, reconnect or saved authorization.
+        #[arg(long, requires = "viewer_backend", conflicts_with_all = ["wayland_keyboard", "wayland_pointer", "view_only", "resize_source", "follow_source_size", "clipboard", "grab_input", "reconnect_attempts"])]
         wayland_control: bool,
 
         /// Separately request single-notch vertical scroll; never smooth or horizontal.
-        #[arg(long, requires = "wayland_pointer")]
+        #[arg(long, requires = "viewer_scroll_lease")]
         wayland_scroll: bool,
 
         /// Best-effort local client origin X,Y; off-screen positions fall back.
@@ -1840,7 +1842,6 @@ mod tests {
             vec!["--view-only"],
             vec!["--wayland-keyboard"],
             vec!["--wayland-pointer"],
-            vec!["--wayland-scroll"],
             vec!["--clipboard"],
             vec!["--grab-input"],
             vec!["--resize-source", "640x480"],
@@ -1860,7 +1861,6 @@ mod tests {
         for extra in [
             "--allow-wayland-keyboard",
             "--allow-wayland-pointer",
-            "--allow-wayland-scroll",
             "--allow-input",
             "--allow-clipboard",
             "--allow-window-resize",
@@ -1868,6 +1868,98 @@ mod tests {
             assert!(Cli::try_parse_from(host.into_iter().chain([extra])).is_err());
         }
         assert!(Cli::try_parse_from(["jwm-remote", "host", "--allow-wayland-control"]).is_err());
+    }
+
+    #[test]
+    fn unified_scroll_requires_both_explicit_permissions_and_is_not_saved() {
+        let host = [
+            "jwm-remote",
+            "host",
+            "--wayland-select",
+            "--once",
+            "--allow-wayland-control",
+        ];
+        let plain = Cli::try_parse_from(host).unwrap();
+        assert!(matches!(
+            plain.command,
+            Command::Host {
+                allow_wayland_control: true,
+                allow_wayland_scroll: false,
+                ..
+            }
+        ));
+        let with_scroll =
+            Cli::try_parse_from(host.into_iter().chain(["--allow-wayland-scroll"])).unwrap();
+        assert!(matches!(
+            with_scroll.command,
+            Command::Host {
+                allow_wayland_control: true,
+                allow_wayland_scroll: true,
+                ..
+            }
+        ));
+        let viewer = [
+            "jwm-remote",
+            "connect",
+            "host",
+            "--viewer-backend",
+            "wayland",
+            "--wayland-control",
+        ];
+        let plain = Cli::try_parse_from(viewer).unwrap();
+        assert!(matches!(
+            plain.command,
+            Command::Connect {
+                wayland_control: true,
+                wayland_scroll: false,
+                ..
+            }
+        ));
+        let with_scroll =
+            Cli::try_parse_from(viewer.into_iter().chain(["--wayland-scroll"])).unwrap();
+        assert!(matches!(
+            &with_scroll.command,
+            Command::Connect {
+                wayland_control: true,
+                wayland_scroll: true,
+                ..
+            }
+        ));
+        assert!(profile_from_command(with_scroll.command).is_err());
+        assert!(
+            Cli::try_parse_from([
+                "jwm-remote",
+                "connect",
+                "host",
+                "--viewer-backend",
+                "wayland",
+                "--wayland-keyboard",
+                "--wayland-scroll"
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "jwm-remote",
+                "host",
+                "--wayland-select",
+                "--once",
+                "--allow-wayland-keyboard",
+                "--allow-wayland-scroll"
+            ])
+            .is_err()
+        );
+        for unsafe_flag in [
+            "--wayland-pointer",
+            "--wayland-keyboard",
+            "--clipboard",
+            "--grab-input",
+        ] {
+            assert!(
+                Cli::try_parse_from(viewer.into_iter().chain(["--wayland-scroll", unsafe_flag]))
+                    .is_err()
+            );
+        }
     }
 
     #[test]

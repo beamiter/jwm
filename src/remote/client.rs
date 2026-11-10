@@ -398,7 +398,6 @@ fn validate_viewer_backend(options: &ClientOptions) -> RemoteResult<()> {
             || options.view_only
             || options.wayland_keyboard
             || options.wayland_pointer
-            || options.wayland_scroll
             || options.clipboard
             || options.grab_input
             || options.resize_source.is_some()
@@ -409,8 +408,10 @@ fn validate_viewer_backend(options: &ClientOptions) -> RemoteResult<()> {
         )
         .into());
     }
-    if options.wayland_scroll && !options.wayland_pointer {
-        return Err(invalid_data("Wayland scroll requires explicit pointer mode").into());
+    if options.wayland_scroll && !options.wayland_pointer && !options.wayland_control {
+        return Err(
+            invalid_data("Wayland scroll requires explicit pointer or control mode").into(),
+        );
     }
     if options.follow_source_size
         && (options.viewer_backend != ViewerBackend::X11
@@ -713,7 +714,10 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
     )?;
     #[cfg(feature = "remote-wayland")]
     if options.wayland_control {
-        state.wayland_control.lock().unwrap().digest = Some(viewer.enable_wayland_control()?);
+        let digest = viewer.enable_wayland_control(options.wayland_scroll)?;
+        let mut control = state.wayland_control.lock().unwrap();
+        control.digest = Some(digest);
+        control.scroll_enabled = options.wayland_scroll;
     }
     #[cfg(feature = "remote-wayland")]
     if options.wayland_keyboard {
@@ -1129,7 +1133,6 @@ fn negotiate_session(
         || (request_wayland_control
             && (hello.stream.wayland_keyboard
                 || hello.stream.wayland_pointer
-                || hello.stream.wayland_scroll
                 || hello.stream.window_resize
                 || hello.clipboard_enabled
                 || hello.pointer_enabled
@@ -1141,7 +1144,7 @@ fn negotiate_session(
     }
 
     validate_scroll_negotiation(
-        request_wayland_pointer,
+        request_wayland_pointer || request_wayland_control,
         request_wayland_scroll,
         hello.stream.wayland_scroll,
     )?;
@@ -1532,6 +1535,10 @@ fn viewer_loop(
                 None
             }
         };
+        let scroll_ready = scroll_ready.or_else(|| {
+            let control = state.wayland_control.lock().unwrap();
+            (control.configured() && control.scroll_enabled).then(|| control.ready_sequence())
+        });
         if let Some(ready) = scroll_ready {
             viewer.wayland_pointer_ready(ready)?;
         }
@@ -7197,14 +7204,19 @@ mod native_viewer_permission_tests {
             validate_viewer_backend(&bundle).is_ok(),
             cfg!(feature = "remote-wayland")
         );
-        for mutation in 0..11 {
+        let mut scrolling_bundle = bundle.clone();
+        scrolling_bundle.wayland_scroll = true;
+        assert_eq!(
+            validate_viewer_backend(&scrolling_bundle).is_ok(),
+            cfg!(feature = "remote-wayland")
+        );
+        for mutation in (0..11).filter(|v| *v != 4) {
             let mut changed = bundle.clone();
             match mutation {
                 0 => changed.viewer_backend = ViewerBackend::X11,
                 1 => changed.view_only = true,
                 2 => changed.wayland_keyboard = true,
                 3 => changed.wayland_pointer = true,
-                4 => changed.wayland_scroll = true,
                 5 => changed.clipboard = true,
                 6 => changed.grab_input = true,
                 7 => changed.display = Some(":never-open".into()),
@@ -7230,14 +7242,19 @@ mod native_viewer_permission_tests {
             validate_viewer_backend(&bundle).is_ok(),
             cfg!(feature = "remote-wayland")
         );
-        for mutation in 0..11 {
+        let mut scrolling_bundle = bundle.clone();
+        scrolling_bundle.wayland_scroll = true;
+        assert_eq!(
+            validate_viewer_backend(&scrolling_bundle).is_ok(),
+            cfg!(feature = "remote-wayland")
+        );
+        for mutation in (0..11).filter(|v| *v != 4) {
             let mut changed = bundle.clone();
             match mutation {
                 0 => changed.viewer_backend = ViewerBackend::X11,
                 1 => changed.view_only = true,
                 2 => changed.wayland_keyboard = true,
                 3 => changed.wayland_pointer = true,
-                4 => changed.wayland_scroll = true,
                 5 => changed.clipboard = true,
                 6 => changed.grab_input = true,
                 7 => changed.display = Some(":never-open".into()),

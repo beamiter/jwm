@@ -1,5 +1,6 @@
 //! Explicit single-surface control bundle: one deadline, sequence and revocation domain.
-//! No scroll, drag, focus changes, global input or modifier-click.
+//! Scroll requires an additional explicit v2 request. No drag, focus changes,
+//! global input or modifier-click.
 use super::image_copy_capture::{
     CaptureAuthority, CaptureFrameData, CaptureSource, ImageCaptureSourceData, authority_is_current,
 };
@@ -42,6 +43,7 @@ pub(crate) struct RemoteControlState {
 struct Lease {
     resource: JwmRemoteControlLeaseV1,
     epoch: u32,
+    allow_scroll: bool,
     authority: Arc<CaptureAuthority>,
     snapshot: AuthorizedKeyboardSnapshot,
     pointer: AuthorizedPointerSnapshot,
@@ -66,7 +68,7 @@ pub struct LeaseData {
     epoch: u32,
 }
 pub(crate) fn init(dh: &DisplayHandle) {
-    dh.create_global::<JwmWaylandState, JwmRemoteControlManagerV1, _>(1, ManagerData);
+    dh.create_global::<JwmWaylandState, JwmRemoteControlManagerV1, _>(2, ManagerData);
 }
 fn current(state: &JwmWaylandState, lease: &Lease) -> bool {
     lease.resource.is_alive()
@@ -167,7 +169,17 @@ impl Dispatch<JwmRemoteControlManagerV1, ManagerData> for JwmWaylandState {
         _dh: &DisplayHandle,
         init: &mut DataInit<'_, Self>,
     ) {
-        if let jwm_remote_control_manager_v1::Request::CreateLease { id, source } = request {
+        // Interface version is not consent: only the additional request grants wheel.
+        let (id, source, allow_scroll) = match request {
+            jwm_remote_control_manager_v1::Request::CreateLease { id, source } => {
+                (id, source, false)
+            }
+            jwm_remote_control_manager_v1::Request::CreateLeaseWithScroll { id, source } => {
+                (id, source, true)
+            }
+            _ => return,
+        };
+        {
             let epoch = state.remote_control.next_epoch.checked_add(1).unwrap_or(0);
             let resource = init.init(id, LeaseData { epoch });
             if epoch == 0 {
@@ -249,6 +261,7 @@ impl Dispatch<JwmRemoteControlManagerV1, ManagerData> for JwmWaylandState {
             state.remote_control.active = Some(Lease {
                 resource: resource.clone(),
                 epoch,
+                allow_scroll,
                 authority,
                 snapshot,
                 pointer,
@@ -416,7 +429,7 @@ impl Dispatch<JwmRemoteControlLeaseV1, LeaseData> for JwmWaylandState {
                     || !lease.held.is_empty()
                     || epoch != lease.epoch
                     || !valid_sequence(lease.sequence, sequence)
-                    || !matches!(kind, 0 | 1)
+                    || !action_allowed(kind, lease.allow_scroll)
                     || x >= lease.authority.width
                     || y >= lease.authority.height
                     || !point_allowed(&lease.mapping, x, y)
@@ -456,14 +469,24 @@ impl Dispatch<JwmRemoteControlLeaseV1, LeaseData> for JwmWaylandState {
                 }
                 lease.pointer_tokens -= 1.0;
                 if !state.seat.get_pointer().is_some_and(|p| {
-                    p.send_authorized_pointer(
-                        &lease.pointer,
-                        f64::from(x),
-                        f64::from(y),
-                        kind == 1,
-                        SERIAL_COUNTER.next_serial(),
-                        InputTime::now(),
-                    )
+                    if kind >= 2 {
+                        p.send_authorized_scroll(
+                            &lease.pointer,
+                            f64::from(x),
+                            f64::from(y),
+                            if kind == 2 { -1 } else { 1 },
+                            InputTime::now(),
+                        )
+                    } else {
+                        p.send_authorized_pointer(
+                            &lease.pointer,
+                            f64::from(x),
+                            f64::from(y),
+                            kind == 1,
+                            SERIAL_COUNTER.next_serial(),
+                            InputTime::now(),
+                        )
+                    }
                 }) {
                     finish(state, lease, SEAT, true);
                     return;
@@ -495,6 +518,9 @@ impl Dispatch<JwmRemoteControlLeaseV1, LeaseData> for JwmWaylandState {
     }
 }
 
+fn action_allowed(kind: u32, allow_scroll: bool) -> bool {
+    matches!(kind, 0 | 1) || (allow_scroll && matches!(kind, 2 | 3))
+}
 fn valid_sequence(previous: u32, next: u32) -> bool {
     previous.checked_add(1) == Some(next) && next <= 60000
 }
@@ -528,6 +554,18 @@ pub(crate) fn source_destroyed(state: &mut JwmWaylandState, source: &ExtImageCap
 #[cfg(test)]
 mod primitive_tests {
     use super::*;
+    #[test]
+    fn wheel_requires_explicit_grant_and_unknown_actions_always_fail() {
+        for allowed in [false, true] {
+            assert!(action_allowed(0, allowed));
+            assert!(action_allowed(1, allowed));
+            assert_eq!(action_allowed(2, allowed), allowed);
+            assert_eq!(action_allowed(3, allowed), allowed);
+            for kind in [4, 5, 120, u32::MAX] {
+                assert!(!action_allowed(kind, allowed));
+            }
+        }
+    }
     #[test]
     fn shared_sequence_rejects_replay_gap_and_exhaustion() {
         assert!(valid_sequence(0, 1));

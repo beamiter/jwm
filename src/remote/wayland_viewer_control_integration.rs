@@ -4,7 +4,7 @@ use super::*;
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
 use smithay::reexports::wayland_server::protocol::{
     wl_keyboard::{KeyState, WlKeyboard},
-    wl_pointer::{ButtonState, WlPointer},
+    wl_pointer::{Axis, AxisSource, ButtonState, WlPointer},
 };
 #[derive(Debug)]
 enum Answer {
@@ -15,9 +15,10 @@ enum Answer {
     Failed(String),
 }
 enum Request {
-    Enable,
+    Enable(bool),
     Draw(u64),
     Confirm(u64),
+    Ready(Option<u64>),
     Check,
     Poll,
     Stop,
@@ -50,8 +51,10 @@ impl ControlPeer {
                     output.send(Answer::Connected)?;
                     loop {
                         match input.recv_timeout(Duration::from_secs(12))? {
-                            Request::Enable => {
-                                output.send(Answer::Enabled(viewer.enable_wayland_control()?))?;
+                            Request::Enable(scroll) => {
+                                output.send(Answer::Enabled(
+                                    viewer.enable_wayland_control(scroll)?,
+                                ))?;
                             }
                             Request::Draw(seq) => {
                                 let frame = RecyclableDecodedFrame::new(
@@ -70,6 +73,13 @@ impl ControlPeer {
                                     "confirmation requires actual protocol presented"
                                 );
                                 viewer.wayland_pointer_presented(seq);
+                                output.send(Answer::Done)?;
+                            }
+                            Request::Ready(sequence) => {
+                                if let Some(seq) = sequence {
+                                    assert!(presented.contains(&seq));
+                                }
+                                viewer.wayland_pointer_ready(sequence)?;
                                 output.send(Answer::Done)?;
                             }
                             Request::Check => {
@@ -154,6 +164,9 @@ impl ControlPeer {
     }
 }
 fn fixture() -> (Server, ControlPeer, WlKeyboard, WlPointer) {
+    fixture_scroll(false)
+}
+fn fixture_scroll(scroll: bool) -> (Server, ControlPeer, WlKeyboard, WlPointer) {
     let mut s = Server::new();
     register_test_presentation(&mut s);
     s.state.image_capture_pending = Some(init_image_copy_capture(&s.display.handle()));
@@ -164,7 +177,7 @@ fn fixture() -> (Server, ControlPeer, WlKeyboard, WlPointer) {
         .unwrap();
     let p = ControlPeer::start(stream);
     assert!(matches!(p.receive(&mut s), Answer::Connected));
-    p.tx.send(Request::Enable).unwrap();
+    p.tx.send(Request::Enable(scroll)).unwrap();
     match p.receive(&mut s) {
         Answer::Enabled(digest) => assert_ne!(digest, [0; 32]),
         a => panic!("enable: {a:?}"),
@@ -370,4 +383,131 @@ fn actual_wayland_control_new_mapping_cancels_old_pointer_not_keyboard() {
         "old pointer survived new mapping: {e:?}"
     );
     p.stop(&mut s);
+}
+
+// Exact v7 discrete wheel group; source is permitted after axis metadata too.
+fn wheel(ptr: &WlPointer, step: i32, late_source: bool) {
+    assert!(matches!(step, -1 | 1));
+    ptr.motion(50, 100.0, 120.0);
+    if !late_source {
+        ptr.axis_source(AxisSource::Wheel);
+    }
+    ptr.axis_discrete(Axis::VerticalScroll, step);
+    ptr.axis(50, Axis::VerticalScroll, f64::from(step) * 10.0);
+    if late_source {
+        ptr.axis_source(AxisSource::Wheel);
+    }
+    ptr.frame();
+}
+#[test]
+fn actual_wayland_control_scroll_two_directions_single_action_after_fresh_frame() {
+    use crate::remote::x11_viewer::WaylandPointerEventKind;
+    let Some(mut gl) = HeadlessSmithayGles::new() else {
+        return;
+    };
+    let (mut s, p, _, ptr) = fixture_scroll(true);
+    for (seq, step) in [(1, -1), (2, 1)] {
+        mapped(&mut s, &p, &mut gl, seq);
+        p.done(&mut s, Request::Ready(Some(seq)));
+        wheel(&ptr, step, step == 1);
+        s.roundtrip();
+        let (events, _) = p.poll(&mut s);
+        let expected = if step == -1 {
+            WaylandPointerEventKind::ScrollUp
+        } else {
+            WaylandPointerEventKind::ScrollDown
+        };
+        assert!(
+            matches!(events.as_slice(), [ViewerEvent::WaylandPointer { kind, .. }] if *kind == expected),
+            "one wheel action, no duplicate motion: {events:?}"
+        );
+        p.done(&mut s, Request::Ready(None));
+        committed_buffer(&viewer_surface(&s)).release();
+        s.roundtrip();
+    }
+    p.stop(&mut s);
+}
+#[test]
+fn actual_wayland_control_scroll_waiting_groups_and_partial_group_never_promote() {
+    let Some(mut gl) = HeadlessSmithayGles::new() else {
+        return;
+    };
+    let (mut s, p, _, ptr) = fixture_scroll(true);
+    mapped(&mut s, &p, &mut gl, 1);
+    // Leave complete old groups queued, then raise Ready through the production
+    // display.sync fence. They must be consumed with its admission gate closed.
+    wheel(&ptr, -1, false);
+    wheel(&ptr, 1, true);
+    s.roundtrip();
+    p.done(&mut s, Request::Ready(Some(1)));
+    assert!(
+        !p.poll(&mut s)
+            .0
+            .iter()
+            .any(|e| matches!(e, ViewerEvent::WaylandPointer { .. }))
+    );
+    p.done(&mut s, Request::Ready(None));
+    ptr.axis_source(AxisSource::Wheel);
+    ptr.axis_discrete(Axis::VerticalScroll, -1);
+    s.roundtrip();
+    p.done(&mut s, Request::Ready(Some(1)));
+    ptr.axis(60, Axis::VerticalScroll, -10.0);
+    ptr.frame();
+    s.roundtrip();
+    assert!(
+        !p.poll(&mut s)
+            .0
+            .iter()
+            .any(|e| matches!(e, ViewerEvent::WaylandPointer { .. }))
+    );
+    wheel(&ptr, 1, false);
+    s.roundtrip();
+    let (events, _) = p.poll(&mut s);
+    assert!(
+        matches!(
+            events.as_slice(),
+            [ViewerEvent::WaylandPointer {
+                kind: crate::remote::x11_viewer::WaylandPointerEventKind::ScrollDown,
+                ..
+            }]
+        ),
+        "fresh notch must still work: {events:?}"
+    );
+    p.stop(&mut s);
+}
+#[test]
+fn actual_wayland_control_scroll_consent_held_inputs_and_invalid_axis_fail_closed() {
+    let Some(mut gl) = HeadlessSmithayGles::new() else {
+        return;
+    };
+    for case in 0..4 {
+        let (mut s, p, k, ptr) = fixture_scroll(case != 0);
+        mapped(&mut s, &p, &mut gl, 1);
+        p.done(&mut s, Request::Ready(Some(1)));
+        if case == 1 {
+            key(&k, true);
+        }
+        if case == 2 {
+            ptr.button(60, 60, 0x110, ButtonState::Pressed);
+            ptr.frame();
+        }
+        if case == 3 {
+            ptr.axis_source(AxisSource::Wheel);
+            ptr.axis_discrete(Axis::HorizontalScroll, 1);
+            ptr.axis(60, Axis::HorizontalScroll, 10.0);
+            ptr.frame();
+        } else {
+            wheel(&ptr, 1, false);
+        }
+        s.roundtrip();
+        p.failed(
+            &mut s,
+            Request::Poll,
+            match case {
+                0 | 2 => "lacks permission or conflicts with held button",
+                1 => "overlaps held keys",
+                _ => "exactly one vertical notch",
+            },
+        );
+    }
 }

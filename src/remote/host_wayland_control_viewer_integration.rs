@@ -11,14 +11,14 @@ use crate::remote::{
     host,
     viewer_backend::{ViewerBackend, with_wayland_control_observer, with_wayland_test_stream},
     wayland_capture::WaylandCapture,
-    wayland_viewer::with_wayland_control_frame_observer,
+    wayland_viewer::{with_wayland_control_frame_observer, with_wayland_control_scroll_observer},
     window_size::WindowSize,
 };
 use smithay::reexports::{
     wayland_protocols::xdg::shell::server::xdg_toplevel::State as TopState,
     wayland_server::protocol::{
         wl_keyboard::{KeyState, WlKeyboard},
-        wl_pointer::{ButtonState, WlPointer},
+        wl_pointer::{Axis, AxisSource, ButtonState, WlPointer},
     },
 };
 use smithay::{backend::input::InputTime, input::pointer::MotionEvent, utils::SERIAL_COUNTER};
@@ -28,7 +28,7 @@ use std::{
     os::fd::AsRawFd,
     sync::{
         Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
 const KEY: [u8; 32] = [0x79; 32];
@@ -42,7 +42,7 @@ impl Drop for Stop {
         self.0.store(true, Ordering::Release);
     }
 }
-fn options() -> host::HostOptions {
+fn options(scroll: bool) -> host::HostOptions {
     host::HostOptions {
         frame_limits: Default::default(),
         listen: "127.0.0.1:0".into(),
@@ -64,7 +64,7 @@ fn options() -> host::HostOptions {
         allow_window_resize: false,
         allow_wayland_keyboard: false,
         allow_wayland_pointer: false,
-        allow_wayland_scroll: false,
+        allow_wayland_scroll: scroll,
         allow_wayland_control: true,
         scroll_copy: false,
         allow_clipboard: false,
@@ -75,8 +75,8 @@ fn options() -> host::HostOptions {
         stats_json: false,
     }
 }
-fn bind_inputs(server: &mut Server, app: &mut App) -> (u32, u32) {
-    let seat = app.client.bind("wl_seat", 7);
+fn bind_inputs(server: &mut Server, app: &mut App, version: u32) -> (u32, u32) {
+    let seat = app.client.bind("wl_seat", version);
     let pointer = app.client.new_id();
     app.client.request(seat, 0, &[pointer]);
     let keyboard = app.client.new_id();
@@ -287,6 +287,7 @@ struct Harness {
     presented_sequence: Option<u64>,
     frames: Arc<Mutex<(Option<u64>, Option<u64>)>>,
     ready: Arc<Mutex<Option<u64>>>,
+    scroll_frames: Arc<AtomicU64>,
     shutdown: Arc<AtomicBool>,
     _stop: Stop,
     client_done: mpsc::Receiver<Result<(), String>>,
@@ -296,6 +297,15 @@ struct Harness {
 }
 impl Harness {
     fn new(gl: &mut HeadlessSmithayGles, held_on_enter: bool) -> Self {
+        Self::new_with_scroll(gl, held_on_enter, false, false, 7)
+    }
+    fn new_with_scroll(
+        gl: &mut HeadlessSmithayGles,
+        held_on_enter: bool,
+        host_scroll: bool,
+        viewer_scroll: bool,
+        recipient_version: u32,
+    ) -> Self {
         let mut native = Server::new();
         let mut local = Server::new();
         native.state.image_capture_pending =
@@ -304,7 +314,8 @@ impl Harness {
         register_test_presentation(&mut local);
         let shift_mask = install_keymaps(&mut native, &mut local);
         let mut target = App::with_size_color(&mut native, [0, 0, 255, 255], SW, SH);
-        let (target_pointer, target_keyboard) = bind_inputs(&mut native, &mut target);
+        let (target_pointer, target_keyboard) =
+            bind_inputs(&mut native, &mut target, recipient_version);
         focus(&mut native, &target);
         target.client.events();
         let (ns, capture_stream) = UnixStream::pair().unwrap();
@@ -342,7 +353,7 @@ impl Harness {
                 let peer = host::authenticate_peer(stream, &KEY)?;
                 host::serve_authenticated(
                     peer,
-                    &options(),
+                    &options(host_scroll),
                     &stopping,
                     &Mutex::new(Some(host::GrantedCapture::Wayland(Box::new(capture)))),
                 )
@@ -371,7 +382,8 @@ impl Harness {
         // Add a different, green app only after the real capture selected red.
         // Neither red nor the click-triggered blue phase can be this bystander.
         let mut other = App::with_size_color(&mut native, [0, 255, 0, 255], SW, SH);
-        let (other_pointer, other_keyboard) = bind_inputs(&mut native, &mut other);
+        let (other_pointer, other_keyboard) =
+            bind_inputs(&mut native, &mut other, recipient_version);
         focus(&mut native, &target);
         target.client.events();
         other.client.events();
@@ -385,6 +397,8 @@ impl Harness {
         let observer = ready.clone();
         let frames = Arc::new(Mutex::new((None, None)));
         let frame_observer = frames.clone();
+        let scroll_frames = Arc::new(AtomicU64::new(0));
+        let scroll_observer = scroll_frames.clone();
         let (client_tx, client_done) = mpsc::channel();
         let client = thread::spawn(move || {
             let opts = ClientOptions {
@@ -392,7 +406,7 @@ impl Harness {
                 viewer_wayland_display: None,
                 wayland_keyboard: false,
                 wayland_pointer: false,
-                wayland_scroll: false,
+                wayland_scroll: viewer_scroll,
                 wayland_control: true,
                 resize_source: None,
                 follow_source_size: false,
@@ -416,7 +430,9 @@ impl Harness {
             };
             let result = with_wayland_control_observer(observer, || {
                 with_wayland_control_frame_observer(frame_observer, || {
-                    with_wayland_test_stream(stream, || run_client(opts))
+                    with_wayland_control_scroll_observer(scroll_observer, || {
+                        with_wayland_test_stream(stream, || run_client(opts))
+                    })
                 })
             })
             .map_err(|e| e.to_string());
@@ -444,6 +460,7 @@ impl Harness {
             presented_sequence: None,
             frames,
             ready,
+            scroll_frames,
             shutdown,
             _stop: stop,
             client_done,
@@ -731,6 +748,138 @@ impl Harness {
             "owned control TCP: click -> actual blue GL/presented -> balanced A; bystander input zero"
         );
     }
+    fn wheel(&mut self, step: i32) {
+        assert!(matches!(step, -1 | 1));
+        let pointer = self.pointer.as_ref().unwrap();
+        assert_eq!(
+            pointer.version(),
+            7,
+            "viewer uses explicit discrete v7 wheel"
+        );
+        // Enter already supplied the surface-local point. Do not precede this
+        // with motion: held-key negatives must reject the axis itself.
+        pointer.axis_source(AxisSource::Wheel);
+        pointer.axis_discrete(Axis::VerticalScroll, step);
+        pointer.axis(100, Axis::VerticalScroll, f64::from(step) * 10.0);
+        pointer.frame();
+        self.local.roundtrip();
+    }
+    fn waiting_wheels_processed(&mut self, gl: &mut HeadlessSmithayGles, count: u64) {
+        let before = self.received.pointer_wire.clone();
+        let keys = self.received.keys.clone();
+        self.wait(
+            gl,
+            "actual Waiting wheel groups consumed without input",
+            false,
+            |s| {
+                assert_eq!(s.received.pointer_wire, before);
+                assert_eq!(s.received.keys, keys);
+                assert!(s.ready.lock().unwrap().is_none());
+                s.scroll_frames.load(Ordering::Acquire) >= count
+            },
+        );
+        assert_eq!(self.scroll_frames.load(Ordering::Acquire), count);
+    }
+    fn repaint_and_ready(&mut self, gl: &mut HeadlessSmithayGles, blue: bool) -> u64 {
+        let before = self.received.pointer_wire.clone();
+        let keys = self.received.keys.clone();
+        let presentations = self.presentations;
+        let previous_sequence = self.presented_sequence.unwrap();
+        assert_ne!(
+            self.blue_presented, blue,
+            "actual new pixel phase, not unchanged capture"
+        );
+        self.repaint(blue);
+        self.wait(
+            gl,
+            "post-action pixels traverse capture TCP and actual viewer GL",
+            true,
+            |s| {
+                assert_eq!(
+                    s.received.pointer_wire, before,
+                    "Waiting wheel was replayed during repaint"
+                );
+                assert_eq!(s.received.keys, keys);
+                s.blue_presented == blue && s.presentations > presentations
+            },
+        );
+        let sequence = self.presented_sequence.unwrap();
+        assert!(sequence > previous_sequence);
+        self.wait(
+            gl,
+            "same exact new pixels presented and Ready",
+            false,
+            |s| {
+                assert_eq!(
+                    s.received.pointer_wire, before,
+                    "Waiting wheel was replayed at Ready"
+                );
+                assert_eq!(s.received.keys, keys);
+                s.frames.lock().unwrap().1 == Some(sequence)
+                    && *s.ready.lock().unwrap() == Some(sequence)
+            },
+        );
+        assert!(remote_control::active(&self.native.state));
+        assert_eq!(remote_control::attempts_for_test(&self.native.state), 1);
+        sequence
+    }
+    fn denied_scroll(mut self, gl: &mut HeadlessSmithayGles) {
+        // Negotiation can correctly fail before a viewer surface exists. This
+        // is separate from rejected(), whose local-input cases require both
+        // real owned device resources and a specific local failure cause.
+        let deadline = Instant::now() + Duration::from_secs(8);
+        loop {
+            self.tick(gl, false);
+            self.received.assert_no_input();
+            assert!(!remote_control::active(&self.native.state));
+            assert_eq!(remote_control::attempts_for_test(&self.native.state), 0);
+            match self.client_done.try_recv() {
+                Ok(result) => {
+                    let error =
+                        result.expect_err("missing host scroll consent must fail negotiation");
+                    assert!(
+                        error.contains("Wayland scroll permission was not mutually negotiated"),
+                        "expected exact permission failure, not timeout/transport: {error}"
+                    );
+                    break;
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    panic!("scroll negotiation worker panicked")
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
+            assert!(
+                Instant::now() < deadline,
+                "scroll permission denial did not complete"
+            );
+            thread::sleep(Duration::from_millis(1));
+        }
+        self.shutdown.store(true, Ordering::Release);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            self.tick(gl, false);
+            self.received.assert_no_input();
+            assert!(!remote_control::active(&self.native.state));
+            assert_eq!(remote_control::attempts_for_test(&self.native.state), 0);
+            match self.host_done.try_recv() {
+                Ok(result) => {
+                    eprintln!("owned denied-scroll host cleanup: {result:?}");
+                    break;
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    panic!("denied-scroll host worker panicked")
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
+            assert!(
+                Instant::now() < deadline,
+                "denied-scroll host cleanup deadline"
+            );
+            thread::sleep(Duration::from_millis(1));
+        }
+        self.client.take().unwrap().join().unwrap();
+        self.host.take().unwrap().join().unwrap();
+    }
     /// Wait for the production adapter's explicit local rejection, not any
     /// successful close, missing channel, panic, test timeout or input fallback.
     fn rejected(
@@ -741,9 +890,14 @@ impl Harness {
         attempts: u32,
         expected_reason: &str,
     ) {
+        let expected_pointer_wire = self.received.pointer_wire.clone();
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
             self.tick(gl, false);
+            assert_eq!(
+                self.received.pointer_wire, expected_pointer_wire,
+                "rejected input must not leak even partial pointer protocol events"
+            );
             assert_eq!(self.received.pointer_actions, expected_pointer);
             assert!(expected_keys.starts_with(&self.received.keys));
             match self.client_done.try_recv() {
@@ -777,6 +931,10 @@ impl Harness {
         let mut host_finished = false;
         loop {
             self.tick(gl, false);
+            assert_eq!(
+                self.received.pointer_wire, expected_pointer_wire,
+                "rejected input must not leak even partial pointer protocol events"
+            );
             assert_eq!(self.received.pointer_actions, expected_pointer);
             assert!(expected_keys.starts_with(&self.received.keys));
             if !host_finished {
@@ -966,4 +1124,162 @@ fn actual_wayland_control_viewer_tcp_held_key_pointer_rejection_cleans_original_
         1,
         "Wayland control pointer overlaps held keys",
     );
+}
+
+fn assert_control_wheel_120(events: &[(u16, Vec<u32>)], step: i32) {
+    assert_eq!(
+        events.iter().map(|e| e.0).collect::<Vec<_>>(),
+        [2, 6, 9, 4, 5],
+        "one exact v9 recipient wheel group, no duplicate axis or button"
+    );
+    assert_eq!(&events[0].1[1..], &[80 * 256, 60 * 256]);
+    assert_eq!(events[1].1, [0]); // wheel source
+    assert_eq!(events[2].1, [0, (step * 120) as u32]); // vertical, signed value120
+    assert_eq!(&events[3].1[1..], &[0, (step * 10 * 256) as u32]);
+    assert!(events[4].1.is_empty());
+}
+
+#[test]
+fn actual_wayland_control_scroll_tcp_click_type_both_directions_and_no_waiting_replay() {
+    let Some(mut gl) = HeadlessSmithayGles::new() else {
+        return;
+    };
+    let mut h = Harness::new_with_scroll(&mut gl, false, true, true, 9);
+    h.wait(
+        &mut gl,
+        "owned scroll viewer before initial presentation",
+        false,
+        |s| s.pointer.is_some() && s.keyboard.is_some() && !s.feedback.is_empty(),
+    );
+    h.wheel(-1);
+    h.wheel(1);
+    h.waiting_wheels_processed(&mut gl, 2);
+    assert_eq!(remote_control::attempts_for_test(&h.native.state), 0);
+    h.click_repaint_type(&mut gl);
+    assert_eq!(
+        h.received.pointer_actions.len(),
+        3,
+        "initial Waiting axes not replayed at grant"
+    );
+    // Keyboard invalidated its old pointer ticket. Repaint before the first
+    // scroll instead of borrowing the pre-key blue Ready.
+    h.repaint_and_ready(&mut gl, false);
+    let mut processed = 2;
+    for step in [-1, 1] {
+        let before = h.received.pointer_wire.len();
+        h.wheel(step);
+        processed += 1;
+        h.wait(
+            &mut gl,
+            "native selected recipient receives real +/-120 axis",
+            false,
+            |s| s.received.pointer_wire.len() >= before + 5,
+        );
+        assert_control_wheel_120(&h.received.pointer_wire[before..], step);
+        h.wait(&mut gl, "axis consumes shared Ready", false, |s| {
+            s.ready.lock().unwrap().is_none()
+                && s.scroll_frames.load(Ordering::Acquire) == processed
+        });
+        let after_axis = h.received.pointer_wire.clone();
+        h.wheel(1);
+        h.wheel(-1);
+        h.wheel(1);
+        processed += 3;
+        h.waiting_wheels_processed(&mut gl, processed);
+        assert_eq!(h.received.pointer_wire, after_axis);
+        let next = h.repaint_and_ready(&mut gl, true);
+        assert_eq!(
+            h.received.pointer_wire, after_axis,
+            "Waiting axes cannot turn into late input after a new exact frame"
+        );
+        eprintln!(
+            "owned control scroll {step}: exact new blue presented Ready {next}, bystander zero"
+        );
+        if step == -1 {
+            // Same authenticated session and same native bundle: scroll then
+            // type B on the new screen, then another scroll after new evidence.
+            h.key(120, 48, true);
+            h.key(122, 48, false);
+            h.wait(
+                &mut gl,
+                "post-scroll keyboard uses same original recipient",
+                true,
+                |s| s.received.keys.len() >= 4,
+            );
+            assert_eq!(h.received.keys, [(30, 1), (30, 0), (48, 1), (48, 0)]);
+            assert_eq!(h.received.pointer_wire, after_axis);
+            h.repaint_and_ready(&mut gl, false);
+        }
+    }
+    assert_eq!(h.received.keys, [(30, 1), (30, 0), (48, 1), (48, 0)]);
+    assert_eq!(remote_control::attempts_for_test(&h.native.state), 1);
+    let before = h.received.pointer_actions.clone();
+    let surface = viewer_surface(&h.local);
+    h.keyboard.as_ref().unwrap().leave(140, &surface);
+    h.local.roundtrip();
+    h.rejected(
+        &mut gl,
+        &[(30, 1), (30, 0), (48, 1), (48, 0)],
+        &before,
+        1,
+        "Wayland keyboard focus left",
+    );
+}
+
+#[test]
+fn actual_wayland_control_scroll_tcp_requires_both_explicit_permissions() {
+    let Some(mut gl) = HeadlessSmithayGles::new() else {
+        return;
+    };
+    Harness::new_with_scroll(&mut gl, false, false, true, 9).denied_scroll(&mut gl);
+    let mut h = Harness::new_with_scroll(&mut gl, false, true, false, 9);
+    h.activate(&mut gl);
+    h.wheel(1); // host permission alone cannot supply the viewer's omitted intent
+    h.rejected(
+        &mut gl,
+        &[],
+        &[],
+        1,
+        "Wayland scroll lacks permission or conflicts with held button",
+    );
+}
+
+#[test]
+fn actual_wayland_control_scroll_tcp_held_key_or_left_button_revokes_whole_bundle() {
+    let Some(mut gl) = HeadlessSmithayGles::new() else {
+        return;
+    };
+    for held_key in [true, false] {
+        let mut h = Harness::new_with_scroll(&mut gl, false, true, true, 9);
+        h.activate(&mut gl);
+        if held_key {
+            h.key(160, 42, true);
+            h.wait(
+                &mut gl,
+                "real original Shift-down before axis conflict",
+                false,
+                |s| !s.received.keys.is_empty(),
+            );
+            assert_eq!(h.received.keys, [(42, 1)]);
+            assert!(remote_control::active(&h.native.state));
+        } else {
+            let pointer = h.pointer.as_ref().unwrap();
+            pointer.button(161, 161, 0x110, ButtonState::Pressed);
+            pointer.frame();
+            // Ordered on the same real Wayland connection. No fake host key
+            // state, synthetic grant or local left-up conceals cancellation.
+        }
+        h.wheel(-1);
+        h.rejected(
+            &mut gl,
+            if held_key { &[(42, 1), (42, 0)] } else { &[] },
+            &[],
+            1,
+            if held_key {
+                "Wayland control pointer overlaps held keys"
+            } else {
+                "Wayland scroll lacks permission or conflicts with held button"
+            },
+        );
+    }
 }

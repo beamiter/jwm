@@ -160,7 +160,17 @@ pub(super) fn process(
                             None
                         }
                         ControlActionKind::Motion { x, y }
-                        | ControlActionKind::ClickLeft { x, y } => {
+                        | ControlActionKind::ClickLeft { x, y }
+                        | ControlActionKind::ScrollUp { x, y }
+                        | ControlActionKind::ScrollDown { x, y } => {
+                            if matches!(
+                                action.kind,
+                                ControlActionKind::ScrollUp { .. }
+                                    | ControlActionKind::ScrollDown { .. }
+                            ) && !sources.scroll_enabled.load(Ordering::Acquire)
+                            {
+                                return Err(invalid_data("control scroll not authorized").into());
+                            }
                             if !state.held.is_empty() || x >= size.0 || y >= size.1 {
                                 return Err(invalid_data(
                                     "control pointer conflicts with keys or bounds",

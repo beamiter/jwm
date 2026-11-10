@@ -113,6 +113,8 @@ pub enum ControlActionKind {
     Key { code: u16, pressed: bool },
     Motion { x: u16, y: u16 },
     ClickLeft { x: u16, y: u16 },
+    ScrollUp { x: u16, y: u16 },
+    ScrollDown { x: u16, y: u16 },
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ControlAction {
@@ -138,11 +140,16 @@ impl ControlAction {
                 b[41..43].copy_from_slice(&code.to_be_bytes());
                 b[43] = u8::from(pressed);
             }
-            ControlActionKind::Motion { x, y } | ControlActionKind::ClickLeft { x, y } => {
-                b[40] = if matches!(self.kind, ControlActionKind::Motion { .. }) {
-                    1
-                } else {
-                    2
+            ControlActionKind::Motion { x, y }
+            | ControlActionKind::ClickLeft { x, y }
+            | ControlActionKind::ScrollUp { x, y }
+            | ControlActionKind::ScrollDown { x, y } => {
+                b[40] = match self.kind {
+                    ControlActionKind::Motion { .. } => 1,
+                    ControlActionKind::ClickLeft { .. } => 2,
+                    ControlActionKind::ScrollUp { .. } => 3,
+                    ControlActionKind::ScrollDown { .. } => 4,
+                    _ => unreachable!(),
                 };
                 b[41..43].copy_from_slice(&x.to_be_bytes());
                 b[43..45].copy_from_slice(&y.to_be_bytes());
@@ -159,13 +166,15 @@ impl ControlAction {
                 code: u16::from_be_bytes([b[41], b[42]]),
                 pressed: b[43] != 0,
             },
-            1 | 2 if b[45..].iter().all(|v| *v == 0) => {
+            1..=4 if b[45..].iter().all(|v| *v == 0) => {
                 let x = u16::from_be_bytes([b[41], b[42]]);
                 let y = u16::from_be_bytes([b[43], b[44]]);
-                if b[40] == 1 {
-                    ControlActionKind::Motion { x, y }
-                } else {
-                    ControlActionKind::ClickLeft { x, y }
+                match b[40] {
+                    1 => ControlActionKind::Motion { x, y },
+                    2 => ControlActionKind::ClickLeft { x, y },
+                    3 => ControlActionKind::ScrollUp { x, y },
+                    4 => ControlActionKind::ScrollDown { x, y },
+                    _ => unreachable!(),
                 }
             }
             _ => return Err(invalid().into()),
@@ -206,7 +215,7 @@ impl ControlRevoke {
 mod tests {
     use super::*;
     #[test]
-    fn records_are_exact_and_do_not_admit_scroll_or_noncanonical_payloads() {
+    fn records_are_exact_and_reject_unknown_or_noncanonical_payloads() {
         let scope = DrawnScope {
             source_epoch: 1,
             geometry_epoch: 2,
@@ -228,6 +237,8 @@ mod tests {
             },
             ControlActionKind::Motion { x: 20, y: 30 },
             ControlActionKind::ClickLeft { x: 20, y: 30 },
+            ControlActionKind::ScrollUp { x: 20, y: 30 },
+            ControlActionKind::ScrollDown { x: 20, y: 30 },
         ] {
             let a = ControlAction {
                 scope,
@@ -242,7 +253,7 @@ mod tests {
             bad[47] = 1;
             assert!(ControlAction::decode(&bad).is_err());
             bad = b;
-            bad[40] = 3;
+            bad[40] = 5;
             assert!(ControlAction::decode(&bad).is_err());
             bad = b;
             bad[32..40].fill(0);

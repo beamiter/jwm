@@ -985,7 +985,7 @@ impl Dispatch<wl_registry::WlRegistry, ()> for State {
             } if version >= 1 => {
                 let bound = match interface.as_str() {
                     "jwm_remote_control_manager_v1" if state.control.manager.is_none() => {
-                        state.control.manager = Some(proxy.bind(name, 1, qh, ()));
+                        state.control.manager = Some(proxy.bind(name, version.min(2), qh, ()));
                         state.control.global = Some(name);
                         false
                     }

@@ -18,9 +18,10 @@ pub(super) struct NativeControl {
     accepted: u32,
     expected: Option<u32>,
     deadline: Option<Instant>,
+    scroll_enabled: bool,
 }
 impl WaylandCapture {
-    pub(in crate::remote) fn enable_control(&mut self) -> RemoteResult<()> {
+    pub(in crate::remote) fn enable_control(&mut self, scroll_enabled: bool) -> RemoteResult<()> {
         if self.state.frame_serial != 0
             || self.state.control.enabled
             || self.state.keyboard.enabled
@@ -30,6 +31,10 @@ impl WaylandCapture {
         {
             return Err(invalid("native control manager unavailable or enable too late").into());
         }
+        if scroll_enabled && self.state.control.manager.as_ref().unwrap().version() < 2 {
+            return Err(invalid("control scroll requires native manager version 2").into());
+        }
+        self.state.control.scroll_enabled = scroll_enabled;
         self.state.control.enabled = true;
         Ok(())
     }
@@ -105,11 +110,16 @@ impl WaylandCapture {
         }
         self.state.control.requested = true;
         let deadline = (Instant::now() + PROTOCOL_TIMEOUT).min(self.arm_deadline.unwrap());
-        let lease = self.state.control.manager.as_ref().unwrap().create_lease(
-            self.source.as_ref().unwrap(),
-            &self.queue.handle(),
-            (),
-        );
+        let manager = self.state.control.manager.as_ref().unwrap();
+        let lease = if self.state.control.scroll_enabled {
+            manager.create_lease_with_scroll(
+                self.source.as_ref().unwrap(),
+                &self.queue.handle(),
+                (),
+            )
+        } else {
+            manager.create_lease(self.source.as_ref().unwrap(), &self.queue.handle(), ())
+        };
         self.control_lease = Some(lease);
         self.await_control(deadline, |state| {
             state.digest.is_some() && state.epoch.is_some()
@@ -186,7 +196,17 @@ impl WaylandCapture {
                 }
                 lease.key(epoch, sequence, u32::from(code), u32::from(pressed));
             }
-            ControlActionKind::Motion { x, y } | ControlActionKind::ClickLeft { x, y } => {
+            ControlActionKind::Motion { x, y }
+            | ControlActionKind::ClickLeft { x, y }
+            | ControlActionKind::ScrollUp { x, y }
+            | ControlActionKind::ScrollDown { x, y } => {
+                if matches!(
+                    action.kind,
+                    ControlActionKind::ScrollUp { .. } | ControlActionKind::ScrollDown { .. }
+                ) && !self.state.control.scroll_enabled
+                {
+                    return Err(invalid("control scroll not authorized").into());
+                }
                 let (actual, at) = self
                     .control_frame()
                     .ok_or_else(|| invalid("missing control pointer frame"))?;
@@ -199,10 +219,12 @@ impl WaylandCapture {
                     epoch,
                     sequence,
                     self.retained_frame.as_ref().unwrap(),
-                    if matches!(action.kind, ControlActionKind::Motion { .. }) {
-                        0
-                    } else {
-                        1
+                    match action.kind {
+                        ControlActionKind::Motion { .. } => 0,
+                        ControlActionKind::ClickLeft { .. } => 1,
+                        ControlActionKind::ScrollUp { .. } => 2,
+                        ControlActionKind::ScrollDown { .. } => 3,
+                        _ => unreachable!(),
                     },
                     u32::from(x),
                     u32::from(y),

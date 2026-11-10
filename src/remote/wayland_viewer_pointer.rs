@@ -517,7 +517,11 @@ impl Dispatch<wl_pointer::WlPointer, ()> for State {
             && state.keyboard.held_keys()
             && matches!(
                 &event,
-                wl_pointer::Event::Motion { .. } | wl_pointer::Event::Button { .. }
+                wl_pointer::Event::Motion { .. }
+                    | wl_pointer::Event::Button { .. }
+                    | wl_pointer::Event::Axis { .. }
+                    | wl_pointer::Event::AxisSource { .. }
+                    | wl_pointer::Event::AxisDiscrete { .. }
             )
         {
             state

@@ -54,6 +54,32 @@ pub(crate) fn with_wayland_control_frame_observer<T>(
     let _reset = Reset;
     run()
 }
+#[cfg(all(test, feature = "backend-wayland-udev"))]
+thread_local! {
+    static CONTROL_SCROLL_OBSERVER: std::cell::RefCell<Option<std::sync::Arc<std::sync::atomic::AtomicU64>>> = const { std::cell::RefCell::new(None) };
+}
+/// Observe consumed native axis groups, including dropped Waiting groups.
+/// This count cannot authorize, present or enqueue an action.
+#[cfg(all(test, feature = "backend-wayland-udev"))]
+pub(crate) fn with_wayland_control_scroll_observer<T>(
+    observer: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    run: impl FnOnce() -> T,
+) -> T {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            CONTROL_SCROLL_OBSERVER.with(|slot| {
+                slot.borrow_mut().take();
+            });
+        }
+    }
+    CONTROL_SCROLL_OBSERVER.with(|slot| {
+        assert!(slot.borrow().is_none());
+        *slot.borrow_mut() = Some(observer);
+    });
+    let _reset = Reset;
+    run()
+}
 const TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_PIXELS: u64 = 16 * 1024 * 1024;
 const MAX_RETAINED_BYTES: usize = 128 * 1024 * 1024;
@@ -475,6 +501,15 @@ impl WaylandViewer {
     fn pump(&mut self) -> RemoteResult<bool> {
         let work = pump_connection(&self.conn, &mut self.queue, &mut self.state)?;
         self.state.control_collect();
+        #[cfg(all(test, feature = "backend-wayland-udev"))]
+        CONTROL_SCROLL_OBSERVER.with(|slot| {
+            if let Some(observer) = slot.borrow().as_ref() {
+                observer.store(
+                    self.state.pointer.scroll_frames_observed,
+                    std::sync::atomic::Ordering::Release,
+                );
+            }
+        });
         if self.state.pending.as_ref().is_some_and(|p| p.presented) {
             self.state.pending = None;
         }
@@ -518,7 +553,10 @@ impl WaylandViewer {
         }
         Ok(())
     }
-    pub(super) fn enable_wayland_control(&mut self) -> RemoteResult<[u8; 32]> {
+    pub(super) fn enable_wayland_control(
+        &mut self,
+        scroll_enabled: bool,
+    ) -> RemoteResult<[u8; 32]> {
         if self.state.keyboard.requested || self.state.pointer.requested || self.state.control_mode
         {
             return Err(
@@ -535,6 +573,7 @@ impl WaylandViewer {
             return Err("Wayland control requires a frame-capable seat".into());
         }
         self.state.control_mode = true;
+        self.state.pointer.scroll_enabled = scroll_enabled;
         self.state.keyboard.requested = true;
         self.state.pointer.requested = true;
         self.state.keyboard.surface = Some(self.surface.clone());
@@ -731,6 +770,20 @@ impl WaylandViewer {
         }
         // A rising Ready gate must not promote scroll already queued by the
         // compositor while Waiting. Keep admission closed through a real sync.
+        if self.state.control_mode {
+            // These edges may already have left Pointer.completed for the
+            // ordered combined queue. A new gate cannot authorize old scroll.
+            self.state.control_events.retain(|event| {
+                !matches!(
+                    event,
+                    ViewerEvent::WaylandPointer {
+                        kind: super::x11_viewer::WaylandPointerEventKind::ScrollUp
+                            | super::x11_viewer::WaylandPointerEventKind::ScrollDown,
+                        ..
+                    }
+                )
+            });
+        }
         self.state.pointer.set_ready(None);
         if sequence.is_none() || self.state.pointer.revoked.is_some() {
             return Ok(());

@@ -1878,14 +1878,16 @@ fn listener_security_notice(address: IpAddr) -> Option<&'static str> {
 }
 
 fn validate_window_policy(options: &HostOptions) -> RemoteResult<()> {
-    if options.allow_wayland_scroll && !options.allow_wayland_pointer {
+    if options.allow_wayland_scroll
+        && !options.allow_wayland_pointer
+        && !options.allow_wayland_control
+    {
         return Err(invalid_data("Wayland scroll requires explicit pointer permission").into());
     }
     if usize::from(options.allow_wayland_keyboard)
         + usize::from(options.allow_wayland_pointer)
         + usize::from(options.allow_wayland_control)
         > 1
-        || (options.allow_wayland_control && options.allow_wayland_scroll)
     {
         return Err(invalid_data("native leases are mutually exclusive").into());
     }
@@ -2425,22 +2427,21 @@ fn serve_authenticated(
         hello.stream.wayland_keyboard && options.allow_wayland_keyboard;
     negotiated_stream.wayland_pointer =
         hello.stream.wayland_pointer && options.allow_wayland_pointer;
-    negotiated_stream.wayland_scroll = hello.stream.wayland_scroll
-        && options.allow_wayland_scroll
-        && negotiated_stream.wayland_pointer;
     negotiated_stream.wayland_control =
         hello.stream.wayland_control && options.allow_wayland_control;
+    negotiated_stream.wayland_scroll = hello.stream.wayland_scroll
+        && options.allow_wayland_scroll
+        && (negotiated_stream.wayland_pointer || negotiated_stream.wayland_control);
     if negotiated_stream.wayland_control {
         if hello.request_input
             || hello.request_clipboard
             || hello.stream.window_resize
             || hello.stream.wayland_keyboard
             || hello.stream.wayland_pointer
-            || hello.stream.wayland_scroll
         {
             return Err(invalid_data("control cannot combine other input capabilities").into());
         }
-        capture.enable_control()?;
+        capture.enable_control(negotiated_stream.wayland_scroll)?;
     }
     if negotiated_stream.wayland_pointer {
         if hello.request_input

@@ -78,7 +78,7 @@ source switching or automatic input grab. A saved profile cannot grant it.
 The default remains view-only. The selected target must already have exact
 native keyboard focus: the remote path never changes focus to obtain access.
 
-Current protocol v20 retains the independent keyboard capability introduced
+Current protocol v21 retains the independent keyboard capability introduced
 in v16 and the pointer capability introduced in v17; scrolling has its own v18
 opt-in. After the first frame is actually reported presented by the viewer, it
 requests one keyboard lease for
@@ -361,7 +361,7 @@ This is a separate, default-off authorization, not a combination of the old
 keyboard and pointer flags. The host explicitly selects one surface with
 `host --wayland-select --once --allow-wayland-control`. The viewer explicitly
 uses `connect HOST --viewer-backend wayland --wayland-control`. Both peers must
-use application protocol **v20** (31-byte capabilities). Older peers are rejected;
+use application protocol **v21** (31-byte capabilities). Older peers are rejected;
 there is no protocol downgrade. Transport encryption remains version 2.
 
 The bundle has one native resource, source owner/instance, epoch, cross-type
@@ -381,9 +381,8 @@ updates, but any held key blocks a real pointer action. Pointer gestures also
 block keyboard input. Overlap ends the whole session rather than guessing order.
 
 Supported actions are keyboard edges, absolute motion and an atomic left click
-from the viewer's own bounded down/up gesture. There is **no wheel, drag,
-modifier-click, clipboard, resize/follow-size, reconnect or stored profile
-permission** in this mode. The independent scroll-copy video codec option grants
+from the viewer's own bounded down/up gesture. There is **no implicit wheel permission, drag, modifier-click, clipboard,
+resize/follow-size, reconnect or stored profile permission** in this mode. The independent scroll-copy video codec option grants
 no input permission. The global cursor and unrelated surfaces are not recipients.
 
 Focus loss on either viewer device, seat/keymap changes, source remapping or
@@ -405,3 +404,36 @@ held-key/pointer conflicts with cleanup only on the original target. Until these
 checks run on the final commit, compilation alone is not a runtime pass. These
 owned offscreen/software-renderer tests do not establish physical DRM/GPU,
 two-machine or input-to-visible latency acceptance.
+
+
+### Separately authorized discrete wheel in a unified session
+
+Add `--allow-wayland-scroll` to the host's `--allow-wayland-control` and
+`--wayland-scroll` to the native viewer's `--wayland-control` to opt in on both
+ends. Omitting either permission must not silently enable wheel input. The
+same flags still work with the separate pointer-only mode; a keyboard-only or
+read-only mode cannot request them. Protocol v21 is required on both network
+peers. The native control manager must support version 2 for its separate
+`create_lease_with_scroll` request; an older manager is rejected, not treated as
+permission. Ordinary `create_lease` remains wheel-disabled even on version 2.
+
+Only a real Wheel-source, single vertical discrete notch of +1 or -1, with a
+finite nonzero matching axis value in the same completed pointer frame, is
+accepted. Both source orderings within that frame are supported. No smooth,
+horizontal, multi-notch, continuous, missing-source or malformed axis event is
+converted into a guessed notch. The target receives one native vertical wheel
+action, scoped to the same surface and sequence as keyboard/click input.
+
+Each wheel action consumes its fresh frame ticket. A new actual capture and
+viewer presentation are needed before another pointer action. Events observed
+while Waiting are dropped rather than accumulated or replayed later. Opening
+Ready includes a real same-connection fence with the input gate closed, so old
+queued axis groups cannot inherit a newly available ticket. Any held remote key
+or observed viewer left button forbids scrolling and revokes the bundle; scrolling
+never grants modifier-wheel or drag behavior. The original lease expiry, source,
+focus and local-takeover revocations are unchanged and never renew the deadline.
+
+Dedicated owned-server regression fixtures exercise actual wheel recipients,
+both directions and new-pixel feedback, alongside old-permission, stale-frame,
+Waiting and held-input negative cases. As elsewhere, this is software-rendered
+protocol/transport verification, not physical input or two-machine acceptance.

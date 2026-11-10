@@ -8,7 +8,7 @@ use super::x11_keymap::{KeymapTable, MAX_ENCODED_KEYMAP_LEN};
 use std::io;
 
 const APPLICATION_MAGIC: &[u8; 8] = b"JWMREM01";
-pub const APPLICATION_VERSION: u16 = 20;
+pub const APPLICATION_VERSION: u16 = 21;
 const HELLO_PREFIX_LEN: usize = 11;
 const STREAM_CAPABILITIES_LEN: usize = 31;
 const SERVER_HELLO_LEN: usize = HELLO_PREFIX_LEN + STREAM_CAPABILITIES_LEN;
@@ -198,10 +198,9 @@ impl StreamCapabilities {
                 && (payload[25] != 0
                     || payload[26] != 0
                     || payload[27] != 0
-                    || payload[28] != 0
                     || payload[23] != 0
                     || payload[24] != 0))
-            || (payload[28] == 1 && payload[27] != 1)
+            || (payload[28] == 1 && (payload[26] == 1 || (payload[27] != 1 && payload[30] != 1)))
             || (payload[26] == 1 && payload[27] == 1)
             || (payload[23] == 0) != (payload[24] == 0)
         {
@@ -1037,7 +1036,7 @@ mod tests {
             ClientHello::decode(&legacy).unwrap_err(),
             ServerHello::decode(&legacy).unwrap_err(),
         ] {
-            assert!(error.to_string().contains("version 6; expected 20"));
+            assert!(error.to_string().contains("version 6; expected 21"));
         }
     }
 
@@ -1195,24 +1194,26 @@ mod tests {
             clipboard_files_enabled: false,
         }
         .encode();
-        assert_eq!(&payload[8..10], &20_u16.to_be_bytes());
+        assert_eq!(&payload[8..10], &21_u16.to_be_bytes());
 
         // Version 5 had no clipboard transfer records: a version-5 peer
         // would end the session on the first copied image or file. It must
         // fail on its version instead. Version 4 sent one digest of the whole
         // keymap where later versions send a per-keycode table.
-        for older in [4_u16, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19] {
+        for older in [
+            4_u16, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
+        ] {
             let mut previous = payload;
             previous[8..10].copy_from_slice(&older.to_be_bytes());
             let error = ServerHello::decode(&previous).unwrap_err();
             assert!(
                 error
                     .to_string()
-                    .contains(&format!("application version {older}; expected 20"))
+                    .contains(&format!("application version {older}; expected 21"))
             );
         }
 
-        for rejected in [0_u16, 2, 3, 21, u16::MAX] {
+        for rejected in [0_u16, 2, 3, 22, u16::MAX] {
             let mut other = payload;
             other[8..10].copy_from_slice(&rejected.to_be_bytes());
             assert!(
@@ -1622,8 +1623,8 @@ mod tests {
 mod scroll_capability_tests {
     use super::*;
     #[test]
-    fn scroll_is_explicit_boolean_and_requires_pointer_in_version_20() {
-        assert_eq!(APPLICATION_VERSION, 20);
+    fn scroll_is_explicit_boolean_and_requires_pointer_or_control_in_version_21() {
+        assert_eq!(APPLICATION_VERSION, 21);
         assert_eq!(STREAM_CAPABILITIES_LEN, 31);
         let mut caps = StreamCapabilities::default();
         assert!(
@@ -1687,7 +1688,15 @@ mod control_capability_tests {
             bad[30] = v;
             assert!(StreamCapabilities::decode(&bad).is_err());
         }
-        for index in [23, 24, 25, 26, 27, 28] {
+        let mut scroll = caps;
+        scroll.wayland_scroll = true;
+        assert_eq!(
+            StreamCapabilities::decode(&scroll.encode()).unwrap(),
+            scroll
+        );
+        scroll.wayland_keyboard = true;
+        assert!(StreamCapabilities::decode(&scroll.encode()).is_err());
+        for index in [23, 24, 25, 26, 27] {
             let mut bad = bytes;
             bad[index] = 1;
             assert!(StreamCapabilities::decode(&bad).is_err());

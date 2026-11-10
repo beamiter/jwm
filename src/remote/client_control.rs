@@ -3,6 +3,7 @@ use super::*;
 use crate::remote::wayland_control_wire::*;
 #[derive(Default)]
 pub(super) struct ClientControl {
+    pub(super) scroll_enabled: bool,
     pub(super) digest: Option<[u8; 32]>,
     request: Option<(ControlRequest, Instant)>,
     pub(super) epoch: Option<u64>,
@@ -221,7 +222,9 @@ impl ClientControl {
                 if !self.held.is_empty() {
                     return Err(invalid_data("control pointer conflicts with held keys").into());
                 }
-                if matches!(pk, P::ScrollUp | P::ScrollDown) {
+                if matches!(pk, P::ScrollUp | P::ScrollDown)
+                    && (!self.scroll_enabled || self.left_down || self.click.is_some())
+                {
                     return Err(invalid_data("control does not authorize scroll").into());
                 }
                 if pk == P::LeftDown {
@@ -262,7 +265,8 @@ impl ClientControl {
                         return Ok(None);
                     }
                     P::Motion => kind = ControlActionKind::Motion { x, y },
-                    _ => unreachable!(),
+                    P::ScrollUp => kind = ControlActionKind::ScrollUp { x, y },
+                    P::ScrollDown => kind = ControlActionKind::ScrollDown { x, y },
                 }
                 self.ready = None;
                 self.click = None;
@@ -457,5 +461,52 @@ mod tests {
         c.revoke();
         assert!(c.ready_sequence().is_none());
         assert!(!c.needs_request());
+    }
+    #[test]
+    fn scroll_needs_consent_and_each_notch_consumes_a_fresh_ticket() {
+        use super::super::super::x11_viewer::WaylandPointerEventKind as P;
+        fn wheel(frame: u64, kind: P) -> ViewerEvent {
+            let mut e = motion(frame);
+            if let ViewerEvent::WaylandPointer { kind: k, .. } = &mut e {
+                *k = kind;
+            }
+            e
+        }
+        let mut c = granted();
+        ready(&mut c, 1);
+        assert!(c.event(&wheel(1, P::ScrollUp), Instant::now()).is_err());
+        c.scroll_enabled = true;
+        let a = c
+            .event(&wheel(1, P::ScrollUp), Instant::now())
+            .unwrap()
+            .unwrap();
+        assert_eq!(a.kind, ControlActionKind::ScrollUp { x: 10, y: 10 });
+        assert_eq!(a.sequence, 1);
+        for _ in 0..3 {
+            assert!(
+                c.event(&wheel(1, P::ScrollDown), Instant::now())
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        ready(&mut c, 2);
+        assert_eq!(c.sequence, 1); // Waiting notches were not queued or replayed.
+        assert!(
+            c.event(&wheel(1, P::ScrollDown), Instant::now())
+                .unwrap()
+                .is_none()
+        );
+        let a = c
+            .event(&wheel(2, P::ScrollDown), Instant::now())
+            .unwrap()
+            .unwrap();
+        assert_eq!(a.sequence, 2);
+        assert_eq!(a.kind, ControlActionKind::ScrollDown { x: 10, y: 10 });
+        ready(&mut c, 3);
+        c.held.insert(42);
+        assert!(c.event(&wheel(3, P::ScrollUp), Instant::now()).is_err());
+        c.held.clear();
+        c.left_down = true;
+        assert!(c.event(&wheel(3, P::ScrollUp), Instant::now()).is_err());
     }
 }

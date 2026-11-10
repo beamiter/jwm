@@ -76,7 +76,9 @@ struct Fixture {
 }
 impl Fixture {
     fn new() -> Self {
-        let version = 7;
+        Self::with_scroll(7, 1, false)
+    }
+    fn with_scroll(version: u32, manager_version: u32, scroll: bool) -> Self {
         let mut server = Server::new();
         server.state.image_capture_pending =
             Some(init_image_copy_capture(&server.display.handle()));
@@ -88,9 +90,15 @@ impl Fixture {
         focus(&mut server, &app);
         events(&mut app.client);
         events(&mut other.client);
-        let manager = capture.client.bind("jwm_remote_control_manager_v1", 1);
+        let manager = capture
+            .client
+            .bind("jwm_remote_control_manager_v1", manager_version);
         let lease = capture.client.new_id();
-        capture.client.request(manager, 1, &[lease, capture.source]);
+        capture.client.request(
+            manager,
+            if scroll { 2 } else { 1 },
+            &[lease, capture.source],
+        );
         sync(&mut server);
         let grant = events(&mut capture.client)
             .into_iter()
@@ -549,5 +557,200 @@ fn wire_control_legacy_first_and_consumed_source_cannot_join_bundle() {
         assert!(!ev.iter().any(|e| e.sender == bundle && e.opcode == 1));
         assert!(f.target_keys().is_empty());
         f.other_empty();
+    }
+}
+
+#[test]
+fn wire_control_scroll_explicit_grant_versions_and_both_directions() {
+    let Some(mut gl) = HeadlessSmithayGles::new() else {
+        return;
+    };
+    for version in [4, 5, 7, 8, 9] {
+        let mut f = Fixture::with_scroll(version, 2, true);
+        let pointer = f.server.state.seat.get_pointer().unwrap();
+        let keyboard = f.server.state.seat.get_keyboard().unwrap();
+        let old_location = pointer.current_location();
+        let old_focus = pointer.current_focus();
+        let old_keyboard_focus = keyboard.current_focus();
+        let frame = f.frame(&mut gl);
+        f.arm(frame);
+        for (sequence, kind, direction) in [(1, 2, -1i32), (2, 3, 1i32)] {
+            let frame = if sequence == 1 {
+                frame
+            } else {
+                f.frame(&mut gl)
+            };
+            let result = f.action(sequence, frame, kind, 40, 30);
+            f.accepted(&result, sequence);
+            // Inspect the entire target stream before filtering: scroll must not
+            // manufacture keyboard edges or extra pointer enter/button events.
+            let events = events(&mut f.app.client);
+            assert!(!events.iter().any(|e| e.sender == f.keyboard));
+            let delivered: Vec<_> = events.iter().filter(|e| e.sender == f.pointer).collect();
+            let expected: &[u16] = if version >= 8 {
+                &[2, 6, 9, 4, 5]
+            } else if version >= 5 {
+                &[2, 6, 8, 4, 5]
+            } else {
+                &[2, 4]
+            };
+            assert_eq!(
+                delivered.iter().map(|e| e.opcode).collect::<Vec<_>>(),
+                expected,
+                "receiver version {version}"
+            );
+            assert_eq!(delivered[0].args[1..], [40 * 256, 30 * 256]);
+            if version >= 5 {
+                assert_eq!(delivered[1].args, [0]);
+                assert_eq!(
+                    delivered[2].args,
+                    [0, (direction * if version >= 8 { 120 } else { 1 }) as u32]
+                );
+                assert!(delivered.last().unwrap().args.is_empty());
+            }
+            let axis = delivered.iter().find(|e| e.opcode == 4).unwrap();
+            assert_eq!(axis.args.len(), 3);
+            assert_eq!(axis.args[1..], [0, (direction * 10 * 256) as u32]);
+            f.other_empty();
+            assert_eq!(pointer.current_location(), old_location);
+            assert_eq!(pointer.current_focus(), old_focus);
+            assert_eq!(keyboard.current_focus(), old_keyboard_focus);
+            assert!(!pointer.is_grabbed());
+            assert!(!keyboard.is_grabbed());
+            assert!(keyboard.pressed_keys().is_empty());
+        }
+    }
+}
+
+#[test]
+fn wire_control_scroll_v1_and_v2_ordinary_create_never_authorize_axis() {
+    let Some(mut gl) = HeadlessSmithayGles::new() else {
+        return;
+    };
+    for manager in [1, 2] {
+        for kind in [2, 3] {
+            let mut f = Fixture::with_scroll(9, manager, false);
+            let frame = f.frame(&mut gl);
+            f.arm(frame);
+            let result = f.action(1, frame, kind, 40, 30);
+            f.denied(&result);
+            let late = f.key(2, 30, true);
+            assert!(!late.iter().any(|e| e.sender == f.lease && e.opcode == 3));
+            assert!(f.target_keys().is_empty());
+            f.other_empty();
+        }
+    }
+}
+
+#[test]
+fn wire_control_scroll_held_shift_revokes_and_cleans_only_original_keys() {
+    let Some(mut gl) = HeadlessSmithayGles::new() else {
+        return;
+    };
+    for kind in [2, 3] {
+        let mut f = Fixture::with_scroll(9, 2, true);
+        let frame = f.frame(&mut gl);
+        f.arm(frame);
+        let result = f.key(1, 42, true);
+        f.accepted(&result, 1);
+        assert_eq!(f.target_keys(), [(42, 1)]);
+        let frame = f.frame(&mut gl);
+        let result = f.action(2, frame, kind, 40, 30);
+        assert!(result.iter().any(|e| e.sender == f.lease && e.opcode == 4));
+        let target = events(&mut f.app.client);
+        assert_eq!(
+            target
+                .iter()
+                .filter(|e| e.sender == f.keyboard && e.opcode == 3)
+                .map(|e| (e.args[2], e.args[3]))
+                .collect::<Vec<_>>(),
+            [(42, 0)]
+        );
+        assert!(!target.iter().any(|e| e.sender == f.pointer));
+        f.other_empty();
+        assert!(!super::active(&f.server.state));
+    }
+}
+
+#[test]
+fn wire_control_scroll_replay_prequeued_and_prekey_frame_never_deliver() {
+    let Some(mut gl) = HeadlessSmithayGles::new() else {
+        return;
+    };
+    for case in 0..4 {
+        let mut f = Fixture::with_scroll(9, 2, true);
+        let frame = f.frame(&mut gl);
+        f.arm(frame);
+        let queued = if case == 1 { f.frame(&mut gl) } else { frame };
+        let (seq, proof) = if case == 3 {
+            let result = f.key(1, 30, true);
+            f.accepted(&result, 1);
+            assert_eq!(f.target_keys(), [(30, 1)]);
+            let result = f.key(2, 30, false);
+            f.accepted(&result, 2);
+            assert_eq!(f.target_keys(), [(30, 0)]);
+            (3, frame)
+        } else {
+            let result = f.action(1, frame, 2, 40, 30);
+            f.accepted(&result, 1);
+            let delivered = pointer_events(&mut f.app, f.pointer);
+            assert!(delivered.iter().any(|e| e.0 == 9));
+            f.other_empty();
+            (if case == 2 { 1 } else { 2 }, queued)
+        };
+        let result = f.action(seq, proof, 3, 40, 30);
+        f.denied(&result);
+        let again = f.action(seq + 1, proof, 2, 40, 30);
+        assert!(!again.iter().any(|e| e.sender == f.lease && e.opcode == 3));
+        assert!(pointer_events(&mut f.app, f.pointer).is_empty());
+        f.other_empty();
+    }
+}
+
+#[test]
+fn wire_control_scroll_wrong_source_and_expired_frame_cannot_deliver() {
+    use crate::backend::wayland_udev::image_copy_capture::CaptureFrameData;
+    use smithay::reexports::wayland_protocols::ext::image_copy_capture::v1::server::ext_image_copy_capture_frame_v1::ExtImageCopyCaptureFrameV1;
+    use smithay::reexports::wayland_server::Resource;
+    use std::time::{Duration, Instant};
+    let Some(mut gl) = HeadlessSmithayGles::new() else {
+        return;
+    };
+    for expired in [false, true] {
+        let mut f = Fixture::with_scroll(9, 2, true);
+        let valid = f.frame(&mut gl);
+        f.arm(valid);
+        let original = f.capture.source;
+        if !expired {
+            let source = f.capture.client.new_id();
+            f.capture
+                .client
+                .request(f.capture.sources, 0, &[source, f.capture.handle]);
+            sync(&mut f.server);
+            f.capture.source = source;
+        }
+        let frame = f.frame(&mut gl);
+        f.capture.source = original;
+        if expired {
+            // Alter only the fixture timestamp of a genuinely rendered frame;
+            // no fake ready bit or capture receipt is introduced.
+            let lease = f.server.state.remote_control.active.as_ref().unwrap();
+            let native: ExtImageCopyCaptureFrameV1 = lease
+                .resource
+                .client()
+                .unwrap()
+                .object_from_protocol_id(&f.server.display.handle(), frame)
+                .unwrap();
+            let mut stamp = native
+                .data::<CaptureFrameData>()
+                .unwrap()
+                .ready_stamp
+                .lock()
+                .unwrap();
+            let (serial, _) = stamp.unwrap();
+            *stamp = Some((serial, Instant::now() - Duration::from_secs(2)));
+        }
+        let result = f.action(1, frame, 2, 40, 30);
+        f.denied(&result);
     }
 }

@@ -327,6 +327,10 @@ impl Viewer {
     }
     #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
     pub(super) fn observe_control_state(&self, sequence: Option<u64>) {
+        let sequence = match self {
+            Self::Wayland(viewer) => sequence.filter(|seq| viewer.local_scroll_ready(*seq)),
+            Self::X11(_) => None,
+        };
         TEST_WAYLAND_CONTROL_OBSERVER.with(|slot| {
             if let Some(observer) = slot.borrow().as_ref() {
                 *observer.lock().unwrap() = sequence;
@@ -334,10 +338,13 @@ impl Viewer {
         });
     }
     #[cfg(feature = "remote-wayland")]
-    pub(super) fn enable_wayland_control(&mut self) -> RemoteResult<[u8; 32]> {
+    pub(super) fn enable_wayland_control(
+        &mut self,
+        scroll_enabled: bool,
+    ) -> RemoteResult<[u8; 32]> {
         match self {
             Self::X11(_) => Err("combined control requires native Wayland viewer".into()),
-            Self::Wayland(v) => v.enable_wayland_control(),
+            Self::Wayland(v) => v.enable_wayland_control(scroll_enabled),
         }
     }
     #[cfg(feature = "remote-wayland")]

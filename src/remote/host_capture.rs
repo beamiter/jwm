@@ -15,11 +15,12 @@ pub(super) enum HostCapture {
 }
 
 impl HostCapture {
-    pub(super) fn enable_control(&mut self) -> RemoteResult<()> {
+    pub(super) fn enable_control(&mut self, scroll_enabled: bool) -> RemoteResult<()> {
         #[cfg(feature = "remote-wayland")]
         if let Self::Wayland(c) = self {
-            return c.enable_control();
+            return c.enable_control(scroll_enabled);
         }
+        let _ = scroll_enabled;
         Err(std::io::Error::other("native control unavailable").into())
     }
     pub(super) fn arm_control(&mut self, digest: [u8; 32]) -> RemoteResult<u64> {
