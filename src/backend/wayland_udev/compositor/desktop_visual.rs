@@ -54,9 +54,16 @@ pub(super) struct DesktopVisualLayer {
     routes: Vec<DesktopVisualLayer>,
     route_configuration: Vec<(String, [f32; 4], PathBuf)>,
     waker: Arc<dyn Fn() + Send + Sync>,
+    #[cfg(test)]
+    wake_count: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl DesktopVisualLayer {
+    #[cfg(test)]
+    pub(super) fn wake_count_for_test(&self) -> usize {
+        self.wake_count.load(std::sync::atomic::Ordering::Acquire)
+    }
+
     pub(super) fn visible(&self) -> bool {
         self.own_visible() || self.routes.iter().any(Self::visible)
     }
@@ -127,7 +134,17 @@ impl WaylandCompositor {
         };
         let server = Server::bind(path.clone(), output).map_err(|error| error.to_string())?;
         let program = unsafe { create_program(gl, shaders::VERTEX_SHADER, FRAGMENT_SHADER)? };
-        let waker: Arc<dyn Fn() + Send + Sync> = Arc::new(move || signal.wakeup());
+        #[cfg(test)]
+        let wake_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        #[cfg(test)]
+        let observed_wake_count = Arc::clone(&wake_count);
+        let waker: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+            signal.wakeup();
+            // Observe completion only; never inject a notification or alter the
+            // production handoff. Server::wake increments revision before this.
+            #[cfg(test)]
+            observed_wake_count.fetch_add(1, std::sync::atomic::Ordering::Release);
+        });
         server.set_waker(waker.clone());
         self.desktop_visual = Some(DesktopVisualLayer {
             server,
@@ -143,6 +160,8 @@ impl WaylandCompositor {
             routes: Vec::new(),
             route_configuration: Vec::new(),
             waker,
+            #[cfg(test)]
+            wake_count,
         });
         Ok(())
     }
@@ -252,6 +271,8 @@ impl WaylandCompositor {
                 routes: Vec::new(),
                 route_configuration: Vec::new(),
                 waker: root.waker.clone(),
+                #[cfg(test)]
+                wake_count: Arc::clone(&root.wake_count),
             });
             changed = true;
         }
