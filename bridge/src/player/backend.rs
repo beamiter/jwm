@@ -109,6 +109,13 @@ impl Controller {
     }
 }
 
+// mpv acknowledges playlist selection before asynchronous file loading finishes.
+// An idle player can therefore already have a selected entry that must not be
+// replaced by a later enqueue request. Only an unselected queue needs starting.
+fn enqueue_should_start(idle: bool, playlist_pos: i64) -> bool {
+    idle && playlist_pos == -1
+}
+
 impl Worker {
     pub(super) fn spawn_inner(
         self,
@@ -478,6 +485,16 @@ impl Mpv {
             );
         }
         let idle = self.get("idle-active")?.as_bool().unwrap_or(true);
+        let start_enqueued = if open.enqueue && idle {
+            let selected = self
+                .get("playlist-pos")?
+                .as_i64()
+                .filter(|position| *position >= -1)
+                .ok_or("mpv returned an invalid playlist position")?;
+            enqueue_should_start(idle, selected)
+        } else {
+            false
+        };
         // Local normalization happens at every API boundary, not in a shell.
         // loadfile with just replace/append works before and after mpv 0.38.
         for (index, file) in open.files.iter().enumerate() {
@@ -498,11 +515,11 @@ impl Mpv {
         if !open.enqueue {
             self.resume_index = 0;
         }
-        if open.enqueue && idle {
+        if start_enqueued {
             self.command(json!(["set_property", "playlist-pos", count]))?;
             self.resume_index = count;
         }
-        if !open.enqueue || idle {
+        if !open.enqueue || start_enqueued {
             self.command(json!(["set_property", "pause", false]))?;
         }
         Ok(())
@@ -800,6 +817,22 @@ impl Drop for Mpv {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn enqueue_does_not_reselect_a_track_while_initial_loading_is_pending() {
+        // First launch selected index 0, but file-loaded has not arrived yet.
+        // A forwarded enqueue must append, not skip to its new index 1.
+        assert!(!enqueue_should_start(true, 0));
+        assert!(!enqueue_should_start(true, 4));
+        assert!(!enqueue_should_start(false, 0));
+    }
+
+    #[test]
+    fn enqueue_starts_a_genuinely_idle_unselected_playlist() {
+        assert!(enqueue_should_start(true, -1));
+        assert!(!enqueue_should_start(false, -1));
+        assert!(!enqueue_should_start(true, -2));
+    }
 
     #[test]
     fn fragmented_events_and_unrelated_replies_do_not_confuse_command_reply() {
