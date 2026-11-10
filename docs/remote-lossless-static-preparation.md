@@ -346,21 +346,42 @@ zero.
 | +7 pixels | 35 / 11,374 | 10 / 1,950 |
 
 These bytes are the subsequent tile repair record, not total session or
-transport traffic. The local pure suite reported 48 passed and three ignored;
-real authenticated TCP/viewer GL coverage for this candidate is still awaiting
-CI. The result is a smaller repair workload, not a latency or speed guarantee.
+transport traffic. The revised local pure suite reported 51 passed and three ignored.
+The initial `44ff992a` candidate passed the real authenticated TCP/GL
+bidirectional scroll regression, but its separate strict 500 ms blink
+regression missed the deadline by 9.68 ms in Wayland run 42912464865.
+That candidate is not being merged, and the deadline is unchanged. The
+replacement identity-check design still requires its own complete CI run. The result is a smaller repair workload, not a latency or speed guarantee.
 
-The candidate also adds full-frame equality checking and encode/commit capture
-hash work to protect the exactness claim. Capture hashing covers RGB, encoded
-and source dimensions, and geometry epoch. Commit rechecks identity after the
-caller has successfully flushed; mismatch invalidates the reference rather
-than declaring pixels exact. This work has a CPU cost, including on records
-that cannot benefit from propagation. Commit-side hashing is **not included in
-`encode_ns`**, so encode timing alone cannot quantify the total cost.
+### Identity-check cost correction
 
-The one-run pure test's combined scroll-and-repair elapsed samples were
-17.10→6.93 ms for −7 and 18.00→8.44 ms for +7. This test timer includes planning,
-encoding, decoding, commit and correctness checks, rather than isolating codec
-CPU or measuring presentation. It is not a repeated controlled performance
-estimate. Full-frame identity checks, per-record hashing and eventual real
-pipeline costs must remain visible when judging the byte savings.
+The initial `44ff` candidate added two full-frame SHA computations for
+JPEG/keepalive transactions, in addition to equality checking. That cost was
+too high and this design is not being merged. The replacement binds the owned
+observed snapshot to pending generation/scope metadata and uses two equality
+checks for those transactions instead. The existing PNG capture hash remains
+unchanged. Commit still checks the pending identity after successful flush;
+invalid identity must not promote exactness or adopt a mismatched reference.
+Commit-side checking is **not included in `encode_ns`**, so encode timing alone
+cannot measure the complete cost.
+
+A separate 64-round, hot-cache primitive comparison produced these aggregate
+medians. The numbers compare checking mechanisms, not complete codec pipelines:
+
+| RGB size | Original equality + two hashes, release ms | Snapshot/scope + two equalities, release ms | Original / replacement debug ms |
+| --- | --- | --- | --- |
+| 800×600 | 1.692 | 0.068 | 101.391 / 0.057 |
+| 1280×720 | 3.232 | 0.129 | 198.813 / 0.111 |
+| 1920×1080 | 7.292 | 0.318 | 434.173 / 0.277 |
+
+These allowlisted aggregates preserve the cost lesson without publishing raw
+logs or runtime paths. They do not include cold-cache behavior, complete
+snapshot allocation/copy costs, transport or presentation, and do not predict
+end-to-end speedup. The replacement still has full-frame memory traffic.
+
+The earlier pure codec test's combined scroll-and-repair samples were
+17.10→6.93 ms for −7 and 18.00→8.44 ms for +7. Those samples belong to the
+initial checking design, not a measurement of its replacement. Their timer
+included planning, encoding, decoding, commit and assertions. The demonstrated
+repair-byte reduction and final SSE=0 must not be turned into a latency promise;
+the revised implementation requires its own integration validation.

@@ -118,3 +118,36 @@ reason to change defaults from this run alone. Compare quiet settings at fixed
 pacing and pacing at fixed quiet time, retaining each session and the prior
 three-run counterexamples. These are synthetic software-pipeline observations,
 including fixture scheduling/readback/validation, not hardware or WAN claims.
+
+
+## Factorial mainline repeat
+
+`factorial-mainline-aggregate.json` records the `1419` mainline repeat,
+[Wayland run 42909393066](https://github.com/beamiter/jwm/actions/runs/42909393066),
+job `130155726968`. This is only the allowlisted aggregate, not raw evidence.
+All 128 generations were presented within 500 ms and the nine-second window;
+the first factorial run had 127/128 on time. Missing, unknown, cleanup-only and
+post-exact quality regressions were all zero. Every policy retained the guard.
+
+| Quiet / pacing ms | Scheduled→presented p50 ms | Scheduled→presented maximum ms | First static exact seconds |
+| --- | --- | --- | --- |
+| 0 / 100 | 232.17 / 240.32 | 341.38 / 368.80 | 3.996 / 4.219 |
+| 0 / 250 | 219.85 / 229.98 | 347.32 / 361.46 | 4.922 / 4.972 |
+| 250 / 100 | 247.92 / 248.55 | 471.91 / 360.08 | 5.167 / 5.206 |
+| 250 / 250 | 248.46 / 235.50 | 398.97 / 373.33 | 5.139 / 5.036 |
+
+Pairs remain separate sessions rather than pooled samples. Relative to 250/250,
+0/250 had lower medians and maxima and earlier exactness in both sessions of
+this repeat. The first run supported earlier exactness but had mixed maximum
+latency, so it remains a counterexample to a universal tail-latency benefit.
+Compared with 0/100 in this repeat, 0/250 had lower medians, mixed maxima and
+approximately 0.75–0.93 seconds later exactness. It is a supported candidate for
+further scheduling decisions, not an across-the-board winner. Defaults are not
+changed by this report.
+
+Every session again sent 242,032 source-envelope payload bytes. The second
+0/100 session discarded two stale PNG attempts; other sessions discarded none.
+Whole-session encode costs were lower across this repeat, so cross-run absolute
+latency reductions cannot be attributed to policy. Compare policies within each
+run and retain the prior counterexamples. Timing, setup/shutdown, synthetic GL
+and experiment-origin limitations above still apply.

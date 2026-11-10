@@ -155,6 +155,13 @@ pub(crate) struct EncodeStageTimings {
     pub(crate) png: Option<Duration>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct ExactCaptureIdentity {
+    generation: u64,
+    geometry_epoch: u64,
+    source: (u16, u16),
+}
+
 /// Host-side delta encoder holding the host's model of the viewer's canvas.
 #[derive(Debug)]
 pub(crate) struct TileEncoder {
@@ -165,6 +172,8 @@ pub(crate) struct TileEncoder {
     committed_exact: Vec<bool>,
     stable_since: Vec<Instant>,
     observed: Option<RgbImage>,
+    observation_generation: u64,
+    pending_exact_identity: Option<ExactCaptureIdentity>,
     exact_changed: bool,
     lossless_rejected: bool,
     pending_lossless: bool,
@@ -217,6 +226,8 @@ impl TileEncoder {
             committed_exact: Vec::new(),
             stable_since: Vec::new(),
             observed: None,
+            observation_generation: 0,
+            pending_exact_identity: None,
             exact_changed: false,
             lossless_rejected: false,
             pending_lossless: false,
@@ -355,6 +366,7 @@ impl TileEncoder {
     ) -> RemoteResult<()> {
         self.pending_lossless = false;
         self.pending_hash = None;
+        self.pending_exact_identity = None;
         self.pending_scroll = None;
         self.pending_sequence = None;
         self.detected = None;
@@ -383,6 +395,10 @@ impl TileEncoder {
         let keyframe = request == TileEncodeRequest::Keyframe || self.needs_keyframe(frame);
         self.exact_changed = false;
         if self.lossless_enabled {
+            self.observation_generation = self
+                .observation_generation
+                .checked_add(1)
+                .ok_or_else(|| invalid_data("exact capture generation exhausted"))?;
             if keyframe
                 || self
                     .observed
@@ -810,9 +826,16 @@ impl TileEncoder {
         }
 
         self.pending_lossless = planned.lossless;
-        // The exact canvas ledger also advances on JPEG/scroll commits. Bind
-        // every such transaction, not merely PNG, to the planned capture.
-        self.pending_hash = self.lossless_enabled.then(|| capture_digest(frame));
+        // Reuse the owned detection snapshot; do not hash whole JPEG/keepalive
+        // captures merely to authenticate an internal transaction. PNG keeps
+        // its existing hash contract. Detection invalidates pending state and
+        // advances this generation before changing the owned snapshot.
+        self.pending_hash = planned.lossless.then(|| capture_digest(frame));
+        self.pending_exact_identity = self.lossless_enabled.then_some(ExactCaptureIdentity {
+            generation: self.observation_generation,
+            geometry_epoch: frame.geometry_epoch,
+            source: (frame.source_width, frame.source_height),
+        });
         self.pending = true;
         self.pending_sequence = Some(sequence);
         self.pending_scroll = planned.scroll;
@@ -834,9 +857,18 @@ impl TileEncoder {
         if !self.pending {
             return;
         }
-        if self
-            .pending_hash
-            .is_some_and(|hash| hash != capture_digest(frame))
+        let exact_identity = ExactCaptureIdentity {
+            generation: self.observation_generation,
+            geometry_epoch: frame.geometry_epoch,
+            source: (frame.source_width, frame.source_height),
+        };
+        let exact_mismatch = self.lossless_enabled
+            && (self.pending_exact_identity != Some(exact_identity)
+                || self.observed.as_ref() != Some(&frame.image));
+        if exact_mismatch
+            || self
+                .pending_hash
+                .is_some_and(|hash| hash != capture_digest(frame))
         {
             // Caller violated the immutable planned-capture contract. The
             // already-sent record cannot be rolled back: force recovery, never
@@ -904,6 +936,7 @@ impl TileEncoder {
     pub(crate) fn discard(&mut self) {
         self.pending_lossless = false;
         self.pending_hash = None;
+        self.pending_exact_identity = None;
         self.pending_scroll = None;
         self.pending_sequence = None;
         self.detected = None;

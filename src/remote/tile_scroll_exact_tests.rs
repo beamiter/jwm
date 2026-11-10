@@ -292,3 +292,60 @@ fn scroll_exact_cached_keepalive_discard_and_commit_preserve_committed_canvas() 
     assert_eq!(encoder.committed_exact, exact);
     assert_eq!(decoder.canvas(), Some(&canvas));
 }
+
+#[test]
+fn scroll_exact_new_detection_invalidates_pending_identity_without_committing() {
+    let (mut encoder, _, frame, at) = exact_pair();
+    let next = shifted(&frame, 7);
+    encoder
+        .plan_at(&next, TileEncodeRequest::Delta, at + Duration::from_secs(4))
+        .unwrap();
+    let mut bytes = Vec::new();
+    encoder.encode_into(&mut bytes, 3, &next, 75).unwrap();
+    assert!(
+        encoder.pending_hash.is_none(),
+        "JPEG must not hash the full capture"
+    );
+    let pending_dirty = encoder.dirty.clone();
+    assert!(encoder.select_refinement(Some((100, 1))).is_err());
+    assert_eq!(encoder.dirty, pending_dirty);
+    assert!(encoder.pending);
+    let generation = encoder.observation_generation;
+    let committed = encoder.committed_exact.clone();
+    encoder
+        .plan_at(
+            &frame,
+            TileEncodeRequest::Keepalive,
+            at + Duration::from_secs(5),
+        )
+        .unwrap();
+    assert!(encoder.observation_generation > generation);
+    encoder.commit(&next);
+    assert_eq!(encoder.last_sequence, Some(2));
+    assert_eq!(encoder.committed_exact, committed);
+    assert_eq!(encoder.reference.as_ref(), Some(&frame.image));
+    encoder.encode_into(&mut bytes, 3, &frame, 75).unwrap();
+    assert!(encoder.pending_hash.is_none());
+    let mut wrong = clone_frame(&frame);
+    wrong.source_width += 1;
+    encoder.commit(&wrong);
+    assert!(encoder.reference.is_none());
+    assert!(encoder.committed_exact.is_empty());
+}
+
+#[test]
+fn scroll_exact_generation_exhaustion_is_not_wrapping_authority() {
+    let (mut encoder, _, frame, at) = exact_pair();
+    encoder.observation_generation = u64::MAX;
+    assert!(
+        encoder
+            .plan_at(
+                &frame,
+                TileEncodeRequest::Keepalive,
+                at + Duration::from_secs(4)
+            )
+            .is_err()
+    );
+    assert!(!encoder.pending);
+    assert_eq!(encoder.last_sequence, Some(2));
+}
