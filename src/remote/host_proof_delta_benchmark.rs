@@ -4,11 +4,26 @@ use super::*;
 use sha2::{Digest, Sha256};
 
 const ORDER: [bool; 4] = [true, false, false, true];
-const METRICS: [&str; 4] = [
+// (forced keyframe, ACK wake): symmetric execution of the four configurations.
+const POLICIES: [(bool, bool); 8] = [
+    (true, false),
+    (false, false),
+    (true, true),
+    (false, true),
+    (false, true),
+    (true, true),
+    (false, false),
+    (true, false),
+];
+const GROUP_INDICES: [[usize; 4]; 2] = [[0, 1, 6, 7], [2, 3, 4, 5]];
+const METRICS: [&str; 7] = [
     "encoded_bytes",
     "jpeg_ms",
     "app_commit_to_gl_verified_ms",
     "inject_to_present_observed_ms",
+    "inject_to_client_ready_ms",
+    "present_to_client_ready_ms",
+    "previous_client_ready_to_inject_ms",
 ];
 fn small_pixels(word: u32, blue: bool) -> Vec<u8> {
     let mut bytes = if blue {
@@ -296,10 +311,71 @@ fn metric_quantiles(values: &[f64]) -> Value {
     let q = quantiles(values);
     json!({"n":q["n"],"min":q["min_ms"],"p50":q["p50_ms"],"p95":q["p95_ms"],"max":q["max_ms"]})
 }
+fn same_rgb_across_groups(sessions: &[Value]) -> bool {
+    if sessions.len() != 8 {
+        return false;
+    }
+    for index in 0..WARMUP + MEASURED {
+        let first = &sessions[0]["samples"][index];
+        if sessions.iter().any(|s| {
+            s["samples"][index]["source_rgb_sha256"] != first["source_rgb_sha256"]
+                || s["samples"][index]["marker"] != first["marker"]
+        }) {
+            return false;
+        }
+    }
+    for index in 0..2 {
+        if sessions.iter().any(|s| {
+            s["checks"][index]["source_rgb_sha256"]
+                != sessions[0]["checks"][index]["source_rgb_sha256"]
+        }) {
+            return false;
+        }
+    }
+    sessions.iter().enumerate().all(|(index, s)| {
+        s["ack_wake_enabled"] == POLICIES[index].1
+            && s["legacy_forced_keyframe"] == POLICIES[index].0
+    })
+}
+fn four_configurations(sessions: &[Value]) -> Value {
+    let mut configurations = Vec::new();
+    for ack_wake in [false, true] {
+        for legacy in [true, false] {
+            let matching: Vec<_> = sessions
+                .iter()
+                .filter(|s| {
+                    s["ack_wake_enabled"] == ack_wake && s["legacy_forced_keyframe"] == legacy
+                })
+                .collect();
+            let mut metrics = serde_json::Map::new();
+            for name in METRICS {
+                let values: Vec<_> = matching
+                    .iter()
+                    .flat_map(|s| s["samples"].as_array().unwrap())
+                    .filter(|s| s["phase"] == "measured")
+                    .map(|s| s[name].as_f64().unwrap())
+                    .collect();
+                metrics.insert(name.into(), metric_quantiles(&values));
+            }
+            configurations.push(json!({"ack_wake_enabled":ack_wake,"legacy_forced_keyframe":legacy,"session_count":matching.len(),"metrics":metrics}));
+        }
+    }
+    json!({"configurations":configurations,"interpretation":"two interleaved symmetric ABBA groups, same RGB and binary; report full Ready cycle together with visible latency and injection phase. Fixed order is not randomized; descriptive evidence, no causal significance or performance threshold."})
+}
+fn suppress_failed_comparisons(groups: &mut [Value], valid: bool) -> Value {
+    if !valid {
+        for group in groups.iter_mut() {
+            group["comparison"] = Value::Null;
+        }
+        return Value::Null;
+    }
+    groups[0]["comparison"].clone()
+}
 struct Session {
     report: Report,
     probe: Arc<host::ProofDeltaProbe>,
     legacy: bool,
+    ack_wake_enabled: bool,
     checks: Vec<Value>,
 }
 struct ProofReport {
@@ -337,6 +413,9 @@ impl Drop for ProofReport {
                         sample["encoded_frame_count"] = json!(interval.len());
                         if let (Some(timeline), Some(frame), Some(origin)) = (s.report.timelines.get(id as usize - 1), frames.iter().find(|f|f.sequence==presented), origin) {
                             sample["timing"] = sample_timing(timeline, frame, &events, frames.iter().find(|f|f.sequence==previous), origin);
+                            sample["inject_to_client_ready_ms"] = json!(timeline.ready_observed.map(|ready|signed_ms(ready,timeline.injected)));
+                            sample["present_to_client_ready_ms"] = json!(timeline.ready_observed.map(|ready|signed_ms(ready,timeline.presented_observed)));
+                            sample["previous_client_ready_to_inject_ms"] = json!(signed_ms(timeline.injected,timeline.previous_ready_observed));
                         }
                     }
                 }
@@ -346,6 +425,10 @@ impl Drop for ProofReport {
                     }
                 }
                 value["session_order"] = json!(index);
+                value["group"] = json!(usize::from(s.ack_wake_enabled));
+                value["actual_order"] = json!(index);
+                value["order_within_group"] = json!(GROUP_INDICES[usize::from(s.ack_wake_enabled)].iter().position(|&i|i==index));
+                value["ack_wake_enabled"] = json!(s.ack_wake_enabled);
                 value["legacy_forced_keyframe"] = json!(s.legacy);
                 value["checks"] = json!(s.checks);
                 value["frames"] = json!(frames.iter().map(|f| {
@@ -358,15 +441,35 @@ impl Drop for ProofReport {
                 value
             })
             .collect();
-        let comparison = if self.success {
-            compare(&sessions)
+        let mut groups:Vec<Value>=[false,true].into_iter().enumerate().map(|(group,ack_wake)| {
+            let indices=GROUP_INDICES[group];
+            let comparison=if self.success && sessions.len()==8 {
+                let grouped:Vec<_>=indices.iter().map(|&index|sessions[index].clone()).collect();
+                compare(&grouped)
+            } else {Value::Null};
+            json!({"group":group,"ack_wake_enabled":ack_wake,"session_indices":indices,"comparison":comparison})
+        }).collect();
+        let same_inputs = same_rgb_across_groups(&sessions);
+        let valid =
+            self.success && same_inputs && groups.iter().all(|g| !g["comparison"].is_null());
+        let comparison = suppress_failed_comparisons(&mut groups, valid);
+        let configurations = if valid {
+            four_configurations(&sessions)
         } else {
             Value::Null
         };
-        let valid = self.success && !comparison.is_null();
-        let report = json!({"schema_version":1,"benchmark":"proof_delta_abba","success":valid,"shared_run_token":self.run,"order":["A_forced_keyframe","B_delta","B_delta","A_forced_keyframe"],"sessions_requested":4,"warmup_per_session":WARMUP,"measured_per_session":MEASURED,"samples_requested":72,"configuration":"same source RGB per sample/check across all four new sessions; only test-only proof keyframe policy differs; production input wake and retained capture scheduling unchanged","workload":"96x72 unique marker on stable 200x150 red canvas (76.96% stable); same-pixel fresh proof and full-canvas change checkpoints","cost_scope":"successful published native-proof frames in (previous presented sequence,current presented sequence]; bytes include source envelope 8B, exclude transport padding/header/tag; JPEG duration is encoder JPEG time, not total sender CPU","failure":if self.success {Value::Null} else {json!("incomplete or failed session/check; all acquired samples/evidence retained")},"sessions":sessions,"comparison":comparison});
+        let report = json!({"schema_version":2,"benchmark":"proof_delta_abba","success":valid,"shared_run_token":self.run,"order":["Aoff","Boff","Aon","Bon","Bon","Aon","Boff","Aoff"],"sessions_requested":8,"warmup_per_session":WARMUP,"measured_per_session":MEASURED,"samples_requested":144,"configuration":"shared source RGB per sample/check across eight independent sessions; interleaved group0 ACK wake disabled [0,1,6,7], group1 enabled [2,3,4,5]; each group ABBA differs only proof keyframe policy; native input wake and retained capture scheduling unchanged","workload":"96x72 unique marker on stable 200x150 red canvas (76.96% stable); same-pixel fresh proof and full-canvas change checkpoints","cost_scope":"successful published native-proof frames in (previous presented sequence,current presented sequence]; bytes include source envelope 8B, exclude transport padding/header/tag; JPEG duration is encoder JPEG time, not total sender CPU","primary_endpoints":"both injection-to-actual-client-Ready complete cycle and injection-to-present; prior Ready-to-injection phase retained; no added delays or phase-selected samples","failure":if valid {Value::Null} else {json!("incomplete, failed, or input-mismatched session/check; all acquired samples/evidence retained")},"sessions":sessions,"groups":groups,"comparison_alias":"compatibility alias of groups[0].comparison: ACK wake disabled only, not the ACK-on candidate or all eight sessions","comparison":comparison,"four_configuration_summary":configurations});
         let encoded = serde_json::to_string_pretty(&report).unwrap();
         eprintln!("JWM_REMOTE_PROOF_DELTA_REPORT\n{encoded}");
+        if encoded.len() > 1024 * 1024 {
+            eprintln!(
+                "complete proof report exceeds 1 MiB; raw evidence retained above, no truncated artifact emitted"
+            );
+            if !thread::panicking() {
+                panic!("proof report size limit exceeded: {} bytes", encoded.len());
+            }
+            return;
+        }
         if let Ok(path) = std::env::var("JWM_REMOTE_LATENCY_REPORT") {
             if let Err(error) = std::fs::write(&path, encoded) {
                 eprintln!("proof-delta artifact write failed: {error}");
@@ -390,7 +493,7 @@ fn controlled_proof_delta_abba_latency_and_bytes() {
         success: false,
         run: rand::random(),
     };
-    for legacy in ORDER {
+    for (legacy, ack_wake_enabled) in POLICIES {
         let mut report = Report::new();
         report.emit = false;
         let probe = Arc::new(host::ProofDeltaProbe::default());
@@ -398,13 +501,14 @@ fn controlled_proof_delta_abba_latency_and_bytes() {
             report,
             probe: probe.clone(),
             legacy,
+            ack_wake_enabled,
             checks: Vec::new(),
         });
         let session = result.sessions.last_mut().unwrap();
         let capture = probe.clone();
         run_session_workload(
             &mut session.report,
-            |gl| Harness::new_with_proof_keyframes(gl, false, legacy, capture),
+            |gl| Harness::new_with_proof_policy(gl, false, legacy, ack_wake_enabled, capture),
             Some(result.run),
             |h, word| commit_pixels(h, &small_pixels(word, false)),
             |bytes| decode_small(bytes, false),
@@ -521,7 +625,7 @@ fn proof_delta_comparison_rejects_different_rgb_failed_and_incomplete_sessions()
     for legacy in ORDER {
         let samples: Vec<Value> = (0..WARMUP + MEASURED).map(|index| {
             let word = marker_word(0x8217, (index+1) as u8);
-            json!({"status":"ok","phase":if index<WARMUP {"warmup"} else {"measured"},"marker":word,"source_rgb_sha256":rgb_hash(&small_pixels(word,false)),"encoded_bytes":if legacy {100.0} else {120.0},"jpeg_ms":1.0,"app_commit_to_gl_verified_ms":10.0,"inject_to_present_observed_ms":20.0})
+            json!({"status":"ok","phase":if index<WARMUP {"warmup"} else {"measured"},"marker":word,"source_rgb_sha256":rgb_hash(&small_pixels(word,false)),"encoded_bytes":if legacy {100.0} else {120.0},"jpeg_ms":1.0,"app_commit_to_gl_verified_ms":10.0,"inject_to_present_observed_ms":20.0,"inject_to_client_ready_ms":30.0,"present_to_client_ready_ms":10.0,"previous_client_ready_to_inject_ms":0.1})
         }).collect();
         let word = marker_word(0x8217, (WARMUP + MEASURED) as u8);
         sessions.push(json!({"success":true,"legacy_forced_keyframe":legacy,"samples":samples,"checks":[{"status":"ok","source_rgb_sha256":rgb_hash(&small_pixels(word,false))},{"status":"ok","source_rgb_sha256":rgb_hash(&small_pixels(!word,true))}]}));
@@ -531,6 +635,28 @@ fn proof_delta_comparison_rejects_different_rgb_failed_and_incomplete_sessions()
         json!([20.0, 20.0]),
         "regression evidence retained"
     );
+    let mut factorial: Vec<Value> = POLICIES
+        .iter()
+        .enumerate()
+        .map(|(index, &(legacy, wake))| {
+            let mut session = sessions[usize::from(!legacy)].clone();
+            session["ack_wake_enabled"] = json!(wake);
+            session["actual_order"] = json!(index);
+            session
+        })
+        .collect();
+    assert!(same_rgb_across_groups(&factorial));
+    assert_eq!(
+        four_configurations(&factorial)["configurations"][0]["metrics"]["inject_to_client_ready_ms"]
+            ["n"],
+        32
+    );
+    for indices in GROUP_INDICES {
+        let group: Vec<_> = indices.iter().map(|&i| factorial[i].clone()).collect();
+        assert!(!compare(&group).is_null());
+    }
+    factorial[2]["samples"][3]["source_rgb_sha256"] = json!("different RGB");
+    assert!(!same_rgb_across_groups(&factorial));
     let hash = sessions[1]["samples"][3]["source_rgb_sha256"].clone();
     sessions[1]["samples"][3]["source_rgb_sha256"] = json!("0".repeat(64));
     assert_eq!(compare(&sessions), Value::Null);
@@ -558,4 +684,27 @@ fn proof_delta_signed_timing_keeps_capture_overlap_and_telescopes() {
         + signed_ms(flush, plan)
         + signed_ms(gl, flush);
     assert_eq!(sum, signed_ms(gl, commit));
+}
+
+#[test]
+fn proof_delta_invalid_group_comparisons_are_all_suppressed_without_hiding_raw_data() {
+    let raw = json!({"samples":[{"status":"ok","source_rgb_sha256":"mismatch"}]});
+    let mut groups = vec![
+        json!({"group":0,"comparison":{"metrics":"off"}}),
+        json!({"group":1,"comparison":{"metrics":"on"}}),
+    ];
+    assert_eq!(
+        suppress_failed_comparisons(&mut groups, true),
+        json!({"metrics":"off"})
+    );
+    // Cross-group RGB mismatch can occur despite individually valid groups.
+    assert_eq!(suppress_failed_comparisons(&mut groups, false), Value::Null);
+    assert!(groups.iter().all(|g| g["comparison"].is_null()));
+    assert_eq!(raw["samples"][0]["source_rgb_sha256"], "mismatch");
+    let mut incomplete = vec![json!({"group":0,"comparison":{"metrics":"partial"}})];
+    assert_eq!(
+        suppress_failed_comparisons(&mut incomplete, false),
+        Value::Null
+    );
+    assert!(incomplete[0]["comparison"].is_null());
 }

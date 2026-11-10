@@ -141,8 +141,10 @@ protocol version, input permission, FPS, lease or presentation gate changes.
 
 The opt-in test
 `latency_benchmark::proof_delta_benchmark::controlled_proof_delta_abba_latency_and_bytes`
-compares legacy forced-keyframe behavior against deltas in A/B/B/A order, with
-four independent sessions and 2 warmups plus 16 measured responses each. A shared
+compares legacy forced-keyframe behavior against deltas under both disabled and
+enabled native-proof ACK wake policies. Eight independent sessions use symmetric
+order Aoff/Boff/Aon/Bon/Bon/Aon/Boff/Aoff, with 2 warmups plus 16 measured responses
+each; either wake-policy subgroup remains A/B/B/A. A shared
 run token and matched source RGB hashes make every same-index sample identical
 across arms. A small unique marker changes less than a quarter of the source;
 all other pixels remain stable. Raw frame evidence records native proof identity,
@@ -157,3 +159,15 @@ response. A separate fixture withholds new-frame presentation feedback and
 checks that the previously acknowledged frame cannot produce Ready; it does
 not claim to inject a malicious replayed network ACK. No runtime performance
 threshold hides negative results, and incomplete reports cannot pass CI.
+
+The ACK notification only follows a new, validated frame acknowledgement that
+exactly matches the current, unannounced native proof in an active input mode.
+After releasing state/proof locks it signals the existing eventfd; the capture
+loop still checks scope, permission, revocation and FPS before granting Ready.
+Duplicate, stale and unrelated ACKs do not produce this hint. It does not change
+retained-frame capture accounting.
+
+The experiment reports both injection-to-visible-presentation and
+injection-to-actual-client-Ready (the complete interaction cycle), with raw
+capture/send/ACK/Ready timing and signed overlapping stages. Neither endpoint
+is hidden when it regresses. [Prior negative results and diagnostic evidence](benchmarks/remote-proof-delta-2026-11-10/README.md) are retained.

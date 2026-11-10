@@ -109,6 +109,35 @@ fn noise_tcp_complete_sessions_preserve_record_boundaries_and_never_reuse_keys()
     );
 }
 
+// Authentication assertions remain separate. Once that handshake has ended,
+// an already-closed peer makes shutdown idempotently complete; no other I/O
+// failure is an acceptable teardown result.
+fn completed_teardown(result: io::Result<()>) -> io::Result<()> {
+    match result {
+        Err(error) if error.kind() == io::ErrorKind::NotConnected => Ok(()),
+        other => other,
+    }
+}
+
+#[test]
+fn noise_teardown_accepts_only_success_or_already_disconnected() {
+    assert!(completed_teardown(Ok(())).is_ok());
+    assert!(completed_teardown(Err(io::ErrorKind::NotConnected.into())).is_ok());
+    for kind in [
+        io::ErrorKind::PermissionDenied,
+        io::ErrorKind::BrokenPipe,
+        io::ErrorKind::ConnectionReset,
+        io::ErrorKind::TimedOut,
+        io::ErrorKind::Interrupted,
+        io::ErrorKind::Other,
+    ] {
+        let result = completed_teardown(Err(io::Error::new(kind, "original teardown failure")));
+        let error = result.expect_err("unrelated teardown errors must remain failures");
+        assert_eq!(error.kind(), kind);
+        assert_eq!(error.to_string(), "original teardown failure");
+    }
+}
+
 #[test]
 fn noise_tcp_wrong_psk_never_reaches_application_hello() {
     let (mut client, mut server) = tcp_pair();
@@ -117,7 +146,7 @@ fn noise_tcp_wrong_psk_never_reaches_application_hello() {
         // Production callers must close on authentication failure, not retry
         // or start parsing Hello under unauthenticated/provisional keys.
         let authenticated = result.is_ok();
-        server.shutdown(Shutdown::Both).unwrap();
+        completed_teardown(server.shutdown(Shutdown::Both)).unwrap();
         authenticated
     });
     let result = client_handshake(&mut client, &[0x96; PSK_LEN], [0x52; NONCE_LEN]);
@@ -128,7 +157,7 @@ fn noise_tcp_wrong_psk_never_reaches_application_hello() {
     // NNpsk2 may already have queued its encrypted server flights. They are
     // not application records: close immediately rather than interpreting or
     // draining those unauthenticated handshake bytes as Hello/HelloAck.
-    client.shutdown(Shutdown::Both).unwrap();
+    completed_teardown(client.shutdown(Shutdown::Both)).unwrap();
     assert!(
         !peer.join().unwrap(),
         "server must not enter application record phase"

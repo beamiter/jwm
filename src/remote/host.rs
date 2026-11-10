@@ -1864,7 +1864,30 @@ struct PointerFrame {
     scope: Option<DrawnScope>,
     announced: bool,
 }
+// This only classifies a successfully acknowledged record. Credits validation
+// remains the sole replay/future-ACK gate; a wake never grants Ready itself.
+fn proof_ack_matches(frame: Option<PointerFrame>, scope: DrawnScope) -> bool {
+    frame.is_some_and(|frame| !frame.announced && frame.scope == Some(scope))
+}
+#[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+thread_local! {
+    static LEGACY_DISABLE_ACK_WAKE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+#[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+pub(super) fn with_legacy_disable_ack_wake<T>(disabled: bool, run: impl FnOnce() -> T) -> T {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            LEGACY_DISABLE_ACK_WAKE.with(|v| v.set(self.0));
+        }
+    }
+    let _restore = Restore(LEGACY_DISABLE_ACK_WAKE.with(|v| v.replace(disabled)));
+    run()
+}
+
 struct SourceControl {
+    #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+    legacy_disable_ack_wake: bool,
     #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
     proof_delta: Option<(bool, Arc<ProofDeltaProbe>)>,
     input_wake: std::sync::OnceLock<input_wake::InputWake>,
@@ -1891,6 +1914,23 @@ struct SourceControl {
 }
 
 impl SourceControl {
+    fn notify_proof_ack(&self, scope: DrawnScope) -> io::Result<()> {
+        #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+        if self.legacy_disable_ack_wake {
+            return Ok(());
+        }
+        let live = (self.control_enabled.load(Ordering::Acquire)
+            && !self.control_revoke.load(Ordering::Acquire))
+            || (self.pointer_enabled.load(Ordering::Acquire)
+                && !self.pointer_revoke.load(Ordering::Acquire));
+        let matching = live && proof_ack_matches(*self.pointer_frame.lock().unwrap(), scope);
+        // No state, proof or credit lock is held across eventfd notification.
+        // Any concurrent revoke/replacement is rechecked by the capture loop.
+        if matching {
+            self.notify_input()?;
+        }
+        Ok(())
+    }
     fn notify_input(&self) -> io::Result<()> {
         self.input_wake
             .get()
@@ -1918,6 +1958,8 @@ impl SourceControl {
         Ok(Self {
             #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
             proof_delta: PROOF_DELTA_TEST.with(|value| value.borrow().clone()),
+            #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+            legacy_disable_ack_wake: LEGACY_DISABLE_ACK_WAKE.with(|v| v.get()),
             input_wake: std::sync::OnceLock::new(),
             #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
             input_wake_probe: input_wake::test_probe(),
@@ -5035,14 +5077,14 @@ fn receive_input_scoped(
                                 frame_sequence: sequence,
                             });
                             sources.changed.notify_all();
+                            let scope = state.presented_frame.unwrap();
+                            drop(state);
                             #[cfg(all(
                                 test,
                                 feature = "remote-wayland",
                                 feature = "backend-wayland-udev"
                             ))]
                             {
-                                let scope = state.presented_frame.unwrap();
-                                drop(state);
                                 if let Some((_, probe)) = &sources.proof_delta {
                                     // Copy under the proof lock, then release it before
                                     // recording: observation must add no nested lock edges.
@@ -5063,6 +5105,7 @@ fn receive_input_scoped(
                                     }
                                 }
                             }
+                            sources.notify_proof_ack(scope)?;
                         }
                         telemetry.record_ack(ack);
                     }
@@ -5394,6 +5437,121 @@ mod tests {
                 .keyframe,
             "test-only baseline remains forced keyframe"
         );
+    }
+    #[test]
+    fn proof_ack_wake_predicate_requires_exact_unannounced_scope() {
+        let scope = DrawnScope {
+            source_epoch: 1,
+            geometry_epoch: 7,
+            frame_sequence: 9,
+        };
+        let frame = PointerFrame {
+            serial: 12,
+            at: Instant::now(),
+            scope: Some(scope),
+            announced: false,
+        };
+        assert!(proof_ack_matches(Some(frame), scope));
+        assert!(!proof_ack_matches(None, scope));
+        assert!(!proof_ack_matches(
+            Some(PointerFrame {
+                announced: true,
+                ..frame
+            }),
+            scope
+        ));
+        assert!(!proof_ack_matches(
+            Some(PointerFrame {
+                scope: None,
+                ..frame
+            }),
+            scope
+        ));
+        for mismatch in [
+            DrawnScope {
+                source_epoch: 2,
+                ..scope
+            },
+            DrawnScope {
+                geometry_epoch: 8,
+                ..scope
+            },
+            DrawnScope {
+                frame_sequence: 8,
+                ..scope
+            },
+            DrawnScope {
+                frame_sequence: 10,
+                ..scope
+            },
+        ] {
+            assert!(!proof_ack_matches(Some(frame), mismatch));
+        }
+    }
+    // Real eventfd regression: CI only, not part of local pure tests.
+    #[test]
+    fn proof_ack_wake_fd_live_scope_only_and_terminal_modes_stay_quiet() {
+        use nix::poll::{PollFd, PollFlags, poll};
+        let sources = test_source_control();
+        assert!(
+            sources
+                .input_wake
+                .set(input_wake::InputWake::new().unwrap())
+                .is_ok()
+        );
+        let wake = sources.input_wake.get().unwrap();
+        let scope = DrawnScope {
+            source_epoch: 1,
+            geometry_epoch: 7,
+            frame_sequence: 9,
+        };
+        *sources.pointer_frame.lock().unwrap() = Some(PointerFrame {
+            serial: 12,
+            at: Instant::now(),
+            scope: Some(scope),
+            announced: false,
+        });
+        let mut fds = [PollFd::new(wake.as_fd(), PollFlags::POLLIN)];
+        sources.notify_proof_ack(scope).unwrap();
+        assert_eq!(poll(&mut fds, 0u8).unwrap(), 0);
+        sources.control_enabled.store(true, Ordering::Release);
+        sources
+            .notify_proof_ack(DrawnScope {
+                frame_sequence: 8,
+                ..scope
+            })
+            .unwrap();
+        assert_eq!(poll(&mut fds, 0u8).unwrap(), 0);
+        sources.notify_proof_ack(scope).unwrap();
+        assert_eq!(poll(&mut fds, 0u8).unwrap(), 1);
+        wake.drain().unwrap();
+        sources
+            .pointer_frame
+            .lock()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .announced = true;
+        sources.notify_proof_ack(scope).unwrap();
+        assert_eq!(poll(&mut fds, 0u8).unwrap(), 0);
+        sources
+            .pointer_frame
+            .lock()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .announced = false;
+        sources.control_revoke.store(true, Ordering::Release);
+        sources.notify_proof_ack(scope).unwrap();
+        assert_eq!(poll(&mut fds, 0u8).unwrap(), 0);
+        sources.control_enabled.store(false, Ordering::Release);
+        sources.pointer_enabled.store(true, Ordering::Release);
+        sources.notify_proof_ack(scope).unwrap();
+        assert_eq!(poll(&mut fds, 0u8).unwrap(), 1);
+        wake.drain().unwrap();
+        sources.pointer_revoke.store(true, Ordering::Release);
+        sources.notify_proof_ack(scope).unwrap();
+        assert_eq!(poll(&mut fds, 0u8).unwrap(), 0);
     }
     #[test]
     fn input_wake_model_backlog_excludes_disabled_and_waiting_modes() {

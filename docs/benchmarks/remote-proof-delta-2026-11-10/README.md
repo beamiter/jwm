@@ -33,3 +33,31 @@ These are small descriptive samples on owned loopback TCP/Wayland servers and
 software/offscreen GL. No physical GPU, DRM, two-machine or input-photon claim.
 The retained report includes all warmups, measured samples and controls; no
 negative samples were removed.
+
+## Timing-only diagnostic rerun
+
+Candidate `e781b0cdd5a45bfb0b8bf5dd91bf7d48456995cb`,
+[Wayland run](https://github.com/beamiter/jwm/actions/runs/42829326628),
+job `129874904600`. [Complete report](timing-candidate.json). Production
+scheduling was unchanged; this added test-only, exact-scope Instant observations.
+
+Measured p50 capture-start wait after app commit was A 2.780836 ms versus
+B 30.888741 ms; ACK-to-Ready publication was A 16.660836 versus B 2.299164 ms.
+These per-stage quantiles are descriptive and are not additive. The complete
+per-sample pipeline offsets, including signed overlapping capture time, remain
+in the report. Scope joins use native serial, source epoch, geometry epoch and
+wire sequence; event-vector insertion order is not a clock order.
+
+Input-to-visible-presentation p50 was 47.283679 versus 61.844578 ms, but
+input-to-actual-client-Ready p50 was 67.476033 versus 68.321643 ms. The latter
+p95 was 68.337936 versus 74.904937 ms. Both block median Ready-cycle differences
+were positive (+0.734190 and +0.973934 ms). The complete-cycle mean decreased
+slightly (67.633828 to 66.546771 ms), which does not override worse medians/tails.
+This is not evidence of faster interaction. Faster encoding changed where the
+closed-loop workload waited relative to the capture rate limit; a possible
+ACK notification fix needs its own controlled comparison.
+
+Wayland diagnostic checks passed. General CI exposed an existing wrong-PSK
+TCP fixture shutdown race (`NotConnected` after the peer had already closed),
+so this diagnostic commit did not satisfy all CI gates and was not promoted.
+Its fix must preserve the authentication rejection assertions.

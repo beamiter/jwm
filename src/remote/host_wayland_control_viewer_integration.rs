@@ -346,6 +346,16 @@ impl Harness {
         legacy: bool,
         probe: Arc<host::ProofDeltaProbe>,
     ) -> Self {
+        // Preserve the production ACK wake policy for all existing callers.
+        Self::new_with_proof_policy(gl, held_on_enter, legacy, true, probe)
+    }
+    fn new_with_proof_policy(
+        gl: &mut HeadlessSmithayGles,
+        held_on_enter: bool,
+        legacy_keyframe: bool,
+        ack_wake: bool,
+        probe: Arc<host::ProofDeltaProbe>,
+    ) -> Self {
         Self::new_with_wake_config(
             gl,
             held_on_enter,
@@ -353,7 +363,7 @@ impl Harness {
             (false, false),
             7,
             None,
-            Some((legacy, probe)),
+            Some((legacy_keyframe, ack_wake, probe)),
         )
     }
     fn new_with_wake_config(
@@ -363,7 +373,7 @@ impl Harness {
         viewer_scroll: (bool, bool),
         recipient_version: u32,
         wake_config: Option<(bool, Arc<host::InputWakeProbe>)>,
-        proof_config: Option<(bool, Arc<host::ProofDeltaProbe>)>,
+        proof_config: Option<(bool, bool, Arc<host::ProofDeltaProbe>)>,
     ) -> Self {
         let mut native = Server::new();
         let mut local = Server::new();
@@ -422,7 +432,11 @@ impl Harness {
                 None => run(),
             };
             let result = match proof_config {
-                Some((legacy, probe)) => host::with_proof_delta(legacy, probe, run_with_wake),
+                Some((legacy, ack_wake, probe)) => {
+                    host::with_legacy_disable_ack_wake(!ack_wake, || {
+                        host::with_proof_delta(legacy, probe, run_with_wake)
+                    })
+                }
                 None => run_with_wake(),
             }
             .map_err(|e| e.to_string());
