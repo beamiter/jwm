@@ -275,7 +275,9 @@ impl Drop for Fixture {
 fn frame(capture: &mut WindowCapture) -> RgbImage {
     match capture.frame().expect("capture authorized instance") {
         CaptureOutcome::Frame(frame) => frame.image,
-        CaptureOutcome::NoChange => panic!("expected a fresh CPU window readback"),
+        CaptureOutcome::NoChange | CaptureOutcome::RetainedProofBlocked => {
+            panic!("expected a fresh CPU window readback")
+        }
     }
 }
 

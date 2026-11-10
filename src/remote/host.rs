@@ -1885,7 +1885,39 @@ pub(super) fn with_legacy_disable_ack_wake<T>(disabled: bool, run: impl FnOnce()
     run()
 }
 
+#[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+thread_local! {
+    static LEGACY_RETAINED_PROOF_SLOTS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+#[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+pub(super) fn with_legacy_retained_proof_slots<T>(legacy: bool, run: impl FnOnce() -> T) -> T {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            LEGACY_RETAINED_PROOF_SLOTS.with(|v| v.set(self.0));
+        }
+    }
+    let _restore = Restore(LEGACY_RETAINED_PROOF_SLOTS.with(|v| v.replace(legacy)));
+    run()
+}
+// Charge every ordinary attempt (including NoChange and backpressure). Only
+// the explicit no-readback native proof outcome preserves the prior deadline.
+fn retained_proof_deadline(
+    previous: Instant,
+    charged: Instant,
+    blocked: bool,
+    legacy: bool,
+) -> Instant {
+    if blocked && !legacy {
+        previous
+    } else {
+        charged
+    }
+}
+
 struct SourceControl {
+    #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+    legacy_retained_proof_slots: bool,
     #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
     legacy_disable_ack_wake: bool,
     #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
@@ -1960,6 +1992,8 @@ impl SourceControl {
             proof_delta: PROOF_DELTA_TEST.with(|value| value.borrow().clone()),
             #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
             legacy_disable_ack_wake: LEGACY_DISABLE_ACK_WAKE.with(|v| v.get()),
+            #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+            legacy_retained_proof_slots: LEGACY_RETAINED_PROOF_SLOTS.with(|v| v.get()),
             input_wake: std::sync::OnceLock::new(),
             #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
             input_wake_probe: input_wake::test_probe(),
@@ -3872,6 +3906,7 @@ fn stream_frames(
             if !running.load(Ordering::Acquire) || shutdown.load(Ordering::Acquire) {
                 break;
             }
+            let previous_capture_deadline = next_capture_allowed;
             next_capture_allowed = Instant::now() + interval;
             telemetry.record_scheduled();
 
@@ -3893,6 +3928,35 @@ fn stream_frames(
             };
             let capture_started = Instant::now();
             let outcome = capture.frame().map_err(LocalRuntimeFailure::capture)?;
+            #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+            let legacy_retained_slots = sources.legacy_retained_proof_slots;
+            #[cfg(not(all(test, feature = "remote-wayland", feature = "backend-wayland-udev")))]
+            let legacy_retained_slots = false;
+            let retained_blocked = matches!(outcome, CaptureOutcome::RetainedProofBlocked);
+            next_capture_allowed = retained_proof_deadline(
+                previous_capture_deadline,
+                next_capture_allowed,
+                retained_blocked,
+                legacy_retained_slots,
+            );
+            if retained_blocked && !legacy_retained_slots {
+                telemetry.record_damage_skipped();
+                // read_frame already pumped native lifecycle/expiry. Wait on
+                // the existing bounded activity path, not the expired FPS
+                // deadline. Input/ACK hints can interrupt this wait; the next
+                // loop always processes control/revocation before readback.
+                #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+                if let Some(probe) = &sources.input_wake_probe {
+                    probe.record_wait();
+                }
+                capture
+                    .wait_for_activity_with_wake(
+                        CAPTURE_RATE_LIMIT_SLICE,
+                        sources.input_wake.get().map(input_wake::InputWake::as_fd),
+                    )
+                    .map_err(LocalRuntimeFailure::capture)?;
+                continue;
+            }
             if options.wayland_resize_follow {
                 let _publication = lock_writer(&writer);
                 let mut state = sources.state.lock().unwrap();
@@ -4016,7 +4080,7 @@ fn stream_result_for_stop(
 fn captured_frame_from_outcome(outcome: CaptureOutcome) -> Option<CapturedFrame> {
     match outcome {
         CaptureOutcome::Frame(frame) => Some(frame),
-        CaptureOutcome::NoChange => None,
+        CaptureOutcome::NoChange | CaptureOutcome::RetainedProofBlocked => None,
     }
 }
 
@@ -5437,6 +5501,43 @@ mod tests {
                 .keyframe,
             "test-only baseline remains forced keyframe"
         );
+    }
+    #[test]
+    fn retained_proof_deadline_model_preserves_real_fps_slots_only() {
+        let base = Instant::now();
+        for interval in [Duration::from_millis(33), Duration::from_secs(1)] {
+            let real_deadline = base + interval;
+            assert!(
+                capture_rate_limit_wait(base, real_deadline, CAPTURE_RATE_LIMIT_SLICE).is_some()
+            );
+            let idle_attempt = real_deadline + Duration::from_millis(2);
+            let charged = idle_attempt + interval;
+            let blocked = retained_proof_deadline(real_deadline, charged, true, false);
+            assert_eq!(blocked, real_deadline);
+            // Repeated no-readback service cannot postpone the next real start.
+            assert_eq!(
+                retained_proof_deadline(blocked, charged + interval, true, false),
+                real_deadline
+            );
+            assert!(
+                capture_rate_limit_wait(idle_attempt, blocked, CAPTURE_RATE_LIMIT_SLICE).is_none()
+            );
+            // A real attempt, ordinary NoChange, or backpressure keeps its charge.
+            assert_eq!(
+                retained_proof_deadline(real_deadline, charged, false, false),
+                charged
+            );
+            assert_eq!(
+                retained_proof_deadline(real_deadline, charged, true, true),
+                charged
+            );
+            let next_real_deadline = idle_attempt + interval;
+            assert!(
+                capture_rate_limit_wait(idle_attempt, next_real_deadline, CAPTURE_RATE_LIMIT_SLICE)
+                    .is_some()
+            );
+        }
+        assert!(captured_frame_from_outcome(CaptureOutcome::RetainedProofBlocked).is_none());
     }
     #[test]
     fn proof_ack_wake_predicate_requires_exact_unannounced_scope() {

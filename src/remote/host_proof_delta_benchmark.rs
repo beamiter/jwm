@@ -1,10 +1,11 @@
-//! Same-binary proof encoding ABBA; only legacy forced keyframe vs delta differs.
+//! Same-binary ABBA within legacy/new scheduling bundles; keyframe vs delta per group.
 //! Tiny unique marker (96x72 of 200x150), identical source RGB in every arm.
 use super::*;
 use sha2::{Digest, Sha256};
 
 const ORDER: [bool; 4] = [true, false, false, true];
-// (forced keyframe, ACK wake): symmetric execution of the four configurations.
+// (forced keyframe, new pipeline): symmetric execution; new bundles ACK wake
+// with non-billing retained-proof waits, legacy disables both changes.
 const POLICIES: [(bool, bool); 8] = [
     (true, false),
     (false, false),
@@ -334,6 +335,7 @@ fn same_rgb_across_groups(sessions: &[Value]) -> bool {
     }
     sessions.iter().enumerate().all(|(index, s)| {
         s["ack_wake_enabled"] == POLICIES[index].1
+            && s["retained_proof_slots_legacy"] == !POLICIES[index].1
             && s["legacy_forced_keyframe"] == POLICIES[index].0
     })
 }
@@ -344,7 +346,9 @@ fn four_configurations(sessions: &[Value]) -> Value {
             let matching: Vec<_> = sessions
                 .iter()
                 .filter(|s| {
-                    s["ack_wake_enabled"] == ack_wake && s["legacy_forced_keyframe"] == legacy
+                    s["ack_wake_enabled"] == ack_wake
+                        && s["retained_proof_slots_legacy"] == !ack_wake
+                        && s["legacy_forced_keyframe"] == legacy
                 })
                 .collect();
             let mut metrics = serde_json::Map::new();
@@ -357,10 +361,10 @@ fn four_configurations(sessions: &[Value]) -> Value {
                     .collect();
                 metrics.insert(name.into(), metric_quantiles(&values));
             }
-            configurations.push(json!({"ack_wake_enabled":ack_wake,"legacy_forced_keyframe":legacy,"session_count":matching.len(),"metrics":metrics}));
+            configurations.push(json!({"policy":if ack_wake {"new_pipeline"} else {"legacy_pipeline"},"ack_wake_enabled":ack_wake,"retained_proof_slots_legacy":!ack_wake,"legacy_forced_keyframe":legacy,"session_count":matching.len(),"metrics":metrics}));
         }
     }
-    json!({"configurations":configurations,"interpretation":"two interleaved symmetric ABBA groups, same RGB and binary; report full Ready cycle together with visible latency and injection phase. Fixed order is not randomized; descriptive evidence, no causal significance or performance threshold."})
+    json!({"configurations":configurations,"interpretation":"two interleaved symmetric ABBA groups, same RGB and binary. Between groups this compares bundled ACK-wake plus retained-proof slot policy, NOT isolated ACK wake. Report full Ready cycle, visible latency and injection phase. Fixed order is not randomized; descriptive evidence, no significance or performance threshold."})
 }
 fn suppress_failed_comparisons(groups: &mut [Value], valid: bool) -> Value {
     if !valid {
@@ -376,6 +380,7 @@ struct Session {
     probe: Arc<host::ProofDeltaProbe>,
     legacy: bool,
     ack_wake_enabled: bool,
+    retained_proof_slots_legacy: bool,
     checks: Vec<Value>,
 }
 struct ProofReport {
@@ -429,6 +434,8 @@ impl Drop for ProofReport {
                 value["actual_order"] = json!(index);
                 value["order_within_group"] = json!(GROUP_INDICES[usize::from(s.ack_wake_enabled)].iter().position(|&i|i==index));
                 value["ack_wake_enabled"] = json!(s.ack_wake_enabled);
+                value["retained_proof_slots_legacy"] = json!(s.retained_proof_slots_legacy);
+                value["policy"] = json!(if s.ack_wake_enabled {"new_pipeline"} else {"legacy_pipeline"});
                 value["legacy_forced_keyframe"] = json!(s.legacy);
                 value["checks"] = json!(s.checks);
                 value["frames"] = json!(frames.iter().map(|f| {
@@ -447,7 +454,7 @@ impl Drop for ProofReport {
                 let grouped:Vec<_>=indices.iter().map(|&index|sessions[index].clone()).collect();
                 compare(&grouped)
             } else {Value::Null};
-            json!({"group":group,"ack_wake_enabled":ack_wake,"session_indices":indices,"comparison":comparison})
+            json!({"group":group,"policy":if ack_wake {"new_pipeline"} else {"legacy_pipeline"},"ack_wake_enabled":ack_wake,"retained_proof_slots_legacy":!ack_wake,"session_indices":indices,"comparison":comparison})
         }).collect();
         let same_inputs = same_rgb_across_groups(&sessions);
         let valid =
@@ -458,7 +465,7 @@ impl Drop for ProofReport {
         } else {
             Value::Null
         };
-        let report = json!({"schema_version":2,"benchmark":"proof_delta_abba","success":valid,"shared_run_token":self.run,"order":["Aoff","Boff","Aon","Bon","Bon","Aon","Boff","Aoff"],"sessions_requested":8,"warmup_per_session":WARMUP,"measured_per_session":MEASURED,"samples_requested":144,"configuration":"shared source RGB per sample/check across eight independent sessions; interleaved group0 ACK wake disabled [0,1,6,7], group1 enabled [2,3,4,5]; each group ABBA differs only proof keyframe policy; native input wake and retained capture scheduling unchanged","workload":"96x72 unique marker on stable 200x150 red canvas (76.96% stable); same-pixel fresh proof and full-canvas change checkpoints","cost_scope":"successful published native-proof frames in (previous presented sequence,current presented sequence]; bytes include source envelope 8B, exclude transport padding/header/tag; JPEG duration is encoder JPEG time, not total sender CPU","primary_endpoints":"both injection-to-actual-client-Ready complete cycle and injection-to-present; prior Ready-to-injection phase retained; no added delays or phase-selected samples","failure":if valid {Value::Null} else {json!("incomplete, failed, or input-mismatched session/check; all acquired samples/evidence retained")},"sessions":sessions,"groups":groups,"comparison_alias":"compatibility alias of groups[0].comparison: ACK wake disabled only, not the ACK-on candidate or all eight sessions","comparison":comparison,"four_configuration_summary":configurations});
+        let report = json!({"schema_version":3,"benchmark":"proof_delta_abba","success":valid,"shared_run_token":self.run,"order":["Alegacy","Blegacy","Anew","Bnew","Bnew","Anew","Blegacy","Alegacy"],"sessions_requested":8,"warmup_per_session":WARMUP,"measured_per_session":MEASURED,"samples_requested":144,"configuration":"shared RGB across eight new sessions; group0 legacy_pipeline [0,1,6,7] has ACK wake disabled and legacy retained-proof slot billing; group1 new_pipeline [2,3,4,5] enables ACK wake and exempts ONLY RetainedProofBlocked from real capture slots. Each group ABBA differs only proof keyframe policy; cross-group comparison is a bundled policy change, not isolated ACK wake. Input wake and all non-retained FPS/backpressure gates unchanged","workload":"96x72 unique marker on stable 200x150 red canvas (76.96% stable); same-pixel fresh proof and full-canvas change checkpoints","cost_scope":"successful published native-proof frames in (previous presented sequence,current presented sequence]; bytes include source envelope 8B, exclude transport padding/header/tag; JPEG duration is encoder JPEG time, not total sender CPU","primary_endpoints":"both injection-to-actual-client-Ready complete cycle and injection-to-present; prior Ready-to-injection phase retained; no added delays or phase-selected samples","failure":if valid {Value::Null} else {json!("incomplete, failed, or input-mismatched session/check; all acquired samples/evidence retained")},"sessions":sessions,"groups":groups,"comparison_alias":"compatibility alias of groups[0].comparison: legacy_pipeline only (ACK wake off plus legacy retained-proof slots), not new_pipeline or all eight sessions","comparison":comparison,"four_configuration_summary":configurations});
         let encoded = serde_json::to_string_pretty(&report).unwrap();
         eprintln!("JWM_REMOTE_PROOF_DELTA_REPORT\n{encoded}");
         if encoded.len() > 1024 * 1024 {
@@ -494,6 +501,7 @@ fn controlled_proof_delta_abba_latency_and_bytes() {
         run: rand::random(),
     };
     for (legacy, ack_wake_enabled) in POLICIES {
+        let retained_proof_slots_legacy = !ack_wake_enabled;
         let mut report = Report::new();
         report.emit = false;
         let probe = Arc::new(host::ProofDeltaProbe::default());
@@ -502,13 +510,23 @@ fn controlled_proof_delta_abba_latency_and_bytes() {
             probe: probe.clone(),
             legacy,
             ack_wake_enabled,
+            retained_proof_slots_legacy,
             checks: Vec::new(),
         });
         let session = result.sessions.last_mut().unwrap();
         let capture = probe.clone();
         run_session_workload(
             &mut session.report,
-            |gl| Harness::new_with_proof_policy(gl, false, legacy, ack_wake_enabled, capture),
+            |gl| {
+                Harness::new_with_proof_schedule(
+                    gl,
+                    false,
+                    legacy,
+                    ack_wake_enabled,
+                    retained_proof_slots_legacy,
+                    capture,
+                )
+            },
             Some(result.run),
             |h, word| commit_pixels(h, &small_pixels(word, false)),
             |bytes| decode_small(bytes, false),
@@ -641,6 +659,7 @@ fn proof_delta_comparison_rejects_different_rgb_failed_and_incomplete_sessions()
         .map(|(index, &(legacy, wake))| {
             let mut session = sessions[usize::from(!legacy)].clone();
             session["ack_wake_enabled"] = json!(wake);
+            session["retained_proof_slots_legacy"] = json!(!wake);
             session["actual_order"] = json!(index);
             session
         })
@@ -655,6 +674,19 @@ fn proof_delta_comparison_rejects_different_rgb_failed_and_incomplete_sessions()
         let group: Vec<_> = indices.iter().map(|&i| factorial[i].clone()).collect();
         assert!(!compare(&group).is_null());
     }
+    factorial[0]["retained_proof_slots_legacy"] = json!(false);
+    assert!(
+        !same_rgb_across_groups(&factorial),
+        "legacy group must preserve original retained-slot billing"
+    );
+    factorial[0]["retained_proof_slots_legacy"] = json!(true);
+    factorial[2]["retained_proof_slots_legacy"] = json!(true);
+    assert!(
+        !same_rgb_across_groups(&factorial),
+        "new group must use non-billing retained-proof waits"
+    );
+    factorial[2]["retained_proof_slots_legacy"] = json!(false);
+    assert!(same_rgb_across_groups(&factorial));
     factorial[2]["samples"][3]["source_rgb_sha256"] = json!("different RGB");
     assert!(!same_rgb_across_groups(&factorial));
     let hash = sessions[1]["samples"][3]["source_rgb_sha256"].clone();

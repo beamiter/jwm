@@ -61,3 +61,28 @@ Wayland diagnostic checks passed. General CI exposed an existing wrong-PSK
 TCP fixture shutdown race (`NotConnected` after the peer had already closed),
 so this diagnostic commit did not satisfy all CI gates and was not promoted.
 Its fix must preserve the authentication rejection assertions.
+
+## ACK wake alone is insufficient
+
+Candidate `32eadbbd17e60d53bae86ac2b71ecb7de44f6b87`,
+[Wayland run](https://github.com/beamiter/jwm/actions/runs/42833425813),
+job `129889183865`. [Complete symmetric eight-session report](ack-wake-candidate.json).
+All 144 inputs and 16 static/full-change controls succeeded. X11 and Wayland
+gates passed. General CI passed on attempt 2 after retrying only an unrelated
+player single-instance readiness timeout; the first failure is not erased.
+The four configurations
+had these measured p50 values (32 per configuration):
+
+| Policy | Input to visible ms | Input to Ready ms | Payload bytes | JPEG ms |
+| --- | ---: | ---: | ---: | ---: |
+| Old ACK + keyframe | 56.932026 | 67.923885 | 3412 | 8.050972 |
+| Old ACK + delta | 62.087115 | 67.921864 | 1107 | 0.391709 |
+| ACK wake + keyframe | 64.591691 | 67.862140 | 3412 | 8.294332 |
+| ACK wake + delta | 63.839790 | 67.142257 | 1107 | 0.375389 |
+
+The new hint reduced presentation-to-Ready observation to about 3.27 ms, but
+complete cycles remained around 67–68 ms and visible latency still regressed
+against the original configuration. No default promotion was justified by this
+result. The next experiment isolates the explicit retained-proof no-readback
+outcome from real capture attempts while keeping the true capture FPS limit;
+it is not the earlier blanket `NoChange` accounting experiment.

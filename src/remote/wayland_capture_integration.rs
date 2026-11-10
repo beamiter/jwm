@@ -79,7 +79,7 @@ fn real_wayland_adapter_isolates_selected_pixels_and_never_revives_revoked_sourc
                         source: (frame.source_width, frame.source_height),
                         bytes: frame.image.into_raw(),
                     },
-                    Ok(CaptureOutcome::NoChange) => {
+                    Ok(CaptureOutcome::NoChange | CaptureOutcome::RetainedProofBlocked) => {
                         Reply::Failed("unexpected NoChange for explicit wire capture".into())
                     }
                     Err(error) => Reply::Failed(error.to_string()),

@@ -286,6 +286,9 @@ pub enum CaptureOutcome {
     Frame(CapturedFrame),
     /// The overlay, geometry and software-composited cursor are unchanged.
     NoChange,
+    /// Only a retained native proof was serviced; no readback was started.
+    /// Unlike NoChange this must not consume a new capture-start rate slot.
+    RetainedProofBlocked,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -142,9 +142,9 @@ protocol version, input permission, FPS, lease or presentation gate changes.
 The opt-in test
 `latency_benchmark::proof_delta_benchmark::controlled_proof_delta_abba_latency_and_bytes`
 compares legacy forced-keyframe behavior against deltas under both disabled and
-enabled native-proof ACK wake policies. Eight independent sessions use symmetric
-order Aoff/Boff/Aon/Bon/Bon/Aon/Boff/Aoff, with 2 warmups plus 16 measured responses
-each; either wake-policy subgroup remains A/B/B/A. A shared
+enabled native-proof ACK wake and retained-proof slot policies. Eight independent
+sessions use symmetric order Alegacy/Blegacy/Anew/Bnew/Bnew/Anew/Blegacy/Alegacy, with 2 warmups plus 16 measured responses
+each; either pipeline-policy subgroup remains A/B/B/A. A shared
 run token and matched source RGB hashes make every same-index sample identical
 across arms. A small unique marker changes less than a quarter of the source;
 all other pixels remain stable. Raw frame evidence records native proof identity,
@@ -164,8 +164,12 @@ The ACK notification only follows a new, validated frame acknowledgement that
 exactly matches the current, unannounced native proof in an active input mode.
 After releasing state/proof locks it signals the existing eventfd; the capture
 loop still checks scope, permission, revocation and FPS before granting Ready.
-Duplicate, stale and unrelated ACKs do not produce this hint. It does not change
-retained-frame capture accounting.
+Duplicate, stale and unrelated ACKs do not produce this hint. The new pipeline also distinguishes a retained-proof service from real readback: only
+`RetainedProofBlocked` preserves the prior capture-start deadline and uses a bounded,
+interruptible activity wait. Ordinary `NoChange`, backpressure and resize accounting
+remain unchanged; real capture starts still obey the FPS limit. The legacy group
+disables ACK wake and uses old retained-proof slot accounting, so this comparison
+is of combined pipeline policies, not isolated ACK effects.
 
 The experiment reports both injection-to-visible-presentation and
 injection-to-actual-client-Ready (the complete interaction cycle), with raw

@@ -144,7 +144,7 @@ fn actual_wayland_keyboard_adapter_arms_ready_frame_and_revokes_recipient_delive
                             );
                             Reply::Frame
                         }
-                        Ok(CaptureOutcome::NoChange) => {
+                        Ok(CaptureOutcome::NoChange | CaptureOutcome::RetainedProofBlocked) => {
                             Reply::Failed("expected captured frame".into())
                         }
                         Err(error) => Reply::Failed(error.to_string()),

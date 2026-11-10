@@ -160,7 +160,9 @@ fn actual_pointer_adapter_ready_motion_click_and_permanent_revocation() {
                                 .0;
                             Reply::Frame
                         }
-                        Ok(CaptureOutcome::NoChange) => Reply::Failed("expected frame".into()),
+                        Ok(CaptureOutcome::NoChange | CaptureOutcome::RetainedProofBlocked) => {
+                            Reply::Failed("expected frame".into())
+                        }
                         Err(e) => Reply::Failed(e.to_string()),
                     },
                     Command::Grant => match adapter.grant_pointer() {

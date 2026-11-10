@@ -149,12 +149,13 @@ jobs:
           p = Path(os.environ["JWM_REMOTE_LATENCY_REPORT"])
           assert p.is_file() and 0 < p.stat().st_size <= 1048576
           r = json.loads(p.read_text())
-          assert r["schema_version"] == 2 and r["success"] is True
+          assert r["schema_version"] == 3 and r["success"] is True
           assert r["benchmark"] == "proof_delta_abba"
-          assert r["order"] == ["Aoff", "Boff", "Aon", "Bon", "Bon", "Aon", "Boff", "Aoff"]
+          assert r["order"] == ["Alegacy", "Blegacy", "Anew", "Bnew", "Bnew", "Anew", "Blegacy", "Alegacy"]
           assert len(r["sessions"]) == 8 and r["comparison"] is not None
           expected = [(True, False), (False, False), (True, True), (False, True), (False, True), (True, True), (False, False), (True, False)]
           assert [(s["legacy_forced_keyframe"], s["ack_wake_enabled"]) for s in r["sessions"]] == expected
+          assert all(s["retained_proof_slots_legacy"] is (not s["ack_wake_enabled"]) for s in r["sessions"])
           assert len(r["groups"]) == 2 and all(g["comparison"] is not None for g in r["groups"])
           assert r["four_configuration_summary"] is not None
           for session in r["sessions"]:

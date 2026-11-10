@@ -356,6 +356,16 @@ impl Harness {
         ack_wake: bool,
         probe: Arc<host::ProofDeltaProbe>,
     ) -> Self {
+        Self::new_with_proof_schedule(gl, held_on_enter, legacy_keyframe, ack_wake, false, probe)
+    }
+    fn new_with_proof_schedule(
+        gl: &mut HeadlessSmithayGles,
+        held_on_enter: bool,
+        legacy_keyframe: bool,
+        ack_wake: bool,
+        legacy_retained_slots: bool,
+        probe: Arc<host::ProofDeltaProbe>,
+    ) -> Self {
         Self::new_with_wake_config(
             gl,
             held_on_enter,
@@ -363,7 +373,7 @@ impl Harness {
             (false, false),
             7,
             None,
-            Some((legacy_keyframe, ack_wake, probe)),
+            Some((legacy_keyframe, ack_wake, legacy_retained_slots, probe)),
         )
     }
     fn new_with_wake_config(
@@ -373,7 +383,7 @@ impl Harness {
         viewer_scroll: (bool, bool),
         recipient_version: u32,
         wake_config: Option<(bool, Arc<host::InputWakeProbe>)>,
-        proof_config: Option<(bool, bool, Arc<host::ProofDeltaProbe>)>,
+        proof_config: Option<(bool, bool, bool, Arc<host::ProofDeltaProbe>)>,
     ) -> Self {
         let mut native = Server::new();
         let mut local = Server::new();
@@ -432,9 +442,11 @@ impl Harness {
                 None => run(),
             };
             let result = match proof_config {
-                Some((legacy, ack_wake, probe)) => {
-                    host::with_legacy_disable_ack_wake(!ack_wake, || {
-                        host::with_proof_delta(legacy, probe, run_with_wake)
+                Some((legacy, ack_wake, legacy_slots, probe)) => {
+                    host::with_legacy_retained_proof_slots(legacy_slots, || {
+                        host::with_legacy_disable_ack_wake(!ack_wake, || {
+                            host::with_proof_delta(legacy, probe, run_with_wake)
+                        })
                     })
                 }
                 None => run_with_wake(),
@@ -1497,12 +1509,35 @@ fn actual_wayland_control_horizontal_scroll_tcp_mixed_axis_revokes_without_input
 
 #[test]
 fn actual_control_zero_dirty_proof_requires_new_exact_presentation() {
+    exercise_zero_dirty_proof_after_hold(Duration::ZERO);
+}
+#[test]
+fn actual_control_retained_hold_click_requires_fresh_proof_and_presentation() {
+    exercise_zero_dirty_proof_after_hold(Duration::from_millis(250));
+}
+fn exercise_zero_dirty_proof_after_hold(hold: Duration) {
     let Some(mut gl) = HeadlessSmithayGles::new() else {
         return;
     };
     let probe = Arc::new(host::ProofDeltaProbe::default());
     let mut h = Harness::new_with_proof_keyframes(&mut gl, false, false, probe.clone());
     let first = h.activate(&mut gl);
+    // Hold across multiple 30 FPS slots without consuming or releasing the
+    // current proof. This stays below the native one-second proof lifetime.
+    let retained_evidence_count = probe.snapshot().len();
+    let held_until = Instant::now() + hold;
+    while Instant::now() < held_until {
+        h.tick(&mut gl, false);
+        assert_eq!(*h.ready.lock().unwrap(), Some(first));
+        assert_eq!(h.frames.lock().unwrap().0, Some(first));
+        h.received.assert_no_input();
+        assert_eq!(
+            probe.snapshot().len(),
+            retained_evidence_count,
+            "retained wait must not duplicate a proof"
+        );
+        thread::sleep(Duration::from_millis(1));
+    }
     h.click();
     // Consume the old ticket without changing the application's red pixels.
     // Keep the next real viewer commit's feedback pending.

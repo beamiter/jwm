@@ -1112,7 +1112,7 @@ impl WaylandCapture {
             self.pump(Instant::now() + Duration::from_millis(1))?;
             self.expire_control();
             self.expire_keyboard();
-            return Ok(CaptureOutcome::NoChange);
+            return Ok(CaptureOutcome::RetainedProofBlocked);
         }
         if self.inflight.is_some() {
             return Err(invalid("duplicate Wayland capture frame").into());
