@@ -116,6 +116,14 @@ fn enqueue_should_start(idle: bool, playlist_pos: i64) -> bool {
     idle && playlist_pos == -1
 }
 
+fn check_action_deadline(now: Instant, deadline: Instant) -> Result<(), String> {
+    if now >= deadline {
+        Err("player request expired before execution".into())
+    } else {
+        Ok(())
+    }
+}
+
 fn open_load_flag(enqueue: bool, start_enqueued: bool, index: usize) -> &'static str {
     match (enqueue, start_enqueued, index) {
         (false, _, 0) => "replace",
@@ -190,6 +198,9 @@ impl Worker {
         }
         let mut requested_quit = false;
         loop {
+            // Capability readback failure is not player failure. Keep transport
+            // exit handling below live, and permit Stop/Quit/Open regardless.
+            let _ = mpv.refresh_loaded_properties();
             // One request per iteration keeps streaming property events and
             // child exit handling live even under a sustained command burst.
             match self.rx.try_recv() {
@@ -251,6 +262,49 @@ impl Worker {
     }
 }
 
+#[derive(Default)]
+struct LoadRefresh {
+    generation: u64,
+    exhausted: bool,
+    pending: Option<u64>,
+    failure: Option<String>,
+    retry_after: Option<Instant>,
+    failures: u8,
+}
+
+impl LoadRefresh {
+    fn event(&mut self, event: Option<&str>) {
+        match event {
+            Some("start-file" | "end-file" | "shutdown") => {
+                self.pending = None;
+                self.failure = None;
+                self.retry_after = None;
+                self.failures = 0;
+                if let Some(next) = self.generation.checked_add(1) {
+                    self.generation = next;
+                } else {
+                    self.exhausted = true;
+                }
+            }
+            Some("file-loaded") if !self.exhausted => self.pending = Some(self.generation),
+            _ => {}
+        }
+    }
+
+    fn failed(&mut self, error: String, now: Instant) {
+        self.failure = Some(error);
+        self.failures = self.failures.saturating_add(1);
+        self.retry_after = Some(now + Duration::from_millis(250));
+        if self.failures >= 3 {
+            self.pending = None;
+        }
+    }
+
+    fn current(&self, generation: u64) -> bool {
+        !self.exhausted && self.generation == generation && self.pending == Some(generation)
+    }
+}
+
 struct Mpv {
     socket: UnixStream,
     child: Child,
@@ -259,6 +313,7 @@ struct Mpv {
     state: SharedState,
     resume_index: usize,
     refresh_position: bool,
+    load_refresh: LoadRefresh,
     seek_pending: bool,
     _ui: Option<super::ui::Script>,
     eva_receipts: EvaReceipts,
@@ -330,6 +385,7 @@ impl Mpv {
             state,
             resume_index: 0,
             refresh_position: false,
+            load_refresh: LoadRefresh::default(),
             seek_pending: false,
             _ui: Some(ui),
             eva_receipts: Arc::new(Mutex::new(VecDeque::new())),
@@ -342,6 +398,7 @@ impl Mpv {
     }
 
     fn event(&mut self, message: &Value) {
+        self.load_refresh.event(message["event"].as_str());
         match message["event"].as_str() {
             Some("seek") => self.seek_pending = true,
             Some("playback-restart") if self.seek_pending => {
@@ -443,6 +500,79 @@ impl Mpv {
             .unwrap_or_else(|e| e.into_inner())
             .property(property, &result);
         Ok(result)
+    }
+
+    fn refresh_loaded_properties(&mut self) -> Result<(), String> {
+        if self
+            .load_refresh
+            .retry_after
+            .is_some_and(|at| Instant::now() < at)
+        {
+            return Err("player capabilities are awaiting readback".into());
+        }
+        let result = self.read_loaded_properties();
+        if let Err(error) = &result {
+            // Never advertise stale seek permission after a failed readback.
+            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            state.seekable = false;
+            state.duration_us = None;
+            // Three bounded attempts per load, spaced apart. A new load resets
+            // the budget; a permanently failing property cannot busy-loop.
+            if self.load_refresh.pending.is_some() {
+                self.load_refresh.failed(error.clone(), Instant::now());
+            }
+        }
+        result
+    }
+
+    fn read_loaded_properties(&mut self) -> Result<(), String> {
+        // Property notifications are coalesced. A same-file loop can retain
+        // identical mpv values while start-file cleared our cached capabilities.
+        // Never call command from event(): replies can themselves dispatch events.
+        for _ in 0..4 {
+            if self.load_refresh.exhausted {
+                return Err("player load generation exhausted".into());
+            }
+            let Some(generation) = self.load_refresh.pending else {
+                return self.load_refresh.failure.clone().map_or(Ok(()), Err);
+            };
+            // Raw command replies must not mutate State before the generation
+            // check: another start/end-file can arrive while waiting for either.
+            let seekable = self.command(json!(["get_property", "seekable"]));
+            if !self.load_refresh.current(generation) {
+                continue;
+            }
+            let seekable = seekable?;
+            let duration = self.command(json!(["get_property", "duration"]));
+            if !self.load_refresh.current(generation) {
+                continue;
+            }
+            // Streams may legitimately have no duration. Other failures are not
+            // successful refreshes and must not admit a dependent command.
+            let duration = match duration {
+                Ok(value) => value,
+                Err(error) if error == "mpv: property unavailable" => Value::Null,
+                Err(error) => return Err(error),
+            };
+            if !seekable.is_boolean() {
+                return Err("mpv returned an invalid seekability value".into());
+            }
+            if !duration.is_null() && super::model::microseconds(&duration).is_none() {
+                return Err("mpv returned an invalid duration value".into());
+            }
+            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            if !state.loaded {
+                return Err("player load changed during capability refresh".into());
+            }
+            state.property("seekable", &seekable);
+            state.property("duration", &duration);
+            self.load_refresh.pending = None;
+            self.load_refresh.failure = None;
+            self.load_refresh.retry_after = None;
+            self.load_refresh.failures = 0;
+            return Ok(());
+        }
+        Err("player load kept changing during capability refresh".into())
     }
 
     fn publish_seek_position(&mut self) {
@@ -665,6 +795,16 @@ impl Mpv {
     }
 
     fn action(&mut self, action: Action, deadline: Instant) -> Result<(), String> {
+        check_action_deadline(Instant::now(), deadline)?;
+        if matches!(
+            action,
+            Action::Seek(_) | Action::SetPosition { .. } | Action::Rate(_)
+        ) {
+            self.refresh_loaded_properties()?;
+            // Readback can consume the remaining request budget. Never execute
+            // a delayed seek/rate command after its caller's authority expires.
+            check_action_deadline(Instant::now(), deadline)?;
+        }
         match action {
             Action::Theme(theme) => {
                 self.command(json!(["script-message", "jwm-theme", theme.to_string()]))?;
@@ -839,6 +979,77 @@ mod tests {
     use super::*;
 
     #[test]
+    fn action_deadline_is_rechecked_after_capability_readback() {
+        let start = Instant::now();
+        let deadline = start + Duration::from_secs(1);
+        assert!(check_action_deadline(start, deadline).is_ok());
+        assert!(check_action_deadline(deadline, deadline).is_err());
+        assert!(check_action_deadline(deadline + Duration::from_nanos(1), deadline).is_err());
+        assert!(check_action_deadline(deadline - Duration::from_nanos(1), deadline).is_ok());
+    }
+
+    #[test]
+    fn capability_readback_failures_are_bounded_and_new_load_can_recover() {
+        let mut refresh = LoadRefresh::default();
+        refresh.event(Some("start-file"));
+        refresh.event(Some("file-loaded"));
+        let now = Instant::now();
+        for attempt in 1..=3 {
+            refresh.failed("mpv: property unavailable".into(), now);
+            assert_eq!(refresh.failures, attempt);
+            assert_eq!(refresh.retry_after, Some(now + Duration::from_millis(250)));
+            assert_eq!(refresh.pending.is_some(), attempt < 3);
+        }
+        assert!(refresh.failure.is_some());
+        refresh.event(Some("start-file"));
+        refresh.event(Some("file-loaded"));
+        assert!(refresh.pending.is_some());
+        assert!(refresh.failure.is_none());
+        assert!(refresh.retry_after.is_none());
+        assert_eq!(refresh.failures, 0);
+    }
+
+    #[test]
+    fn loaded_refresh_rejects_old_replies_even_for_same_track_reload() {
+        let mut refresh = LoadRefresh::default();
+        let mut state = State::default();
+        for cycle in 0..2 {
+            let start = json!({"event":"start-file", "playlist_entry_id":2});
+            refresh.event(start["event"].as_str());
+            state.event(&start);
+            refresh.event(Some("file-loaded"));
+            state.event(&json!({"event":"file-loaded"}));
+            assert!(!state.seekable);
+            assert_eq!(state.duration_us, None);
+            let generation = refresh.pending.unwrap();
+            assert!(refresh.current(generation));
+            // Simulate actual readback values, not a repeated property event.
+            state.property("seekable", &json!(true));
+            state.property("duration", &json!(4.0));
+            refresh.pending = None;
+            assert!(state.seekable);
+            assert_eq!(state.duration_us, Some(4_000_000));
+            if cycle == 0 {
+                refresh.event(Some("end-file"));
+                assert!(!refresh.current(generation));
+            }
+        }
+        refresh.event(Some("file-loaded"));
+        let stale = refresh.pending.unwrap();
+        refresh.event(Some("start-file"));
+        refresh.event(Some("file-loaded"));
+        assert!(!refresh.current(stale));
+        assert!(refresh.current(refresh.pending.unwrap()));
+        refresh.event(Some("shutdown"));
+        assert!(refresh.pending.is_none());
+        refresh.generation = u64::MAX;
+        refresh.event(Some("start-file"));
+        refresh.event(Some("file-loaded"));
+        assert!(refresh.exhausted);
+        assert!(refresh.pending.is_none());
+    }
+
+    #[test]
     fn enqueue_does_not_reselect_a_track_while_initial_loading_is_pending() {
         // First launch selected index 0, but file-loaded has not arrived yet.
         // A forwarded enqueue must append, not skip to its new index 1.
@@ -958,6 +1169,7 @@ mod tests {
             state,
             resume_index: 0,
             refresh_position: false,
+            load_refresh: LoadRefresh::default(),
             seek_pending: false,
             _ui: None,
             eva_receipts: Arc::new(Mutex::new(VecDeque::new())),
@@ -1000,6 +1212,7 @@ mod tests {
             state: Arc::new(Mutex::new(State::default())),
             resume_index: 0,
             refresh_position: false,
+            load_refresh: LoadRefresh::default(),
             seek_pending: false,
             _ui: None,
             eva_receipts: Arc::new(Mutex::new(VecDeque::new())),
@@ -1026,6 +1239,7 @@ mod tests {
             state: Arc::new(Mutex::new(State::default())),
             resume_index: 0,
             refresh_position: false,
+            load_refresh: LoadRefresh::default(),
             seek_pending: false,
             _ui: None,
             eva_receipts: Arc::new(Mutex::new(VecDeque::new())),
