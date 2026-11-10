@@ -285,7 +285,6 @@ impl TileEncoder {
                 })
     }
 
-    #[cfg(test)]
     pub(crate) fn detected_exact_change(&self) -> bool {
         self.exact_changed
     }

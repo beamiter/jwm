@@ -35,9 +35,19 @@ two-second **exact** observed RGB stability gate. On captures without ordinary
 JPEG dirty work, bounded round-robin PNG batches repair eligible stable tiles;
 a changing neighbor does not reset the stable text tile's clock. Ordinary dirty
 work always takes JPEG priority, so continuously changing captures can still
-delay repairs. The stability gate is paid per changed tile, not per batch. Successful batches are separated by at least 100 ms
-from the preceding record's completed flush, and still require capture/FPS and
-transport credit; a delayed writer never causes catch-up bursts. A failed PNG
+delay repairs. The stability gate is paid per changed tile, not per batch. The scheduling
+candidate adds 250 ms of quiet after any exact raw change and separates successful
+batches by at least 250 ms from the preceding record's completed flush. Capture/FPS
+and transport credit still apply; a delayed writer never causes catch-up bursts.
+Before writing a PNG, the candidate compares any newer queued capture's full
+source/geometry/dimensions/RGB and discards the repair if content was superseded.
+Identical newer captures do not cancel it. A discarded repair consumes no credit
+and does not clear exactness debt. This is best effort before writing, not
+preemption of an already-sent record. The former policy used a 100 ms batch gap;
+[real-pipeline comparison](remote-lossless-scheduling-ab.md) is still pending. The global quiet guard
+intentionally gives changing content priority: updates more frequent than every
+250 ms can indefinitely postpone repair of otherwise stable neighboring tiles.
+It is not guaranteed per-tile convergence during continuous animation. A failed PNG
 encode instead backs off for two seconds without clearing exactness debt.
 Any subsequent raw change, including a single channel
 changing by one, restarts that tile's stability and makes its pixels owe an exact

@@ -512,7 +512,80 @@ pub(super) fn with_proof_delta<T>(
 /// unchanged capture simply has no dirty tiles. Keepalive timing stays here
 /// rather than in the codec because it is a property of the *session*, and it
 /// must remain strictly inside the viewer's shared video idle timeout.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum LosslessSchedule {
+    #[default]
+    New250,
+    #[cfg(test)]
+    Legacy100,
+}
+#[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct LosslessScheduleStats {
+    pub encoded_jpeg: u64,
+    pub encoded_png: u64,
+    pub encode_ns: u128,
+    pub jpeg_ns: u128,
+    pub png_ns: u128,
+    pub sent_bytes: u64,
+    pub comparisons: u64,
+    pub comparison_ns: u128,
+    pub stale_png_dropped: u64,
+}
+#[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+#[derive(Default)]
+pub(crate) struct LosslessScheduleProbe {
+    stats: Mutex<LosslessScheduleStats>,
+    records: Mutex<Vec<LosslessScheduleRecord>>,
+}
+#[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct LosslessScheduleRecord {
+    pub sequence: u64,
+    pub source_epoch: u64,
+    pub geometry_epoch: u64,
+    pub png: bool,
+    pub bytes: usize,
+    pub encode_ns: u128,
+    pub jpeg_ns: u128,
+    pub png_ns: u128,
+}
+#[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+impl LosslessScheduleProbe {
+    pub(crate) fn records(&self) -> Vec<LosslessScheduleRecord> {
+        self.records.lock().unwrap().clone()
+    }
+    pub(crate) fn snapshot(&self) -> LosslessScheduleStats {
+        *self.stats.lock().unwrap()
+    }
+}
+#[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+thread_local! {static LOSSLESS_SCHEDULE_TEST:std::cell::RefCell<Option<(LosslessSchedule,Arc<LosslessScheduleProbe>)>>=const{std::cell::RefCell::new(None)};}
+#[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+pub(crate) fn with_lossless_schedule<T>(
+    policy: LosslessSchedule,
+    probe: Arc<LosslessScheduleProbe>,
+    run: impl FnOnce() -> T,
+) -> T {
+    struct Restore(Option<(LosslessSchedule, Arc<LosslessScheduleProbe>)>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            LOSSLESS_SCHEDULE_TEST.with(|slot| *slot.borrow_mut() = self.0.take());
+        }
+    }
+    let _restore = Restore(LOSSLESS_SCHEDULE_TEST.with(|slot| slot.replace(Some((policy, probe)))));
+    run()
+}
+fn newer_frame_supersedes_repair(current: &PendingFrame, newer: &PendingFrame) -> bool {
+    current.source_version != newer.source_version
+        || current.frame.geometry_epoch != newer.frame.geometry_epoch
+        || (current.frame.source_width, current.frame.source_height)
+            != (newer.frame.source_width, newer.frame.source_height)
+        || current.frame.image != newer.frame.image
+}
 struct FrameSender {
+    lossless_schedule: LosslessSchedule,
+    recent_dynamic_at: Option<Instant>,
     scroll_copy: bool,
     static_lossless: bool,
     encoder: TileEncoder,
@@ -541,6 +614,8 @@ impl FrameSender {
         encoder.set_scroll_copy_enabled(enabled);
         encoder.set_lossless_enabled(static_lossless);
         Self {
+            lossless_schedule: LosslessSchedule::New250,
+            recent_dynamic_at: None,
             scroll_copy: enabled,
             static_lossless,
             encoder,
@@ -588,11 +663,19 @@ impl FrameSender {
         }
         let mut plan = self.encoder.plan_at(frame, request, now)?;
         if self.static_lossless {
+            if self.encoder.detected_exact_change() {
+                self.recent_dynamic_at = Some(now);
+            }
+            let quiet = self.lossless_schedule != LosslessSchedule::New250
+                || self.recent_dynamic_at.is_some_and(|at| {
+                    now.saturating_duration_since(at) >= Duration::from_millis(250)
+                });
             // Tile-local exact stability allows static text to converge beside
             // animation, but any ordinary dirty work takes JPEG priority.
             let retry = self.lossless_retry_after.is_none_or(|at| now >= at)
                 && self.lossless_next_batch.is_none_or(|at| now >= at);
-            if !plan.keyframe
+            if quiet
+                && !plan.keyframe
                 && plan.dirty_tiles == 0
                 && retry
                 && self.encoder.has_stable_exact_debt(now)
@@ -636,7 +719,14 @@ impl FrameSender {
             if self.static_lossless {
                 // Anchor to completed flush: a delayed writer never catches up
                 // by bursting through missed batch deadlines.
-                self.lossless_next_batch = Some(committed_at + Duration::from_millis(100));
+                self.lossless_next_batch = Some(
+                    committed_at
+                        + if self.lossless_schedule == LosslessSchedule::New250 {
+                            Duration::from_millis(250)
+                        } else {
+                            Duration::from_millis(100)
+                        },
+                );
             } else {
                 self.last_refinement =
                     Some(refinement_clock_after_commit(planned_at, committed_at));
@@ -1100,6 +1190,13 @@ impl<T> LatestMailbox<T> {
         }
     }
 
+    fn inspect_latest(&self, inspect: impl FnOnce(Option<&T>) -> bool) -> io::Result<bool> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| io::Error::other("remote frame mailbox lock was poisoned"))?;
+        Ok(inspect(state.latest.as_ref()))
+    }
     fn clear(&self) {
         let mut state = self.state.lock().unwrap();
         let pending = state.latest.take();
@@ -2042,6 +2139,8 @@ pub(crate) fn with_pending_lossless_probe<T>(
 }
 struct SourceControl {
     #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+    lossless_schedule_test: Option<(LosslessSchedule, Arc<LosslessScheduleProbe>)>,
+    #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
     pending_lossless_probe: Option<Arc<PendingLosslessProbe>>,
     #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
     legacy_retained_proof_slots: bool,
@@ -2125,6 +2224,8 @@ impl SourceControl {
             proof_delta: PROOF_DELTA_TEST.with(|value| value.borrow().clone()),
             #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
             pending_lossless_probe: PENDING_LOSSLESS_PROBE.with(|slot| slot.borrow().clone()),
+            #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+            lossless_schedule_test: LOSSLESS_SCHEDULE_TEST.with(|slot| slot.borrow().clone()),
             #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
             legacy_disable_ack_wake: LEGACY_DISABLE_ACK_WAKE.with(|v| v.get()),
             #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
@@ -4429,6 +4530,10 @@ fn send_frames_with_encoder_scoped<W: std::io::Write + SetWriteTimeout>(
                 source_epoch = Some(pending.source_version.epoch);
             }
         }
+        #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+        if let Some((policy, _)) = sources.and_then(|s| s.lossless_schedule_test.as_ref()) {
+            sender.lossless_schedule = *policy;
+        }
         // A retained proof requires a fresh record/sequence/presentation, not
         // a fresh codec reference. FreshProof forces exact damage and emission through both
         // refinement passes, including a legitimate zero-dirty frame.
@@ -4503,6 +4608,22 @@ fn send_frames_with_encoder_scoped<W: std::io::Write + SetWriteTimeout>(
             }
             return Err(LocalRuntimeFailure::encoding(error));
         }
+        #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+        if let Some((_, probe)) = sources.and_then(|s| s.lossless_schedule_test.as_ref()) {
+            let mut stats = probe.stats.lock().unwrap();
+            stats.encode_ns += encode_started.elapsed().as_nanos();
+            if let Some(t) = sender.encoder.encode_timings() {
+                if let Some(png) = t.png {
+                    stats.encoded_png += 1;
+                    stats.png_ns += png.as_nanos();
+                } else {
+                    stats.encoded_jpeg += 1;
+                    stats.jpeg_ns += t.jpeg.as_nanos();
+                }
+            }
+        }
+        #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+        let schedule_encode_ns = encode_started.elapsed().as_nanos();
         telemetry.record_encoded(encode_started.elapsed(), plan);
         if let Some(stages) = sender.encoder.encode_timings() {
             telemetry.record_encode_stages(stages);
@@ -4528,6 +4649,29 @@ fn send_frames_with_encoder_scoped<W: std::io::Write + SetWriteTimeout>(
                 pending.source_version.epoch,
                 pending.frame.geometry_epoch,
             )?;
+        }
+        if sender.lossless_schedule == LosslessSchedule::New250
+            && sender
+                .encoder
+                .encode_timings()
+                .is_some_and(|t| t.png.is_some())
+        {
+            #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+            let compare_started = Instant::now();
+            let superseded = mailbox.inspect_latest(|latest| {
+                latest.is_some_and(|newer| newer_frame_supersedes_repair(&pending, newer))
+            })?;
+            #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+            if let Some((_, probe)) = sources.and_then(|s| s.lossless_schedule_test.as_ref()) {
+                let mut stats = probe.stats.lock().unwrap();
+                stats.comparisons += 1;
+                stats.comparison_ns += compare_started.elapsed().as_nanos();
+                stats.stale_png_dropped += u64::from(superseded);
+            }
+            if superseded {
+                sender.discard();
+                continue;
+            }
         }
         let wire_payload = payload.as_slice();
         let write_started = Instant::now();
@@ -4609,6 +4753,27 @@ fn send_frames_with_encoder_scoped<W: std::io::Write + SetWriteTimeout>(
         // flush succeeded. A partial/failed write therefore cannot suppress a
         // future frame in a replacement session or test harness.
         sender.commit_at(&pending.frame, Instant::now());
+        #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+        if let Some((_, probe)) = sources.and_then(|s| s.lossless_schedule_test.as_ref()) {
+            probe.stats.lock().unwrap().sent_bytes += wire_payload.len() as u64;
+            let stages = sender.encoder.encode_timings();
+            let mut records = probe.records.lock().unwrap();
+            assert!(
+                records.len() < 4096,
+                "test lossless schedule ledger exhausted"
+            );
+            records.push(LosslessScheduleRecord {
+                sequence,
+                source_epoch: pending.source_version.epoch,
+                geometry_epoch: pending.frame.geometry_epoch,
+                png: stages.is_some_and(|t| t.png.is_some()),
+                bytes: wire_payload.len(),
+                encode_ns: schedule_encode_ns,
+                jpeg_ns: stages.map_or(0, |t| t.jpeg.as_nanos()),
+                png_ns: stages.and_then(|t| t.png).map_or(0, |d| d.as_nanos()),
+            });
+        }
+
         #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
         if let Some(probe) = sources.and_then(|s| s.pending_lossless_probe.as_ref()) {
             let mut written = probe.written.lock().unwrap();
@@ -5738,10 +5903,10 @@ mod tests {
         sender.commit_at(&frame, flushed);
         assert!(sender.encoder.has_exact_debt());
         sender
-            .plan_at(&frame, flushed + Duration::from_millis(99))
+            .plan_at(&frame, flushed + Duration::from_millis(249))
             .unwrap();
         assert!(sender.pending_refinement_at.is_none());
-        let next = flushed + Duration::from_millis(100);
+        let next = flushed + Duration::from_millis(250);
         let second = sender.plan_at(&frame, next).unwrap();
         assert_eq!(second.dirty_tiles, 16);
         assert!(sender.pending_refinement_at.is_some());
@@ -5802,7 +5967,7 @@ mod tests {
             assert!(!decoder.last_frame_was_lossless());
             sender.commit_at(&frame, now);
         }
-        let idle = at + Duration::from_millis(2034);
+        let idle = at + Duration::from_millis(2250);
         let repair = sender.plan_at(&frame, idle).unwrap();
         assert_eq!(repair.dirty_tiles, 1);
         assert!(sender.pending_refinement_at.is_some());
@@ -5820,7 +5985,7 @@ mod tests {
         sender.commit_at(&frame, idle);
         assert!(sender.encoder.has_exact_debt());
         sender
-            .plan_at(&frame, at + Duration::from_millis(2200))
+            .plan_at(&frame, at + Duration::from_millis(2400))
             .unwrap();
         assert!(sender.pending_refinement_at.is_none());
         sender.plan_at(&frame, at + Duration::from_secs(4)).unwrap();
@@ -5833,6 +5998,88 @@ mod tests {
         assert_eq!(result.image(), &frame.image);
         sender.commit_at(&frame, at + Duration::from_secs(4));
         assert!(!sender.encoder.has_exact_debt());
+    }
+
+    #[test]
+    fn new_lossless_quiet_gate_is_exact_and_legacy_policy_remains_available() {
+        for policy in [LosslessSchedule::New250, LosslessSchedule::Legacy100] {
+            let base = Instant::now();
+            let mut frame = proof_test_frame();
+            let mut sender = FrameSender::with_codecs(false, true);
+            sender.lossless_schedule = policy;
+            let mut bytes = Vec::new();
+            sender.plan_at(&frame, base).unwrap();
+            sender
+                .encoder
+                .encode_into(&mut bytes, 0, &frame, 70)
+                .unwrap();
+            sender.commit_at(&frame, base);
+            let changed = base + Duration::from_secs(3);
+            frame.image.as_mut()[0] += 1;
+            sender.plan_at(&frame, changed).unwrap();
+            assert_eq!(
+                sender.pending_refinement_at.is_some(),
+                policy == LosslessSchedule::Legacy100
+            );
+            sender.discard();
+            sender
+                .plan_at(&frame, changed + Duration::from_millis(249))
+                .unwrap();
+            assert_eq!(
+                sender.pending_refinement_at.is_some(),
+                policy == LosslessSchedule::Legacy100
+            );
+            sender.discard();
+            sender
+                .plan_at(&frame, changed + Duration::from_millis(250))
+                .unwrap();
+            assert!(sender.pending_refinement_at.is_some());
+        }
+    }
+    #[test]
+    fn pending_png_supersession_compares_scope_and_rgb_without_consuming_latest() {
+        let current = test_pending_frame(90);
+        let mailbox = LatestMailbox::new();
+        mailbox.publish(test_pending_frame(90)).unwrap();
+        assert!(
+            !mailbox
+                .inspect_latest(
+                    |next| next.is_some_and(|n| newer_frame_supersedes_repair(&current, n))
+                )
+                .unwrap()
+        );
+        let same = mailbox.receive().unwrap().unwrap();
+        assert!(!newer_frame_supersedes_repair(&current, &same));
+        let mut newer = test_pending_frame(90);
+        newer.source_version.epoch += 1;
+        assert!(newer_frame_supersedes_repair(&current, &newer));
+        let mut newer = test_pending_frame(90);
+        newer.frame.geometry_epoch += 1;
+        assert!(newer_frame_supersedes_repair(&current, &newer));
+        let mut newer = test_pending_frame(90);
+        newer.frame.source_width += 1;
+        assert!(newer_frame_supersedes_repair(&current, &newer));
+        let mut newer = test_pending_frame(90);
+        newer.frame.image = RgbImage::from_pixel(3, 2, Rgb([90, 0, 0]));
+        assert!(newer_frame_supersedes_repair(&current, &newer));
+        mailbox.publish(test_pending_frame(91)).unwrap();
+        assert!(
+            mailbox
+                .inspect_latest(
+                    |next| next.is_some_and(|n| newer_frame_supersedes_repair(&current, n))
+                )
+                .unwrap()
+        );
+        assert_eq!(
+            mailbox
+                .receive()
+                .unwrap()
+                .unwrap()
+                .frame
+                .image
+                .get_pixel(0, 0)[0],
+            91
+        );
     }
 
     fn proof_test_frame() -> CapturedFrame {

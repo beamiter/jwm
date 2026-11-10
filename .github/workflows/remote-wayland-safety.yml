@@ -73,14 +73,43 @@ jobs:
         run: |
           export XDG_RUNTIME_DIR="$(mktemp -d)"
           cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib remote_control -- --test-threads=1 --nocapture
+      - name: Measure lossless scheduling with three explicit policies
+        run: |
+          set -euo pipefail
+          export XDG_RUNTIME_DIR="$(mktemp -d)"
+          export JWM_REMOTE_SCHEDULER_REPORT="${{ runner.temp }}/remote-lossless-scheduler-ab.json"
+          python3 scripts/summarize-lossless-scheduler-ab.py --self-test
+          prefix='remote::host::wayland_viewer_integration::host_lossless_integration::scheduler_benchmark'
+          marker="$prefix::unique_gray_markers_survive_production_jpeg_and_reject_uncertain_cells"
+          measure="$prefix::actual_static_lossless_scheduler_three_arm_measurement"
+          for filter in "$marker" "$measure"; do
+            listed="$(env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --exact --list)"
+            test "$(printf '%s\n' "$listed" | grep -c ': test$')" -eq 1
+          done
+          env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$marker" -- --exact --test-threads=1
+          status=0
+          env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$measure" -- --ignored --exact --test-threads=1 > "${{ runner.temp }}/remote-lossless-scheduler-ab.log" 2>&1 || status=$?
+          if test -f "$JWM_REMOTE_SCHEDULER_REPORT"; then
+            python3 scripts/summarize-lossless-scheduler-ab.py --public-summary "$JWM_REMOTE_SCHEDULER_REPORT" > "${{ runner.temp }}/remote-lossless-scheduler-summary.json" 2> "${{ runner.temp }}/remote-lossless-summary-error.log"
+            cat "${{ runner.temp }}/remote-lossless-scheduler-summary.json"
+          fi
+          exit "$status"
+      - name: Preserve allowlisted aggregate lossless scheduling metrics
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: remote-lossless-scheduler-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/remote-lossless-scheduler-summary.json
+          if-no-files-found: warn
+          retention-days: 3
       - name: Static lossless refinement exact TCP and viewer pixels
         run: |
           set -euo pipefail
           export XDG_RUNTIME_DIR="$(mktemp -d)"
           filter='remote::host::wayland_viewer_integration::host_lossless_integration::'
-          listed="$(env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --list)"
+          listed="$(env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --skip scheduler_benchmark --list)"
           test "$(printf '%s\n' "$listed" | grep -c ': test$')" -eq 7
-          env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --test-threads=1 --nocapture
+          env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --skip scheduler_benchmark --test-threads=1 --nocapture
       - name: Lossless popup and passive resize family exact pixels and epoch fences
         run: |
           set -euo pipefail

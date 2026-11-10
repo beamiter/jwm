@@ -639,3 +639,6 @@ fn blink_actual_timestamp_not_poll_order_decides_deadline() {
         "even real 1ns lateness must not be hidden by reordering"
     );
 }
+
+#[path = "host_lossless_scheduler_benchmark.rs"]
+mod scheduler_benchmark;
