@@ -3801,6 +3801,7 @@ mod horizontal_scroll_cli_tests {
             let cli = Cli::try_parse_from([
                 "jwm-remote",
                 "connect",
+                "localhost:48221",
                 "--viewer-backend",
                 "wayland",
                 lease,
@@ -3822,7 +3823,13 @@ mod horizontal_scroll_cli_tests {
                 .is_err()
         );
         assert!(
-            Cli::try_parse_from(["jwm-remote", "connect", "--wayland-horizontal-scroll"]).is_err()
+            Cli::try_parse_from([
+                "jwm-remote",
+                "connect",
+                "localhost:48221",
+                "--wayland-horizontal-scroll"
+            ])
+            .is_err()
         );
         assert!(
             Cli::try_parse_from([

@@ -1215,7 +1215,7 @@ mod tests {
     }
 
     #[test]
-    fn hello_uses_version_nineteen_and_rejects_neighbouring_versions() {
+    fn hello_uses_current_version_and_rejects_neighbouring_versions() {
         let payload = ServerHello {
             stream: Default::default(),
             pointer_enabled: false,
@@ -1231,7 +1231,7 @@ mod tests {
         // fail on its version instead. Version 4 sent one digest of the whole
         // keymap where later versions send a per-keycode table.
         for older in [
-            4_u16, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21,
+            4_u16, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22,
         ] {
             let mut previous = payload;
             previous[8..10].copy_from_slice(&older.to_be_bytes());
@@ -1243,7 +1243,7 @@ mod tests {
             );
         }
 
-        for rejected in [0_u16, 2, 3, 23, u16::MAX] {
+        for rejected in [0_u16, 2, 3, 24, u16::MAX] {
             let mut other = payload;
             other[8..10].copy_from_slice(&rejected.to_be_bytes());
             assert!(

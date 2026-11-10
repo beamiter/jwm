@@ -506,7 +506,7 @@ fn actual_wayland_control_scroll_consent_held_inputs_and_invalid_axis_fail_close
             match case {
                 0 | 2 => "lacks permission or conflicts with held button",
                 1 => "overlaps held keys",
-                _ => "exactly one vertical notch",
+                _ => "unapproved Wayland wheel notch axis",
             },
         );
     }
