@@ -79,7 +79,7 @@ jobs:
           export XDG_RUNTIME_DIR="$(mktemp -d)"
           filter='remote::host::wayland_viewer_integration::host_lossless_integration::'
           listed="$(env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --list)"
-          test "$(printf '%s\n' "$listed" | grep -c ': test$')" -eq 4
+          test "$(printf '%s\n' "$listed" | grep -c ': test$')" -eq 6
           env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --test-threads=1 --nocapture
       - name: One-shot text native protocol, exact context and revocation
         run: |

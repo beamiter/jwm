@@ -1,0 +1,23 @@
+{
+  "saved_utc": "2026-11-10T17:36:01.244509+00:00",
+  "head": "52d1fa5a44d06527a11bcca15c8e2b09775b39f8",
+  "dirty_status": [
+    " M .github/workflows/remote-wayland-safety.yml",
+    " M docs/remote-lossless-static-preparation.md",
+    " M src/remote/host.rs",
+    " M src/remote/host_wayland_lossless_viewer_integration.rs",
+    " M src/remote/tile.rs",
+    "?? docs/benchmarks/static-lossless-tile-stability-2026-11-10/",
+    "?? src/remote/tile_stability_benchmark.rs"
+  ],
+  "source_sha256": {
+    "src/remote/tile.rs": "68e64244833cf01132360555f07c925a5131e4e9431e9f0aabc36dc84e14e258",
+    "src/remote/tile_stability_benchmark.rs": "dc5e8685c3d3f8e5a00d0e637c702969f2a54dcac2d7a9a1354b53c31aa7035f",
+    "src/remote/png_atlas.rs": "500b8f46c40a3109c73175a6134d824f9adff73c36ded2c5c793d1024fefe8b6",
+    "Cargo.lock": "cc32a6f2404f4c9ba3097b774437581c10c3382ca7f7e0941b2e475b659ff600"
+  },
+  "raw_log_sha256": "d28d1a2ad259877cf4d9668e24c2c3465aaee78cf0d9e232e1268c329e969690",
+  "test": "remote::tile::stability_benchmark::offline_blinking_tile_exact_stability_ab",
+  "profile": "debug (report debug_assertions true)",
+  "execution": "parent coordinated exact offline ignored test; no socket or GL in this benchmark"
+}

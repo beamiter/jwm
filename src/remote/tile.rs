@@ -136,6 +136,7 @@ struct PlannedFrame {
 /// One capture's pixel damage, reusable while the quality controller changes epoch.
 #[derive(Debug, Clone, Copy)]
 struct DetectedFrame {
+    observed_at: Instant,
     scroll: Option<ScrollCopy>,
     geometry_epoch: u64,
     keyframe: bool,
@@ -159,6 +160,7 @@ pub(crate) struct EncodeStageTimings {
 pub(crate) struct TileEncoder {
     lossless_enabled: bool,
     exact: Vec<bool>,
+    stable_since: Vec<Instant>,
     observed: Option<RgbImage>,
     exact_changed: bool,
     lossless_rejected: bool,
@@ -209,6 +211,7 @@ impl TileEncoder {
         Self {
             lossless_enabled: false,
             exact: Vec::new(),
+            stable_since: Vec::new(),
             observed: None,
             exact_changed: false,
             lossless_rejected: false,
@@ -260,15 +263,29 @@ impl TileEncoder {
         if self.lossless_enabled != enabled {
             self.discard();
             self.exact.clear();
+            self.stable_since.clear();
             self.observed = None;
             self.lossless_enabled = enabled;
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn has_exact_debt(&self) -> bool {
         self.lossless_enabled && self.exact.iter().any(|exact| !exact)
     }
 
+    pub(crate) fn has_stable_exact_debt(&self, now: Instant) -> bool {
+        self.lossless_enabled
+            && self
+                .exact
+                .iter()
+                .zip(&self.stable_since)
+                .any(|(exact, since)| {
+                    !exact && now.saturating_duration_since(*since) >= Duration::from_secs(2)
+                })
+    }
+
+    #[cfg(test)]
     pub(crate) fn detected_exact_change(&self) -> bool {
         self.exact_changed
     }
@@ -300,7 +317,16 @@ impl TileEncoder {
         frame: &CapturedFrame,
         request: TileEncodeRequest,
     ) -> RemoteResult<TilePlan> {
-        self.detect(frame, request)?;
+        self.plan_at(frame, request, Instant::now())
+    }
+
+    pub(crate) fn plan_at(
+        &mut self,
+        frame: &CapturedFrame,
+        request: TileEncodeRequest,
+        now: Instant,
+    ) -> RemoteResult<TilePlan> {
+        self.detect(frame, request, now)?;
         self.select_refinement(None)
     }
 
@@ -312,11 +338,16 @@ impl TileEncoder {
         request: TileEncodeRequest,
         refinement: Option<(u8, usize)>,
     ) -> RemoteResult<TilePlan> {
-        self.detect(frame, request)?;
+        self.detect(frame, request, Instant::now())?;
         self.select_refinement(refinement)
     }
 
-    fn detect(&mut self, frame: &CapturedFrame, request: TileEncodeRequest) -> RemoteResult<()> {
+    fn detect(
+        &mut self,
+        frame: &CapturedFrame,
+        request: TileEncodeRequest,
+        now: Instant,
+    ) -> RemoteResult<()> {
         self.pending_lossless = false;
         self.pending_hash = None;
         self.pending_scroll = None;
@@ -354,6 +385,7 @@ impl TileEncoder {
                     .is_none_or(|old| old.dimensions() != frame.image.dimensions())
             {
                 self.exact = vec![false; total_tiles as usize];
+                self.stable_since = vec![now; total_tiles as usize];
                 self.exact_changed = true;
             } else {
                 let mut changed = Vec::new();
@@ -370,6 +402,7 @@ impl TileEncoder {
                 self.exact_changed = !changed.is_empty();
                 for index in changed {
                     self.exact[index as usize] = false;
+                    self.stable_since[index as usize] = now;
                 }
             }
             self.observed = Some(frame.image.clone());
@@ -436,9 +469,11 @@ impl TileEncoder {
         }
         if scroll.is_some() {
             self.exact.fill(false);
+            self.stable_since.fill(now);
         }
         self.detected_dirty.clone_from(&self.dirty);
         self.detected = Some(DetectedFrame {
+            observed_at: now,
             scroll,
             geometry_epoch: frame.geometry_epoch,
             keyframe,
@@ -474,6 +509,7 @@ impl TileEncoder {
             .detected
             .ok_or_else(|| invalid_data("tile refinement selected without detection"))?;
         let DetectedFrame {
+            observed_at,
             mut scroll,
             geometry_epoch,
             keyframe,
@@ -525,13 +561,24 @@ impl TileEncoder {
         let lossless = self.lossless_enabled
             && request == TileEncodeRequest::LosslessRepair
             && !keyframe
-            && !self.exact_changed
+            && self.detected_dirty.is_empty()
             && scroll.is_none();
         if lossless {
             // Single-column packing has no unused cells, so the actual padded
             // atlas, not merely selected source pixels, is strictly bounded.
             let limit = (65_536 / (tile * tile)).min(usize::from(MAX_DIMENSION) / tile);
-            let debts: Vec<u8> = self.exact.iter().map(|exact| u8::from(*exact)).collect();
+            let debts: Vec<u8> = self
+                .exact
+                .iter()
+                .zip(&self.stable_since)
+                .map(|(exact, since)| {
+                    u8::from(
+                        *exact
+                            || observed_at.saturating_duration_since(*since)
+                                < Duration::from_secs(2),
+                    )
+                })
+                .collect();
             let (indices, next) = refinement_tiles(&debts, 1, limit, self.refinement_cursor);
             self.dirty = indices.into_iter().map(|i| i as u32).collect();
             self.bitmap.fill(0);
@@ -1866,6 +1913,58 @@ mod tests {
     }
 
     #[test]
+    fn lossless_tile_stability_preserves_neighbor_and_rejects_young_tolerance_change() {
+        let mut source = busy(32, 16);
+        let base = Instant::now();
+        let mut encoder = TileEncoder::new();
+        encoder.set_lossless_enabled(true);
+        let mut payload = Vec::new();
+        encoder
+            .plan_at(&source, TileEncodeRequest::Keyframe, base)
+            .unwrap();
+        encoder.encode_into(&mut payload, 1, &source, 75).unwrap();
+        encoder.commit(&source);
+        assert!(!encoder.has_stable_exact_debt(base + Duration::from_millis(1999)));
+        source.image.get_pixel_mut(0, 0).0[0] ^= 1;
+        let now = base + Duration::from_secs(2);
+        assert_eq!(
+            encoder
+                .plan_at(&source, TileEncodeRequest::Delta, now)
+                .unwrap()
+                .dirty_tiles,
+            0
+        );
+        assert!(encoder.has_stable_exact_debt(now));
+        let repair = encoder
+            .plan_at(&source, TileEncodeRequest::LosslessRepair, now)
+            .unwrap();
+        assert_eq!(repair.dirty_tiles, 1);
+        assert_eq!(encoder.dirty, [1]); // Only the unchanged neighbor is old enough.
+        encoder.encode_into(&mut payload, 2, &source, 75).unwrap();
+        encoder.discard();
+        assert!(encoder.exact.iter().all(|exact| !exact));
+        encoder
+            .plan_at(&source, TileEncodeRequest::LosslessRepair, now)
+            .unwrap();
+        encoder.encode_into(&mut payload, 3, &source, 75).unwrap();
+        encoder.commit(&source);
+        assert_eq!(encoder.exact, [false, true]);
+        assert!(!encoder.has_stable_exact_debt(now + Duration::from_millis(1999)));
+        assert!(encoder.has_stable_exact_debt(now + Duration::from_secs(2)));
+        // A real dynamic tile retains priority even when its neighbor is stable.
+        source.image.get_pixel_mut(0, 0).0[0] ^= 128;
+        let plan = encoder
+            .plan_at(
+                &source,
+                TileEncodeRequest::LosslessRepair,
+                now + Duration::from_secs(3),
+            )
+            .unwrap();
+        assert!(plan.emit);
+        assert!(!encoder.planned.unwrap().lossless);
+    }
+
+    #[test]
     fn lossless_repair_converges_exactly_in_bounded_fair_batches() {
         let source = busy(513, 257);
         let mut encoder = TileEncoder::new();
@@ -2044,9 +2143,15 @@ mod tests {
         );
         encoder.encode_into(&mut payload, 3, &source, 100).unwrap();
         encoder.commit(&source);
-        encoder
-            .plan(&source, TileEncodeRequest::LosslessRepair)
-            .unwrap();
+        let repair_at =
+            encoder.stable_since.iter().copied().max().unwrap() + Duration::from_secs(2);
+        assert!(
+            encoder
+                .plan_at(&source, TileEncodeRequest::LosslessRepair, repair_at)
+                .unwrap()
+                .emit
+        );
+        assert!(encoder.planned.unwrap().lossless);
         let epoch = source.geometry_epoch;
         source.geometry_epoch += 1;
         assert!(encoder.encode_into(&mut payload, 4, &source, 100).is_err());
@@ -2159,7 +2264,21 @@ mod tests {
         quality: u8,
         request: TileEncodeRequest,
     ) -> TilePlan {
-        let plan = encoder.plan(frame, request).expect("plan succeeds");
+        // Existing codec-only repair tests advance the observation clock
+        // explicitly, never sleep or bypass the production two-second gate.
+        // Dedicated stability tests below use named absolute timestamps.
+        let now = if request == TileEncodeRequest::LosslessRepair {
+            encoder
+                .stable_since
+                .iter()
+                .copied()
+                .max()
+                .unwrap_or_else(Instant::now)
+                + Duration::from_secs(2)
+        } else {
+            Instant::now()
+        };
+        let plan = encoder.plan_at(frame, request, now).expect("plan succeeds");
         if plan.emit {
             encoder
                 .encode_into(payload, sequence, frame, quality)
@@ -3210,3 +3329,7 @@ mod atlas_envelope_tests {
 #[cfg(test)]
 #[path = "tile_lossless_baseline.rs"]
 mod lossless_baseline;
+
+#[cfg(test)]
+#[path = "tile_stability_benchmark.rs"]
+mod stability_benchmark;

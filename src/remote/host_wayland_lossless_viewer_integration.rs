@@ -82,6 +82,43 @@ fn pattern(revised: bool) -> Vec<u8> {
     }
     bytes
 }
+// Exactly one native 16x16 codec tile. No neighboring edge pixels are
+// excluded from the static-region equality assertion.
+const BLINK_SIDE: usize = 16;
+fn blink_pattern(generation: usize) -> Vec<u8> {
+    let mut bytes = pattern(false);
+    let value = if generation % 2 == 0 { 24 } else { 232 };
+    for y in 0..BLINK_SIDE {
+        for x in 0..BLINK_SIDE {
+            bytes[(y * 800 + x) * 4..(y * 800 + x) * 4 + 4]
+                .copy_from_slice(&[value, value, value, 255]);
+        }
+    }
+    bytes
+}
+fn static_sse(actual: &[u8], expected: &[u8]) -> u64 {
+    assert_eq!(actual.len(), expected.len());
+    actual
+        .chunks_exact(4)
+        .zip(expected.chunks_exact(4))
+        .enumerate()
+        .filter(|(index, _)| index % 800 >= BLINK_SIDE || index / 800 >= BLINK_SIDE)
+        .map(|(_, (a, b))| sse(a, b))
+        .sum()
+}
+fn blink_matches(bytes: &[u8], generation: usize) -> bool {
+    // JPEG motion is deliberately not called lossless. Interior pixels must
+    // unambiguously identify this black/white state, never an arbitrary hue.
+    (4..12).all(|y| {
+        (4..12).all(|x| {
+            let p = &bytes[(y * 800 + x) * 4..(y * 800 + x) * 4 + 4];
+            p[3] == 255
+                && p[..3]
+                    .iter()
+                    .all(|&v| if generation % 2 == 0 { v < 70 } else { v > 185 })
+        })
+    })
+}
 fn repaint(server: &mut Server, app: &mut App, bytes: &[u8]) {
     let (buffer, mut file) = shm_buffer_file(server, &mut app.client, [0, 0, 0, 255]);
     file.seek(SeekFrom::Start(0)).unwrap();
@@ -160,6 +197,9 @@ fn pump(native: &mut Server, local: &mut Server, gl: &mut HeadlessSmithayGles) {
     local.roundtrip();
 }
 fn exercise(host_permission: bool, client_permission: bool) {
+    exercise_workload(host_permission, client_permission, false);
+}
+fn exercise_workload(host_permission: bool, client_permission: bool, blinking: bool) {
     let Some(mut gl) = HeadlessSmithayGles::new() else {
         return;
     };
@@ -169,7 +209,11 @@ fn exercise(host_permission: bool, client_permission: bool) {
     local.state.image_capture_pending = Some(init_image_copy_capture(&local.display.handle()));
     register_test_presentation(&mut local);
     let mut target = App::with_color(&mut native, [0, 0, 255, 255]);
-    let mut expected = pattern(false);
+    let mut expected = if blinking {
+        blink_pattern(0)
+    } else {
+        pattern(false)
+    };
     repaint(&mut native, &mut target, &expected);
     let (server, stream) = UnixStream::pair().unwrap();
     native
@@ -293,16 +337,40 @@ fn exercise(host_permission: bool, client_permission: bool) {
     let mut last_sse = None;
     let mut minimum_sse = u64::MAX;
     let mut first_difference = None;
+    let mut blink_generation = 0usize;
+    let mut blink_observed = None;
+    let mut blink_candidate = None;
+    let mut blink_next: Option<Instant> = None;
+    let mut static_recovered = false;
     loop {
         if Instant::now() >= deadline {
             let encoded = codecs.lock().unwrap();
             let png_count = encoded.iter().filter(|(_, png)| *png).count();
             panic!(
-                "bounded static-lossless TCP/GL completion: phase={phase} phase_elapsed={:?} last_gl_sequence={last:?} exact_sequence={exact:?} committed_presented={:?} decoded_frames={} png_frames={png_count} last_sse={last_sse:?} minimum_sse={minimum_sse} first_difference={first_difference:?} host={host_result:?} client={client_result:?}",
+                "bounded static-lossless TCP/GL completion: phase={phase} phase_elapsed={:?} last_gl_sequence={last:?} exact_sequence={exact:?} committed_presented={:?} decoded_frames={} png_frames={png_count} last_sse={last_sse:?} minimum_sse={minimum_sse} first_difference={first_difference:?} blink_generation={blink_generation} blink_observed={blink_observed:?} blink_candidate={blink_candidate:?} static_recovered={static_recovered} host={host_result:?} client={client_result:?}",
                 phase_started.elapsed(),
                 *frames.lock().unwrap(),
                 encoded.len()
             );
+        }
+        if blinking && blink_next.is_some_and(|at| Instant::now() >= at) {
+            // Fixed cadence: never postpone a source update until feedback.
+            // A missing generation is a failure, not silently merged evidence.
+            assert_eq!(
+                blink_observed,
+                Some(blink_generation),
+                "blink generation {blink_generation} not actually presented within 500ms; candidate={blink_candidate:?} frames={:?}",
+                *frames.lock().unwrap()
+            );
+            blink_generation += 1;
+            assert!(
+                blink_generation < 28,
+                "static region failed to converge under continuous blinking"
+            );
+            expected = blink_pattern(blink_generation);
+            repaint(&mut native, &mut target, &expected);
+            blink_candidate = None;
+            blink_next = blink_next.map(|at| at + Duration::from_millis(500));
         }
         pump(&mut native, &mut local, &mut gl);
         if let Some(top) = local.state.toplevels.values().next() {
@@ -320,7 +388,22 @@ fn exercise(host_permission: bool, client_permission: bool) {
                 .find(|(s, _)| *s == seq)
                 .expect("actual decoded frame codec evidence")
                 .1;
-            let error = sse(&pixels, &expected);
+            let error = if blinking {
+                static_sse(&pixels, &expected)
+            } else {
+                sse(&pixels, &expected)
+            };
+            if blinking {
+                if static_recovered {
+                    assert_eq!(
+                        error, 0,
+                        "static exact pixels regressed during one-tile blink"
+                    );
+                }
+                if blink_matches(&pixels, blink_generation) {
+                    blink_candidate = Some((blink_generation, seq));
+                }
+            }
             last_sse = Some(error);
             minimum_sse = minimum_sse.min(error);
             first_difference = pixels
@@ -336,7 +419,11 @@ fn exercise(host_permission: bool, client_permission: bool) {
             if first.is_none() {
                 assert!(!is_png, "initial frame must remain JPEG");
                 assert!(error > 0, "workload must expose real JPEG loss");
-                first = Some(Instant::now());
+                let now = Instant::now();
+                first = Some(now);
+                if blinking {
+                    blink_next = Some(now + Duration::from_millis(500));
+                }
             }
             if error == 0 {
                 assert!(host_permission && client_permission);
@@ -350,7 +437,26 @@ fn exercise(host_permission: bool, client_permission: bool) {
             present(&mut local, std::mem::take(&mut feedback));
             last = Some(seq);
         }
-        if let Some(seq) = exact {
+        if blinking {
+            if let Some((generation, seq)) = blink_candidate {
+                if frames.lock().unwrap().1 == Some(seq) {
+                    if blink_observed != Some(generation) {
+                        eprintln!(
+                            "blink actual-present generation={generation} sequence={seq} elapsed={:?}",
+                            first.unwrap().elapsed()
+                        );
+                    }
+                    blink_observed = Some(generation);
+                }
+            }
+            if exact.is_some_and(|seq| frames.lock().unwrap().1 == Some(seq)) {
+                static_recovered = true;
+            }
+            if static_recovered && blink_generation >= 7 && blink_observed == Some(blink_generation)
+            {
+                break;
+            }
+        } else if let Some(seq) = exact {
             if frames.lock().unwrap().1 == Some(seq) {
                 if phase == 0 {
                     phase = 1;
@@ -449,4 +555,22 @@ fn exact_pixel_sse_detects_single_channel_subtolerance_edit() {
     let b = pattern(true);
     assert_eq!(sse(&a, &a), 0);
     assert_eq!(sse(&a, &b), 64 * 64);
+}
+
+#[test]
+fn actual_static_lossless_tcp_blinking_tile_does_not_starve_exact_text() {
+    exercise_workload(true, true, true);
+}
+#[test]
+fn blink_exclusion_is_exactly_one_tile_not_neighboring_edges() {
+    let a = blink_pattern(0);
+    let mut b = a.clone();
+    b[0] += 1;
+    assert_eq!(static_sse(&a, &b), 0);
+    b[16 * 4] += 1;
+    assert_eq!(static_sse(&a, &b), 1);
+    b[(16 * 800) * 4] += 1;
+    assert_eq!(static_sse(&a, &b), 2);
+    assert!(blink_matches(&a, 0));
+    assert!(!blink_matches(&a, 1));
 }

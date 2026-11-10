@@ -586,24 +586,20 @@ impl FrameSender {
                 invalid_data("lossless repairs cannot be used as native input proofs").into(),
             );
         }
-        let mut plan = self.encoder.plan(frame, request)?;
+        let mut plan = self.encoder.plan_at(frame, request, now)?;
         if self.static_lossless {
-            if self.encoder.detected_exact_change() {
-                self.last_content_change = Some(now);
-                self.last_refinement = None;
-            }
-            let stable = self
-                .last_content_change
-                .is_some_and(|at| now.saturating_duration_since(at) >= STATIC_REFINEMENT_INTERVAL);
-            // Stability is paid once per raw change. Failed PNG attempts wait two seconds;
-            // successful batches wait only 100ms after actual flush, and still
-            // require a real capture, FPS scheduling and transport credit.
+            // Tile-local exact stability allows static text to converge beside
+            // animation, but any ordinary dirty work takes JPEG priority.
             let retry = self.lossless_retry_after.is_none_or(|at| now >= at)
                 && self.lossless_next_batch.is_none_or(|at| now >= at);
-            if !plan.keyframe && stable && retry && self.encoder.has_exact_debt() {
+            if !plan.keyframe
+                && plan.dirty_tiles == 0
+                && retry
+                && self.encoder.has_stable_exact_debt(now)
+            {
                 plan = self
                     .encoder
-                    .plan(frame, TileEncodeRequest::LosslessRepair)?;
+                    .plan_at(frame, TileEncodeRequest::LosslessRepair, now)?;
                 self.pending_refinement_at = Some(now);
             }
             return Ok(plan);
@@ -5540,7 +5536,12 @@ mod tests {
     #[test]
     fn static_lossless_requires_two_seconds_exact_stability_and_committed_repair() {
         let at = Instant::now();
-        let mut frame = proof_test_frame();
+        let mut frame = CapturedFrame {
+            geometry_epoch: 1,
+            source_width: 16,
+            source_height: 16,
+            image: RgbImage::from_pixel(16, 16, Rgb([80, 100, 120])),
+        };
         let mut sender = FrameSender::with_codecs(false, true);
         let mut decoder = TileDecoder::new();
         decoder.set_lossless_enabled(true);
@@ -5557,9 +5558,10 @@ mod tests {
         assert!(sender.encoder.has_exact_debt());
         frame.image.as_mut()[0] += 1;
         sender.plan_at(&frame, at + Duration::from_secs(1)).unwrap();
-        assert_eq!(
-            sender.last_content_change,
-            Some(at + Duration::from_secs(1))
+        assert!(
+            !sender
+                .encoder
+                .has_stable_exact_debt(at + Duration::from_secs(1))
         );
         sender
             .plan_at(&frame, at + Duration::from_millis(2999))
@@ -5646,6 +5648,74 @@ mod tests {
         let recovered = next + STATIC_REFINEMENT_INTERVAL + Duration::from_millis(50);
         sender.plan_at(&frame, recovered).unwrap();
         assert!(sender.pending_refinement_at.is_some());
+    }
+
+    #[test]
+    fn tile_local_lossless_repairs_static_neighbor_only_after_dirty_jpeg() {
+        let at = Instant::now();
+        let mut frame = CapturedFrame {
+            geometry_epoch: 1,
+            source_width: 32,
+            source_height: 16,
+            image: RgbImage::from_pixel(32, 16, Rgb([80, 100, 120])),
+        };
+        let mut sender = FrameSender::with_codecs(false, true);
+        let mut decoder = TileDecoder::new();
+        decoder.set_lossless_enabled(true);
+        let pool = super::super::frame::new_decode_buffer_pool();
+        let mut bytes = Vec::new();
+        sender.plan_at(&frame, at).unwrap();
+        sender
+            .encoder
+            .encode_into(&mut bytes, 0, &frame, 70)
+            .unwrap();
+        decoder.decode_into(&bytes, Arc::clone(&pool)).unwrap();
+        sender.commit_at(&frame, at);
+        for (sequence, seconds) in [(1, 1), (2, 2)] {
+            frame.image.as_mut()[0] += 20;
+            let now = at + Duration::from_secs(seconds);
+            let plan = sender.plan_at(&frame, now).unwrap();
+            assert_eq!(plan.dirty_tiles, 1);
+            assert!(sender.pending_refinement_at.is_none());
+            sender
+                .encoder
+                .encode_into(&mut bytes, sequence, &frame, 70)
+                .unwrap();
+            decoder.decode_into(&bytes, Arc::clone(&pool)).unwrap();
+            assert!(!decoder.last_frame_was_lossless());
+            sender.commit_at(&frame, now);
+        }
+        let idle = at + Duration::from_millis(2034);
+        let repair = sender.plan_at(&frame, idle).unwrap();
+        assert_eq!(repair.dirty_tiles, 1);
+        assert!(sender.pending_refinement_at.is_some());
+        sender
+            .encoder
+            .encode_into(&mut bytes, 3, &frame, 70)
+            .unwrap();
+        let result = decoder.decode_into(&bytes, Arc::clone(&pool)).unwrap();
+        assert!(decoder.last_frame_was_lossless());
+        for y in 0..16 {
+            for x in 16..32 {
+                assert_eq!(result.image().get_pixel(x, y), frame.image.get_pixel(x, y));
+            }
+        }
+        sender.commit_at(&frame, idle);
+        assert!(sender.encoder.has_exact_debt());
+        sender
+            .plan_at(&frame, at + Duration::from_millis(2200))
+            .unwrap();
+        assert!(sender.pending_refinement_at.is_none());
+        sender.plan_at(&frame, at + Duration::from_secs(4)).unwrap();
+        assert!(sender.pending_refinement_at.is_some());
+        sender
+            .encoder
+            .encode_into(&mut bytes, 4, &frame, 70)
+            .unwrap();
+        let result = decoder.decode_into(&bytes, pool).unwrap();
+        assert_eq!(result.image(), &frame.image);
+        sender.commit_at(&frame, at + Duration::from_secs(4));
+        assert!(!sender.encoder.has_exact_debt());
     }
 
     fn proof_test_frame() -> CapturedFrame {
