@@ -443,8 +443,8 @@ Application protocol v13 adds a bounded host-only SessionClose record with five
 existing operational causes: busy, admission disabled, capture unavailable,
 clipboard unavailable and host stopping. Its strict UTF-8 codec caps the human
 reason at 240 bytes and rejects unknown tags, malformed lengths and trailing
-data. The encrypted transport remains version 2; both application endpoints
-must upgrade together. This is a concrete record, not a generic extension
+data. This record originally used encrypted transport v2; current endpoints
+require transport v3 independently. Both application endpoints must upgrade together. This is a concrete record, not a generic extension
 framework or backward-compatible version negotiation.
 
 The viewer preserves the typed code through negotiation, initial-frame wait

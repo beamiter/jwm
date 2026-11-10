@@ -36,6 +36,8 @@ jobs:
         run: |
           cargo fmt --all -- --check
           cargo clippy --locked --no-default-features --features remote-x11 --lib --bin jwm-remote --tests --no-deps -- -D warnings
+      - name: Noise v3 handshake, key confirmation and real TCP deadlines
+        run: cargo test --locked --no-default-features --features remote-x11 --lib remote::protocol::noise_ -- --test-threads=1 --nocapture
       - name: Unit and workload regressions
         run: |
           export XDG_RUNTIME_DIR="$(mktemp -d)"

@@ -102,8 +102,8 @@ exits with it. Either way nothing stays running on the other machine.
 
 This grants nothing new: the SSH login can already run any program as that
 user, including a host with `--allow-input`. The session's traffic is
-encrypted twice, and SSH adds the forward secrecy the pre-shared-key
-transport lacks.
+encrypted twice. SSH also provides its independently authenticated channel;
+the native transport now has ephemeral forward secrecy of its own.
 
 ### One key for a machine you use often
 
@@ -369,10 +369,11 @@ Remote control is disabled until `jwm-remote host` is started. The host listens
 only on `127.0.0.1` by default. A non-loopback listener requires the explicit
 `--allow-lan` flag, and input requires the separate `--allow-input` flag.
 
-Every session uses a 256-bit pre-shared key, fresh client/server nonces,
-role-separated HMAC-SHA256 proofs, independent traffic keys, strictly
-increasing record sequence numbers, and ChaCha20-Poly1305 on every
-frame/input message.
+Every session uses a 256-bit pre-shared key, a fresh ephemeral
+`Noise_NNpsk2_25519_ChaChaPoly_SHA256` handshake, independent traffic keys,
+strictly increasing record sequence numbers, and ChaCha20-Poly1305 on every
+frame/input message. Shared key possession authenticates a peer, not a distinct
+person or device identity.
 The key is never sent over the network. Key files must be owned by the current
 user, must not be symlinks, and must have no group/other permission bits.
 Both peers enforce a total negotiation deadline, so slowly dripping handshake
@@ -551,20 +552,27 @@ most for input: a key press is a three-byte record, so a passive listener could
 otherwise reconstruct a typed password, SSH passphrase or 2FA code byte for
 byte with no image analysis at all.
 
-The transport handshake is:
+Transport version **3** uses Snow's standard
+`Noise_NNpsk2_25519_ChaChaPoly_SHA256` handshake. Both public magic/version/nonce
+prefixes, in fixed server/client order, are bound into its prologue. Nonces are
+public context, not ephemeral private-key seeds. The library generates fresh
+ephemeral keys; handshake payloads are empty and there is no early application
+data.
 
-```text
-server -> client: "JWMRT" || version (u16) || server_nonce (32)
-client -> server: "JWMRT" || version (u16) || client_nonce (32) || proof (32)
-server -> client: server_proof (32)
-```
+After Noise completes, its standard encrypted transport carries a fixed,
+role-separated key envelope containing independently random C2S/S2C record
+keys and the handshake hash. Encrypted client and server Finished messages
+bind that exact envelope and handshake before either handshake function
+succeeds. The existing application record layer then uses those independent
+keys, never Noise's internal keys or nonce space. This is **Noise-protected
+application key delivery**, not a claim that the subsequent record format is
+standard Noise transport.
 
-Both proofs and both traffic keys are derived over the complete transcript,
-including each side's advertised version, so rewriting the version changes
-every derived secret and the handshake fails rather than quietly settling on
-weaker terms. The current transport version is 2; version 1 was the
-authenticated-but-unencrypted transport, and its key-derivation domains are
-separately versioned so the two can never collide even for an identical key.
+All handshake flights have fixed small bounds and share the existing absolute
+negotiation deadline. Wrong keys, versions, malformed flights or missing
+confirmation close the connection. There is no downgrade or v2 fallback.
+Upgrade both endpoints together. Application protocol v23 and the native
+Wayland protocol versions are separate and unchanged by this transport update.
 
 Each record is `kind || sequence || ciphertext_len || ciphertext || tag(16)`.
 The plaintext is sealed with ChaCha20-Poly1305 under a nonce of four zero bytes
@@ -583,15 +591,22 @@ release-all. Larger records are not padded: a screen frame's size is dominated
 by its content and no bucket could hide that. **Inter-keystroke timing remains
 a side channel** — padding does not hide when you type, only what you type.
 
-Measured cost on a 3440x1440 native-resolution session, the largest payloads
-this carries: the telemetry `write` stage stayed at 0.0-0.1 ms, unchanged from
+Historical record-layer measurement, not a v3 handshake benchmark: on a
+3440x1440 native-resolution session, the largest payloads this carries, the telemetry `write` stage stayed at 0.0-0.1 ms, unchanged from
 the unencrypted transport. ChaCha20-Poly1305 is pure Rust here and adds no C
 toolchain or system dependency to the helper.
 
-What this does **not** provide is forward secrecy: the traffic keys are a
-function of the pre-shared key and both nonces, so anyone who later obtains the
-key file can decrypt a recorded session. Rotate the key file if that matters,
-and keep using SSH when you want an independently keyed channel:
+After ephemeral secrets and session keys have been destroyed, later disclosure
+of only the long-term PSK should not decrypt previously recorded v3 sessions.
+This does not protect sessions whose live endpoints or random source are
+compromised, prevent an attacker already holding the PSK from impersonating a
+peer, or retroactively protect recorded v2 sessions. Explicit zeroization
+reduces retained key material; Rust/runtime copies are not a guarantee of
+complete process-memory erasure. In particular, the selected Snow version does
+not explicitly zeroize every internal DH/PSK/cipher-state allocation; dropping
+its state must not be advertised as protection against later process-memory
+inspection. Rotate a compromised PSK and keep using SSH
+when you want an independently authenticated channel:
 
 ```bash
 # Host
@@ -1597,8 +1612,8 @@ XRender for anyone who prefers that speed and does not see the artifacts;
 - video uses cumulative display acknowledgements, at most two unacknowledged
   frames, and one latest queued frame; persistently slow viewers therefore
   reduce capture/encode/network work instead of accumulating stale video;
-- encrypted and authenticated direct-LAN transport, without forward secrecy:
-  a leaked key file decrypts previously recorded sessions;
+- encrypted PSK-authenticated direct-LAN transport with ephemeral forward secrecy
+  in v3; no independent per-device identity or automatic key rotation;
 - inter-keystroke timing is not hidden;
 - X11 `x11rb`/`xcb` JWM sessions only.
 

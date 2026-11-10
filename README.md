@@ -474,10 +474,10 @@ jwm-remote connect 192.168.1.50:48221 --grab-input \
   --key-file ~/.config/jwm/remote.key
 ```
 
-Direct LAN traffic is authenticated and encrypted with ChaCha20-Poly1305, but
-without forward secrecy: a leaked key file decrypts previously recorded
-sessions. Rotate the key, or carry the default loopback listener through SSH,
-when that matters. See the complete setup, security boundary, tuning, and
+Direct LAN transport v3 uses a standard ephemeral Noise handshake to protect
+independent ChaCha20-Poly1305 traffic keys. Later PSK disclosure alone does not
+reveal recorded v3 sessions, but a compromised key still permits impersonation:
+rotate it, or use the independently authenticated SSH channel. See the complete setup, security boundary, tuning, and
 current limits in [JWM remote control](docs/remote-control.md).
 
 The default modifier is Alt (`Mod1`). Useful built-in bindings include:

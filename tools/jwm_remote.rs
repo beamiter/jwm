@@ -279,8 +279,8 @@ enum Command {
 
         /// Permit binding beyond loopback.
         ///
-        /// Traffic is encrypted and authenticated, but without forward secrecy:
-        /// a leaked key file decrypts recorded sessions.
+        /// Traffic uses forward-secret encryption and pre-shared-key authentication.
+        /// A leaked key file permits future impersonation; protect both endpoints.
         #[arg(long)]
         allow_lan: bool,
 

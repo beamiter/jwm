@@ -6714,16 +6714,54 @@ pub(super) mod tests {
 
     #[test]
     fn negotiation_deadline_cannot_be_extended_by_a_slow_nonce() {
+        // Run the real server handshake, not a hand-written invalid transcript.
+        // Deliver the v3 seven-byte magic/version prefix immediately, then drip
+        // the valid public nonce. No Noise ciphertext or private key is fabricated.
+        struct SlowHandshake {
+            stream: TcpStream,
+            written: usize,
+        }
+        impl Read for SlowHandshake {
+            fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+                self.stream.read(bytes)
+            }
+        }
+        impl Write for SlowHandshake {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                if bytes.is_empty() {
+                    return Ok(0);
+                }
+                let count = if self.written < 7 {
+                    bytes.len().min(7 - self.written)
+                } else {
+                    thread::sleep(Duration::from_millis(20));
+                    1
+                };
+                let sent = self.stream.write(&bytes[..count])?;
+                self.written += sent;
+                Ok(sent)
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                self.stream.flush()
+            }
+        }
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let server = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            for byte in 0_u8..32 {
-                if stream.write_all(&[byte]).is_err() {
-                    break;
-                }
-                thread::sleep(Duration::from_millis(20));
-            }
+            let (stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(1)))
+                .unwrap();
+            stream
+                .set_write_timeout(Some(Duration::from_secs(1)))
+                .unwrap();
+            let mut stream = SlowHandshake { stream, written: 0 };
+            let result = server_handshake(&mut stream, &TEST_PSK, [0x24; 32]);
+            assert!(
+                matches!(result, Err(ProtocolError::Io(_))),
+                "client deadline must close the real handshake"
+            );
+            assert!(stream.written >= 7);
         });
 
         let stream = TcpStream::connect(address).unwrap();
@@ -6748,7 +6786,18 @@ pub(super) mod tests {
             Default::default(),
             Duration::from_millis(80),
         );
-        assert!(result.is_err());
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("slow handshake unexpectedly succeeded"),
+        };
+        assert!(matches!(
+            classify_failure(error.as_ref()).io_kind,
+            Some("connection_aborted" | "timed_out" | "would_block" | "connection_reset")
+        ));
+        assert!(
+            started.elapsed() >= Duration::from_millis(60),
+            "not an early malformed-flight rejection"
+        );
         assert!(started.elapsed() < Duration::from_millis(500));
         server.join().unwrap();
     }
@@ -7226,7 +7275,7 @@ mod diagnostic_tests {
             (
                 ProtocolError::UnsupportedTransportVersion {
                     received: 999,
-                    expected: 2,
+                    expected: super::super::protocol::TRANSPORT_VERSION,
                 },
                 "unsupported_transport_version",
             ),

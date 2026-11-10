@@ -1870,14 +1870,11 @@ impl SourceControl {
 }
 
 /// Startup notice for a listener reachable beyond loopback.
-///
-/// The operator decides whether to expose the host from this line, so it must
-/// state the transport's real properties: every record is sealed with
-/// ChaCha20-Poly1305 under the pre-shared key (see `protocol`), and the missing
-/// property is forward secrecy. The earlier text still described the v1
-/// transport and claimed the screen and input crossed the LAN in cleartext.
-const TRUSTED_LAN_NOTICE: &str = "jwm-remote: trusted-LAN mode encrypts and authenticates traffic \
-     with the pre-shared key, but without forward secrecy: a leaked key file decrypts recorded sessions";
+/// Transport v3 authenticates with the PSK and uses fresh ephemeral Noise keys.
+/// Later PSK disclosure alone does not recover completed sessions' traffic keys;
+/// it still permits impersonation in future sessions. Endpoint compromise is not covered.
+const TRUSTED_LAN_NOTICE: &str = "jwm-remote: trusted-LAN mode encrypts traffic with forward secrecy \
+     and pre-shared-key authentication; a leaked key file permits future peer impersonation";
 
 /// The notice to print for a listener bound to `address`, if any.
 fn listener_security_notice(address: IpAddr) -> Option<&'static str> {
@@ -10251,6 +10248,8 @@ mod tests {
             assert!(!notice.contains("does not encrypt"), "{notice}");
             assert!(notice.contains("forward secrecy"), "{notice}");
             assert!(notice.contains("leaked key file"), "{notice}");
+            assert!(notice.contains("future peer impersonation"), "{notice}");
+            assert!(!notice.contains("without forward secrecy"), "{notice}");
         }
 
         assert_eq!(

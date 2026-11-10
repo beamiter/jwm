@@ -366,8 +366,8 @@ This is a separate, default-off authorization, not a combination of the old
 keyboard and pointer flags. The host explicitly selects one surface with
 `host --wayland-select --once --allow-wayland-control`. The viewer explicitly
 uses `connect HOST --viewer-backend wayland --wayland-control`. Both peers must
-use application protocol **v22** (31-byte capabilities). Older peers are rejected;
-there is no protocol downgrade. Transport encryption remains version 2.
+use application protocol **v23** (31-byte capabilities). Older peers are rejected;
+there is no protocol downgrade. Transport encryption independently requires v3.
 
 The bundle has one native resource, source owner/instance, epoch, cross-type
 sequence and creation-time **30-second nonrenewable deadline**. It atomically

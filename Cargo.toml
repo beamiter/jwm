@@ -107,7 +107,7 @@ backend-x11rb = ["x11-backends", "dep:x11rb"]
 # JWM-to-JWM remote viewing/control for X11 sessions.  The helper opens an
 # independent x11rb connection, so it works while JWM itself uses either the
 # x11rb or xcb backend.
-remote-x11 = ["dep:rayon", "dep:x11rb", "x11rb/image", "dep:sha2", "dep:chacha20poly1305", "xbar_core/x11-connection"]
+remote-x11 = ["dep:rayon", "dep:x11rb", "x11rb/image", "dep:sha2", "dep:chacha20poly1305", "dep:snow", "dep:zeroize", "xbar_core/x11-connection"]
 # Native Wayland single-surface source; the shared viewer remains X11.
 remote-wayland = ["remote-x11", "dep:wayland-client", "dep:wayland-protocols", "dep:wayland-scanner", "xkbcommon/x11", "dep:xcb"]
 # XCB transport + shared X11 compositor.
@@ -231,6 +231,8 @@ egl = { version = "0.2.7", optional = true }
 xcb = { version = "1.7.1", features = ["as-raw-xcb-connection", "xkb", "composite", "shape", "randr", "damage", "present", "xfixes", "screensaver"], optional = true }
 # ChaCha20-Poly1305 for the remote transport record layer. Pure Rust and
 # no_std-capable: it adds no C toolchain or system dependency to the helper.
+snow = { version = "0.10", default-features = false, features = ["use-chacha20poly1305", "use-sha2", "use-curve25519", "use-getrandom"], optional = true }
+zeroize = { version = "1.8", optional = true }
 chacha20poly1305 = { version = "0.11", default-features = false, features = ["alloc"], optional = true }
 
 [dev-dependencies]
