@@ -23,6 +23,8 @@ pub mod ipc_connection;
 pub mod ipc_server;
 pub mod jwm;
 #[cfg(any(feature = "remote-wayland", feature = "wayland-backends"))]
+pub mod readonly_popup_capture_protocol;
+#[cfg(any(feature = "remote-wayland", feature = "wayland-backends"))]
 pub mod readonly_resize_capture_protocol;
 #[cfg(feature = "remote-x11")]
 pub mod remote;

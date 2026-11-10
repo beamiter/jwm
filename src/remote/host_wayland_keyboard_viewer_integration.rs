@@ -29,6 +29,7 @@ fn host_options() -> host::HostOptions {
         key: crate::remote::key::KeySource::Bytes(KEY.to_vec()),
         display: None,
         wayland_select: true,
+        wayland_popups: false,
         wayland_resize_follow: false,
         wayland_display: None,
         fps: 12,

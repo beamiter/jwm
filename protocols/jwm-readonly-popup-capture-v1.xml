@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<protocol name="jwm_readonly_popup_capture_v1">
+ <interface name="jwm_readonly_popup_capture_manager_v1" version="1">
+  <description summary="explicit fixed-canvas readonly popup capture">Trusted-local capability. One source may be derived from a live same-client toplevel source, consuming its input attempts. Includes only bounded same-client xdg popups whose exact parent chain terminates at the selected root. Clips to the fixed root canvas. Never grants popup input, root expansion or resize-follow. Destruction and lifecycle invalidation permanently stop the derived source.</description>
+  <request name="destroy" type="destructor"/>
+  <request name="create_source"><arg name="id" type="new_id" interface="ext_image_capture_source_v1"/><arg name="source" type="object" interface="ext_image_capture_source_v1"/></request>
+  <event name="ready"><arg name="width" type="uint"/><arg name="height" type="uint"/></event>
+  <event name="stopped"/>
+ </interface>
+</protocol>

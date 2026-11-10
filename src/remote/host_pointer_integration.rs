@@ -43,6 +43,7 @@ fn options() -> HostOptions {
         key: KeySource::File("/unused-private-test-key".into()),
         display: None,
         wayland_select: true,
+        wayland_popups: false,
         wayland_resize_follow: false,
         wayland_display: None,
         fps: 30,

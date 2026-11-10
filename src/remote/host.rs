@@ -1624,6 +1624,7 @@ pub struct HostOptions {
     pub display: Option<String>,
     pub wayland_select: bool,
     pub wayland_resize_follow: bool,
+    pub wayland_popups: bool,
     pub wayland_display: Option<String>,
     pub fps: u16,
     pub jpeg_quality: u8,
@@ -1884,6 +1885,22 @@ fn listener_security_notice(address: IpAddr) -> Option<&'static str> {
 }
 
 fn validate_window_policy(options: &HostOptions) -> RemoteResult<()> {
+    if options.wayland_popups
+        && (!options.wayland_select
+            || !options.once
+            || options.wayland_resize_follow
+            || options.allow_input
+            || options.allow_clipboard
+            || options.allow_window_resize
+            || options.allow_wayland_keyboard
+            || options.allow_wayland_pointer
+            || options.allow_wayland_control
+            || options.allow_wayland_scroll
+            || options.allow_wayland_horizontal_scroll)
+    {
+        return Err(permission_denied("Wayland popup capture requires an explicitly selected one-session read-only source without input, clipboard, resize or resize-follow").into());
+    }
+
     if options.wayland_resize_follow
         && (!options.wayland_select
             || options.allow_input
@@ -1998,6 +2015,7 @@ pub fn run_host(options: HostOptions) -> RemoteResult<()> {
                     options.wayland_display.as_deref(),
                     options.max_width,
                     options.wayland_resize_follow,
+                    options.wayland_popups,
                 )?,
             )))
         }
@@ -5706,6 +5724,34 @@ mod tests {
     }
 
     #[test]
+    fn popup_host_permission_is_explicit_exclusive_read_only() {
+        let mut options = test_host_source_options();
+        options.capture_area = CaptureArea::Root;
+        options.wayland_select = true;
+        options.wayland_popups = true;
+        assert_eq!(
+            validate_window_policy(&options).is_ok(),
+            cfg!(feature = "remote-wayland")
+        );
+        for case in 0..11 {
+            let mut denied = options.clone();
+            match case {
+                0 => denied.wayland_select = false,
+                1 => denied.once = false,
+                2 => denied.wayland_resize_follow = true,
+                3 => denied.allow_input = true,
+                4 => denied.allow_clipboard = true,
+                5 => denied.allow_window_resize = true,
+                6 => denied.allow_wayland_keyboard = true,
+                7 => denied.allow_wayland_pointer = true,
+                8 => denied.allow_wayland_control = true,
+                9 => denied.allow_wayland_scroll = true,
+                _ => denied.allow_wayland_horizontal_scroll = true,
+            }
+            assert!(validate_window_policy(&denied).is_err(), "case {case}");
+        }
+    }
+    #[test]
     fn resize_follow_host_permission_is_explicit_read_only() {
         let mut options = test_host_source_options();
         options.capture_area = CaptureArea::Root;
@@ -5833,6 +5879,7 @@ mod tests {
             display: None,
             wayland_select: false,
             wayland_resize_follow: false,
+            wayland_popups: false,
             wayland_display: None,
             fps: 12,
             jpeg_quality: 70,
@@ -8517,6 +8564,7 @@ mod tests {
             display: None,
             wayland_select: false,
             wayland_resize_follow: false,
+            wayland_popups: false,
             wayland_display: None,
             fps: 30,
             jpeg_quality: 85,

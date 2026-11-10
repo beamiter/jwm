@@ -56,6 +56,11 @@ jobs:
           export XDG_RUNTIME_DIR="$(mktemp -d)"
           cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib image_copy_capture::resize_tests -- --test-threads=1 --nocapture
           cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib host_resize_integration -- --test-threads=1 --nocapture
+      - name: Explicit read-only popup capture isolation
+        run: |
+          export XDG_RUNTIME_DIR="$(mktemp -d)"
+          cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib image_copy_capture_popup_tests -- --test-threads=1 --nocapture
+          cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib host_popup_integration -- --test-threads=1 --nocapture
       - name: Actual scoped keyboard lease recipient and revocation tests
         run: |
           export XDG_RUNTIME_DIR="$(mktemp -d)"

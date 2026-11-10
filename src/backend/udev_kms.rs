@@ -1,3 +1,6 @@
+#[path = "capture_popup_snapshot.rs"]
+mod capture_popup_snapshot;
+
 #[path = "presentation_batch.rs"]
 mod presentation_batch;
 use presentation_batch::{Completion, PresentationBatch, Submission};
@@ -7764,10 +7767,39 @@ impl KmsState {
                 continue;
             };
             let location: Point<i32, Physical> = (x, y).into();
-            let tree = SurfaceTree::from_surface(surface);
-            let elements: Vec<KmsRenderElement> = AsRenderElements::<GlesRenderer>::render_elements(
-                &tree, renderer, location, scale, 1.0,
-            );
+            let elements: Vec<KmsRenderElement> = if authority.include_popups {
+                let Some(trees) = capture_popup_snapshot::snapshot(state, surface, (x, y)) else {
+                    Self::note_image_capture_frame_failed(
+                        counters,
+                        FailureReason::BufferConstraints,
+                    );
+                    frame_info.frame.failed(FailureReason::BufferConstraints);
+                    continue;
+                };
+                let mut elements = Vec::new();
+                let mut complete = true;
+                for item in trees {
+                    let tree = SurfaceTree::from_surface(&item.surface);
+                    let location: Point<i32, Physical> = item.origin.into();
+                    let rendered: Vec<KmsRenderElement> =
+                        AsRenderElements::<GlesRenderer>::render_elements(
+                            &tree, renderer, location, scale, 1.0,
+                        );
+                    complete &= rendered.len() == item.mapped;
+                    elements.extend(rendered);
+                }
+                if !complete {
+                    Self::note_image_capture_frame_failed(counters, FailureReason::Unknown);
+                    frame_info.frame.failed(FailureReason::Unknown);
+                    continue;
+                }
+                elements
+            } else {
+                let tree = SurfaceTree::from_surface(surface);
+                AsRenderElements::<GlesRenderer>::render_elements(
+                    &tree, renderer, location, scale, 1.0,
+                )
+            };
 
             // dmabuf fast path: render the window straight into the client buffer.
             if let Some(dmabuf) = get_dmabuf(&frame_info.buffer).ok().cloned() {

@@ -554,3 +554,31 @@ the existing capability record carries the vertical/horizontal permission bits;
 unknown bits are rejected. v22 peers must be upgraded together, rather than
 silently interpreting horizontal permission as an old boolean. The scroll-copy
 video format is unchanged and still grants no input authority.
+
+
+## Explicit read-only popup capture
+
+`host --wayland-select --once --wayland-popups` explicitly includes live
+xdg-popup descendants of the selected application in a read-only stream.
+The default still captures only the selected root's surface tree. The popup
+mode requires its separate native compositor capability and is incompatible
+with input, clipboard, remote resizing and resize-follow permissions.
+
+Every included popup must belong to the root application's client and have an
+exact live parent chain ending at that selected surface. Titles and application
+IDs are not authority. Popup depth, count, total surface count and checked
+relative coordinates are bounded; malformed or excessive trees fail capture
+rather than falling back to the desktop or silently selecting another window.
+IME surfaces, global cursors and unrelated windows are not included.
+
+The canvas stays the root window's original size. Menus outside that canvas
+are clipped; this is not complete capture of an expanded application footprint.
+Popup movement, creation and destruction are visual updates, not input grants.
+Both the original authorization and its derived popup source remain unable to
+grant keyboard, pointer or unified control. Root size/layout changes, unmap,
+lock, destruction or disconnect remain terminal; no title-based reselection,
+reconnect or permission renewal occurs.
+
+Verification separates native protocol/production offscreen pixel tests from
+an authenticated TCP and owned native viewer presentation path. Neither is
+physical DRM/GPU, two-machine or input-to-visible latency acceptance.

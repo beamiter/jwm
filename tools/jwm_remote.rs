@@ -302,6 +302,11 @@ enum Command {
         #[arg(long, requires_all = ["wayland_select", "once"], conflicts_with_all = ["allow_input", "allow_clipboard", "allow_window_resize", "allow_wayland_keyboard", "allow_wayland_pointer", "allow_wayland_control", "allow_wayland_scroll", "allow_wayland_horizontal_scroll"])]
         wayland_resize_follow: bool,
 
+        /// Include owned descendant xdg_popups inside the fixed selected root canvas.
+        /// Explicit read-only capability; no output fallback, input or resize-follow.
+        #[arg(long, requires_all = ["wayland_select", "once"], conflicts_with_all = ["wayland_resize_follow", "allow_input", "allow_clipboard", "allow_window_resize", "allow_wayland_keyboard", "allow_wayland_pointer", "allow_wayland_control", "allow_wayland_scroll", "allow_wayland_horizontal_scroll"])]
+        wayland_popups: bool,
+
         /// Permit a single explicitly requested, scoped Wayland keyboard lease.
         #[arg(long, requires_all = ["wayland_select", "once"], conflicts_with_all = ["allow_input", "allow_clipboard", "allow_window_resize"])]
         allow_wayland_keyboard: bool,
@@ -1254,6 +1259,7 @@ fn run(command: Command) -> RemoteResult<()> {
             allow_window_resize,
             wayland_select,
             wayland_resize_follow,
+            wayland_popups,
             allow_wayland_keyboard,
             allow_wayland_pointer,
             allow_wayland_control,
@@ -1305,6 +1311,7 @@ fn run(command: Command) -> RemoteResult<()> {
                 allow_window_resize,
                 wayland_select,
                 wayland_resize_follow,
+                wayland_popups,
                 allow_wayland_keyboard,
                 allow_wayland_pointer,
                 allow_wayland_control,
@@ -3842,5 +3849,69 @@ mod horizontal_scroll_cli_tests {
             ])
             .is_err()
         );
+    }
+}
+
+#[cfg(test)]
+mod popup_cli_tests {
+    use super::*;
+    #[test]
+    fn popup_capture_is_host_only_default_off_and_read_only() {
+        assert!(matches!(
+            Cli::try_parse_from(["jwm-remote", "host", "--once", "--wayland-select"])
+                .unwrap()
+                .command,
+            Command::Host {
+                wayland_popups: false,
+                ..
+            }
+        ));
+        assert!(matches!(
+            Cli::try_parse_from([
+                "jwm-remote",
+                "host",
+                "--once",
+                "--wayland-select",
+                "--wayland-popups"
+            ])
+            .unwrap()
+            .command,
+            Command::Host {
+                wayland_popups: true,
+                ..
+            }
+        ));
+        for option in [
+            "--wayland-resize-follow",
+            "--allow-input",
+            "--allow-clipboard",
+            "--allow-window-resize",
+            "--allow-wayland-keyboard",
+            "--allow-wayland-pointer",
+            "--allow-wayland-control",
+            "--allow-wayland-scroll",
+            "--allow-wayland-horizontal-scroll",
+        ] {
+            assert!(
+                Cli::try_parse_from([
+                    "jwm-remote",
+                    "host",
+                    "--once",
+                    "--wayland-select",
+                    "--wayland-popups",
+                    option
+                ])
+                .is_err(),
+                "{option}"
+            );
+        }
+        for args in [
+            vec!["jwm-remote", "host", "--once", "--wayland-popups"],
+            vec!["jwm-remote", "host", "--wayland-select", "--wayland-popups"],
+            vec!["jwm-remote", "connect", "--wayland-popups"],
+            vec!["jwm-remote", "ssh", "--wayland-popups"],
+        ] {
+            assert!(Cli::try_parse_from(&args).is_err(), "{args:?}");
+        }
     }
 }

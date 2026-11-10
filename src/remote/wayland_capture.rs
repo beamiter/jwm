@@ -8,6 +8,9 @@ mod control;
 use super::RemoteResult;
 use super::messages::FrameLimits;
 use super::x11_capture::{CaptureImageRecycler, CaptureOutcome, CapturedFrame, frame_dimensions};
+use crate::readonly_popup_capture_protocol::client::jwm_readonly_popup_capture_manager_v1::{
+    self as popup_manager, JwmReadonlyPopupCaptureManagerV1,
+};
 use crate::readonly_resize_capture_protocol::client::jwm_readonly_resize_capture_manager_v1::{
     self as resize_manager, JwmReadonlyResizeCaptureManagerV1,
 };
@@ -120,6 +123,9 @@ struct NativePointer {
 }
 #[derive(Default)]
 struct State {
+    popups: bool,
+    popup_manager: Option<JwmReadonlyPopupCaptureManagerV1>,
+    popup_layout: Option<(u16, u16)>,
     resize_follow: bool,
     resize_manager: Option<JwmReadonlyResizeCaptureManagerV1>,
     session_stopped: bool,
@@ -261,10 +267,11 @@ impl WaylandCapture {
         display: Option<&str>,
         max_width: u16,
         resize_follow: bool,
+        popups: bool,
     ) -> RemoteResult<Self> {
         let path = socket_path(display)?;
         let stream = jwm_ipc_transport::connect(&path, PROTOCOL_TIMEOUT)?;
-        Self::connect_stream(stream, max_width, resize_follow, |capture| {
+        Self::connect_stream(stream, max_width, resize_follow, popups, |capture| {
             eprint!("jwm-remote: select Wayland window index: ");
             io::stderr().flush()?;
             capture.read_selection(Instant::now() + SELECTION_TIMEOUT)
@@ -279,7 +286,7 @@ impl WaylandCapture {
         index: usize,
         max_width: u16,
     ) -> RemoteResult<Self> {
-        Self::connect_stream(stream, max_width, false, |_| {
+        Self::connect_stream(stream, max_width, false, false, |_| {
             index
                 .checked_sub(1)
                 .filter(|index| *index < MAX_TOPLEVELS)
@@ -293,7 +300,20 @@ impl WaylandCapture {
         index: usize,
         max_width: u16,
     ) -> RemoteResult<Self> {
-        Self::connect_stream(stream, max_width, true, |_| {
+        Self::connect_stream(stream, max_width, true, false, |_| {
+            index
+                .checked_sub(1)
+                .filter(|index| *index < MAX_TOPLEVELS)
+                .ok_or_else(|| invalid("invalid Wayland test selection index").into())
+        })
+    }
+    #[cfg(all(test, feature = "backend-wayland-udev"))]
+    pub(crate) fn connect_test_stream_popups(
+        stream: UnixStream,
+        index: usize,
+        max_width: u16,
+    ) -> RemoteResult<Self> {
+        Self::connect_stream(stream, max_width, false, true, |_| {
             index
                 .checked_sub(1)
                 .filter(|index| *index < MAX_TOPLEVELS)
@@ -304,8 +324,12 @@ impl WaylandCapture {
         stream: UnixStream,
         max_width: u16,
         resize_follow: bool,
+        popups: bool,
         select: impl FnOnce(&mut Self) -> RemoteResult<usize>,
     ) -> RemoteResult<Self> {
+        if resize_follow && popups {
+            return Err(invalid("popup capture and resize-follow are mutually exclusive").into());
+        }
         stream.set_nonblocking(true)?;
         let conn = Connection::from_socket(stream)?;
         let queue = conn.new_event_queue();
@@ -316,6 +340,7 @@ impl WaylandCapture {
             queue,
             state: State {
                 resize_follow,
+                popups,
                 ..Default::default()
             },
             source: None,
@@ -393,6 +418,17 @@ impl WaylandCapture {
             .as_ref()
             .unwrap()
             .create_source(&selected, &qh, ());
+        let source = if popups {
+            let manager = capture.state.popup_manager.as_ref().ok_or_else(|| {
+                invalid("Wayland compositor lacks explicit read-only popup capture capability")
+            })?;
+            let derived = manager.create_source(&source, &qh, ());
+            source.destroy();
+            capture.drive_until(deadline, |state| state.popup_layout.is_some())?;
+            derived
+        } else {
+            source
+        };
         let source = if resize_follow {
             let manager = capture.state.resize_manager.as_ref().ok_or_else(|| {
                 invalid("Wayland compositor lacks explicit read-only resize-follow capability")
@@ -431,6 +467,11 @@ impl WaylandCapture {
                 invalid("Wayland resize-follow constraints disagree with native layout").into(),
             );
         }
+        if popups && capture.state.size != capture.state.popup_layout {
+            return Err(
+                invalid("Wayland popup constraints disagree with fixed root canvas").into(),
+            );
+        }
         capture.create_buffer()?;
         capture.sync_until(deadline)?;
         Ok(capture)
@@ -439,6 +480,7 @@ impl WaylandCapture {
     /// Must be enabled before the first frame and only after wire negotiation.
     pub(super) fn enable_pointer(&mut self) -> RemoteResult<()> {
         if self.state.resize_follow
+            || self.state.popups
             || self.state.frame_serial != 0
             || self.state.control.enabled
             || self.state.keyboard.enabled
@@ -632,6 +674,7 @@ impl WaylandCapture {
 
     pub(super) fn enable_keyboard(&mut self) -> RemoteResult<()> {
         if self.state.resize_follow
+            || self.state.popups
             || self.state.frame_serial != 0
             || self.state.control.enabled
             || self.state.keyboard.enabled
@@ -1264,6 +1307,12 @@ impl Dispatch<wl_registry::WlRegistry, ()> for State {
                 version,
             } if version >= 1 => {
                 let bound = match interface.as_str() {
+                    "jwm_readonly_popup_capture_manager_v1"
+                        if state.popups && state.popup_manager.is_none() =>
+                    {
+                        state.popup_manager = Some(proxy.bind(name, 1, qh, ()));
+                        true
+                    }
                     "jwm_readonly_resize_capture_manager_v1"
                         if state.resize_follow && state.resize_manager.is_none() =>
                     {
@@ -1839,5 +1888,73 @@ impl Dispatch<JwmRemotePointerLeaseV1, ()> for State {
                 pointer.revoked = true;
             }
         }
+    }
+}
+
+impl Dispatch<JwmReadonlyPopupCaptureManagerV1, ()> for State {
+    fn event(
+        state: &mut Self,
+        _: &JwmReadonlyPopupCaptureManagerV1,
+        event: popup_manager::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match event {
+            popup_manager::Event::Ready { width, height } => state.popup_ready(width, height),
+            popup_manager::Event::Stopped => {
+                state.fail("Wayland popup capture permanently stopped")
+            }
+        }
+    }
+}
+impl State {
+    fn popup_ready(&mut self, width: u32, height: u32) {
+        if !self.popups
+            || self.failed.is_some()
+            || self.popup_layout.is_some()
+            || width == 0
+            || height == 0
+            || width > 16384
+            || height > 16384
+            || u64::from(width) * u64::from(height) > 64 * 1024 * 1024
+        {
+            self.fail("invalid or repeated Wayland popup canvas");
+        } else {
+            self.popup_layout = Some((width as u16, height as u16));
+        }
+    }
+}
+#[cfg(test)]
+mod popup_state_tests {
+    use super::*;
+    #[test]
+    fn popup_canvas_is_explicit_bounded_single_and_terminal() {
+        let mut state = State::default();
+        state.popup_ready(320, 240);
+        assert!(state.failed.is_some());
+        for (width, height) in [(0, 240), (320, 0), (16385, 1), (16384, 16384)] {
+            let mut state = State {
+                popups: true,
+                ..Default::default()
+            };
+            state.popup_ready(width, height);
+            assert!(state.failed.is_some());
+        }
+        let mut state = State {
+            popups: true,
+            ..Default::default()
+        };
+        state.popup_ready(320, 240);
+        assert_eq!(state.popup_layout, Some((320, 240)));
+        state.popup_ready(320, 240);
+        assert!(state.failed.is_some());
+        let mut state = State {
+            popups: true,
+            ..Default::default()
+        };
+        state.fail("stopped");
+        state.popup_ready(320, 240);
+        assert!(state.popup_layout.is_none());
     }
 }

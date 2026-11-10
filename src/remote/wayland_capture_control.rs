@@ -28,6 +28,7 @@ impl WaylandCapture {
         horizontal_enabled: bool,
     ) -> RemoteResult<()> {
         if self.state.resize_follow
+            || self.state.popups
             || self.state.frame_serial != 0
             || self.state.control.enabled
             || self.state.keyboard.enabled
