@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<protocol name="jwm_readonly_resize_capture_v1">
+  <interface name="jwm_readonly_resize_capture_manager_v1" version="1">
+    <description summary="one explicitly selected readonly resize-follow source">Trusted local capability. Exactly one source may be derived per manager. Derivation consumes all input attempts on the original source. It never follows remapping, locking or another surface. Epochs are bounded to 1024. A layout event is emitted only after a matching real surface commit; suspended invalidates all old sessions. Destroy revokes the derived family.</description>
+    <request name="destroy" type="destructor"/>
+    <request name="create_source">
+      <arg name="id" type="new_id" interface="ext_image_capture_source_v1"/>
+      <arg name="source" type="object" interface="ext_image_capture_source_v1"/>
+    </request>
+    <event name="suspended"><arg name="epoch" type="uint"/></event>
+    <event name="layout"><arg name="epoch" type="uint"/><arg name="width" type="uint"/><arg name="height" type="uint"/></event>
+    <event name="stopped"/>
+  </interface>
+</protocol>

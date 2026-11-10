@@ -5007,6 +5007,9 @@ impl CompositorHandler for JwmWaylandState {
         if inactive_layer || matches!(buf_state, BufferState::Removed) {
             self.release_layer_keyboard_focus(surface);
         }
+        crate::backend::wayland_udev::image_copy_capture::readonly_resize_surface_committed(
+            self, surface,
+        );
     }
 
     fn destroyed(&mut self, surface: &WlSurface) {

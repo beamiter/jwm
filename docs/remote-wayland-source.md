@@ -49,7 +49,8 @@ application's native geometry.
 
 A closed/unmapped source, lock transition, native source size change, or committed
 buffer scale/transform change ends this
-first-stage grant permanently, even after remap/unlock/resize-back. The server
+default grant permanently, even after remap/unlock/resize-back. The separately
+opted-in read-only resize-follow mode below permits size changes only. The server
 must bind the captured surface and its mapping/lock generation, and revalidate
 queued frames before rendering; checking only when a session was created is
 insufficient. The native server bounds live sources to 256 and sessions to 512;
@@ -475,3 +476,38 @@ report for the tested revision.
 
 See [the bounded-band offline A/B report](remote-scroll-band-benchmark.md) for
 identical-input byte, quality and CPU measurements, including fallback cost.
+
+## Explicit read-only native resize following
+
+`host --wayland-select --once --wayland-resize-follow` opts into following
+size changes made by the selected application or its local user. It does not
+request a native resize, move a window, or reuse the X11 `--follow-source-size`
+control. Without this option, the original resize-ends-capture contract remains
+unchanged. The mode is strictly read-only and cannot be combined with native
+keyboard, pointer, unified control, clipboard, reconnect or remote resize grants.
+
+The native compositor must explicitly support the read-only resize-follow
+`jwm_readonly_resize_capture_manager_v1` extension. This is a local protocol
+capability; network protocol v22 and the existing geometry-epoch frame format
+are unchanged. An older compositor is rejected, never treated as permission
+to recreate an ordinary source. The original surface resource and connection
+remain fixed. A new layout replaces the capture session and starts a new video
+geometry epoch and keyframe; old-layout frames cannot be acknowledged as the
+new layout. Queued host frames from the old epoch are discarded before the
+next send; bytes already written to the socket cannot be recalled. Following
+is not reselecting a similarly named window.
+
+The derived capture authority and its original authorization family cannot
+subsequently grant input. Resize generations and capture allocations are bounded;
+exhaustion ends the source instead of wrapping or resetting the budget. Source
+unmap/remap, destruction, lock, disconnect and committed buffer scale/transform
+changes remain terminal, even if the original geometry or mapping later returns.
+Only size changes within the original live authorization may be followed.
+If another resize interrupts session reconstruction, the bounded attempt may
+terminate rather than retry indefinitely.
+
+Verification must cover old pending frames and resize-back (ABA), new-size pixel
+isolation, and terminal lifecycle changes using actual native protocol dispatch.
+Authenticated TCP and owned software-rendered viewer tests must confirm the new
+geometry and actual presented pixels. These tests are not physical DRM/GPU or
+two-machine latency acceptance.

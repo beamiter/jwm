@@ -8,6 +8,9 @@ mod control;
 use super::RemoteResult;
 use super::messages::FrameLimits;
 use super::x11_capture::{CaptureImageRecycler, CaptureOutcome, CapturedFrame, frame_dimensions};
+use crate::readonly_resize_capture_protocol::client::jwm_readonly_resize_capture_manager_v1::{
+    self as resize_manager, JwmReadonlyResizeCaptureManagerV1,
+};
 use crate::remote_control_protocol::client::jwm_remote_control_lease_v1::JwmRemoteControlLeaseV1;
 use crate::remote_keyboard_protocol::client::{
     jwm_remote_keyboard_lease_v1::{self as keyboard_lease, JwmRemoteKeyboardLeaseV1},
@@ -47,6 +50,30 @@ use wayland_protocols::ext::image_copy_capture::v1::client::{
     ext_image_copy_capture_session_v1::{self as session, ExtImageCopyCaptureSessionV1},
 };
 
+#[cfg(all(test, feature = "backend-wayland-udev"))]
+type CaptureFrameObservation = std::sync::Arc<std::sync::Mutex<Vec<(u32, u32, u64)>>>;
+#[cfg(all(test, feature = "backend-wayland-udev"))]
+thread_local! { static CAPTURE_FRAME_OBSERVER: std::cell::RefCell<Option<CaptureFrameObservation>> = const { std::cell::RefCell::new(None) }; }
+#[cfg(all(test, feature = "backend-wayland-udev"))]
+pub(crate) fn with_wayland_capture_frame_observer<T>(
+    observer: CaptureFrameObservation,
+    run: impl FnOnce() -> T,
+) -> T {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            CAPTURE_FRAME_OBSERVER.with(|slot| {
+                slot.borrow_mut().take();
+            });
+        }
+    }
+    CAPTURE_FRAME_OBSERVER.with(|slot| {
+        assert!(slot.borrow().is_none());
+        *slot.borrow_mut() = Some(observer);
+    });
+    let _reset = Reset;
+    run()
+}
 const PROTOCOL_TIMEOUT: Duration = Duration::from_secs(5);
 const SELECTION_TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_TOPLEVELS: usize = 256;
@@ -92,6 +119,13 @@ struct NativePointer {
 }
 #[derive(Default)]
 struct State {
+    resize_follow: bool,
+    resize_manager: Option<JwmReadonlyResizeCaptureManagerV1>,
+    session_stopped: bool,
+    frame_failed: bool,
+    follow_epoch: u32,
+    follow_suspended: bool,
+    follow_layout: Option<(u16, u16)>,
     control: NativeControl,
     pointer: NativePointer,
     keyboard: NativeKeyboard,
@@ -115,6 +149,43 @@ struct State {
 }
 
 impl State {
+    fn follow_event(&mut self, event: resize_manager::Event) {
+        if self.failed.is_some() {
+            return;
+        }
+        match event {
+            resize_manager::Event::Suspended { epoch } => {
+                if epoch == 0 || epoch <= self.follow_epoch {
+                    self.fail("nonmonotonic Wayland resize-follow suspension");
+                    return;
+                }
+                self.follow_epoch = epoch;
+                self.follow_suspended = true;
+                self.follow_layout = None;
+                self.session_stopped = true;
+            }
+            resize_manager::Event::Layout {
+                epoch,
+                width,
+                height,
+            } => {
+                if !self.follow_suspended
+                    || epoch != self.follow_epoch
+                    || buffer_layout(width, height).is_err()
+                {
+                    self.fail("invalid or stale Wayland resize-follow layout");
+                    return;
+                }
+                self.follow_epoch = epoch;
+                self.follow_suspended = false;
+                self.follow_layout = Some((width as u16, height as u16));
+            }
+            resize_manager::Event::Stopped => {
+                self.fail("Wayland resize-follow source permanently stopped")
+            }
+        }
+    }
+
     fn fail(&mut self, message: &'static str) {
         self.failed.get_or_insert(message);
     }
@@ -173,6 +244,8 @@ pub(super) struct WaylandCapture {
     max_height: u16,
     limits: FrameLimits,
     epoch: u64,
+    resize_sessions: u32,
+    applied_follow_epoch: u32,
     recycler: CaptureImageRecycler,
     control_lease: Option<JwmRemoteControlLeaseV1>,
     pointer_lease: Option<JwmRemotePointerLeaseV1>,
@@ -183,10 +256,14 @@ pub(super) struct WaylandCapture {
 }
 
 impl WaylandCapture {
-    pub(super) fn connect(display: Option<&str>, max_width: u16) -> RemoteResult<Self> {
+    pub(super) fn connect(
+        display: Option<&str>,
+        max_width: u16,
+        resize_follow: bool,
+    ) -> RemoteResult<Self> {
         let path = socket_path(display)?;
         let stream = jwm_ipc_transport::connect(&path, PROTOCOL_TIMEOUT)?;
-        Self::connect_stream(stream, max_width, |capture| {
+        Self::connect_stream(stream, max_width, resize_follow, |capture| {
             eprint!("jwm-remote: select Wayland window index: ");
             io::stderr().flush()?;
             capture.read_selection(Instant::now() + SELECTION_TIMEOUT)
@@ -201,7 +278,7 @@ impl WaylandCapture {
         index: usize,
         max_width: u16,
     ) -> RemoteResult<Self> {
-        Self::connect_stream(stream, max_width, |_| {
+        Self::connect_stream(stream, max_width, false, |_| {
             index
                 .checked_sub(1)
                 .filter(|index| *index < MAX_TOPLEVELS)
@@ -209,9 +286,23 @@ impl WaylandCapture {
         })
     }
 
+    #[cfg(all(test, feature = "backend-wayland-udev"))]
+    pub(crate) fn connect_test_stream_follow(
+        stream: UnixStream,
+        index: usize,
+        max_width: u16,
+    ) -> RemoteResult<Self> {
+        Self::connect_stream(stream, max_width, true, |_| {
+            index
+                .checked_sub(1)
+                .filter(|index| *index < MAX_TOPLEVELS)
+                .ok_or_else(|| invalid("invalid Wayland test selection index").into())
+        })
+    }
     fn connect_stream(
         stream: UnixStream,
         max_width: u16,
+        resize_follow: bool,
         select: impl FnOnce(&mut Self) -> RemoteResult<usize>,
     ) -> RemoteResult<Self> {
         stream.set_nonblocking(true)?;
@@ -222,7 +313,10 @@ impl WaylandCapture {
         let mut capture = Self {
             conn,
             queue,
-            state: State::default(),
+            state: State {
+                resize_follow,
+                ..Default::default()
+            },
             source: None,
             session: None,
             inflight: None,
@@ -233,6 +327,8 @@ impl WaylandCapture {
             max_height: 0,
             limits: FrameLimits::default(),
             epoch: 1,
+            resize_sessions: 0,
+            applied_follow_epoch: 0,
             recycler: CaptureImageRecycler::default(),
             control_lease: None,
             pointer_lease: None,
@@ -296,6 +392,23 @@ impl WaylandCapture {
             .as_ref()
             .unwrap()
             .create_source(&selected, &qh, ());
+        let source = if resize_follow {
+            let manager = capture.state.resize_manager.as_ref().ok_or_else(|| {
+                invalid("Wayland compositor lacks explicit read-only resize-follow capability")
+            })?;
+            let derived = manager.create_source(&source, &qh, ());
+            source.destroy();
+            derived
+        } else {
+            source
+        };
+        if resize_follow {
+            capture.drive_until(deadline, |state| {
+                state.follow_layout.is_some() && !state.follow_suspended
+            })?;
+            capture.applied_follow_epoch = capture.state.follow_epoch;
+            capture.state.session_stopped = false;
+        }
         let session = capture
             .state
             .capture_manager
@@ -304,7 +417,19 @@ impl WaylandCapture {
             .create_session(&source, manager::Options::empty(), &qh, ());
         capture.source = Some(source);
         capture.session = Some(session);
-        capture.drive_until(deadline, |state| state.constraints_done)?;
+        capture.drive_until(deadline, |state| {
+            state.constraints_done || state.session_stopped
+        })?;
+        if capture.state.session_stopped {
+            return Err(
+                invalid("Wayland source session stopped before initial constraints").into(),
+            );
+        }
+        if resize_follow && capture.state.size != capture.state.follow_layout {
+            return Err(
+                invalid("Wayland resize-follow constraints disagree with native layout").into(),
+            );
+        }
         capture.create_buffer()?;
         capture.sync_until(deadline)?;
         Ok(capture)
@@ -312,7 +437,8 @@ impl WaylandCapture {
 
     /// Must be enabled before the first frame and only after wire negotiation.
     pub(super) fn enable_pointer(&mut self) -> RemoteResult<()> {
-        if self.state.frame_serial != 0
+        if self.state.resize_follow
+            || self.state.frame_serial != 0
             || self.state.control.enabled
             || self.state.keyboard.enabled
             || self.state.pointer.enabled
@@ -473,7 +599,8 @@ impl WaylandCapture {
     }
 
     pub(super) fn enable_keyboard(&mut self) -> RemoteResult<()> {
-        if self.state.frame_serial != 0
+        if self.state.resize_follow
+            || self.state.frame_serial != 0
             || self.state.control.enabled
             || self.state.keyboard.enabled
             || self.state.keyboard.revoked
@@ -790,6 +917,72 @@ impl WaylandCapture {
         result
     }
 
+    fn rebuild_resize_session(&mut self, deadline: Instant) -> RemoteResult<()> {
+        if !self.state.resize_follow
+            || self.state.follow_suspended
+            || self.state.follow_layout.is_none()
+            || self.state.follow_epoch <= self.applied_follow_epoch
+        {
+            return Err(invalid("resize-follow rebuild requires stopped session").into());
+        }
+        self.resize_sessions = self
+            .resize_sessions
+            .checked_add(1)
+            .filter(|count| *count <= 1024)
+            .ok_or_else(|| invalid("Wayland resize-follow session budget exhausted"))?;
+        if let Some(frame) = self.inflight.take() {
+            frame.destroy();
+        }
+        if let Some(session) = self.session.take() {
+            session.destroy();
+        }
+        if let Some(buffer) = self.buffer.take() {
+            buffer.destroy();
+        }
+        // Drain old callbacks and acknowledge old SHM retirement before any new
+        // session/buffer. Keep the same derived source and same connection.
+        self.sync_until(deadline)?;
+        self.file = None;
+        self.state.size = None;
+        self.state.batch_size = None;
+        self.state.batch_xrgb = false;
+        self.state.constraints_done = false;
+        self.state.session_stopped = false;
+        self.state.frame_failed = false;
+        self.state.frame_ready = false;
+        let transitions = u64::from(self.state.follow_epoch - self.applied_follow_epoch);
+        self.epoch = self
+            .epoch
+            .checked_add(transitions)
+            .ok_or_else(|| invalid("Wayland geometry epoch exhausted"))?;
+        self.applied_follow_epoch = self.state.follow_epoch;
+        self.session = Some(self.state.capture_manager.as_ref().unwrap().create_session(
+            self.source.as_ref().unwrap(),
+            manager::Options::empty(),
+            &self.queue.handle(),
+            (),
+        ));
+        self.drive_until(deadline, |state| {
+            state.constraints_done || state.session_stopped
+        })?;
+        if self.state.session_stopped {
+            return Err(invalid(
+                "Wayland resize-follow source revoked or unstable during bounded rebuild",
+            )
+            .into());
+        }
+        if self.state.size != self.state.follow_layout {
+            return Err(
+                invalid("Wayland resize-follow constraints disagree with native layout").into(),
+            );
+        }
+        self.create_buffer()?;
+        self.sync_until(deadline)?;
+        if self.state.session_stopped {
+            return Err(invalid("Wayland resize-follow stopped during buffer creation").into());
+        }
+        Ok(())
+    }
     fn read_frame(&mut self) -> RemoteResult<CaptureOutcome> {
         self.state.check()?;
         self.expire_control();
@@ -808,7 +1001,26 @@ impl WaylandCapture {
         }
         let deadline = Instant::now() + PROTOCOL_TIMEOUT;
         self.sync_until(deadline)?;
-        self.drive_until(deadline, |state| state.constraints_done)?;
+        if self.state.resize_follow {
+            if self.state.follow_suspended {
+                return Ok(CaptureOutcome::NoChange);
+            }
+            if self.state.follow_epoch > self.applied_follow_epoch {
+                self.rebuild_resize_session(deadline)?;
+            } else if self.state.session_stopped {
+                return Err(invalid(
+                    "Wayland capture session stopped without a newer native layout",
+                )
+                .into());
+            }
+        }
+        self.drive_until(deadline, |state| {
+            state.constraints_done || state.session_stopped
+        })?;
+        if self.state.session_stopped {
+            return Ok(CaptureOutcome::NoChange);
+        }
+        self.state.frame_failed = false;
         self.state.frame_serial = self
             .state
             .frame_serial
@@ -826,7 +1038,21 @@ impl WaylandCapture {
         frame.damage_buffer(0, 0, i32::from(width), i32::from(height));
         frame.capture();
         self.inflight = Some(frame);
-        self.drive_until(deadline, |state| state.frame_ready)?;
+        self.drive_until(deadline, |state| {
+            state.frame_ready || state.frame_failed || state.session_stopped
+        })?;
+        if self.state.resize_follow {
+            self.sync_until(deadline)?;
+            if self.state.session_stopped {
+                self.inflight.take().unwrap().destroy();
+                return Ok(CaptureOutcome::NoChange);
+            }
+            if self.state.frame_failed {
+                return Err(
+                    invalid("Wayland capture failed without a stopped resize session").into(),
+                );
+            }
+        }
         let ready_frame = self.inflight.take().unwrap();
         if self.state.control.enabled && !self.control_revoked() {
             self.retained_frame = Some(ready_frame);
@@ -850,6 +1076,9 @@ impl WaylandCapture {
         // A final ordered barrier catches already-issued closed/stopped events.
         self.sync_until(deadline)?;
         self.state.check()?;
+        if self.state.resize_follow && self.state.session_stopped {
+            return Ok(CaptureOutcome::NoChange);
+        }
         if !self.state.constraints_done {
             return Err(invalid("Wayland buffer constraints changed during capture").into());
         }
@@ -876,6 +1105,17 @@ impl WaylandCapture {
         };
         self.sync_until(deadline)?;
         self.state.check()?;
+        if self.state.resize_follow && self.state.session_stopped {
+            return Ok(CaptureOutcome::NoChange);
+        }
+        #[cfg(all(test, feature = "backend-wayland-udev"))]
+        CAPTURE_FRAME_OBSERVER.with(|slot| {
+            if let Some(observer) = slot.borrow().as_ref() {
+                let mut frames = observer.lock().unwrap();
+                assert!(frames.len() < 4096, "test capture observer bound");
+                frames.push((u32::from(width), u32::from(height), self.epoch));
+            }
+        });
         Ok(CaptureOutcome::Frame(CapturedFrame {
             geometry_epoch: self.epoch,
             image,
@@ -921,7 +1161,15 @@ impl WaylandCapture {
         self.advance_epoch()
     }
     pub(super) fn geometry_epoch(&self) -> u64 {
+        // Publish invalidation as soon as suspended is observed, before the
+        // application commits its replacement layout or new pixels are read.
         self.epoch
+            .checked_add(u64::from(
+                self.state
+                    .follow_epoch
+                    .saturating_sub(self.applied_follow_epoch),
+            ))
+            .unwrap_or(u64::MAX)
     }
     pub(crate) fn image_recycler(&self) -> CaptureImageRecycler {
         self.recycler.clone()
@@ -984,6 +1232,12 @@ impl Dispatch<wl_registry::WlRegistry, ()> for State {
                 version,
             } if version >= 1 => {
                 let bound = match interface.as_str() {
+                    "jwm_readonly_resize_capture_manager_v1"
+                        if state.resize_follow && state.resize_manager.is_none() =>
+                    {
+                        state.resize_manager = Some(proxy.bind(name, 1, qh, ()));
+                        true
+                    }
                     "jwm_remote_control_manager_v1" if state.control.manager.is_none() => {
                         state.control.manager = Some(proxy.bind(name, version.min(2), qh, ()));
                         state.control.global = Some(name);
@@ -1163,6 +1417,7 @@ impl Dispatch<ExtImageCopyCaptureSessionV1, ()> for State {
                     state.fail("Wayland session requires bounded XRGB8888 SHM constraints");
                 }
             }
+            session::Event::Stopped if state.resize_follow => state.session_stopped = true,
             session::Event::Stopped => state.fail("Wayland image capture session stopped"),
             _ => state.fail("unknown Wayland capture session event"),
         }
@@ -1192,6 +1447,11 @@ impl Dispatch<ExtImageCopyCaptureFrameV1, u64> for State {
             frame::Event::Ready => {
                 state.fail("Wayland frame missing normal transform or duplicated ready")
             }
+            frame::Event::Failed { .. }
+                if state.resize_follow && !state.frame_ready && !state.frame_failed =>
+            {
+                state.frame_failed = true
+            }
             frame::Event::Failed { .. } => state.fail("Wayland compositor rejected capture frame"),
             frame::Event::Damage { .. } | frame::Event::PresentationTime { .. } => {}
             _ => state.fail("unknown Wayland frame event"),
@@ -1203,6 +1463,18 @@ wayland_client::delegate_noop!(State: ignore wl_shm_pool::WlShmPool);
 wayland_client::delegate_noop!(State: ignore ExtForeignToplevelImageCaptureSourceManagerV1);
 wayland_client::delegate_noop!(State: ignore ExtImageCaptureSourceV1);
 wayland_client::delegate_noop!(State: ignore ExtImageCopyCaptureManagerV1);
+impl Dispatch<JwmReadonlyResizeCaptureManagerV1, ()> for State {
+    fn event(
+        state: &mut Self,
+        _: &JwmReadonlyResizeCaptureManagerV1,
+        event: resize_manager::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        state.follow_event(event);
+    }
+}
 
 fn socket_path(display: Option<&str>) -> RemoteResult<PathBuf> {
     let name = display
@@ -1298,6 +1570,57 @@ fn invalid(message: &str) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn resize_follow_layout_requires_monotonic_suspension_and_stopped_never_revives() {
+        let mut state = State {
+            resize_follow: true,
+            ..Default::default()
+        };
+        for epoch in 1..=3 {
+            state.follow_event(resize_manager::Event::Suspended { epoch });
+            assert!(state.follow_suspended && state.session_stopped);
+            assert!(state.follow_layout.is_none());
+            state.follow_event(resize_manager::Event::Layout {
+                epoch,
+                width: 320,
+                height: 240,
+            });
+            assert!(!state.follow_suspended);
+            assert_eq!(state.follow_epoch, epoch);
+            assert_eq!(state.follow_layout, Some((320, 240)));
+            assert!(state.check().is_ok());
+        }
+        state.follow_event(resize_manager::Event::Stopped);
+        state.follow_event(resize_manager::Event::Suspended { epoch: 4 });
+        state.follow_event(resize_manager::Event::Layout {
+            epoch: 4,
+            width: 640,
+            height: 480,
+        });
+        assert!(state.check().is_err());
+        assert_eq!(state.follow_epoch, 3);
+    }
+    #[test]
+    fn resize_follow_rejects_unsolicited_stale_or_unbounded_layout() {
+        for case in 0..4 {
+            let mut state = State {
+                resize_follow: true,
+                ..Default::default()
+            };
+            if case != 0 {
+                state.follow_event(resize_manager::Event::Suspended { epoch: 1 });
+            }
+            if case == 3 {
+                state.follow_event(resize_manager::Event::Suspended { epoch: 1 });
+            }
+            state.follow_event(resize_manager::Event::Layout {
+                epoch: if case == 1 { 2 } else { 1 },
+                width: if case == 2 { 0 } else { 320 },
+                height: 240,
+            });
+            assert!(state.check().is_err(), "case {case}");
+        }
+    }
     #[test]
     fn selection_is_bounded_decimal_and_never_a_title_or_identifier() {
         assert_eq!(parse_selection(b"1\n").unwrap(), 0);

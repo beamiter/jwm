@@ -1623,6 +1623,7 @@ pub struct HostOptions {
     pub key: KeySource,
     pub display: Option<String>,
     pub wayland_select: bool,
+    pub wayland_resize_follow: bool,
     pub wayland_display: Option<String>,
     pub fps: u16,
     pub jpeg_quality: u8,
@@ -1757,6 +1758,7 @@ struct PointerFrame {
     announced: bool,
 }
 struct SourceControl {
+    follow_geometry: AtomicBool,
     control_enabled: AtomicBool,
     control_revoke: AtomicBool,
     control_queue: Mutex<VecDeque<ControlCommand>>,
@@ -1782,6 +1784,7 @@ impl SourceControl {
         geometry_epoch: u64,
     ) -> RemoteResult<Self> {
         Ok(Self {
+            follow_geometry: AtomicBool::new(false),
             control_enabled: AtomicBool::new(false),
             control_revoke: AtomicBool::new(false),
             control_queue: Mutex::new(VecDeque::new()),
@@ -1878,6 +1881,19 @@ fn listener_security_notice(address: IpAddr) -> Option<&'static str> {
 }
 
 fn validate_window_policy(options: &HostOptions) -> RemoteResult<()> {
+    if options.wayland_resize_follow
+        && (!options.wayland_select
+            || options.allow_input
+            || options.allow_clipboard
+            || options.allow_window_resize
+            || options.allow_wayland_keyboard
+            || options.allow_wayland_pointer
+            || options.allow_wayland_control
+            || options.allow_wayland_scroll)
+    {
+        return Err(permission_denied("Wayland resize-follow requires an explicitly selected read-only source without any input, clipboard or resize permission").into());
+    }
+
     if options.allow_wayland_scroll
         && !options.allow_wayland_pointer
         && !options.allow_wayland_control
@@ -1977,6 +1993,7 @@ pub fn run_host(options: HostOptions) -> RemoteResult<()> {
                 super::wayland_capture::WaylandCapture::connect(
                     options.wayland_display.as_deref(),
                     options.max_width,
+                    options.wayland_resize_follow,
                 )?,
             )))
         }
@@ -2585,6 +2602,9 @@ fn serve_authenticated(
             input_area,
             capture.geometry_epoch(),
         )?);
+        sources
+            .follow_geometry
+            .store(options.wayland_resize_follow, Ordering::Release);
         sources
             .control_enabled
             .store(negotiated_stream.wayland_control, Ordering::Release);
@@ -3556,6 +3576,15 @@ fn stream_frames(
                     eprintln!("jwm-remote: encoding to fit {width}x{height} for this viewer");
                 }
             }
+            if options.wayland_resize_follow {
+                let _publication = lock_writer(&writer);
+                let mut state = sources.state.lock().unwrap();
+                if state.geometry_epoch != capture.geometry_epoch() {
+                    state.geometry_epoch = capture.geometry_epoch();
+                    state.presented_geometry = None;
+                    mailbox.clear();
+                }
+            }
             process_keyboard(sources, capture, &writer, &mut keyboard)?;
             control::process(sources, capture, &writer, &mut bundle_control, source_size)?;
             process_pointer(sources, capture, &writer, &mut pointer, source_size)?;
@@ -3630,9 +3659,17 @@ fn stream_frames(
                 version
             };
             let capture_started = Instant::now();
-            let Some(frame) =
-                captured_frame_from_outcome(capture.frame().map_err(LocalRuntimeFailure::capture)?)
-            else {
+            let outcome = capture.frame().map_err(LocalRuntimeFailure::capture)?;
+            if options.wayland_resize_follow {
+                let _publication = lock_writer(&writer);
+                let mut state = sources.state.lock().unwrap();
+                if state.geometry_epoch != capture.geometry_epoch() {
+                    state.geometry_epoch = capture.geometry_epoch();
+                    state.presented_geometry = None;
+                    mailbox.clear();
+                }
+            }
+            let Some(frame) = captured_frame_from_outcome(outcome) else {
                 telemetry.record_damage_skipped();
                 continue;
             };
@@ -3943,10 +3980,12 @@ fn send_frames_with_encoder_scoped<W: std::io::Write + SetWriteTimeout>(
             // encoding old pixels must recheck before reserving credit or
             // writing, and can never appear after SourceChanged.
             let mut source_state = sources.map(|sources| sources.state.lock().unwrap());
-            if source_state
-                .as_ref()
-                .is_some_and(|state| !state.policy.accepts_capture(pending.source_version))
-            {
+            if source_state.as_ref().is_some_and(|state| {
+                !state.policy.accepts_capture(pending.source_version)
+                    || (sources
+                        .is_some_and(|sources| sources.follow_geometry.load(Ordering::Acquire))
+                        && state.geometry_epoch != pending.frame.geometry_epoch)
+            }) {
                 sender.discard();
                 continue;
             }
@@ -5646,6 +5685,31 @@ mod tests {
     }
 
     #[test]
+    fn resize_follow_host_permission_is_explicit_read_only() {
+        let mut options = test_host_source_options();
+        options.capture_area = CaptureArea::Root;
+        options.wayland_select = true;
+        options.wayland_resize_follow = true;
+        assert_eq!(
+            validate_window_policy(&options).is_ok(),
+            cfg!(feature = "remote-wayland")
+        );
+        for case in 0..8 {
+            let mut denied = options.clone();
+            match case {
+                0 => denied.wayland_select = false,
+                1 => denied.allow_input = true,
+                2 => denied.allow_clipboard = true,
+                3 => denied.allow_window_resize = true,
+                4 => denied.allow_wayland_keyboard = true,
+                5 => denied.allow_wayland_pointer = true,
+                6 => denied.allow_wayland_control = true,
+                _ => denied.allow_wayland_scroll = true,
+            }
+            assert!(validate_window_policy(&denied).is_err(), "case {case}");
+        }
+    }
+    #[test]
     fn wayland_selection_is_exclusive_local_and_never_accepts_stdin_key() {
         let mut options = test_host_source_options();
         options.capture_area = CaptureArea::Root;
@@ -5747,6 +5811,7 @@ mod tests {
             key: KeySource::File("/unused".into()),
             display: None,
             wayland_select: false,
+            wayland_resize_follow: false,
             wayland_display: None,
             fps: 12,
             jpeg_quality: 70,
@@ -8429,6 +8494,7 @@ mod tests {
             key: KeySource::File(std::path::PathBuf::from("key")),
             display: None,
             wayland_select: false,
+            wayland_resize_follow: false,
             wayland_display: None,
             fps: 30,
             jpeg_quality: 85,

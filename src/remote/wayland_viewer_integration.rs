@@ -1011,3 +1011,6 @@ mod control_integration;
 
 #[path = "host_wayland_control_viewer_integration.rs"]
 mod host_control_integration;
+
+#[path = "host_wayland_resize_viewer_integration.rs"]
+mod host_resize_integration;

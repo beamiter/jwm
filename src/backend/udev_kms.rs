@@ -7737,6 +7737,8 @@ impl KmsState {
                 continue;
             }
             let surface = &authority.surface;
+            // Session authorities are immutable snapshots, including for a
+            // resize-follow source. Never render using the mutable root layout.
             let (width, height) = (authority.width as i32, authority.height as i32);
 
             // Shift the surface buffer origin by -window_geometry.loc so client-side
@@ -7854,6 +7856,13 @@ impl KmsState {
                 continue;
             }
 
+            // A resize-follow frame belongs to its original session layout.
+            // Never read back an old render target after that session expires.
+            if !frame_info.authorized(state) {
+                Self::note_image_capture_frame_failed(counters, FailureReason::Stopped);
+                frame_info.frame.failed(FailureReason::Stopped);
+                continue;
+            }
             let region = Rectangle::from_size(size);
             let mapping = match renderer.copy_framebuffer(&target, region, Fourcc::Abgr8888) {
                 Ok(m) => m,

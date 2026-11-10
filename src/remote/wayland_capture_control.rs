@@ -22,7 +22,8 @@ pub(super) struct NativeControl {
 }
 impl WaylandCapture {
     pub(in crate::remote) fn enable_control(&mut self, scroll_enabled: bool) -> RemoteResult<()> {
-        if self.state.frame_serial != 0
+        if self.state.resize_follow
+            || self.state.frame_serial != 0
             || self.state.control.enabled
             || self.state.keyboard.enabled
             || self.state.pointer.enabled

@@ -297,6 +297,11 @@ enum Command {
         #[arg(long, requires = "once", conflicts_with_all = ["display", "window", "monitor", "region", "share_monitor", "share_region", "share_root", "allow_input", "allow_clipboard", "allow_window_resize", "key_stdin", "capture_source"])]
         wayland_select: bool,
 
+        /// Keep a read-only selected Wayland source when the application changes size.
+        /// No remote resize command, input permission, reselection or reconnect.
+        #[arg(long, requires_all = ["wayland_select", "once"], conflicts_with_all = ["allow_input", "allow_clipboard", "allow_window_resize", "allow_wayland_keyboard", "allow_wayland_pointer", "allow_wayland_control", "allow_wayland_scroll"])]
+        wayland_resize_follow: bool,
+
         /// Permit a single explicitly requested, scoped Wayland keyboard lease.
         #[arg(long, requires_all = ["wayland_select", "once"], conflicts_with_all = ["allow_input", "allow_clipboard", "allow_window_resize"])]
         allow_wayland_keyboard: bool,
@@ -1234,6 +1239,7 @@ fn run(command: Command) -> RemoteResult<()> {
             allow_input,
             allow_window_resize,
             wayland_select,
+            wayland_resize_follow,
             allow_wayland_keyboard,
             allow_wayland_pointer,
             allow_wayland_control,
@@ -1283,6 +1289,7 @@ fn run(command: Command) -> RemoteResult<()> {
                 allow_input,
                 allow_window_resize,
                 wayland_select,
+                wayland_resize_follow,
                 allow_wayland_keyboard,
                 allow_wayland_pointer,
                 allow_wayland_control,
@@ -3347,6 +3354,60 @@ mod explicit_resize_tests {
 #[cfg(test)]
 mod wayland_source_cli_tests {
     use super::*;
+    #[test]
+    fn wayland_resize_follow_is_host_only_explicit_and_read_only() {
+        let cli =
+            Cli::try_parse_from(["jwm-remote", "host", "--wayland-select", "--once"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Host {
+                wayland_resize_follow: false,
+                ..
+            }
+        ));
+        let cli = Cli::try_parse_from([
+            "jwm-remote",
+            "host",
+            "--wayland-select",
+            "--once",
+            "--wayland-resize-follow",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Host {
+                wayland_resize_follow: true,
+                ..
+            }
+        ));
+        assert!(
+            Cli::try_parse_from(["jwm-remote", "host", "--once", "--wayland-resize-follow"])
+                .is_err()
+        );
+        assert!(Cli::try_parse_from(["jwm-remote", "connect", "--wayland-resize-follow"]).is_err());
+        for option in [
+            "--allow-input",
+            "--allow-clipboard",
+            "--allow-window-resize",
+            "--allow-wayland-keyboard",
+            "--allow-wayland-pointer",
+            "--allow-wayland-control",
+            "--allow-wayland-scroll",
+        ] {
+            assert!(
+                Cli::try_parse_from([
+                    "jwm-remote",
+                    "host",
+                    "--wayland-select",
+                    "--once",
+                    "--wayland-resize-follow",
+                    option
+                ])
+                .is_err(),
+                "{option}"
+            );
+        }
+    }
     #[test]
     fn wayland_selection_is_local_single_use_and_has_no_x11_permissions() {
         assert!(Cli::try_parse_from(["jwm-remote", "host", "--wayland-select", "--once"]).is_ok());
