@@ -62,6 +62,7 @@ impl Viewer {
                     height,
                     options.window_size,
                     options.window_position,
+                    options.scaling,
                     pointer,
                     keyboard,
                     keymap,

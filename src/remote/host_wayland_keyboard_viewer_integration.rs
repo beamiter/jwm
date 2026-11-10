@@ -247,6 +247,7 @@ fn actual_wayland_keyboard_viewer_tcp_requires_presented_and_targets_only_origin
             clipboard_direction: Default::default(),
             clipboard_file_limit: 0,
             escape_key: "Escape".into(),
+            scaling: Default::default(),
         };
         let result = with_wayland_keyboard_observer(client_observed, || {
             with_wayland_test_stream(viewer_stream, || run_client(opts))

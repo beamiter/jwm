@@ -97,7 +97,7 @@ fn quantiles(values: &[f64]) -> Value {
     let mut sorted = values.to_vec();
     sorted.sort_by(f64::total_cmp);
     let nearest = |percent: usize| sorted[(sorted.len() * percent).div_ceil(100).saturating_sub(1)];
-    json!({"n": sorted.len(), "min_ms": sorted[0], "p50_ms": nearest(50), "p95_ms": nearest(95), "max_ms": sorted[sorted.len()-1], "method":"nearest-rank; n=16 is not a stable tail estimate"})
+    json!({"n": sorted.len(), "min_ms": sorted[0], "p50_ms": nearest(50), "p95_ms": nearest(95), "max_ms": sorted[sorted.len()-1], "method":"nearest-rank; small sample counts do not provide a stable tail estimate"})
 }
 struct Report {
     samples: Vec<Value>,

@@ -118,3 +118,7 @@ waits remain uninterruptible by this hint. The actual queue, lease, source scope
 sequence, fresh-frame and FPS checks remain authoritative. A signal is never an
 input event or an authorization grant. The benefit is limited to input arriving
 while the host is in that idle wait, not arbitrary capture/codec stalls.
+
+[Versioned input-wake observations](benchmarks/remote-input-wake-2026-11-10/README.md)
+include complete same-process ABBA data, its notification/drain overhead and
+limitations. They are not a comparison against a different CI run.

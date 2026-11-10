@@ -825,6 +825,7 @@ fn actual_wayland_viewer_tcp_ack_waits_for_presented_not_release() {
             clipboard_direction: Default::default(),
             clipboard_file_limit: 0,
             escape_key: "Escape".into(),
+            scaling: Default::default(),
         };
         let result = with_wayland_test_stream(stream, || run_client(options));
         done_tx.send(result.map_err(|e| e.to_string())).unwrap();
