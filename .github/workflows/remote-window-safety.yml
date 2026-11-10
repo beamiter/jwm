@@ -60,6 +60,14 @@ jobs:
             cargo test --locked --no-default-features --features remote-x11 --lib window_capture_integration -- --ignored --test-threads=1 --nocapture
             cargo test --locked --no-default-features --features remote-x11,backend-xcb --lib resize_history_fence_xcb_native -- --ignored --test-threads=1 --nocapture
           '
+      - name: Actual core readback compatibility and top-edge display pixels
+        run: |
+          cargo test --locked --no-default-features --features remote-x11,backend-x11rb --lib owned_x_core_compatibility_survives_viewport_limits_and_source_switch -- --test-threads=1 --nocapture
+          xvfb-run -a -s '-screen 0 1280x900x24 -nolisten tcp' sh -ec '
+            export JWM_REMOTE_TEST_VIEWER_OWNED=1
+            export JWM_REMOTE_TEST_VIEWER_DISPLAY="$DISPLAY"
+            cargo test --locked --no-default-features --features remote-x11 --lib actual_top_edge_codec_scaled_core_and_shm_pixels -- --ignored --test-threads=1 --nocapture
+          '
       - name: Real JWM explicit resize authority and viewer round trip
         run: |
           python3 scripts/test-remote-window-resize-e2e.py --self-test

@@ -6955,3 +6955,7 @@ mod scoped_pointer_coordinate_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "top_edge_pixel_integration.rs"]
+mod top_edge_pixel_integration;

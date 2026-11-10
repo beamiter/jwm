@@ -1025,6 +1025,26 @@ impl X11Capture {
         area: CaptureArea,
         scaling: ScalingPolicy,
     ) -> RemoteResult<Self> {
+        Self::connect_with_driver_probe(
+            display,
+            requested_source,
+            max_width,
+            area,
+            scaling,
+            nvidia_driver,
+        )
+    }
+
+    // The probe seam lets owned-X tests exercise the NVIDIA policy without
+    // claiming that software Xvfb reproduces proprietary driver behaviour.
+    fn connect_with_driver_probe(
+        display: Option<&str>,
+        requested_source: CaptureSource,
+        max_width: u16,
+        area: CaptureArea,
+        scaling: ScalingPolicy,
+        driver_probe: fn(&RustConnection) -> bool,
+    ) -> RemoteResult<Self> {
         let (conn, screen_num) = open_display(display)?;
         let screen = conn
             .setup()
@@ -1035,7 +1055,16 @@ impl X11Capture {
         // MIT-SHM requires QueryVersion to complete before any other request
         // from the extension. Segment allocation remains lazy until the first
         // frame establishes the exact native image size.
-        let shm_readback = ShmReadback::connect(&conn, screen.root_depth);
+        let nvidia = driver_probe(&conn);
+        let gpu_scaling = scaling.allows_gpu(nvidia);
+        let shm_readback = if scaling.requires_core_readback(nvidia) {
+            eprintln!(
+                "jwm-remote: compatibility readback: core GetImage + CPU scaling (MIT-SHM and XRender disabled)"
+            );
+            ShmReadback::Disabled
+        } else {
+            ShmReadback::connect(&conn, screen.root_depth)
+        };
 
         let xfixes_ready = match query_xfixes(&conn) {
             Ok(()) => true,
@@ -1110,7 +1139,6 @@ impl X11Capture {
                 return Err(error);
             }
         };
-        let gpu_scaling = scaling.allows_gpu(nvidia_driver(&conn));
         if !gpu_scaling && scaling == ScalingPolicy::Auto {
             eprintln!(
                 "jwm-remote: NVIDIA driver: scaling on the CPU, because XRender reads of the \
@@ -2757,6 +2785,12 @@ impl ReadbackLayout {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    // Counts attempted protocol requests on this capture thread, not mode labels.
+    static READBACK_REQUESTS: std::cell::Cell<(u64, u64, u64)> = const { std::cell::Cell::new((0, 0, 0)) };
+}
+
 enum ShmReadback {
     Disabled,
     Enabled(EnabledShmReadback),
@@ -2883,6 +2917,11 @@ impl EnabledShmReadback {
                 .segment
                 .as_ref()
                 .ok_or_else(|| invalid_data("MIT-SHM segment was not created"))?;
+            #[cfg(test)]
+            READBACK_REQUESTS.with(|c| {
+                let (core, shm, alloc) = c.get();
+                c.set((core, shm + 1, alloc));
+            });
             let reply = shm::get_image(
                 conn,
                 drawable,
@@ -2968,6 +3007,11 @@ impl ShmSegment {
         }
         let id = conn.generate_id()?;
         // `false` is required: the server writes captured pixels into the segment.
+        #[cfg(test)]
+        READBACK_REQUESTS.with(|c| {
+            let (core, shm, alloc) = c.get();
+            c.set((core, shm, alloc + 1));
+        });
         let cookie = shm::create_segment(conn, id, size, false)?;
         // Split waiting from parsing. An X11/raw transport error does not prove
         // that the server created the resource, so do not detach an uncreated
@@ -3138,6 +3182,11 @@ fn core_capture_rgb(
     layout: ReadbackLayout,
     buffers: &mut CaptureImageRecycler,
 ) -> RemoteResult<RgbImage> {
+    #[cfg(test)]
+    READBACK_REQUESTS.with(|c| {
+        let (core, shm, alloc) = c.get();
+        c.set((core + 1, shm, alloc));
+    });
     let reply = conn
         .get_image(
             ImageFormat::Z_PIXMAP,
@@ -4738,6 +4787,113 @@ mod tests {
 
     use super::*;
     use std::cell::Cell;
+
+    #[cfg(any(
+        feature = "backend-x11rb",
+        feature = "backend-xcb",
+        feature = "wayland-backends"
+    ))]
+    #[test]
+    fn owned_x_core_compatibility_survives_viewport_limits_and_source_switch() {
+        let x11 = crate::backend::clipboard_offer::IsolatedXvfb::acquire();
+        for (policy, probe) in [
+            (
+                ScalingPolicy::Cpu,
+                (|_: &RustConnection| false) as fn(&RustConnection) -> bool,
+            ),
+            (
+                ScalingPolicy::Auto,
+                (|_: &RustConnection| true) as fn(&RustConnection) -> bool,
+            ),
+        ] {
+            for initial_width in [0, 32] {
+                READBACK_REQUESTS.with(|c| c.set((0, 0, 0)));
+                let region = CaptureRegion {
+                    x: 0,
+                    y: 0,
+                    width: 64,
+                    height: 48,
+                };
+                let mut capture = X11Capture::connect_with_driver_probe(
+                    Some(x11.name()),
+                    CaptureSource::Root,
+                    initial_width,
+                    CaptureArea::Region(region),
+                    policy,
+                    probe,
+                )
+                .unwrap();
+                capture.cursor.disable();
+                for step in 0..4 {
+                    match step {
+                        1 => {
+                            assert!(capture.set_encoded_bounds(24, 24));
+                        }
+                        2 => {
+                            assert!(capture.set_frame_limits(FrameLimits {
+                                max_width: 16,
+                                max_height: 16,
+                                max_pixels: 256
+                            }));
+                        }
+                        3 => {
+                            capture
+                                .switch_area(CaptureArea::Region(CaptureRegion { x: 80, ..region }))
+                                .unwrap();
+                        }
+                        _ => {}
+                    }
+                    assert!(!capture.gpu_scaling);
+                    assert!(capture.render_scaler.is_none());
+                    assert!(!capture.shm_readback.is_enabled());
+                    let before = READBACK_REQUESTS.with(Cell::get);
+                    let CaptureOutcome::Frame(frame) = capture.frame().unwrap() else {
+                        panic!("fresh frame required");
+                    };
+                    assert_eq!((frame.source_width, frame.source_height), (64, 48));
+                    let after = READBACK_REQUESTS.with(Cell::get);
+                    assert!(after.0 > before.0, "must issue core GetImage");
+                    assert_eq!(
+                        (after.1, after.2),
+                        (0, 0),
+                        "no SHM image or segment requests"
+                    );
+                }
+            }
+        }
+        // Positive control: software/non-NVIDIA Auto and explicit GPU keep
+        // their native-width SHM path. This fixture requires SHM 1.2 support.
+        for policy in [ScalingPolicy::Auto, ScalingPolicy::Gpu] {
+            READBACK_REQUESTS.with(|c| c.set((0, 0, 0)));
+            let mut capture = X11Capture::connect_with_driver_probe(
+                Some(x11.name()),
+                CaptureSource::Root,
+                0,
+                CaptureArea::Region(CaptureRegion {
+                    x: 0,
+                    y: 0,
+                    width: 64,
+                    height: 48,
+                }),
+                policy,
+                |_| false,
+            )
+            .unwrap();
+            capture.cursor.disable();
+            assert!(capture.gpu_scaling);
+            assert!(
+                capture.shm_readback.is_enabled(),
+                "owned Xvfb must offer SHM FD segments"
+            );
+            assert!(matches!(capture.frame().unwrap(), CaptureOutcome::Frame(_)));
+            let counts = READBACK_REQUESTS.with(Cell::get);
+            assert_eq!(counts.0, 0);
+            assert!(
+                counts.1 > 0 && counts.2 > 0,
+                "positive SHM request control: {counts:?}"
+            );
+        }
+    }
 
     #[test]
     fn auto_scaling_avoids_xrender_only_on_the_nvidia_driver() {

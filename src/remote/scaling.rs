@@ -17,6 +17,13 @@ pub enum ScalingPolicy {
 }
 
 impl ScalingPolicy {
+    /// Host compatibility readback uses core GetImage, not MIT-SHM. This
+    /// preserves the tested core path; it does not diagnose SHM as faulty.
+    #[must_use]
+    pub(crate) fn requires_core_readback(self, nvidia_driver: bool) -> bool {
+        matches!(self, Self::Cpu) || (self == Self::Auto && nvidia_driver)
+    }
+
     #[must_use]
     pub fn allows_gpu(self, nvidia_driver: bool) -> bool {
         match self {
@@ -77,6 +84,23 @@ mod tests {
         assert_eq!("cpu".parse(), Ok(ScalingPolicy::Cpu));
         assert_eq!("auto".parse(), Ok(ScalingPolicy::Auto));
         assert!("fast".parse::<ScalingPolicy>().is_err());
+    }
+
+    #[test]
+    fn host_readback_compatibility_policy_matrix() {
+        for (policy, nvidia, core) in [
+            (ScalingPolicy::Cpu, false, true),
+            (ScalingPolicy::Cpu, true, true),
+            (ScalingPolicy::Auto, false, false),
+            (ScalingPolicy::Auto, true, true),
+            (ScalingPolicy::Gpu, false, false),
+            (ScalingPolicy::Gpu, true, false),
+        ] {
+            assert_eq!(policy.requires_core_readback(nvidia), core);
+            if core {
+                assert!(!policy.allows_gpu(nvidia));
+            }
+        }
     }
 
     #[test]
