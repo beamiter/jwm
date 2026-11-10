@@ -6,7 +6,7 @@ use crate::sync_ext::MutexExt;
 use std::collections::HashMap;
 #[cfg(feature = "backend-wayland-udev")]
 use std::sync::atomic::AtomicU64;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -132,24 +132,37 @@ pub struct CaptureAuthority {
         smithay::reexports::wayland_server::protocol::wl_output::Transform,
     ),
     revoked: AtomicBool,
-    keyboard_consumed: AtomicBool,
-    pointer_consumed: AtomicBool,
+    input_consumed: AtomicU8,
     #[cfg(feature = "backend-wayland-udev")]
     ready_serial: AtomicU64,
 }
+// A bundle atomically consumes both non-renewable channel attempts.
+fn consume_input_attempt(consumed: &AtomicU8, mask: u8) -> bool {
+    let mut previous = consumed.load(Ordering::Acquire);
+    loop {
+        if previous & mask != 0 {
+            return false;
+        }
+        match consumed.compare_exchange(
+            previous,
+            previous | mask,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => return true,
+            Err(actual) => previous = actual,
+        }
+    }
+}
 impl CaptureAuthority {
     pub(crate) fn consume_pointer_attempt(&self) -> bool {
-        self.pointer_consumed
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
+        consume_input_attempt(&self.input_consumed, 2)
     }
-    /// A source authorizes at most one keyboard attempt. Failed admission,
-    /// revoke, timeout and resource destruction never make it renewable.
-    /// Read-only capture does not consume or reset this bit.
     pub(crate) fn consume_keyboard_attempt(&self) -> bool {
-        self.keyboard_consumed
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
+        consume_input_attempt(&self.input_consumed, 1)
+    }
+    pub(crate) fn consume_control_attempt(&self) -> bool {
+        consume_input_attempt(&self.input_consumed, 3)
     }
 }
 #[derive(Default)]
@@ -262,8 +275,7 @@ fn create_toplevel_source(
         owner: _owner,
         lock_epoch: state.session_lock_epoch,
         revoked: AtomicBool::new(false),
-        keyboard_consumed: AtomicBool::new(false),
-        pointer_consumed: AtomicBool::new(false),
+        input_consumed: AtomicU8::new(0),
         #[cfg(feature = "backend-wayland-udev")]
         ready_serial: AtomicU64::new(0),
     });
@@ -879,6 +891,7 @@ impl Dispatch<ExtImageCaptureSourceV1, ImageCaptureSourceData> for JwmWaylandSta
         _data: &ImageCaptureSourceData,
     ) {
         super::remote_pointer::source_destroyed(state, resource);
+        super::remote_control::source_destroyed(state, resource);
     }
 }
 
@@ -2142,3 +2155,22 @@ mod tests {
 #[cfg(test)]
 #[path = "image_copy_capture_authority_tests.rs"]
 pub(crate) mod authority_tests;
+
+#[cfg(test)]
+mod input_attempt_tests {
+    use super::*;
+    #[test]
+    fn bundle_consumes_both_channels_without_partial_retry() {
+        let consumed = AtomicU8::new(0);
+        assert!(consume_input_attempt(&consumed, 3));
+        for mask in [1, 2, 3] {
+            assert!(!consume_input_attempt(&consumed, mask));
+        }
+        for first in [1, 2] {
+            let consumed = AtomicU8::new(0);
+            assert!(consume_input_attempt(&consumed, first));
+            assert!(!consume_input_attempt(&consumed, 3));
+            assert_eq!(consumed.load(Ordering::Acquire), first);
+        }
+    }
+}

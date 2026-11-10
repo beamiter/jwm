@@ -60,14 +60,14 @@ pub struct LeaseData {
     epoch: u32,
 }
 #[derive(Clone, PartialEq)]
-struct Mapping {
+pub(super) struct Mapping {
     geometry: Option<(i32, i32, i32, i32)>,
     region: Option<Vec<(bool, i32, i32, i32, i32)>>,
 }
 // Only a 1:1 uncropped root buffer is supported. Reject rather than guess a
 // coordinate transform or route a root pixel into a subsurface or decoration.
 struct NonzeroPointerOffset;
-fn mapping(authority: &CaptureAuthority) -> Option<Mapping> {
+pub(super) fn mapping(authority: &CaptureAuthority) -> Option<Mapping> {
     let surface = &authority.surface;
     if !get_children(surface).is_empty() {
         return None;
@@ -137,7 +137,7 @@ fn mapping(authority: &CaptureAuthority) -> Option<Mapping> {
 fn action_allowed(kind: u32, allow_scroll: bool) -> bool {
     matches!(kind, 0 | 1) || (allow_scroll && matches!(kind, 2 | 3))
 }
-fn point_allowed(mapping: &Mapping, x: u32, y: u32) -> bool {
+pub(super) fn point_allowed(mapping: &Mapping, x: u32, y: u32) -> bool {
     let Some(region) = &mapping.region else {
         return true;
     };
@@ -160,6 +160,7 @@ pub(crate) fn active(state: &JwmWaylandState) -> bool {
     state.remote_pointer.active.is_some()
 }
 pub(crate) fn revoke(state: &mut JwmWaylandState, reason: u32) {
+    super::remote_control::revoke(state, reason);
     if let Some(lease) = state.remote_pointer.active.take() {
         lease.resource.revoked(reason);
         state.request_client_flush();
@@ -169,6 +170,7 @@ pub(crate) fn revoke_for_window(
     state: &mut JwmWaylandState,
     window: crate::backend::common_define::WindowId,
 ) {
+    super::remote_control::revoke_for_window(state, window);
     if state
         .remote_pointer
         .active
@@ -193,6 +195,7 @@ pub(crate) fn surface_committed(state: &mut JwmWaylandState, surface: &WlSurface
             states.data_map.insert_if_missing(|| NonzeroPointerOffset);
         }
     });
+    super::remote_control::surface_committed(state, surface);
     if state.remote_pointer.active.as_ref().is_some_and(|l| {
         l.authority.surface == *surface && mapping(&l.authority).as_ref() != Some(&l.mapping)
     }) {
@@ -200,6 +203,7 @@ pub(crate) fn surface_committed(state: &mut JwmWaylandState, surface: &WlSurface
     }
 }
 pub(crate) fn new_subsurface(state: &mut JwmWaylandState, parent: &WlSurface) {
+    super::remote_control::new_subsurface(state, parent);
     if state
         .remote_pointer
         .active
@@ -209,7 +213,7 @@ pub(crate) fn new_subsurface(state: &mut JwmWaylandState, parent: &WlSurface) {
         revoke(state, SOURCE);
     }
 }
-fn unconstrained(state: &JwmWaylandState, surface: &WlSurface) -> bool {
+pub(super) fn unconstrained(state: &JwmWaylandState, surface: &WlSurface) -> bool {
     state.seat.get_pointer().is_some_and(|pointer| {
         smithay::wayland::pointer_constraints::with_pointer_constraint(
             surface,
@@ -305,6 +309,7 @@ impl Dispatch<JwmRemotePointerManagerV1, ManagerData> for JwmWaylandState {
                 || !authority.consume_pointer_attempt()
                 || active(state)
                 || super::remote_keyboard::active(state)
+                || super::remote_control::active(state)
                 || !authority_is_current(state, &authority)
                 || !unconstrained(state, &authority.surface)
                 || !state.remote_keyboard_seat_eligible()

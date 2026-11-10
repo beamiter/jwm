@@ -806,6 +806,7 @@ fn actual_wayland_viewer_tcp_ack_waits_for_presented_not_release() {
             viewer_wayland_display: None,
             wayland_keyboard: false,
             wayland_pointer: false,
+            wayland_control: false,
             wayland_scroll: false,
             resize_source: None,
             follow_source_size: false,
@@ -1004,3 +1005,9 @@ mod pointer_integration;
 
 #[path = "host_wayland_pointer_viewer_integration.rs"]
 mod host_pointer_integration;
+
+#[path = "wayland_viewer_control_integration.rs"]
+mod control_integration;
+
+#[path = "host_wayland_control_viewer_integration.rs"]
+mod host_control_integration;

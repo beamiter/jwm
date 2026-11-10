@@ -111,12 +111,24 @@ impl Queue {
             MessageKind::WaylandPointerRequest => Some(24),
             MessageKind::WaylandPointerAction => Some(45),
             MessageKind::WaylandPointerRevoke => Some(8),
+            MessageKind::WaylandControlRequest => Some(56),
+            MessageKind::WaylandControlAction => Some(48),
+            MessageKind::WaylandControlRevoke => Some(8),
             _ => None,
         };
         if expected.is_some_and(|length| payload.len() != length) {
             return Err(
                 io::Error::new(io::ErrorKind::InvalidInput, "invalid control record size").into(),
             );
+        }
+        if kind == MessageKind::WaylandControlRevoke {
+            self.control.retain(|r| {
+                !matches!(
+                    r.kind,
+                    MessageKind::WaylandControlRequest | MessageKind::WaylandControlAction
+                )
+            });
+            self.control_bytes = self.control.iter().map(|r| r.payload.len()).sum();
         }
         if kind == MessageKind::WaylandPointerRevoke {
             self.control.retain(|r| {
@@ -548,6 +560,51 @@ impl Drop for Sender {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn scoped_control_revoke_clears_pending_request_and_actions() {
+        let mut queue = super::Queue::default();
+        queue
+            .push(super::MessageKind::WaylandControlRequest, &[1; 56])
+            .unwrap();
+        queue
+            .push(super::MessageKind::WaylandControlAction, &[1; 48])
+            .unwrap();
+        queue.push(super::MessageKind::Heartbeat, &[]).unwrap();
+        queue
+            .push(super::MessageKind::WaylandControlRevoke, &[1; 8])
+            .unwrap();
+        assert!(queue.control.iter().all(|r| !matches!(
+            r.kind,
+            super::MessageKind::WaylandControlRequest | super::MessageKind::WaylandControlAction
+        )));
+        assert!(
+            queue
+                .control
+                .iter()
+                .any(|r| r.kind == super::MessageKind::Heartbeat)
+        );
+        assert_eq!(
+            queue.control.back().unwrap().kind,
+            super::MessageKind::WaylandControlRevoke
+        );
+        assert_eq!(queue.control_bytes, 8);
+        for (kind, size) in [
+            (super::MessageKind::WaylandControlRequest, 56),
+            (super::MessageKind::WaylandControlAction, 48),
+            (super::MessageKind::WaylandControlRevoke, 8),
+        ] {
+            assert!(
+                super::Queue::default()
+                    .push(kind, &vec![0; size - 1])
+                    .is_err()
+            );
+            assert!(
+                super::Queue::default()
+                    .push(kind, &vec![0; size + 1])
+                    .is_err()
+            );
+        }
+    }
     #[test]
     fn scoped_pointer_revoke_clears_pending_request_and_actions() {
         let mut queue = super::Queue::default();

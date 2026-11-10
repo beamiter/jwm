@@ -25,6 +25,8 @@ pub mod jwm;
 #[cfg(feature = "remote-x11")]
 pub mod remote;
 #[cfg(any(feature = "remote-wayland", feature = "wayland-backends"))]
+pub mod remote_control_protocol;
+#[cfg(any(feature = "remote-wayland", feature = "wayland-backends"))]
 pub mod remote_keyboard_protocol;
 #[cfg(any(feature = "remote-wayland", feature = "wayland-backends"))]
 pub mod remote_pointer_protocol;

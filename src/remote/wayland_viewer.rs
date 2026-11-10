@@ -1,5 +1,6 @@
 //! Native Wayland viewer, read-only unless one explicit scoped input mode is enabled.
-//! Keyboard-only and pointer-only are exclusive; no clipboard, grab or X11 binding.
+//! Independent input modes stay exclusive. Explicit control observes both devices
+//! on one seat with cross-device exclusion; no clipboard, grab or X11 binding.
 //! A buffer release only frees storage. Only wp_presentation.presented earns ACK.
 use super::RemoteResult;
 use super::frame::RecyclableDecodedFrame;
@@ -26,6 +27,33 @@ mod keyboard;
 #[path = "wayland_viewer_pointer.rs"]
 mod pointer;
 
+// Only observes successful commits and actually drained presented sequences.
+#[cfg(all(test, feature = "backend-wayland-udev"))]
+type ControlFrameObservation = std::sync::Arc<std::sync::Mutex<(Option<u64>, Option<u64>)>>;
+#[cfg(all(test, feature = "backend-wayland-udev"))]
+thread_local! {
+    static CONTROL_FRAME_OBSERVER: std::cell::RefCell<Option<ControlFrameObservation>> = const { std::cell::RefCell::new(None) };
+}
+#[cfg(all(test, feature = "backend-wayland-udev"))]
+pub(crate) fn with_wayland_control_frame_observer<T>(
+    observer: ControlFrameObservation,
+    run: impl FnOnce() -> T,
+) -> T {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            CONTROL_FRAME_OBSERVER.with(|slot| {
+                slot.borrow_mut().take();
+            });
+        }
+    }
+    CONTROL_FRAME_OBSERVER.with(|slot| {
+        assert!(slot.borrow().is_none());
+        *slot.borrow_mut() = Some(observer);
+    });
+    let _reset = Reset;
+    run()
+}
 const TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_PIXELS: u64 = 16 * 1024 * 1024;
 const MAX_RETAINED_BYTES: usize = 128 * 1024 * 1024;
@@ -198,12 +226,47 @@ fn plan_slot(slots: &[SlotMeta], size: (u16, u16)) -> RemoteResult<SlotPlan> {
         None => Err("both Wayland SHM slots remain busy".into()),
     }
 }
+impl State {
+    fn control_collect(&mut self) {
+        if !self.control_mode {
+            return;
+        }
+        self.pointer.check();
+        if let Some(reason) = self.keyboard.revoked.or(self.pointer.revoked) {
+            self.keyboard.revoke(reason);
+            self.pointer.revoke(reason);
+            self.control_events.clear();
+            return;
+        }
+        self.control_events.extend(self.keyboard.take_events());
+        let pointer_events = self.pointer.take_events();
+        if pointer_events.iter().any(|event| {
+            matches!(
+                event,
+                ViewerEvent::WaylandPointerCancel | ViewerEvent::WaylandPointerButtonCancel { .. }
+            )
+        }) {
+            // Layout/new-frame cancellation also clears already collected pointer
+            // edges. Keyboard dispatch order is retained.
+            self.control_events
+                .retain(|event| matches!(event, ViewerEvent::Key { .. }));
+        }
+        self.control_events.extend(pointer_events);
+        if self.control_events.len() > 64 {
+            self.keyboard.revoke("Wayland control event bound exceeded");
+            self.pointer.revoke("Wayland control event bound exceeded");
+            self.control_events.clear();
+        }
+    }
+}
 struct Retirement {
     id: u64,
     bytes: usize,
     started: Instant,
 }
 struct State {
+    control_mode: bool,
+    control_events: Vec<ViewerEvent>,
     pointer: pointer::Pointer,
     keyboard: keyboard::Keyboard,
     compositor: Option<wl_compositor::WlCompositor>,
@@ -331,6 +394,8 @@ impl WaylandViewer {
         let qh = queue.handle();
         let registry = conn.display().get_registry(&qh, ());
         let mut state = State {
+            control_mode: false,
+            control_events: Vec::new(),
             pointer: pointer::Pointer::default(),
             keyboard: keyboard::Keyboard::default(),
             compositor: None,
@@ -409,6 +474,7 @@ impl WaylandViewer {
     }
     fn pump(&mut self) -> RemoteResult<bool> {
         let work = pump_connection(&self.conn, &mut self.queue, &mut self.state)?;
+        self.state.control_collect();
         if self.state.pending.as_ref().is_some_and(|p| p.presented) {
             self.state.pending = None;
         }
@@ -451,6 +517,87 @@ impl WaylandViewer {
             std::thread::sleep(Duration::from_millis(1));
         }
         Ok(())
+    }
+    pub(super) fn enable_wayland_control(&mut self) -> RemoteResult<[u8; 32]> {
+        if self.state.keyboard.requested || self.state.pointer.requested || self.state.control_mode
+        {
+            return Err(
+                "Wayland control cannot be re-enabled or combined with an input mode".into(),
+            );
+        }
+        let deadline = Instant::now() + TIMEOUT;
+        self.keyboard_fence(deadline)?;
+        if self.state.keyboard.ambiguous || self.state.keyboard.seats.len() != 1 {
+            return Err("Wayland control requires exactly one unambiguous seat".into());
+        }
+        let (name, version) = self.state.keyboard.seats[0];
+        if version < 5 {
+            return Err("Wayland control requires a frame-capable seat".into());
+        }
+        self.state.control_mode = true;
+        self.state.keyboard.requested = true;
+        self.state.pointer.requested = true;
+        self.state.keyboard.surface = Some(self.surface.clone());
+        self.state.pointer.surface = Some(self.surface.clone());
+        let seat = self
+            .registry
+            .bind::<wayland_client::protocol::wl_seat::WlSeat, _, _>(
+                name,
+                version.min(7),
+                &self.queue.handle(),
+                (),
+            );
+        self.state.keyboard.seat = Some(seat.clone());
+        self.state.pointer.seat = Some(seat);
+        self.toplevel.set_app_id("jwm-remote-control".into());
+        loop {
+            self.pump()?;
+            self.state.keyboard.check()?;
+            if let Some(digest) = self.state.keyboard.digest {
+                if self.state.pointer.device.is_some() {
+                    return Ok(digest);
+                }
+            }
+            if self.state.closed || Instant::now() >= deadline {
+                self.disable_wayland_control();
+                return Err("Wayland control initialization expired".into());
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+    pub(super) fn check_wayland_control(&mut self, initial: bool) -> RemoteResult<()> {
+        if !self.state.control_mode {
+            return Err("Wayland control is disabled".into());
+        }
+        self.keyboard_fence(Instant::now() + TIMEOUT)?;
+        self.state.control_collect();
+        self.state.keyboard.check()?;
+        if initial
+            && (!self.state.keyboard.clean_ready()
+                || !self.state.pointer.locally_ready()
+                || self.state.control_events.iter().any(|event| {
+                    matches!(
+                        event,
+                        ViewerEvent::Key { .. }
+                            | ViewerEvent::WaylandPointer { .. }
+                            | ViewerEvent::WaylandPointerButtonCancel { pressed: true }
+                    )
+                })
+                || self.state.pointer.control_busy())
+        {
+            self.disable_wayland_control();
+            return Err("Wayland control requires clean dual focus and actual presentation".into());
+        }
+        Ok(())
+    }
+    pub(super) fn disable_wayland_control(&mut self) {
+        self.state
+            .keyboard
+            .revoke("Wayland control permanently disabled");
+        self.state
+            .pointer
+            .revoke("Wayland control permanently disabled");
+        self.state.control_events.clear();
     }
     pub(super) fn enable_wayland_keyboard(
         &mut self,
@@ -696,6 +843,15 @@ impl WaylandViewer {
         self.pump()?;
         // An input frame does not fence xdg/registry history. Synchronize the
         // same connection before releasing this batch, never future events.
+        if self.state.control_mode {
+            self.fence_pointer_events_inner(true)?;
+            self.state.control_collect();
+            self.state.keyboard.check()?;
+            if self.state.closed {
+                return Ok(vec![ViewerEvent::Close]);
+            }
+            return Ok(std::mem::take(&mut self.state.control_events));
+        }
         self.fence_pointer_events()?;
         let mut events = self.state.keyboard.take_events();
         events.extend(self.state.pointer.take_events());
@@ -805,6 +961,12 @@ impl WaylandViewer {
             .damage_buffer(0, 0, i32::from(width), i32::from(height));
         self.surface.commit();
         self.prepare_wait()?;
+        #[cfg(all(test, feature = "backend-wayland-udev"))]
+        CONTROL_FRAME_OBSERVER.with(|slot| {
+            if let Some(observer) = slot.borrow().as_ref() {
+                observer.lock().unwrap().0 = Some(frame.sequence());
+            }
+        });
         Ok(true)
     }
     fn retire_slot(&mut self, index: usize) -> RemoteResult<()> {
@@ -881,7 +1043,16 @@ impl WaylandViewer {
     }
     pub(super) fn take_presented_sequences(&mut self) -> RemoteResult<Vec<u64>> {
         self.pump()?;
-        Ok(std::mem::take(&mut self.state.completed))
+        let sequences = std::mem::take(&mut self.state.completed);
+        #[cfg(all(test, feature = "backend-wayland-udev"))]
+        if let Some(sequence) = sequences.last().copied() {
+            CONTROL_FRAME_OBSERVER.with(|slot| {
+                if let Some(observer) = slot.borrow().as_ref() {
+                    observer.lock().unwrap().1 = Some(sequence);
+                }
+            });
+        }
+        Ok(sequences)
     }
     pub(super) fn prepare_wait(&self) -> RemoteResult<()> {
         match self.conn.flush() {

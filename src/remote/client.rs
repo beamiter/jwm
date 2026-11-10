@@ -1,5 +1,9 @@
 //! Remote desktop viewer/client orchestration.
 
+#[path = "client_control.rs"]
+mod control;
+use control::ClientControl;
+
 use super::clipboard_policy::{self, ClipboardDirection, ClipboardMode};
 use super::clipboard_sync::{
     ClipboardInbox, ClipboardOutbox, ClipboardSync, Outgoing, SyncOptions, SyncStatus,
@@ -62,6 +66,7 @@ pub struct ClientOptions {
     pub viewer_wayland_display: Option<String>,
     pub wayland_keyboard: bool,
     pub wayland_pointer: bool,
+    pub wayland_control: bool,
     pub wayland_scroll: bool,
     /// One explicit source-size operation; never replayed or saved in a profile.
     pub resize_source: Option<super::window_size::WindowSize>,
@@ -286,6 +291,7 @@ pub fn run_client_reconnecting(options: ClientOptions, attempts: u8) -> RemoteRe
     if (options.follow_source_size
         || options.resize_source.is_some()
         || options.wayland_keyboard
+        || options.wayland_control
         || options.wayland_pointer
         || options.wayland_scroll
         || options.viewer_backend == ViewerBackend::Wayland)
@@ -387,6 +393,22 @@ fn suppress_reconnect(result: RemoteResult<()>, suppress: bool) -> RemoteResult<
 }
 
 fn validate_viewer_backend(options: &ClientOptions) -> RemoteResult<()> {
+    if options.wayland_control
+        && (options.viewer_backend != ViewerBackend::Wayland
+            || options.view_only
+            || options.wayland_keyboard
+            || options.wayland_pointer
+            || options.wayland_scroll
+            || options.clipboard
+            || options.grab_input
+            || options.resize_source.is_some()
+            || options.follow_source_size)
+    {
+        return Err(invalid_data(
+            "control requires exclusive native Wayland viewer without other permissions",
+        )
+        .into());
+    }
     if options.wayland_scroll && !options.wayland_pointer {
         return Err(invalid_data("Wayland scroll requires explicit pointer mode").into());
     }
@@ -411,6 +433,7 @@ fn validate_viewer_backend(options: &ClientOptions) -> RemoteResult<()> {
             || usize::from(options.view_only)
                 + usize::from(options.wayland_keyboard)
                 + usize::from(options.wayland_pointer)
+                + usize::from(options.wayland_control)
                 != 1
             || options.clipboard
             || options.resize_source.is_some()
@@ -418,7 +441,7 @@ fn validate_viewer_backend(options: &ClientOptions) -> RemoteResult<()> {
             || options.window_position.is_some()
             || options.display.is_some()
         {
-            return Err(invalid_data("Wayland viewer requires exactly one of view-only, scoped Wayland keyboard or scoped Wayland pointer, without clipboard, source resize, grab, X11 display or window positioning").into());
+            return Err(invalid_data("Wayland viewer requires exactly one of view-only, scoped Wayland keyboard, scoped Wayland pointer or explicit control, without clipboard, source resize, grab, X11 display or window positioning").into());
         }
     }
     Ok(())
@@ -496,7 +519,10 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
     {
         return Err(invalid_data("scoped pointer requires exclusive explicit permission without clipboard, resize, grabs or other input").into());
     }
-    let request_input = !options.view_only && !options.wayland_keyboard && !options.wayland_pointer;
+    let request_input = !options.view_only
+        && !options.wayland_keyboard
+        && !options.wayland_pointer
+        && !options.wayland_control;
     let keymap = if request_input {
         read_display(options.display.as_deref())?
     } else {
@@ -526,6 +552,7 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
         options.wayland_keyboard,
         options.wayland_pointer,
         options.wayland_scroll,
+        options.wayland_control,
         stream,
         &key,
         request_input,
@@ -684,6 +711,10 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
         hello.keyboard_enabled,
         hello.keyboard_enabled.then_some(keymap),
     )?;
+    #[cfg(feature = "remote-wayland")]
+    if options.wayland_control {
+        state.wayland_control.lock().unwrap().digest = Some(viewer.enable_wayland_control()?);
+    }
     #[cfg(feature = "remote-wayland")]
     if options.wayland_keyboard {
         let digest = viewer.enable_wayland_keyboard(options.display.as_deref())?;
@@ -1017,6 +1048,7 @@ fn negotiate_session(
     request_wayland_keyboard: bool,
     request_wayland_pointer: bool,
     request_wayland_scroll: bool,
+    request_wayland_control: bool,
     mut stream: TcpStream,
     key: &[u8],
     request_input: bool,
@@ -1065,6 +1097,7 @@ fn negotiate_session(
                 wayland_keyboard: request_wayland_keyboard,
                 wayland_pointer: request_wayland_pointer,
                 wayland_scroll: request_wayland_scroll,
+                wayland_control: request_wayland_control,
                 scroll_copy: true,
                 frame_limits,
                 clipboard_content: requested_policy.0,
@@ -1092,6 +1125,21 @@ fn negotiate_session(
     writer.flush()?;
     let hello = read_server_hello(&mut reader)?;
     validate_server_frame_limits(&hello, frame_limits)?;
+    if hello.stream.wayland_control != request_wayland_control
+        || (request_wayland_control
+            && (hello.stream.wayland_keyboard
+                || hello.stream.wayland_pointer
+                || hello.stream.wayland_scroll
+                || hello.stream.window_resize
+                || hello.clipboard_enabled
+                || hello.pointer_enabled
+                || hello.keyboard_enabled))
+    {
+        return Err(
+            invalid_data("control permission mismatch or mixed legacy capabilities").into(),
+        );
+    }
+
     validate_scroll_negotiation(
         request_wayland_pointer,
         request_wayland_scroll,
@@ -1351,6 +1399,37 @@ fn viewer_loop(
         .is_some_and(|catalog| catalog.entries.len() > 1);
     loop {
         wake.drain()?;
+        {
+            let (configured, ended, epoch, activated) = {
+                let control = state.wayland_control.lock().unwrap();
+                control.check(presented_scope, Instant::now())?;
+                (
+                    control.configured(),
+                    control.ended,
+                    control.epoch,
+                    control.activated,
+                )
+            };
+            if configured {
+                if ended {
+                    #[cfg(feature = "remote-wayland")]
+                    viewer.disable_wayland_control();
+                } else if epoch.is_some() && !activated {
+                    // Do not hold the shared state while a real compositor fence waits.
+                    #[cfg(feature = "remote-wayland")]
+                    viewer.check_wayland_control(true)?;
+                    let mut control = state.wayland_control.lock().unwrap();
+                    control.check(presented_scope, Instant::now())?;
+                    if !control.ended && control.epoch == epoch && !control.activated {
+                        control.activated = true;
+                        eprintln!(
+                            "jwm-remote: control ready for sequential typing and pointer actions"
+                        );
+                    }
+                }
+            }
+        }
+
         state.resize.lock().unwrap().check_timeout(Instant::now())?;
         {
             let mut keyboard = state.wayland_keyboard.lock().unwrap();
@@ -1481,6 +1560,46 @@ fn viewer_loop(
                     )
                     .into());
                 }
+            }
+        }
+        {
+            let check_local = {
+                let control = state.wayland_control.lock().unwrap();
+                control.configured() && !control.ended
+            };
+            if check_local {
+                #[cfg(feature = "remote-wayland")]
+                viewer.check_wayland_control(false)?;
+            }
+            let mut control = state.wayland_control.lock().unwrap();
+            control.check(presented_scope, Instant::now())?;
+            if control.configured() {
+                for event in &events {
+                    if matches!(
+                        event,
+                        ViewerEvent::ReleaseAll
+                            | ViewerEvent::Close
+                            | ViewerEvent::CycleSource
+                            | ViewerEvent::WaylandPointerRevoke
+                    ) {
+                        if let Some(revoke) = control.revoke() {
+                            writer.write_message(
+                                MessageKind::WaylandControlRevoke,
+                                &revoke.encode()?,
+                            )?;
+                            writer.flush()?;
+                        }
+                        #[cfg(feature = "remote-wayland")]
+                        viewer.disable_wayland_control();
+                    } else if let Some(action) = control.event(event, Instant::now())? {
+                        writer
+                            .write_message(MessageKind::WaylandControlAction, &action.encode()?)?;
+                        writer.flush()?;
+                    }
+                }
+                #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+                viewer.observe_control_state(control.ready_sequence());
+                events.retain(|event| matches!(event, ViewerEvent::Close));
             }
         }
         {
@@ -1726,6 +1845,44 @@ fn viewer_loop(
                 }
             }
             acknowledge_presentation(writer, sequence, pending_presentations, &state.telemetry)?;
+            {
+                let (enabled, needs_request, epoch) = {
+                    let control = state.wayland_control.lock().unwrap();
+                    control.check(presented_scope, Instant::now())?;
+                    (
+                        control.configured() && !control.ended,
+                        control.needs_request(),
+                        control.epoch,
+                    )
+                };
+                if enabled {
+                    viewer.wayland_pointer_presented(sequence);
+                    if needs_request {
+                        #[cfg(feature = "remote-wayland")]
+                        viewer.check_wayland_control(true)?;
+                    }
+                    let mut control = state.wayland_control.lock().unwrap();
+                    control.check(presented_scope, Instant::now())?;
+                    if control.ended || control.epoch != epoch {
+                        continue;
+                    }
+                    if let Some(request) = control.presented(
+                        super::wayland_control_wire::DrawnScope {
+                            source_epoch: presented_scope.0,
+                            geometry_epoch: presented_scope.1,
+                            frame_sequence: sequence,
+                        },
+                        Instant::now(),
+                    ) {
+                        writer.write_message(
+                            MessageKind::WaylandControlRequest,
+                            &request.encode()?,
+                        )?;
+                        writer.flush()?;
+                    }
+                }
+            }
+
             {
                 let mut keyboard = state.wayland_keyboard.lock().unwrap();
                 keyboard.check_scope(presented_scope)?;
@@ -3100,6 +3257,7 @@ impl ClientResize {
 }
 
 struct ReceiveState {
+    wayland_control: Mutex<ClientControl>,
     resize: Mutex<ClientResize>,
     wayland_keyboard: Mutex<ClientKeyboard>,
     wayland_pointer: Mutex<ClientPointer>,
@@ -3129,6 +3287,7 @@ impl ReceiveState {
 
     fn new() -> Self {
         Self {
+            wayland_control: Mutex::new(ClientControl::default()),
             resize: Mutex::new(ClientResize::default()),
             wayland_keyboard: Mutex::new(ClientKeyboard::default()),
             wayland_pointer: Mutex::new(ClientPointer::default()),
@@ -3359,6 +3518,12 @@ fn receive_frame_records(
             })?;
         let kind = read_record(&mut payload, remaining)?;
         match kind {
+            MessageKind::WaylandControlStatus => {
+                state.wayland_control.lock().unwrap().receive(
+                    super::wayland_control_wire::ControlStatus::decode(&payload)?,
+                )?;
+                completion.signal()?;
+            }
             MessageKind::WaylandPointerStatus => {
                 state.wayland_pointer.lock().unwrap().receive(
                     super::wayland_pointer_wire::PointerStatus::decode(&payload)?,
@@ -3450,6 +3615,7 @@ fn receive_frame_records(
                 }
                 last_sequence = queued.frame.sequence();
                 last_video_at = Instant::now();
+                state.wayland_control.lock().unwrap().before_frame();
                 state.wayland_pointer.lock().unwrap().before_frame();
                 let replaced = replace_latest(&state.latest, queued);
                 if replaced.is_some() {
@@ -3488,6 +3654,9 @@ fn receive_frame_records(
             | MessageKind::WaylandPointerRequest
             | MessageKind::WaylandPointerAction
             | MessageKind::WaylandPointerRevoke
+            | MessageKind::WaylandControlRequest
+            | MessageKind::WaylandControlAction
+            | MessageKind::WaylandControlRevoke
             | MessageKind::ClipboardRestrict => {
                 return Err(invalid_data(format!("unexpected host message: {kind:?}")).into());
             }
@@ -4383,6 +4552,7 @@ pub(super) mod tests {
             viewer_wayland_display: None,
             wayland_keyboard: false,
             wayland_pointer: false,
+            wayland_control: false,
             wayland_scroll: false,
             resize_source: None,
             follow_source_size: false,
@@ -6389,6 +6559,7 @@ pub(super) mod tests {
             false,
             false,
             false,
+            false,
             stream,
             &TEST_PSK,
             false,
@@ -6450,6 +6621,7 @@ pub(super) mod tests {
             false,
             false,
             false,
+            false,
             stream,
             &TEST_PSK,
             false,
@@ -6502,6 +6674,7 @@ pub(super) mod tests {
         });
         let stream = TcpStream::connect(address).unwrap();
         let result = negotiate_session(
+            false,
             false,
             false,
             false,
@@ -6561,6 +6734,7 @@ pub(super) mod tests {
         });
         let stream = TcpStream::connect(address).unwrap();
         let result = negotiate_session(
+            false,
             false,
             false,
             false,
@@ -6628,6 +6802,7 @@ pub(super) mod tests {
             });
             let stream = TcpStream::connect(address).unwrap();
             let result = negotiate_session(
+                false,
                 false,
                 false,
                 false,
@@ -6719,6 +6894,7 @@ pub(super) mod tests {
         let stream = TcpStream::connect(address).unwrap();
         let (mut reader, _writer, hello) = negotiate_session(
             true,
+            false,
             false,
             false,
             false,
@@ -6967,6 +7143,7 @@ mod native_viewer_permission_tests {
             viewer_wayland_display: None,
             wayland_keyboard: false,
             wayland_pointer: false,
+            wayland_control: false,
             wayland_scroll: false,
             resize_source: None,
             follow_source_size: false,
@@ -7013,6 +7190,72 @@ mod native_viewer_permission_tests {
             }
             assert!(validate_viewer_backend(&changed).is_err());
         }
+        let mut bundle = options.clone();
+        bundle.view_only = false;
+        bundle.wayland_control = true;
+        assert_eq!(
+            validate_viewer_backend(&bundle).is_ok(),
+            cfg!(feature = "remote-wayland")
+        );
+        for mutation in 0..11 {
+            let mut changed = bundle.clone();
+            match mutation {
+                0 => changed.viewer_backend = ViewerBackend::X11,
+                1 => changed.view_only = true,
+                2 => changed.wayland_keyboard = true,
+                3 => changed.wayland_pointer = true,
+                4 => changed.wayland_scroll = true,
+                5 => changed.clipboard = true,
+                6 => changed.grab_input = true,
+                7 => changed.display = Some(":never-open".into()),
+                8 => {
+                    changed.resize_source = Some(super::super::window_size::WindowSize {
+                        width: 10,
+                        height: 10,
+                    })
+                }
+                9 => changed.follow_source_size = true,
+                _ => {
+                    changed.window_position =
+                        Some(super::super::window_position::WindowPosition { x: 0, y: 0 })
+                }
+            }
+            assert!(validate_viewer_backend(&changed).is_err());
+        }
+        assert!(run_client_reconnecting(bundle, 1).is_err());
+        let mut bundle = options.clone();
+        bundle.view_only = false;
+        bundle.wayland_control = true;
+        assert_eq!(
+            validate_viewer_backend(&bundle).is_ok(),
+            cfg!(feature = "remote-wayland")
+        );
+        for mutation in 0..11 {
+            let mut changed = bundle.clone();
+            match mutation {
+                0 => changed.viewer_backend = ViewerBackend::X11,
+                1 => changed.view_only = true,
+                2 => changed.wayland_keyboard = true,
+                3 => changed.wayland_pointer = true,
+                4 => changed.wayland_scroll = true,
+                5 => changed.clipboard = true,
+                6 => changed.grab_input = true,
+                7 => changed.display = Some(":never-open".into()),
+                8 => {
+                    changed.resize_source = Some(super::super::window_size::WindowSize {
+                        width: 10,
+                        height: 10,
+                    })
+                }
+                9 => changed.follow_source_size = true,
+                _ => {
+                    changed.window_position =
+                        Some(super::super::window_position::WindowPosition { x: 0, y: 0 })
+                }
+            }
+            assert!(validate_viewer_backend(&changed).is_err());
+        }
+        assert!(run_client_reconnecting(bundle, 1).is_err());
         // Native keyboard is a distinct scoped lease, not legacy input.
         let mut keyboard = options.clone();
         keyboard.view_only = false;

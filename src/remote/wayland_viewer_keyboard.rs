@@ -60,6 +60,9 @@ impl Keyboard {
         }
         Ok(())
     }
+    pub(super) fn held_keys(&self) -> bool {
+        !self.held.is_empty()
+    }
     pub(super) fn pending_keys(&self) -> bool {
         !self.events.is_empty() || !self.held.is_empty()
     }
@@ -191,6 +194,13 @@ impl Dispatch<wl_seat::WlSeat, ()> for State {
                 }
                 keyboard.capabilities_seen = true;
                 keyboard.device = Some(seat.get_keyboard(qh, ()));
+                if state.control_mode {
+                    if !capabilities.contains(wl_seat::Capability::Pointer) {
+                        keyboard.revoke("Wayland control pointer capability missing");
+                        return;
+                    }
+                    state.pointer.device = Some(seat.get_pointer(qh, ()));
+                }
             }
             wl_seat::Event::Name { .. } => {}
             _ => keyboard.revoke("unsupported Wayland seat event"),
@@ -206,6 +216,16 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for State {
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
+        if state.control_mode
+            && matches!(&event, wl_keyboard::Event::Key { .. })
+            && state.pointer.control_busy()
+        {
+            state
+                .keyboard
+                .revoke("Wayland control key overlaps pointer action");
+            state.control_collect();
+            return;
+        }
         let keyboard = &mut state.keyboard;
         if keyboard.revoked.is_some() {
             return;
@@ -302,6 +322,7 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for State {
             }
             _ => keyboard.revoke("unsupported Wayland keyboard event"),
         }
+        state.control_collect();
     }
 }
 

@@ -59,6 +59,10 @@ jobs:
         run: |
           export XDG_RUNTIME_DIR="$(mktemp -d)"
           cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib remote_pointer -- --test-threads=1 --nocapture
+      - name: Actual unified control recipients and shared lease revocation
+        run: |
+          export XDG_RUNTIME_DIR="$(mktemp -d)"
+          cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib remote_control -- --test-threads=1 --nocapture
       - name: Actual Wayland protocol authority and offscreen pixel isolation
         run: |
           export XDG_RUNTIME_DIR="$(mktemp -d)"

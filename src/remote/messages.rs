@@ -8,9 +8,9 @@ use super::x11_keymap::{KeymapTable, MAX_ENCODED_KEYMAP_LEN};
 use std::io;
 
 const APPLICATION_MAGIC: &[u8; 8] = b"JWMREM01";
-pub const APPLICATION_VERSION: u16 = 19;
+pub const APPLICATION_VERSION: u16 = 20;
 const HELLO_PREFIX_LEN: usize = 11;
-const STREAM_CAPABILITIES_LEN: usize = 30;
+const STREAM_CAPABILITIES_LEN: usize = 31;
 const SERVER_HELLO_LEN: usize = HELLO_PREFIX_LEN + STREAM_CAPABILITIES_LEN;
 const CLIENT_HELLO_HEADER_LEN: usize = SERVER_HELLO_LEN + 4;
 /// Largest client hello: the shared prefix plus a full keymap table.
@@ -118,6 +118,8 @@ pub struct StreamCapabilities {
     pub wayland_scroll: bool,
     /// Experimental video-only vertical copy deltas; no input authority.
     pub scroll_copy: bool,
+    /// Explicit single combined authority, never inferred from old flags.
+    pub wayland_control: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -171,6 +173,7 @@ impl StreamCapabilities {
         payload[27] = u8::from(self.wayland_pointer);
         payload[28] = u8::from(self.wayland_scroll);
         payload[29] = u8::from(self.scroll_copy);
+        payload[30] = u8::from(self.wayland_control);
         payload
     }
 
@@ -190,6 +193,14 @@ impl StreamCapabilities {
             || payload[27] > 1
             || payload[28] > 1
             || payload[29] > 1
+            || payload[30] > 1
+            || (payload[30] == 1
+                && (payload[25] != 0
+                    || payload[26] != 0
+                    || payload[27] != 0
+                    || payload[28] != 0
+                    || payload[23] != 0
+                    || payload[24] != 0))
             || (payload[28] == 1 && payload[27] != 1)
             || (payload[26] == 1 && payload[27] == 1)
             || (payload[23] == 0) != (payload[24] == 0)
@@ -213,6 +224,7 @@ impl StreamCapabilities {
             wayland_pointer: payload[27] == 1,
             wayland_scroll: payload[28] == 1,
             scroll_copy: payload[29] == 1,
+            wayland_control: payload[30] == 1,
             ..Self::default()
         })
     }
@@ -347,6 +359,10 @@ impl ServerHello {
 }
 
 fn validate_clipboard_flags(flags: u8, stream: StreamCapabilities) -> RemoteResult<()> {
+    if stream.wayland_control && flags & (INPUT_FLAGS | FLAG_CLIPBOARD | FLAG_CLIPBOARD_FILES) != 0
+    {
+        return Err(invalid_data("control cannot combine legacy input or clipboard flags").into());
+    }
     if (flags & FLAG_CLIPBOARD != 0) != (stream.clipboard_content != 0)
         || (flags & FLAG_CLIPBOARD_FILES != 0) != (stream.clipboard_content & 4 != 0)
         || (stream.clipboard_file_limit != 0) != (stream.clipboard_content & 4 != 0)
@@ -1021,7 +1037,7 @@ mod tests {
             ClientHello::decode(&legacy).unwrap_err(),
             ServerHello::decode(&legacy).unwrap_err(),
         ] {
-            assert!(error.to_string().contains("version 6; expected 19"));
+            assert!(error.to_string().contains("version 6; expected 20"));
         }
     }
 
@@ -1179,24 +1195,24 @@ mod tests {
             clipboard_files_enabled: false,
         }
         .encode();
-        assert_eq!(&payload[8..10], &19_u16.to_be_bytes());
+        assert_eq!(&payload[8..10], &20_u16.to_be_bytes());
 
         // Version 5 had no clipboard transfer records: a version-5 peer
         // would end the session on the first copied image or file. It must
         // fail on its version instead. Version 4 sent one digest of the whole
         // keymap where later versions send a per-keycode table.
-        for older in [4_u16, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18] {
+        for older in [4_u16, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19] {
             let mut previous = payload;
             previous[8..10].copy_from_slice(&older.to_be_bytes());
             let error = ServerHello::decode(&previous).unwrap_err();
             assert!(
                 error
                     .to_string()
-                    .contains(&format!("application version {older}; expected 19"))
+                    .contains(&format!("application version {older}; expected 20"))
             );
         }
 
-        for rejected in [0_u16, 2, 3, 20, u16::MAX] {
+        for rejected in [0_u16, 2, 3, 21, u16::MAX] {
             let mut other = payload;
             other[8..10].copy_from_slice(&rejected.to_be_bytes());
             assert!(
@@ -1606,9 +1622,9 @@ mod tests {
 mod scroll_capability_tests {
     use super::*;
     #[test]
-    fn scroll_is_explicit_boolean_and_requires_pointer_in_version_19() {
-        assert_eq!(APPLICATION_VERSION, 19);
-        assert_eq!(STREAM_CAPABILITIES_LEN, 30);
+    fn scroll_is_explicit_boolean_and_requires_pointer_in_version_20() {
+        assert_eq!(APPLICATION_VERSION, 20);
+        assert_eq!(STREAM_CAPABILITIES_LEN, 31);
         let mut caps = StreamCapabilities::default();
         assert!(
             !StreamCapabilities::decode(&caps.encode())
@@ -1651,5 +1667,42 @@ mod scroll_copy_capability_tests {
             assert!(StreamCapabilities::decode(&payload).is_err());
         }
         assert!(StreamCapabilities::decode(&caps.encode()[..29]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod control_capability_tests {
+    use super::*;
+    #[test]
+    fn control_is_explicit_bounded_boolean_and_excludes_old_permissions() {
+        let caps = StreamCapabilities {
+            wayland_control: true,
+            ..Default::default()
+        };
+        let bytes = caps.encode();
+        assert_eq!(bytes.len(), 31);
+        assert_eq!(StreamCapabilities::decode(&bytes).unwrap(), caps);
+        for v in [2, 255] {
+            let mut bad = bytes;
+            bad[30] = v;
+            assert!(StreamCapabilities::decode(&bad).is_err());
+        }
+        for index in [23, 24, 25, 26, 27, 28] {
+            let mut bad = bytes;
+            bad[index] = 1;
+            assert!(StreamCapabilities::decode(&bad).is_err());
+        }
+        assert!(StreamCapabilities::decode(&bytes[..30]).is_err());
+        assert!(!StreamCapabilities::default().wayland_control);
+        for flags in [
+            FLAG_POINTER,
+            FLAG_KEYBOARD,
+            INPUT_FLAGS,
+            FLAG_CLIPBOARD,
+            FLAG_CLIPBOARD_FILES,
+        ] {
+            let hello = encode_hello(flags, caps);
+            assert!(ServerHello::decode(&hello).is_err());
+        }
     }
 }

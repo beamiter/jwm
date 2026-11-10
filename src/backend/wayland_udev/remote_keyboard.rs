@@ -95,6 +95,7 @@ pub(crate) fn revoke(state: &mut JwmWaylandState, reason: u32) {
 /// SeatHandler::focus_changed is invoked under Smithay's keyboard lock. It
 /// must not reenter that lock. wl_keyboard.leave ends the old focus's keys.
 pub(crate) fn focus_changed(state: &mut JwmWaylandState) {
+    super::remote_control::focus_changed(state);
     super::remote_pointer::revoke(state, SEAT);
     if let Some(lease) = state.remote_keyboard.active.take() {
         finish(state, lease, SEAT, false);
@@ -174,6 +175,7 @@ impl Dispatch<JwmRemoteKeyboardManagerV1, ManagerData> for JwmWaylandState {
                 || !authority.consume_keyboard_attempt()
                 || state.remote_keyboard.active.is_some()
                 || super::remote_pointer::active(state)
+                || super::remote_control::active(state)
                 || !authority_is_current(state, &authority)
                 || !state.remote_keyboard_seat_eligible()
                 || !state.remote_keyboard_target_eligible(&authority)

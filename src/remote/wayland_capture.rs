@@ -3,9 +3,12 @@
 //! No X11 access, output fallback, identifier lookup, reconnection, cursor,
 //! input, clipboard, or native resize. Protocol globals are not a per-client
 //! permission boundary: this host must itself be a trusted local client.
+#[path = "wayland_capture_control.rs"]
+mod control;
 use super::RemoteResult;
 use super::messages::FrameLimits;
 use super::x11_capture::{CaptureImageRecycler, CaptureOutcome, CapturedFrame, frame_dimensions};
+use crate::remote_control_protocol::client::jwm_remote_control_lease_v1::JwmRemoteControlLeaseV1;
 use crate::remote_keyboard_protocol::client::{
     jwm_remote_keyboard_lease_v1::{self as keyboard_lease, JwmRemoteKeyboardLeaseV1},
     jwm_remote_keyboard_manager_v1::JwmRemoteKeyboardManagerV1,
@@ -14,6 +17,7 @@ use crate::remote_pointer_protocol::client::{
     jwm_remote_pointer_lease_v1::{self as pointer_lease, JwmRemotePointerLeaseV1},
     jwm_remote_pointer_manager_v1::JwmRemotePointerManagerV1,
 };
+use control::NativeControl;
 use image::{RgbImage, imageops::FilterType};
 use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 use nix::sys::memfd::{MFdFlags, memfd_create};
@@ -88,6 +92,7 @@ struct NativePointer {
 }
 #[derive(Default)]
 struct State {
+    control: NativeControl,
     pointer: NativePointer,
     keyboard: NativeKeyboard,
     shm: Option<wl_shm::WlShm>,
@@ -169,6 +174,7 @@ pub(super) struct WaylandCapture {
     limits: FrameLimits,
     epoch: u64,
     recycler: CaptureImageRecycler,
+    control_lease: Option<JwmRemoteControlLeaseV1>,
     pointer_lease: Option<JwmRemotePointerLeaseV1>,
     pointer_ready_at: Option<Instant>,
     keyboard_lease: Option<JwmRemoteKeyboardLeaseV1>,
@@ -228,6 +234,7 @@ impl WaylandCapture {
             limits: FrameLimits::default(),
             epoch: 1,
             recycler: CaptureImageRecycler::default(),
+            control_lease: None,
             pointer_lease: None,
             pointer_ready_at: None,
             keyboard_lease: None,
@@ -306,6 +313,7 @@ impl WaylandCapture {
     /// Must be enabled before the first frame and only after wire negotiation.
     pub(super) fn enable_pointer(&mut self) -> RemoteResult<()> {
         if self.state.frame_serial != 0
+            || self.state.control.enabled
             || self.state.keyboard.enabled
             || self.state.pointer.enabled
             || self.state.pointer.manager.is_none()
@@ -466,6 +474,7 @@ impl WaylandCapture {
 
     pub(super) fn enable_keyboard(&mut self) -> RemoteResult<()> {
         if self.state.frame_serial != 0
+            || self.state.control.enabled
             || self.state.keyboard.enabled
             || self.state.keyboard.revoked
             || self.state.keyboard.manager.is_none()
@@ -513,6 +522,7 @@ impl WaylandCapture {
         done: impl Fn(&NativeKeyboard) -> bool,
     ) -> RemoteResult<()> {
         loop {
+            self.expire_control();
             self.expire_keyboard();
             self.state.check()?;
             if self.state.keyboard.revoked {
@@ -536,6 +546,7 @@ impl WaylandCapture {
         result
     }
     fn arm_keyboard_inner(&mut self, digest: [u8; 32]) -> RemoteResult<u64> {
+        self.expire_control();
         self.expire_keyboard();
         if !self.state.keyboard.enabled
             || self.state.keyboard.revoked
@@ -582,6 +593,7 @@ impl WaylandCapture {
         result
     }
     fn keyboard_key_inner(&mut self, key: &super::wayland_keyboard_wire::Key) -> RemoteResult<()> {
+        self.expire_control();
         self.expire_keyboard();
         let epoch = u32::try_from(key.lease_epoch)?;
         let sequence = u32::try_from(key.sequence)?;
@@ -780,12 +792,14 @@ impl WaylandCapture {
 
     fn read_frame(&mut self) -> RemoteResult<CaptureOutcome> {
         self.state.check()?;
+        self.expire_control();
         self.expire_keyboard();
         if self.state.pointer.enabled && self.pointer_revoked() {
             self.revoke_pointer();
         }
         if self.retained_frame.is_some() {
             self.pump(Instant::now() + Duration::from_millis(1))?;
+            self.expire_control();
             self.expire_keyboard();
             return Ok(CaptureOutcome::NoChange);
         }
@@ -814,7 +828,13 @@ impl WaylandCapture {
         self.inflight = Some(frame);
         self.drive_until(deadline, |state| state.frame_ready)?;
         let ready_frame = self.inflight.take().unwrap();
-        if self.state.pointer.enabled && !self.pointer_revoked() {
+        if self.state.control.enabled && !self.control_revoked() {
+            self.retained_frame = Some(ready_frame);
+            self.pointer_ready_at = Some(Instant::now());
+            if self.state.frame_serial == 1 {
+                self.arm_deadline = Some(Instant::now() + PROTOCOL_TIMEOUT);
+            }
+        } else if self.state.pointer.enabled && !self.pointer_revoked() {
             self.retained_frame = Some(ready_frame);
             self.pointer_ready_at = Some(Instant::now());
         } else if self.state.keyboard.enabled
@@ -910,6 +930,7 @@ impl WaylandCapture {
         let deadline = Instant::now()
             .checked_add(timeout)
             .ok_or_else(|| invalid("invalid Wayland wait timeout"))?;
+        self.expire_control();
         self.expire_keyboard();
         let deadline = self
             .arm_deadline
@@ -917,6 +938,7 @@ impl WaylandCapture {
             .chain(self.state.keyboard.deadline)
             .fold(deadline, |a, b| a.min(b));
         let result = self.pump(deadline);
+        self.expire_control();
         self.expire_keyboard();
         if result.is_err() {
             self.state.fail("Wayland capture connection failed");
@@ -927,6 +949,7 @@ impl WaylandCapture {
 
 impl Drop for WaylandCapture {
     fn drop(&mut self) {
+        self.revoke_control();
         self.revoke_pointer();
         self.revoke_keyboard();
         if let Some(frame) = self.inflight.take() {
@@ -961,6 +984,11 @@ impl Dispatch<wl_registry::WlRegistry, ()> for State {
                 version,
             } if version >= 1 => {
                 let bound = match interface.as_str() {
+                    "jwm_remote_control_manager_v1" if state.control.manager.is_none() => {
+                        state.control.manager = Some(proxy.bind(name, 1, qh, ()));
+                        state.control.global = Some(name);
+                        false
+                    }
                     "jwm_remote_pointer_manager_v1" if state.pointer.manager.is_none() => {
                         state.pointer.manager = Some(proxy.bind(name, version.min(2), qh, ()));
                         state.pointer.global = Some(name);
@@ -994,6 +1022,10 @@ impl Dispatch<wl_registry::WlRegistry, ()> for State {
                 if bound {
                     state.globals.push(name);
                 }
+            }
+            wl_registry::Event::GlobalRemove { name } if state.control.global == Some(name) => {
+                state.control.revoked = true;
+                state.control.manager = None;
             }
             wl_registry::Event::GlobalRemove { name } if state.pointer.global == Some(name) => {
                 state.pointer.revoked = true;

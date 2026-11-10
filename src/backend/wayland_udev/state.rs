@@ -609,6 +609,7 @@ pub struct JwmWaylandState {
     /// Live ext-image-copy-capture sessions of each captured window, stopped
     /// when the window is retired (see `retire_window_geometry`).
     pub(crate) remote_pointer: crate::backend::wayland_udev::remote_pointer::RemotePointerState,
+    pub(crate) remote_control: crate::backend::wayland_udev::remote_control::RemoteControlState,
     pub(crate) remote_keyboard: crate::backend::wayland_udev::remote_keyboard::RemoteKeyboardState,
     pub(crate) toplevel_capture_authorities:
         crate::backend::wayland_udev::image_copy_capture::ToplevelCaptureAuthorities,
@@ -3439,6 +3440,7 @@ impl JwmWaylandState {
 
         crate::backend::wayland_udev::remote_keyboard::init(dh);
         crate::backend::wayland_udev::remote_pointer::init(dh);
+        crate::backend::wayland_udev::remote_control::init(dh);
         let image_capture_pending = if frame_capture_supported
             && optional_global_enabled(
                 behavior.wayland_enable_image_copy_capture,
@@ -3713,6 +3715,7 @@ impl JwmWaylandState {
                 image_capture_pending,
                 toplevel_capture_sessions: HashMap::new(),
                 toplevel_capture_authorities: Default::default(),
+                remote_control: Default::default(),
                 remote_keyboard: Default::default(),
                 remote_pointer: Default::default(),
 

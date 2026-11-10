@@ -49,6 +49,7 @@ pub mod usability;
 mod wayland_capture;
 #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
 mod wayland_capture_integration;
+pub mod wayland_control_wire;
 #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
 mod wayland_keyboard_integration;
 pub mod wayland_keyboard_wire;

@@ -78,7 +78,7 @@ source switching or automatic input grab. A saved profile cannot grant it.
 The default remains view-only. The selected target must already have exact
 native keyboard focus: the remote path never changes focus to obtain access.
 
-Current protocol v19 retains the independent keyboard capability introduced
+Current protocol v20 retains the independent keyboard capability introduced
 in v16 and the pointer capability introduced in v17; scrolling has its own v18
 opt-in. After the first frame is actually reported presented by the viewer, it
 requests one keyboard lease for
@@ -135,7 +135,7 @@ never enables XTEST. Saved profiles and automatic reconnect cannot grant it.
 
 The native viewer may explicitly select this mode with
 `connect ... --viewer-backend wayland --wayland-pointer`. Choose exactly one
-of native read-only, keyboard or pointer mode. Native scrolling additionally
+of native read-only, keyboard, pointer or unified control mode. Native scrolling additionally
 requires `--wayland-scroll` and the host's separate `--allow-wayland-scroll`
 permission. Native pointer input accepts
 only observed LeftDown→LeftUp pairs for atomic clicks. An unmatched release
@@ -323,9 +323,9 @@ jwm-remote connect HOST --viewer-backend wayland --wayland-keyboard --key-file /
 ```
 
 Use `--viewer-wayland-display SOCKET` to select the local native display, not
-`--display`. Exactly one of `--view-only`, `--wayland-keyboard` and
-`--wayland-pointer` is required with `--viewer-backend wayland`; these modes are
-mutually exclusive and omitting all three is rejected rather than enabling legacy input. No host authorization is inferred from choosing a viewer backend.
+`--display`. Exactly one of `--view-only`, `--wayland-keyboard`,
+`--wayland-pointer` and `--wayland-control` is required with `--viewer-backend wayland`; these modes are
+mutually exclusive and omitting all four is rejected rather than enabling legacy input. No host authorization is inferred from choosing a viewer backend.
 
 This mode reuses the existing exact-surface keyboard authority, full keymap
 compatibility check, and nonrenewable 30-second lease. A mismatched keymap or
@@ -353,3 +353,55 @@ both the X11 and native Wayland scoped-keyboard viewers.
 In the native Wayland keyboard viewer, local keyboard focus loss is fail-closed:
 the session terminates rather than reusing the lease after focus returns. Start
 a new explicitly authorized session to regain control.
+
+
+## Optional unified single-surface control bundle (experimental)
+
+This is a separate, default-off authorization, not a combination of the old
+keyboard and pointer flags. The host explicitly selects one surface with
+`host --wayland-select --once --allow-wayland-control`. The viewer explicitly
+uses `connect HOST --viewer-backend wayland --wayland-control`. Both peers must
+use application protocol **v20** (31-byte capabilities). Older peers are rejected;
+there is no protocol downgrade. Transport encryption remains version 2.
+
+The bundle has one native resource, source owner/instance, epoch, cross-type
+sequence and creation-time **30-second nonrenewable deadline**. It atomically
+consumes both input attempts on that capture authority. It never partially
+falls back to a separate lease or legacy XTEST. Existing keyboard-only and
+pointer-only modes remain separate and mutually exclusive with this mode.
+
+Keyboard and pointer must both already focus the selected source. Granting
+control never changes focus. The viewer binds both devices on one actual seat,
+requires a clean keyboard enter and matching complete canonical keymap, and
+requests permission only after a real frame presentation. Each pointer action
+needs a matching, recent host Ready ticket backed by capture and presentation.
+Every key invalidates the pointer ticket; subsequent pointer input needs a newer
+captured and presented frame. Keyboard chords such as Shift+A can span video
+updates, but any held key blocks a real pointer action. Pointer gestures also
+block keyboard input. Overlap ends the whole session rather than guessing order.
+
+Supported actions are keyboard edges, absolute motion and an atomic left click
+from the viewer's own bounded down/up gesture. There is **no wheel, drag,
+modifier-click, clipboard, resize/follow-size, reconnect or stored profile
+permission** in this mode. The independent scroll-copy video codec option grants
+no input permission. The global cursor and unrelated surfaces are not recipients.
+
+Focus loss on either viewer device, seat/keymap changes, source remapping or
+loss, lock, local takeover, expired authority, invalid sequence or frame, and
+transport loss revoke the entire bundle. Cleanup affects only that lease's held
+keys on its original recipient. No return of focus or content revives permission.
+The viewer preserves actual event dispatch order in a bounded queue; it does not
+concatenate separately polled keyboard and pointer batches. A new video mapping
+can cancel an old pending click without treating that cancellation as a real
+pointer action while a key is held.
+
+Validation for this slice includes pure wire/state/CLI checks and dedicated CI
+fixtures for actual wl_keyboard/wl_pointer recipients, shared lease revocation,
+owned native viewer presentation, and authenticated TCP from production capture
+to production viewer GL. The combined fixture checks click→application repaint→
+actual newly presented pixels→typing, and Shift across a new frame before more
+key edges. Negative cases cover either-side leave, held-enter, stale frames and
+held-key/pointer conflicts with cleanup only on the original target. Until these
+checks run on the final commit, compilation alone is not a runtime pass. These
+owned offscreen/software-renderer tests do not establish physical DRM/GPU,
+two-machine or input-to-visible latency acceptance.

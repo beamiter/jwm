@@ -1,5 +1,9 @@
 //! Trusted-LAN remote desktop host.
 
+#[path = "host_control.rs"]
+mod control;
+use control::{ControlCommand, HostControl};
+
 use super::RemoteResult;
 use super::clipboard_policy::{self, ClipboardDirection, ClipboardMode};
 use super::clipboard_sync::{
@@ -1637,6 +1641,7 @@ pub struct HostOptions {
     pub allow_window_resize: bool,
     pub allow_wayland_keyboard: bool,
     pub allow_wayland_pointer: bool,
+    pub allow_wayland_control: bool,
     pub allow_wayland_scroll: bool,
     /// Experimental video codec optimization, independent of input grants.
     pub scroll_copy: bool,
@@ -1752,6 +1757,9 @@ struct PointerFrame {
     announced: bool,
 }
 struct SourceControl {
+    control_enabled: AtomicBool,
+    control_revoke: AtomicBool,
+    control_queue: Mutex<VecDeque<ControlCommand>>,
     scroll_copy: AtomicBool,
     pointer_enabled: AtomicBool,
     scroll_enabled: AtomicBool,
@@ -1774,6 +1782,9 @@ impl SourceControl {
         geometry_epoch: u64,
     ) -> RemoteResult<Self> {
         Ok(Self {
+            control_enabled: AtomicBool::new(false),
+            control_revoke: AtomicBool::new(false),
+            control_queue: Mutex::new(VecDeque::new()),
             scroll_copy: AtomicBool::new(false),
             pointer_enabled: AtomicBool::new(false),
             scroll_enabled: AtomicBool::new(false),
@@ -1870,7 +1881,12 @@ fn validate_window_policy(options: &HostOptions) -> RemoteResult<()> {
     if options.allow_wayland_scroll && !options.allow_wayland_pointer {
         return Err(invalid_data("Wayland scroll requires explicit pointer permission").into());
     }
-    if options.allow_wayland_keyboard && options.allow_wayland_pointer {
+    if usize::from(options.allow_wayland_keyboard)
+        + usize::from(options.allow_wayland_pointer)
+        + usize::from(options.allow_wayland_control)
+        > 1
+        || (options.allow_wayland_control && options.allow_wayland_scroll)
+    {
         return Err(invalid_data("native leases are mutually exclusive").into());
     }
     if options.wayland_select {
@@ -1889,7 +1905,10 @@ fn validate_window_policy(options: &HostOptions) -> RemoteResult<()> {
         }
         return Ok(());
     }
-    if options.allow_wayland_keyboard || options.allow_wayland_pointer {
+    if options.allow_wayland_keyboard
+        || options.allow_wayland_pointer
+        || options.allow_wayland_control
+    {
         return Err(permission_denied(
             "Wayland keyboard requires explicit native Wayland selection",
         )
@@ -2409,6 +2428,20 @@ fn serve_authenticated(
     negotiated_stream.wayland_scroll = hello.stream.wayland_scroll
         && options.allow_wayland_scroll
         && negotiated_stream.wayland_pointer;
+    negotiated_stream.wayland_control =
+        hello.stream.wayland_control && options.allow_wayland_control;
+    if negotiated_stream.wayland_control {
+        if hello.request_input
+            || hello.request_clipboard
+            || hello.stream.window_resize
+            || hello.stream.wayland_keyboard
+            || hello.stream.wayland_pointer
+            || hello.stream.wayland_scroll
+        {
+            return Err(invalid_data("control cannot combine other input capabilities").into());
+        }
+        capture.enable_control()?;
+    }
     if negotiated_stream.wayland_pointer {
         if hello.request_input
             || hello.request_clipboard
@@ -2551,6 +2584,9 @@ fn serve_authenticated(
             input_area,
             capture.geometry_epoch(),
         )?);
+        sources
+            .control_enabled
+            .store(negotiated_stream.wayland_control, Ordering::Release);
         sources
             .resize_enabled
             .store(negotiated_stream.window_resize, Ordering::Release);
@@ -3444,6 +3480,7 @@ fn stream_frames(
     let mut next_cursor_poll = Instant::now();
     let cursor_interval = Duration::from_millis(16);
     let mut keyboard = HostKeyboardState::new();
+    let mut bundle_control = HostControl::default();
     let mut pointer = HostPointerState::default();
     let mut resize = HostResizeState::new(sources.resize_enabled.load(Ordering::Acquire));
     let mut source_size = (0u16, 0u16);
@@ -3519,6 +3556,7 @@ fn stream_frames(
                 }
             }
             process_keyboard(sources, capture, &writer, &mut keyboard)?;
+            control::process(sources, capture, &writer, &mut bundle_control, source_size)?;
             process_pointer(sources, capture, &writer, &mut pointer, source_size)?;
             let mode = capture.mode();
             // Record every tick: the telemetry window resets on each report, so
@@ -3621,15 +3659,18 @@ fn stream_frames(
                 state.geometry_epoch = frame.geometry_epoch;
                 state.input_area = capture.input_area();
             }
-            let pointer_serial = capture.pointer_frame().map(|(serial, at)| {
-                *sources.pointer_frame.lock().unwrap() = Some(PointerFrame {
-                    serial,
-                    at,
-                    scope: None,
-                    announced: false,
+            let pointer_serial = capture
+                .control_frame()
+                .or_else(|| capture.pointer_frame())
+                .map(|(serial, at)| {
+                    *sources.pointer_frame.lock().unwrap() = Some(PointerFrame {
+                        serial,
+                        at,
+                        scope: None,
+                        announced: false,
+                    });
+                    serial
                 });
-                serial
-            });
             let pending = PendingFrame {
                 pointer_serial,
                 source_version,
@@ -4529,6 +4570,35 @@ fn receive_input_scoped(
                         }
                     }
                 }
+                MessageKind::WaylandControlRequest | MessageKind::WaylandControlAction => {
+                    let sources = sources.ok_or_else(|| invalid_data("control unavailable"))?;
+                    if !sources.control_enabled.load(Ordering::Acquire)
+                        || sources.control_revoke.load(Ordering::Acquire)
+                    {
+                        return Err(invalid_data("control not negotiated or revoked").into());
+                    }
+                    let command = if kind == MessageKind::WaylandControlRequest {
+                        ControlCommand::Request(
+                            super::wayland_control_wire::ControlRequest::decode(&payload)?,
+                        )
+                    } else {
+                        ControlCommand::Action(super::wayland_control_wire::ControlAction::decode(
+                            &payload,
+                        )?)
+                    };
+                    let mut queue = sources.control_queue.lock().unwrap();
+                    if queue.len() >= 32 {
+                        sources.control_revoke.store(true, Ordering::Release);
+                        return Err(invalid_data("control queue exceeded").into());
+                    }
+                    queue.push_back(command);
+                }
+                MessageKind::WaylandControlRevoke => {
+                    let _ = super::wayland_control_wire::ControlRevoke::decode(&payload)?;
+                    let sources = sources.ok_or_else(|| invalid_data("control unavailable"))?;
+                    sources.control_revoke.store(true, Ordering::Release);
+                    sources.control_queue.lock().unwrap().clear();
+                }
                 MessageKind::WaylandPointerRequest | MessageKind::WaylandPointerAction => {
                     let sources =
                         sources.ok_or_else(|| invalid_data("native pointer unavailable"))?;
@@ -4700,7 +4770,8 @@ fn receive_input_scoped(
                 | MessageKind::ClipboardRestricted
                 | MessageKind::WindowResizeResult
                 | MessageKind::WaylandKeyboardStatus
-                | MessageKind::WaylandPointerStatus => {
+                | MessageKind::WaylandPointerStatus
+                | MessageKind::WaylandControlStatus => {
                     return Err(invalid_data(format!("unexpected client message: {kind:?}")).into());
                 }
             }
@@ -5690,6 +5761,7 @@ mod tests {
             allow_window_resize: false,
             allow_wayland_keyboard: false,
             allow_wayland_pointer: false,
+            allow_wayland_control: false,
             allow_wayland_scroll: false,
             scroll_copy: false,
             allow_clipboard: false,
@@ -8371,6 +8443,7 @@ mod tests {
             allow_window_resize: false,
             allow_wayland_keyboard: false,
             allow_wayland_pointer: false,
+            allow_wayland_control: false,
             allow_wayland_scroll: false,
             scroll_copy: false,
             allow_clipboard: false,

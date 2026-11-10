@@ -98,6 +98,9 @@ pub(super) struct Pointer {
     frame_started: Option<Instant>,
 }
 impl Pointer {
+    pub(super) fn control_busy(&self) -> bool {
+        self.left_down || !self.frame_events.is_empty() || self.frame_button || self.frame_axis
+    }
     pub(super) fn revoke(&mut self, reason: &'static str) {
         if !self.requested {
             return;
@@ -510,6 +513,19 @@ impl Dispatch<wl_pointer::WlPointer, ()> for State {
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
+        if state.control_mode
+            && state.keyboard.held_keys()
+            && matches!(
+                &event,
+                wl_pointer::Event::Motion { .. } | wl_pointer::Event::Button { .. }
+            )
+        {
+            state
+                .pointer
+                .revoke("Wayland control pointer overlaps held keys");
+            state.control_collect();
+            return;
+        }
         let pointer = &mut state.pointer;
         if pointer.revoked.is_some() {
             return;
@@ -569,6 +585,7 @@ impl Dispatch<wl_pointer::WlPointer, ()> for State {
             wl_pointer::Event::Frame => pointer.finish_frame(),
             _ => pointer.revoke("unsupported Wayland pointer button or axis"),
         }
+        state.control_collect();
     }
 }
 

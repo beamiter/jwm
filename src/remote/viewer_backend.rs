@@ -325,6 +325,35 @@ impl Viewer {
             Self::Wayland(v) => v.wayland_pointer_presented(sequence),
         }
     }
+    #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+    pub(super) fn observe_control_state(&self, sequence: Option<u64>) {
+        TEST_WAYLAND_CONTROL_OBSERVER.with(|slot| {
+            if let Some(observer) = slot.borrow().as_ref() {
+                *observer.lock().unwrap() = sequence;
+            }
+        });
+    }
+    #[cfg(feature = "remote-wayland")]
+    pub(super) fn enable_wayland_control(&mut self) -> RemoteResult<[u8; 32]> {
+        match self {
+            Self::X11(_) => Err("combined control requires native Wayland viewer".into()),
+            Self::Wayland(v) => v.enable_wayland_control(),
+        }
+    }
+    #[cfg(feature = "remote-wayland")]
+    pub(super) fn check_wayland_control(&mut self, initial: bool) -> RemoteResult<()> {
+        match self {
+            Self::X11(_) => Err("combined control requires native Wayland viewer".into()),
+            Self::Wayland(v) => v.check_wayland_control(initial),
+        }
+    }
+    #[cfg(feature = "remote-wayland")]
+    pub(super) fn disable_wayland_control(&mut self) {
+        match self {
+            Self::X11(_) => {}
+            Self::Wayland(v) => v.disable_wayland_control(),
+        }
+    }
     #[cfg(feature = "remote-wayland")]
     pub(super) fn enable_wayland_keyboard(
         &mut self,
@@ -487,6 +516,30 @@ pub(crate) fn with_wayland_pointer_observer<T>(
         }
     }
     TEST_WAYLAND_POINTER_OBSERVER.with(|slot| {
+        assert!(slot.borrow().is_none());
+        *slot.borrow_mut() = Some(observer);
+    });
+    let _reset = Reset;
+    run()
+}
+
+// Read-only observation of the independent combined lease.
+#[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+thread_local! { static TEST_WAYLAND_CONTROL_OBSERVER: std::cell::RefCell<Option<Arc<std::sync::Mutex<Option<u64>>>>> = const { std::cell::RefCell::new(None) }; }
+#[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+pub(crate) fn with_wayland_control_observer<T>(
+    observer: Arc<std::sync::Mutex<Option<u64>>>,
+    run: impl FnOnce() -> T,
+) -> T {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            TEST_WAYLAND_CONTROL_OBSERVER.with(|slot| {
+                slot.borrow_mut().take();
+            });
+        }
+    }
+    TEST_WAYLAND_CONTROL_OBSERVER.with(|slot| {
         assert!(slot.borrow().is_none());
         *slot.borrow_mut() = Some(observer);
     });

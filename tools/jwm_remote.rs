@@ -304,6 +304,10 @@ enum Command {
         #[arg(long, requires_all = ["wayland_select", "once"], conflicts_with_all = ["allow_wayland_keyboard", "allow_input", "allow_clipboard", "allow_window_resize"])]
         allow_wayland_pointer: bool,
 
+        /// Permit one unified single-surface keyboard and pointer lease.
+        #[arg(long, requires_all = ["wayland_select", "once"], conflicts_with_all = ["allow_wayland_keyboard", "allow_wayland_pointer", "allow_wayland_scroll", "allow_input", "allow_clipboard", "allow_window_resize"])]
+        allow_wayland_control: bool,
+
         /// Experimentally encode exact bounded vertical screen shifts as copy plus changed pixels.
         /// Codec optimization only; grants no input or scrolling permission.
         #[arg(long)]
@@ -433,9 +437,9 @@ enum Command {
     },
     /// Open a remote JWM desktop in an explicitly selected local viewer.
     #[command(group(clap::ArgGroup::new("native_viewer_mode")
-        .args(["view_only", "wayland_keyboard", "wayland_pointer"]).multiple(false)))]
+        .args(["view_only", "wayland_keyboard", "wayland_pointer", "wayland_control"]).multiple(false)))]
     Connect {
-        /// Local backend; Wayland requires explicit view-only, scoped keyboard or scoped pointer.
+        /// Local backend; Wayland requires an explicit read-only or scoped input mode.
         #[arg(long, default_value_t=ViewerBackend::X11, requires_if("wayland", "native_viewer_mode"))]
         viewer_backend: ViewerBackend,
 
@@ -477,6 +481,11 @@ enum Command {
         /// Request a fresh-frame scoped pointer lease, not legacy pointer input.
         #[arg(long, conflicts_with_all = ["wayland_keyboard", "view_only", "resize_source", "clipboard", "grab_input", "reconnect_attempts"])]
         wayland_pointer: bool,
+
+        /// Request one native single-surface keyboard and pointer lease.
+        /// No wheel, drag, modifier-click, clipboard, reconnect or saved authorization.
+        #[arg(long, requires = "viewer_backend", conflicts_with_all = ["wayland_keyboard", "wayland_pointer", "wayland_scroll", "view_only", "resize_source", "follow_source_size", "clipboard", "grab_input", "reconnect_attempts"])]
+        wayland_control: bool,
 
         /// Separately request single-notch vertical scroll; never smooth or horizontal.
         #[arg(long, requires = "wayland_pointer")]
@@ -674,6 +683,7 @@ fn profile_from_command(command: Command) -> RemoteResult<Profile> {
             follow_source_size,
             wayland_keyboard,
             wayland_pointer,
+            wayland_control,
             wayland_scroll,
             window_position,
             view_only,
@@ -691,7 +701,7 @@ fn profile_from_command(command: Command) -> RemoteResult<Profile> {
                 )
                 .into());
             }
-            if wayland_keyboard || wayland_pointer || wayland_scroll {
+            if wayland_keyboard || wayland_pointer || wayland_scroll || wayland_control {
                 return Err(profile_error(
                     "Wayland input authorization cannot be saved in a profile",
                 )
@@ -1224,6 +1234,7 @@ fn run(command: Command) -> RemoteResult<()> {
             wayland_select,
             allow_wayland_keyboard,
             allow_wayland_pointer,
+            allow_wayland_control,
             allow_wayland_scroll,
             scroll_copy,
             wayland_display,
@@ -1272,6 +1283,7 @@ fn run(command: Command) -> RemoteResult<()> {
                 wayland_select,
                 allow_wayland_keyboard,
                 allow_wayland_pointer,
+                allow_wayland_control,
                 allow_wayland_scroll,
                 scroll_copy,
                 wayland_display,
@@ -1343,6 +1355,7 @@ fn run(command: Command) -> RemoteResult<()> {
             follow_source_size,
             wayland_keyboard,
             wayland_pointer,
+            wayland_control,
             wayland_scroll,
             window_position,
             view_only,
@@ -1372,6 +1385,7 @@ fn run(command: Command) -> RemoteResult<()> {
                     follow_source_size,
                     wayland_keyboard,
                     wayland_pointer,
+                    wayland_control,
                     wayland_scroll,
                     window_position,
                     view_only,
@@ -1798,6 +1812,62 @@ mod tests {
                 .unwrap()
                 .command;
         assert!(profile_from_command(command).is_err());
+    }
+
+    #[test]
+    fn native_wayland_control_is_explicit_narrow_and_never_profile_saved() {
+        let base = [
+            "jwm-remote",
+            "connect",
+            "host",
+            "--viewer-backend",
+            "wayland",
+            "--wayland-control",
+        ];
+        let cli = Cli::try_parse_from(base).unwrap();
+        assert!(matches!(
+            &cli.command,
+            Command::Connect {
+                wayland_control: true,
+                wayland_keyboard: false,
+                wayland_pointer: false,
+                wayland_scroll: false,
+                ..
+            }
+        ));
+        assert!(profile_from_command(cli.command).is_err());
+        for extra in [
+            vec!["--view-only"],
+            vec!["--wayland-keyboard"],
+            vec!["--wayland-pointer"],
+            vec!["--wayland-scroll"],
+            vec!["--clipboard"],
+            vec!["--grab-input"],
+            vec!["--resize-source", "640x480"],
+            vec!["--follow-source-size"],
+            vec!["--reconnect-attempts", "1"],
+        ] {
+            assert!(Cli::try_parse_from(base.into_iter().chain(extra)).is_err());
+        }
+        let host = [
+            "jwm-remote",
+            "host",
+            "--wayland-select",
+            "--once",
+            "--allow-wayland-control",
+        ];
+        assert!(Cli::try_parse_from(host).is_ok());
+        for extra in [
+            "--allow-wayland-keyboard",
+            "--allow-wayland-pointer",
+            "--allow-wayland-scroll",
+            "--allow-input",
+            "--allow-clipboard",
+            "--allow-window-resize",
+        ] {
+            assert!(Cli::try_parse_from(host.into_iter().chain([extra])).is_err());
+        }
+        assert!(Cli::try_parse_from(["jwm-remote", "host", "--allow-wayland-control"]).is_err());
     }
 
     #[test]
@@ -3461,6 +3531,7 @@ mod scroll_copy_cli_tests {
                 scroll_copy,
                 allow_input,
                 allow_wayland_pointer,
+                allow_wayland_control,
                 allow_wayland_scroll,
                 allow_clipboard,
                 ..
@@ -3470,7 +3541,11 @@ mod scroll_copy_cli_tests {
             };
             assert_eq!(scroll_copy, enabled);
             assert!(
-                !allow_input && !allow_wayland_pointer && !allow_wayland_scroll && !allow_clipboard
+                !allow_input
+                    && !allow_wayland_pointer
+                    && !allow_wayland_control
+                    && !allow_wayland_scroll
+                    && !allow_clipboard
             );
         }
         for args in [

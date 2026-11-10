@@ -15,6 +15,66 @@ pub(super) enum HostCapture {
 }
 
 impl HostCapture {
+    pub(super) fn enable_control(&mut self) -> RemoteResult<()> {
+        #[cfg(feature = "remote-wayland")]
+        if let Self::Wayland(c) = self {
+            return c.enable_control();
+        }
+        Err(std::io::Error::other("native control unavailable").into())
+    }
+    pub(super) fn arm_control(&mut self, digest: [u8; 32]) -> RemoteResult<u64> {
+        #[cfg(feature = "remote-wayland")]
+        if let Self::Wayland(c) = self {
+            return c.arm_control(digest);
+        }
+        {
+            let _ = digest;
+            Err(std::io::Error::other("native control unavailable").into())
+        }
+    }
+    pub(super) fn control_action(
+        &mut self,
+        action: &super::wayland_control_wire::ControlAction,
+        serial: Option<u64>,
+    ) -> RemoteResult<()> {
+        #[cfg(feature = "remote-wayland")]
+        if let Self::Wayland(c) = self {
+            return c.control_action(action, serial);
+        }
+        {
+            let _ = (action, serial);
+            Err(std::io::Error::other("native control unavailable").into())
+        }
+    }
+    pub(super) fn control_revoked(&self) -> bool {
+        #[cfg(feature = "remote-wayland")]
+        if let Self::Wayland(c) = self {
+            return c.control_revoked();
+        }
+        true
+    }
+    pub(super) fn control_frame(&self) -> Option<(u64, std::time::Instant)> {
+        #[cfg(feature = "remote-wayland")]
+        if let Self::Wayland(c) = self {
+            return c.control_frame();
+        }
+        None
+    }
+    pub(super) fn revoke_control(&mut self) -> () {
+        #[cfg(feature = "remote-wayland")]
+        if let Self::Wayland(c) = self {
+            return c.revoke_control();
+        }
+        ()
+    }
+    pub(super) fn discard_control_frame(&mut self) -> () {
+        #[cfg(feature = "remote-wayland")]
+        if let Self::Wayland(c) = self {
+            return c.discard_control_frame();
+        }
+        ()
+    }
+
     pub(super) fn enable_scroll(&mut self) -> RemoteResult<()> {
         #[cfg(feature = "remote-wayland")]
         if let Self::Wayland(c) = self {
