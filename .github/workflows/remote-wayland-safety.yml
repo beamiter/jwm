@@ -81,6 +81,14 @@ jobs:
           listed="$(env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --list)"
           test "$(printf '%s\n' "$listed" | grep -c ': test$')" -eq 7
           env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --test-threads=1 --nocapture
+      - name: Lossless popup and passive resize family exact pixels and epoch fences
+        run: |
+          set -euo pipefail
+          export XDG_RUNTIME_DIR="$(mktemp -d)"
+          filter='remote::host::wayland_viewer_integration::host_popup_integration::lossless_family_integration::'
+          listed="$(env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --list)"
+          test "$(printf '%s\n' "$listed" | grep -c ': test$')" -eq 3
+          env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --test-threads=1 --nocapture
       - name: One-shot text native protocol, exact context and revocation
         run: |
           set -euo pipefail

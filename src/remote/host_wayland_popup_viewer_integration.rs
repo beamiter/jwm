@@ -27,7 +27,7 @@ impl Drop for Stop {
         self.0.store(true, Ordering::Release);
     }
 }
-fn options(popups: bool, follow: bool) -> host::HostOptions {
+fn options(popups: bool, follow: bool, lossless: bool) -> host::HostOptions {
     host::HostOptions {
         frame_limits: Default::default(),
         listen: "127.0.0.1:0".into(),
@@ -55,7 +55,7 @@ fn options(popups: bool, follow: bool) -> host::HostOptions {
         allow_wayland_horizontal_scroll: false,
         allow_wayland_control: false,
         allow_wayland_text: false,
-        allow_static_lossless: false,
+        allow_static_lossless: lossless,
         scroll_copy: false,
         allow_clipboard: false,
         clipboard_mode: Default::default(),
@@ -93,7 +93,16 @@ enum Pixels {
     ReturnedInitial,
     ReturnedRoot,
 }
+struct ReleasePendingProbe(Option<Arc<host::PendingLosslessProbe>>);
+impl Drop for ReleasePendingProbe {
+    fn drop(&mut self) {
+        if let Some(probe) = &self.0 {
+            probe.release();
+        }
+    }
+}
 struct Harness {
+    _pending_probe: ReleasePendingProbe,
     native: Server,
     local: Server,
     target: App,
@@ -101,11 +110,13 @@ struct Harness {
     popups: bool,
     _other: App,
     frames: Arc<Mutex<(Option<u64>, Option<u64>)>>,
+    codecs: Arc<Mutex<Vec<(u64, bool)>>>,
     captures: Arc<Mutex<Vec<(u32, u32, u64)>>>,
     readback: Option<Capture>,
     presented: Vec<(u64, Pixels)>,
     stop: Arc<AtomicBool>,
     _stop: Stop,
+    client_failure: Arc<Mutex<Option<(crate::remote::client::FailureDiagnostic, String)>>>,
     client_done: mpsc::Receiver<Result<(), String>>,
     host_done: mpsc::Receiver<Result<(), String>>,
     client: Option<thread::JoinHandle<()>>,
@@ -116,6 +127,24 @@ impl Harness {
         Self::with_follow(gl, popups, false)
     }
     fn with_follow(gl: &mut HeadlessSmithayGles, popups: bool, follow: bool) -> Self {
+        Self::new_with_lossless(gl, popups, follow, false)
+    }
+    fn new_with_lossless(
+        gl: &mut HeadlessSmithayGles,
+        popups: bool,
+        follow: bool,
+        lossless: bool,
+    ) -> Self {
+        Self::with_lossless_probe(gl, popups, follow, lossless, None)
+    }
+    fn with_lossless_probe(
+        gl: &mut HeadlessSmithayGles,
+        popups: bool,
+        follow: bool,
+        lossless: bool,
+        probe: Option<Arc<host::PendingLosslessProbe>>,
+    ) -> Self {
+        let probe_guard = ReleasePendingProbe(probe.clone());
         let mut native = Server::new();
         let mut local = Server::new();
         native.state.image_capture_pending =
@@ -193,12 +222,14 @@ impl Harness {
                         }
                     };
                     let peer = host::authenticate_peer(stream, &KEY)?;
-                    host::serve_authenticated(
-                        peer,
-                        &options(popups, follow),
-                        &stopping,
-                        &Mutex::new(Some(host::GrantedCapture::Wayland(Box::new(capture)))),
-                    )
+                    host::with_pending_lossless_probe(probe, || {
+                        host::serve_authenticated(
+                            peer,
+                            &options(popups, follow, lossless),
+                            &stopping,
+                            &Mutex::new(Some(host::GrantedCapture::Wayland(Box::new(capture)))),
+                        )
+                    })
                 },
             )
             .map_err(|e| e.to_string());
@@ -237,7 +268,11 @@ impl Harness {
             .unwrap();
         let frames = Arc::new(Mutex::new((None, None)));
         let observer = frames.clone();
+        let codecs = Arc::new(Mutex::new(Vec::new()));
+        let codec_observer = Arc::clone(&codecs);
         let (client_tx, client_done) = mpsc::channel();
+        let client_failure = Arc::new(Mutex::new(None));
+        let failure_observer = Arc::clone(&client_failure);
         let client = thread::spawn(move || {
             let opts = ClientOptions {
                 viewer_backend: ViewerBackend::Wayland,
@@ -248,7 +283,7 @@ impl Harness {
                 wayland_horizontal_scroll: false,
                 wayland_control: false,
                 wayland_text: None,
-                static_lossless: false,
+                static_lossless: lossless,
                 resize_source: None,
                 follow_source_size: false,
                 window_size: Some(WindowSize {
@@ -271,12 +306,29 @@ impl Harness {
                 scaling: Default::default(),
             };
             let result = with_wayland_control_frame_observer(observer, || {
-                with_wayland_test_stream(stream, || run_client(opts))
+                crate::remote::client::with_static_lossless_frame_observer(codec_observer, || {
+                    with_wayland_test_stream(stream, || run_client(opts))
+                })
             })
-            .map_err(|e| e.to_string());
+            .map_err(|error| {
+                let diagnostic = crate::remote::client::classify_failure(error.as_ref());
+                let mut cause: &(dyn std::error::Error + 'static) = error.as_ref();
+                for _ in 0..32 {
+                    match cause.source() {
+                        Some(source) => cause = source,
+                        None => {
+                            *failure_observer.lock().unwrap() =
+                                Some((diagnostic, cause.to_string()));
+                            return error.to_string();
+                        }
+                    }
+                }
+                panic!("unexpected cyclic/oversized client error chain");
+            });
             let _ = client_tx.send(result);
         });
         Self {
+            _pending_probe: probe_guard,
             native,
             local,
             target,
@@ -284,11 +336,13 @@ impl Harness {
             popups,
             _other: other,
             frames,
+            codecs,
             captures,
             readback: None,
             presented: Vec::new(),
             stop,
             _stop: stop_guard,
+            client_failure,
             client_done,
             host_done,
             client: Some(client),
@@ -769,3 +823,6 @@ fn actual_wayland_readonly_popup_resize_tcp_epochs_pixels_clip_return_and_revoca
         h.finish(&mut gl, lock);
     }
 }
+
+#[path = "host_wayland_lossless_family_integration.rs"]
+mod lossless_family_integration;

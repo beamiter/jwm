@@ -49,3 +49,15 @@ preserved rather than interpreting the failed run as successful convergence.
 
 `metadata.json` records the offline candidate's dirty tree and source hashes.
 New per-tile actual TCP/GL validation must be reported independently.
+
+
+## Later real transport/viewer evidence
+
+`actual-tcp-gl-ci.json` records candidate `eb45d52e` in owned Wayland/TCP/software
+GL CI. Three repeated blink cases reached static-region exact RGB while source
+updates continued at fixed 500 ms intervals. The deadline is measured at actual
+client `take_presented` completion observation, not a hardware clock. The minimum
+observed margin was about 0.249 ms, so this is not a broad latency guarantee.
+The earlier failed run lacked timestamps and cannot prove whether presentation
+itself was timely. The fix added a timestamp ledger rather than extending the
+deadline. The additional raw failure trace is retained privately, not published.

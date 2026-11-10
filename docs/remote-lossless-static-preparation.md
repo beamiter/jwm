@@ -1,17 +1,12 @@
-# Static text fidelity: offline preparation, not an integrated codec
+# Opt-in static text fidelity
 
-The candidate `src/remote/tile_lossless_baseline.rs` is an independent ignored
-harness, connected only under `cfg(test)`. The initial offline run is recorded
-below; no released lossless feature is claimed. That standalone comparison did
-not change production encoding. A separate opt-in integration candidate is now
-being implemented and must be validated independently of the baseline.
+The integrated JPEG/PNG path is available on master at `eb45d52e`. The earlier
+standalone baseline remains separate evidence, not a production throughput claim.
 
-## Using the opt-in integration candidate
+## Using the read-only feature
 
-This implementation is a candidate awaiting its complete CI validation, not a
-released performance result. Both peers must run **application protocol v25**;
-older application versions are rejected rather than silently downgraded.
-Authenticated transport remains v3.
+Both peers must run **application protocol v25**; older application versions are
+rejected rather than silently downgraded. Authenticated transport remains v3.
 
 Enable the host permission and request it explicitly in a read-only viewer:
 
@@ -214,3 +209,50 @@ repairs are not native input proof records and never change input permissions.
 The earlier full-image standalone PNG sizes/timings are not measurements of this
 integrated atlas path. Integrated byte totals, convergence and actual presentation
 still require separate codec and authenticated transport tests.
+
+
+## Verified integration boundary (2026-11-10)
+
+Master `eb45d52e` passed all four mainline workflows: [Wayland](https://github.com/beamiter/jwm/actions/runs/42871308519),
+[X11](https://github.com/beamiter/jwm/actions/runs/42871308768),
+[CI](https://github.com/beamiter/jwm/actions/runs/42871308597) and
+[Eva](https://github.com/beamiter/jwm/actions/runs/42871308605). The new path was
+verified with owned Wayland servers, authenticated TCP and software GL. Tests
+check exact post-encoding RGB, permission refusal, default-off behavior, small
+raw changes and a continuously blinking tile beside static content.
+
+The blink fixture uses fixed 500 ms source updates and checks actual client
+`take_presented` completion observations against those deadlines. This is not a
+hardware presentation clock or a general 500 ms latency guarantee. One candidate
+run had only about 0.249 ms of margin; the raw observations are retained rather
+than claiming generous performance headroom. Physical GPU/DRM and two-machine
+desktop acceptance remain unverified.
+
+The [same-input offline policy comparison](benchmarks/static-lossless-tile-stability-2026-11-10/README.md)
+uses simulated convergence time and the same candidate codec in both arms. It
+is not a historical-binary or network performance comparison. Combined popup
+and passive source-resize behavior requires its own integration evidence;
+individual passing fixtures do not establish that combination.
+
+## Selected-window family and passive resizing
+
+The existing read-only options can be combined explicitly:
+
+```sh
+jwm-remote host --wayland-select --once --wayland-popups --wayland-resize-follow --allow-static-lossless
+jwm-remote connect HOST --viewer-backend wayland --view-only --static-lossless
+```
+
+The host follows changes made locally to the selected source; this does not
+permit the viewer to resize that window. Viewer `--follow-source-size` is an
+active remote-resize request and remains incompatible with static lossless.
+Popup capture is restricted to the selected window family, not another top-level
+window. Lock and unmap remain terminal; remapping does not create a new grant.
+
+The dedicated combination regression is newly added and awaits its own CI result.
+It checks unscaled matched-size pixels, popup creation/movement/clipping/closure,
+size changes and a return to the original size with a new geometry epoch. A
+bounded test-only barrier suspends an already encoded PNG before the publication
+lock so a resize ABA can advance; successful-write evidence must exclude the old
+scope and identify a fresh JPEG keyframe before exact repair resumes. This is
+not a promise that bytes already sent before revocation disappear from the peer.

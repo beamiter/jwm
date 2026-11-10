@@ -1977,7 +1977,72 @@ fn retained_proof_deadline(
     }
 }
 
+#[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+#[derive(Default)]
+pub(crate) struct PendingLosslessProbe {
+    blocked: Mutex<Option<(u64, u64, u64)>>,
+    released: Mutex<bool>,
+    changed: Condvar,
+    once: AtomicBool,
+    publication: std::sync::atomic::AtomicU64,
+    written: Mutex<Vec<(u64, u64, u64, bool, bool)>>,
+}
+#[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+impl PendingLosslessProbe {
+    pub(crate) fn observing_only() -> Self {
+        Self {
+            once: AtomicBool::new(true),
+            ..Self::default()
+        }
+    }
+    pub(crate) fn blocked(&self) -> Option<(u64, u64, u64)> {
+        *self.blocked.lock().unwrap()
+    }
+    pub(crate) fn release(&self) {
+        *self.released.lock().unwrap() = true;
+        self.changed.notify_all();
+    }
+    pub(crate) fn publication_epoch(&self) -> u64 {
+        self.publication.load(Ordering::Acquire)
+    }
+    pub(crate) fn written(&self) -> Vec<(u64, u64, u64, bool, bool)> {
+        self.written.lock().unwrap().clone()
+    }
+    fn pause(&self, sequence: u64, source_epoch: u64, epoch: u64) -> RemoteResult<()> {
+        if self.once.swap(true, Ordering::AcqRel) {
+            return Ok(());
+        }
+        *self.blocked.lock().unwrap() = Some((sequence, source_epoch, epoch));
+        let released = self.released.lock().unwrap();
+        let (released, _) = self
+            .changed
+            .wait_timeout_while(released, Duration::from_secs(5), |value| !*value)
+            .unwrap();
+        if !*released {
+            return Err(invalid_data("test pending PNG barrier timed out").into());
+        }
+        Ok(())
+    }
+}
+#[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+thread_local! {static PENDING_LOSSLESS_PROBE:std::cell::RefCell<Option<Arc<PendingLosslessProbe>>>=const{std::cell::RefCell::new(None)};}
+#[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+pub(crate) fn with_pending_lossless_probe<T>(
+    probe: Option<Arc<PendingLosslessProbe>>,
+    run: impl FnOnce() -> T,
+) -> T {
+    struct Restore(Option<Arc<PendingLosslessProbe>>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            PENDING_LOSSLESS_PROBE.with(|slot| *slot.borrow_mut() = self.0.take());
+        }
+    }
+    let _restore = Restore(PENDING_LOSSLESS_PROBE.with(|slot| slot.replace(probe)));
+    run()
+}
 struct SourceControl {
+    #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+    pending_lossless_probe: Option<Arc<PendingLosslessProbe>>,
     #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
     legacy_retained_proof_slots: bool,
     #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
@@ -2058,6 +2123,8 @@ impl SourceControl {
         Ok(Self {
             #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
             proof_delta: PROOF_DELTA_TEST.with(|value| value.borrow().clone()),
+            #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+            pending_lossless_probe: PENDING_LOSSLESS_PROBE.with(|slot| slot.borrow().clone()),
             #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
             legacy_disable_ack_wake: LEGACY_DISABLE_ACK_WAKE.with(|v| v.get()),
             #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
@@ -3953,6 +4020,12 @@ fn stream_frames(
                     let mut state = sources.state.lock().unwrap();
                     state.input_area = capture.input_area();
                     state.geometry_epoch = capture.geometry_epoch();
+                    #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+                    if let Some(probe) = &sources.pending_lossless_probe {
+                        probe
+                            .publication
+                            .store(state.geometry_epoch, Ordering::Release);
+                    }
                     state.presented_geometry = None;
                     state
                         .policy
@@ -3977,6 +4050,12 @@ fn stream_frames(
                 let mut state = sources.state.lock().unwrap();
                 if state.geometry_epoch != capture.geometry_epoch() {
                     state.geometry_epoch = capture.geometry_epoch();
+                    #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+                    if let Some(probe) = &sources.pending_lossless_probe {
+                        probe
+                            .publication
+                            .store(state.geometry_epoch, Ordering::Release);
+                    }
                     state.presented_geometry = None;
                     mailbox.clear();
                 }
@@ -4105,6 +4184,12 @@ fn stream_frames(
                 let mut state = sources.state.lock().unwrap();
                 if state.geometry_epoch != capture.geometry_epoch() {
                     state.geometry_epoch = capture.geometry_epoch();
+                    #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+                    if let Some(probe) = &sources.pending_lossless_probe {
+                        probe
+                            .publication
+                            .store(state.geometry_epoch, Ordering::Release);
+                    }
                     state.presented_geometry = None;
                     mailbox.clear();
                 }
@@ -4430,6 +4515,20 @@ fn send_frames_with_encoder_scoped<W: std::io::Write + SetWriteTimeout>(
             // copying a second frame-sized envelope on every frame.
             payload.splice(..0, pending.source_version.epoch.to_be_bytes());
         }
+        #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+        if sender
+            .encoder
+            .encode_timings()
+            .is_some_and(|t| t.png.is_some())
+            && let Some(probe) = sources.and_then(|s| s.pending_lossless_probe.as_ref())
+        {
+            // No publication, source-state or writer lock is held here.
+            probe.pause(
+                sequence,
+                pending.source_version.epoch,
+                pending.frame.geometry_epoch,
+            )?;
+        }
         let wire_payload = payload.as_slice();
         let write_started = Instant::now();
         let write_result = {
@@ -4510,6 +4609,24 @@ fn send_frames_with_encoder_scoped<W: std::io::Write + SetWriteTimeout>(
         // flush succeeded. A partial/failed write therefore cannot suppress a
         // future frame in a replacement session or test harness.
         sender.commit_at(&pending.frame, Instant::now());
+        #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+        if let Some(probe) = sources.and_then(|s| s.pending_lossless_probe.as_ref()) {
+            let mut written = probe.written.lock().unwrap();
+            assert!(
+                written.len() < 4096,
+                "test pending PNG write ledger exhausted"
+            );
+            written.push((
+                sequence,
+                pending.source_version.epoch,
+                pending.frame.geometry_epoch,
+                sender
+                    .encoder
+                    .encode_timings()
+                    .is_some_and(|t| t.png.is_some()),
+                plan.keyframe,
+            ));
+        }
         #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
         if let (Some(serial), Some((_, probe))) = (
             pending.pointer_serial,
