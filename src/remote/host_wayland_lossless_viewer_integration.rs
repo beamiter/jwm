@@ -6,7 +6,7 @@ use crate::remote::{
     host,
     viewer_backend::{ViewerBackend, with_wayland_test_stream},
     wayland_capture::WaylandCapture,
-    wayland_viewer::with_wayland_control_frame_observer,
+    wayland_viewer::{with_wayland_control_frame_observer, with_wayland_presented_time_observer},
 };
 use std::{
     io::Write,
@@ -118,6 +118,32 @@ fn blink_matches(bytes: &[u8], generation: usize) -> bool {
                     .all(|&v| if generation % 2 == 0 { v < 70 } else { v > 185 })
         })
     })
+}
+fn observe_blink_presentation(
+    candidate: Option<(usize, u64)>,
+    deadline: Option<Instant>,
+    ledger: &[(u64, Instant)],
+    observed: &mut Option<usize>,
+) {
+    let Some((generation, seq)) = candidate else {
+        return;
+    };
+    let Some((_, at)) = ledger.iter().find(|(s, _)| *s == seq) else {
+        return;
+    };
+    let deadline = deadline.expect("blink candidate has scheduled deadline");
+    assert!(
+        *at <= deadline,
+        "real blink presentation exceeded fixed deadline: generation={generation} sequence={seq} late_by={:?}",
+        at.saturating_duration_since(deadline)
+    );
+    if *observed != Some(generation) {
+        eprintln!(
+            "blink actual-present generation={generation} sequence={seq} deadline_margin={:?}",
+            deadline.duration_since(*at)
+        );
+    }
+    *observed = Some(generation);
 }
 fn repaint(server: &mut Server, app: &mut App, bytes: &[u8]) {
     let (buffer, mut file) = shm_buffer_file(server, &mut app.client, [0, 0, 0, 255]);
@@ -272,6 +298,8 @@ fn exercise_workload(host_permission: bool, client_permission: bool, blinking: b
         .unwrap();
     let frames = Arc::new(Mutex::new((None, None)));
     let observer = frames.clone();
+    let presented_times = Arc::new(Mutex::new(Vec::new()));
+    let presented_observer = presented_times.clone();
     let codecs = Arc::new(Mutex::new(Vec::new()));
     let codec_observer = codecs.clone();
     let (client_tx, client_done) = mpsc::channel();
@@ -305,8 +333,10 @@ fn exercise_workload(host_permission: bool, client_permission: bool, blinking: b
             scaling: Default::default(),
         };
         let result = with_static_lossless_frame_observer(codec_observer, || {
-            with_wayland_control_frame_observer(observer, || {
-                with_wayland_test_stream(viewer_stream, || run_client(opts))
+            with_wayland_presented_time_observer(presented_observer, || {
+                with_wayland_control_frame_observer(observer, || {
+                    with_wayland_test_stream(viewer_stream, || run_client(opts))
+                })
             })
         })
         .map_err(|error| {
@@ -352,6 +382,20 @@ fn exercise_workload(host_permission: bool, client_permission: bool, blinking: b
                 *frames.lock().unwrap(),
                 encoded.len()
             );
+        }
+        // Consume timestamped actual presentation before inspecting the fixed
+        // source deadline. A cached generation number can lag the receiver;
+        // an actual late timestamp must still fail, never be rounded away.
+        if blinking {
+            let ledger = presented_times.lock().unwrap();
+            observe_blink_presentation(blink_candidate, blink_next, &ledger, &mut blink_observed);
+            if exact.is_some_and(|seq| ledger.iter().any(|(seen, _)| *seen == seq)) {
+                static_recovered = true;
+            }
+            if static_recovered && blink_generation >= 7 && blink_observed == Some(blink_generation)
+            {
+                break;
+            }
         }
         if blinking && blink_next.is_some_and(|at| Instant::now() >= at) {
             // Fixed cadence: never postpone a source update until feedback.
@@ -400,7 +444,7 @@ fn exercise_workload(host_permission: bool, client_permission: bool, blinking: b
                         "static exact pixels regressed during one-tile blink"
                     );
                 }
-                if blink_matches(&pixels, blink_generation) {
+                if blink_candidate.is_none() && blink_matches(&pixels, blink_generation) {
                     blink_candidate = Some((blink_generation, seq));
                 }
             }
@@ -438,17 +482,12 @@ fn exercise_workload(host_permission: bool, client_permission: bool, blinking: b
             last = Some(seq);
         }
         if blinking {
-            if let Some((generation, seq)) = blink_candidate {
-                if frames.lock().unwrap().1 == Some(seq) {
-                    if blink_observed != Some(generation) {
-                        eprintln!(
-                            "blink actual-present generation={generation} sequence={seq} elapsed={:?}",
-                            first.unwrap().elapsed()
-                        );
-                    }
-                    blink_observed = Some(generation);
-                }
-            }
+            observe_blink_presentation(
+                blink_candidate,
+                blink_next,
+                &presented_times.lock().unwrap(),
+                &mut blink_observed,
+            );
             if exact.is_some_and(|seq| frames.lock().unwrap().1 == Some(seq)) {
                 static_recovered = true;
             }
@@ -573,4 +612,30 @@ fn blink_exclusion_is_exactly_one_tile_not_neighboring_edges() {
     assert_eq!(static_sse(&a, &b), 2);
     assert!(blink_matches(&a, 0));
     assert!(!blink_matches(&a, 1));
+}
+
+#[test]
+fn blink_actual_timestamp_not_poll_order_decides_deadline() {
+    let deadline = Instant::now();
+    let mut observed = Some(7);
+    observe_blink_presentation(
+        Some((8, 16)),
+        Some(deadline),
+        &[(16, deadline - Duration::from_millis(1))],
+        &mut observed,
+    );
+    assert_eq!(observed, Some(8));
+    let late = std::panic::catch_unwind(|| {
+        let mut observed = None;
+        observe_blink_presentation(
+            Some((8, 16)),
+            Some(deadline),
+            &[(16, deadline + Duration::from_nanos(1))],
+            &mut observed,
+        );
+    });
+    assert!(
+        late.is_err(),
+        "even real 1ns lateness must not be hidden by reordering"
+    );
 }

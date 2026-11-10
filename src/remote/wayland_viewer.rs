@@ -80,6 +80,33 @@ pub(crate) fn with_wayland_control_scroll_observer<T>(
     let _reset = Reset;
     run()
 }
+/// Test-only ledger of actual drained presentation completions, never feedback injection.
+#[cfg(all(test, feature = "backend-wayland-udev"))]
+type PresentedTimeObservation = std::sync::Arc<std::sync::Mutex<Vec<(u64, Instant)>>>;
+#[cfg(all(test, feature = "backend-wayland-udev"))]
+thread_local! {
+    static PRESENTED_TIME_OBSERVER: std::cell::RefCell<Option<PresentedTimeObservation>> = const { std::cell::RefCell::new(None) };
+}
+#[cfg(all(test, feature = "backend-wayland-udev"))]
+pub(crate) fn with_wayland_presented_time_observer<T>(
+    observer: PresentedTimeObservation,
+    run: impl FnOnce() -> T,
+) -> T {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            PRESENTED_TIME_OBSERVER.with(|slot| {
+                slot.borrow_mut().take();
+            });
+        }
+    }
+    PRESENTED_TIME_OBSERVER.with(|slot| {
+        assert!(slot.borrow().is_none());
+        *slot.borrow_mut() = Some(observer);
+    });
+    let _reset = Reset;
+    run()
+}
 const TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_PIXELS: u64 = 16 * 1024 * 1024;
 const MAX_RETAINED_BYTES: usize = 128 * 1024 * 1024;
@@ -1106,6 +1133,23 @@ impl WaylandViewer {
     pub(super) fn take_presented_sequences(&mut self) -> RemoteResult<Vec<u64>> {
         self.pump()?;
         let sequences = std::mem::take(&mut self.state.completed);
+        #[cfg(all(test, feature = "backend-wayland-udev"))]
+        PRESENTED_TIME_OBSERVER.with(|slot| {
+            if let Some(observer) = slot.borrow().as_ref() {
+                let drained_at = Instant::now();
+                let mut ledger = observer.lock().unwrap();
+                assert!(
+                    ledger.len().saturating_add(sequences.len()) <= 4096,
+                    "test presentation time ledger exhausted"
+                );
+                ledger.extend(
+                    sequences
+                        .iter()
+                        .copied()
+                        .map(|sequence| (sequence, drained_at)),
+                );
+            }
+        });
         #[cfg(all(test, feature = "backend-wayland-udev"))]
         if let Some(sequence) = sequences.last().copied() {
             CONTROL_FRAME_OBSERVER.with(|slot| {
