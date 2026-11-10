@@ -315,3 +315,52 @@ overall latency improvement. The option remains default off. Further scheduling
 work needs a quiet-time/pacing ablation, not a larger test deadline or a claim
 that the cause is already proven. This status does not change the independently
 documented permission or keyboard-combination boundaries.
+
+## Candidate: preserving committed exactness across scroll-copy
+
+This candidate keeps application protocol v26, existing explicit scroll-copy
+and static-lossless negotiation, and their existing permission boundaries.
+It adds no input authority and changes no defaults. The optimization concerns
+video copy records, not scroll input authorization.
+
+Only exactness established by a successfully committed lossless record may
+propagate through a validated scroll-copy. A destination tile is retained as
+exact only when all of its copied pixels originate in committed exact tiles;
+exposed pixels, mixed boundary tiles and JPEG-overwritten tiles remain repair
+debt. JPEG quality 100 is not proof of exactness. Unsent or discarded PNGs do
+not promote the committed ledger. Source/geometry resets and invalid capture
+identity cannot carry that ledger into a new canvas. Existing bounded repair
+batches and stability requirements remain in force.
+
+The pure production-codec regression used the same 65×97 RGB input, 16-pixel
+tiles and ±7-pixel movement in both arms. Both first committed an exact PNG
+canvas. The comparison arm then deliberately cleared the exactness ledger
+following the same scroll, modeling conservative all-tiles repair; it was not
+a separate historical binary. Actual decoding verified the retained exact tiles
+and full-frame equality after repair, so both arms ended with RGB SSE exactly
+zero.
+
+| Vertical shift | Conservative repair tiles / payload bytes | Propagated repair tiles / payload bytes |
+| --- | --- | --- |
+| −7 pixels | 35 / 11,145 | 5 / 1,388 |
+| +7 pixels | 35 / 11,374 | 10 / 1,950 |
+
+These bytes are the subsequent tile repair record, not total session or
+transport traffic. The local pure suite reported 48 passed and three ignored;
+real authenticated TCP/viewer GL coverage for this candidate is still awaiting
+CI. The result is a smaller repair workload, not a latency or speed guarantee.
+
+The candidate also adds full-frame equality checking and encode/commit capture
+hash work to protect the exactness claim. Capture hashing covers RGB, encoded
+and source dimensions, and geometry epoch. Commit rechecks identity after the
+caller has successfully flushed; mismatch invalidates the reference rather
+than declaring pixels exact. This work has a CPU cost, including on records
+that cannot benefit from propagation. Commit-side hashing is **not included in
+`encode_ns`**, so encode timing alone cannot quantify the total cost.
+
+The one-run pure test's combined scroll-and-repair elapsed samples were
+17.10→6.93 ms for −7 and 18.00→8.44 ms for +7. This test timer includes planning,
+encoding, decoding, commit and correctness checks, rather than isolating codec
+CPU or measuring presentation. It is not a repeated controlled performance
+estimate. Full-frame identity checks, per-record hashing and eventual real
+pipeline costs must remain visible when judging the byte savings.

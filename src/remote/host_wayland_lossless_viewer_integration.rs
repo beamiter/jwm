@@ -642,3 +642,6 @@ fn blink_actual_timestamp_not_poll_order_decides_deadline() {
 
 #[path = "host_lossless_scheduler_benchmark.rs"]
 mod scheduler_benchmark;
+
+#[path = "host_lossless_scroll_integration.rs"]
+mod scroll_integration;

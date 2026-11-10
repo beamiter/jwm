@@ -4,6 +4,9 @@ Baseline: `c8cf77ec` (2026-11-06). These increments implement the
 measurement, scheduling, resource-reuse and asynchronous presentation foundations
 of the shared plan.
 It is not completion of the entire remote-control roadmap.
+This document retains historical implementation stages and their introduction
+versions. For current usage and compatibility, see [remote-control.md](remote-control.md);
+the current application protocol is v26, separate from transport v3.
 
 ## Implemented
 
@@ -40,10 +43,10 @@ It is not completion of the entire remote-control roadmap.
   reuse while X11 consumes a segment; input polling continues while completion
   and server-copy fences are pending. Frame ACK follows both conditions, never
   receipt alone. Geometry setup and initial resource allocation may still block.
-- Current protocol v19 negotiates an explicit supported stream profile and sends
-  initial viewport before capture. Both peers must use v19; prior versions are
-  rejected without silent downgrade. Tile video and cursor state carry a
-  geometry epoch. Explicit source resize was introduced in v15; the subsequent
+- At the historical v19 stage, peers negotiated an explicit supported stream
+  profile and sent the initial viewport before capture. That stage required
+  matching v19 peers and rejected prior versions without silent downgrade.
+  Tile video and cursor state carry a geometry epoch. Explicit source resize was introduced in v15; the subsequent
   v16 keyboard, v17 pointer and v18 scroll capabilities are separately negotiated.
 - Independent bounded cursor shape/position records are negotiated when host
   XFixes and viewer XRender formats support them. Cursor movement avoids video
@@ -73,7 +76,8 @@ It is not completion of the entire remote-control roadmap.
   in view-only mode. A scoped initial selection never implicitly grants root.
   Source changes release input and reset frame/cursor state; unsafe transitions
   fail closed. Extra grants are explicit on host/SSH CLI and cannot be saved in
-  profiles yet. Both peers now require a coordinated v19 upgrade.
+  profiles yet. The v19 stage required a coordinated upgrade of both peers;
+  it is not the current compatibility version.
 - This source-switching work is covered by offline tests only in this checkout;
   no new live-X11, hardware timing, or benchmark result is claimed here.
 
@@ -188,7 +192,10 @@ this cloud workspace; live-X11 results remain pending until it runs.
 
 ## Compatibility note for Rust callers
 
-Current wire v19 is intentionally incompatible with prior application protocol versions.
+The historical v19 wire stage was intentionally incompatible with prior
+application protocol versions. Current application v26 likewise requires
+matching peers. The Rust API notes below describe those historical increments,
+not a complete current migration checklist.
 The public `DecodedFrame` and synchronous `Viewer::draw` behavior remain usable.
 `HostOptions`, `ClientOptions` and `SshOptions` now require `frame_limits`;
 `StreamCapabilities` also adds that field. `FrameLimits::default()` retains the

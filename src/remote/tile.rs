@@ -160,6 +160,9 @@ pub(crate) struct EncodeStageTimings {
 pub(crate) struct TileEncoder {
     lossless_enabled: bool,
     exact: Vec<bool>,
+    // Proof for the successfully committed decoded canvas, never the latest
+    // observed capture. Detection may invalidate `exact` before a scroll.
+    committed_exact: Vec<bool>,
     stable_since: Vec<Instant>,
     observed: Option<RgbImage>,
     exact_changed: bool,
@@ -211,6 +214,7 @@ impl TileEncoder {
         Self {
             lossless_enabled: false,
             exact: Vec::new(),
+            committed_exact: Vec::new(),
             stable_since: Vec::new(),
             observed: None,
             exact_changed: false,
@@ -255,6 +259,7 @@ impl TileEncoder {
             self.reference = None;
             self.last_sequence = None;
             self.qualities.clear();
+            self.committed_exact.clear();
             self.scroll_copy_enabled = enabled;
         }
     }
@@ -263,6 +268,7 @@ impl TileEncoder {
         if self.lossless_enabled != enabled {
             self.discard();
             self.exact.clear();
+            self.committed_exact.clear();
             self.stable_since.clear();
             self.observed = None;
             self.lossless_enabled = enabled;
@@ -712,6 +718,7 @@ impl TileEncoder {
         if planned.geometry_epoch != frame.geometry_epoch
             || planned.encoded != encoded
             || planned.source != (frame.source_width, frame.source_height)
+            || (self.lossless_enabled && self.observed.as_ref() != Some(&frame.image))
         {
             return Err(invalid_data("tile frame does not match its plan").into());
         }
@@ -803,7 +810,9 @@ impl TileEncoder {
         }
 
         self.pending_lossless = planned.lossless;
-        self.pending_hash = planned.lossless.then(|| capture_digest(frame));
+        // The exact canvas ledger also advances on JPEG/scroll commits. Bind
+        // every such transaction, not merely PNG, to the planned capture.
+        self.pending_hash = self.lossless_enabled.then(|| capture_digest(frame));
         self.pending = true;
         self.pending_sequence = Some(sequence);
         self.pending_scroll = planned.scroll;
@@ -835,12 +844,17 @@ impl TileEncoder {
             self.discard();
             self.reference = None;
             self.exact.fill(false);
+            self.committed_exact.clear();
             return;
         }
         self.pending = false;
         self.last_sequence = self.pending_sequence.take();
         if let Some(copy) = self.pending_scroll.take() {
             let height = frame.image.height() as usize;
+            if self.lossless_enabled {
+                self.exact =
+                    copied_exact_tiles(&self.committed_exact, self.grid, height, self.tile(), copy);
+            }
             self.qualities =
                 shifted_qualities(&self.qualities, self.grid, height, self.tile(), copy);
             shift_rgb_rows(self.reference.as_mut().expect("scroll has reference"), copy);
@@ -858,6 +872,7 @@ impl TileEncoder {
             for index in &self.dirty {
                 self.exact[*index as usize] = self.pending_lossless;
             }
+            self.committed_exact.clone_from(&self.exact);
         }
         for index in &self.dirty {
             self.qualities[*index as usize] = self.pending_quality;
@@ -1611,6 +1626,37 @@ fn shift_rgb_rows(image: &mut RgbImage, copy: ScrollCopy) {
         .as_mut()
         .copy_within(source * stride..(source + rows) * stride, dest * stride);
 }
+/// Only complete destination tiles wholly inside the proven copy overlap
+/// inherit exactness. Partial/band-boundary and unchanged outside tiles remain
+/// conservative debt; each source tile touched by a non-aligned shift must be
+/// exact in the previously committed canvas.
+fn copied_exact_tiles(
+    committed: &[bool],
+    grid: (usize, usize),
+    height: usize,
+    tile: usize,
+    copy: ScrollCopy,
+) -> Vec<bool> {
+    let mut result = vec![false; grid.0 * grid.1];
+    let (dest, source, rows) = scroll_ranges(copy);
+    for (index, exact) in result.iter_mut().enumerate() {
+        let y0 = (index / grid.0) * tile;
+        let y1 = (y0 + tile).min(height);
+        if y0 < dest || y1 > dest + rows || y0 >= y1 {
+            continue;
+        }
+        let source0 = (source + y0 - dest) / tile;
+        let source1 = (source + y1 - 1 - dest) / tile;
+        *exact = (source0..=source1).all(|row| {
+            committed
+                .get(row * grid.0 + index % grid.0)
+                .copied()
+                .unwrap_or(false)
+        });
+    }
+    result
+}
+
 fn shifted_qualities(
     old: &[u8],
     grid: (usize, usize),
@@ -3327,3 +3373,7 @@ mod lossless_baseline;
 #[cfg(test)]
 #[path = "tile_stability_benchmark.rs"]
 mod stability_benchmark;
+
+#[cfg(test)]
+#[path = "tile_scroll_exact_tests.rs"]
+mod scroll_exact_tests;

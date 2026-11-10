@@ -87,6 +87,71 @@ pub(crate) fn with_frame_purpose_observer<T>(
     let _restore = Restore(FRAME_PURPOSE_OBSERVER.with(|slot| slot.replace(Some(observer))));
     run()
 }
+#[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+#[derive(Clone, Debug)]
+pub(crate) struct ScrollDecodeObservation {
+    pub seq: u64,
+    pub source_epoch: u64,
+    pub geometry_epoch: u64,
+    pub scroll_dy: Option<i16>,
+    pub dirty_tiles: u32,
+    pub total_tiles: u32,
+    pub tile_log2: u8,
+    pub lossless: bool,
+}
+#[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+type ScrollDecodeObserver = Arc<Mutex<Vec<ScrollDecodeObservation>>>;
+#[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+thread_local! {static SCROLL_DECODE_OBSERVER: std::cell::RefCell<Option<ScrollDecodeObserver>>=const {std::cell::RefCell::new(None)};}
+#[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+pub(crate) fn with_scroll_decode_observer<T>(
+    observer: ScrollDecodeObserver,
+    run: impl FnOnce() -> T,
+) -> T {
+    struct Restore(Option<ScrollDecodeObserver>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            SCROLL_DECODE_OBSERVER.with(|slot| *slot.borrow_mut() = self.0.take());
+        }
+    }
+    let _restore = Restore(SCROLL_DECODE_OBSERVER.with(|slot| slot.replace(Some(observer))));
+    run()
+}
+#[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+fn observe_decoded_scroll(
+    observer: &Option<ScrollDecodeObserver>,
+    bytes: &[u8],
+    source_epoch: u64,
+    frame: &RecyclableDecodedFrame,
+    lossless: bool,
+) {
+    let Some(observer) = observer else {
+        return;
+    };
+    // Read-only extraction AFTER production decode accepted the complete header,
+    // atlas and scope. Never grants permission, changes pixels or generates ACKs.
+    assert!(bytes.len() >= 32);
+    let tile_log2 = bytes[16];
+    let side = 1u32 << tile_log2;
+    let (width, height) = frame.dimensions();
+    let row = ScrollDecodeObservation {
+        seq: frame.sequence(),
+        source_epoch,
+        geometry_epoch: frame.geometry_epoch(),
+        scroll_dy: (bytes[17] & 2 != 0)
+            .then(|| i16::from_be_bytes(bytes[40..42].try_into().unwrap())),
+        dirty_tiles: u32::from_be_bytes(bytes[20..24].try_into().unwrap()),
+        total_tiles: width.div_ceil(side) * height.div_ceil(side),
+        tile_log2,
+        lossless,
+    };
+    let mut rows = observer.lock().unwrap();
+    assert!(
+        rows.len() < 4096,
+        "scroll decode observation budget exceeded"
+    );
+    rows.push(row);
+}
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(15);
@@ -836,6 +901,14 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
             .unwrap()
             .push((first_frame.frame.sequence(), first_frame.purpose));
     }
+    #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+    observe_decoded_scroll(
+        &state.scroll_decode_observer,
+        initial_payload,
+        initial_epoch,
+        &first_frame.frame,
+        tile_decoder.last_frame_was_lossless(),
+    );
     first_frame.frame = first_frame.frame.with_source_epoch(initial_epoch);
     reader
         .get_ref()
@@ -3544,6 +3617,8 @@ impl ClientResize {
 
 struct ReceiveState {
     #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+    scroll_decode_observer: Option<ScrollDecodeObserver>,
+    #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
     lossless_observer: Option<LosslessFrameObserver>,
     #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
     purpose_observer: Option<FramePurposeObserver>,
@@ -3582,6 +3657,8 @@ impl ReceiveState {
         Self {
             #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
             lossless_observer: LOSSLESS_FRAME_OBSERVER.with(|slot| slot.borrow().clone()),
+            #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+            scroll_decode_observer: SCROLL_DECODE_OBSERVER.with(|slot| slot.borrow().clone()),
             #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
             purpose_observer: FRAME_PURPOSE_OBSERVER.with(|slot| slot.borrow().clone()),
             wayland_text: Mutex::new(ClientText::default()),
@@ -3944,6 +4021,14 @@ fn receive_frame_records(
                     ))
                     .into());
                 }
+                #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+                observe_decoded_scroll(
+                    &state.scroll_decode_observer,
+                    inner,
+                    epoch,
+                    &queued.frame,
+                    tile_decoder.last_frame_was_lossless(),
+                );
                 last_sequence = queued.frame.sequence();
                 last_video_at = Instant::now();
                 state.wayland_control.lock().unwrap().before_frame();
