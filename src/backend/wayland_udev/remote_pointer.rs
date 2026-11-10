@@ -43,7 +43,7 @@ struct Lease {
     source: Weak<ExtImageCaptureSourceV1>,
     resource: JwmRemotePointerLeaseV1,
     epoch: u32,
-    allow_scroll: bool,
+    scroll_axes: u32,
     authority: Arc<CaptureAuthority>,
     pointer: AuthorizedPointerSnapshot,
     keyboard: AuthorizedKeyboardSnapshot,
@@ -134,8 +134,11 @@ pub(super) fn mapping(authority: &CaptureAuthority) -> Option<Mapping> {
         Some(Mapping { geometry, region })
     })
 }
-fn action_allowed(kind: u32, allow_scroll: bool) -> bool {
-    matches!(kind, 0 | 1) || (allow_scroll && matches!(kind, 2 | 3))
+fn action_allowed(kind: u32, axes: u32) -> bool {
+    axes <= 3
+        && (matches!(kind, 0 | 1)
+            || (axes & 1 != 0 && matches!(kind, 2 | 3))
+            || (axes & 2 != 0 && matches!(kind, 4 | 5)))
 }
 pub(super) fn point_allowed(mapping: &Mapping, x: u32, y: u32) -> bool {
     let Some(region) = &mapping.region else {
@@ -154,7 +157,7 @@ pub(super) fn point_allowed(mapping: &Mapping, x: u32, y: u32) -> bool {
     inside
 }
 pub(crate) fn init(dh: &DisplayHandle) {
-    dh.create_global::<JwmWaylandState, JwmRemotePointerManagerV1, _>(2, ManagerData);
+    dh.create_global::<JwmWaylandState, JwmRemotePointerManagerV1, _>(3, ManagerData);
 }
 pub(crate) fn active(state: &JwmWaylandState) -> bool {
     state.remote_pointer.active.is_some()
@@ -280,13 +283,18 @@ impl Dispatch<JwmRemotePointerManagerV1, ManagerData> for JwmWaylandState {
     ) {
         // A v2 bind is not permission. The original request remains strictly
         // motion/click-only, even when issued on a version-two manager.
-        let (id, source, allow_scroll) = match request {
+        let (id, source, scroll_axes, axes_valid) = match request {
             jwm_remote_pointer_manager_v1::Request::CreateLease { id, source } => {
-                (id, source, false)
+                (id, source, 0, true)
             }
             jwm_remote_pointer_manager_v1::Request::CreateLeaseWithScroll { id, source } => {
-                (id, source, true)
+                (id, source, 1, true)
             }
+            jwm_remote_pointer_manager_v1::Request::CreateLeaseWithScrollAxes {
+                id,
+                source,
+                axes,
+            } => (id, source, axes, matches!(axes, 1..=3)),
             _ => return,
         };
         {
@@ -307,6 +315,7 @@ impl Dispatch<JwmRemotePointerManagerV1, ManagerData> for JwmWaylandState {
             let authority = authority.clone();
             if source.client().map(|c| c.id()) != Some(client.id())
                 || !authority.consume_pointer_attempt()
+                || !axes_valid
                 || active(state)
                 || super::remote_keyboard::active(state)
                 || super::remote_control::active(state)
@@ -343,7 +352,7 @@ impl Dispatch<JwmRemotePointerManagerV1, ManagerData> for JwmWaylandState {
                 source: source.downgrade(),
                 resource: resource.clone(),
                 epoch,
-                allow_scroll,
+                scroll_axes,
                 authority,
                 pointer,
                 keyboard,
@@ -418,7 +427,7 @@ impl Dispatch<JwmRemotePointerLeaseV1, LeaseData> for JwmWaylandState {
             if epoch != lease.epoch
                 || sequence != lease.sequence.saturating_add(1)
                 || sequence > 60000
-                || !action_allowed(kind, lease.allow_scroll)
+                || !action_allowed(kind, lease.scroll_axes)
                 || x >= lease.authority.width
                 || y >= lease.authority.height
                 || !point_allowed(&lease.mapping, x, y)
@@ -456,11 +465,16 @@ impl Dispatch<JwmRemotePointerLeaseV1, LeaseData> for JwmWaylandState {
             // installed as a compositor implicit grab or popup key.
             if !state.seat.get_pointer().is_some_and(|p| {
                 if kind >= 2 {
-                    p.send_authorized_scroll(
+                    p.send_authorized_scroll_axis(
                         &lease.pointer,
                         f64::from(x),
                         f64::from(y),
-                        if kind == 2 { -1 } else { 1 },
+                        if kind >= 4 {
+                            smithay::backend::input::Axis::Horizontal
+                        } else {
+                            smithay::backend::input::Axis::Vertical
+                        },
+                        if matches!(kind, 2 | 4) { -1 } else { 1 },
                         InputTime::now(),
                     )
                 } else {
@@ -526,14 +540,23 @@ pub(crate) fn source_destroyed(state: &mut JwmWaylandState, source: &ExtImageCap
 mod coordinate_tests {
     use super::*;
     #[test]
-    fn scroll_requires_explicit_grant_and_only_two_discrete_kinds_exist() {
-        for allow in [false, true] {
-            assert!(action_allowed(0, allow));
-            assert!(action_allowed(1, allow));
-            assert_eq!(action_allowed(2, allow), allow);
-            assert_eq!(action_allowed(3, allow), allow);
-            for kind in [4, 5, 120, u32::MAX] {
-                assert!(!action_allowed(kind, allow));
+    fn scroll_axes_require_independent_explicit_grants() {
+        for axes in 0..=3 {
+            assert!(action_allowed(0, axes));
+            assert!(action_allowed(1, axes));
+            for kind in [2, 3] {
+                assert_eq!(action_allowed(kind, axes), axes & 1 != 0);
+            }
+            for kind in [4, 5] {
+                assert_eq!(action_allowed(kind, axes), axes & 2 != 0);
+            }
+            for kind in [6, 120, u32::MAX] {
+                assert!(!action_allowed(kind, axes));
+            }
+        }
+        for axes in [4, 7, u32::MAX] {
+            for kind in 0..6 {
+                assert!(!action_allowed(kind, axes));
             }
         }
     }

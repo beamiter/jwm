@@ -74,6 +74,8 @@ enum Case {
     ReadOnly,
     Scroll,
     ScrollNotRequested,
+    Horizontal,
+    HorizontalNotRequested,
 }
 struct ShutdownGuard(Arc<AtomicBool>);
 impl Drop for ShutdownGuard {
@@ -107,6 +109,7 @@ fn options() -> HostOptions {
         allow_wayland_pointer: true,
         allow_wayland_control: false,
         allow_wayland_scroll: false,
+        allow_wayland_horizontal_scroll: false,
         scroll_copy: false,
         allow_clipboard: false,
         clipboard_mode: Default::default(),
@@ -218,7 +221,8 @@ fn client_options(
         wayland_keyboard: false,
         wayland_pointer: !matches!(case, Case::ReadOnly),
         wayland_control: false,
-        wayland_scroll: matches!(case, Case::Scroll),
+        wayland_scroll: matches!(case, Case::Scroll | Case::HorizontalNotRequested),
+        wayland_horizontal_scroll: matches!(case, Case::Horizontal),
         resize_source: None,
         follow_source_size: false,
         // A small real viewport keeps the controlled short-hold regression
@@ -307,8 +311,18 @@ fn drive(
     );
     let ready = driver.wait_ready_after(window, Some(ready))?;
     note(trace, format!("driver post-motion Ready seq={ready}"));
-    if matches!(case, Case::ScrollNotRequested) {
-        driver.wheel_notches(true, 3)?;
+    let wheel = |negative, count| {
+        if matches!(case, Case::Horizontal | Case::HorizontalNotRequested) {
+            driver.horizontal_notches(negative, count)
+        } else {
+            driver.wheel_notches(negative, count)
+        }
+    };
+    if matches!(
+        case,
+        Case::ScrollNotRequested | Case::HorizontalNotRequested
+    ) {
+        wheel(true, 3)?;
         driver.wait_scroll_observed(window, 3)?;
         let observed = driver
             .pointer_observation(window)?
@@ -320,14 +334,14 @@ fn drive(
         driver.close(window)?;
         return Ok(());
     }
-    if matches!(case, Case::Scroll) {
+    if matches!(case, Case::Scroll | Case::Horizontal) {
         // Hold only new capture fulfillment, never forge Ready or relax native
         // freshness. This makes the Waiting burst a deterministic negative case.
         capture_hold.store(true, Ordering::Release);
-        driver.wheel_notches(true, 1)?;
+        wheel(true, 1)?;
         steps.recv_timeout(Duration::from_secs(5))?;
         driver.wait_title(window, "Pointer: Waiting")?;
-        driver.wheel_notches(false, 3)?;
+        wheel(false, 3)?;
         driver.wait_scroll_observed(window, 4)?;
         let observed = driver
             .pointer_observation(window)?
@@ -345,7 +359,7 @@ fn drive(
             "Waiting wheel burst must not replay when Ready returns"
         );
         // A new physical notch, not a queued old one, consumes the new ticket.
-        driver.wheel_notches(false, 1)?;
+        wheel(false, 1)?;
         steps.recv_timeout(Duration::from_secs(5))?;
         driver.wait_red(window)?;
         driver.wait_ready_after(window, Some(green_ready))?;
@@ -474,7 +488,11 @@ fn drive(
             driver.wait_title(window, "Pointer: Revoked")?;
         }
         Case::BlackBar => {}
-        Case::ReadOnly | Case::Scroll | Case::ScrollNotRequested => unreachable!(),
+        Case::ReadOnly
+        | Case::Scroll
+        | Case::ScrollNotRequested
+        | Case::Horizontal
+        | Case::HorizontalNotRequested => unreachable!(),
     }
     std::thread::sleep(Duration::from_millis(100));
     driver.close(window)?;
@@ -509,6 +527,8 @@ fn actual_viewer_tcp_pointer_presented_scope_and_revocation() {
         Case::ReadOnly,
         Case::Scroll,
         Case::ScrollNotRequested,
+        Case::Horizontal,
+        Case::HorizontalNotRequested,
     ] {
         let mut server = Server::new();
         server.state.image_capture_pending =
@@ -576,8 +596,12 @@ fn actual_viewer_tcp_pointer_presented_scope_and_revocation() {
                     let peer = authenticate_peer(stream, &TEST_KEY)?;
                     note(&host_trace, "host authenticated");
                     let mut opts = options();
-                    opts.allow_wayland_scroll =
-                        matches!(case, Case::Scroll | Case::ScrollNotRequested);
+                    opts.allow_wayland_scroll = matches!(
+                        case,
+                        Case::Scroll | Case::ScrollNotRequested | Case::HorizontalNotRequested
+                    );
+                    opts.allow_wayland_horizontal_scroll =
+                        matches!(case, Case::Horizontal | Case::HorizontalNotRequested);
                     serve_authenticated(
                         peer,
                         &opts,
@@ -691,7 +715,7 @@ fn actual_viewer_tcp_pointer_presented_scope_and_revocation() {
                     notified = 1;
                 }
                 let scrolls = events.iter().filter(|(op, _)| *op == 4).count();
-                if matches!(case, Case::Scroll) && scrolls > scroll_notified {
+                if matches!(case, Case::Scroll | Case::Horizontal) && scrolls > scroll_notified {
                     assert_eq!(scrolls, scroll_notified + 1, "wheel notches must not batch");
                     assert!(
                         scrolls <= 2,
@@ -784,7 +808,11 @@ fn actual_viewer_tcp_pointer_presented_scope_and_revocation() {
             .collect();
         let clicks = if matches!(
             case,
-            Case::ReadOnly | Case::Scroll | Case::ScrollNotRequested
+            Case::ReadOnly
+                | Case::Scroll
+                | Case::ScrollNotRequested
+                | Case::Horizontal
+                | Case::HorizontalNotRequested
         ) {
             0
         } else if matches!(case, Case::Positive | Case::NewFrameCancel) {
@@ -802,11 +830,11 @@ fn actual_viewer_tcp_pointer_presented_scope_and_revocation() {
             .filter(|(op, _)| *op == 8)
             .map(|(_, args)| (args[0], args[1] as i32))
             .collect();
-        if matches!(case, Case::Scroll) {
+        if matches!(case, Case::Scroll | Case::Horizontal) {
             assert_eq!(axes.len(), 2);
-            assert_eq!((axes[0].0, axes[1].0), (0, 0));
-            assert!(axes[0].1 < 0 && axes[1].1 > 0);
-            assert_eq!(discrete, [(0, -1), (0, 1)]);
+            let axis = u32::from(matches!(case, Case::Horizontal));
+            assert_eq!(axes, [(axis, -10 * 256), (axis, 10 * 256)]);
+            assert_eq!(discrete, [(axis, -1), (axis, 1)]);
             assert_eq!(scroll_notified, 2);
         } else {
             assert!(axes.is_empty(), "no scroll grant/action in case={case:?}");

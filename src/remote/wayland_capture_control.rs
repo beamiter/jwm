@@ -19,9 +19,14 @@ pub(super) struct NativeControl {
     expected: Option<u32>,
     deadline: Option<Instant>,
     scroll_enabled: bool,
+    horizontal_enabled: bool,
 }
 impl WaylandCapture {
-    pub(in crate::remote) fn enable_control(&mut self, scroll_enabled: bool) -> RemoteResult<()> {
+    pub(in crate::remote) fn enable_control(
+        &mut self,
+        scroll_enabled: bool,
+        horizontal_enabled: bool,
+    ) -> RemoteResult<()> {
         if self.state.resize_follow
             || self.state.frame_serial != 0
             || self.state.control.enabled
@@ -35,6 +40,12 @@ impl WaylandCapture {
         if scroll_enabled && self.state.control.manager.as_ref().unwrap().version() < 2 {
             return Err(invalid("control scroll requires native manager version 2").into());
         }
+        if horizontal_enabled && self.state.control.manager.as_ref().unwrap().version() < 3 {
+            return Err(
+                invalid("control horizontal scroll requires native manager version 3").into(),
+            );
+        }
+        self.state.control.horizontal_enabled = horizontal_enabled;
         self.state.control.scroll_enabled = scroll_enabled;
         self.state.control.enabled = true;
         Ok(())
@@ -112,7 +123,14 @@ impl WaylandCapture {
         self.state.control.requested = true;
         let deadline = (Instant::now() + PROTOCOL_TIMEOUT).min(self.arm_deadline.unwrap());
         let manager = self.state.control.manager.as_ref().unwrap();
-        let lease = if self.state.control.scroll_enabled {
+        let lease = if self.state.control.horizontal_enabled {
+            manager.create_lease_with_scroll_axes(
+                self.source.as_ref().unwrap(),
+                2 | u32::from(self.state.control.scroll_enabled),
+                &self.queue.handle(),
+                (),
+            )
+        } else if self.state.control.scroll_enabled {
             manager.create_lease_with_scroll(
                 self.source.as_ref().unwrap(),
                 &self.queue.handle(),
@@ -200,13 +218,22 @@ impl WaylandCapture {
             ControlActionKind::Motion { x, y }
             | ControlActionKind::ClickLeft { x, y }
             | ControlActionKind::ScrollUp { x, y }
-            | ControlActionKind::ScrollDown { x, y } => {
+            | ControlActionKind::ScrollDown { x, y }
+            | ControlActionKind::ScrollLeft { x, y }
+            | ControlActionKind::ScrollRight { x, y } => {
                 if matches!(
                     action.kind,
                     ControlActionKind::ScrollUp { .. } | ControlActionKind::ScrollDown { .. }
                 ) && !self.state.control.scroll_enabled
                 {
                     return Err(invalid("control scroll not authorized").into());
+                }
+                if matches!(
+                    action.kind,
+                    ControlActionKind::ScrollLeft { .. } | ControlActionKind::ScrollRight { .. }
+                ) && !self.state.control.horizontal_enabled
+                {
+                    return Err(invalid("control horizontal scroll not authorized").into());
                 }
                 let (actual, at) = self
                     .control_frame()
@@ -225,6 +252,8 @@ impl WaylandCapture {
                         ControlActionKind::ClickLeft { .. } => 1,
                         ControlActionKind::ScrollUp { .. } => 2,
                         ControlActionKind::ScrollDown { .. } => 3,
+                        ControlActionKind::ScrollLeft { .. } => 4,
+                        ControlActionKind::ScrollRight { .. } => 5,
                         _ => unreachable!(),
                     },
                     u32::from(x),

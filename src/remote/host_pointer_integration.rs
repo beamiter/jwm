@@ -61,6 +61,7 @@ fn options() -> HostOptions {
         allow_wayland_pointer: true,
         allow_wayland_control: false,
         allow_wayland_scroll: false,
+        allow_wayland_horizontal_scroll: false,
         scroll_copy: false,
         allow_clipboard: false,
         clipboard_mode: Default::default(),

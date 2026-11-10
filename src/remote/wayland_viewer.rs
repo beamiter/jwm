@@ -556,6 +556,7 @@ impl WaylandViewer {
     pub(super) fn enable_wayland_control(
         &mut self,
         scroll_enabled: bool,
+        horizontal_enabled: bool,
     ) -> RemoteResult<[u8; 32]> {
         if self.state.keyboard.requested || self.state.pointer.requested || self.state.control_mode
         {
@@ -574,6 +575,7 @@ impl WaylandViewer {
         }
         self.state.control_mode = true;
         self.state.pointer.scroll_enabled = scroll_enabled;
+        self.state.pointer.horizontal_enabled = horizontal_enabled;
         self.state.keyboard.requested = true;
         self.state.pointer.requested = true;
         self.state.keyboard.surface = Some(self.surface.clone());
@@ -720,7 +722,11 @@ impl WaylandViewer {
             .keyboard
             .revoke("Wayland keyboard permanently disabled");
     }
-    pub(super) fn enable_wayland_pointer(&mut self, scroll_enabled: bool) -> RemoteResult<()> {
+    pub(super) fn enable_wayland_pointer(
+        &mut self,
+        scroll_enabled: bool,
+        horizontal_enabled: bool,
+    ) -> RemoteResult<()> {
         if self.state.pointer.requested || self.state.keyboard.requested {
             return Err("Wayland pointer cannot be re-enabled or combined with keyboard".into());
         }
@@ -735,6 +741,7 @@ impl WaylandViewer {
         }
         self.state.pointer.requested = true;
         self.state.pointer.scroll_enabled = scroll_enabled;
+        self.state.pointer.horizontal_enabled = horizontal_enabled;
         self.state.pointer.surface = Some(self.surface.clone());
         self.toplevel.set_app_id("jwm-remote-pointer".into());
         self.state.pointer.seat = Some(self.registry.bind(
@@ -762,7 +769,7 @@ impl WaylandViewer {
     }
     pub(super) fn wayland_pointer_ready(&mut self, sequence: Option<u64>) -> RemoteResult<()> {
         if !self.state.pointer.requested
-            || !self.state.pointer.scroll_enabled
+            || !(self.state.pointer.scroll_enabled || self.state.pointer.horizontal_enabled)
             || self.state.pointer.revoked.is_some()
             || self.state.pointer.ready() == sequence
         {
@@ -778,7 +785,9 @@ impl WaylandViewer {
                     event,
                     ViewerEvent::WaylandPointer {
                         kind: super::x11_viewer::WaylandPointerEventKind::ScrollUp
-                            | super::x11_viewer::WaylandPointerEventKind::ScrollDown,
+                            | super::x11_viewer::WaylandPointerEventKind::ScrollDown
+                            | super::x11_viewer::WaylandPointerEventKind::ScrollLeft
+                            | super::x11_viewer::WaylandPointerEventKind::ScrollRight,
                         ..
                     }
                 )
@@ -821,7 +830,7 @@ impl WaylandViewer {
     /// A host Ready is not local scroll readiness until the event-history fence
     /// completed for this exact currently presented mapping.
     pub(super) fn local_scroll_ready(&self, sequence: u64) -> bool {
-        !self.state.pointer.scroll_enabled
+        !(self.state.pointer.scroll_enabled || self.state.pointer.horizontal_enabled)
             || (self.state.pointer.ready() == Some(sequence)
                 && self
                     .state
@@ -835,7 +844,7 @@ impl WaylandViewer {
             "Pointer: Revoked"
         } else if !self.state.pointer.locally_ready() {
             "Pointer: Waiting for local focus/presentation"
-        } else if self.state.pointer.scroll_enabled
+        } else if (self.state.pointer.scroll_enabled || self.state.pointer.horizontal_enabled)
             && !self
                 .state
                 .pointer

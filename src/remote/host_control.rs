@@ -162,7 +162,9 @@ pub(super) fn process(
                         ControlActionKind::Motion { x, y }
                         | ControlActionKind::ClickLeft { x, y }
                         | ControlActionKind::ScrollUp { x, y }
-                        | ControlActionKind::ScrollDown { x, y } => {
+                        | ControlActionKind::ScrollDown { x, y }
+                        | ControlActionKind::ScrollLeft { x, y }
+                        | ControlActionKind::ScrollRight { x, y } => {
                             if matches!(
                                 action.kind,
                                 ControlActionKind::ScrollUp { .. }
@@ -170,6 +172,17 @@ pub(super) fn process(
                             ) && !sources.scroll_enabled.load(Ordering::Acquire)
                             {
                                 return Err(invalid_data("control scroll not authorized").into());
+                            }
+                            if matches!(
+                                action.kind,
+                                ControlActionKind::ScrollLeft { .. }
+                                    | ControlActionKind::ScrollRight { .. }
+                            ) && !sources.horizontal_scroll_enabled.load(Ordering::Acquire)
+                            {
+                                return Err(invalid_data(
+                                    "control horizontal scroll not authorized",
+                                )
+                                .into());
                             }
                             if !state.held.is_empty() || x >= size.0 || y >= size.1 {
                                 return Err(invalid_data(

@@ -173,3 +173,14 @@ KMS feedback belongs to the exact queued submission and is discarded on an
 invalid output/VT generation, uncertain completion time, queue failure, or
 unsubmitted batch drop. Pure batch tests and controlled protocol tests do not
 constitute a real DRM pageflip acceptance run.
+
+### Horizontal wheel opt-in
+
+Use `--wayland-horizontal-scroll` together with `--wayland-pointer` or
+`--wayland-control`; the source must separately enable
+`--allow-wayland-horizontal-scroll`. Existing `--wayland-scroll` remains
+vertical-only. Both network peers require v23, and the source compositor needs
+native pointer/control protocol version 3. See the [source-side permission and
+single-axis contract](remote-wayland-source.md#independently-authorized-horizontal-wheel-v23).
+This does not enable smooth scrolling, mixed-axis gestures, modifier-wheel,
+dragging or input replay while waiting for fresh pixels.

@@ -4,6 +4,7 @@ use crate::remote::wayland_control_wire::*;
 #[derive(Default)]
 pub(super) struct ClientControl {
     pub(super) scroll_enabled: bool,
+    pub(super) horizontal_enabled: bool,
     pub(super) digest: Option<[u8; 32]>,
     request: Option<(ControlRequest, Instant)>,
     pub(super) epoch: Option<u64>,
@@ -222,8 +223,15 @@ impl ClientControl {
                 if !self.held.is_empty() {
                     return Err(invalid_data("control pointer conflicts with held keys").into());
                 }
-                if matches!(pk, P::ScrollUp | P::ScrollDown)
-                    && (!self.scroll_enabled || self.left_down || self.click.is_some())
+                if matches!(
+                    pk,
+                    P::ScrollUp | P::ScrollDown | P::ScrollLeft | P::ScrollRight
+                ) && (!(if matches!(pk, P::ScrollLeft | P::ScrollRight) {
+                    self.horizontal_enabled
+                } else {
+                    self.scroll_enabled
+                }) || self.left_down
+                    || self.click.is_some())
                 {
                     return Err(invalid_data("control does not authorize scroll").into());
                 }
@@ -267,6 +275,8 @@ impl ClientControl {
                     P::Motion => kind = ControlActionKind::Motion { x, y },
                     P::ScrollUp => kind = ControlActionKind::ScrollUp { x, y },
                     P::ScrollDown => kind = ControlActionKind::ScrollDown { x, y },
+                    P::ScrollLeft => kind = ControlActionKind::ScrollLeft { x, y },
+                    P::ScrollRight => kind = ControlActionKind::ScrollRight { x, y },
                 }
                 self.ready = None;
                 self.click = None;
@@ -461,6 +471,28 @@ mod tests {
         c.revoke();
         assert!(c.ready_sequence().is_none());
         assert!(!c.needs_request());
+    }
+    #[test]
+    fn horizontal_control_requires_separate_permission_and_consumes_ready() {
+        use super::super::super::x11_viewer::WaylandPointerEventKind as P;
+        for direction in [P::ScrollLeft, P::ScrollRight] {
+            let mut c = granted();
+            ready(&mut c, 1);
+            c.scroll_enabled = true;
+            let mut event = motion(1);
+            if let ViewerEvent::WaylandPointer { kind, .. } = &mut event {
+                *kind = direction;
+            }
+            assert!(c.event(&event, Instant::now()).is_err());
+            c.scroll_enabled = false;
+            c.horizontal_enabled = true;
+            let action = c.event(&event, Instant::now()).unwrap().unwrap();
+            assert!(matches!(
+                action.kind,
+                ControlActionKind::ScrollLeft { .. } | ControlActionKind::ScrollRight { .. }
+            ));
+            assert!(c.event(&event, Instant::now()).unwrap().is_none());
+        }
     }
     #[test]
     fn scroll_needs_consent_and_each_notch_consumes_a_fresh_ticket() {

@@ -51,7 +51,7 @@ impl PointerPeer {
                     loop {
                         match input.recv_timeout(Duration::from_secs(12))? {
                             Request::Enable(scroll) => {
-                                v.enable_wayland_pointer(scroll)?;
+                                v.enable_wayland_pointer(scroll, false)?;
                                 output.send(Answer::Done)?;
                             }
                             Request::Draw(seq, w, h) => {

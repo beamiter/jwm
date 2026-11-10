@@ -106,10 +106,18 @@ pub enum PointerActionKind {
     ClickLeft = 1,
     ScrollUp = 2,
     ScrollDown = 3,
+    ScrollLeft = 4,
+    ScrollRight = 5,
 }
 impl PointerActionKind {
+    pub(super) fn is_horizontal(self) -> bool {
+        matches!(self, Self::ScrollLeft | Self::ScrollRight)
+    }
     pub(super) fn is_scroll(self) -> bool {
-        matches!(self, Self::ScrollUp | Self::ScrollDown)
+        matches!(
+            self,
+            Self::ScrollUp | Self::ScrollDown | Self::ScrollLeft | Self::ScrollRight
+        )
     }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -147,6 +155,8 @@ impl PointerAction {
             1 => PointerActionKind::ClickLeft,
             2 => PointerActionKind::ScrollUp,
             3 => PointerActionKind::ScrollDown,
+            4 => PointerActionKind::ScrollLeft,
+            5 => PointerActionKind::ScrollRight,
             _ => return Err(invalid().into()),
         };
         Ok(Self {
@@ -205,6 +215,8 @@ mod tests {
         for (byte, kind) in [
             (2, PointerActionKind::ScrollUp),
             (3, PointerActionKind::ScrollDown),
+            (4, PointerActionKind::ScrollLeft),
+            (5, PointerActionKind::ScrollRight),
         ] {
             b[40] = byte;
             let parsed = PointerAction::decode(&b).unwrap();
@@ -212,7 +224,7 @@ mod tests {
             assert!(parsed.kind.is_scroll());
             assert_eq!(parsed.encode().unwrap(), b);
         }
-        b[40] = 4;
+        b[40] = 6;
         assert!(PointerAction::decode(&b).is_err());
         b[40] = 1;
         b[8..16].fill(0);

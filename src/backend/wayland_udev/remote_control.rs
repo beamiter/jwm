@@ -43,7 +43,7 @@ pub(crate) struct RemoteControlState {
 struct Lease {
     resource: JwmRemoteControlLeaseV1,
     epoch: u32,
-    allow_scroll: bool,
+    scroll_axes: u32,
     authority: Arc<CaptureAuthority>,
     snapshot: AuthorizedKeyboardSnapshot,
     pointer: AuthorizedPointerSnapshot,
@@ -68,7 +68,7 @@ pub struct LeaseData {
     epoch: u32,
 }
 pub(crate) fn init(dh: &DisplayHandle) {
-    dh.create_global::<JwmWaylandState, JwmRemoteControlManagerV1, _>(2, ManagerData);
+    dh.create_global::<JwmWaylandState, JwmRemoteControlManagerV1, _>(3, ManagerData);
 }
 fn current(state: &JwmWaylandState, lease: &Lease) -> bool {
     lease.resource.is_alive()
@@ -170,13 +170,18 @@ impl Dispatch<JwmRemoteControlManagerV1, ManagerData> for JwmWaylandState {
         init: &mut DataInit<'_, Self>,
     ) {
         // Interface version is not consent: only the additional request grants wheel.
-        let (id, source, allow_scroll) = match request {
+        let (id, source, scroll_axes, axes_valid) = match request {
             jwm_remote_control_manager_v1::Request::CreateLease { id, source } => {
-                (id, source, false)
+                (id, source, 0, true)
             }
             jwm_remote_control_manager_v1::Request::CreateLeaseWithScroll { id, source } => {
-                (id, source, true)
+                (id, source, 1, true)
             }
+            jwm_remote_control_manager_v1::Request::CreateLeaseWithScrollAxes {
+                id,
+                source,
+                axes,
+            } => (id, source, axes, matches!(axes, 1..=3)),
             _ => return,
         };
         {
@@ -199,6 +204,7 @@ impl Dispatch<JwmRemoteControlManagerV1, ManagerData> for JwmWaylandState {
             };
             if source.client().as_ref().map(Client::id) != Some(client.id())
                 || !authority.consume_control_attempt()
+                || !axes_valid
                 || state.remote_control.active.is_some()
                 || super::remote_pointer::active(state)
                 || super::remote_keyboard::active(state)
@@ -261,7 +267,7 @@ impl Dispatch<JwmRemoteControlManagerV1, ManagerData> for JwmWaylandState {
             state.remote_control.active = Some(Lease {
                 resource: resource.clone(),
                 epoch,
-                allow_scroll,
+                scroll_axes,
                 authority,
                 snapshot,
                 pointer,
@@ -429,7 +435,7 @@ impl Dispatch<JwmRemoteControlLeaseV1, LeaseData> for JwmWaylandState {
                     || !lease.held.is_empty()
                     || epoch != lease.epoch
                     || !valid_sequence(lease.sequence, sequence)
-                    || !action_allowed(kind, lease.allow_scroll)
+                    || !action_allowed(kind, lease.scroll_axes)
                     || x >= lease.authority.width
                     || y >= lease.authority.height
                     || !point_allowed(&lease.mapping, x, y)
@@ -470,11 +476,16 @@ impl Dispatch<JwmRemoteControlLeaseV1, LeaseData> for JwmWaylandState {
                 lease.pointer_tokens -= 1.0;
                 if !state.seat.get_pointer().is_some_and(|p| {
                     if kind >= 2 {
-                        p.send_authorized_scroll(
+                        p.send_authorized_scroll_axis(
                             &lease.pointer,
                             f64::from(x),
                             f64::from(y),
-                            if kind == 2 { -1 } else { 1 },
+                            if kind >= 4 {
+                                smithay::backend::input::Axis::Horizontal
+                            } else {
+                                smithay::backend::input::Axis::Vertical
+                            },
+                            if matches!(kind, 2 | 4) { -1 } else { 1 },
                             InputTime::now(),
                         )
                     } else {
@@ -518,8 +529,11 @@ impl Dispatch<JwmRemoteControlLeaseV1, LeaseData> for JwmWaylandState {
     }
 }
 
-fn action_allowed(kind: u32, allow_scroll: bool) -> bool {
-    matches!(kind, 0 | 1) || (allow_scroll && matches!(kind, 2 | 3))
+fn action_allowed(kind: u32, axes: u32) -> bool {
+    axes <= 3
+        && (matches!(kind, 0 | 1)
+            || (axes & 1 != 0 && matches!(kind, 2 | 3))
+            || (axes & 2 != 0 && matches!(kind, 4 | 5)))
 }
 fn valid_sequence(previous: u32, next: u32) -> bool {
     previous.checked_add(1) == Some(next) && next <= 60000
@@ -556,13 +570,22 @@ mod primitive_tests {
     use super::*;
     #[test]
     fn wheel_requires_explicit_grant_and_unknown_actions_always_fail() {
-        for allowed in [false, true] {
-            assert!(action_allowed(0, allowed));
-            assert!(action_allowed(1, allowed));
-            assert_eq!(action_allowed(2, allowed), allowed);
-            assert_eq!(action_allowed(3, allowed), allowed);
-            for kind in [4, 5, 120, u32::MAX] {
-                assert!(!action_allowed(kind, allowed));
+        for axes in 0..=3 {
+            assert!(action_allowed(0, axes));
+            assert!(action_allowed(1, axes));
+            for kind in [2, 3] {
+                assert_eq!(action_allowed(kind, axes), axes & 1 != 0);
+            }
+            for kind in [4, 5] {
+                assert_eq!(action_allowed(kind, axes), axes & 2 != 0);
+            }
+            for kind in [6, 120, u32::MAX] {
+                assert!(!action_allowed(kind, axes));
+            }
+        }
+        for axes in [4, 7, u32::MAX] {
+            for kind in 0..6 {
+                assert!(!action_allowed(kind, axes));
             }
         }
     }

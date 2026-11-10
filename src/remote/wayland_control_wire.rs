@@ -115,6 +115,8 @@ pub enum ControlActionKind {
     ClickLeft { x: u16, y: u16 },
     ScrollUp { x: u16, y: u16 },
     ScrollDown { x: u16, y: u16 },
+    ScrollLeft { x: u16, y: u16 },
+    ScrollRight { x: u16, y: u16 },
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ControlAction {
@@ -143,12 +145,16 @@ impl ControlAction {
             ControlActionKind::Motion { x, y }
             | ControlActionKind::ClickLeft { x, y }
             | ControlActionKind::ScrollUp { x, y }
-            | ControlActionKind::ScrollDown { x, y } => {
+            | ControlActionKind::ScrollDown { x, y }
+            | ControlActionKind::ScrollLeft { x, y }
+            | ControlActionKind::ScrollRight { x, y } => {
                 b[40] = match self.kind {
                     ControlActionKind::Motion { .. } => 1,
                     ControlActionKind::ClickLeft { .. } => 2,
                     ControlActionKind::ScrollUp { .. } => 3,
                     ControlActionKind::ScrollDown { .. } => 4,
+                    ControlActionKind::ScrollLeft { .. } => 5,
+                    ControlActionKind::ScrollRight { .. } => 6,
                     _ => unreachable!(),
                 };
                 b[41..43].copy_from_slice(&x.to_be_bytes());
@@ -166,7 +172,7 @@ impl ControlAction {
                 code: u16::from_be_bytes([b[41], b[42]]),
                 pressed: b[43] != 0,
             },
-            1..=4 if b[45..].iter().all(|v| *v == 0) => {
+            1..=6 if b[45..].iter().all(|v| *v == 0) => {
                 let x = u16::from_be_bytes([b[41], b[42]]);
                 let y = u16::from_be_bytes([b[43], b[44]]);
                 match b[40] {
@@ -174,6 +180,8 @@ impl ControlAction {
                     2 => ControlActionKind::ClickLeft { x, y },
                     3 => ControlActionKind::ScrollUp { x, y },
                     4 => ControlActionKind::ScrollDown { x, y },
+                    5 => ControlActionKind::ScrollLeft { x, y },
+                    6 => ControlActionKind::ScrollRight { x, y },
                     _ => unreachable!(),
                 }
             }
@@ -239,6 +247,8 @@ mod tests {
             ControlActionKind::ClickLeft { x: 20, y: 30 },
             ControlActionKind::ScrollUp { x: 20, y: 30 },
             ControlActionKind::ScrollDown { x: 20, y: 30 },
+            ControlActionKind::ScrollLeft { x: 20, y: 30 },
+            ControlActionKind::ScrollRight { x: 20, y: 30 },
         ] {
             let a = ControlAction {
                 scope,
@@ -253,7 +263,7 @@ mod tests {
             bad[47] = 1;
             assert!(ControlAction::decode(&bad).is_err());
             bad = b;
-            bad[40] = 5;
+            bad[40] = 7;
             assert!(ControlAction::decode(&bad).is_err());
             bad = b;
             bad[32..40].fill(0);

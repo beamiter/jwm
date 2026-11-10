@@ -808,6 +808,7 @@ fn actual_wayland_viewer_tcp_ack_waits_for_presented_not_release() {
             wayland_pointer: false,
             wayland_control: false,
             wayland_scroll: false,
+            wayland_horizontal_scroll: false,
             resize_source: None,
             follow_source_size: false,
             window_size: None,

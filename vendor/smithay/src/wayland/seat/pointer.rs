@@ -163,6 +163,25 @@ where
         step: i32,
         time: InputTime,
     ) -> bool {
+        self.send_authorized_scroll_axis(snapshot, x, y, Axis::Vertical, step, time)
+    }
+
+    /// Deliver one detent on one explicitly authorized axis to the exact
+    /// receiver snapshot. This never changes the seat or synthesizes an
+    /// implicit grab. Axis authorization remains the caller's responsibility.
+    pub fn send_authorized_scroll_axis(
+        &self,
+        snapshot: &AuthorizedPointerSnapshot,
+        x: f64,
+        y: f64,
+        axis: Axis,
+        step: i32,
+        time: InputTime,
+    ) -> bool {
+        let axis = match axis {
+            Axis::Vertical => WlAxis::VerticalScroll,
+            Axis::Horizontal => WlAxis::HorizontalScroll,
+        };
         if !matches!(step, -1 | 1)
             || !x.is_finite()
             || !y.is_finite()
@@ -180,11 +199,11 @@ where
                     pointer.axis_source(WlAxisSource::Wheel);
                 }
                 if pointer.version() >= 8 {
-                    pointer.axis_value120(WlAxis::VerticalScroll, step * 120);
+                    pointer.axis_value120(axis, step * 120);
                 } else if pointer.version() >= 5 {
-                    pointer.axis_discrete(WlAxis::VerticalScroll, step);
+                    pointer.axis_discrete(axis, step);
                 }
-                pointer.axis(time.millis(), WlAxis::VerticalScroll, f64::from(step) * 10.0);
+                pointer.axis(time.millis(), axis, f64::from(step) * 10.0);
                 if pointer.version() >= 5 {
                     pointer.frame();
                 }

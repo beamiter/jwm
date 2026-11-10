@@ -59,6 +59,8 @@ struct ScrollFrame {
     active: bool,
     source: Option<wl_pointer::AxisSource>,
     axis: Option<f64>,
+    axis_kind: Option<wl_pointer::Axis>,
+    discrete_kind: Option<wl_pointer::Axis>,
     discrete: Option<i32>,
     mapping: Option<Mapping>,
     confirmed: Option<u64>,
@@ -67,6 +69,7 @@ struct ScrollFrame {
 #[derive(Default)]
 pub(super) struct Pointer {
     pub(super) scroll_enabled: bool,
+    pub(super) horizontal_enabled: bool,
     ready: Option<u64>,
     frame_axis: bool,
     #[cfg(test)]
@@ -137,7 +140,7 @@ impl Pointer {
             !matches!(
                 event,
                 ViewerEvent::WaylandPointer {
-                    kind: Kind::ScrollUp | Kind::ScrollDown,
+                    kind: Kind::ScrollUp | Kind::ScrollDown | Kind::ScrollLeft | Kind::ScrollRight,
                     ..
                 }
             )
@@ -316,7 +319,8 @@ impl Pointer {
         }
     }
     fn begin_axis(&mut self) -> bool {
-        if !self.scroll_enabled || self.left_down || self.frame_button {
+        if !(self.scroll_enabled || self.horizontal_enabled) || self.left_down || self.frame_button
+        {
             self.revoke("Wayland scroll lacks permission or conflicts with held button");
             return false;
         }
@@ -355,32 +359,56 @@ impl Pointer {
             self.revoke("duplicate Wayland wheel source");
         }
     }
-    fn axis_value(&mut self, axis: WEnum<wl_pointer::Axis>, value: f64) {
-        if axis != WEnum::Value(wl_pointer::Axis::VerticalScroll)
-            || !value.is_finite()
-            || value == 0.0
-        {
-            self.revoke("invalid or horizontal Wayland wheel axis");
-            return;
-        }
-        if !self.begin_axis() {
-            return;
-        }
-        if self.scroll.axis.replace(value).is_some() {
-            self.revoke("duplicate Wayland wheel axis");
+    fn permitted_axis(&self, axis: WEnum<wl_pointer::Axis>) -> Option<wl_pointer::Axis> {
+        match axis {
+            WEnum::Value(wl_pointer::Axis::VerticalScroll) if self.scroll_enabled => {
+                Some(wl_pointer::Axis::VerticalScroll)
+            }
+            WEnum::Value(wl_pointer::Axis::HorizontalScroll) if self.horizontal_enabled => {
+                Some(wl_pointer::Axis::HorizontalScroll)
+            }
+            _ => None,
         }
     }
-    fn axis_discrete(&mut self, axis: WEnum<wl_pointer::Axis>, discrete: i32) {
-        if axis != WEnum::Value(wl_pointer::Axis::VerticalScroll) || !matches!(discrete, -1 | 1) {
-            self.revoke("Wayland wheel must contain exactly one vertical notch");
+    fn axis_value(&mut self, axis: WEnum<wl_pointer::Axis>, value: f64) {
+        let Some(axis) = self.permitted_axis(axis) else {
+            self.revoke("unapproved Wayland wheel axis");
+            return;
+        };
+        if !value.is_finite() || value == 0.0 {
+            self.revoke("invalid Wayland wheel axis");
             return;
         }
         if !self.begin_axis() {
             return;
         }
-        if self.scroll.discrete.replace(discrete).is_some() {
-            self.revoke("duplicate Wayland wheel notch");
+        if self.scroll.axis.replace(value).is_some()
+            || self.scroll.discrete_kind.is_some_and(|other| other != axis)
+        {
+            self.revoke("duplicate or mixed Wayland wheel axis");
+            return;
         }
+        self.scroll.axis_kind = Some(axis);
+    }
+    fn axis_discrete(&mut self, axis: WEnum<wl_pointer::Axis>, discrete: i32) {
+        let Some(axis) = self.permitted_axis(axis) else {
+            self.revoke("unapproved Wayland wheel notch axis");
+            return;
+        };
+        if !matches!(discrete, -1 | 1) {
+            self.revoke("Wayland wheel must contain exactly one notch");
+            return;
+        }
+        if !self.begin_axis() {
+            return;
+        }
+        if self.scroll.discrete.replace(discrete).is_some()
+            || self.scroll.axis_kind.is_some_and(|other| other != axis)
+        {
+            self.revoke("duplicate or mixed Wayland wheel notch");
+            return;
+        }
+        self.scroll.discrete_kind = Some(axis);
     }
     fn finish_frame(&mut self) {
         self.check();
@@ -404,6 +432,8 @@ impl Pointer {
         } else if self.scroll.active {
             let scroll = std::mem::take(&mut self.scroll);
             let valid = scroll.source == Some(wl_pointer::AxisSource::Wheel)
+                && scroll.axis_kind.is_some()
+                && scroll.axis_kind == scroll.discrete_kind
                 && matches!((scroll.axis, scroll.discrete), (Some(axis),Some(notch)) if axis.is_sign_positive() == (notch > 0));
             if !valid || self.frame_button || self.left_down {
                 self.revoke("incomplete or inconsistent Wayland wheel frame");
@@ -421,10 +451,11 @@ impl Pointer {
                     .is_some_and(|map| scroll.ready == Some(map.sequence))
                 && self.locally_ready()
             {
-                self.scoped(if scroll.discrete == Some(-1) {
-                    Kind::ScrollUp
-                } else {
-                    Kind::ScrollDown
+                self.scoped(match (scroll.axis_kind, scroll.discrete) {
+                    (Some(wl_pointer::Axis::HorizontalScroll), Some(-1)) => Kind::ScrollLeft,
+                    (Some(wl_pointer::Axis::HorizontalScroll), _) => Kind::ScrollRight,
+                    (_, Some(-1)) => Kind::ScrollUp,
+                    _ => Kind::ScrollDown,
                 })
             } else {
                 ViewerEvent::WaylandPointerCancel
@@ -905,5 +936,95 @@ mod tests {
         }
         assert!(pointer.revoked.is_some());
         assert!(pointer.frame_events.is_empty());
+    }
+    fn horizontal_wheel(p: &mut Pointer, notch: i32) {
+        p.axis_value(
+            WEnum::Value(wl_pointer::Axis::HorizontalScroll),
+            f64::from(notch) * 10.0,
+        );
+        p.axis_discrete(WEnum::Value(wl_pointer::Axis::HorizontalScroll), notch);
+        p.axis_source(WEnum::Value(wl_pointer::AxisSource::Wheel));
+    }
+    #[test]
+    fn horizontal_scroll_independent_permission_and_one_action() {
+        for notch in [-1, 1] {
+            let mut p = scroll_pointer();
+            horizontal_wheel(&mut p, notch);
+            assert!(p.revoked.is_some(), "vertical does not grant horizontal");
+            let mut p = pointer();
+            p.horizontal_enabled = true;
+            p.set_ready(Some(1));
+            p.queue(p.scoped(Kind::Motion));
+            horizontal_wheel(&mut p, notch);
+            p.finish_frame();
+            let events = p.take_events();
+            assert_eq!(events.len(), 1);
+            assert!(
+                matches!(events[0],ViewerEvent::WaylandPointer{kind,..} if kind==if notch<0 {Kind::ScrollLeft}else{Kind::ScrollRight})
+            );
+            wheel(&mut p, notch);
+            assert!(p.revoked.is_some(), "horizontal does not grant vertical");
+        }
+    }
+    #[test]
+    fn horizontal_scroll_mixed_axis_and_held_rejected() {
+        for reverse in [false, true] {
+            let mut p = scroll_pointer();
+            p.horizontal_enabled = true;
+            let (a, b) = if reverse {
+                (
+                    wl_pointer::Axis::VerticalScroll,
+                    wl_pointer::Axis::HorizontalScroll,
+                )
+            } else {
+                (
+                    wl_pointer::Axis::HorizontalScroll,
+                    wl_pointer::Axis::VerticalScroll,
+                )
+            };
+            p.axis_value(WEnum::Value(a), 10.0);
+            p.axis_discrete(WEnum::Value(b), 1);
+            p.finish_frame();
+            assert!(p.revoked.is_some());
+        }
+        let mut p = scroll_pointer();
+        p.horizontal_enabled = true;
+        p.left_down = true;
+        horizontal_wheel(&mut p, 1);
+        p.finish_frame();
+        assert!(p.revoked.is_some());
+    }
+    #[test]
+    fn horizontal_scroll_ready_drops_complete_and_partial_old_groups() {
+        let mut p = scroll_pointer();
+        p.horizontal_enabled = true;
+        horizontal_wheel(&mut p, 1);
+        p.finish_frame();
+        p.set_ready(None);
+        p.set_ready(Some(1));
+        assert!(p.take_events().is_empty());
+        p.axis_value(WEnum::Value(wl_pointer::Axis::HorizontalScroll), 10.0);
+        p.set_ready(None);
+        p.set_ready(Some(1));
+        p.axis_discrete(WEnum::Value(wl_pointer::Axis::HorizontalScroll), 1);
+        p.axis_source(WEnum::Value(wl_pointer::AxisSource::Wheel));
+        p.finish_frame();
+        assert!(!p.take_events().iter().any(|e| matches!(
+            e,
+            ViewerEvent::WaylandPointer {
+                kind: Kind::ScrollLeft | Kind::ScrollRight,
+                ..
+            }
+        )));
+        assert!(p.revoked.is_none());
+        horizontal_wheel(&mut p, -1);
+        p.finish_frame();
+        assert!(p.take_events().iter().any(|e| matches!(
+            e,
+            ViewerEvent::WaylandPointer {
+                kind: Kind::ScrollLeft,
+                ..
+            }
+        )));
     }
 }

@@ -299,7 +299,7 @@ enum Command {
 
         /// Keep a read-only selected Wayland source when the application changes size.
         /// No remote resize command, input permission, reselection or reconnect.
-        #[arg(long, requires_all = ["wayland_select", "once"], conflicts_with_all = ["allow_input", "allow_clipboard", "allow_window_resize", "allow_wayland_keyboard", "allow_wayland_pointer", "allow_wayland_control", "allow_wayland_scroll"])]
+        #[arg(long, requires_all = ["wayland_select", "once"], conflicts_with_all = ["allow_input", "allow_clipboard", "allow_window_resize", "allow_wayland_keyboard", "allow_wayland_pointer", "allow_wayland_control", "allow_wayland_scroll", "allow_wayland_horizontal_scroll"])]
         wayland_resize_follow: bool,
 
         /// Permit a single explicitly requested, scoped Wayland keyboard lease.
@@ -322,6 +322,10 @@ enum Command {
         /// Separately permit discrete vertical scroll on a pointer or unified lease.
         #[arg(long, requires = "host_scroll_lease")]
         allow_wayland_scroll: bool,
+
+        /// Separately permit one-notch horizontal scroll; vertical permission does not imply it.
+        #[arg(long, requires = "host_scroll_lease")]
+        allow_wayland_horizontal_scroll: bool,
 
         /// Native Wayland socket for local selection (defaults to WAYLAND_DISPLAY).
         #[arg(long, value_name = "SOCKET", requires = "wayland_select")]
@@ -497,6 +501,10 @@ enum Command {
         /// Separately request single-notch vertical scroll; never smooth or horizontal.
         #[arg(long, requires = "viewer_scroll_lease")]
         wayland_scroll: bool,
+
+        /// Separately request one-notch horizontal scroll, without Shift translation.
+        #[arg(long, requires = "viewer_scroll_lease")]
+        wayland_horizontal_scroll: bool,
 
         /// Best-effort local client origin X,Y; off-screen positions fall back.
         #[arg(long, value_name = "X,Y", allow_hyphen_values = true)]
@@ -692,6 +700,7 @@ fn profile_from_command(command: Command) -> RemoteResult<Profile> {
             wayland_pointer,
             wayland_control,
             wayland_scroll,
+            wayland_horizontal_scroll,
             window_position,
             view_only,
             grab_input,
@@ -708,7 +717,12 @@ fn profile_from_command(command: Command) -> RemoteResult<Profile> {
                 )
                 .into());
             }
-            if wayland_keyboard || wayland_pointer || wayland_scroll || wayland_control {
+            if wayland_keyboard
+                || wayland_pointer
+                || wayland_scroll
+                || wayland_horizontal_scroll
+                || wayland_control
+            {
                 return Err(profile_error(
                     "Wayland input authorization cannot be saved in a profile",
                 )
@@ -1244,6 +1258,7 @@ fn run(command: Command) -> RemoteResult<()> {
             allow_wayland_pointer,
             allow_wayland_control,
             allow_wayland_scroll,
+            allow_wayland_horizontal_scroll,
             scroll_copy,
             wayland_display,
             allow_clipboard,
@@ -1294,6 +1309,7 @@ fn run(command: Command) -> RemoteResult<()> {
                 allow_wayland_pointer,
                 allow_wayland_control,
                 allow_wayland_scroll,
+                allow_wayland_horizontal_scroll,
                 scroll_copy,
                 wayland_display,
                 allow_clipboard,
@@ -1366,6 +1382,7 @@ fn run(command: Command) -> RemoteResult<()> {
             wayland_pointer,
             wayland_control,
             wayland_scroll,
+            wayland_horizontal_scroll,
             window_position,
             view_only,
             grab_input,
@@ -1396,6 +1413,7 @@ fn run(command: Command) -> RemoteResult<()> {
                     wayland_pointer,
                     wayland_control,
                     wayland_scroll,
+                    wayland_horizontal_scroll,
                     window_position,
                     view_only,
                     grab_input,
@@ -1772,6 +1790,7 @@ mod tests {
                 view_only: false,
                 wayland_pointer: false,
                 wayland_scroll: false,
+                wayland_horizontal_scroll: false,
                 grab_input: false,
                 clipboard: false,
                 reconnect_attempts: 0,
@@ -1841,6 +1860,7 @@ mod tests {
                 wayland_keyboard: false,
                 wayland_pointer: false,
                 wayland_scroll: false,
+                wayland_horizontal_scroll: false,
                 ..
             }
         ));
@@ -1892,6 +1912,7 @@ mod tests {
             Command::Host {
                 allow_wayland_control: true,
                 allow_wayland_scroll: false,
+                allow_wayland_horizontal_scroll: false,
                 ..
             }
         ));
@@ -1919,6 +1940,7 @@ mod tests {
             Command::Connect {
                 wayland_control: true,
                 wayland_scroll: false,
+                wayland_horizontal_scroll: false,
                 ..
             }
         ));
@@ -1987,6 +2009,7 @@ mod tests {
                 wayland_pointer: true,
                 wayland_keyboard: false,
                 wayland_scroll: false,
+                wayland_horizontal_scroll: false,
                 view_only: false,
                 clipboard: false,
                 grab_input: false,
@@ -3747,5 +3770,70 @@ mod scroll_copy_cli_tests {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod horizontal_scroll_cli_tests {
+    use super::*;
+    #[test]
+    fn horizontal_scroll_is_separate_host_and_viewer_opt_in() {
+        for permission in ["--allow-wayland-pointer", "--allow-wayland-control"] {
+            let cli = Cli::try_parse_from([
+                "jwm-remote",
+                "host",
+                "--once",
+                "--wayland-select",
+                permission,
+                "--allow-wayland-horizontal-scroll",
+            ])
+            .unwrap();
+            assert!(matches!(
+                cli.command,
+                Command::Host {
+                    allow_wayland_horizontal_scroll: true,
+                    allow_wayland_scroll: false,
+                    ..
+                }
+            ));
+        }
+        for lease in ["--wayland-pointer", "--wayland-control"] {
+            let cli = Cli::try_parse_from([
+                "jwm-remote",
+                "connect",
+                "--viewer-backend",
+                "wayland",
+                lease,
+                "--wayland-horizontal-scroll",
+            ])
+            .unwrap();
+            assert!(matches!(
+                &cli.command,
+                Command::Connect {
+                    wayland_horizontal_scroll: true,
+                    wayland_scroll: false,
+                    ..
+                }
+            ));
+            assert!(profile_from_command(cli.command).is_err());
+        }
+        assert!(
+            Cli::try_parse_from(["jwm-remote", "host", "--allow-wayland-horizontal-scroll"])
+                .is_err()
+        );
+        assert!(
+            Cli::try_parse_from(["jwm-remote", "connect", "--wayland-horizontal-scroll"]).is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "jwm-remote",
+                "host",
+                "--once",
+                "--wayland-select",
+                "--wayland-resize-follow",
+                "--allow-wayland-horizontal-scroll"
+            ])
+            .is_err()
+        );
     }
 }

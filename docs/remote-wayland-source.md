@@ -79,7 +79,7 @@ source switching or automatic input grab. A saved profile cannot grant it.
 The default remains view-only. The selected target must already have exact
 native keyboard focus: the remote path never changes focus to obtain access.
 
-Current protocol v22 retains the independent keyboard capability introduced
+Current protocol v23 retains the independent keyboard capability introduced
 in v16 and the pointer capability introduced in v17; scrolling has its own v18
 opt-in. After the first frame is actually reported presented by the viewer, it
 requests one keyboard lease for
@@ -151,10 +151,11 @@ fresh actual-presentation/Ready gate and 30-second lease apply. Default read-onl
 native viewing does not bind input devices.
 
 The native scroll adapter binds pointer protocol versions 5–7, not version 8.
-It accepts only explicit `axis_source=wheel`, vertical `axis_discrete` of exactly
+It accepts only explicit `axis_source=wheel`, separately authorized single-axis
+`axis_discrete` of exactly
 +1 or -1 and matching finite, nonzero continuous-axis direction in one complete
 `wl_pointer.frame`. Source/discrete ordering is not assumed. Missing or unknown
-source, horizontal axes, smooth/finger/continuous scrolling, multiple notches,
+source, unauthorized axes, smooth/finger/continuous scrolling, multiple notches,
 and mixed button/axis input are not supported. It does not accumulate fractional
 steps, batch notches or replay scrolling received while Waiting. Each accepted
 notch still consumes a fresh actual-presented frame/Ready ticket. This reuses the
@@ -227,8 +228,8 @@ rather than silently downgrading. No profile, reconnect, keyboard, clipboard or
 legacy input permission is enabled by these flags.
 
 Only a single vertical wheel notch up or down is supported per action. There
-are no arbitrary axis magnitudes, horizontal scrolling, smooth/continuous
-scrolling or inertia. The native compositor delivers the fixed wheel sequence
+are no arbitrary axis magnitudes, implicit horizontal permission, smooth or
+continuous scrolling, or inertia. The native compositor delivers the fixed wheel sequence
 to the same authorized surface/receiver snapshot at the validated surface-local
 coordinates; it does not change physical seat position or global focus. The
 application decides what one notch means, so equal line or pixel movement
@@ -416,7 +417,7 @@ Add `--allow-wayland-scroll` to the host's `--allow-wayland-control` and
 `--wayland-scroll` to the native viewer's `--wayland-control` to opt in on both
 ends. Omitting either permission must not silently enable wheel input. The
 same flags still work with the separate pointer-only mode; a keyboard-only or
-read-only mode cannot request them. Protocol v22 is required on both network
+read-only mode cannot request them. Protocol v23 is required on both network
 peers. The native control manager must support version 2 for its separate
 `create_lease_with_scroll` request; an older manager is rejected, not treated as
 permission. Ordinary `create_lease` remains wheel-disabled even on version 2.
@@ -424,7 +425,7 @@ permission. Ordinary `create_lease` remains wheel-disabled even on version 2.
 Only a real Wheel-source, single vertical discrete notch of +1 or -1, with a
 finite nonzero matching axis value in the same completed pointer frame, is
 accepted. Both source orderings within that frame are supported. No smooth,
-horizontal, multi-notch, continuous, missing-source or malformed axis event is
+multi-notch, continuous, missing-source or malformed axis event is
 converted into a guessed notch. The target receives one native vertical wheel
 action, scoped to the same surface and sequence as keyboard/click input.
 
@@ -488,7 +489,7 @@ keyboard, pointer, unified control, clipboard, reconnect or remote resize grants
 
 The native compositor must explicitly support the read-only resize-follow
 `jwm_readonly_resize_capture_manager_v1` extension. This is a local protocol
-capability; network protocol v22 and the existing geometry-epoch frame format
+capability; network protocol v23 and the existing geometry-epoch frame format
 are unchanged. An older compositor is rejected, never treated as permission
 to recreate an ordinary source. The original surface resource and connection
 remain fixed. A new layout replaces the capture session and starts a new video
@@ -516,3 +517,40 @@ isolation, and terminal lifecycle changes using actual native protocol dispatch.
 Authenticated TCP and owned software-rendered viewer tests must confirm the new
 geometry and actual presented pixels. These tests are not physical DRM/GPU or
 two-machine latency acceptance.
+
+### Independently authorized horizontal wheel (v23)
+
+Wide tables and canvases may opt into one discrete horizontal wheel notch:
+
+```sh
+jwm-remote host --wayland-select --once --allow-wayland-control --allow-wayland-horizontal-scroll ...
+jwm-remote connect HOST:48221 --wayland-control --wayland-horizontal-scroll ...
+```
+
+The same horizontal flags are available with pointer-only mode. They do not
+imply vertical permission: add the existing `--allow-wayland-scroll` and
+`--wayland-scroll` independently if both axes are desired. Both ends must
+explicitly authorize the chosen axis. Native manager/lease version 3 adds an
+explicit axes request; old create and version-2 vertical requests remain
+horizontal-disabled even when bound at version 3. A missing new native
+capability is an error, never a downgrade to a different input mechanism.
+
+Each completed Wheel-source frame must describe exactly one axis, one matching
+finite axis value and one discrete notch of -1 or +1. Mixed axes, mismatched
+axis/discrete fields, repeated fields, smooth input and multi-notch input are
+rejected. Shift plus vertical input is not translated to horizontal. Native
+Wayland viewers retain the version-5–7 discrete-event contract; X11 viewers use
+physical wheel buttons 6/7. The native target receives a horizontal axis event,
+not a modifier or synthetic key. No focus, recipient, lifetime or coordinate
+scope is enlarged.
+
+Horizontal actions consume the same fresh-frame ticket as clicks and vertical
+wheel. Waiting input is not replayed, held keys/buttons remain prohibited, and
+local takeover, lock, unmap and deadline revocations remain terminal. This adds
+neither drag nor continuous scrolling.
+
+Compatibility: the authenticated application protocol is now v23. Byte 28 of
+the existing capability record carries the vertical/horizontal permission bits;
+unknown bits are rejected. v22 peers must be upgraded together, rather than
+silently interpreting horizontal permission as an old boolean. The scroll-copy
+video format is unchanged and still grants no input authority.

@@ -279,3 +279,132 @@ fn wire_scroll_same_client_other_surface_is_not_authorized_target() {
     let result = f.action(1, frame, 2, 10, 10);
     f.denied(&result);
 }
+
+#[test]
+fn wire_horizontal_scroll_exact_axis_original_receiver_and_versions() {
+    let Some(mut gl) = HeadlessSmithayGles::new() else {
+        return;
+    };
+    for version in [4, 5, 7, 8, 9] {
+        let mut f = Fixture::with_scroll_axes(version, 3, false, Some(2));
+        let pointer = f.server.state.seat.get_pointer().unwrap();
+        let before = (pointer.current_location(), pointer.current_focus());
+        for (seq, kind, step) in [(1, 4, -1_i32), (2, 5, 1)] {
+            let frame = f.frame(&mut gl);
+            let e = f.action(seq, frame, kind, 40, 30);
+            f.accepted(&e, seq);
+            let delivered = pointer_events(&mut f.app, f.pointer);
+            let expected: &[u16] = if version >= 8 {
+                &[2, 6, 9, 4, 5]
+            } else if version >= 5 {
+                &[2, 6, 8, 4, 5]
+            } else {
+                &[2, 4]
+            };
+            assert_eq!(delivered.iter().map(|e| e.0).collect::<Vec<_>>(), expected);
+            assert_eq!(delivered[0].1[1..], [40 * 256, 30 * 256]);
+            if version >= 5 {
+                assert_eq!(delivered[1].1, [0]);
+                assert_eq!(
+                    delivered[2].1,
+                    [1, (step * if version >= 8 { 120 } else { 1 }) as u32]
+                );
+            }
+            let axis = delivered.iter().find(|e| e.0 == 4).unwrap();
+            assert_eq!(axis.1[1..], [1, (step * 10 * 256) as u32]);
+            assert!(pointer_events(&mut f.other, f.other_pointer).is_empty());
+            assert_eq!(
+                (pointer.current_location(), pointer.current_focus()),
+                before
+            );
+            assert!(!pointer.is_grabbed());
+        }
+    }
+}
+
+#[test]
+fn wire_horizontal_permission_is_independent_and_mixed_frame_is_not_reusable() {
+    let Some(mut gl) = HeadlessSmithayGles::new() else {
+        return;
+    };
+    for (manager, vertical, axes, kind) in [
+        (2, true, None, 4),
+        (3, true, None, 5),
+        (3, false, None, 4),
+        (3, false, Some(1), 4),
+        (3, false, Some(2), 2),
+    ] {
+        let mut f = Fixture::with_scroll_axes(9, manager, vertical, axes);
+        let frame = f.frame(&mut gl);
+        let e = f.action(1, frame, kind, 10, 10);
+        f.denied(&e);
+    }
+    let mut f = Fixture::with_scroll_axes(9, 3, false, Some(3));
+    let frame = f.frame(&mut gl);
+    let e = f.action(1, frame, 2, 10, 10);
+    f.accepted(&e, 1);
+    assert!(
+        pointer_events(&mut f.app, f.pointer)
+            .iter()
+            .any(|e| e.0 == 4 && e.1[1] == 0)
+    );
+    // Even both-axis authority cannot spend one frame as a two-axis gesture.
+    let e = f.action(2, frame, 4, 10, 10);
+    f.denied(&e);
+}
+
+#[test]
+fn wire_horizontal_scroll_cannot_survive_focus_unmap_or_expiry() {
+    let Some(mut gl) = HeadlessSmithayGles::new() else {
+        return;
+    };
+    for mode in 0..3 {
+        let mut f = Fixture::with_scroll_axes(9, 3, false, Some(2));
+        let frame = f.frame(&mut gl);
+        match mode {
+            0 => {
+                focus(&mut f.server, &f.other);
+                focus(&mut f.server, &f.app);
+            }
+            1 => {
+                f.app.unmap(&mut f.server);
+                f.app.remap(&mut f.server);
+            }
+            _ => super::super::expire_for_test(&mut f.server.state),
+        }
+        events(&mut f.app.client);
+        events(&mut f.other.client);
+        let e = f.action(1, frame, 4, 10, 10);
+        f.denied(&e);
+    }
+}
+
+#[test]
+fn wire_pointer_malformed_axes_consume_attempt_and_cannot_retry_expanded_grant() {
+    for axes in [0, 4, u32::MAX] {
+        let mut f = Fixture::with_scroll_axes(9, 3, false, Some(axes));
+        assert_eq!(f.epoch, 0);
+        assert!(!super::super::active(&f.server.state));
+        // A new manager cannot hide the previous failed attempt on this source.
+        let manager = f.capture.client.bind("jwm_remote_pointer_manager_v1", 3);
+        for (opcode, mask) in [(3, Some(3)), (2, None), (1, None)] {
+            let lease = f.capture.client.new_id();
+            if let Some(mask) = mask {
+                f.capture
+                    .client
+                    .request(manager, opcode, &[lease, f.capture.source, mask]);
+            } else {
+                f.capture
+                    .client
+                    .request(manager, opcode, &[lease, f.capture.source]);
+            }
+            sync(&mut f.server);
+            let e = events(&mut f.capture.client);
+            assert!(e.iter().any(|e| e.sender == lease && e.opcode == 2));
+            assert!(!e.iter().any(|e| e.sender == lease && e.opcode == 0));
+            assert!(!super::super::active(&f.server.state));
+        }
+        assert!(pointer_events(&mut f.app, f.pointer).is_empty());
+        assert!(pointer_events(&mut f.other, f.other_pointer).is_empty());
+    }
+}

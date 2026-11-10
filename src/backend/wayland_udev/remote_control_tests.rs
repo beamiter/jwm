@@ -79,6 +79,14 @@ impl Fixture {
         Self::with_scroll(7, 1, false)
     }
     fn with_scroll(version: u32, manager_version: u32, scroll: bool) -> Self {
+        Self::with_scroll_axes(version, manager_version, scroll, None)
+    }
+    fn with_scroll_axes(
+        version: u32,
+        manager_version: u32,
+        scroll: bool,
+        axes: Option<u32>,
+    ) -> Self {
         let mut server = Server::new();
         server.state.image_capture_pending =
             Some(init_image_copy_capture(&server.display.handle()));
@@ -94,17 +102,38 @@ impl Fixture {
             .client
             .bind("jwm_remote_control_manager_v1", manager_version);
         let lease = capture.client.new_id();
-        capture.client.request(
-            manager,
-            if scroll { 2 } else { 1 },
-            &[lease, capture.source],
-        );
+        if let Some(axes) = axes {
+            capture
+                .client
+                .request(manager, 3, &[lease, capture.source, axes]);
+        } else {
+            capture.client.request(
+                manager,
+                if scroll { 2 } else { 1 },
+                &[lease, capture.source],
+            );
+        }
+
         sync(&mut server);
-        let grant = events(&mut capture.client)
-            .into_iter()
-            .find(|e| e.sender == lease && e.opcode == 1)
-            .expect("native control grant");
-        assert_eq!(grant.args[2], 30_000);
+        let admission = events(&mut capture.client);
+        let epoch = if axes.is_some_and(|axes| !matches!(axes, 1..=3)) {
+            assert!(
+                admission.iter().any(|e| e.sender == lease && e.opcode == 4),
+                "malformed axes must explicitly revoke"
+            );
+            assert!(
+                !admission.iter().any(|e| e.sender == lease && e.opcode != 4),
+                "malformed axes cannot publish grant/keymap/armed"
+            );
+            0 // Inert test resource, never used for an authorized action.
+        } else {
+            let grant = admission
+                .into_iter()
+                .find(|e| e.sender == lease && e.opcode == 1)
+                .expect("native control grant");
+            assert_eq!(grant.args[2], 30_000);
+            grant.args[1]
+        };
         Self {
             server,
             app,
@@ -115,7 +144,7 @@ impl Fixture {
             other_keyboard,
             capture,
             lease,
-            epoch: grant.args[1],
+            epoch,
         }
     }
     fn frame(&mut self, gl: &mut HeadlessSmithayGles) -> u32 {
@@ -754,3 +783,6 @@ fn wire_control_scroll_wrong_source_and_expired_frame_cannot_deliver() {
         f.denied(&result);
     }
 }
+
+#[path = "remote_control_scroll_tests.rs"]
+mod scroll_axes_tests;

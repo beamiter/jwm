@@ -96,6 +96,8 @@ pub enum ViewerEvent {
 pub enum WaylandPointerEventKind {
     ScrollUp,
     ScrollDown,
+    ScrollLeft,
+    ScrollRight,
     Motion,
     LeftDown,
     LeftUp,
@@ -1400,7 +1402,9 @@ impl Viewer {
         let cancelled = match kind {
             WaylandPointerEventKind::Motion
             | WaylandPointerEventKind::ScrollUp
-            | WaylandPointerEventKind::ScrollDown => ViewerEvent::WaylandPointerCancel,
+            | WaylandPointerEventKind::ScrollDown
+            | WaylandPointerEventKind::ScrollLeft
+            | WaylandPointerEventKind::ScrollRight => ViewerEvent::WaylandPointerCancel,
             WaylandPointerEventKind::LeftDown => {
                 ViewerEvent::WaylandPointerButtonCancel { pressed: true }
             }
@@ -1567,7 +1571,7 @@ impl Viewer {
                             event.event_y,
                             WaylandPointerEventKind::LeftDown,
                         )
-                    } else if event.detail == 4 || event.detail == 5 {
+                    } else if matches!(event.detail, 4..=7) {
                         match scoped_wheel_press(event.detail, event.state) {
                             ScopedWheelPress::Scroll(kind) => {
                                 self.scoped_pointer_event(event.event_x, event.event_y, kind)
@@ -4695,7 +4699,7 @@ enum ScopedWheelPress {
 }
 
 fn scoped_wheel_press(detail: u8, state: KeyButMask) -> ScopedWheelPress {
-    if !matches!(detail, 4 | 5) {
+    if !matches!(detail, 4..=7) {
         return ScopedWheelPress::Unsupported;
     }
     // X11's state reports a physical hold even if its original press was
@@ -4703,10 +4707,12 @@ fn scoped_wheel_press(detail: u8, state: KeyButMask) -> ScopedWheelPress {
     if state.contains(KeyButMask::BUTTON1) {
         return ScopedWheelPress::LeftHeld;
     }
-    ScopedWheelPress::Scroll(if detail == 4 {
-        WaylandPointerEventKind::ScrollUp
-    } else {
-        WaylandPointerEventKind::ScrollDown
+    ScopedWheelPress::Scroll(match detail {
+        4 => WaylandPointerEventKind::ScrollUp,
+        5 => WaylandPointerEventKind::ScrollDown,
+        6 => WaylandPointerEventKind::ScrollLeft,
+        7 => WaylandPointerEventKind::ScrollRight,
+        _ => unreachable!(),
     })
 }
 
@@ -4802,6 +4808,8 @@ mod tests {
         for (button, kind) in [
             (4, WaylandPointerEventKind::ScrollUp),
             (5, WaylandPointerEventKind::ScrollDown),
+            (6, WaylandPointerEventKind::ScrollLeft),
+            (7, WaylandPointerEventKind::ScrollRight),
         ] {
             assert_eq!(
                 scoped_wheel_press(button, KeyButMask::default()),
@@ -4817,7 +4825,7 @@ mod tests {
             );
         }
         assert_eq!(
-            scoped_wheel_press(6, KeyButMask::default()),
+            scoped_wheel_press(8, KeyButMask::default()),
             ScopedWheelPress::Unsupported
         );
     }

@@ -8,7 +8,7 @@ use super::x11_keymap::{KeymapTable, MAX_ENCODED_KEYMAP_LEN};
 use std::io;
 
 const APPLICATION_MAGIC: &[u8; 8] = b"JWMREM01";
-pub const APPLICATION_VERSION: u16 = 22;
+pub const APPLICATION_VERSION: u16 = 23;
 const HELLO_PREFIX_LEN: usize = 11;
 const STREAM_CAPABILITIES_LEN: usize = 31;
 const SERVER_HELLO_LEN: usize = HELLO_PREFIX_LEN + STREAM_CAPABILITIES_LEN;
@@ -116,6 +116,7 @@ pub struct StreamCapabilities {
     pub wayland_pointer: bool,
     /// Separate opt-in for discrete vertical wheel notches. Requires pointer.
     pub wayland_scroll: bool,
+    pub wayland_horizontal_scroll: bool,
     /// Experimental video-only vertical copy deltas; no input authority.
     pub scroll_copy: bool,
     /// Explicit single combined authority, never inferred from old flags.
@@ -171,7 +172,8 @@ impl StreamCapabilities {
         payload[25] = u8::from(self.window_resize);
         payload[26] = u8::from(self.wayland_keyboard);
         payload[27] = u8::from(self.wayland_pointer);
-        payload[28] = u8::from(self.wayland_scroll);
+        payload[28] =
+            u8::from(self.wayland_scroll) | (u8::from(self.wayland_horizontal_scroll) << 1);
         payload[29] = u8::from(self.scroll_copy);
         payload[30] = u8::from(self.wayland_control);
         payload
@@ -191,7 +193,7 @@ impl StreamCapabilities {
             || payload[25] > 1
             || payload[26] > 1
             || payload[27] > 1
-            || payload[28] > 1
+            || payload[28] > 3
             || payload[29] > 1
             || payload[30] > 1
             || (payload[30] == 1
@@ -200,7 +202,7 @@ impl StreamCapabilities {
                     || payload[27] != 0
                     || payload[23] != 0
                     || payload[24] != 0))
-            || (payload[28] == 1 && (payload[26] == 1 || (payload[27] != 1 && payload[30] != 1)))
+            || (payload[28] != 0 && (payload[26] == 1 || (payload[27] != 1 && payload[30] != 1)))
             || (payload[26] == 1 && payload[27] == 1)
             || (payload[23] == 0) != (payload[24] == 0)
         {
@@ -221,7 +223,8 @@ impl StreamCapabilities {
             window_resize: payload[25] == 1,
             wayland_keyboard: payload[26] == 1,
             wayland_pointer: payload[27] == 1,
-            wayland_scroll: payload[28] == 1,
+            wayland_scroll: payload[28] & 1 != 0,
+            wayland_horizontal_scroll: payload[28] & 2 != 0,
             scroll_copy: payload[29] == 1,
             wayland_control: payload[30] == 1,
             ..Self::default()
@@ -770,6 +773,33 @@ fn invalid_data(message: impl Into<String>) -> io::Error {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn horizontal_scroll_capability_is_independent_and_bounded() {
+        use super::StreamCapabilities;
+        for control in [false, true] {
+            for (vertical, horizontal) in
+                [(false, false), (true, false), (false, true), (true, true)]
+            {
+                let caps = StreamCapabilities {
+                    wayland_pointer: !control,
+                    wayland_control: control,
+                    wayland_scroll: vertical,
+                    wayland_horizontal_scroll: horizontal,
+                    ..Default::default()
+                };
+                assert_eq!(StreamCapabilities::decode(&caps.encode()).unwrap(), caps);
+                assert_eq!(
+                    caps.encode()[28],
+                    u8::from(vertical) | (u8::from(horizontal) << 1)
+                );
+            }
+        }
+        let invalid = StreamCapabilities {
+            wayland_horizontal_scroll: true,
+            ..Default::default()
+        };
+        assert!(StreamCapabilities::decode(&invalid.encode()).is_err());
+    }
+    #[test]
     fn wayland_keyboard_capability_is_independent_and_strict() {
         let stream = super::StreamCapabilities {
             wayland_keyboard: true,
@@ -1036,7 +1066,7 @@ mod tests {
             ClientHello::decode(&legacy).unwrap_err(),
             ServerHello::decode(&legacy).unwrap_err(),
         ] {
-            assert!(error.to_string().contains("version 6; expected 22"));
+            assert!(error.to_string().contains("version 6; expected 23"));
         }
     }
 
@@ -1194,7 +1224,7 @@ mod tests {
             clipboard_files_enabled: false,
         }
         .encode();
-        assert_eq!(&payload[8..10], &22_u16.to_be_bytes());
+        assert_eq!(&payload[8..10], &23_u16.to_be_bytes());
 
         // Version 5 had no clipboard transfer records: a version-5 peer
         // would end the session on the first copied image or file. It must
@@ -1209,7 +1239,7 @@ mod tests {
             assert!(
                 error
                     .to_string()
-                    .contains(&format!("application version {older}; expected 22"))
+                    .contains(&format!("application version {older}; expected 23"))
             );
         }
 
@@ -1623,8 +1653,8 @@ mod tests {
 mod scroll_capability_tests {
     use super::*;
     #[test]
-    fn scroll_is_explicit_boolean_and_requires_pointer_or_control_in_version_22() {
-        assert_eq!(APPLICATION_VERSION, 22);
+    fn scroll_is_explicit_boolean_and_requires_pointer_or_control_in_version_23() {
+        assert_eq!(APPLICATION_VERSION, 23);
         assert_eq!(STREAM_CAPABILITIES_LEN, 31);
         let mut caps = StreamCapabilities::default();
         assert!(
@@ -1636,7 +1666,7 @@ mod scroll_capability_tests {
         assert!(StreamCapabilities::decode(&caps.encode()).is_err());
         caps.wayland_pointer = true;
         assert_eq!(StreamCapabilities::decode(&caps.encode()).unwrap(), caps);
-        for flag in [2, 3, 255] {
+        for flag in [4, 128, 255] {
             let mut payload = caps.encode();
             payload[28] = flag;
             assert!(StreamCapabilities::decode(&payload).is_err());

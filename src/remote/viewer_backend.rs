@@ -245,14 +245,18 @@ impl Viewer {
             }
         }
     }
-    pub(super) fn enable_wayland_pointer(&mut self, scroll_enabled: bool) -> RemoteResult<()> {
+    pub(super) fn enable_wayland_pointer(
+        &mut self,
+        scroll_enabled: bool,
+        horizontal_enabled: bool,
+    ) -> RemoteResult<()> {
         match self {
             Self::X11(v) => {
-                let _ = scroll_enabled;
+                let _ = (scroll_enabled, horizontal_enabled);
                 v.enable_wayland_pointer()
             }
             #[cfg(feature = "remote-wayland")]
-            Self::Wayland(v) => v.enable_wayland_pointer(scroll_enabled),
+            Self::Wayland(v) => v.enable_wayland_pointer(scroll_enabled, horizontal_enabled),
         }
     }
     /// Native scroll admission fence; legacy X11 input keeps its existing gate.
@@ -341,10 +345,11 @@ impl Viewer {
     pub(super) fn enable_wayland_control(
         &mut self,
         scroll_enabled: bool,
+        horizontal_enabled: bool,
     ) -> RemoteResult<[u8; 32]> {
         match self {
             Self::X11(_) => Err("combined control requires native Wayland viewer".into()),
-            Self::Wayland(v) => v.enable_wayland_control(scroll_enabled),
+            Self::Wayland(v) => v.enable_wayland_control(scroll_enabled, horizontal_enabled),
         }
     }
     #[cfg(feature = "remote-wayland")]

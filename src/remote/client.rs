@@ -68,6 +68,7 @@ pub struct ClientOptions {
     pub wayland_pointer: bool,
     pub wayland_control: bool,
     pub wayland_scroll: bool,
+    pub wayland_horizontal_scroll: bool,
     /// One explicit source-size operation; never replayed or saved in a profile.
     pub resize_source: Option<super::window_size::WindowSize>,
     pub follow_source_size: bool,
@@ -294,6 +295,7 @@ pub fn run_client_reconnecting(options: ClientOptions, attempts: u8) -> RemoteRe
         || options.wayland_control
         || options.wayland_pointer
         || options.wayland_scroll
+        || options.wayland_horizontal_scroll
         || options.viewer_backend == ViewerBackend::Wayland)
         && attempts != 0
     {
@@ -408,7 +410,10 @@ fn validate_viewer_backend(options: &ClientOptions) -> RemoteResult<()> {
         )
         .into());
     }
-    if options.wayland_scroll && !options.wayland_pointer && !options.wayland_control {
+    if (options.wayland_scroll || options.wayland_horizontal_scroll)
+        && !options.wayland_pointer
+        && !options.wayland_control
+    {
         return Err(
             invalid_data("Wayland scroll requires explicit pointer or control mode").into(),
         );
@@ -553,6 +558,7 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
         options.wayland_keyboard,
         options.wayland_pointer,
         options.wayland_scroll,
+        options.wayland_horizontal_scroll,
         options.wayland_control,
         stream,
         &key,
@@ -714,10 +720,12 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
     )?;
     #[cfg(feature = "remote-wayland")]
     if options.wayland_control {
-        let digest = viewer.enable_wayland_control(options.wayland_scroll)?;
+        let digest = viewer
+            .enable_wayland_control(options.wayland_scroll, options.wayland_horizontal_scroll)?;
         let mut control = state.wayland_control.lock().unwrap();
         control.digest = Some(digest);
         control.scroll_enabled = options.wayland_scroll;
+        control.horizontal_enabled = options.wayland_horizontal_scroll;
     }
     #[cfg(feature = "remote-wayland")]
     if options.wayland_keyboard {
@@ -725,10 +733,11 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
         state.wayland_keyboard.lock().unwrap().enable(digest);
     }
     if options.wayland_pointer {
-        viewer.enable_wayland_pointer(options.wayland_scroll)?;
+        viewer.enable_wayland_pointer(options.wayland_scroll, options.wayland_horizontal_scroll)?;
         let mut pointer = state.wayland_pointer.lock().unwrap();
         pointer.enabled = true;
         pointer.scroll_enabled = options.wayland_scroll;
+        pointer.horizontal_enabled = options.wayland_horizontal_scroll;
     }
     viewer.set_clipboard_status(hello.clipboard_enabled);
     viewer.enable_clipboard_narrowing(hello.clipboard_enabled);
@@ -1052,6 +1061,7 @@ fn negotiate_session(
     request_wayland_keyboard: bool,
     request_wayland_pointer: bool,
     request_wayland_scroll: bool,
+    request_wayland_horizontal_scroll: bool,
     request_wayland_control: bool,
     mut stream: TcpStream,
     key: &[u8],
@@ -1101,6 +1111,7 @@ fn negotiate_session(
                 wayland_keyboard: request_wayland_keyboard,
                 wayland_pointer: request_wayland_pointer,
                 wayland_scroll: request_wayland_scroll,
+                wayland_horizontal_scroll: request_wayland_horizontal_scroll,
                 wayland_control: request_wayland_control,
                 scroll_copy: true,
                 frame_limits,
@@ -1148,6 +1159,15 @@ fn negotiate_session(
         request_wayland_scroll,
         hello.stream.wayland_scroll,
     )?;
+    if (request_wayland_horizontal_scroll || hello.stream.wayland_horizontal_scroll)
+        && (!(request_wayland_pointer || request_wayland_control)
+            || request_wayland_horizontal_scroll != hello.stream.wayland_horizontal_scroll)
+    {
+        return Err(invalid_data(
+            "Wayland horizontal scroll permission was not mutually negotiated",
+        )
+        .into());
+    }
     if hello.stream.wayland_pointer != request_wayland_pointer
         || (request_wayland_pointer
             && (hello.stream.wayland_keyboard
@@ -1525,7 +1545,7 @@ fn viewer_loop(
         // local compositor. Never hold the receive-thread lease mutex across it.
         let scroll_ready = {
             let pointer = state.wayland_pointer.lock().unwrap();
-            if pointer.enabled && pointer.scroll_enabled {
+            if pointer.enabled && (pointer.scroll_enabled || pointer.horizontal_enabled) {
                 Some(if pointer.fresh(Instant::now()) {
                     pointer.ready.map(|scope| scope.frame_sequence)
                 } else {
@@ -1537,7 +1557,8 @@ fn viewer_loop(
         };
         let scroll_ready = scroll_ready.or_else(|| {
             let control = state.wayland_control.lock().unwrap();
-            (control.configured() && control.scroll_enabled).then(|| control.ready_sequence())
+            (control.configured() && (control.scroll_enabled || control.horizontal_enabled))
+                .then(|| control.ready_sequence())
         });
         if let Some(ready) = scroll_ready {
             viewer.wayland_pointer_ready(ready)?;
@@ -2770,6 +2791,7 @@ fn average_millis(duration: Duration, count: u64) -> f64 {
 #[derive(Default)]
 struct ClientPointer {
     scroll_enabled: bool,
+    horizontal_enabled: bool,
     #[cfg(test)]
     scroll_observed: u64,
     enabled: bool,
@@ -2947,12 +2969,21 @@ impl ClientPointer {
         } else if kind == E::LeftUp {
             self.left_down = false;
         }
-        if matches!(kind, E::ScrollUp | E::ScrollDown) {
+        if matches!(
+            kind,
+            E::ScrollUp | E::ScrollDown | E::ScrollLeft | E::ScrollRight
+        ) {
             #[cfg(test)]
             {
                 self.scroll_observed += 1;
             }
-            if !self.scroll_enabled || self.left_down || self.click.is_some() {
+            if !(if matches!(kind, E::ScrollLeft | E::ScrollRight) {
+                self.horizontal_enabled
+            } else {
+                self.scroll_enabled
+            }) || self.left_down
+                || self.click.is_some()
+            {
                 self.click = None;
                 return Ok(None);
             }
@@ -3001,6 +3032,8 @@ impl ClientPointer {
             E::Motion => A::Motion,
             E::ScrollUp => A::ScrollUp,
             E::ScrollDown => A::ScrollDown,
+            E::ScrollLeft => A::ScrollLeft,
+            E::ScrollRight => A::ScrollRight,
         };
         self.sequence = self
             .sequence
@@ -3860,6 +3893,37 @@ pub(super) mod tests {
         }
     }
     #[test]
+    fn horizontal_pointer_consent_is_independent_and_consumes_one_ticket() {
+        use super::super::{
+            wayland_pointer_wire::PointerActionKind as A, x11_viewer::WaylandPointerEventKind as E,
+        };
+        let now = std::time::Instant::now();
+        for (event, expected) in [
+            (E::ScrollLeft, A::ScrollLeft),
+            (E::ScrollRight, A::ScrollRight),
+        ] {
+            let mut p = pointer_fixture(now);
+            p.scroll_enabled = true;
+            assert!(p.event(&pointer_event(event, 0), now).unwrap().is_none());
+            p.scroll_enabled = false;
+            p.horizontal_enabled = true;
+            assert!(
+                p.event(&pointer_event(E::ScrollUp, 0), now)
+                    .unwrap()
+                    .is_none()
+            );
+            assert_eq!(
+                p.event(&pointer_event(event, 0), now)
+                    .unwrap()
+                    .unwrap()
+                    .kind,
+                expected
+            );
+            assert!(p.event(&pointer_event(event, 0), now).unwrap().is_none());
+            assert!(!p.fresh(now));
+        }
+    }
+    #[test]
     fn scoped_scroll_requires_both_permissions_and_consumes_one_fresh_gate() {
         use super::super::{
             wayland_pointer_wire::PointerActionKind as A, x11_viewer::WaylandPointerEventKind as E,
@@ -4663,6 +4727,7 @@ pub(super) mod tests {
             wayland_pointer: false,
             wayland_control: false,
             wayland_scroll: false,
+            wayland_horizontal_scroll: false,
             resize_source: None,
             follow_source_size: false,
             window_position: None,
@@ -6669,6 +6734,7 @@ pub(super) mod tests {
             false,
             false,
             false,
+            false,
             stream,
             &TEST_PSK,
             false,
@@ -6731,6 +6797,7 @@ pub(super) mod tests {
             false,
             false,
             false,
+            false,
             stream,
             &TEST_PSK,
             false,
@@ -6783,6 +6850,7 @@ pub(super) mod tests {
         });
         let stream = TcpStream::connect(address).unwrap();
         let result = negotiate_session(
+            false,
             false,
             false,
             false,
@@ -6843,6 +6911,7 @@ pub(super) mod tests {
         });
         let stream = TcpStream::connect(address).unwrap();
         let result = negotiate_session(
+            false,
             false,
             false,
             false,
@@ -6911,6 +6980,7 @@ pub(super) mod tests {
             });
             let stream = TcpStream::connect(address).unwrap();
             let result = negotiate_session(
+                false,
                 false,
                 false,
                 false,
@@ -7003,6 +7073,7 @@ pub(super) mod tests {
         let stream = TcpStream::connect(address).unwrap();
         let (mut reader, _writer, hello) = negotiate_session(
             true,
+            false,
             false,
             false,
             false,
@@ -7254,6 +7325,7 @@ mod native_viewer_permission_tests {
             wayland_pointer: false,
             wayland_control: false,
             wayland_scroll: false,
+            wayland_horizontal_scroll: false,
             resize_source: None,
             follow_source_size: false,
             window_position: None,

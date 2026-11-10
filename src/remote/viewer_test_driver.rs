@@ -386,6 +386,13 @@ impl ViewerTestDriver {
     }
     /// Balanced wheel edges only on the explicitly owned Xvfb connection.
     pub(super) fn wheel_notches(&self, up: bool, count: u8) -> RemoteResult<()> {
+        self.wheel_buttons(if up { 4 } else { 5 }, count)
+    }
+    /// Horizontal physical detents, injected only into this owned test server.
+    pub(super) fn horizontal_notches(&self, left: bool, count: u8) -> RemoteResult<()> {
+        self.wheel_buttons(if left { 6 } else { 7 }, count)
+    }
+    fn wheel_buttons(&self, button: u8, count: u8) -> RemoteResult<()> {
         if !(1..=8).contains(&count) {
             return Err("owned wheel batch must contain 1..8 notches".into());
         }
@@ -398,7 +405,7 @@ impl ViewerTestDriver {
                     } else {
                         xproto::BUTTON_RELEASE_EVENT
                     },
-                    if up { 4 } else { 5 },
+                    button,
                     CURRENT_TIME,
                     self.root,
                     0,

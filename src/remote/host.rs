@@ -1644,6 +1644,7 @@ pub struct HostOptions {
     pub allow_wayland_pointer: bool,
     pub allow_wayland_control: bool,
     pub allow_wayland_scroll: bool,
+    pub allow_wayland_horizontal_scroll: bool,
     /// Experimental video codec optimization, independent of input grants.
     pub scroll_copy: bool,
     pub allow_clipboard: bool,
@@ -1765,6 +1766,7 @@ struct SourceControl {
     scroll_copy: AtomicBool,
     pointer_enabled: AtomicBool,
     scroll_enabled: AtomicBool,
+    horizontal_scroll_enabled: AtomicBool,
     pointer_revoke: AtomicBool,
     pointer_queue: Mutex<VecDeque<PointerCommand>>,
     pointer_frame: Mutex<Option<PointerFrame>>,
@@ -1791,6 +1793,7 @@ impl SourceControl {
             scroll_copy: AtomicBool::new(false),
             pointer_enabled: AtomicBool::new(false),
             scroll_enabled: AtomicBool::new(false),
+            horizontal_scroll_enabled: AtomicBool::new(false),
             pointer_revoke: AtomicBool::new(false),
             pointer_queue: Mutex::new(VecDeque::new()),
             pointer_frame: Mutex::new(None),
@@ -1889,12 +1892,13 @@ fn validate_window_policy(options: &HostOptions) -> RemoteResult<()> {
             || options.allow_wayland_keyboard
             || options.allow_wayland_pointer
             || options.allow_wayland_control
-            || options.allow_wayland_scroll)
+            || options.allow_wayland_scroll
+            || options.allow_wayland_horizontal_scroll)
     {
         return Err(permission_denied("Wayland resize-follow requires an explicitly selected read-only source without any input, clipboard or resize permission").into());
     }
 
-    if options.allow_wayland_scroll
+    if (options.allow_wayland_scroll || options.allow_wayland_horizontal_scroll)
         && !options.allow_wayland_pointer
         && !options.allow_wayland_control
     {
@@ -2449,6 +2453,9 @@ fn serve_authenticated(
     negotiated_stream.wayland_scroll = hello.stream.wayland_scroll
         && options.allow_wayland_scroll
         && (negotiated_stream.wayland_pointer || negotiated_stream.wayland_control);
+    negotiated_stream.wayland_horizontal_scroll = hello.stream.wayland_horizontal_scroll
+        && options.allow_wayland_horizontal_scroll
+        && (negotiated_stream.wayland_pointer || negotiated_stream.wayland_control);
     if negotiated_stream.wayland_control {
         if hello.request_input
             || hello.request_clipboard
@@ -2458,7 +2465,10 @@ fn serve_authenticated(
         {
             return Err(invalid_data("control cannot combine other input capabilities").into());
         }
-        capture.enable_control(negotiated_stream.wayland_scroll)?;
+        capture.enable_control(
+            negotiated_stream.wayland_scroll,
+            negotiated_stream.wayland_horizontal_scroll,
+        )?;
     }
     if negotiated_stream.wayland_pointer {
         if hello.request_input
@@ -2469,6 +2479,9 @@ fn serve_authenticated(
             return Err(invalid_data("native pointer cannot combine other capabilities").into());
         }
         capture.enable_pointer()?;
+        if negotiated_stream.wayland_horizontal_scroll {
+            capture.enable_horizontal_scroll()?;
+        }
         if negotiated_stream.wayland_scroll {
             capture.enable_scroll()?;
         }
@@ -2620,6 +2633,10 @@ fn serve_authenticated(
         sources
             .scroll_enabled
             .store(negotiated_stream.wayland_scroll, Ordering::Release);
+        sources.horizontal_scroll_enabled.store(
+            negotiated_stream.wayland_horizontal_scroll,
+            Ordering::Release,
+        );
         sources
             .scroll_copy
             .store(negotiated_stream.scroll_copy, Ordering::Release);
@@ -4652,7 +4669,11 @@ fn receive_input_scoped(
                     } else {
                         let action = PointerAction::decode(&payload)?;
                         if action.kind.is_scroll()
-                            && !sources.scroll_enabled.load(Ordering::Acquire)
+                            && !(if action.kind.is_horizontal() {
+                                sources.horizontal_scroll_enabled.load(Ordering::Acquire)
+                            } else {
+                                sources.scroll_enabled.load(Ordering::Acquire)
+                            })
                         {
                             sources.pointer_revoke.store(true, Ordering::Release);
                             return Err(invalid_data(
@@ -5829,6 +5850,7 @@ mod tests {
             allow_wayland_pointer: false,
             allow_wayland_control: false,
             allow_wayland_scroll: false,
+            allow_wayland_horizontal_scroll: false,
             scroll_copy: false,
             allow_clipboard: false,
             clipboard_mode: Default::default(),
@@ -8512,6 +8534,7 @@ mod tests {
             allow_wayland_pointer: false,
             allow_wayland_control: false,
             allow_wayland_scroll: false,
+            allow_wayland_horizontal_scroll: false,
             scroll_copy: false,
             allow_clipboard: false,
             clipboard_mode: Default::default(),

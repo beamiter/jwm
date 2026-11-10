@@ -107,6 +107,7 @@ struct NativeKeyboard {
 #[derive(Default)]
 struct NativePointer {
     scroll_enabled: bool,
+    horizontal_enabled: bool,
     manager: Option<JwmRemotePointerManagerV1>,
     global: Option<u32>,
     enabled: bool,
@@ -465,6 +466,25 @@ impl WaylandCapture {
         self.state.pointer.scroll_enabled = true;
         Ok(())
     }
+    pub(super) fn enable_horizontal_scroll(&mut self) -> RemoteResult<()> {
+        if self.state.frame_serial != 0
+            || !self.state.pointer.enabled
+            || self.state.pointer.requested
+            || self
+                .state
+                .pointer
+                .manager
+                .as_ref()
+                .is_none_or(|manager| manager.version() < 3)
+        {
+            return Err(invalid(
+                "native horizontal scroll requires explicit pointer v3 permission",
+            )
+            .into());
+        }
+        self.state.pointer.horizontal_enabled = true;
+        Ok(())
+    }
     pub(super) fn pointer_revoked(&self) -> bool {
         self.state.pointer.revoked
             || self
@@ -508,7 +528,14 @@ impl WaylandCapture {
         self.state.pointer.deadline =
             Some(Instant::now() + super::wayland_pointer_wire::LEASE_DURATION);
         let manager = self.state.pointer.manager.as_ref().unwrap();
-        self.pointer_lease = Some(if self.state.pointer.scroll_enabled {
+        self.pointer_lease = Some(if self.state.pointer.horizontal_enabled {
+            manager.create_lease_with_scroll_axes(
+                self.source.as_ref().unwrap(),
+                2 | u32::from(self.state.pointer.scroll_enabled),
+                &self.queue.handle(),
+                (),
+            )
+        } else if self.state.pointer.scroll_enabled {
             manager.create_lease_with_scroll(
                 self.source.as_ref().unwrap(),
                 &self.queue.handle(),
@@ -557,7 +584,12 @@ impl WaylandCapture {
             .pointer_frame()
             .ok_or_else(|| invalid("missing native pointer frame"))?;
         if self.pointer_revoked()
-            || (action.kind.is_scroll() && !self.state.pointer.scroll_enabled)
+            || (action.kind.is_scroll()
+                && !(if action.kind.is_horizontal() {
+                    self.state.pointer.horizontal_enabled
+                } else {
+                    self.state.pointer.scroll_enabled
+                }))
             || self.state.pointer.epoch != Some(epoch)
             || actual_serial != serial
             || at.elapsed() >= super::wayland_pointer_wire::FRAME_MAX_AGE
@@ -1239,12 +1271,12 @@ impl Dispatch<wl_registry::WlRegistry, ()> for State {
                         true
                     }
                     "jwm_remote_control_manager_v1" if state.control.manager.is_none() => {
-                        state.control.manager = Some(proxy.bind(name, version.min(2), qh, ()));
+                        state.control.manager = Some(proxy.bind(name, version.min(3), qh, ()));
                         state.control.global = Some(name);
                         false
                     }
                     "jwm_remote_pointer_manager_v1" if state.pointer.manager.is_none() => {
-                        state.pointer.manager = Some(proxy.bind(name, version.min(2), qh, ()));
+                        state.pointer.manager = Some(proxy.bind(name, version.min(3), qh, ()));
                         state.pointer.global = Some(name);
                         false
                     }

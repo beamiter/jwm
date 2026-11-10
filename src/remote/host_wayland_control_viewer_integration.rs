@@ -42,7 +42,7 @@ impl Drop for Stop {
         self.0.store(true, Ordering::Release);
     }
 }
-fn options(scroll: bool) -> host::HostOptions {
+fn options(scroll: bool, horizontal_scroll: bool) -> host::HostOptions {
     host::HostOptions {
         frame_limits: Default::default(),
         listen: "127.0.0.1:0".into(),
@@ -66,6 +66,7 @@ fn options(scroll: bool) -> host::HostOptions {
         allow_wayland_keyboard: false,
         allow_wayland_pointer: false,
         allow_wayland_scroll: scroll,
+        allow_wayland_horizontal_scroll: horizontal_scroll,
         allow_wayland_control: true,
         scroll_copy: false,
         allow_clipboard: false,
@@ -307,6 +308,21 @@ impl Harness {
         viewer_scroll: bool,
         recipient_version: u32,
     ) -> Self {
+        Self::new_with_scroll_permissions(
+            gl,
+            held_on_enter,
+            (host_scroll, false),
+            (viewer_scroll, false),
+            recipient_version,
+        )
+    }
+    fn new_with_scroll_permissions(
+        gl: &mut HeadlessSmithayGles,
+        held_on_enter: bool,
+        host_scroll: (bool, bool),
+        viewer_scroll: (bool, bool),
+        recipient_version: u32,
+    ) -> Self {
         let mut native = Server::new();
         let mut local = Server::new();
         native.state.image_capture_pending =
@@ -354,7 +370,7 @@ impl Harness {
                 let peer = host::authenticate_peer(stream, &KEY)?;
                 host::serve_authenticated(
                     peer,
-                    &options(host_scroll),
+                    &options(host_scroll.0, host_scroll.1),
                     &stopping,
                     &Mutex::new(Some(host::GrantedCapture::Wayland(Box::new(capture)))),
                 )
@@ -407,7 +423,8 @@ impl Harness {
                 viewer_wayland_display: None,
                 wayland_keyboard: false,
                 wayland_pointer: false,
-                wayland_scroll: viewer_scroll,
+                wayland_scroll: viewer_scroll.0,
+                wayland_horizontal_scroll: viewer_scroll.1,
                 wayland_control: true,
                 resize_source: None,
                 follow_source_size: false,
@@ -750,6 +767,9 @@ impl Harness {
         );
     }
     fn wheel(&mut self, step: i32) {
+        self.wheel_axis(step, Axis::VerticalScroll);
+    }
+    fn wheel_axis(&mut self, step: i32, axis: Axis) {
         assert!(matches!(step, -1 | 1));
         let pointer = self.pointer.as_ref().unwrap();
         assert_eq!(
@@ -760,8 +780,8 @@ impl Harness {
         // Enter already supplied the surface-local point. Do not precede this
         // with motion: held-key negatives must reject the axis itself.
         pointer.axis_source(AxisSource::Wheel);
-        pointer.axis_discrete(Axis::VerticalScroll, step);
-        pointer.axis(100, Axis::VerticalScroll, f64::from(step) * 10.0);
+        pointer.axis_discrete(axis, step);
+        pointer.axis(100, axis, f64::from(step) * 10.0);
         pointer.frame();
         self.local.roundtrip();
     }
@@ -824,7 +844,10 @@ impl Harness {
         assert_eq!(remote_control::attempts_for_test(&self.native.state), 1);
         sequence
     }
-    fn denied_scroll(mut self, gl: &mut HeadlessSmithayGles) {
+    fn denied_scroll(self, gl: &mut HeadlessSmithayGles) {
+        self.denied_scroll_with_error(gl, "Wayland scroll permission was not mutually negotiated");
+    }
+    fn denied_scroll_with_error(mut self, gl: &mut HeadlessSmithayGles, expected: &str) {
         // Negotiation can correctly fail before a viewer surface exists. This
         // is separate from rejected(), whose local-input cases require both
         // real owned device resources and a specific local failure cause.
@@ -839,7 +862,7 @@ impl Harness {
                     let error =
                         result.expect_err("missing host scroll consent must fail negotiation");
                     assert!(
-                        error.contains("Wayland scroll permission was not mutually negotiated"),
+                        error.contains(expected),
                         "expected exact permission failure, not timeout/transport: {error}"
                     );
                     break;
@@ -1127,7 +1150,7 @@ fn actual_wayland_control_viewer_tcp_held_key_pointer_rejection_cleans_original_
     );
 }
 
-fn assert_control_wheel_120(events: &[(u16, Vec<u32>)], step: i32) {
+fn assert_control_wheel_120(events: &[(u16, Vec<u32>)], step: i32, axis: Axis) {
     assert_eq!(
         events.iter().map(|e| e.0).collect::<Vec<_>>(),
         [2, 6, 9, 4, 5],
@@ -1135,25 +1158,45 @@ fn assert_control_wheel_120(events: &[(u16, Vec<u32>)], step: i32) {
     );
     assert_eq!(&events[0].1[1..], &[80 * 256, 60 * 256]);
     assert_eq!(events[1].1, [0]); // wheel source
-    assert_eq!(events[2].1, [0, (step * 120) as u32]); // vertical, signed value120
-    assert_eq!(&events[3].1[1..], &[0, (step * 10 * 256) as u32]);
+    assert_eq!(events[2].1, [axis as u32, (step * 120) as u32]);
+    assert_eq!(&events[3].1[1..], &[axis as u32, (step * 10 * 256) as u32]);
     assert!(events[4].1.is_empty());
 }
 
 #[test]
 fn actual_wayland_control_scroll_tcp_click_type_both_directions_and_no_waiting_replay() {
+    exercise_control_scroll_tcp(false);
+}
+
+#[test]
+fn actual_wayland_control_horizontal_scroll_tcp_click_type_both_directions_no_waiting_replay() {
+    exercise_control_scroll_tcp(true);
+}
+
+fn exercise_control_scroll_tcp(horizontal: bool) {
+    let axis = if horizontal {
+        Axis::HorizontalScroll
+    } else {
+        Axis::VerticalScroll
+    };
     let Some(mut gl) = HeadlessSmithayGles::new() else {
         return;
     };
-    let mut h = Harness::new_with_scroll(&mut gl, false, true, true, 9);
+    let mut h = Harness::new_with_scroll_permissions(
+        &mut gl,
+        false,
+        (!horizontal, horizontal),
+        (!horizontal, horizontal),
+        9,
+    );
     h.wait(
         &mut gl,
         "owned scroll viewer before initial presentation",
         false,
         |s| s.pointer.is_some() && s.keyboard.is_some() && !s.feedback.is_empty(),
     );
-    h.wheel(-1);
-    h.wheel(1);
+    h.wheel_axis(-1, axis);
+    h.wheel_axis(1, axis);
     h.waiting_wheels_processed(&mut gl, 2);
     assert_eq!(remote_control::attempts_for_test(&h.native.state), 0);
     h.click_repaint_type(&mut gl);
@@ -1168,7 +1211,7 @@ fn actual_wayland_control_scroll_tcp_click_type_both_directions_and_no_waiting_r
     let mut processed = 2;
     for step in [-1, 1] {
         let before = h.received.pointer_wire.len();
-        h.wheel(step);
+        h.wheel_axis(step, axis);
         processed += 1;
         h.wait(
             &mut gl,
@@ -1176,15 +1219,15 @@ fn actual_wayland_control_scroll_tcp_click_type_both_directions_and_no_waiting_r
             false,
             |s| s.received.pointer_wire.len() >= before + 5,
         );
-        assert_control_wheel_120(&h.received.pointer_wire[before..], step);
+        assert_control_wheel_120(&h.received.pointer_wire[before..], step, axis);
         h.wait(&mut gl, "axis consumes shared Ready", false, |s| {
             s.ready.lock().unwrap().is_none()
                 && s.scroll_frames.load(Ordering::Acquire) == processed
         });
         let after_axis = h.received.pointer_wire.clone();
-        h.wheel(1);
-        h.wheel(-1);
-        h.wheel(1);
+        h.wheel_axis(1, axis);
+        h.wheel_axis(-1, axis);
+        h.wheel_axis(1, axis);
         processed += 3;
         h.waiting_wheels_processed(&mut gl, processed);
         assert_eq!(h.received.pointer_wire, after_axis);
@@ -1213,6 +1256,22 @@ fn actual_wayland_control_scroll_tcp_click_type_both_directions_and_no_waiting_r
         }
     }
     assert_eq!(h.received.keys, [(30, 1), (30, 0), (48, 1), (48, 0)]);
+    if horizontal {
+        // The new exact presentation is an input barrier, not scroll-only:
+        // keyboard B above and this click still use the original bundle.
+        let before = h.received.pointer_actions.len();
+        h.click();
+        h.wait(
+            &mut gl,
+            "post-horizontal exact Ready admits same-bundle click",
+            false,
+            |s| s.received.pointer_actions.len() == before + 3,
+        );
+        let click = &h.received.pointer_actions[before..];
+        assert_eq!(click.iter().map(|e| e.0).collect::<Vec<_>>(), [2, 3, 3]);
+        assert_eq!(&click[1].1[2..], &[0x110, 1]);
+        assert_eq!(&click[2].1[2..], &[0x110, 0]);
+    }
     assert_eq!(remote_control::attempts_for_test(&h.native.state), 1);
     let before = h.received.pointer_actions.clone();
     let surface = viewer_surface(&h.local);
@@ -1247,11 +1306,31 @@ fn actual_wayland_control_scroll_tcp_requires_both_explicit_permissions() {
 
 #[test]
 fn actual_wayland_control_scroll_tcp_held_key_or_left_button_revokes_whole_bundle() {
+    exercise_control_scroll_held(false);
+}
+
+#[test]
+fn actual_wayland_control_horizontal_scroll_tcp_held_key_or_left_button_revokes_whole_bundle() {
+    exercise_control_scroll_held(true);
+}
+
+fn exercise_control_scroll_held(horizontal: bool) {
+    let axis = if horizontal {
+        Axis::HorizontalScroll
+    } else {
+        Axis::VerticalScroll
+    };
     let Some(mut gl) = HeadlessSmithayGles::new() else {
         return;
     };
     for held_key in [true, false] {
-        let mut h = Harness::new_with_scroll(&mut gl, false, true, true, 9);
+        let mut h = Harness::new_with_scroll_permissions(
+            &mut gl,
+            false,
+            (!horizontal, horizontal),
+            (!horizontal, horizontal),
+            9,
+        );
         h.activate(&mut gl);
         if held_key {
             h.key(160, 42, true);
@@ -1270,7 +1349,7 @@ fn actual_wayland_control_scroll_tcp_held_key_or_left_button_revokes_whole_bundl
             // Ordered on the same real Wayland connection. No fake host key
             // state, synthetic grant or local left-up conceals cancellation.
         }
-        h.wheel(-1);
+        h.wheel_axis(-1, axis);
         h.rejected(
             &mut gl,
             if held_key { &[(42, 1), (42, 0)] } else { &[] },
@@ -1283,4 +1362,45 @@ fn actual_wayland_control_scroll_tcp_held_key_or_left_button_revokes_whole_bundl
             },
         );
     }
+}
+
+#[test]
+fn actual_wayland_control_horizontal_scroll_tcp_requires_each_permission() {
+    let Some(mut gl) = HeadlessSmithayGles::new() else {
+        return;
+    };
+    Harness::new_with_scroll_permissions(&mut gl, false, (true, false), (true, true), 9)
+        .denied_scroll_with_error(
+            &mut gl,
+            "Wayland horizontal scroll permission was not mutually negotiated",
+        );
+    let mut h =
+        Harness::new_with_scroll_permissions(&mut gl, false, (true, true), (true, false), 9);
+    h.activate(&mut gl);
+    h.wheel_axis(1, Axis::HorizontalScroll);
+    h.rejected(&mut gl, &[], &[], 1, "unapproved Wayland wheel notch axis");
+}
+
+#[test]
+fn actual_wayland_control_horizontal_scroll_tcp_mixed_axis_revokes_without_input() {
+    let Some(mut gl) = HeadlessSmithayGles::new() else {
+        return;
+    };
+    let mut h = Harness::new_with_scroll_permissions(&mut gl, false, (true, true), (true, true), 9);
+    h.activate(&mut gl);
+    let pointer = h.pointer.as_ref().unwrap();
+    pointer.axis_source(AxisSource::Wheel);
+    pointer.axis_discrete(Axis::VerticalScroll, 1);
+    pointer.axis(190, Axis::VerticalScroll, 10.0);
+    pointer.axis_discrete(Axis::HorizontalScroll, -1);
+    pointer.axis(190, Axis::HorizontalScroll, -10.0);
+    pointer.frame();
+    h.local.roundtrip();
+    h.rejected(
+        &mut gl,
+        &[],
+        &[],
+        1,
+        "duplicate or mixed Wayland wheel notch",
+    );
 }
