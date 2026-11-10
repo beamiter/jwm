@@ -293,7 +293,19 @@ fn exercise(
         let result = with_wayland_control_frame_observer(observer, || {
             with_wayland_test_stream(viewer_stream, || run_client(opts))
         })
-        .map_err(|e| e.to_string());
+        .map_err(|error| {
+            let diagnostic = crate::remote::client::classify_failure(error.as_ref());
+            // Keep the actual causal message separate from ClientFailure's
+            // user-facing stage and troubleshooting-hint formatting.
+            let mut cause: &(dyn std::error::Error + 'static) = error.as_ref();
+            for _ in 0..32 {
+                match cause.source() {
+                    Some(source) => cause = source,
+                    None => return (diagnostic, cause.to_string()),
+                }
+            }
+            panic!("unexpected cyclic/oversized client error chain");
+        });
         let _ = client_tx.send(result);
     });
     let positive = host_permission && client_permission && with_ime;
@@ -382,10 +394,22 @@ fn exercise(
                     } else {
                         "host closed the remote session: host cannot capture its display: native text context unavailable or refused"
                     };
+                    assert_eq!(error.0.stage, Some("negotiate"));
                     assert_eq!(
-                        error, expected,
+                        error.1, expected,
                         "unrelated transport failure is not a permission refusal"
                     );
+                    if !host_permission {
+                        assert_eq!(error.0.category, "io");
+                        assert_eq!(error.0.io_kind, Some("invalid_data"));
+                        assert_eq!(error.0.peer_close_code, None);
+                    } else {
+                        assert_eq!(error.0.category, "peer_closed");
+                        assert_eq!(
+                            error.0.peer_close_code,
+                            Some(crate::remote::close_wire::SessionCloseCode::CaptureUnavailable)
+                        );
+                    }
                     break;
                 }
             } else {
@@ -437,9 +461,15 @@ fn exercise(
             host_result.as_ref().unwrap().is_ok(),
             "read-only host must stop normally: {host_result:?}"
         );
+        let (diagnostic, reason) = client_result.as_ref().unwrap().as_ref().unwrap_err();
+        assert_eq!(diagnostic.stage, Some("session"));
+        assert_eq!(diagnostic.category, "peer_closed");
         assert_eq!(
-            client_result.as_ref().unwrap().as_ref().unwrap_err(),
-            "host closed the remote session: the host stopped sharing its desktop",
+            diagnostic.peer_close_code,
+            Some(crate::remote::close_wire::SessionCloseCode::HostStopping)
+        );
+        assert_eq!(
+            reason, "host closed the remote session: the host stopped sharing its desktop",
             "read-only completion must be the requested host stop, not an authorization error"
         );
         assert!(commits.is_empty());

@@ -328,9 +328,28 @@ fn native_text_context_aba_half_ime_batch_preedit_owner_lock_unmap_fail_closed()
                     .into_iter()
                     .filter(|e| e.sender == f.context.text)
                     .collect();
-                assert_eq!(prefix.len(), 1, "only the known local IME prefix");
-                assert_eq!(prefix[0].opcode, 3);
-                assert_eq!(wire_string(&prefix[0].args), "pending IME");
+                // Focus enter/leave carries only the exact target surface,
+                // not an IME text edit. Keep it separate from text operations;
+                // do not mask done/preedit/delete as benign setup traffic.
+                let opcodes: Vec<_> = prefix.iter().map(|e| (e.sender, e.opcode)).collect();
+                for event in prefix.iter().filter(|e| matches!(e.opcode, 0 | 1)) {
+                    assert_eq!(
+                        event.args.as_slice(),
+                        &[f.app.surface],
+                        "focus lifecycle must name only the target surface; events {opcodes:?}"
+                    );
+                }
+                let edits: Vec<_> = prefix
+                    .iter()
+                    .filter(|e| !matches!(e.opcode, 0 | 1))
+                    .collect();
+                assert_eq!(
+                    edits.len(),
+                    1,
+                    "only one known local IME text operation, no done; events {opcodes:?}"
+                );
+                assert_eq!(edits[0].opcode, 3, "events {opcodes:?}");
+                assert_eq!(wire_string(&edits[0].args), "pending IME");
             }
             2 => {
                 f.context.preedit(&mut f.server);
