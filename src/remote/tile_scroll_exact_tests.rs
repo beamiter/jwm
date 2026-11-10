@@ -302,10 +302,6 @@ fn scroll_exact_new_detection_invalidates_pending_identity_without_committing() 
         .unwrap();
     let mut bytes = Vec::new();
     encoder.encode_into(&mut bytes, 3, &next, 75).unwrap();
-    assert!(
-        encoder.pending_hash.is_none(),
-        "JPEG must not hash the full capture"
-    );
     let pending_dirty = encoder.dirty.clone();
     assert!(encoder.select_refinement(Some((100, 1))).is_err());
     assert_eq!(encoder.dirty, pending_dirty);
@@ -325,7 +321,6 @@ fn scroll_exact_new_detection_invalidates_pending_identity_without_committing() 
     assert_eq!(encoder.committed_exact, committed);
     assert_eq!(encoder.reference.as_ref(), Some(&frame.image));
     encoder.encode_into(&mut bytes, 3, &frame, 75).unwrap();
-    assert!(encoder.pending_hash.is_none());
     let mut wrong = clone_frame(&frame);
     wrong.source_width += 1;
     encoder.commit(&wrong);
@@ -348,4 +343,154 @@ fn scroll_exact_generation_exhaustion_is_not_wrapping_authority() {
     );
     assert!(!encoder.pending);
     assert_eq!(encoder.last_sequence, Some(2));
+}
+
+#[test]
+fn png_snapshot_mutation_scope_and_redetection_never_commit_old_transaction() {
+    for mutation in 0..7 {
+        let (mut encoder, _, mut source, at) = exact_pair();
+        // Create new exact debt, then allow it to stabilize before PNG.
+        source.image.as_mut()[0] ^= 0x80;
+        encoder
+            .plan_at(
+                &source,
+                TileEncodeRequest::Delta,
+                at + Duration::from_secs(4),
+            )
+            .unwrap();
+        let mut bytes = Vec::new();
+        encoder.encode_into(&mut bytes, 3, &source, 75).unwrap();
+        encoder.commit(&source);
+        encoder
+            .plan_at(
+                &source,
+                TileEncodeRequest::LosslessRepair,
+                at + Duration::from_secs(7),
+            )
+            .unwrap();
+        let mut wrong = clone_frame(&source);
+        if mutation == 0 {
+            wrong.image.as_mut()[0] ^= 1;
+            assert!(encoder.encode_into(&mut bytes, 4, &wrong, 75).is_err());
+            assert_eq!(encoder.last_sequence, Some(3));
+            continue;
+        }
+        encoder.encode_into(&mut bytes, 4, &source, 75).unwrap();
+        assert!(TileHeader::parse(&bytes).unwrap().lossless);
+        match mutation {
+            1 => wrong.image.as_mut()[0] ^= 1,
+            2 => wrong.geometry_epoch += 1,
+            3 => wrong.source_height += 1,
+            5 => wrong.image = RgbImage::from_raw(97, 65, source.image.as_raw().clone()).unwrap(),
+            6 => {
+                encoder.discard();
+                encoder.commit(&source);
+                assert_eq!(encoder.last_sequence, Some(3));
+                assert!(!encoder.committed_exact[0]);
+                continue;
+            }
+            4 => {
+                // ABA to identical RGB/scope is still a new detection, not the
+                // already encoded PNG transaction.
+                wrong.image.as_mut()[0] ^= 1;
+                encoder
+                    .plan_at(
+                        &wrong,
+                        TileEncodeRequest::Delta,
+                        at + Duration::from_secs(8),
+                    )
+                    .unwrap();
+                encoder
+                    .plan_at(
+                        &source,
+                        TileEncodeRequest::Keepalive,
+                        at + Duration::from_secs(9),
+                    )
+                    .unwrap();
+                encoder.commit(&source);
+                assert_eq!(encoder.last_sequence, Some(3));
+                assert!(!encoder.committed_exact[0]);
+                continue;
+            }
+            _ => unreachable!(),
+        }
+        encoder.commit(&wrong);
+        assert!(encoder.reference.is_none());
+        assert!(encoder.committed_exact.is_empty());
+        assert_eq!(encoder.last_sequence, Some(3));
+    }
+}
+
+#[test]
+#[ignore = "explicit offline CPU measurement; no display or transport"]
+fn png_snapshot_transaction_cost_comparison() {
+    use sha2::{Digest, Sha256};
+    use std::hint::black_box;
+    fn old_hash(f: &CapturedFrame) -> [u8; 32] {
+        let mut h = Sha256::new();
+        h.update(f.geometry_epoch.to_be_bytes());
+        h.update(f.source_width.to_be_bytes());
+        h.update(f.source_height.to_be_bytes());
+        h.update(f.image.width().to_be_bytes());
+        h.update(f.image.height().to_be_bytes());
+        h.update(f.image.as_raw());
+        h.finalize().into()
+    }
+    let source = CapturedFrame {
+        image: RgbImage::from_fn(800, 600, |x, y| {
+            let v = (x * 37 ^ y * 101 ^ x * y) as u8;
+            Rgb([v, v.wrapping_add(53), v.wrapping_add(151)])
+        }),
+        geometry_epoch: 3,
+        source_width: 800,
+        source_height: 600,
+    };
+    let mut expected = None;
+    for redundant_hash in [true, false] {
+        let mut times = Vec::new();
+        let mut size = 0;
+        for round in 0..10 {
+            let mut e = TileEncoder::new();
+            e.set_lossless_enabled(true);
+            let at = Instant::now();
+            let mut bytes = Vec::new();
+            e.plan_at(&source, TileEncodeRequest::Delta, at).unwrap();
+            e.encode_into(&mut bytes, 1, &source, 75).unwrap();
+            e.commit(&source);
+            let start = Instant::now();
+            let plan = e
+                .plan_at(
+                    &source,
+                    TileEncodeRequest::LosslessRepair,
+                    at + Duration::from_secs(3),
+                )
+                .unwrap();
+            e.encode_into(&mut bytes, 2, &source, 75).unwrap();
+            if redundant_hash {
+                let a = black_box(old_hash(black_box(&source)));
+                let b = black_box(old_hash(black_box(&source)));
+                assert_eq!(a, b);
+            }
+            e.commit(&source);
+            let elapsed = start.elapsed().as_nanos();
+            assert!(TileHeader::parse(&bytes).unwrap().lossless);
+            assert_eq!(plan.dirty_tiles, 256);
+            if let Some(ref expected) = expected {
+                assert_eq!(&bytes, expected);
+            } else {
+                expected = Some(bytes.clone());
+            }
+            size = bytes.len();
+            if round >= 2 {
+                times.push(elapsed);
+            }
+        }
+        times.sort();
+        eprintln!(
+            "png snapshot 800x600 redundant_hash={redundant_hash} debug={} samples=8 warmup=2 payload={size} repair_tiles=256 p50_ns={} max_ns={}",
+            cfg!(debug_assertions),
+            times[3],
+            times[7]
+        );
+    }
 }

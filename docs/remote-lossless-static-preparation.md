@@ -357,10 +357,15 @@ replacement identity-check design still requires its own complete CI run. The re
 
 The initial `44ff` candidate added two full-frame SHA computations for
 JPEG/keepalive transactions, in addition to equality checking. That cost was
-too high and this design is not being merged. The replacement binds the owned
-observed snapshot to pending generation/scope metadata and uses two equality
-checks for those transactions instead. The existing PNG capture hash remains
-unchanged. Commit still checks the pending identity after successful flush;
+too high and this design is not being merged. The current replacement applies one owned-snapshot identity path to all records,
+including PNG, JPEG and keepalive. Encode compares complete RGB and encoded
+dimensions with the owned observed snapshot and checks planned source dimensions
+and geometry. Pending metadata binds a checked observation generation and scope;
+commit checks that generation, complete scope and RGB again. Detection cancels
+pending work before replacing the snapshot, and discard or option changes
+cancel it too. This introduces no new snapshot clone. All production
+`capture_digest` hashing has been removed; SHA remains only in test comparison
+code. Commit still checks the pending identity after successful flush;
 invalid identity must not promote exactness or adopt a mismatched reference.
 Commit-side checking is **not included in `encode_ns`**, so encode timing alone
 cannot measure the complete cost.
@@ -385,3 +390,33 @@ initial checking design, not a measurement of its replacement. Their timer
 included planning, encoding, decoding, commit and assertions. The demonstrated
 repair-byte reduction and final SSE=0 must not be turned into a latency promise;
 the revised implementation requires its own integration validation.
+
+
+### Follow-up candidate and actual PNG transaction cost
+
+The intermediate `7e4a` candidate passed the standalone strict blink test,
+general full suite and real scroll integration test. However, the later Wayland
+full-suite strict blink run missed generation 16's 500 ms deadline by 24.37 ms.
+It was not merged. Passing the isolated test did not negate the full-suite
+failure. The next correction removes the remaining redundant PNG hashes using
+the unified owned-snapshot checks above; it changes neither the 500 ms gate,
+scheduling policy nor permissions.
+
+A pure production PNG repair comparison used an 800×600 input, a 256-tile batch,
+two warmups and eight measured debug-build samples per arm. Each arm produced
+the same 36,100-byte PNG repair payload, with complete payload equality asserted.
+The comparison arm added the former two digest computations to the current
+production repair path to model their redundant cost; this was not a historical
+binary comparison.
+
+| Plan + encode + commit | Median ms | Maximum ms |
+| --- | --- | --- |
+| Redundant two-SHA model | 171.455 | 178.575 |
+| Unified snapshot only | 72.562 | 78.575 |
+
+The isolated comparison passed. Its timer includes the complete repair
+transaction, including commit, unlike `encode_ns`. These are debug CPU-side
+elapsed observations, not separate stage timings, transport or presentation
+latency. The sample count is small, and the result does not establish that the
+strict 500 ms failure is fixed. Complete CI validation of the new candidate is
+still required; raw logs and runtime details are not published here.

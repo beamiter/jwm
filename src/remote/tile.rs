@@ -43,6 +43,8 @@ use super::source_wire::MAX_FRAME_INNER_PAYLOAD_LEN;
 use super::x11_capture::CapturedFrame;
 use image::codecs::jpeg::{JpegDecoder, JpegEncoder};
 use image::{ColorType, DynamicImage, ExtendedColorType, ImageDecoder, Limits, RgbImage};
+// Existing offline benchmark children use the crate hash dependency.
+#[cfg(test)]
 use sha2::{Digest, Sha256};
 use std::io::Cursor;
 use std::time::{Duration, Instant};
@@ -177,7 +179,6 @@ pub(crate) struct TileEncoder {
     exact_changed: bool,
     lossless_rejected: bool,
     pending_lossless: bool,
-    pending_hash: Option<[u8; 32]>,
     scroll_copy_enabled: bool,
     last_sequence: Option<u64>,
     pending_sequence: Option<u64>,
@@ -231,7 +232,6 @@ impl TileEncoder {
             exact_changed: false,
             lossless_rejected: false,
             pending_lossless: false,
-            pending_hash: None,
             scroll_copy_enabled: false,
             last_sequence: None,
             pending_sequence: None,
@@ -365,7 +365,6 @@ impl TileEncoder {
         now: Instant,
     ) -> RemoteResult<()> {
         self.pending_lossless = false;
-        self.pending_hash = None;
         self.pending_exact_identity = None;
         self.pending_scroll = None;
         self.pending_sequence = None;
@@ -826,11 +825,10 @@ impl TileEncoder {
         }
 
         self.pending_lossless = planned.lossless;
-        // Reuse the owned detection snapshot; do not hash whole JPEG/keepalive
-        // captures merely to authenticate an internal transaction. PNG keeps
-        // its existing hash contract. Detection invalidates pending state and
-        // advances this generation before changing the owned snapshot.
-        self.pending_hash = planned.lossless.then(|| capture_digest(frame));
+        // Reuse the owned detection snapshot for every codec. Full byte
+        // equality at encode and commit binds the transaction without a
+        // redundant cryptographic digest. Detection invalidates pending state
+        // and advances this generation before changing the owned snapshot.
         self.pending_exact_identity = self.lossless_enabled.then_some(ExactCaptureIdentity {
             generation: self.observation_generation,
             geometry_epoch: frame.geometry_epoch,
@@ -865,11 +863,7 @@ impl TileEncoder {
         let exact_mismatch = self.lossless_enabled
             && (self.pending_exact_identity != Some(exact_identity)
                 || self.observed.as_ref() != Some(&frame.image));
-        if exact_mismatch
-            || self
-                .pending_hash
-                .is_some_and(|hash| hash != capture_digest(frame))
-        {
+        if exact_mismatch {
             // Caller violated the immutable planned-capture contract. The
             // already-sent record cannot be rolled back: force recovery, never
             // claim current pixels exact or adopt them as the sent reference.
@@ -935,7 +929,6 @@ impl TileEncoder {
     /// Drop an encoded-but-unsent frame without advancing the reference.
     pub(crate) fn discard(&mut self) {
         self.pending_lossless = false;
-        self.pending_hash = None;
         self.pending_exact_identity = None;
         self.pending_scroll = None;
         self.pending_sequence = None;
@@ -952,19 +945,6 @@ impl TileEncoder {
     pub(crate) fn reference(&self) -> Option<&RgbImage> {
         self.reference.as_ref()
     }
-}
-
-// Bind the pending repair to the complete immutable capture identity, not
-// just an equal byte vector under a changed geometry/source interpretation.
-fn capture_digest(frame: &CapturedFrame) -> [u8; 32] {
-    let mut hash = Sha256::new();
-    hash.update(frame.geometry_epoch.to_be_bytes());
-    hash.update(frame.source_width.to_be_bytes());
-    hash.update(frame.source_height.to_be_bytes());
-    hash.update(frame.image.width().to_be_bytes());
-    hash.update(frame.image.height().to_be_bytes());
-    hash.update(frame.image.as_raw());
-    hash.finalize().into()
 }
 
 /// Bounded round-robin selection avoids starving the tail while quality rises.

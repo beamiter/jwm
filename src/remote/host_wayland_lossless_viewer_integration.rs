@@ -222,10 +222,50 @@ fn pump(native: &mut Server, local: &mut Server, gl: &mut HeadlessSmithayGles) {
     }
     local.roundtrip();
 }
+// Bounded, content-free failure evidence. No raw pixels, peer text, or paths.
+struct BlinkStageDiagnostics {
+    base: Instant,
+    sources: Vec<serde_json::Value>,
+    draws: Vec<serde_json::Value>,
+    omitted_draws: usize,
+    presented: Arc<Mutex<Vec<(u64, Instant)>>>,
+}
+impl BlinkStageDiagnostics {
+    fn ns(&self, at: Instant) -> u64 {
+        u64::try_from(at.saturating_duration_since(self.base).as_nanos()).unwrap_or(u64::MAX)
+    }
+}
+impl Drop for BlinkStageDiagnostics {
+    fn drop(&mut self) {
+        if !thread::panicking() {
+            return;
+        }
+        let ledger = self.presented.lock().unwrap_or_else(|p| p.into_inner());
+        for row in &mut self.draws {
+            let seq = row["sequence"].as_u64();
+            if let Some((_, at)) = ledger.iter().find(|(seen, _)| Some(*seen) == seq) {
+                row["actual_presented_ns"] = serde_json::json!(
+                    u64::try_from(at.saturating_duration_since(self.base).as_nanos())
+                        .unwrap_or(u64::MAX)
+                );
+            }
+        }
+        eprintln!(
+            "blink-stage-diagnostic {}",
+            serde_json::json!({
+                "schema_version":1,"clock":"same_process_monotonic",
+                "source_schedule":"generation0 baseline established after first GL; later generations fixed 500ms",
+                "sources":self.sources,"draws":self.draws,"omitted_draws":self.omitted_draws
+            })
+        );
+    }
+}
+
 fn exercise(host_permission: bool, client_permission: bool) {
     exercise_workload(host_permission, client_permission, false);
 }
 fn exercise_workload(host_permission: bool, client_permission: bool, blinking: bool) {
+    let diagnostic_base = Instant::now();
     let Some(mut gl) = HeadlessSmithayGles::new() else {
         return;
     };
@@ -240,7 +280,9 @@ fn exercise_workload(host_permission: bool, client_permission: bool, blinking: b
     } else {
         pattern(false)
     };
+    let initial_repaint_started = Instant::now();
     repaint(&mut native, &mut target, &expected);
+    let initial_repaint_completed = Instant::now();
     let (server, stream) = UnixStream::pair().unwrap();
     native
         .display
@@ -300,6 +342,20 @@ fn exercise_workload(host_permission: bool, client_permission: bool, blinking: b
     let observer = frames.clone();
     let presented_times = Arc::new(Mutex::new(Vec::new()));
     let presented_observer = presented_times.clone();
+    let mut diagnostic = blinking.then(|| BlinkStageDiagnostics {
+        base: diagnostic_base,
+        sources: Vec::with_capacity(28),
+        draws: Vec::with_capacity(256),
+        omitted_draws: 0,
+        presented: presented_times.clone(),
+    });
+    if let Some(trace) = diagnostic.as_mut() {
+        trace
+            .sources
+            .push(serde_json::json!({"generation":0,"scheduled_ns":null,
+            "repaint_started_ns":trace.ns(initial_repaint_started),
+            "repaint_completed_ns":trace.ns(initial_repaint_completed)}));
+    }
     let codecs = Arc::new(Mutex::new(Vec::new()));
     let codec_observer = codecs.clone();
     let (client_tx, client_done) = mpsc::channel();
@@ -412,7 +468,17 @@ fn exercise_workload(host_permission: bool, client_permission: bool, blinking: b
                 "static region failed to converge under continuous blinking"
             );
             expected = blink_pattern(blink_generation);
+            let repaint_started = Instant::now();
             repaint(&mut native, &mut target, &expected);
+            let repaint_completed = Instant::now();
+            if let Some(trace) = diagnostic.as_mut() {
+                trace
+                    .sources
+                    .push(serde_json::json!({"generation":blink_generation,
+                    "scheduled_ns":blink_next.map(|at| trace.ns(at)),
+                    "repaint_started_ns":trace.ns(repaint_started),
+                    "repaint_completed_ns":trace.ns(repaint_completed)}));
+            }
             blink_candidate = None;
             blink_next = blink_next.map(|at| at + Duration::from_millis(500));
         }
@@ -424,7 +490,9 @@ fn exercise_workload(host_permission: bool, client_permission: bool, blinking: b
         if !feedback.is_empty() && seq.is_some_and(|s| last.is_none_or(|old| s > old)) {
             assert_eq!(feedback.len(), 1);
             let seq = seq.unwrap();
+            let gl_started = Instant::now();
             let pixels = read_pixels(&mut local, &mut gl, &mut reader);
+            let gl_completed = Instant::now();
             assert_eq!(frames.lock().unwrap().0, Some(seq));
             let encoded = codecs.lock().unwrap();
             let is_png = encoded
@@ -467,6 +535,9 @@ fn exercise_workload(host_permission: bool, client_permission: bool, blinking: b
                 first = Some(now);
                 if blinking {
                     blink_next = Some(now + Duration::from_millis(500));
+                    if let Some(trace) = diagnostic.as_mut() {
+                        trace.sources[0]["scheduled_ns"] = serde_json::json!(trace.ns(now));
+                    }
                 }
             }
             if error == 0 {
@@ -478,7 +549,24 @@ fn exercise_workload(host_permission: bool, client_permission: bool, blinking: b
                 exact = Some(seq);
             }
             drop(encoded);
+            let checked = Instant::now();
+            let feedback_started = Instant::now();
             present(&mut local, std::mem::take(&mut feedback));
+            let feedback_completed = Instant::now();
+            if let Some(trace) = diagnostic.as_mut() {
+                if trace.draws.len() < 256 {
+                    trace.draws.push(serde_json::json!({"generation_observed":blink_generation,
+                        "sequence":seq,"png":is_png,
+                        "matched_candidate":blink_candidate == Some((blink_generation,seq)),
+                        "scheduled_deadline_ns":blink_next.map(|at|trace.ns(at)),
+                        "gl_started_ns":trace.ns(gl_started),"gl_completed_ns":trace.ns(gl_completed),
+                        "check_started_ns":trace.ns(gl_completed),"check_completed_ns":trace.ns(checked),
+                        "feedback_started_ns":trace.ns(feedback_started),
+                        "feedback_completed_ns":trace.ns(feedback_completed),"actual_presented_ns":null}));
+                } else {
+                    trace.omitted_draws += 1;
+                }
+            }
             last = Some(seq);
         }
         if blinking {
