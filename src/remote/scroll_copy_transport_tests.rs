@@ -98,12 +98,65 @@ fn band_frame(dy: i16) -> CapturedFrame {
             } else {
                 y
             };
-            Rgb([
+            let mut pixel = [
                 (x * 17 + row * 29) as u8,
                 (row * 53 + x * 3) as u8,
                 (x ^ (row * 11)) as u8,
-            ])
+            ];
+            // Newly exposed content is not copied from the fixed toolbar/footer.
+            // Otherwise the exact matching run legitimately extends beyond the
+            // intended band and the encoder infers a wider copy interval.
+            if (32..128).contains(&y) && !(32..128).contains(&row) {
+                for channel in &mut pixel {
+                    *channel ^= 0xa5;
+                }
+            }
+            Rgb(pixel)
         }),
+    }
+}
+
+#[test]
+fn fixed_band_codec_pairs_preserve_toolbar_footer_without_transport() {
+    for dy in [-7, 7] {
+        let records = pair(1, Some(dy));
+        assert_eq!(records.len(), 2);
+    }
+}
+
+/// Pure fixture proof: no socket, decoder or encoder assumptions are involved.
+#[test]
+fn fixed_band_fixture_has_exact_overlap_and_genuinely_new_exposed_rows() {
+    let initial = band_frame(0);
+    for dy in [-7_i16, 7] {
+        let next = band_frame(dy);
+        for y in 0..160 {
+            for x in 0..96 {
+                if !(32..128).contains(&y) {
+                    assert_eq!(next.image.get_pixel(x, y), initial.image.get_pixel(x, y));
+                } else {
+                    let source_y = (y as i32 + i32::from(dy)) as u32;
+                    if (32..128).contains(&source_y) {
+                        assert_eq!(
+                            next.image.get_pixel(x, y),
+                            initial.image.get_pixel(x, source_y)
+                        );
+                    } else {
+                        assert_ne!(
+                            next.image.get_pixel(x, y),
+                            initial.image.get_pixel(x, source_y)
+                        );
+                    }
+                }
+            }
+        }
+        // Outside rows adjacent to the band also cannot extend the matching run.
+        for y in [31_u32, 128] {
+            let source_y = (y as i32 + i32::from(dy)) as u32;
+            assert!(
+                (0..96).any(|x| next.image.get_pixel(x, y) != initial.image.get_pixel(x, source_y))
+            );
+        }
     }
 }
 
