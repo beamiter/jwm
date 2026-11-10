@@ -61,6 +61,7 @@ fn options() -> HostOptions {
         allow_wayland_keyboard: false,
         allow_wayland_pointer: true,
         allow_wayland_control: false,
+        allow_wayland_text: false,
         allow_wayland_scroll: false,
         allow_wayland_horizontal_scroll: false,
         scroll_copy: false,
@@ -188,6 +189,7 @@ fn peer(address: std::net::SocketAddr, case: Case, trace: &Trace) -> RemoteResul
             stream: super::super::messages::StreamCapabilities {
                 wayland_pointer: true,
                 wayland_control: false,
+                wayland_text: false,
                 ..Default::default()
             },
             initial_viewport: None,

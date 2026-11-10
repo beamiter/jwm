@@ -321,6 +321,10 @@ enum Command {
         #[arg(long, requires_all = ["wayland_select", "once"], conflicts_with_all = ["allow_wayland_keyboard", "allow_wayland_pointer", "allow_input", "allow_clipboard", "allow_window_resize"])]
         allow_wayland_control: bool,
 
+        /// Permit one UTF-8 commit to the selected surface's existing clean IME context.
+        #[arg(long, requires_all=["wayland_select","once"], conflicts_with_all=["allow_input","allow_clipboard","allow_window_resize","allow_wayland_keyboard","allow_wayland_pointer","allow_wayland_control","allow_wayland_scroll","allow_wayland_horizontal_scroll","wayland_popups","wayland_resize_follow"])]
+        allow_wayland_text: bool,
+
         /// Experimentally encode exact bounded vertical screen shifts as copy plus changed pixels.
         /// Codec optimization only; grants no input or scrolling permission.
         #[arg(long)]
@@ -460,7 +464,7 @@ enum Command {
     },
     /// Open a remote JWM desktop in an explicitly selected local viewer.
     #[command(group(clap::ArgGroup::new("native_viewer_mode")
-        .args(["view_only", "wayland_keyboard", "wayland_pointer", "wayland_control"]).multiple(false)))]
+        .args(["view_only", "wayland_keyboard", "wayland_pointer", "wayland_control", "wayland_text_stdin"]).multiple(false)))]
     #[command(group(clap::ArgGroup::new("viewer_scroll_lease").args(["wayland_pointer", "wayland_control"]).multiple(false)))]
     Connect {
         /// Local backend; Wayland requires an explicit read-only or scoped input mode.
@@ -510,6 +514,11 @@ enum Command {
         /// No drag, modifier-click, clipboard, reconnect or saved authorization.
         #[arg(long, requires = "viewer_backend", conflicts_with_all = ["wayland_keyboard", "wayland_pointer", "view_only", "resize_source", "follow_source_size", "clipboard", "grab_input", "reconnect_attempts"])]
         wayland_control: bool,
+
+        /// Read one exact UTF-8 text payload from stdin (1..=4000 bytes, no NUL).
+        /// Requires a native Wayland viewer; no keyboard or clipboard fallback.
+        #[arg(long, requires="viewer_backend", conflicts_with_all=["view_only","wayland_keyboard","wayland_pointer","wayland_control","wayland_scroll","wayland_horizontal_scroll","clipboard","grab_input","resize_source","follow_source_size","reconnect_attempts"])]
+        wayland_text_stdin: bool,
 
         /// Separately request single-notch vertical scroll; never smooth or horizontal.
         #[arg(long, requires = "viewer_scroll_lease")]
@@ -718,6 +727,7 @@ fn profile_from_command(command: Command) -> RemoteResult<Profile> {
             wayland_keyboard,
             wayland_pointer,
             wayland_control,
+            wayland_text_stdin,
             wayland_scroll,
             wayland_horizontal_scroll,
             window_position,
@@ -748,6 +758,7 @@ fn profile_from_command(command: Command) -> RemoteResult<Profile> {
                 || wayland_scroll
                 || wayland_horizontal_scroll
                 || wayland_control
+                || wayland_text_stdin
             {
                 return Err(profile_error(
                     "Wayland input authorization cannot be saved in a profile",
@@ -1291,6 +1302,7 @@ fn run(command: Command) -> RemoteResult<()> {
             allow_wayland_keyboard,
             allow_wayland_pointer,
             allow_wayland_control,
+            allow_wayland_text,
             allow_wayland_scroll,
             allow_wayland_horizontal_scroll,
             scroll_copy,
@@ -1343,6 +1355,7 @@ fn run(command: Command) -> RemoteResult<()> {
                 allow_wayland_keyboard,
                 allow_wayland_pointer,
                 allow_wayland_control,
+                allow_wayland_text,
                 allow_wayland_scroll,
                 allow_wayland_horizontal_scroll,
                 scroll_copy,
@@ -1418,6 +1431,7 @@ fn run(command: Command) -> RemoteResult<()> {
             wayland_keyboard,
             wayland_pointer,
             wayland_control,
+            wayland_text_stdin,
             wayland_scroll,
             wayland_horizontal_scroll,
             window_position,
@@ -1450,6 +1464,11 @@ fn run(command: Command) -> RemoteResult<()> {
                     wayland_keyboard,
                     wayland_pointer,
                     wayland_control,
+                    wayland_text: if wayland_text_stdin {
+                        Some(read_explicit_text(std::io::stdin().lock())?)
+                    } else {
+                        None
+                    },
                     wayland_scroll,
                     wayland_horizontal_scroll,
                     window_position,
@@ -3770,6 +3789,7 @@ mod scroll_copy_cli_tests {
                 allow_input,
                 allow_wayland_pointer,
                 allow_wayland_control,
+                allow_wayland_text,
                 allow_wayland_scroll,
                 allow_clipboard,
                 ..
@@ -3782,6 +3802,7 @@ mod scroll_copy_cli_tests {
                 !allow_input
                     && !allow_wayland_pointer
                     && !allow_wayland_control
+                    && !allow_wayland_text
                     && !allow_wayland_scroll
                     && !allow_clipboard
             );
@@ -3988,6 +4009,92 @@ mod popup_cli_tests {
             vec!["jwm-remote", "ssh", "--wayland-popups"],
         ] {
             assert!(Cli::try_parse_from(&args).is_err(), "{args:?}");
+        }
+    }
+}
+
+fn read_explicit_text(
+    reader: impl std::io::Read,
+) -> RemoteResult<jwm::remote::wayland_text_wire::ExplicitText> {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    reader
+        .take((jwm::remote::wayland_text_wire::MAX_TEXT_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)?;
+    jwm::remote::wayland_text_wire::ExplicitText::new(bytes)
+}
+#[cfg(test)]
+mod explicit_text_cli_tests {
+    use super::*;
+    #[test]
+    fn exact_text_is_bounded_and_not_trimmed() {
+        let text = read_explicit_text("中文e\u{301}🙂\n".as_bytes()).unwrap();
+        assert_eq!(text.as_bytes(), "中文e\u{301}🙂\n".as_bytes());
+        assert!(read_explicit_text(&b""[..]).is_err());
+        assert!(read_explicit_text(&b"a\0b"[..]).is_err());
+        assert!(read_explicit_text(vec![b'a'; 4001].as_slice()).is_err());
+    }
+    #[test]
+    fn text_host_requires_explicit_exclusive_single_source() {
+        assert!(matches!(
+            Cli::try_parse_from(["jwm-remote", "host"]).unwrap().command,
+            Command::Host {
+                allow_wayland_text: false,
+                ..
+            }
+        ));
+        let base = [
+            "jwm-remote",
+            "host",
+            "--wayland-select",
+            "--once",
+            "--allow-wayland-text",
+        ];
+        assert!(matches!(
+            Cli::try_parse_from(base).unwrap().command,
+            Command::Host {
+                allow_wayland_text: true,
+                ..
+            }
+        ));
+        for flag in [
+            "--allow-input",
+            "--allow-clipboard",
+            "--allow-window-resize",
+            "--allow-wayland-keyboard",
+            "--allow-wayland-pointer",
+            "--allow-wayland-control",
+            "--wayland-popups",
+            "--wayland-resize-follow",
+        ] {
+            let mut args = base.to_vec();
+            args.push(flag);
+            assert!(Cli::try_parse_from(args).is_err(), "{flag}");
+        }
+        assert!(Cli::try_parse_from(["jwm-remote", "host", "--allow-wayland-text"]).is_err());
+    }
+    #[test]
+    fn text_mode_cannot_be_saved_or_mixed() {
+        let args = [
+            "jwm-remote",
+            "connect",
+            "127.0.0.1:7788",
+            "--viewer-backend",
+            "wayland",
+            "--wayland-text-stdin",
+        ];
+        let parsed = Cli::try_parse_from(args).unwrap();
+        assert!(profile_from_command(parsed.command).is_err());
+        for extra in [
+            "--wayland-keyboard",
+            "--wayland-pointer",
+            "--wayland-control",
+            "--view-only",
+            "--grab-input",
+        ] {
+            let mut a = args.to_vec();
+            a.push(extra);
+            assert!(Cli::try_parse_from(a).is_err(), "{extra}");
         }
     }
 }

@@ -69,6 +69,7 @@ fn options(scroll: bool, horizontal_scroll: bool) -> host::HostOptions {
         allow_wayland_scroll: scroll,
         allow_wayland_horizontal_scroll: horizontal_scroll,
         allow_wayland_control: true,
+        allow_wayland_text: false,
         scroll_copy: false,
         allow_clipboard: false,
         clipboard_mode: Default::default(),
@@ -502,6 +503,7 @@ impl Harness {
                 wayland_scroll: viewer_scroll.0,
                 wayland_horizontal_scroll: viewer_scroll.1,
                 wayland_control: true,
+                wayland_text: None,
                 resize_source: None,
                 follow_source_size: false,
                 window_size: Some(WindowSize {

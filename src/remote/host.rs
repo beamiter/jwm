@@ -4,6 +4,8 @@
 mod control;
 #[path = "host_input_wake.rs"]
 mod input_wake;
+#[path = "host_text.rs"]
+mod text;
 use control::{ControlCommand, HostControl};
 #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
 pub(super) use input_wake::{InputWakeProbe, with_input_wake};
@@ -1749,6 +1751,7 @@ pub struct HostOptions {
     pub allow_wayland_keyboard: bool,
     pub allow_wayland_pointer: bool,
     pub allow_wayland_control: bool,
+    pub allow_wayland_text: bool,
     pub allow_wayland_scroll: bool,
     pub allow_wayland_horizontal_scroll: bool,
     /// Experimental video codec optimization, independent of input grants.
@@ -1926,6 +1929,9 @@ struct SourceControl {
     #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
     input_wake_probe: Option<Arc<InputWakeProbe>>,
     follow_geometry: AtomicBool,
+    text_enabled: AtomicBool,
+    text_attempted: AtomicBool,
+    text_request: Mutex<Option<super::wayland_text_wire::TextCommit>>,
     control_enabled: AtomicBool,
     control_revoke: AtomicBool,
     control_queue: Mutex<VecDeque<ControlCommand>>,
@@ -1951,8 +1957,9 @@ impl SourceControl {
         if self.legacy_disable_ack_wake {
             return Ok(());
         }
-        let live = (self.control_enabled.load(Ordering::Acquire)
-            && !self.control_revoke.load(Ordering::Acquire))
+        let live = self.text_enabled.load(Ordering::Acquire)
+            || (self.control_enabled.load(Ordering::Acquire)
+                && !self.control_revoke.load(Ordering::Acquire))
             || (self.pointer_enabled.load(Ordering::Acquire)
                 && !self.pointer_revoke.load(Ordering::Acquire));
         let matching = live && proof_ack_matches(*self.pointer_frame.lock().unwrap(), scope);
@@ -1971,9 +1978,10 @@ impl SourceControl {
     fn input_backlog(&self) -> bool {
         // Only actionable queue entries, never held keys or waiting-for-Ready
         // state. Disabled modes are terminal and their stale flags cannot spin.
-        (self.control_enabled.load(Ordering::Acquire)
-            && (self.control_revoke.load(Ordering::Acquire)
-                || !self.control_queue.lock().unwrap().is_empty()))
+        (self.text_enabled.load(Ordering::Acquire) && self.text_request.lock().unwrap().is_some())
+            || (self.control_enabled.load(Ordering::Acquire)
+                && (self.control_revoke.load(Ordering::Acquire)
+                    || !self.control_queue.lock().unwrap().is_empty()))
             || (self.pointer_enabled.load(Ordering::Acquire)
                 && (self.pointer_revoke.load(Ordering::Acquire)
                     || !self.pointer_queue.lock().unwrap().is_empty()))
@@ -1998,6 +2006,9 @@ impl SourceControl {
             #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
             input_wake_probe: input_wake::test_probe(),
             follow_geometry: AtomicBool::new(false),
+            text_enabled: AtomicBool::new(false),
+            text_attempted: AtomicBool::new(false),
+            text_request: Mutex::new(None),
             control_enabled: AtomicBool::new(false),
             control_revoke: AtomicBool::new(false),
             control_queue: Mutex::new(VecDeque::new()),
@@ -2092,6 +2103,23 @@ fn listener_security_notice(address: IpAddr) -> Option<&'static str> {
 }
 
 fn validate_window_policy(options: &HostOptions) -> RemoteResult<()> {
+    if options.allow_wayland_text
+        && (!options.wayland_select
+            || !options.once
+            || options.wayland_popups
+            || options.wayland_resize_follow
+            || options.allow_input
+            || options.allow_clipboard
+            || options.allow_window_resize
+            || options.allow_wayland_keyboard
+            || options.allow_wayland_pointer
+            || options.allow_wayland_control
+            || options.allow_wayland_scroll
+            || options.allow_wayland_horizontal_scroll)
+    {
+        return Err(invalid_data("text requires exclusive one-session native root selection without other input or clipboard").into());
+    }
+
     if options.wayland_popups
         && (!options.wayland_select
             || !options.once
@@ -2672,6 +2700,25 @@ fn serve_authenticated(
         hello.stream.wayland_keyboard && options.allow_wayland_keyboard;
     negotiated_stream.wayland_pointer =
         hello.stream.wayland_pointer && options.allow_wayland_pointer;
+    negotiated_stream.wayland_text = hello.stream.wayland_text && options.allow_wayland_text;
+    if negotiated_stream.wayland_text {
+        if hello.request_input
+            || hello.request_clipboard
+            || hello.stream.window_resize
+            || hello.stream.wayland_keyboard
+            || hello.stream.wayland_pointer
+            || hello.stream.wayland_control
+        {
+            return Err(invalid_data("text cannot combine other input permissions").into());
+        }
+        if let Err(error) = capture.enable_text() {
+            decline_session(
+                &mut writer,
+                capture_refusal("native text context unavailable or refused"),
+            );
+            return Err(error);
+        }
+    }
     negotiated_stream.wayland_control =
         hello.stream.wayland_control && options.allow_wayland_control;
     negotiated_stream.wayland_scroll = hello.stream.wayland_scroll
@@ -2815,6 +2862,8 @@ fn serve_authenticated(
         };
         if clipboard_enabled {
             reader.set_max_payload_len(MAX_INBOUND_CLIPBOARD_PAYLOAD_LEN);
+        } else if negotiated_stream.wayland_text {
+            reader.set_max_payload_len(super::wayland_text_wire::MAX_TEXT_BYTES + 26);
         }
         let grants = host_source_grants(options)?;
         let catalog = SourceCatalog {
@@ -2840,7 +2889,8 @@ fn serve_authenticated(
             capture.geometry_epoch(),
         )?);
         if input_wake::enabled()
-            && (negotiated_stream.wayland_control
+            && (negotiated_stream.wayland_text
+                || negotiated_stream.wayland_control
                 || negotiated_stream.wayland_keyboard
                 || negotiated_stream.wayland_pointer)
         {
@@ -2852,6 +2902,9 @@ fn serve_authenticated(
         sources
             .follow_geometry
             .store(options.wayland_resize_follow, Ordering::Release);
+        sources
+            .text_enabled
+            .store(negotiated_stream.wayland_text, Ordering::Release);
         sources
             .control_enabled
             .store(negotiated_stream.wayland_control, Ordering::Release);
@@ -3840,6 +3893,7 @@ fn stream_frames(
                 }
             }
             process_keyboard(sources, capture, &writer, &mut keyboard)?;
+            text::process(sources, capture, &writer)?;
             control::process(sources, capture, &writer, &mut bundle_control, source_size)?;
             process_pointer(sources, capture, &writer, &mut pointer, source_size)?;
             let mode = capture.mode();
@@ -3997,6 +4051,7 @@ fn stream_frames(
             let pointer_serial = capture
                 .control_frame()
                 .or_else(|| capture.pointer_frame())
+                .or_else(|| capture.text_frame())
                 .map(|(serial, at)| {
                     *sources.pointer_frame.lock().unwrap() = Some(PointerFrame {
                         serial,
@@ -4968,6 +5023,20 @@ fn receive_input_scoped(
                     drop(queue);
                     sources.notify_input()?;
                 }
+                MessageKind::WaylandTextCommit => {
+                    let sources = sources.ok_or_else(|| invalid_data("text source unavailable"))?;
+                    if !sources.text_enabled.load(Ordering::Acquire)
+                        || sources.text_attempted.swap(true, Ordering::AcqRel)
+                    {
+                        return Err(invalid_data(
+                            "one-shot text not authorized or already attempted",
+                        )
+                        .into());
+                    }
+                    let request = super::wayland_text_wire::TextCommit::decode(&payload)?;
+                    *sources.text_request.lock().unwrap() = Some(request);
+                    sources.notify_input()?;
+                }
                 MessageKind::WaylandControlRevoke => {
                     let _ = super::wayland_control_wire::ControlRevoke::decode(&payload)?;
                     let sources = sources.ok_or_else(|| invalid_data("control unavailable"))?;
@@ -5186,7 +5255,8 @@ fn receive_input_scoped(
                 | MessageKind::WindowResizeResult
                 | MessageKind::WaylandKeyboardStatus
                 | MessageKind::WaylandPointerStatus
-                | MessageKind::WaylandControlStatus => {
+                | MessageKind::WaylandControlStatus
+                | MessageKind::WaylandTextResult => {
                     return Err(invalid_data(format!("unexpected client message: {kind:?}")).into());
                 }
             }
@@ -6566,6 +6636,7 @@ mod tests {
             allow_wayland_keyboard: false,
             allow_wayland_pointer: false,
             allow_wayland_control: false,
+            allow_wayland_text: false,
             allow_wayland_scroll: false,
             allow_wayland_horizontal_scroll: false,
             scroll_copy: false,
@@ -9250,6 +9321,7 @@ mod tests {
             allow_wayland_keyboard: false,
             allow_wayland_pointer: false,
             allow_wayland_control: false,
+            allow_wayland_text: false,
             allow_wayland_scroll: false,
             allow_wayland_horizontal_scroll: false,
             scroll_copy: false,

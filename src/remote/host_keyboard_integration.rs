@@ -70,6 +70,7 @@ fn options() -> HostOptions {
         allow_wayland_keyboard: true,
         allow_wayland_pointer: false,
         allow_wayland_control: false,
+        allow_wayland_text: false,
         allow_wayland_scroll: false,
         allow_wayland_horizontal_scroll: false,
         scroll_copy: false,

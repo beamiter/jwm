@@ -1,5 +1,5 @@
 use std::mem;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 
 use tracing::debug;
 use wayland_protocols::wp::text_input::zv3::server::zwp_text_input_v3::{
@@ -18,9 +18,95 @@ pub(crate) struct TextInput {
     focus: Option<WlSurface>,
     active_text_input_id: Option<ObjectId>,
     compositor_input_method: bool,
+    text_authority: TextAuthority,
+}
+
+/// Opaque, single-use authority for an already enabled text-input context.
+/// This neither enables an input method nor grants compositor input permissions.
+#[derive(Debug)]
+pub struct AuthorizedTextTarget {
+    handle: Weak<Mutex<TextInput>>,
+    resource: ZwpTextInputV3,
+    surface: WlSurface,
+    revision: u64,
+}
+
+#[derive(Debug)]
+struct TextAuthority {
+    revision: Option<u64>,
+    input_method:
+        Option<wayland_protocols_misc::zwp_input_method_v2::server::zwp_input_method_v2::ZwpInputMethodV2>,
+    batch_dirty: bool,
+    pending_preedit: Option<bool>,
+    preedit_active: bool,
+    uncertain: bool,
+}
+impl Default for TextAuthority {
+    fn default() -> Self {
+        Self {
+            revision: Some(0),
+            input_method: None,
+            batch_dirty: false,
+            pending_preedit: None,
+            preedit_active: false,
+            uncertain: false,
+        }
+    }
+}
+impl TextAuthority {
+    fn invalidate(&mut self) {
+        self.revision = self.revision.and_then(|v| v.checked_add(1));
+    }
+    fn begin_batch(&mut self, preedit: Option<bool>) {
+        self.invalidate();
+        self.batch_dirty = true;
+        if preedit.is_some() {
+            self.pending_preedit = preedit;
+        }
+    }
+    fn finish_batch(&mut self, discard: bool) {
+        self.invalidate();
+        if discard {
+            self.uncertain = true;
+        } else if let Some(active) = self.pending_preedit.take() {
+            self.preedit_active = active;
+        }
+        self.batch_dirty = false;
+        self.pending_preedit = None;
+    }
+    fn clean(&self) -> bool {
+        self.revision.is_some()
+            && !self.batch_dirty
+            && !self.preedit_active
+            && !self.uncertain
+            && self.input_method.as_ref().is_some_and(Resource::is_alive)
+    }
 }
 
 impl TextInput {
+    fn authorized_instance(&self, surface: &WlSurface) -> Option<&Instance> {
+        if !surface.is_alive()
+            || self.focus.as_ref() != Some(surface)
+            || self.compositor_input_method
+            || !self.text_authority.clean()
+        {
+            return None;
+        }
+        let id = self.active_text_input_id.as_ref()?;
+        self.instances.iter().find(|i| {
+            !i.pending_context
+                && i.instance.is_alive()
+                && i.instance.id() == *id
+                && i.instance.id().same_client_as(&surface.id())
+        })
+    }
+    fn matches_authorized(&self, target: &AuthorizedTextTarget) -> bool {
+        self.text_authority.revision == Some(target.revision)
+            && target.resource.is_alive()
+            && self
+                .authorized_instance(&target.surface)
+                .is_some_and(|i| i.instance == target.resource)
+    }
     fn with_focused_client_all_text_inputs<F>(&mut self, mut f: F)
     where
         F: FnMut(&ZwpTextInputV3, &WlSurface, u32),
@@ -70,10 +156,12 @@ pub struct TextInputHandle {
 impl TextInputHandle {
     pub(super) fn add_instance(&self, instance: &ZwpTextInputV3) {
         let mut inner = self.inner.lock().unwrap();
+        inner.text_authority.invalidate();
         inner.instances.push(Instance {
             instance: instance.clone(),
             serial: 0,
             pending_state: Default::default(),
+            pending_context: false,
         });
     }
 
@@ -86,8 +174,85 @@ impl TextInputHandle {
             .iter_mut()
             .find(|instance| instance.instance == *text_input)
         {
-            instance.serial += 1
+            instance.serial = instance.serial.wrapping_add(1)
         }
+    }
+
+    /// Freeze the exact active resource of the expected surface. Requires an
+    /// existing real IME, a committed context and no pending/local composition.
+    pub fn snapshot_authorized_text(&self, surface: &WlSurface) -> Option<AuthorizedTextTarget> {
+        let inner = self.inner.lock().unwrap();
+        let instance = inner.authorized_instance(surface)?;
+        Some(AuthorizedTextTarget {
+            handle: Arc::downgrade(&self.inner),
+            resource: instance.instance.clone(),
+            surface: surface.clone(),
+            revision: inner.text_authority.revision?,
+        })
+    }
+
+    /// Check a frozen context without enabling, switching or refreshing it.
+    pub fn authorized_text_is_current(&self, target: &AuthorizedTextTarget) -> bool {
+        if !target.handle.ptr_eq(&Arc::downgrade(&self.inner)) {
+            return false;
+        }
+        self.inner.lock().unwrap().matches_authorized(target)
+    }
+
+    /// Deliver exactly one bounded UTF-8 commit to the frozen resource. Both
+    /// events and authority consumption happen under one text-input lock; no
+    /// focus lookup, IME callback, keyboard or clipboard fallback follows it.
+    /// Success means events queued, not that the application accepted text.
+    pub fn commit_authorized_text(&self, target: &AuthorizedTextTarget, text: &str) -> bool {
+        if text.is_empty()
+            || text.len() > 4000
+            || text.contains('\0')
+            || !target.handle.ptr_eq(&Arc::downgrade(&self.inner))
+        {
+            return false;
+        }
+        let mut inner = self.inner.lock().unwrap();
+        if !inner.matches_authorized(target) {
+            return false;
+        }
+        let serial = inner.authorized_instance(&target.surface).unwrap().serial;
+        inner.text_authority.invalidate();
+        // Overflow must fail closed before producing either event.
+        if inner.text_authority.revision.is_none() {
+            return false;
+        }
+        target.resource.commit_string(Some(text.to_owned()));
+        target.resource.done(serial);
+        true
+    }
+
+    pub(crate) fn set_authorized_input_method(
+        &self,
+        method: Option<
+            wayland_protocols_misc::zwp_input_method_v2::server::zwp_input_method_v2::ZwpInputMethodV2,
+        >,
+    ) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.text_authority.invalidate();
+        inner.text_authority.input_method = method;
+        // Do not declare pending/preedit state clean merely because the IME
+        // changed. A partially delivered local batch cannot be reconstructed.
+    }
+
+    pub(crate) fn send_input_method_text(&self, text: String) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.text_authority.begin_batch(None);
+        inner.with_active_text_input(|ti, _, _| ti.commit_string(Some(text.clone())));
+    }
+    pub(crate) fn send_input_method_preedit(&self, text: String, begin: i32, end: i32) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.text_authority.begin_batch(Some(!text.is_empty()));
+        inner.with_active_text_input(|ti, _, _| ti.preedit_string(Some(text.clone()), begin, end));
+    }
+    pub(crate) fn send_input_method_delete(&self, before: u32, after: u32) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.text_authority.begin_batch(None);
+        inner.with_active_text_input(|ti, _, _| ti.delete_surrounding_text(before, after));
     }
 
     /// Return the currently focused surface.
@@ -99,13 +264,16 @@ impl TextInputHandle {
     ///
     /// This doesn't send any 'enter' or 'leave' events.
     pub fn set_focus(&self, surface: Option<WlSurface>) {
-        self.inner.lock().unwrap().focus = surface;
+        let mut inner = self.inner.lock().unwrap();
+        inner.text_authority.invalidate();
+        inner.focus = surface;
     }
 
     /// Send `leave` on the text-input instance for the currently focused
     /// surface.
     pub fn leave(&self) {
         let mut inner = self.inner.lock().unwrap();
+        inner.text_authority.invalidate();
         // Leaving clears the active text input.
         inner.active_text_input_id = None;
         // NOTE: we implement it in a symmetrical way with `enter`.
@@ -118,6 +286,7 @@ impl TextInputHandle {
     /// surface.
     pub fn enter(&self) {
         let mut inner = self.inner.lock().unwrap();
+        inner.text_authority.invalidate();
         // NOTE: protocol states that if we have multiple text inputs enabled, `enter` must
         // be send for each of them.
         inner.with_focused_client_all_text_inputs(|text_input, focus, _| {
@@ -137,6 +306,7 @@ impl TextInputHandle {
             if inner.compositor_input_method == active {
                 return;
             }
+            inner.text_authority.invalidate();
             inner.compositor_input_method = active;
         }
         if active {
@@ -156,6 +326,7 @@ impl TextInputHandle {
     /// the state should be discarded and wrong serial sent.
     pub fn done(&self, discard_state: bool) {
         let mut inner = self.inner.lock().unwrap();
+        inner.text_authority.finish_batch(discard_state);
         inner.with_active_text_input(|text_input, _, serial| {
             if discard_state {
                 debug!("discarding text-input state due to serial");
@@ -228,6 +399,15 @@ where
         _dhandle: &wayland_server::DisplayHandle,
         _data_init: &mut wayland_server::DataInit<'_, D>,
     ) {
+        {
+            let mut inner = self.handle.inner.lock().unwrap();
+            inner.text_authority.invalidate();
+            if let Some(instance) = inner.instances.iter_mut().find(|i| i.instance == *resource) {
+                // Keep the context unavailable throughout a Commit's multiple
+                // subsystem calls. Only its successful completion clears this.
+                instance.pending_context = true;
+            }
+        }
         // Always increment serial to not desync with clients.
         if matches!(request, zwp_text_input_v3::Request::Commit) {
             self.handle.increment_serial(resource);
@@ -350,6 +530,13 @@ where
                 self.input_method_handle.with_instance(|input_method| {
                     input_method.done();
                 });
+                // No IME lock is held here. A concurrent snapshot cannot see
+                // the new revision paired with the pre-Commit active context.
+                let mut inner = self.handle.inner.lock().unwrap();
+                inner.text_authority.invalidate();
+                if let Some(instance) = inner.instances.iter_mut().find(|i| i.instance == *resource) {
+                    instance.pending_context = false;
+                }
             }
             zwp_text_input_v3::Request::Destroy => {
                 // Nothing to do
@@ -362,6 +549,10 @@ where
         let destroyed_id = text_input.id();
         let deactivate_im = {
             let mut inner = self.handle.inner.lock().unwrap();
+            inner.text_authority.invalidate();
+            if inner.active_text_input_id.as_ref() == Some(&destroyed_id) {
+                inner.active_text_input_id = None;
+            }
             inner.instances.retain(|inst| inst.instance.id() != destroyed_id);
             let destroyed_focused = inner
                 .focus
@@ -389,6 +580,7 @@ struct Instance {
     instance: ZwpTextInputV3,
     serial: u32,
     pending_state: TextInputState,
+    pending_context: bool,
 }
 
 #[derive(Debug, Default)]
@@ -398,4 +590,55 @@ struct TextInputState {
     content_type: Option<(ContentHint, ContentPurpose)>,
     cursor_rectangle: Option<Rectangle<i32, Logical>>,
     text_change_cause: Option<ChangeCause>,
+}
+
+#[cfg(test)]
+mod authorized_text_tests {
+    use super::TextAuthority;
+
+    #[test]
+    fn authorized_text_revision_never_restores_or_wraps() {
+        let mut state = TextAuthority::default();
+        let initial = state.revision;
+        state.begin_batch(None);
+        state.finish_batch(false);
+        assert_ne!(state.revision, initial);
+        state.revision = Some(u64::MAX);
+        state.invalidate();
+        assert_eq!(state.revision, None);
+        state.begin_batch(Some(false));
+        state.finish_batch(false);
+        assert_eq!(state.revision, None);
+        assert!(!state.clean());
+    }
+
+    #[test]
+    fn authorized_text_preedit_survives_done_until_explicit_empty_done() {
+        let mut state = TextAuthority::default();
+        state.begin_batch(Some(true));
+        assert!(state.batch_dirty);
+        state.finish_batch(false);
+        assert!(state.preedit_active);
+        assert!(!state.batch_dirty);
+        state.begin_batch(None); // unrelated commit/delete is not preedit cancellation
+        state.finish_batch(false);
+        assert!(state.preedit_active);
+        state.begin_batch(Some(false));
+        assert!(state.preedit_active && state.batch_dirty);
+        state.finish_batch(false);
+        assert!(!state.preedit_active && !state.batch_dirty);
+        assert!(!state.clean(), "no real input method is never authorized");
+    }
+
+    #[test]
+    fn authorized_text_invalid_done_cannot_restore_clean_state() {
+        let mut state = TextAuthority::default();
+        state.begin_batch(Some(true));
+        state.finish_batch(true);
+        assert!(state.uncertain);
+        state.begin_batch(Some(false));
+        state.finish_batch(false);
+        assert!(state.uncertain);
+        assert!(!state.clean());
+    }
 }

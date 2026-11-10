@@ -1498,7 +1498,7 @@ jwm-remote: capture mode now overlay/cpu-resize/shm/damage/cursor-events
 ```
 
 The healthy reading is `overlay/xrender/shm/damage/cursor-events`, or
-`overlay/cpu-resize/shm/damage/cursor-events` on NVIDIA's proprietary driver
+`overlay/cpu-resize/core-getimage/damage/cursor-events` on NVIDIA's proprietary driver
 (see [Half-drawn frames on NVIDIA](#half-drawn-frames-on-nvidia)). Each field
 names its fallback explicitly rather than disappearing, so a degraded session
 is obvious at a glance: `root`, `cpu-resize`, `core-getimage`, `no-damage`,
@@ -1570,7 +1570,7 @@ or shows blocky black-and-white noise, most often across the top of the
 screen where the clock and status bar redraw every second. The host machine's
 own screen shows nothing of the kind.
 
-Cause: on NVIDIA's proprietary driver, XRender and CopyArea reads of the
+One previously measured cause: on NVIDIA's proprietary driver, XRender and CopyArea reads of the
 GL-composited screen can return a frame the compositor is still drawing —
 its blurred backdrop before any window, or a partial blur pass. The host
 reads right after every Damage notification, so it lands in that window far
@@ -1579,8 +1579,9 @@ more often than a periodic screen grab would. Measured on an RTX 4090 D
 XRender; 0 through a core `GetImage`, which the driver synchronizes with GL
 rendering; 0 in 2,700 frames of ffmpeg recording the host's screen directly.
 
-`--scaling auto`, the default on `host`, `connect`, and `ssh`, avoids this
-hazard across the entire pipeline. On the host, it reads the screen with `GetImage`
+`--scaling auto`, the default on `host`, `connect`, and `ssh`, selects compatibility
+paths for this previously measured failure. On the host, it reads the screen with core `GetImage`
+(not MIT-SHM `GetImage`)
 and shrinks it on the CPU when the X server has the `NV-GLX` or `NV-CONTROL`
 extension, and says so at session start. The CPU path averages each output
 pixel's source area across threads; it took the place of a generic filter
@@ -1588,9 +1589,15 @@ that cost about 90 ms per 2560x1440 frame. On the same loaded desktop the
 corrected path captured at about 152 ms per frame against 117 ms through
 XRender, both dominated by waiting for the GPU. On the viewer, `--scaling auto`
 disables XRender upscaling on NVIDIA systems, performing high-quality multi-threaded
-CPU upscaling instead to eliminate black-and-white noise jitter. `--scaling gpu` restores
+CPU upscaling instead. This does not disable viewer SHM uploads or the cursor renderer,
+and is not a guarantee against every source of top-edge noise. `--scaling gpu` restores
 XRender for anyone who prefers that speed and does not see the artifacts;
-`--scaling cpu` forces the direct CPU path elsewhere.
+`--scaling cpu` forces the direct CPU path elsewhere. On the host, CPU mode and
+NVIDIA Auto also skip SHM segment creation, including after viewport or capture-area
+changes. Older implementations disabled XRender but still attempted MIT-SHM; that
+was not the same readback path as the core-GetImage measurement above. Software
+Xvfb regressions now check actual core/SHM requests and codec-to-display top-edge
+pixels. They do not reproduce or certify a physical NVIDIA driver.
 
 - A black/invalid Composite overlay can be bypassed with
   `--capture-source root`. Root capture is a compatibility fallback and may

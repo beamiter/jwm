@@ -208,6 +208,7 @@ impl Dispatch<JwmRemoteControlManagerV1, ManagerData> for JwmWaylandState {
                 || state.remote_control.active.is_some()
                 || super::remote_pointer::active(state)
                 || super::remote_keyboard::active(state)
+                || super::remote_text::active(state)
                 || !authority_is_current(state, &authority)
                 || !state.remote_keyboard_seat_eligible()
                 || !state.remote_keyboard_target_eligible(&authority)

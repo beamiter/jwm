@@ -3,6 +3,10 @@
 #[path = "client_control.rs"]
 mod control;
 use control::ClientControl;
+#[path = "client_text.rs"]
+mod text;
+use super::wayland_keyboard_wire::DrawnScope;
+use text::ClientText;
 
 use super::clipboard_policy::{self, ClipboardDirection, ClipboardMode};
 use super::clipboard_sync::{
@@ -67,6 +71,7 @@ pub struct ClientOptions {
     pub wayland_keyboard: bool,
     pub wayland_pointer: bool,
     pub wayland_control: bool,
+    pub wayland_text: Option<super::wayland_text_wire::ExplicitText>,
     pub wayland_scroll: bool,
     pub wayland_horizontal_scroll: bool,
     /// One explicit source-size operation; never replayed or saved in a profile.
@@ -294,6 +299,7 @@ pub fn run_client_reconnecting(options: ClientOptions, attempts: u8) -> RemoteRe
         || options.resize_source.is_some()
         || options.wayland_keyboard
         || options.wayland_control
+        || options.wayland_text.is_some()
         || options.wayland_pointer
         || options.wayland_scroll
         || options.wayland_horizontal_scroll
@@ -396,6 +402,25 @@ fn suppress_reconnect(result: RemoteResult<()>, suppress: bool) -> RemoteResult<
 }
 
 fn validate_viewer_backend(options: &ClientOptions) -> RemoteResult<()> {
+    if options.wayland_text.is_some()
+        && (options.viewer_backend != ViewerBackend::Wayland
+            || options.view_only
+            || options.wayland_control
+            || options.wayland_keyboard
+            || options.wayland_pointer
+            || options.wayland_scroll
+            || options.wayland_horizontal_scroll
+            || options.clipboard
+            || options.grab_input
+            || options.resize_source.is_some()
+            || options.follow_source_size)
+    {
+        return Err(invalid_data(
+            "text requires exclusive native viewer mode without other input, clipboard or resize",
+        )
+        .into());
+    }
+
     if options.wayland_control
         && (options.viewer_backend != ViewerBackend::Wayland
             || options.view_only
@@ -441,6 +466,7 @@ fn validate_viewer_backend(options: &ClientOptions) -> RemoteResult<()> {
                 + usize::from(options.wayland_keyboard)
                 + usize::from(options.wayland_pointer)
                 + usize::from(options.wayland_control)
+                + usize::from(options.wayland_text.is_some())
                 != 1
             || options.clipboard
             || options.resize_source.is_some()
@@ -529,7 +555,8 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
     let request_input = !options.view_only
         && !options.wayland_keyboard
         && !options.wayland_pointer
-        && !options.wayland_control;
+        && !options.wayland_control
+        && options.wayland_text.is_none();
     let keymap = if request_input {
         read_display(options.display.as_deref())?
     } else {
@@ -561,6 +588,7 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
         options.wayland_scroll,
         options.wayland_horizontal_scroll,
         options.wayland_control,
+        options.wayland_text.is_some(),
         stream,
         &key,
         request_input,
@@ -649,6 +677,7 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
 
     *stage = ClientStage::FirstFrame;
     let mut initial_state = ReceiveState::new();
+    initial_state.wayland_text.get_mut().unwrap().payload = options.wayland_text.clone();
     initial_state.frame_limits = hello.stream.frame_limits;
     initial_state.scroll_copy = hello.stream.scroll_copy;
     initial_state.resize.get_mut().unwrap().requested = options.resize_source;
@@ -1064,6 +1093,7 @@ fn negotiate_session(
     request_wayland_scroll: bool,
     request_wayland_horizontal_scroll: bool,
     request_wayland_control: bool,
+    request_wayland_text: bool,
     mut stream: TcpStream,
     key: &[u8],
     request_input: bool,
@@ -1114,6 +1144,7 @@ fn negotiate_session(
                 wayland_scroll: request_wayland_scroll,
                 wayland_horizontal_scroll: request_wayland_horizontal_scroll,
                 wayland_control: request_wayland_control,
+                wayland_text: request_wayland_text,
                 scroll_copy: true,
                 frame_limits,
                 clipboard_content: requested_policy.0,
@@ -1155,6 +1186,21 @@ fn negotiate_session(
         );
     }
 
+    if hello.stream.wayland_text != request_wayland_text
+        || (request_wayland_text
+            && (hello.pointer_enabled
+                || hello.keyboard_enabled
+                || hello.clipboard_enabled
+                || hello.stream.window_resize
+                || hello.stream.wayland_keyboard
+                || hello.stream.wayland_pointer
+                || hello.stream.wayland_control))
+    {
+        return Err(invalid_data(
+            "one-shot text permission was not mutually negotiated exclusively",
+        )
+        .into());
+    }
     validate_scroll_negotiation(
         request_wayland_pointer || request_wayland_control,
         request_wayland_scroll,
@@ -1422,6 +1468,7 @@ fn viewer_loop(
         .as_ref()
         .is_some_and(|catalog| catalog.entries.len() > 1);
     loop {
+        state.wayland_text.lock().unwrap().check()?;
         wake.drain()?;
         {
             let (configured, ended, epoch, activated) = {
@@ -1874,6 +1921,14 @@ fn viewer_loop(
                 }
             }
             acknowledge_presentation(writer, sequence, pending_presentations, &state.telemetry)?;
+            if let Some(request) = state.wayland_text.lock().unwrap().presented(DrawnScope {
+                source_epoch: presented_scope.0,
+                geometry_epoch: presented_scope.1,
+                frame_sequence: sequence,
+            }) {
+                writer.write_message(MessageKind::WaylandTextCommit, &request.encode()?)?;
+                writer.flush()?;
+            }
             {
                 let (enabled, needs_request, epoch) = {
                     let control = state.wayland_control.lock().unwrap();
@@ -2056,6 +2111,13 @@ fn viewer_loop(
             continue;
         }
         let mut deadline = next_heartbeat.min(telemetry_reporter.next_deadline());
+        {
+            let text = state.wayland_text.lock().unwrap();
+            text.check()?;
+            if let Some(at) = text.deadline() {
+                deadline = deadline.min(at);
+            }
+        }
         if let Some(follow_deadline) = state
             .resize
             .lock()
@@ -3305,6 +3367,7 @@ impl ClientResize {
 }
 
 struct ReceiveState {
+    wayland_text: Mutex<ClientText>,
     wayland_control: Mutex<ClientControl>,
     resize: Mutex<ClientResize>,
     wayland_keyboard: Mutex<ClientKeyboard>,
@@ -3335,6 +3398,7 @@ impl ReceiveState {
 
     fn new() -> Self {
         Self {
+            wayland_text: Mutex::new(ClientText::default()),
             wayland_control: Mutex::new(ClientControl::default()),
             resize: Mutex::new(ClientResize::default()),
             wayland_keyboard: Mutex::new(ClientKeyboard::default()),
@@ -3572,6 +3636,14 @@ fn receive_frame_records(
                 )?;
                 completion.signal()?;
             }
+            MessageKind::WaylandTextResult => {
+                state
+                    .wayland_text
+                    .lock()
+                    .unwrap()
+                    .receive(super::wayland_text_wire::TextResult::decode(&payload)?)?;
+                completion.signal()?;
+            }
             MessageKind::WaylandPointerStatus => {
                 state.wayland_pointer.lock().unwrap().receive(
                     super::wayland_pointer_wire::PointerStatus::decode(&payload)?,
@@ -3705,6 +3777,7 @@ fn receive_frame_records(
             | MessageKind::WaylandControlRequest
             | MessageKind::WaylandControlAction
             | MessageKind::WaylandControlRevoke
+            | MessageKind::WaylandTextCommit
             | MessageKind::ClipboardRestrict => {
                 return Err(invalid_data(format!("unexpected host message: {kind:?}")).into());
             }
@@ -4727,6 +4800,7 @@ pub(super) mod tests {
             wayland_keyboard: false,
             wayland_pointer: false,
             wayland_control: false,
+            wayland_text: None,
             wayland_scroll: false,
             wayland_horizontal_scroll: false,
             resize_source: None,
@@ -6775,6 +6849,7 @@ pub(super) mod tests {
             false,
             false,
             false,
+            false,
             stream,
             &TEST_PSK,
             false,
@@ -6867,6 +6942,7 @@ pub(super) mod tests {
             false,
             false,
             false,
+            false,
             stream,
             &TEST_PSK,
             false,
@@ -6935,6 +7011,7 @@ pub(super) mod tests {
             false,
             false,
             false,
+            false,
             stream,
             &TEST_PSK,
             false,
@@ -6990,6 +7067,7 @@ pub(super) mod tests {
         });
         let stream = TcpStream::connect(address).unwrap();
         let result = negotiate_session(
+            false,
             false,
             false,
             false,
@@ -7059,6 +7137,7 @@ pub(super) mod tests {
             });
             let stream = TcpStream::connect(address).unwrap();
             let result = negotiate_session(
+                false,
                 false,
                 false,
                 false,
@@ -7162,6 +7241,7 @@ pub(super) mod tests {
         let started = Instant::now();
         let (mut reader, _writer, hello) = negotiate_session(
             true,
+            false,
             false,
             false,
             false,
@@ -7421,6 +7501,7 @@ mod native_viewer_permission_tests {
             wayland_keyboard: false,
             wayland_pointer: false,
             wayland_control: false,
+            wayland_text: None,
             wayland_scroll: false,
             wayland_horizontal_scroll: false,
             resize_source: None,

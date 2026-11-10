@@ -168,6 +168,8 @@ pub enum MessageKind {
     WaylandControlStatus = 34,
     WaylandControlAction = 35,
     WaylandControlRevoke = 36,
+    WaylandTextCommit = 37,
+    WaylandTextResult = 38,
 }
 
 impl TryFrom<u8> for MessageKind {
@@ -209,6 +211,8 @@ impl TryFrom<u8> for MessageKind {
             34 => Ok(Self::WaylandControlStatus),
             35 => Ok(Self::WaylandControlAction),
             36 => Ok(Self::WaylandControlRevoke),
+            37 => Ok(Self::WaylandTextCommit),
+            38 => Ok(Self::WaylandTextResult),
             21 => Ok(Self::ClipboardRestrict),
             22 => Ok(Self::ClipboardRestricted),
             other => Err(ProtocolError::UnknownMessageKind(other)),
@@ -736,11 +740,13 @@ mod tests {
             (34, MessageKind::WaylandControlStatus),
             (35, MessageKind::WaylandControlAction),
             (36, MessageKind::WaylandControlRevoke),
+            (37, MessageKind::WaylandTextCommit),
+            (38, MessageKind::WaylandTextResult),
         ] {
             assert_eq!(MessageKind::try_from(tag).unwrap(), kind);
             assert_eq!(u8::from(kind), tag);
         }
-        for tag in (0..=u8::MAX).filter(|tag| !(1..=36).contains(tag)) {
+        for tag in (0..=u8::MAX).filter(|tag| !(1..=38).contains(tag)) {
             assert!(
                 matches!(MessageKind::try_from(tag), Err(ProtocolError::UnknownMessageKind(rejected)) if rejected == tag),
                 "unallocated application message kind {tag} must be rejected"

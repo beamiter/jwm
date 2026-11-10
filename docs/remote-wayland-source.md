@@ -617,3 +617,44 @@ Verification covers actual native dispatch and production offscreen composition,
 old pending-buffer non-writes, resize-back epochs and an authenticated TCP viewer
 with exact presented-frame pixel checks. These remain owned software-rendered
 tests, not physical DRM/GPU or two-machine latency acceptance.
+
+### Explicit one-shot text submission
+
+The host and native Wayland viewer must independently opt in:
+
+```sh
+jwm-remote host --wayland-select --once --allow-wayland-text
+jwm-remote connect HOST --viewer-backend wayland --wayland-text-stdin
+```
+
+Supply the text through the viewer's standard input. Do not add `--view-only`:
+this is a separate text permission, not read-only mode or a keyboard/pointer
+bundle. It is mutually exclusive with the other input modes and with read-only
+popup/resize-follow capture. Both sides default to denying text submission.
+
+The selected original surface must already have keyboard focus and a clean,
+enabled `text-input-v3` context backed by an existing normal input method.
+An unfinished IME batch or active preedit is not eligible. Applications without
+that context are rejected; the host does not enable a global IME, synthesize
+keys, change focus, or fall back to the clipboard.
+
+The original exact text-input resource and its context generation are frozen
+before the first capture proof, for one nonrenewable 30-second lease. Submission
+requires that same live context and an exact newly presented capture proof;
+context/focus changes, local input, lock, unmap or disconnect revoke permission.
+No new context is selected if the old one disappears or becomes eligible again.
+
+The payload is nonempty valid UTF-8, at most **4000 bytes**, with no NUL byte.
+Whitespace and newlines are preserved, not trimmed or translated. The byte
+limit leaves room for Wayland message framing; it is not a character count.
+There is one attempt, with no retry, renewal, reconnect, saved-profile permission
+or clipboard fallback. A successful result means only that `commit_string` and
+`done` were sent to the exact authorized resource. It does not establish that
+the application inserted, processed or saved the text. After an uncertain result,
+do not assume another submission would be safe from duplication.
+
+This capability uses application protocol **v24**, with transport **v3** unchanged.
+Both peers must support the matching application version; there is no downgrade
+to an older peer, alternate input mode or older transport. Protocol and
+software-rendered integration coverage must be evaluated separately from real
+application compatibility and physical-device acceptance.

@@ -148,6 +148,38 @@ impl HostCapture {
             c.discard_pointer_frame();
         }
     }
+    pub(super) fn finish_text(&mut self) {
+        #[cfg(feature = "remote-wayland")]
+        if let Self::Wayland(c) = self {
+            c.finish_text();
+        }
+    }
+    pub(super) fn enable_text(&mut self) -> RemoteResult<()> {
+        #[cfg(feature = "remote-wayland")]
+        if let Self::Wayland(c) = self {
+            return c.enable_text();
+        }
+        Err(std::io::Error::other("text requires native Wayland source").into())
+    }
+    pub(super) fn text_frame(&self) -> Option<(u64, std::time::Instant)> {
+        #[cfg(feature = "remote-wayland")]
+        if let Self::Wayland(c) = self {
+            return c.text_frame();
+        }
+        None
+    }
+    pub(super) fn text_commit(
+        &mut self,
+        text: &super::wayland_text_wire::ExplicitText,
+        serial: u64,
+    ) -> RemoteResult<()> {
+        #[cfg(feature = "remote-wayland")]
+        if let Self::Wayland(c) = self {
+            return c.text_commit(text, serial);
+        }
+        let _ = (text, serial);
+        Err(std::io::Error::other("text requires native Wayland source").into())
+    }
     pub(super) fn enable_keyboard(&mut self) -> RemoteResult<()> {
         #[cfg(feature = "remote-wayland")]
         if let Self::Wayland(c) = self {

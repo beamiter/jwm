@@ -27,7 +27,8 @@ impl WaylandCapture {
         scroll_enabled: bool,
         horizontal_enabled: bool,
     ) -> RemoteResult<()> {
-        if self.state.resize_follow
+        if self.state.text.enabled
+            || self.state.resize_follow
             || self.state.popups
             || self.state.frame_serial != 0
             || self.state.control.enabled

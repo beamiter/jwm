@@ -8,9 +8,9 @@ use super::x11_keymap::{KeymapTable, MAX_ENCODED_KEYMAP_LEN};
 use std::io;
 
 const APPLICATION_MAGIC: &[u8; 8] = b"JWMREM01";
-pub const APPLICATION_VERSION: u16 = 23;
+pub const APPLICATION_VERSION: u16 = 24;
 const HELLO_PREFIX_LEN: usize = 11;
-const STREAM_CAPABILITIES_LEN: usize = 31;
+const STREAM_CAPABILITIES_LEN: usize = 32;
 const SERVER_HELLO_LEN: usize = HELLO_PREFIX_LEN + STREAM_CAPABILITIES_LEN;
 const CLIENT_HELLO_HEADER_LEN: usize = SERVER_HELLO_LEN + 4;
 /// Largest client hello: the shared prefix plus a full keymap table.
@@ -121,6 +121,7 @@ pub struct StreamCapabilities {
     pub scroll_copy: bool,
     /// Explicit single combined authority, never inferred from old flags.
     pub wayland_control: bool,
+    pub wayland_text: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -176,6 +177,7 @@ impl StreamCapabilities {
             u8::from(self.wayland_scroll) | (u8::from(self.wayland_horizontal_scroll) << 1);
         payload[29] = u8::from(self.scroll_copy);
         payload[30] = u8::from(self.wayland_control);
+        payload[31] = u8::from(self.wayland_text);
         payload
     }
 
@@ -195,6 +197,9 @@ impl StreamCapabilities {
             || payload[27] > 1
             || payload[28] > 3
             || payload[29] > 1
+            || payload[31] > 1
+            || (payload[31] == 1 && payload[23..29].iter().any(|b| *b != 0))
+            || (payload[31] == 1 && payload[30] != 0)
             || payload[30] > 1
             || (payload[30] == 1
                 && (payload[25] != 0
@@ -227,6 +232,7 @@ impl StreamCapabilities {
             wayland_horizontal_scroll: payload[28] & 2 != 0,
             scroll_copy: payload[29] == 1,
             wayland_control: payload[30] == 1,
+            wayland_text: payload[31] == 1,
             ..Self::default()
         })
     }
@@ -1066,7 +1072,7 @@ mod tests {
             ClientHello::decode(&legacy).unwrap_err(),
             ServerHello::decode(&legacy).unwrap_err(),
         ] {
-            assert!(error.to_string().contains("version 6; expected 23"));
+            assert!(error.to_string().contains("version 6; expected 24"));
         }
     }
 
@@ -1224,14 +1230,14 @@ mod tests {
             clipboard_files_enabled: false,
         }
         .encode();
-        assert_eq!(&payload[8..10], &23_u16.to_be_bytes());
+        assert_eq!(&payload[8..10], &24_u16.to_be_bytes());
 
         // Version 5 had no clipboard transfer records: a version-5 peer
         // would end the session on the first copied image or file. It must
         // fail on its version instead. Version 4 sent one digest of the whole
         // keymap where later versions send a per-keycode table.
         for older in [
-            4_u16, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22,
+            4_u16, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
         ] {
             let mut previous = payload;
             previous[8..10].copy_from_slice(&older.to_be_bytes());
@@ -1239,11 +1245,11 @@ mod tests {
             assert!(
                 error
                     .to_string()
-                    .contains(&format!("application version {older}; expected 23"))
+                    .contains(&format!("application version {older}; expected 24"))
             );
         }
 
-        for rejected in [0_u16, 2, 3, 24, u16::MAX] {
+        for rejected in [0_u16, 2, 3, 25, u16::MAX] {
             let mut other = payload;
             other[8..10].copy_from_slice(&rejected.to_be_bytes());
             assert!(
@@ -1654,8 +1660,8 @@ mod scroll_capability_tests {
     use super::*;
     #[test]
     fn scroll_is_explicit_boolean_and_requires_pointer_or_control_in_version_23() {
-        assert_eq!(APPLICATION_VERSION, 23);
-        assert_eq!(STREAM_CAPABILITIES_LEN, 31);
+        assert_eq!(APPLICATION_VERSION, 24);
+        assert_eq!(STREAM_CAPABILITIES_LEN, 32);
         let mut caps = StreamCapabilities::default();
         assert!(
             !StreamCapabilities::decode(&caps.encode())
@@ -1711,7 +1717,7 @@ mod control_capability_tests {
             ..Default::default()
         };
         let bytes = caps.encode();
-        assert_eq!(bytes.len(), 31);
+        assert_eq!(bytes.len(), 32);
         assert_eq!(StreamCapabilities::decode(&bytes).unwrap(), caps);
         for v in [2, 255] {
             let mut bad = bytes;
@@ -1742,6 +1748,32 @@ mod control_capability_tests {
         ] {
             let hello = encode_hello(flags, caps);
             assert!(ServerHello::decode(&hello).is_err());
+        }
+    }
+}
+
+#[cfg(test)]
+mod text_capability_tests {
+    use super::*;
+    #[test]
+    fn text_is_separate_default_off_and_exclusive() {
+        assert!(!StreamCapabilities::default().wayland_text);
+        let c = StreamCapabilities {
+            wayland_text: true,
+            ..Default::default()
+        };
+        let bytes = c.encode();
+        assert_eq!(bytes.len(), 32);
+        assert_eq!(StreamCapabilities::decode(&bytes).unwrap(), c);
+        for i in [23, 24, 25, 26, 27, 28, 30] {
+            let mut b = bytes;
+            b[i] = 1;
+            assert!(StreamCapabilities::decode(&b).is_err(), "{i}");
+        }
+        for v in [2, 255] {
+            let mut b = bytes;
+            b[31] = v;
+            assert!(StreamCapabilities::decode(&b).is_err());
         }
     }
 }

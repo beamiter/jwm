@@ -5,6 +5,8 @@
 //! permission boundary: this host must itself be a trusted local client.
 #[path = "wayland_capture_control.rs"]
 mod control;
+#[path = "wayland_capture_text.rs"]
+mod text;
 use super::RemoteResult;
 use super::messages::FrameLimits;
 use super::x11_capture::{CaptureImageRecycler, CaptureOutcome, CapturedFrame, frame_dimensions};
@@ -126,6 +128,7 @@ struct State {
     popups: bool,
     popup_manager: Option<JwmReadonlyPopupCaptureManagerV1>,
     popup_layout: Option<(u16, u16)>,
+    text: text::NativeText,
     resize_follow: bool,
     resize_manager: Option<JwmReadonlyResizeCaptureManagerV1>,
     session_stopped: bool,
@@ -494,7 +497,8 @@ impl WaylandCapture {
 
     /// Must be enabled before the first frame and only after wire negotiation.
     pub(super) fn enable_pointer(&mut self) -> RemoteResult<()> {
-        if self.state.resize_follow
+        if self.state.text.enabled
+            || self.state.resize_follow
             || self.state.popups
             || self.state.frame_serial != 0
             || self.state.control.enabled
@@ -688,7 +692,8 @@ impl WaylandCapture {
     }
 
     pub(super) fn enable_keyboard(&mut self) -> RemoteResult<()> {
-        if self.state.resize_follow
+        if self.state.text.enabled
+            || self.state.resize_follow
             || self.state.popups
             || self.state.frame_serial != 0
             || self.state.control.enabled
@@ -739,6 +744,7 @@ impl WaylandCapture {
         done: impl Fn(&NativeKeyboard) -> bool,
     ) -> RemoteResult<()> {
         loop {
+            self.expire_text();
             self.expire_control();
             self.expire_keyboard();
             self.state.check()?;
@@ -763,6 +769,7 @@ impl WaylandCapture {
         result
     }
     fn arm_keyboard_inner(&mut self, digest: [u8; 32]) -> RemoteResult<u64> {
+        self.expire_text();
         self.expire_control();
         self.expire_keyboard();
         if !self.state.keyboard.enabled
@@ -810,6 +817,7 @@ impl WaylandCapture {
         result
     }
     fn keyboard_key_inner(&mut self, key: &super::wayland_keyboard_wire::Key) -> RemoteResult<()> {
+        self.expire_text();
         self.expire_control();
         self.expire_keyboard();
         let epoch = u32::try_from(key.lease_epoch)?;
@@ -1103,6 +1111,7 @@ impl WaylandCapture {
     }
     fn read_frame(&mut self) -> RemoteResult<CaptureOutcome> {
         self.state.check()?;
+        self.expire_text();
         self.expire_control();
         self.expire_keyboard();
         if self.state.pointer.enabled && self.pointer_revoked() {
@@ -1110,6 +1119,7 @@ impl WaylandCapture {
         }
         if self.retained_frame.is_some() {
             self.pump(Instant::now() + Duration::from_millis(1))?;
+            self.expire_text();
             self.expire_control();
             self.expire_keyboard();
             return Ok(CaptureOutcome::RetainedProofBlocked);
@@ -1172,7 +1182,10 @@ impl WaylandCapture {
             }
         }
         let ready_frame = self.inflight.take().unwrap();
-        if self.state.control.enabled && !self.control_revoked() {
+        if self.state.text.enabled && !self.state.text.ended && !self.state.text.revoked {
+            self.retained_frame = Some(ready_frame);
+            self.pointer_ready_at = Some(Instant::now());
+        } else if self.state.control.enabled && !self.control_revoked() {
             self.retained_frame = Some(ready_frame);
             self.pointer_ready_at = Some(Instant::now());
             if self.state.frame_serial == 1 {
@@ -1300,6 +1313,7 @@ impl WaylandCapture {
         let deadline = Instant::now()
             .checked_add(timeout)
             .ok_or_else(|| invalid("invalid Wayland wait timeout"))?;
+        self.expire_text();
         self.expire_control();
         self.expire_keyboard();
         let deadline = self
@@ -1308,6 +1322,7 @@ impl WaylandCapture {
             .chain(self.state.keyboard.deadline)
             .fold(deadline, |a, b| a.min(b));
         let result = self.pump_activity(deadline, wake);
+        self.expire_text();
         self.expire_control();
         self.expire_keyboard();
         if result.is_err() {
@@ -1319,6 +1334,7 @@ impl WaylandCapture {
 
 impl Drop for WaylandCapture {
     fn drop(&mut self) {
+        self.finish_text();
         self.revoke_control();
         self.revoke_pointer();
         self.revoke_keyboard();
@@ -1354,6 +1370,11 @@ impl Dispatch<wl_registry::WlRegistry, ()> for State {
                 version,
             } if version >= 1 => {
                 let bound = match interface.as_str() {
+                    "jwm_remote_text_manager_v1" if state.text.manager.is_none() => {
+                        state.text.global = Some(name);
+                        state.text.manager = Some(proxy.bind(name, 1, qh, ()));
+                        false
+                    }
                     "jwm_readonly_popup_capture_manager_v1"
                         if state.popups
                             && !state.resize_follow
@@ -1406,6 +1427,10 @@ impl Dispatch<wl_registry::WlRegistry, ()> for State {
                 if bound {
                     state.globals.push(name);
                 }
+            }
+            wl_registry::Event::GlobalRemove { name } if state.text.global == Some(name) => {
+                state.text.revoked = true;
+                state.text.manager = None;
             }
             wl_registry::Event::GlobalRemove { name } if state.control.global == Some(name) => {
                 state.control.revoked = true;

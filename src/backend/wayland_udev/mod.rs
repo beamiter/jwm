@@ -29,6 +29,7 @@ pub mod image_copy_capture;
 pub(crate) mod remote_control;
 pub(crate) mod remote_keyboard;
 pub(crate) mod remote_pointer;
+pub(crate) mod remote_text;
 
 pub mod gamma_control;
 

@@ -172,6 +172,9 @@ impl CaptureAuthority {
             && self.follow_parent.is_none()
             && consume_input_attempt(&self.input_consumed, 1)
     }
+    pub(crate) fn consume_text_attempt(&self) -> bool {
+        self.consume_control_attempt()
+    }
     pub(crate) fn consume_control_attempt(&self) -> bool {
         !self.include_popups
             && self.follow.is_none()
@@ -1032,6 +1035,7 @@ impl Dispatch<ExtImageCaptureSourceV1, ImageCaptureSourceData> for JwmWaylandSta
         }
         super::remote_pointer::source_destroyed(state, resource);
         super::remote_control::source_destroyed(state, resource);
+        super::remote_text::source_destroyed(state, resource);
     }
 }
 

@@ -163,6 +163,7 @@ pub(crate) fn active(state: &JwmWaylandState) -> bool {
     state.remote_pointer.active.is_some()
 }
 pub(crate) fn revoke(state: &mut JwmWaylandState, reason: u32) {
+    super::remote_text::revoke(state, reason);
     super::remote_control::revoke(state, reason);
     if let Some(lease) = state.remote_pointer.active.take() {
         lease.resource.revoked(reason);
@@ -173,6 +174,7 @@ pub(crate) fn revoke_for_window(
     state: &mut JwmWaylandState,
     window: crate::backend::common_define::WindowId,
 ) {
+    super::remote_text::revoke_for_window(state, window);
     super::remote_control::revoke_for_window(state, window);
     if state
         .remote_pointer
@@ -318,6 +320,7 @@ impl Dispatch<JwmRemotePointerManagerV1, ManagerData> for JwmWaylandState {
                 || !axes_valid
                 || active(state)
                 || super::remote_keyboard::active(state)
+                || super::remote_text::active(state)
                 || super::remote_control::active(state)
                 || !authority_is_current(state, &authority)
                 || !unconstrained(state, &authority.surface)
