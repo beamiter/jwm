@@ -3670,26 +3670,10 @@ fn stream_frames(
             if !running.load(Ordering::Acquire) || shutdown.load(Ordering::Acquire) {
                 break;
             }
-            let decision = mailbox.capture_decision(backpressure_refresh)?;
-            if let Some(wait) = reserve_capture_slot(
-                &mut next_capture_allowed,
-                Instant::now(),
-                interval,
-                capture.retains_capture_proof(),
-                decision,
-                legacy_retained_capture_schedule(),
-            ) {
-                // No capture can start while this exact proof is retained.
-                // Still pump lifecycle/expiry events, without moving the last
-                // real attempt's absolute FPS deadline or spinning when idle.
-                capture
-                    .wait_for_activity(wait)
-                    .map_err(LocalRuntimeFailure::capture)?;
-                continue;
-            }
+            next_capture_allowed = Instant::now() + interval;
             telemetry.record_scheduled();
 
-            match decision {
+            match mailbox.capture_decision(backpressure_refresh)? {
                 CaptureDecision::Capture => {}
                 CaptureDecision::Skip => {
                     telemetry.record_skipped();
@@ -3824,53 +3808,6 @@ fn stream_result_for_stop(
         StopCause::Input | StopCause::Graceful => Ok(()),
         StopCause::ThreadPanic => sender_result.and(clipboard_result),
         StopCause::None => capture_result.and(sender_result).and(clipboard_result),
-    }
-}
-
-// Called only after the existing absolute rate deadline is due. Ordinary
-// NoChange attempts and mailbox backpressure retain their prior accounting.
-fn reserve_capture_slot(
-    next: &mut Instant,
-    now: Instant,
-    interval: Duration,
-    retained: bool,
-    decision: CaptureDecision,
-    legacy: bool,
-) -> Option<Duration> {
-    if retained && decision == CaptureDecision::Capture && !legacy {
-        return Some(CAPTURE_RATE_LIMIT_SLICE);
-    }
-    *next = now + interval;
-    None
-}
-
-#[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
-thread_local! {
-    static LEGACY_RETAINED_CAPTURE_SCHEDULE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-// The A/B fixture enters this on its owned host thread only. No CLI or process
-// environment can select the legacy behavior; restore even on test panic.
-#[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
-pub(super) fn with_legacy_retained_capture_schedule<T>(run: impl FnOnce() -> T) -> T {
-    struct Restore(bool);
-    impl Drop for Restore {
-        fn drop(&mut self) {
-            LEGACY_RETAINED_CAPTURE_SCHEDULE.with(|value| value.set(self.0));
-        }
-    }
-    let _restore = Restore(LEGACY_RETAINED_CAPTURE_SCHEDULE.with(|value| value.replace(true)));
-    run()
-}
-
-fn legacy_retained_capture_schedule() -> bool {
-    #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
-    {
-        LEGACY_RETAINED_CAPTURE_SCHEDULE.with(std::cell::Cell::get)
-    }
-    #[cfg(not(all(test, feature = "remote-wayland", feature = "backend-wayland-udev")))]
-    {
-        false
     }
 }
 
@@ -5076,66 +5013,6 @@ fn permission_denied(message: impl Into<String>) -> io::Error {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn retained_proof_wait_does_not_reserve_a_capture_slot_at_any_fps() {
-        let start = Instant::now();
-        for fps in [1, 2, 30, 60] {
-            let interval = target_frame_interval(fps);
-            let mut next = start + interval;
-            let original = next;
-            // Real attempts remain blocked until their existing deadline.
-            assert!(capture_rate_limit_wait(start, next, CAPTURE_RATE_LIMIT_SLICE).is_some());
-            for ticks in 0..20 {
-                let now = original + Duration::from_millis(ticks * 20);
-                assert_eq!(
-                    reserve_capture_slot(
-                        &mut next,
-                        now,
-                        interval,
-                        true,
-                        CaptureDecision::Capture,
-                        false
-                    ),
-                    Some(Duration::from_millis(20))
-                );
-                assert_eq!(next, original);
-            }
-            // Acceptance/expiry/revocation removes the retained proof. A new
-            // attempt now consumes a full slot, even if it later says NoChange.
-            let now = original + Duration::from_secs(1);
-            assert_eq!(
-                reserve_capture_slot(
-                    &mut next,
-                    now,
-                    interval,
-                    false,
-                    CaptureDecision::Capture,
-                    false
-                ),
-                None
-            );
-            assert_eq!(next, now + interval);
-            assert!(capture_rate_limit_wait(now, next, CAPTURE_RATE_LIMIT_SLICE).is_some());
-        }
-    }
-
-    #[test]
-    fn retained_backpressure_and_legacy_preserve_their_slot_accounting() {
-        let now = Instant::now();
-        let interval = Duration::from_millis(1000);
-        for (decision, legacy) in [
-            (CaptureDecision::Skip, false),
-            (CaptureDecision::Closed, false),
-            (CaptureDecision::Capture, true),
-        ] {
-            let mut next = now;
-            assert_eq!(
-                reserve_capture_slot(&mut next, now, interval, true, decision, legacy),
-                None
-            );
-            assert_eq!(next, now + interval);
-        }
-    }
     #[test]
     fn host_cleanup_clipboard_startup_failure_preserves_error_and_disables_admission() {
         let admission = Arc::new(AtomicU8::new(VIEWER_IDLE));

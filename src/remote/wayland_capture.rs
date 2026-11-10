@@ -1264,13 +1264,6 @@ impl WaylandCapture {
     pub(crate) fn image_recycler(&self) -> CaptureImageRecycler {
         self.recycler.clone()
     }
-    /// Scheduler observation only: this proof must remain owned until its
-    /// existing action, expiry or revocation path releases it. Callers must
-    /// still pump native events and process lease expiry while capture waits.
-    pub(super) fn retains_capture_proof(&self) -> bool {
-        self.retained_frame.is_some()
-    }
-
     pub(super) fn wait_for_activity(&mut self, timeout: Duration) -> RemoteResult<bool> {
         let deadline = Instant::now()
             .checked_add(timeout)

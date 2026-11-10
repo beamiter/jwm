@@ -86,29 +86,11 @@ Use the exact CI commit, JSON samples and build/runner context when publishing
 results. No physical-display or production-network conclusion follows from these
 controlled observations alone.
 
-## Retained-frame scheduler A/B experiment
+## Versioned observations and rejected experiment
 
-The opt-in `controlled_input_to_unique_visible_marker_latency_abba` test compares
-the legacy retained-proof polling scheduler (A) with the candidate scheduler (B)
-in a single process in A/B/B/A order. Each arm uses two independent sessions;
-each session has 2 warmups and 16 measured responses. All 72 samples are retained,
-with 32 measured samples per arm. Each session keeps its own 25-second checked
-work budget and original control lease. No lease is renewed.
-
-Only a test-only, thread-local scheduler setting differs. Both arms use the same
-production capture, transport, encoding, native input and viewer path, dimensions,
-quality and FPS. The setting is explicitly passed into the fixture's host thread;
-it is not a production environment variable, permission or compatibility mode.
-The legacy arm deliberately reproduces empty retained-proof polling consuming a
-capture-rate slot. The candidate still pumps events and processes revocation but
-charges rate-limit slots only on the existing capture/backpressure paths. It does
-not allow real capture attempts faster than the configured FPS.
-
-The A/B JSON retains every session report, order and raw samples. Comparisons
-include per-arm distributions and paired order-block median differences. A
-negative B-minus-A difference is faster in that experiment, not proof of a general
-speedup. CI requires complete successful evidence but sets no performance
-threshold. A failed experiment cannot become success by deleting slow samples.
-Use the same exact command above with the `_abba` suffix and a distinct report
-path to reproduce. CI preserves the bounded A/B JSON and log alongside the
-single-arm report. Different CI runs are not an A/B comparison.
+[The 2026-11-10 evidence](benchmarks/remote-input-response-2026-11-10/README.md)
+retains complete initial reports and a same-process ABBA experiment. Avoiding
+retained-proof capture-slot accounting with a 20 ms wait regressed the controlled
+workload, so that production change was reverted. The exact experimental commit
+remains linked for reproduction; it is not a shipped optimization or a general
+performance claim.
