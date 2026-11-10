@@ -124,6 +124,7 @@ pub struct CaptureAuthority {
     pub(crate) surface: smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
     pub(crate) width: u32,
     pub(crate) height: u32,
+    pub(crate) follow_origin: Option<(i32, i32)>,
     owner: ClientId,
     lock_epoch: u64,
     buffer_layout: (
@@ -215,14 +216,17 @@ pub(crate) fn toplevel_capture_surface_committed(
         })
         .collect();
     for root in roots {
+        if !smithay::wayland::compositor::get_children(&root.surface).is_empty() {
+            stop_follow_family(state, &root);
+            continue;
+        }
         let mut follow = root.follow.as_ref().unwrap().lock().unwrap();
-        let exact = state
-            .surface_window_geometry_rect(surface)
-            .is_some_and(|r| {
-                r.size.w > 0
-                    && r.size.h > 0
-                    && (r.size.w as u32, r.size.h as u32) == (follow.width, follow.height)
-            });
+        let exact = follow_effective_geometry(state, surface).is_some_and(|r| {
+            r.size.w > 0
+                && r.size.h > 0
+                && (r.size.w as u32, r.size.h as u32) == (follow.width, follow.height)
+                && Some((r.loc.x, r.loc.y)) == follow.origin
+        });
         if !follow.suspended && !exact {
             if follow.epoch >= 1024 {
                 drop(follow);
@@ -269,14 +273,12 @@ pub(crate) fn authority_is_current(state: &JwmWaylandState, authority: &CaptureA
         return false;
     }
     if let Some((parent, epoch)) = &authority.follow_parent {
-        if !state
-            .surface_window_geometry_rect(&authority.surface)
-            .is_some_and(|r| {
-                r.size.w > 0
-                    && r.size.h > 0
-                    && (r.size.w as u32, r.size.h as u32) == (authority.width, authority.height)
-            })
-        {
+        if !follow_effective_geometry(state, &authority.surface).is_some_and(|r| {
+            r.size.w > 0
+                && r.size.h > 0
+                && (r.size.w as u32, r.size.h as u32) == (authority.width, authority.height)
+                && Some((r.loc.x, r.loc.y)) == authority.follow_origin
+        }) {
             return false;
         }
         if !authority_is_current(state, parent)
@@ -336,6 +338,7 @@ fn create_toplevel_source(
         surface,
         width,
         height,
+        follow_origin: None,
         owner: _owner,
         lock_epoch: state.session_lock_epoch,
         revoked: AtomicBool::new(false),
@@ -2283,6 +2286,7 @@ use crate::readonly_resize_capture_protocol::server::jwm_readonly_resize_capture
 };
 #[derive(Debug)]
 struct FollowLayout {
+    origin: Option<(i32, i32)>,
     manager: ResizeManager,
     epoch: u32,
     width: u32,
@@ -2323,6 +2327,7 @@ fn snapshot_follow_source(state: &JwmWaylandState, source: CaptureSource) -> Opt
         surface: root.surface.clone(),
         width: layout.width,
         height: layout.height,
+        follow_origin: layout.origin,
         owner: root.owner.clone(),
         lock_epoch: root.lock_epoch,
         buffer_layout: root.buffer_layout,
@@ -2368,7 +2373,8 @@ fn publish_follow_layout(state: &mut JwmWaylandState, root: &CaptureAuthority) {
         revoke_authority(root);
         return;
     }
-    let Some(rect) = state.surface_window_geometry_rect(&root.surface) else {
+    let Some(rect) = follow_effective_geometry(state, &root.surface) else {
+        stop_follow_family(state, root);
         return;
     };
     let Some(geometry) = state.window_geometry.get(&root.window) else {
@@ -2383,6 +2389,7 @@ fn publish_follow_layout(state: &mut JwmWaylandState, root: &CaptureAuthority) {
         && (rect.size.w as u32, rect.size.h as u32) == (layout.width, layout.height)
         && (geometry.w, geometry.h) == (layout.width, layout.height)
     {
+        layout.origin = Some((rect.loc.x, rect.loc.y));
         layout.suspended = false;
         layout
             .manager
@@ -2438,6 +2445,7 @@ impl Dispatch<ResizeManager, ResizeManagerData> for JwmWaylandState {
                             {
                                 return None;
                             }
+                            follow_effective_geometry(state, &original.surface)?;
                             let CaptureSource::Toplevel(root) =
                                 create_toplevel_source(state, original.window, client.id())?
                             else {
@@ -2448,12 +2456,14 @@ impl Dispatch<ResizeManager, ResizeManagerData> for JwmWaylandState {
                                 surface: root.surface.clone(),
                                 width: root.width,
                                 height: root.height,
+                                follow_origin: None,
                                 owner: root.owner.clone(),
                                 lock_epoch: root.lock_epoch,
                                 buffer_layout: root.buffer_layout,
                                 revoked: AtomicBool::new(false),
                                 input_consumed: AtomicU8::new(3),
                                 follow: Some(Mutex::new(FollowLayout {
+                                    origin: None,
                                     manager: resource.clone(),
                                     epoch: 1,
                                     width: root.width,
@@ -2510,12 +2520,12 @@ impl Dispatch<ResizeManager, ResizeManagerData> for JwmWaylandState {
     }
 }
 
-fn stop_follow_family(state: &mut JwmWaylandState, root: &Arc<CaptureAuthority>) {
+fn stop_follow_family(state: &mut JwmWaylandState, root: &CaptureAuthority) {
     revoke_authority(root);
     if let Some(sessions) = state.toplevel_capture_sessions.get(&root.window) {
         for session in sessions.iter().filter_map(|s| s.upgrade().ok()) {
             if session.data::<CaptureSessionData>().and_then(|d| d.source.as_ref()).is_some_and(|s| {
-                matches!(s, CaptureSource::Toplevel(a) if a.follow_parent.as_ref().is_some_and(|(parent,_)| Arc::ptr_eq(parent,root)))
+                matches!(s, CaptureSource::Toplevel(a) if a.follow_parent.as_ref().is_some_and(|(parent,_)| std::ptr::eq(parent.as_ref(),root)))
             }) { stop_session(&session); }
         }
     }
@@ -2524,3 +2534,112 @@ fn stop_follow_family(state: &mut JwmWaylandState, root: &Arc<CaptureAuthority>)
 #[cfg(all(test, feature = "backend-wayland-udev"))]
 #[path = "image_copy_capture_resize_tests.rs"]
 mod resize_tests;
+
+// xdg_surface geometry is optional and, when present, is clipped to the
+// committed root extent. Never substitute a desired WM size for actual pixels.
+type FollowRect = smithay::utils::Rectangle<i32, smithay::utils::Logical>;
+fn bounded_follow_geometry(bbox: FollowRect, explicit: Option<FollowRect>) -> Option<FollowRect> {
+    if bbox.size.w <= 0 || bbox.size.h <= 0 {
+        return None;
+    }
+    let mut edges = (
+        i64::from(bbox.loc.x),
+        i64::from(bbox.loc.y),
+        i64::from(bbox.loc.x) + i64::from(bbox.size.w),
+        i64::from(bbox.loc.y) + i64::from(bbox.size.h),
+    );
+    if let Some(rect) = explicit {
+        if rect.size.w <= 0 || rect.size.h <= 0 {
+            return None;
+        }
+        edges.0 = edges.0.max(i64::from(rect.loc.x));
+        edges.1 = edges.1.max(i64::from(rect.loc.y));
+        edges.2 = edges.2.min(i64::from(rect.loc.x) + i64::from(rect.size.w));
+        edges.3 = edges.3.min(i64::from(rect.loc.y) + i64::from(rect.size.h));
+    }
+    let (x, y, w, h) = (
+        i32::try_from(edges.0).ok()?,
+        i32::try_from(edges.1).ok()?,
+        u32::try_from(edges.2 - edges.0).ok()?,
+        u32::try_from(edges.3 - edges.1).ok()?,
+    );
+    if !valid_follow_size(w, h)
+        || x.checked_neg().is_none()
+        || y.checked_neg().is_none()
+        || i32::try_from(edges.2).is_err()
+        || i32::try_from(edges.3).is_err()
+    {
+        return None;
+    }
+    Some(FollowRect::new((x, y).into(), (w as i32, h as i32).into()))
+}
+fn follow_effective_geometry(
+    state: &JwmWaylandState,
+    surface: &smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
+) -> Option<FollowRect> {
+    use smithay::backend::renderer::utils::RendererSurfaceStateUserData;
+    use smithay::wayland::compositor::{get_children, with_states};
+    // Follow's first layout contract is a single root. Do not inherit the
+    // unchecked coordinate merging of arbitrary subsurface trees.
+    if !get_children(surface).is_empty() {
+        return None;
+    }
+    let view = with_states(surface, |states| {
+        states
+            .data_map
+            .get::<RendererSurfaceStateUserData>()
+            .and_then(|data| data.lock().unwrap().view())
+    })?;
+    bounded_follow_geometry(
+        FollowRect::new(view.offset, view.dst),
+        state.surface_window_geometry_rect(surface),
+    )
+}
+pub(crate) fn readonly_resize_new_subsurface(
+    state: &mut JwmWaylandState,
+    parent: &smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
+) {
+    let roots: Vec<_> = state
+        .toplevel_capture_authorities
+        .by_window
+        .values()
+        .flatten()
+        .filter_map(std::sync::Weak::upgrade)
+        .filter(|a| a.follow.is_some() && a.surface == *parent)
+        .collect();
+    for root in roots {
+        stop_follow_family(state, &root);
+    }
+}
+
+#[cfg(test)]
+mod follow_geometry_tests {
+    use super::*;
+    fn rect(x: i32, y: i32, w: i32, h: i32) -> FollowRect {
+        FollowRect::new((x, y).into(), (w, h).into())
+    }
+    #[test]
+    fn implicit_committed_extent_preserves_origin_and_explicit_geometry_is_clipped() {
+        let bbox = rect(-10, -20, 330, 260);
+        assert_eq!(bounded_follow_geometry(bbox, None), Some(bbox));
+        assert_eq!(
+            bounded_follow_geometry(bbox, Some(rect(0, 0, 400, 300))),
+            Some(rect(0, 0, 320, 240))
+        );
+        assert_eq!(
+            bounded_follow_geometry(bbox, Some(rect(500, 500, 10, 10))),
+            None
+        );
+    }
+    #[test]
+    fn empty_oversized_and_nonrepresentable_capture_extents_are_denied() {
+        for bad in [
+            rect(0, 0, 0, 240),
+            rect(0, 0, 16385, 240),
+            rect(0, 0, 16384, 16384),
+            rect(i32::MIN, 0, 320, 240),
+        ] {
+            assert!(bounded_follow_geometry(bad, None).is_none());
+        }
+    }
+}

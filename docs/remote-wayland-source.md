@@ -503,6 +503,11 @@ exhaustion ends the source instead of wrapping or resetting the budget. Source
 unmap/remap, destruction, lock, disconnect and committed buffer scale/transform
 changes remain terminal, even if the original geometry or mapping later returns.
 Only size changes within the original live authorization may be followed.
+This first follow mode supports a root surface without subsurfaces. A subsurface
+tree is rejected rather than silently clipped or traversed without a layout
+budget. Ordinary non-follow capture retains its existing surface-tree contract.
+When no explicit xdg window geometry is supplied, the layout comes from the
+actual committed root buffer view, not the window manager’s requested size.
 If another resize interrupts session reconstruction, the bounded attempt may
 terminate rather than retry indefinitely.
 

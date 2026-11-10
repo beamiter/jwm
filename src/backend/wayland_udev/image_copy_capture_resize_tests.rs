@@ -52,9 +52,45 @@ fn bytes(file: &mut File) -> Vec<u8> {
     file.read_to_end(&mut result).unwrap();
     result
 }
+fn app_with_geometry(server: &mut Server, size: (u32, u32), pixel: [u8; 4]) -> App {
+    let mut app = App::with_size_color(server, pixel, size.0, size.1);
+    // This fixture explicitly supplies real xdg window geometry. The legacy
+    // App fixture intentionally omits it, which does not exercise this path.
+    app.client.request(app.xdg, 3, &[0, 0, size.0, size.1]);
+    app.client.request(app.surface, 6, &[]);
+    commit_fence(server, &mut app);
+    let surface = server.state.surface_for_window(app.window).unwrap();
+    let rect = server
+        .state
+        .surface_window_geometry_rect(&surface)
+        .expect("committed xdg geometry");
+    assert_eq!((rect.size.w, rect.size.h), (size.0 as i32, size.1 as i32));
+    app
+}
+fn commit_fence(server: &mut Server, app: &mut App) {
+    let done = app.client.new_id();
+    app.client.request(1, 0, &[done]);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        sync(server);
+        if events(&mut app.client)
+            .iter()
+            .any(|e| e.sender == done && e.opcode == 0)
+        {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "real app commit sync timeout"
+        );
+    }
+}
 fn resize(server: &mut Server, app: &mut App, size: (u32, u32), pixel: [u8; 4]) {
     // The owned headless wire server has no WM layout tick. Match its layout
     // to the actual xdg configure/ACK followed by a real resized SHM commit.
+    // Use the same pre-mutation hook as the actual WM resize path. Directly
+    // editing the headless geometry map would bypass production revocation.
+    toplevel_capture_geometry_changing(&mut server.state, app.window, size.0, size.1);
     let geometry = server.state.window_geometry.get_mut(&app.window).unwrap();
     geometry.w = size.0;
     geometry.h = size.1;
@@ -71,25 +107,10 @@ fn resize(server: &mut Server, app: &mut App, size: (u32, u32), pixel: [u8; 4]) 
         .args[0];
     app.client.request(app.xdg, 4, &[serial]);
     let (id, _file) = buffer(server, &mut app.client, size, pixel);
+    app.client.request(app.xdg, 3, &[0, 0, size.0, size.1]);
     app.client.request(app.surface, 1, &[id, 0, 0]);
     app.client.request(app.surface, 6, &[]);
-    // Explicit sync acknowledgement closes the SCM_RIGHTS dispatch boundary.
-    let done = app.client.new_id();
-    app.client.request(1, 0, &[done]);
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    loop {
-        sync(server);
-        if events(&mut app.client)
-            .iter()
-            .any(|e| e.sender == done && e.opcode == 0)
-        {
-            break;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "resized commit sync timeout"
-        );
-    }
+    commit_fence(server, app);
     assert!(server.state.mapped_windows.contains(&app.window));
 }
 
@@ -253,7 +274,11 @@ fn wire_follow_resize_aba_old_pending_cannot_revive_or_stop_new_session_pixels()
     };
     for restore in [false, true] {
         let mut server = server();
-        let mut app = App::with_size_color(&mut server, [0, 0, 255, 255], 320, 240);
+        let mut app = if restore {
+            app_with_geometry(&mut server, (320, 240), [0, 0, 255, 255])
+        } else {
+            App::with_size_color(&mut server, [0, 0, 255, 255], 320, 240)
+        };
         let mut capture = Capture::new(&mut server, true, (320, 240));
         let _other = App::with_size_color(&mut server, [255, 0, 0, 255], 400, 300);
         let old_session = capture.session;
@@ -559,4 +584,136 @@ fn wire_follow_epoch_budget_exhaustion_is_permanent() {
     capture.session(&mut server, None);
     resize(&mut server, &mut app, (800, 600), [0, 0, 255, 255]);
     capture.session(&mut server, None);
+}
+
+#[test]
+fn wire_follow_subsurface_creation_or_initial_child_never_authorizes_follow() {
+    for already_following in [false, true] {
+        let mut server = server();
+        let mut app = App::new(&mut server);
+        // Default source/session is deliberately valid before the child exists.
+        let mut capture = Capture::new(&mut server, already_following, (800, 600));
+        let compositor = app.client.bind("wl_compositor", 6);
+        let subcompositor = app.client.bind("wl_subcompositor", 1);
+        let child = app.client.new_id();
+        app.client.request(compositor, 0, &[child]);
+        let subsurface = app.client.new_id();
+        app.client
+            .request(subcompositor, 1, &[subsurface, child, app.surface]);
+        sync(&mut server);
+        events(&mut app.client);
+        let root = server.state.surface_for_window(app.window).unwrap();
+        assert!(
+            !smithay::wayland::compositor::get_children(&root).is_empty(),
+            "actual child role installed without resizing root"
+        );
+        if already_following {
+            let e = events(&mut capture.client);
+            assert!(
+                e.iter()
+                    .any(|e| e.sender == capture.session && e.opcode == 5)
+            );
+            assert!(
+                e.iter()
+                    .any(|e| e.sender == capture.follow_manager.unwrap() && e.opcode == 2)
+            );
+            assert_old_session_stopped(&mut server, &mut capture);
+            capture.session(&mut server, None);
+        } else {
+            let e = events(&mut capture.client);
+            assert!(
+                !e.iter()
+                    .any(|e| e.sender == capture.session && e.opcode == 5),
+                "root-only follow restriction does not revoke ordinary capture"
+            );
+            let manager = capture
+                .client
+                .bind("jwm_readonly_resize_capture_manager_v1", 1);
+            let derived = capture.client.new_id();
+            capture
+                .client
+                .request(manager, 1, &[derived, capture.original]);
+            sync(&mut server);
+            let e = events(&mut capture.client);
+            assert!(e.iter().any(|e| e.sender == manager && e.opcode == 2));
+            assert!(!e.iter().any(|e| e.sender == manager && e.opcode == 1));
+            capture.source = derived;
+            capture.session(&mut server, None);
+        }
+        app.client.request(subsurface, 0, &[]);
+        app.client.request(child, 0, &[]);
+        sync(&mut server);
+        events(&mut app.client);
+        assert!(smithay::wayland::compositor::get_children(&root).is_empty());
+        capture.session(&mut server, None);
+    }
+}
+
+#[test]
+fn wire_follow_nonzero_xdg_origin_captures_exact_green_interior_pixels() {
+    use crate::backend::wayland_udev::backend::fulfill_test_toplevel_capture;
+    use crate::backend::wayland_udev::compositor::headless_render::HeadlessSmithayGles;
+    let Some(mut gl) = HeadlessSmithayGles::new() else {
+        return;
+    };
+    let mut server = server();
+    let mut app = App::with_size_color(&mut server, [0, 0, 255, 255], 32, 24);
+    // Real root buffer remains larger than its explicit window geometry.
+    // The owned WM supplies the matching 16x12 layout before configure/ACK.
+    toplevel_capture_geometry_changing(&mut server.state, app.window, 16, 12);
+    let wm = server.state.window_geometry.get_mut(&app.window).unwrap();
+    wm.w = 16;
+    wm.h = 12;
+    server.state.toplevels[&app.window].with_pending_state(|pending| {
+        pending.size = Some((16, 12).into());
+    });
+    server.state.toplevels[&app.window].send_configure();
+    sync(&mut server);
+    let serial = events(&mut app.client)
+        .into_iter()
+        .filter(|e| e.sender == app.xdg && e.opcode == 0)
+        .next_back()
+        .expect("crop configure")
+        .args[0];
+    app.client.request(app.xdg, 4, &[serial]);
+    let (input, mut input_file) = buffer(&mut server, &mut app.client, (32, 24), [0, 0, 255, 255]);
+    let mut pixels = [0, 0, 255, 255].repeat(32 * 24);
+    for y in 3..15 {
+        for x in 4..20 {
+            pixels[(y * 32 + x) * 4..(y * 32 + x + 1) * 4].copy_from_slice(&[0, 255, 0, 255]);
+        }
+    }
+    input_file.seek(SeekFrom::Start(0)).unwrap();
+    input_file.write_all(&pixels).unwrap();
+    app.client.request(app.xdg, 3, &[4, 3, 16, 12]);
+    app.client.request(app.surface, 1, &[input, 0, 0]);
+    app.client.request(app.surface, 6, &[]);
+    commit_fence(&mut server, &mut app);
+    let surface = server.state.surface_for_window(app.window).unwrap();
+    let rect = server.state.surface_window_geometry_rect(&surface).unwrap();
+    assert_eq!(
+        (rect.loc.x, rect.loc.y, rect.size.w, rect.size.h),
+        (4, 3, 16, 12)
+    );
+    assert_eq!(
+        bytes(&mut input_file),
+        pixels,
+        "real committed source has contrasting exterior"
+    );
+    let mut capture = Capture::new(&mut server, true, (16, 12));
+    let (frame, mut output) = capture.queue(&mut server, (16, 12));
+    let queue = server.state.image_capture_pending.as_ref().unwrap().clone();
+    assert_eq!(queue.lock().unwrap().len(), 1);
+    let mut cache = None;
+    fulfill_test_toplevel_capture(&mut gl.renderer, &mut cache, &server.state, &queue);
+    sync(&mut server);
+    let e = events(&mut capture.client);
+    assert!(e.iter().any(|e| e.sender == frame && e.opcode == 3));
+    assert!(!e.iter().any(|e| e.sender == frame && e.opcode == 4));
+    let actual = bytes(&mut output);
+    assert_eq!(actual.len(), 16 * 12 * 4);
+    assert!(
+        actual.chunks_exact(4).all(|p| p == [0, 255, 0, 255]),
+        "nonzero origin must capture only exact green crop, never red root exterior"
+    );
 }

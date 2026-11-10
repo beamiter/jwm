@@ -7743,13 +7743,18 @@ impl KmsState {
 
             // Shift the surface buffer origin by -window_geometry.loc so client-side
             // shadow/CSD margins don't push the content off the capture buffer.
-            let (off_x, off_y) = with_states(surface, |states| {
-                let mut cached = states.cached_state.get::<SurfaceCachedState>();
-                cached
-                    .current()
-                    .geometry
-                    .map(|r| (r.loc.x, r.loc.y))
-                    .unwrap_or((0, 0))
+            // Follow snapshots freeze the actual committed crop origin, including
+            // the legal no-set_window_geometry case. Ordinary capture retains
+            // its existing xdg geometry behavior.
+            let (off_x, off_y) = authority.follow_origin.unwrap_or_else(|| {
+                with_states(surface, |states| {
+                    let mut cached = states.cached_state.get::<SurfaceCachedState>();
+                    cached
+                        .current()
+                        .geometry
+                        .map(|r| (r.loc.x, r.loc.y))
+                        .unwrap_or((0, 0))
+                })
             });
 
             let scale = Scale::from(1.0f64);

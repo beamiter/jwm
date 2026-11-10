@@ -4724,6 +4724,9 @@ impl CompositorHandler for JwmWaylandState {
 
     fn new_subsurface(&mut self, _surface: &WlSurface, parent: &WlSurface) {
         crate::backend::wayland_udev::remote_pointer::new_subsurface(self, parent);
+        crate::backend::wayland_udev::image_copy_capture::readonly_resize_new_subsurface(
+            self, parent,
+        );
     }
     fn commit(&mut self, surface: &WlSurface) {
         crate::backend::wayland_udev::remote_pointer::surface_committed(self, surface);
@@ -4785,6 +4788,9 @@ impl CompositorHandler for JwmWaylandState {
         // Without this, WaylandSurfaceRenderElement will often have no view/texture and nothing
         // will be drawn even though windows are managed and receive input.
         on_commit_buffer_handler::<JwmWaylandState>(surface);
+        crate::backend::wayland_udev::image_copy_capture::toplevel_capture_surface_committed(
+            self, surface,
+        );
         crate::backend::wayland_udev::remote_pointer::surface_committed(self, surface);
 
         // Legacy XWayland (< 23.1) associates content via the WL_SURFACE_ID atom. smithay records

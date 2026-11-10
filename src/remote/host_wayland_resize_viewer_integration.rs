@@ -105,7 +105,29 @@ impl Harness {
             Some(init_image_copy_capture(&native.display.handle()));
         local.state.image_capture_pending = Some(init_image_copy_capture(&local.display.handle()));
         register_test_presentation(&mut local);
-        let target = App::with_size_color(&mut native, [0, 0, 255, 255], 320, 240);
+        let mut target = App::with_size_color(&mut native, [0, 0, 255, 255], 320, 240);
+        // The follow contract waits for committed client geometry, not the
+        // headless WM's desired size. Publish it through the actual xdg wire.
+        target.client.request(target.xdg, 3, &[0, 0, 320, 240]);
+        target.client.request(target.surface, 6, &[]);
+        native.roundtrip();
+        native.roundtrip();
+        assert!(
+            target
+                .client
+                .events()
+                .iter()
+                .all(|e| !(e.sender == 1 && e.opcode == 0))
+        );
+        let surface = native.state.surface_for_window(target.window).unwrap();
+        let committed = native.state.surface_window_geometry_rect(&surface).unwrap();
+        assert_eq!((committed.size.w, committed.size.h), (320, 240));
+        smithay::wayland::shm::with_buffer_contents(&committed_buffer(&surface), |_, _, data| {
+            assert_eq!((data.width, data.height), (320, 240));
+        })
+        .unwrap();
+        let geometry = native.state.window_geometry[&target.window];
+        assert_eq!((geometry.w, geometry.h), (320, 240));
         let (server, stream) = UnixStream::pair().unwrap();
         native
             .display
@@ -163,7 +185,12 @@ impl Harness {
             native.roundtrip();
             match selected.try_recv() {
                 Ok(()) => break,
-                Err(mpsc::TryRecvError::Disconnected) => panic!("selection ended prematurely"),
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    // Selection can fail before its success signal. Preserve the
+                    // adapter's actual error instead of hiding it behind mpsc.
+                    let failure = host_done.recv_timeout(Duration::from_secs(1));
+                    panic!("native capture selection failed: {failure:?}");
+                }
                 Err(mpsc::TryRecvError::Empty) => {}
             }
             assert!(Instant::now() < deadline);
