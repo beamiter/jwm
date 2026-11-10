@@ -146,6 +146,15 @@ fn read_pixels(
     gl: &mut HeadlessSmithayGles,
     reader: &mut Option<Capture>,
 ) -> Vec<u8> {
+    read_pixels_or_stopped(local, gl, reader).expect("capture must be ready")
+}
+
+// Only the expiry caller may consider an explicit Stopped terminal event.
+fn read_pixels_or_stopped(
+    local: &mut Server,
+    gl: &mut HeadlessSmithayGles,
+    reader: &mut Option<Capture>,
+) -> Option<Vec<u8>> {
     if reader.is_none() {
         *reader = Some(Capture::new(local));
     }
@@ -167,14 +176,66 @@ fn read_pixels(
     local.roundtrip();
     let events = capture.client.events();
     assert!(!events.iter().any(|e| e.sender == 1 && e.opcode == 0));
-    assert!(events.iter().any(|e| e.sender == frame && e.opcode == 3));
+    let ready = events
+        .iter()
+        .filter(|e| e.sender == frame && e.opcode == 3)
+        .count();
+    let failed: Vec<_> = events
+        .iter()
+        .filter(|e| e.sender == frame && e.opcode == 4)
+        .collect();
+    if !failed.is_empty() {
+        assert_eq!(ready, 0, "conflicting capture terminals");
+        assert_eq!(failed.len(), 1);
+        assert_eq!(failed[0].args, [2], "only explicit Stopped is eligible");
+        capture.client.request(frame, 0, &[]);
+        local.roundtrip();
+        return None;
+    }
+    assert_eq!(ready, 1, "capture terminal missing");
     file.seek(SeekFrom::Start(0)).unwrap();
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes).unwrap();
     assert_eq!(bytes.len(), 800 * 600 * 4);
     capture.client.request(frame, 0, &[]);
     local.roundtrip();
-    bytes
+    Some(bytes)
+}
+
+fn expiry_capture_stop_is_proven(
+    failed_at: Duration,
+    ended_at: Duration,
+    ttl_error: bool,
+    inactive: bool,
+    released: bool,
+) -> bool {
+    (Duration::from_secs(29)..=Duration::from_secs(40)).contains(&failed_at)
+        && (Duration::from_secs(29)..=Duration::from_secs(40)).contains(&ended_at)
+        && ttl_error
+        && inactive
+        && released
+}
+
+#[test]
+fn expiry_capture_stop_requires_all_terminal_evidence() {
+    let t = Duration::from_secs(30);
+    assert!(expiry_capture_stop_is_proven(t, t, true, true, true));
+    for (error, inactive, released) in [
+        (false, true, true),
+        (true, false, true),
+        (true, true, false),
+    ] {
+        assert!(!expiry_capture_stop_is_proven(
+            t, t, error, inactive, released
+        ));
+    }
+    for bad in [
+        Duration::from_secs(28),
+        Duration::from_secs(40) + Duration::from_nanos(1),
+    ] {
+        assert!(!expiry_capture_stop_is_proven(bad, t, true, true, true));
+        assert!(!expiry_capture_stop_is_proven(t, bad, true, true, true));
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -320,6 +381,8 @@ fn run(termination: Termination) {
     let purposes = Arc::new(Mutex::new(Vec::new()));
     let client_purposes = purposes.clone();
     let (client_tx, client_done) = mpsc::channel();
+    let exact_ttl_error = Arc::new(AtomicBool::new(false));
+    let client_ttl_error = exact_ttl_error.clone();
     let client_thread = thread::spawn(move || {
         let opts = ClientOptions {
             viewer_backend: ViewerBackend::Wayland,
@@ -358,7 +421,27 @@ fn run(termination: Termination) {
                 })
             })
         })
-        .map_err(|e| e.to_string());
+        .map_err(|e| {
+            let diagnostic = crate::remote::client::classify_failure(e.as_ref());
+            let mut leaf: &(dyn std::error::Error + 'static) = e.as_ref();
+            for _ in 0..32 {
+                match leaf.source() {
+                    Some(next) => leaf = next,
+                    None => break,
+                }
+            }
+            client_ttl_error.store(
+                diagnostic.stage == Some("session")
+                    && diagnostic.cleanup == "unknown"
+                    && leaf.source().is_none()
+                    && leaf.downcast_ref::<std::io::Error>().is_some_and(|error| {
+                        error.kind() == std::io::ErrorKind::InvalidData
+                            && error.to_string() == "keyboard lease deadline expired; not renewed"
+                    }),
+                Ordering::Release,
+            );
+            e.to_string()
+        });
         client_tx.send(result).unwrap();
     });
     let mut viewer_keyboard = None;
@@ -587,6 +670,7 @@ fn run(termination: Termination) {
         let mut png_after_hold = 0;
         let mut done_client = false;
         let mut done_host = false;
+        let mut capture_stopped_at = None;
         loop {
             if Instant::now() >= next_change && remote_keyboard::active(&native.state) {
                 revision = revision.checked_add(1).unwrap();
@@ -601,21 +685,25 @@ fn run(termination: Termination) {
             assert!(unexpected.is_empty());
             assert_eq!(remote_keyboard::attempts_for_test(&native.state), 1);
             let feedback = take_feedback(&surface);
-            if !feedback.is_empty() {
+            if !feedback.is_empty() && capture_stopped_at.is_none() {
                 let seq = frames.lock().unwrap().0.unwrap();
-                let pixels = read_pixels(&mut local, &mut gl, &mut reader);
-                assert_eq!(pixels.len(), expected_pixels.len());
-                if codecs
-                    .lock()
-                    .unwrap()
-                    .iter()
-                    .find(|(s, _)| *s == seq)
-                    .unwrap()
-                    .1
-                {
-                    png_after_hold += 1;
+                if let Some(pixels) = read_pixels_or_stopped(&mut local, &mut gl, &mut reader) {
+                    assert_eq!(pixels.len(), expected_pixels.len());
+                    if codecs
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .find(|(s, _)| *s == seq)
+                        .unwrap()
+                        .1
+                    {
+                        png_after_hold += 1;
+                    }
+                    present(&mut local, feedback);
+                } else {
+                    capture_stopped_at = Some(activated_at.elapsed());
+                    // Failed readback is neither PNG nor presentation evidence.
                 }
-                present(&mut local, feedback);
             }
             if let Ok(result) = client_done.try_recv() {
                 let error = result.expect_err(
@@ -641,7 +729,19 @@ fn run(termination: Termination) {
                     || received == [expected.as_slice(), &[(48, 1)]].concat()
                     || received == released
             );
-            if !remote_keyboard::active(&native.state) && received == released {
+            if !remote_keyboard::active(&native.state)
+                && received == released
+                && (capture_stopped_at.is_none() || done_client)
+            {
+                if let Some(failed_at) = capture_stopped_at {
+                    assert!(expiry_capture_stop_is_proven(
+                        failed_at,
+                        activated_at.elapsed(),
+                        done_client && exact_ttl_error.load(Ordering::Acquire),
+                        !remote_keyboard::active(&native.state),
+                        received == released
+                    ));
+                }
                 assert!(
                     activated_at.elapsed() >= Duration::from_secs(29),
                     "unexpected premature revoke, not TTL evidence"
