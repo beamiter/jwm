@@ -1,0 +1,9 @@
+# Static lossless scheduling: first real-pipeline comparison
+
+Candidate `0987a0d153aed65baba3bcce9ab6ef262197375e` passed [Wayland](https://github.com/beamiter/jwm/actions/runs/42894832038), [X11](https://github.com/beamiter/jwm/actions/runs/42894832040), and [general CI](https://github.com/beamiter/jwm/actions/runs/42894832261). The unchanged strict 500 ms blink and popup/resize integration gates passed.
+
+`first-aggregate.json` retains only allowlisted aggregate synthetic measurements, not raw traces or failure logs. Six symmetric same-input sessions each scheduled 16 generations at 500 ms intervals. All 96 were presented. Old scheduling had one late generation across its 32 samples; proposed scheduling had none. Per-session maximum scheduled-to-present latency was 533/468 ms old versus 420/428 ms proposed. Lossless-off was 294/287 ms.
+
+This is a tradeoff, not an across-the-board speedup. First exact static presentation, measured from the experiment origin after initial JPEG presentation, moved from 4.34/4.65 seconds to 7.09/6.59 seconds. Both enabled policies sent 242,007 source-envelope payload bytes per session; off sent 220,191. These are not full transport bytes. Encoding counters include attempts; whole-session costs include startup and shutdown.
+
+The renderer, both displays, source injection and validation share a synthetic process. Scheduled latency therefore includes fixture source scheduling, GL readback and validation, not just transport. This first summary does not expose those stage distributions or distinguish cleanup-time confirmations. A follow-up summary adds those aggregate distinctions; do not infer their values from the first report. Two sessions per policy are limited evidence, not a physical-GPU or two-machine latency guarantee. Continuous changes faster than 250 ms can defer otherwise-stable background repairs indefinitely. Lossless remains explicit opt-in and read-only.

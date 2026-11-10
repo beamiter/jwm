@@ -122,3 +122,72 @@ environment details. Raw evidence must not be copied into the repository or
 uploaded as an artifact; any later retrieval requires an appropriately authorized
 tool. A failed run remains visible through success/count fields without exposing
 its raw failure trace.
+
+
+### Aggregate stage attribution
+
+The public allowlist also retains per-session nearest-rank count/p50/p95/max
+summaries for the following stages. The two sessions of an arm remain separate;
+the summarizer does not pool away run-to-run or ordering differences.
+
+| Aggregate | Interval | Population |
+| --- | --- | --- |
+| `source_schedule_delay` | scheduled tick → source preparation start | Every submitted generation, including missing/late presentations |
+| `source_preparation` | preparation start → commit issued | Same submitted generations |
+| `commit_dispatch` | commit issued → dispatch completed | Same submitted generations |
+| `fixture_stages.gl_readback` | GL start → GL complete | Every recorded post-baseline frame, including unknown markers |
+| `fixture_stages.validation` | GL complete → validation complete | Same post-baseline frames |
+| `fixture_stages.validation_to_feedback` | validation complete → feedback call start | Same post-baseline frames |
+| `fixture_stages.feedback_dispatch` | feedback call start → dispatch return | Same post-baseline frames |
+| `fixture_stages.feedback_started_to_presented` | feedback call start → actual sequence-associated presentation timestamp | Post-baseline frames with a recorded presentation |
+
+Each frame's GL/validation/feedback durations are calculated from that frame's
+own timestamps before aggregation. Source delay is signed rather than clamped.
+A presentation can occur during feedback dispatch, so its timestamp may precede
+`feedback_sent_ns`; the analysis does not incorrectly treat the dispatch return
+as the beginning of that wait. Quantiles of different stages are **not additive**,
+and counts expose different populations. An empty population has null quantiles,
+not zero duration. None of these aggregates contains paths, environment, failure
+strings or individual timestamps/traces.
+
+`unknown_marker_frames` counts post-baseline frames whose marker could not be
+identified, including frames without a presentation observation; they still
+contribute to the applicable fixture stage durations. Unknown markers cannot
+satisfy generation-latency matching. Exact-static convergence independently
+requires static SSE=0, an actual presented timestamp and sequence greater than
+the baseline. Its null value means not observed to converge, never zero ms.
+
+
+### Fixed observation window versus cleanup
+
+The experiment schedules updates for eight seconds and allows one second of
+normal drain. The fixed window ends at **9,000,000,000 ns**, inclusive, relative
+to the experiment origin. Shutdown may still collect presentation observations
+for up to another six seconds. Therefore unprefixed presentation counts and
+quantiles describe eventual observations, including cleanup, not solely the
+nine-second window.
+
+`within_window_presented_generations`, `within_window_missing_after_submission`
+and the two `within_window_*_to_present` distributions use only presentations
+at or before the nine-second boundary. `cleanup_only_presented_generations`
+separately counts submitted generations first presented after that boundary.
+A cleanup-only presentation remains missing in fixed-window coverage.
+`within_window_first_static_exact_presented_ns` similarly excludes late cleanup
+convergence; the unprefixed exact time retains the eventual observation.
+
+The experiment origin is established after initial JPEG presentation/setup.
+Static pixels may already have aged during setup, so experiment-relative exact
+time does **not** measure two seconds from the first source capture. Whole-session
+host counters include startup and shutdown and all encoded/discarded attempts;
+dividing them by nine seconds would not yield a valid experiment throughput.
+These limitations apply independently to every arm/session.
+
+
+The allowlist explicitly reports on-time generation counts (eventual and
+fixed-window), in addition to late/missing counts. `static_quality_eventual` and
+`static_quality_within_window` report the number of actually presented frames
+with nonzero static SSE after the first actually presented exact frame, plus the
+maximum subsequent static SSE. Their populations are independently bounded by
+the stated window. Both fields are null if no exact presentation was observed;
+zero regression after convergence must not be confused with never converging.
+This detects later quality regressions that a first-exact timestamp alone hides.

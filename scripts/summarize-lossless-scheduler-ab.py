@@ -7,6 +7,7 @@ from pathlib import Path
 
 MAX_REPORT_BYTES = 16 * 1024 * 1024
 PERIOD_NS = 500_000_000
+WINDOW_NS = 9_000_000_000
 
 
 def integer(value, label):
@@ -35,6 +36,15 @@ def distribution(values):
     return {"count": len(values), "p50_ms": ordered[math.ceil(len(values) * .5) - 1] / 1e6,
             "p95_ms": ordered[math.ceil(len(values) * .95) - 1] / 1e6,
             "max_ms": ordered[-1] / 1e6}
+
+
+def exact_regressions(observations):
+    first = min((at for at, sse in observations if sse == 0), default=None)
+    if first is None:
+        return {"regressed_frames_after_exact": None, "max_sse_after_exact": None}
+    later = [sse for at, sse in observations if at > first]
+    return {"regressed_frames_after_exact": sum(sse > 0 for sse in later),
+            "max_sse_after_exact": max(later, default=0)}
 
 
 def summarize(report):
@@ -92,8 +102,13 @@ def summarize(report):
             scheduled[generation] = (scheduled_ns, paint, commit, completed)
         matched = {}
         exact_at = []
+        presented_quality = []
         seen_sequences = set()
         png_count = 0
+        unknown_marker_frames = 0
+        stage_samples = {name: [] for name in (
+            "gl_readback", "validation", "validation_to_feedback", "feedback_dispatch",
+            "feedback_started_to_presented")}
         for frame in frames:
             sequence = integer(frame.get("sequence"), "sequence")
             if sequence in seen_sequences:
@@ -108,10 +123,29 @@ def summarize(report):
             present = frame.get("presented_ns")
             if present is not None:
                 present = integer(present, "presented_ns")
-                if sse == 0 and sequence > baseline_sequence:
-                    exact_at.append(present)
+                if sequence > baseline_sequence:
+                    presented_quality.append((present, sse))
+                    if sse == 0:
+                        exact_at.append(present)
+            # All four non-overlapping fixture stages come from each same
+            # post-baseline frame, whether or not its marker was identified.
+            if sequence > baseline_sequence:
+                times = [frame[key] for key in ("gl_started_ns", "gl_completed_ns",
+                         "validation_completed_ns", "feedback_started_ns", "feedback_sent_ns")]
+                if times != sorted(times):
+                    raise ValueError("fixture stage timestamps moved backwards")
+                for name, start, end in zip(
+                        ("gl_readback", "validation", "validation_to_feedback", "feedback_dispatch"),
+                        times, times[1:]):
+                    stage_samples[name].append(end - start)
+                if present is not None:
+                    # A callback during dispatch is valid: use its start, not
+                    # the return timestamp; never clamp a signed difference.
+                    stage_samples["feedback_started_to_presented"].append(present - times[3])
             generation = frame.get("marker_generation")
             if generation is None:
+                if sequence > baseline_sequence:
+                    unknown_marker_frames += 1
                 continue
             generation = integer(generation, "marker_generation")
             if generation >= 16:
@@ -132,16 +166,32 @@ def summarize(report):
                             "presented_ns": present, "late": present is not None and present > tick + PERIOD_NS,
                             "scheduled_to_present_ns": None if present is None else present - tick,
                             "commit_to_present_ns": None if present is None else present - commit,
-                            "source_schedule_delay_ns": paint - tick, "commit_dispatch_duration_ns": completed - commit})
+                            "source_schedule_delay_ns": paint - tick, "source_preparation_ns": commit - paint,
+                            "commit_dispatch_duration_ns": completed - commit})
         results.append({"arm": arm, "order": order, "success": session["success"],
                         "failure": session.get("failure"), "planned_generation_budget": 16,
                         "submitted_generations": len(scheduled), "not_submitted": 16 - len(scheduled),
                         "presented_generations": len(matched), "missing_after_submission": len(scheduled) - len(matched),
                         "late_presented_generations": sum(row["late"] for row in samples),
+                        "on_time_presented_generations": sum(row["presented_ns"] is not None and not row["late"] for row in samples),
+                        "within_window_on_time_presented_generations": sum(row["presented_ns"] is not None and row["presented_ns"] <= WINDOW_NS and not row["late"] for row in samples),
+                        "within_window_presented_generations": sum(row["presented_ns"] is not None and row["presented_ns"] <= WINDOW_NS for row in samples),
+                        "within_window_missing_after_submission": sum(row["presented_ns"] is None or row["presented_ns"] > WINDOW_NS for row in samples),
+                        "cleanup_only_presented_generations": sum(row["presented_ns"] is not None and row["presented_ns"] > WINDOW_NS for row in samples),
+                        "within_window_scheduled_to_present": distribution([row["scheduled_to_present_ns"] for row in samples if row["presented_ns"] is not None and row["presented_ns"] <= WINDOW_NS]),
+                        "within_window_commit_to_present": distribution([row["commit_to_present_ns"] for row in samples if row["presented_ns"] is not None and row["presented_ns"] <= WINDOW_NS]),
                         "scheduled_to_present": distribution([row["scheduled_to_present_ns"] for row in samples if row["presented_ns"] is not None]),
                         "commit_to_present": distribution([row["commit_to_present_ns"] for row in samples if row["presented_ns"] is not None]),
+                        "source_schedule_delay": distribution([row["source_schedule_delay_ns"] for row in samples]),
+                        "source_preparation": distribution([row["source_preparation_ns"] for row in samples]),
+                        "commit_dispatch": distribution([row["commit_dispatch_duration_ns"] for row in samples]),
+                        "fixture_stages": {name: distribution(values) for name, values in stage_samples.items()},
                         "first_static_exact_presented_ns": min(exact_at) if exact_at else None,
-                        "decoded_png_frames": png_count, "decoded_frames": len(frames), "samples": samples,
+                        "within_window_first_static_exact_presented_ns": min((at for at in exact_at if at <= WINDOW_NS), default=None),
+                        "static_quality_eventual": exact_regressions(presented_quality),
+                        "static_quality_within_window": exact_regressions([(at, sse) for at, sse in presented_quality if at <= WINDOW_NS]),
+                        "decoded_png_frames": png_count, "decoded_frames": len(frames),
+                        "unknown_marker_frames": unknown_marker_frames, "samples": samples,
                         "host_stats": session.get("host_stats")})
     return {"schema_version": 1, "benchmark": report["benchmark"],
             "interpretation": "500ms scheduled deadlines; missing samples retained; nearest-rank quantiles only among observed presentations; commit means issued; host sent_bytes is payload including source envelope, excluding Noise/TCP; encode_ns and encoded codec counts include discarded attempts; host_stats otherwise unmodified",
@@ -153,7 +203,14 @@ def public_summary(summary):
     allowed = ("arm", "order", "success", "planned_generation_budget", "submitted_generations",
                "not_submitted", "presented_generations", "missing_after_submission",
                "late_presented_generations", "scheduled_to_present", "commit_to_present",
-               "first_static_exact_presented_ns", "decoded_png_frames", "decoded_frames")
+               "first_static_exact_presented_ns", "decoded_png_frames", "decoded_frames",
+               "source_schedule_delay", "source_preparation", "commit_dispatch", "fixture_stages",
+               "unknown_marker_frames", "within_window_presented_generations",
+               "within_window_missing_after_submission", "cleanup_only_presented_generations",
+               "within_window_scheduled_to_present", "within_window_commit_to_present",
+               "within_window_first_static_exact_presented_ns", "on_time_presented_generations",
+               "within_window_on_time_presented_generations", "static_quality_eventual",
+               "static_quality_within_window")
     counters = ("encoded_jpeg", "encoded_png", "encode_ns", "jpeg_ns", "png_ns", "sent_bytes",
                 "comparisons", "comparison_ns", "stale_png_dropped")
     sessions = []
@@ -164,7 +221,7 @@ def public_summary(summary):
             item["aggregate_host_counters"] = {key: integer(stats[key], key) for key in counters if key in stats}
         sessions.append(item)
     return {"schema_version": 1, "benchmark": summary["benchmark"],
-            "scope": "aggregate synthetic CI results; not physical latency; sent_bytes is source-envelope payload; codec counts include discarded attempts",
+            "scope": "aggregate synthetic CI results; within_window is <=9s experiment time; unprefixed presentation metrics include cleanup; exact time is relative to post-first-JPEG setup baseline, not first capture; host counters include setup/shutdown, are not 9s throughput; sent_bytes is source-envelope payload; codec counts include discarded attempts",
             "sessions": sessions}
 
 
@@ -180,19 +237,55 @@ def self_test():
     public = public_summary(summarize(report))
     assert "retained failure" not in json.dumps(public)
     assert "samples" not in public["sessions"][0] and "failure" not in public["sessions"][0]
+    aggregate = public["sessions"][0]
+    assert aggregate["source_schedule_delay"]["p50_ms"] == 10 / 1e6
+    assert aggregate["source_preparation"]["p50_ms"] == 9 / 1e6
+    assert aggregate["commit_dispatch"]["p50_ms"] == 1 / 1e6
+    assert aggregate["fixture_stages"]["gl_readback"]["p50_ms"] == 10 / 1e6
+    assert aggregate["fixture_stages"]["validation"]["p50_ms"] == 10 / 1e6
+    assert aggregate["fixture_stages"]["feedback_dispatch"]["p50_ms"] == 5 / 1e6
     frame["presented_ns"] = 58  # callback may complete before dispatch returns
-    assert summarize(report)["sessions"][0]["presented_generations"] == 1
+    during = summarize(report)["sessions"][0]
+    assert during["presented_generations"] == 1
+    assert during["fixture_stages"]["feedback_started_to_presented"]["p50_ms"] == 3 / 1e6
+    frame["presented_ns"] = WINDOW_NS
+    boundary = public_summary(summarize(report))["sessions"][0]
+    assert boundary["within_window_presented_generations"] == 1
+    frame["presented_ns"] = WINDOW_NS + 1
+    cleanup = public_summary(summarize(report))["sessions"][0]
+    assert cleanup["presented_generations"] == 1
+    assert cleanup["within_window_presented_generations"] == 0
+    assert cleanup["within_window_missing_after_submission"] == 1
+    assert cleanup["cleanup_only_presented_generations"] == 1
+    assert cleanup["within_window_commit_to_present"]["count"] == 0
+    frame["static_sse"] = 0
+    cleanup_exact = public_summary(summarize(report))["sessions"][0]
+    assert cleanup_exact["first_static_exact_presented_ns"] == WINDOW_NS + 1
+    assert cleanup_exact["within_window_first_static_exact_presented_ns"] is None
+    frame["static_sse"] = 9
+    frame["marker_generation"] = None
+    unknown = public_summary(summarize(report))["sessions"][0]
+    assert unknown["unknown_marker_frames"] == 1
+    assert unknown["missing_after_submission"] == 1
+    assert unknown["first_static_exact_presented_ns"] is None
+    assert unknown["fixture_stages"]["gl_readback"]["count"] == 1
+    frame["marker_generation"] = 0
     frame["presented_ns"] = PERIOD_NS + 1
     frame["gl_started_ns"] = 18
     assert summarize(report)["sessions"][0]["missing_after_submission"] == 1
     frame["gl_started_ns"] = 30
     report["sessions"][0]["baseline_sequence"] = 1
-    assert summarize(report)["sessions"][0]["missing_after_submission"] == 1
+    before = summarize(report)["sessions"][0]
+    assert before["missing_after_submission"] == 1
+    assert before["fixture_stages"]["gl_readback"]["count"] == 0
     report["sessions"][0]["baseline_sequence"] = 0
     frame["presented_ns"] = None
     assert summarize(report)["sessions"][0]["missing_after_submission"] == 1
     marker.update(paint_started_ns=None, commit_issued_ns=None, commit_completed_ns=None)
-    assert summarize(report)["sessions"][0]["not_submitted"] == 16
+    absent = summarize(report)["sessions"][0]
+    assert absent["not_submitted"] == 16
+    assert absent["source_schedule_delay"]["count"] == 0
+    assert absent["source_schedule_delay"]["p50_ms"] is None
     marker.update(paint_started_ns=10, commit_issued_ns=19, commit_completed_ns=20)
     for invalid in (True, -1, 16):
         marker["generation"] = invalid
@@ -202,6 +295,11 @@ def self_test():
             pass
         else:
             raise AssertionError("invalid generation accepted")
+    assert exact_regressions([(1, 9)])["max_sse_after_exact"] is None
+    assert exact_regressions([(1, 0), (2, 3), (3, 0), (4, 7)]) == {
+        "regressed_frames_after_exact": 2, "max_sse_after_exact": 7}
+    assert exact_regressions([(1, 0), (2, 0)]) == {
+        "regressed_frames_after_exact": 0, "max_sse_after_exact": 0}
     print("scheduler summary self-test passed")
 
 
