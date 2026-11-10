@@ -91,10 +91,14 @@ fn update_presented(report: &mut Value, base: Instant, ledger: &[(u64, Instant)]
 }
 fn run_session(arm: &str, report: &mut Value) {
     let enabled = arm != "off";
-    let policy = if arm == "legacy" {
-        host::LosslessSchedule::Legacy100
-    } else {
-        host::LosslessSchedule::New250
+    let policy = match arm {
+        "legacy" => host::LosslessSchedule::Legacy100,
+        "off" | "proposed" => host::LosslessSchedule::New250,
+        "quiet0_pace100" => host::LosslessSchedule::Quiet0Pace100,
+        "quiet0_pace250" => host::LosslessSchedule::Quiet0Pace250,
+        "quiet250_pace100" => host::LosslessSchedule::Quiet250Pace100,
+        "quiet250_pace250" => host::LosslessSchedule::Quiet250Pace250,
+        _ => panic!("unknown explicit benchmark policy"),
     };
     let probe = Arc::new(host::LosslessScheduleProbe::default());
     let inputs: Vec<_> = (0..16).map(marker_pixels).collect();
@@ -365,6 +369,68 @@ fn actual_static_lossless_scheduler_three_arm_measurement() {
     let mut failed = false;
     for (index, arm) in order.iter().enumerate() {
         let mut session = json!({"arm":arm,"order":index,"success":false,"failure":null,"markers":[],"frames":[],"host_stats":null,"host_records":[]});
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            run_session(arm, &mut session)
+        }));
+        if let Err(error) = result {
+            failed = true;
+            let cause = error
+                .downcast_ref::<String>()
+                .cloned()
+                .or_else(|| error.downcast_ref::<&str>().map(|s| s.to_string()))
+                .unwrap_or_else(|| "non-string test panic".into());
+            session["failure"] = json!(cause);
+        }
+        report["sessions"].as_array_mut().unwrap().push(session);
+    }
+    let sessions = report["sessions"].as_array().unwrap();
+    for generation in 0..16 {
+        let hash = &sessions[0]["markers"][generation]["source_sha256"];
+        if hash.is_null()
+            || sessions
+                .iter()
+                .any(|session| &session["markers"][generation]["source_sha256"] != hash)
+        {
+            failed = true;
+            report["input_identity_failure"] = json!(true);
+            break;
+        }
+    }
+    report["success"] = json!(!failed);
+    let path = std::env::var("JWM_REMOTE_SCHEDULER_REPORT")
+        .expect("explicit private report path required");
+    let bytes = serde_json::to_vec_pretty(&report).unwrap();
+    assert!(bytes.len() <= 2 * 1024 * 1024);
+    std::fs::write(path, bytes).unwrap();
+    assert!(
+        !failed,
+        "measurement infrastructure failed; raw private report retains every session"
+    );
+}
+#[test]
+#[ignore = "explicit private synthetic real TCP/GL schedule comparison; no performance threshold"]
+fn actual_static_lossless_scheduler_factorial_measurement() {
+    let order = [
+        "quiet0_pace100",
+        "quiet0_pace250",
+        "quiet250_pace100",
+        "quiet250_pace250",
+        "quiet250_pace250",
+        "quiet250_pace100",
+        "quiet0_pace250",
+        "quiet0_pace100",
+    ];
+    let mut report = json!({"schema_version":1,"benchmark":"static_lossless_scheduler_factorial_tcp_ab","scope":"same-process synthetic owned displays and controlled GL presentation; not physical display latency","scheduled_interval_ns":500_000_000u64,"drain_ns":1_000_000_000u64,"success":true,"sessions":[]});
+    let mut failed = false;
+    for (index, arm) in order.iter().enumerate() {
+        let mut session = json!({"arm":arm,"order":index,"success":false,"failure":null,"markers":[],"frames":[],"host_stats":null,"host_records":[]});
+        session["policy"] = match *arm {
+            "quiet0_pace100" => json!({"quiet_ms":0,"pace_ms":100,"supersession_guard":true}),
+            "quiet0_pace250" => json!({"quiet_ms":0,"pace_ms":250,"supersession_guard":true}),
+            "quiet250_pace100" => json!({"quiet_ms":250,"pace_ms":100,"supersession_guard":true}),
+            "quiet250_pace250" => json!({"quiet_ms":250,"pace_ms":250,"supersession_guard":true}),
+            _ => unreachable!(),
+        };
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             run_session(arm, &mut session)
         }));

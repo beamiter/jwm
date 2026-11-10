@@ -52,6 +52,28 @@ struct Record {
     payload: Vec<u8>,
 }
 
+/// Test-only provenance of the actual first sender worker socket failure.
+#[cfg(test)]
+#[derive(Debug)]
+pub(super) struct SenderShutdownTransportError {
+    pub(super) kind: io::ErrorKind,
+    pub(super) message: String,
+}
+#[cfg(test)]
+impl std::fmt::Display for SenderShutdownTransportError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.message.fmt(f)
+    }
+}
+#[cfg(test)]
+impl std::error::Error for SenderShutdownTransportError {}
+
+#[cfg(test)]
+fn shutdown_transport_provenance_allowed(shutdown: &io::Result<()>) -> bool {
+    matches!(shutdown, Ok(()))
+        || matches!(shutdown, Err(error) if error.kind() == io::ErrorKind::NotConnected)
+}
+
 #[derive(Default)]
 struct Queue {
     control: VecDeque<Record>,
@@ -62,6 +84,8 @@ struct Queue {
     stopped: bool,
     cancelling: bool,
     error: Option<String>,
+    #[cfg(test)]
+    error_io_kind: Option<io::ErrorKind>,
     writing_since: Option<Instant>,
     input_scope: Option<(u64, u64)>,
     clipboard_policy: Option<Arc<AtomicU8>>,
@@ -70,6 +94,17 @@ struct Queue {
 }
 
 impl Queue {
+    fn record_worker_error(
+        &mut self,
+        message: impl FnOnce() -> String,
+        _io_kind: Option<io::ErrorKind>,
+    ) {
+        #[cfg(test)]
+        if self.error.is_none() {
+            self.error_io_kind = _io_kind;
+        }
+        self.error.get_or_insert_with(message);
+    }
     fn check(&self) -> RemoteResult<()> {
         if let Some(error) = &self.error {
             return Err(io::Error::new(io::ErrorKind::BrokenPipe, error.clone()).into());
@@ -304,14 +339,22 @@ impl Sender {
         self.shared.1.notify_all();
         let shutdown = self.control.shutdown(Shutdown::Both);
         self.join_timeout(timeout)?;
-        if let Some(error) = &self
-            .shared
-            .0
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .error
         {
-            return Err(io::Error::other(error.clone()).into());
+            let queue = self.shared.0.lock().unwrap_or_else(|p| p.into_inner());
+            if let Some(error) = &queue.error {
+                #[cfg(test)]
+                if let Some(kind @ (io::ErrorKind::BrokenPipe | io::ErrorKind::ConnectionReset)) =
+                    queue
+                        .error_io_kind
+                        .filter(|_| shutdown_transport_provenance_allowed(&shutdown))
+                {
+                    return Err(Box::new(SenderShutdownTransportError {
+                        kind,
+                        message: error.clone(),
+                    }));
+                }
+                return Err(io::Error::other(error.clone()).into());
+            }
         }
         match shutdown {
             Ok(()) => Ok(()),
@@ -388,6 +431,10 @@ impl Sender {
                                     if remaining.is_zero() {
                                         queue.error =
                                             Some("remote record write deadline exceeded".into());
+                                        #[cfg(test)]
+                                        {
+                                            queue.error_io_kind = None;
+                                        }
                                         queue.stopped = true;
                                         drop(queue);
                                         let _ = socket.shutdown(Shutdown::Both);
@@ -479,7 +526,10 @@ impl Sender {
                             )
                         });
                     if !cancelled_io {
-                        queue.error.get_or_insert_with(|| error.to_string());
+                        queue.record_worker_error(
+                            || error.to_string(),
+                            io_error.map(io::Error::kind),
+                        );
                     }
                 }
                 drop(queue);
@@ -1117,5 +1167,52 @@ mod explicit_resize_tests {
             .push(MessageKind::WindowResizeRequest, &[2; 28])
             .unwrap();
         assert_eq!(queue.control.len(), 2);
+    }
+}
+
+#[cfg(test)]
+mod shutdown_provenance_tests {
+    use super::*;
+    #[test]
+    fn independent_shutdown_failure_cannot_be_sole_worker_provenance() {
+        assert!(shutdown_transport_provenance_allowed(&Ok(())));
+        assert!(shutdown_transport_provenance_allowed(&Err(
+            io::ErrorKind::NotConnected.into()
+        )));
+        for kind in [
+            io::ErrorKind::Other,
+            io::ErrorKind::PermissionDenied,
+            io::ErrorKind::BrokenPipe,
+            io::ErrorKind::ConnectionReset,
+            io::ErrorKind::TimedOut,
+        ] {
+            assert!(!shutdown_transport_provenance_allowed(&Err(kind.into())));
+        }
+    }
+    #[test]
+    fn first_worker_error_and_kind_are_indivisible() {
+        for first in [
+            None,
+            Some(io::ErrorKind::BrokenPipe),
+            Some(io::ErrorKind::TimedOut),
+        ] {
+            let mut queue = Queue::default();
+            queue.record_worker_error(|| "first".into(), first);
+            queue.record_worker_error(
+                || panic!("first error must not be replaced"),
+                Some(io::ErrorKind::ConnectionReset),
+            );
+            assert_eq!(queue.error.as_deref(), Some("first"));
+            assert_eq!(queue.error_io_kind, first);
+        }
+        let mut deadline = Queue {
+            error: Some("deadline".into()),
+            ..Queue::default()
+        };
+        deadline.record_worker_error(
+            || panic!("deadline must not be replaced"),
+            Some(io::ErrorKind::BrokenPipe),
+        );
+        assert_eq!(deadline.error_io_kind, None);
     }
 }

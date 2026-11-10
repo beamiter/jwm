@@ -8,6 +8,11 @@ from pathlib import Path
 MAX_REPORT_BYTES = 16 * 1024 * 1024
 PERIOD_NS = 500_000_000
 WINDOW_NS = 9_000_000_000
+BENCHMARKS = {
+    "static_lossless_scheduler_tcp_ab": (6, ("off", "legacy", "proposed")),
+    "static_lossless_scheduler_factorial_tcp_ab": (8, (
+        "quiet0_pace100", "quiet0_pace250", "quiet250_pace100", "quiet250_pace250")),
+}
 
 
 def integer(value, label):
@@ -50,20 +55,31 @@ def exact_regressions(observations):
 def summarize(report):
     if type(report.get("schema_version")) is not int or report["schema_version"] != 1:
         raise ValueError("unsupported schema_version")
-    if report.get("benchmark") != "static_lossless_scheduler_tcp_ab":
+    benchmark = report.get("benchmark")
+    if not isinstance(benchmark, str) or benchmark not in BENCHMARKS:
         raise ValueError("wrong benchmark")
+    maximum_sessions, allowed_arms = BENCHMARKS[benchmark]
     sessions = report.get("sessions")
-    if not isinstance(sessions, list) or not 1 <= len(sessions) <= 6:
-        raise ValueError("expected 1..6 bounded sessions, including failed sessions")
+    if not isinstance(sessions, list) or not 1 <= len(sessions) <= maximum_sessions:
+        raise ValueError("invalid bounded session count, including failed sessions")
     results = []
     orders = set()
     input_hashes = {}
     for session in sessions:
         arm = session.get("arm")
-        if arm not in ("off", "legacy", "proposed"):
+        if arm not in allowed_arms:
             raise ValueError("unknown arm")
+        policy = None
+        if benchmark == "static_lossless_scheduler_factorial_tcp_ab":
+            supplied = session.get("policy")
+            quiet, pace = arm.removeprefix("quiet").split("_pace")
+            if not isinstance(supplied, dict) or set(supplied) != {"quiet_ms", "pace_ms", "supersession_guard"}:
+                raise ValueError("factorial policy metadata required")
+            if integer(supplied["quiet_ms"], "quiet_ms") != int(quiet) or integer(supplied["pace_ms"], "pace_ms") != int(pace) or supplied["supersession_guard"] is not True:
+                raise ValueError("factorial policy does not match arm or guard")
+            policy = dict(supplied)
         order = integer(session.get("order"), "order")
-        if order in orders:
+        if order >= maximum_sessions or order in orders:
             raise ValueError("duplicate session order")
         orders.add(order)
         if type(session.get("success")) is not bool:
@@ -168,7 +184,7 @@ def summarize(report):
                             "commit_to_present_ns": None if present is None else present - commit,
                             "source_schedule_delay_ns": paint - tick, "source_preparation_ns": commit - paint,
                             "commit_dispatch_duration_ns": completed - commit})
-        results.append({"arm": arm, "order": order, "success": session["success"],
+        results.append({"arm": arm, "order": order, "policy": policy, "success": session["success"],
                         "failure": session.get("failure"), "planned_generation_budget": 16,
                         "submitted_generations": len(scheduled), "not_submitted": 16 - len(scheduled),
                         "presented_generations": len(matched), "missing_after_submission": len(scheduled) - len(matched),
@@ -194,13 +210,17 @@ def summarize(report):
                         "unknown_marker_frames": unknown_marker_frames, "samples": samples,
                         "host_stats": session.get("host_stats")})
     return {"schema_version": 1, "benchmark": report["benchmark"],
+            "planned_sessions": maximum_sessions,
+            "planned_generation_budget": maximum_sessions * 16,
+            "reported_sessions": len(sessions),
+            "unreported_session_generation_budget": (maximum_sessions - len(sessions)) * 16,
             "interpretation": "500ms scheduled deadlines; missing samples retained; nearest-rank quantiles only among observed presentations; commit means issued; host sent_bytes is payload including source envelope, excluding Noise/TCP; encode_ns and encoded codec counts include discarded attempts; host_stats otherwise unmodified",
             "sessions": results}
 
 
 def public_summary(summary):
     """Explicit aggregate allowlist: never publish raw traces or failure strings."""
-    allowed = ("arm", "order", "success", "planned_generation_budget", "submitted_generations",
+    allowed = ("arm", "order", "policy", "success", "planned_generation_budget", "submitted_generations",
                "not_submitted", "presented_generations", "missing_after_submission",
                "late_presented_generations", "scheduled_to_present", "commit_to_present",
                "first_static_exact_presented_ns", "decoded_png_frames", "decoded_frames",
@@ -221,6 +241,10 @@ def public_summary(summary):
             item["aggregate_host_counters"] = {key: integer(stats[key], key) for key in counters if key in stats}
         sessions.append(item)
     return {"schema_version": 1, "benchmark": summary["benchmark"],
+            "planned_sessions": summary["planned_sessions"],
+            "planned_generation_budget": summary["planned_generation_budget"],
+            "reported_sessions": summary["reported_sessions"],
+            "unreported_session_generation_budget": summary["unreported_session_generation_budget"],
             "scope": "aggregate synthetic CI results; within_window is <=9s experiment time; unprefixed presentation metrics include cleanup; exact time is relative to post-first-JPEG setup baseline, not first capture; host counters include setup/shutdown, are not 9s throughput; sent_bytes is source-envelope payload; codec counts include discarded attempts",
             "sessions": sessions}
 
@@ -300,6 +324,39 @@ def self_test():
         "regressed_frames_after_exact": 2, "max_sse_after_exact": 7}
     assert exact_regressions([(1, 0), (2, 0)]) == {
         "regressed_frames_after_exact": 0, "max_sse_after_exact": 0}
+    marker["generation"] = 0
+    factorial = json.loads(json.dumps(report))
+    factorial["benchmark"] = "static_lossless_scheduler_factorial_tcp_ab"
+    template = factorial["sessions"][0]
+    arms = BENCHMARKS[factorial["benchmark"]][1]
+    factorial["sessions"] = []
+    for order, arm in enumerate((*arms, *reversed(arms))):
+        session = json.loads(json.dumps(template))
+        quiet, pace = arm.removeprefix("quiet").split("_pace")
+        session.update(order=order, arm=arm, policy={"quiet_ms":int(quiet), "pace_ms":int(pace), "supersession_guard":True})
+        factorial["sessions"].append(session)
+    aggregate = public_summary(summarize(factorial))
+    assert aggregate["planned_generation_budget"] == 128
+    assert aggregate["reported_sessions"] == 8
+    assert aggregate["unreported_session_generation_budget"] == 0
+    assert len(aggregate["sessions"]) == 8  # do not pool repeated arms
+    factorial["sessions"].pop()
+    assert public_summary(summarize(factorial))["unreported_session_generation_budget"] == 16
+    factorial["sessions"][0]["policy"]["supersession_guard"] = False
+    try:
+        summarize(factorial)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("factorial guard disabled")
+    factorial["sessions"][0]["policy"]["supersession_guard"] = True
+    factorial["sessions"][0]["arm"] = "legacy"
+    try:
+        summarize(factorial)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("three-arm policy accepted as factorial policy")
     print("scheduler summary self-test passed")
 
 

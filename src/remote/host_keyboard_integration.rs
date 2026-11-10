@@ -143,9 +143,20 @@ fn pump_until(
     phase: &str,
     mut done: impl FnMut() -> bool,
 ) {
+    pump_until_state(server, gl, cache, probe, phase, |_| done());
+}
+
+fn pump_until_state(
+    server: &mut Server,
+    gl: &mut HeadlessSmithayGles,
+    cache: &mut Option<(i32, i32, smithay::backend::renderer::gles::GlesRenderbuffer)>,
+    probe: &Probe,
+    phase: &str,
+    mut done: impl FnMut(&Server) -> bool,
+) {
     eprintln!("TCP keyboard case={:?} phase={phase}", probe.case);
     let deadline = Instant::now() + Duration::from_secs(12);
-    while !done() {
+    while !done(server) {
         if let Ok(error) = probe.failures.try_recv() {
             panic!(
                 "case={:?} phase={phase}: {error}; trace={:?}",
@@ -581,6 +592,17 @@ fn actual_tcp_keyboard_host_requires_drawn_scope_and_cleans_only_original_recipi
                 &probe,
                 "PNG duplicate lease denied",
                 || matches!(event_rx.try_recv(), Ok(PeerEvent::Finished)),
+            );
+            // TCP Revoked follows a flushed Wayland lease.destroy, not its
+            // dispatch on this independent compositor connection. Require the
+            // actual native cleanup state before inspecting recipient effects.
+            pump_until_state(
+                &mut server,
+                &mut gl,
+                &mut cache,
+                &probe,
+                "PNG duplicate lease native cleanup",
+                |server| !crate::backend::wayland_udev::remote_keyboard::active(&server.state),
             );
             assert_eq!(
                 crate::backend::wayland_udev::remote_keyboard::attempts_for_test(&server.state),

@@ -520,6 +520,45 @@ pub(crate) enum LosslessSchedule {
     New250,
     #[cfg(test)]
     Legacy100,
+    #[cfg(test)]
+    Quiet0Pace100,
+    #[cfg(test)]
+    Quiet0Pace250,
+    #[cfg(test)]
+    Quiet250Pace100,
+    #[cfg(test)]
+    Quiet250Pace250,
+}
+impl LosslessSchedule {
+    fn quiet_period(self) -> Duration {
+        match self {
+            Self::New250 => Duration::from_millis(250),
+            #[cfg(test)]
+            Self::Legacy100 | Self::Quiet0Pace100 | Self::Quiet0Pace250 => Duration::ZERO,
+            #[cfg(test)]
+            Self::Quiet250Pace100 | Self::Quiet250Pace250 => Duration::from_millis(250),
+        }
+    }
+
+    fn batch_interval(self) -> Duration {
+        match self {
+            Self::New250 => Duration::from_millis(250),
+            #[cfg(test)]
+            Self::Legacy100 | Self::Quiet0Pace100 | Self::Quiet250Pace100 => {
+                Duration::from_millis(100)
+            }
+            #[cfg(test)]
+            Self::Quiet0Pace250 | Self::Quiet250Pace250 => Duration::from_millis(250),
+        }
+    }
+
+    fn guards_supersession(self) -> bool {
+        match self {
+            #[cfg(test)]
+            Self::Legacy100 => false,
+            _ => true,
+        }
+    }
 }
 #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
 #[derive(Clone, Copy, Debug, Default)]
@@ -668,10 +707,11 @@ impl FrameSender {
             if self.encoder.detected_exact_change() {
                 self.recent_dynamic_at = Some(now);
             }
-            let quiet = self.lossless_schedule != LosslessSchedule::New250
-                || self.recent_dynamic_at.is_some_and(|at| {
-                    now.saturating_duration_since(at) >= Duration::from_millis(250)
-                });
+            let quiet_period = self.lossless_schedule.quiet_period();
+            let quiet = quiet_period.is_zero()
+                || self
+                    .recent_dynamic_at
+                    .is_some_and(|at| now.saturating_duration_since(at) >= quiet_period);
             // Tile-local exact stability allows static text to converge beside
             // animation, but any ordinary dirty work takes JPEG priority.
             let retry = self.lossless_retry_after.is_none_or(|at| now >= at)
@@ -721,14 +761,8 @@ impl FrameSender {
             if self.static_lossless {
                 // Anchor to completed flush: a delayed writer never catches up
                 // by bursting through missed batch deadlines.
-                self.lossless_next_batch = Some(
-                    committed_at
-                        + if self.lossless_schedule == LosslessSchedule::New250 {
-                            Duration::from_millis(250)
-                        } else {
-                            Duration::from_millis(100)
-                        },
-                );
+                self.lossless_next_batch =
+                    Some(committed_at + self.lossless_schedule.batch_interval());
             } else {
                 self.last_refinement =
                     Some(refinement_clock_after_commit(planned_at, committed_at));
@@ -4723,7 +4757,7 @@ fn send_frames_with_encoder_scoped<W: std::io::Write + SetWriteTimeout>(
                 pending.frame.geometry_epoch,
             )?;
         }
-        if sender.lossless_schedule == LosslessSchedule::New250
+        if sender.lossless_schedule.guards_supersession()
             && sender
                 .encoder
                 .encode_timings()
@@ -6078,8 +6112,62 @@ mod tests {
     }
 
     #[test]
+    fn lossless_factorial_policies_keep_production_default_and_guard_fixed() {
+        assert_eq!(LosslessSchedule::default(), LosslessSchedule::New250);
+        assert_eq!(
+            LosslessSchedule::New250.quiet_period(),
+            Duration::from_millis(250)
+        );
+        assert_eq!(
+            LosslessSchedule::New250.batch_interval(),
+            Duration::from_millis(250)
+        );
+        assert!(LosslessSchedule::New250.guards_supersession());
+        assert_eq!(LosslessSchedule::Legacy100.quiet_period(), Duration::ZERO);
+        assert_eq!(
+            LosslessSchedule::Legacy100.batch_interval(),
+            Duration::from_millis(100)
+        );
+        assert!(!LosslessSchedule::Legacy100.guards_supersession());
+        for (policy, quiet, pacing) in [
+            (LosslessSchedule::Quiet0Pace100, 0, 100),
+            (LosslessSchedule::Quiet0Pace250, 0, 250),
+            (LosslessSchedule::Quiet250Pace100, 250, 100),
+            (LosslessSchedule::Quiet250Pace250, 250, 250),
+        ] {
+            assert_eq!(policy.quiet_period(), Duration::from_millis(quiet));
+            assert_eq!(policy.batch_interval(), Duration::from_millis(pacing));
+            assert!(policy.guards_supersession());
+            let mut sender = FrameSender::with_codecs(false, true);
+            sender.lossless_schedule = policy;
+            let now = Instant::now();
+            let frame = proof_test_frame();
+            sender.plan_at(&frame, now).unwrap();
+            let mut bytes = Vec::new();
+            sender
+                .encoder
+                .encode_into(&mut bytes, 0, &frame, 70)
+                .unwrap();
+            sender.pending_refinement_at = Some(now);
+            let flushed = now + Duration::from_secs(1);
+            sender.commit_at(&proof_test_frame(), flushed);
+            assert_eq!(
+                sender.lossless_next_batch,
+                Some(flushed + Duration::from_millis(pacing))
+            );
+        }
+    }
+
+    #[test]
     fn new_lossless_quiet_gate_is_exact_and_legacy_policy_remains_available() {
-        for policy in [LosslessSchedule::New250, LosslessSchedule::Legacy100] {
+        for policy in [
+            LosslessSchedule::New250,
+            LosslessSchedule::Legacy100,
+            LosslessSchedule::Quiet0Pace100,
+            LosslessSchedule::Quiet0Pace250,
+            LosslessSchedule::Quiet250Pace100,
+            LosslessSchedule::Quiet250Pace250,
+        ] {
             let base = Instant::now();
             let mut frame = proof_test_frame();
             let mut sender = FrameSender::with_codecs(false, true);
@@ -6096,7 +6184,7 @@ mod tests {
             sender.plan_at(&frame, changed).unwrap();
             assert_eq!(
                 sender.pending_refinement_at.is_some(),
-                policy == LosslessSchedule::Legacy100
+                policy.quiet_period().is_zero()
             );
             sender.discard();
             sender
@@ -6104,7 +6192,7 @@ mod tests {
                 .unwrap();
             assert_eq!(
                 sender.pending_refinement_at.is_some(),
-                policy == LosslessSchedule::Legacy100
+                policy.quiet_period().is_zero()
             );
             sender.discard();
             sender

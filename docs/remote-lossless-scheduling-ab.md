@@ -242,3 +242,28 @@ maximum subsequent static SSE. Their populations are independently bounded by
 the stated window. Both fields are null if no exact presentation was observed;
 zero regression after convergence must not be confused with never converging.
 This detects later quality regressions that a first-exact timestamp alone hides.
+
+## Test-only factorial experiment preparation
+
+The planned 2×2 comparison has a distinct report identifier,
+`static_lossless_scheduler_factorial_tcp_ab`, retaining `schema_version: 1` and
+the same bounded session data. The original three-arm report remains supported.
+No production scheduling or permission change is implied by this preparation,
+and no new experiment result is claimed here.
+
+Four labels, `quiet0_pace100`, `quiet0_pace250`, `quiet250_pace100` and
+`quiet250_pace250`, are followed by their reverse order: eight separate sessions,
+16 scheduled identities each, **128 planned generations**. Each session declares
+matching integer `quiet_ms`/`pace_ms` and `supersession_guard: true`. The parser
+rejects mismatched policies or a disabled guard. All four retain the guard, so
+the 0/100 reference is not the former unguarded legacy policy.
+
+The parser permits at most eight sessions for this identifier, six for the
+original, without increasing the 16 MiB input or per-session marker/frame bounds.
+Top-level summaries retain planned/reported session counts, the full generation
+budget and the budget belonging to unreported sessions. Repeated arms remain
+separate; failed partial reports cannot silently shrink the denominator. Only
+these counts and validated policy parameters extend the public allowlist, never
+raw traces, failure strings, paths or environment details. The existing
+`--public-summary` command handles both identifiers. This preparation does not
+change the workflow, original three-arm test or strict regression gate.

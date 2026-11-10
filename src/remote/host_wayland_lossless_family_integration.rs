@@ -300,7 +300,16 @@ fn finish(mut h: Harness, gl: &mut HeadlessSmithayGles, size: (u32, u32), lock: 
         .as_ref()
         .expect("typed receiver failure required for revoked capture");
     assert_eq!(diagnostic.stage, Some("session"));
-    assert_eq!(diagnostic.category, "peer_closed");
+    if diagnostic.cleanup_sender_transport_only {
+        // Only a typed closed-socket failure from the joined ACK sender may
+        // accompany the exact authenticated capture revocation checked below.
+        assert_eq!(diagnostic.category, "cleanup_failed");
+        assert_eq!(diagnostic.cleanup, "incomplete");
+        assert!(!diagnostic.reconnect_certified);
+    } else {
+        assert_eq!(diagnostic.category, "peer_closed");
+        assert_eq!(diagnostic.cleanup, "unknown");
+    }
     assert_eq!(
         diagnostic.peer_close_code,
         Some(crate::remote::close_wire::SessionCloseCode::CaptureUnavailable)

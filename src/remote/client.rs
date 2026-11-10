@@ -206,6 +206,9 @@ pub struct FailureDiagnostic {
     pub peer_close_code: Option<SessionCloseCode>,
     pub cleanup: &'static str,
     pub reconnect_certified: bool,
+    #[cfg(test)]
+    #[serde(skip)]
+    pub cleanup_sender_transport_only: bool,
 }
 
 /// Classify without changing retry policy or making teardown claims from an
@@ -221,6 +224,8 @@ pub fn classify_failure(error: &(dyn std::error::Error + 'static)) -> FailureDia
         peer_close_code: None,
         cleanup: if certified { "complete" } else { "unknown" },
         reconnect_certified: certified,
+        #[cfg(test)]
+        cleanup_sender_transport_only: false,
     };
     let mut current = Some(error);
     for _ in 0..32 {
@@ -287,6 +292,36 @@ pub fn classify_failure(error: &(dyn std::error::Error + 'static)) -> FailureDia
             continue;
         }
         current = error.source();
+    }
+    #[cfg(test)]
+    {
+        // Accept exactly one cleanup wrapper with a direct authenticated close
+        // primary. Nested/host/unknown cleanup cannot acquire this evidence.
+        let mut current = Some(error);
+        let mut cleanup_count = 0;
+        let mut sender_only = false;
+        for _ in 0..32 {
+            let Some(error) = current else { break };
+            if let Some(cleanup) = error.downcast_ref::<SessionCleanupError>() {
+                cleanup_count += 1;
+                sender_only = cleanup.sender_transport_only
+                    && cleanup
+                        .primary
+                        .as_ref()
+                        .is_some_and(|p| p.is::<PeerClosed>());
+            } else if super::host::cleanup_incomplete(error) {
+                cleanup_count += 1;
+                sender_only = false;
+            }
+            current = if let Some(io) = error.downcast_ref::<io::Error>() {
+                io.get_ref()
+                    .map(|inner| inner as &(dyn std::error::Error + 'static))
+            } else {
+                error.source()
+            };
+        }
+        result.cleanup_sender_transport_only =
+            current.is_none() && cleanup_count == 1 && sender_only;
     }
     result
 }
@@ -1002,6 +1037,8 @@ fn finalize_retry_intent(
                 Ok(true) => Err(transport),
                 Ok(false) => Err(Box::new(transport.0)),
                 Err(error) => Err(Box::new(SessionCleanupError {
+                    #[cfg(test)]
+                    sender_transport_only: false,
                     primary: Some(transport),
                     failures: vec![error],
                 })),
@@ -1025,6 +1062,8 @@ impl std::error::Error for UserClosed {}
 
 fn user_close_cleanup_failure(error: RemoteError) -> RemoteError {
     Box::new(SessionCleanupError {
+        #[cfg(test)]
+        sender_transport_only: false,
         primary: Some(Box::new(UserClosed)),
         failures: vec![error],
     })
@@ -1076,6 +1115,8 @@ impl std::error::Error for PeerClosed {}
 /// timeout must not be hidden by a transport error that a caller might retry.
 #[derive(Debug)]
 struct SessionCleanupError {
+    #[cfg(test)]
+    sender_transport_only: bool,
     primary: Option<RemoteError>,
     failures: Vec<RemoteError>,
 }
@@ -1104,6 +1145,19 @@ fn finish_session(
     sender: RemoteResult<()>,
     clipboard: RemoteResult<()>,
 ) -> RemoteResult<()> {
+    #[cfg(test)]
+    let sender_transport_only = cancel.is_ok()
+        && matches!(&receiver, ReceiverExit::Completed)
+        && clipboard.is_ok()
+        && sender.as_ref().err().is_some_and(|error| {
+            let kind = error
+                .downcast_ref::<super::sender::SenderShutdownTransportError>()
+                .map(|e| e.kind);
+            matches!(
+                kind,
+                Some(io::ErrorKind::BrokenPipe | io::ErrorKind::ConnectionReset)
+            )
+        });
     let mut failures = Vec::new();
     if let Err(error) = cancel {
         failures.push(error);
@@ -1140,6 +1194,8 @@ fn finish_session(
         })
     } else {
         Err(Box::new(SessionCleanupError {
+            #[cfg(test)]
+            sender_transport_only,
             primary: foreground.err(),
             failures,
         }))
@@ -6988,6 +7044,140 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn only_closed_sender_cleanup_has_readonly_test_provenance() {
+        let peer = || -> RemoteError {
+            PeerClosed::decode(
+                MessageKind::SessionClose,
+                &SessionClose::new(SessionCloseCode::CaptureUnavailable, "capture unavailable")
+                    .encode(),
+            )
+            .unwrap()
+            .into()
+        };
+        for kind in [
+            io::ErrorKind::BrokenPipe,
+            io::ErrorKind::ConnectionReset,
+            io::ErrorKind::TimedOut,
+            io::ErrorKind::Other,
+        ] {
+            for extra in 0..4 {
+                let error = finish_session(
+                    Err(peer()),
+                    if extra == 1 {
+                        Err(io::Error::other("cancel").into())
+                    } else {
+                        Ok(())
+                    },
+                    if extra == 2 {
+                        ReceiverExit::TimedOut
+                    } else {
+                        ReceiverExit::Completed
+                    },
+                    Err(Box::new(
+                        super::super::sender::SenderShutdownTransportError {
+                            kind,
+                            message: "sender".into(),
+                        },
+                    )),
+                    if extra == 3 {
+                        Err(io::Error::other("clipboard").into())
+                    } else {
+                        Ok(())
+                    },
+                )
+                .unwrap_err();
+                let summary = classify_failure(error.as_ref());
+                assert_eq!(summary.category, "cleanup_failed");
+                assert_eq!(summary.cleanup, "incomplete");
+                assert_eq!(
+                    summary.peer_close_code,
+                    Some(SessionCloseCode::CaptureUnavailable)
+                );
+                assert!(!summary.reconnect_certified);
+                assert_eq!(
+                    summary.cleanup_sender_transport_only,
+                    extra == 0
+                        && matches!(
+                            kind,
+                            io::ErrorKind::BrokenPipe | io::ErrorKind::ConnectionReset
+                        )
+                );
+                assert!(
+                    !serde_json::to_string(&summary)
+                        .unwrap()
+                        .contains("cleanup_sender_transport_only")
+                );
+            }
+        }
+        let inner = finish_session(
+            Err(peer()),
+            Err(io::Error::other("cancel").into()),
+            ReceiverExit::Completed,
+            Ok(()),
+            Ok(()),
+        )
+        .unwrap_err();
+        let outer = finish_session(
+            Err(inner),
+            Ok(()),
+            ReceiverExit::Completed,
+            Err(Box::new(
+                super::super::sender::SenderShutdownTransportError {
+                    kind: io::ErrorKind::BrokenPipe,
+                    message: "sender".into(),
+                },
+            )),
+            Ok(()),
+        )
+        .unwrap_err();
+        assert!(!classify_failure(outer.as_ref()).cleanup_sender_transport_only);
+        let direct = finish_session(
+            Err(peer()),
+            Ok(()),
+            ReceiverExit::Completed,
+            Err(Box::new(
+                super::super::sender::SenderShutdownTransportError {
+                    kind: io::ErrorKind::BrokenPipe,
+                    message: "worker".into(),
+                },
+            )),
+            Ok(()),
+        )
+        .unwrap_err();
+        let nested = SessionCleanupError {
+            sender_transport_only: false,
+            primary: Some(direct),
+            failures: vec![io::Error::other("unknown cleanup").into()],
+        };
+        let wrapped = io::Error::other(nested);
+        assert!(!classify_failure(&wrapped).cleanup_sender_transport_only);
+
+        let no_primary = finish_session(
+            Ok(()),
+            Ok(()),
+            ReceiverExit::Completed,
+            Err(Box::new(
+                super::super::sender::SenderShutdownTransportError {
+                    kind: io::ErrorKind::BrokenPipe,
+                    message: "sender".into(),
+                },
+            )),
+            Ok(()),
+        )
+        .unwrap_err();
+        assert!(!classify_failure(no_primary.as_ref()).cleanup_sender_transport_only);
+        let non_worker = finish_session(
+            Err(peer()),
+            Ok(()),
+            ReceiverExit::Completed,
+            Err(io::Error::from(io::ErrorKind::BrokenPipe).into()),
+            Ok(()),
+        )
+        .unwrap_err();
+        assert!(!classify_failure(non_worker.as_ref()).cleanup_sender_transport_only);
+    }
+
+    #[test]
     fn terminal_types_and_cleanup_failures_are_preserved() {
         let auth: RemoteError = Box::new(ProtocolError::AuthenticationFailed);
         let error =
@@ -7631,6 +7821,8 @@ mod diagnostic_tests {
     #[test]
     fn cleanup_failure_overrides_nested_certificate() {
         let error = session(Box::new(SessionCleanupError {
+            #[cfg(test)]
+            sender_transport_only: false,
             primary: Some(session(certificate())),
             failures: vec![io::Error::other("private cleanup path").into()],
         }));
