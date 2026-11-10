@@ -901,6 +901,11 @@ mod tests {
     #[test]
     fn handshake_derives_matching_directional_sessions() {
         let (mut client_stream, mut server_stream) = UnixStream::pair().unwrap();
+        for stream in [&client_stream, &server_stream] {
+            let timeout = Some(std::time::Duration::from_secs(5));
+            stream.set_read_timeout(timeout).unwrap();
+            stream.set_write_timeout(timeout).unwrap();
+        }
 
         let server = thread::spawn(move || {
             let keys = server_handshake(&mut server_stream, &TEST_PSK, [0x51; NONCE_LEN]).unwrap();
@@ -935,23 +940,32 @@ mod tests {
     #[test]
     fn handshake_rejects_wrong_key() {
         let (mut client_stream, mut server_stream) = UnixStream::pair().unwrap();
+        for stream in [&client_stream, &server_stream] {
+            let timeout = Some(std::time::Duration::from_secs(5));
+            stream.set_read_timeout(timeout).unwrap();
+            stream.set_write_timeout(timeout).unwrap();
+        }
         let wrong_psk = [0x24; PSK_LEN];
 
         let server = thread::spawn(move || {
             server_handshake(&mut server_stream, &TEST_PSK, [0x52; NONCE_LEN])
         });
         let client_result = client_handshake(&mut client_stream, &wrong_psk, [0x62; NONCE_LEN]);
-        let server_result = server.join().unwrap();
-
         assert!(matches!(
-            server_result,
+            client_result,
             Err(ProtocolError::AuthenticationFailed)
         ));
-        assert!(match client_result {
-            Err(ProtocolError::AuthenticationFailed) => true,
-            Err(ProtocolError::Io(error)) => error.kind() == ErrorKind::UnexpectedEof,
-            _ => false,
-        });
+        // NNpsk2 rejects the responder's authenticated second flight here.
+        // The responder is still awaiting client Finished: honor the public
+        // caller contract by closing before joining, rather than deadlocking.
+        drop(client_stream);
+        let server_result = server.join().unwrap();
+        assert!(matches!(
+            server_result,
+            Err(ProtocolError::Io(ref error))
+                if matches!(error.kind(), ErrorKind::UnexpectedEof
+                    | ErrorKind::ConnectionReset | ErrorKind::BrokenPipe)
+        ));
     }
 
     #[test]
