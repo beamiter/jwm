@@ -35,6 +35,7 @@ use x11rb::x11_utils::{TryParseFd, X11Error};
 use super::cursor::{CursorPosition, CursorShape};
 use super::frame::{DamageRegions, DecodedFrame, FrameDamage, RecyclableDecodedFrame};
 use super::pacing::EventPollBudget;
+use super::scaling::{ScalingPolicy, nvidia_driver};
 use super::triangle_patch::TrianglePatch;
 use super::usability::viewer_title;
 use super::{RemoteError, RemoteResult};
@@ -900,6 +901,7 @@ impl Viewer {
             initial_width,
             initial_height,
             None,
+            ScalingPolicy::Auto,
             pointer_enabled,
             forward_keyboard,
             verified_keymap,
@@ -915,6 +917,7 @@ impl Viewer {
         initial_width: u16,
         initial_height: u16,
         window_size: Option<super::window_size::WindowSize>,
+        scaling: ScalingPolicy,
         pointer_enabled: bool,
         forward_keyboard: bool,
         verified_keymap: Option<super::x11_keymap::KeymapTable>,
@@ -928,6 +931,7 @@ impl Viewer {
             initial_height,
             window_size,
             None,
+            scaling,
             pointer_enabled,
             forward_keyboard,
             verified_keymap,
@@ -944,6 +948,7 @@ impl Viewer {
         initial_height: u16,
         window_size: Option<super::window_size::WindowSize>,
         window_position: Option<super::window_position::WindowPosition>,
+        scaling: ScalingPolicy,
         pointer_enabled: bool,
         forward_keyboard: bool,
         verified_keymap: Option<super::x11_keymap::KeymapTable>,
@@ -1044,7 +1049,7 @@ impl Viewer {
             ShmUpload::Disabled
         };
         let mut render_upscale =
-            RenderUpscale::connect(&conn, screen_num, root, root_depth, root_visual)?;
+            RenderUpscale::connect(&conn, screen_num, root, root_depth, root_visual, scaling)?;
 
         let presentation_atom = intern_atom(&conn, b"_JWM_REMOTE_PRESENTED")?;
         let wm_protocols = intern_atom(&conn, b"WM_PROTOCOLS")?;
@@ -3036,7 +3041,19 @@ impl RenderUpscale {
         root: Window,
         depth: u8,
         root_visual: u32,
+        scaling: ScalingPolicy,
     ) -> RemoteResult<Self> {
+        let is_nvidia = nvidia_driver(conn);
+        if !scaling.allows_gpu(is_nvidia) {
+            if is_nvidia && scaling == ScalingPolicy::Auto {
+                eprintln!(
+                    "jwm-remote: NVIDIA driver: viewer upscaling on the CPU, because XRender \
+                     operations can return unfinished frames (--scaling gpu overrides)"
+                );
+            }
+            return Ok(Self::Disabled);
+        }
+
         let Some(extension) = conn.extension_information(render::X11_EXTENSION_NAME)? else {
             eprintln!("jwm-remote: XRender unavailable for viewer upscaling; using CPU scaling");
             return Ok(Self::Disabled);
@@ -5014,6 +5031,7 @@ mod tests {
             1,
             Some(size),
             Some(position),
+            ScalingPolicy::Auto,
             false,
             false,
             None,
@@ -5059,6 +5077,7 @@ mod tests {
             1,
             Some(size),
             Some(outside),
+            ScalingPolicy::Auto,
             false,
             false,
             None,
@@ -6906,6 +6925,14 @@ mod tests {
             true,
             false
         ));
+    }
+
+    #[test]
+    fn viewer_scaling_policy_controls_render_upscale() {
+        assert!(ScalingPolicy::Auto.allows_gpu(false));
+        assert!(!ScalingPolicy::Auto.allows_gpu(true));
+        assert!(ScalingPolicy::Gpu.allows_gpu(true));
+        assert!(!ScalingPolicy::Cpu.allows_gpu(false));
     }
 }
 

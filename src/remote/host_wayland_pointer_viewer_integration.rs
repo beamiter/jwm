@@ -379,6 +379,7 @@ impl Harness {
                 clipboard_direction: Default::default(),
                 clipboard_file_limit: 0,
                 escape_key: "Escape".into(),
+                scaling: Default::default(),
             };
             let result = with_wayland_pointer_observer(observed, || {
                 with_wayland_pointer_candidate_observer(observed_candidate, || {

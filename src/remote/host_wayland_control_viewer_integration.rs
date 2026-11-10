@@ -436,6 +436,7 @@ impl Harness {
                 clipboard_direction: Default::default(),
                 clipboard_file_limit: 0,
                 escape_key: "Escape".into(),
+                scaling: Default::default(),
             };
             let result = with_wayland_control_observer(observer, || {
                 with_wayland_control_frame_observer(frame_observer, || {

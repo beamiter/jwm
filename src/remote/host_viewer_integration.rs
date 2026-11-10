@@ -253,6 +253,7 @@ fn client_options(
         clipboard_direction: Default::default(),
         clipboard_file_limit: 0,
         escape_key: "Escape".into(),
+        scaling: Default::default(),
     }
 }
 fn drive(

@@ -451,6 +451,12 @@ enum Command {
         /// Extra ssh -o option, such as Port=2222; may be repeated.
         #[arg(long = "ssh-option", value_name = "OPTION")]
         ssh_options: Vec<String>,
+
+        /// auto uses GPU/XRender scaling except on NVIDIA's proprietary driver,
+        /// where XRender operations can return unfinished frames; there it scales
+        /// on the CPU. gpu forces XRender; cpu forces CPU scaling.
+        #[arg(long, default_value = "auto", value_parser = parse_scaling)]
+        scaling: ScalingPolicy,
     },
     /// Open a remote JWM desktop in an explicitly selected local viewer.
     #[command(group(clap::ArgGroup::new("native_viewer_mode")
@@ -557,6 +563,12 @@ enum Command {
 
         #[command(flatten)]
         frame_limits: FrameLimitArgs,
+
+        /// auto uses GPU/XRender upscaling except on NVIDIA's proprietary driver,
+        /// where XRender operations can return unfinished frames; there it scales
+        /// on the CPU. gpu forces XRender; cpu forces CPU scaling.
+        #[arg(long, default_value = "auto", value_parser = parse_scaling)]
+        scaling: ScalingPolicy,
     },
 }
 
@@ -717,7 +729,14 @@ fn profile_from_command(command: Command) -> RemoteResult<Profile> {
             clipboard_direction,
             clipboard_file_limit,
             frame_limits,
+            scaling,
         } => {
+            if scaling != ScalingPolicy::Auto {
+                return Err(profile_error(
+                    "profiles do not store scaling overrides; use connect directly",
+                )
+                .into());
+            }
             if viewer_backend == ViewerBackend::Wayland || viewer_wayland_display.is_some() {
                 return Err(profile_error(
                     "native Wayland viewer selection cannot be saved in a profile",
@@ -794,8 +813,15 @@ fn profile_from_command(command: Command) -> RemoteResult<Profile> {
             frame_limits,
             remote_command,
             ssh_options,
+            scaling,
         } => {
             jwm::remote::ssh::validate_destination(&destination)?;
+            if scaling != ScalingPolicy::Auto {
+                return Err(profile_error(
+                    "profiles do not store scaling overrides; use ssh directly",
+                )
+                .into());
+            }
             if !shares.is_empty() {
                 return Err(profile_error("profiles do not store extra source grants; use ssh directly with --share-monitor/--share-region/--share-root").into());
             }
@@ -1350,6 +1376,7 @@ fn run(command: Command) -> RemoteResult<()> {
             window_position,
             remote_command,
             ssh_options,
+            scaling,
         } => {
             let initial = monitor
                 .clone()
@@ -1375,6 +1402,7 @@ fn run(command: Command) -> RemoteResult<()> {
                 clipboard_file_limit,
                 frame_limits: frame_limits.limits(),
                 escape_key,
+                scaling,
             })
         }
         Command::Connect {
@@ -1401,6 +1429,7 @@ fn run(command: Command) -> RemoteResult<()> {
             clipboard_file_limit,
             frame_limits,
             escape_key,
+            scaling,
         } => {
             validate_follow_source_cli(
                 follow_source_size,
@@ -1432,6 +1461,7 @@ fn run(command: Command) -> RemoteResult<()> {
                     clipboard_file_limit,
                     frame_limits: frame_limits.limits(),
                     escape_key,
+                    scaling,
                 },
                 reconnect_attempts,
             )
@@ -2653,6 +2683,29 @@ mod tests {
             assert!(
                 Cli::try_parse_from(["jwm-remote", "profile", "run", "desk", flag, "all"]).is_err()
             );
+        }
+    }
+
+    #[test]
+    fn scaling_flags_are_parsed_and_rejected_in_profiles() {
+        for transport in ["connect host", "ssh host"] {
+            for mode in ["auto", "gpu", "cpu"] {
+                let mut args = vec!["jwm-remote"];
+                args.extend(transport.split_whitespace());
+                args.extend(["--scaling", mode]);
+                let cli = Cli::try_parse_from(args).unwrap();
+                let scaling = match cli.command {
+                    Command::Connect { scaling, .. } | Command::Ssh { scaling, .. } => scaling,
+                    _ => unreachable!(),
+                };
+                assert_eq!(scaling.to_string(), mode);
+                let profile_res = profile_from_command(cli.command);
+                if mode == "auto" {
+                    assert!(profile_res.is_ok());
+                } else {
+                    assert!(profile_res.is_err());
+                }
+            }
         }
     }
 

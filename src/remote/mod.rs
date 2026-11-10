@@ -38,6 +38,8 @@ pub mod profiles;
 pub mod protocol;
 pub mod replay_benchmark;
 mod sender;
+pub mod scaling;
+pub use scaling::ScalingPolicy;
 pub mod session_env;
 pub mod source_session;
 pub mod source_wire;

@@ -22,6 +22,7 @@ use super::client::{ClientOptions, run_client};
 use super::clipboard_policy::{ClipboardDirection, ClipboardMode};
 use super::key::{KeySource, generate_session_key};
 use super::messages::FrameLimits;
+use super::scaling::ScalingPolicy;
 use super::x11_capture::CaptureArea;
 use super::x11_viewer::{close_existing_viewer, focus_existing_viewer};
 use std::fs::{File, OpenOptions};
@@ -75,6 +76,7 @@ pub struct SshOptions {
     /// Largest file copy shared through the clipboard; 0 shares no files.
     pub clipboard_file_limit: u64,
     pub escape_key: String,
+    pub scaling: ScalingPolicy,
 }
 
 pub fn run_ssh(options: SshOptions) -> RemoteResult<()> {
@@ -170,6 +172,7 @@ pub fn run_ssh(options: SshOptions) -> RemoteResult<()> {
                 clipboard_file_limit: options.clipboard_file_limit,
                 frame_limits: options.frame_limits,
                 escape_key: options.escape_key.clone(),
+                scaling: options.scaling,
             })
         }),
         Err(ref error) => Err(io::Error::new(error.kind(), error.to_string()).into()),
@@ -625,6 +628,9 @@ fn remote_host_script_with(options: &SshOptions, remote_port: u16, managed: &str
             host.push_str(&format!(" {flag} {value}"));
         }
     }
+    if options.scaling != ScalingPolicy::Auto {
+        host.push_str(&format!(" --scaling {}", options.scaling));
+    }
     format!(
         "for candidate in {candidates}; do \
          if command -v \"$candidate\" >/dev/null 2>&1; then exec \"$candidate\" {host}; fi; \
@@ -665,7 +671,18 @@ mod tests {
             clipboard_direction: ClipboardDirection::Both,
             clipboard_file_limit: 2 << 30,
             escape_key: "F12".into(),
+            scaling: ScalingPolicy::Auto,
         }
+    }
+
+    #[test]
+    fn ssh_remote_script_forwards_scaling_policy() {
+        let mut opts = options();
+        assert!(!remote_host_script(&opts, 50000).contains("--scaling"));
+        opts.scaling = ScalingPolicy::Cpu;
+        assert!(remote_host_script(&opts, 50000).contains("--scaling cpu"));
+        opts.scaling = ScalingPolicy::Gpu;
+        assert!(remote_host_script(&opts, 50000).contains("--scaling gpu"));
     }
 
     /// Run the generated script through a real `sh`, with fake helpers on

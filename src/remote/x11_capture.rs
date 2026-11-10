@@ -212,43 +212,7 @@ impl EventAttribution {
 pub(crate) const DAMAGE_FORCE_REFRESH: Duration = Duration::from_secs(2);
 const ROOT_STAGING_MAX_BYTES: usize = 64 * 1024 * 1024;
 
-/// Where a frame is shrunk to the viewer's size.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum ScalingPolicy {
-    /// XRender in the X server, except on NVIDIA's proprietary driver.
-    #[default]
-    Auto,
-    /// Always XRender, which reads back only the encoded size.
-    Gpu,
-    /// Always a full-size readback, shrunk on the CPU.
-    Cpu,
-}
-
-impl ScalingPolicy {
-    /// Whether XRender may scale on this X server.
-    ///
-    /// On NVIDIA's proprietary driver, XRender and CopyArea reads of the
-    /// GL-composited screen can return a frame the compositor is still
-    /// drawing: measured over 45 s of a jwm session it showed only the
-    /// blurred wallpaper on 20 frames, and other partial passes appear as
-    /// blocky black-and-white noise. A core GetImage is synchronized with GL
-    /// rendering and showed none, so `Auto` takes that path there.
-    fn allows_gpu(self, nvidia_driver: bool) -> bool {
-        match self {
-            Self::Gpu => true,
-            Self::Cpu => false,
-            Self::Auto => !nvidia_driver,
-        }
-    }
-}
-
-/// Whether the X server runs NVIDIA's proprietary driver, by the extensions
-/// only that driver registers.
-fn nvidia_driver(conn: &RustConnection) -> bool {
-    ["NV-GLX", "NV-CONTROL"]
-        .iter()
-        .any(|name| conn.extension_information(name).ok().flatten().is_some())
-}
+pub use super::scaling::{ScalingPolicy, nvidia_driver};
 
 /// Which X drawable supplies the remote desktop image.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -290,20 +254,6 @@ impl std::str::FromStr for CaptureRegion {
     }
 }
 
-impl std::str::FromStr for ScalingPolicy {
-    type Err = String;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value.to_ascii_lowercase().as_str() {
-            "auto" => Ok(Self::Auto),
-            "gpu" | "xrender" => Ok(Self::Gpu),
-            "cpu" => Ok(Self::Cpu),
-            _ => Err(format!(
-                "unknown scaling {value:?}; expected auto, gpu, or cpu"
-            )),
-        }
-    }
-}
 
 impl std::str::FromStr for CaptureSource {
     type Err = String;

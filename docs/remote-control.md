@@ -966,7 +966,11 @@ bandwidth-friendly host `--max-width` can still be viewed fullscreen without
 moving the corresponding upscale work through CPU memory. This changes only
 local presentation: it does not increase the encoded resolution or network
 traffic. One-to-one presentation and downscaling keep the existing CPU path;
-an unavailable or unusable XRender path falls back there as well.
+an unavailable or unusable XRender path falls back there as well. On NVIDIA's
+proprietary driver, XRender composite into backing pixmaps similarly suffers
+from asynchronous pipeline races with core CopyArea; under `--scaling auto`
+(the default), the viewer automatically upscales on the CPU to prevent blocky
+black-and-white noise jitter. `--scaling gpu` overrides this.
 When idle, the viewer blocks on its X11 connection, the video receiver's wake
 descriptor, and the nearest heartbeat, telemetry or deferred-key deadline; it
 also checks x11rb's internal and MIT-SHM-deferred event queues before sleeping.
@@ -1575,15 +1579,18 @@ more often than a periodic screen grab would. Measured on an RTX 4090 D
 XRender; 0 through a core `GetImage`, which the driver synchronizes with GL
 rendering; 0 in 2,700 frames of ffmpeg recording the host's screen directly.
 
-`--scaling auto`, the default, therefore reads the screen with `GetImage` and
-shrinks it on the CPU when the X server has the `NV-GLX` or `NV-CONTROL`
+`--scaling auto`, the default on `host`, `connect`, and `ssh`, avoids this
+hazard across the entire pipeline. On the host, it reads the screen with `GetImage`
+and shrinks it on the CPU when the X server has the `NV-GLX` or `NV-CONTROL`
 extension, and says so at session start. The CPU path averages each output
 pixel's source area across threads; it took the place of a generic filter
 that cost about 90 ms per 2560x1440 frame. On the same loaded desktop the
 corrected path captured at about 152 ms per frame against 117 ms through
-XRender, both dominated by waiting for the GPU. `--scaling gpu` restores
+XRender, both dominated by waiting for the GPU. On the viewer, `--scaling auto`
+disables XRender upscaling on NVIDIA systems, performing high-quality multi-threaded
+CPU upscaling instead to eliminate black-and-white noise jitter. `--scaling gpu` restores
 XRender for anyone who prefers that speed and does not see the artifacts;
-`--scaling cpu` forces the direct path elsewhere.
+`--scaling cpu` forces the direct CPU path elsewhere.
 
 - A black/invalid Composite overlay can be bypassed with
   `--capture-source root`. Root capture is a compatibility fallback and may

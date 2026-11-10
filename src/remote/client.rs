@@ -92,6 +92,7 @@ pub struct ClientOptions {
     pub clipboard_file_limit: u64,
     /// Base X keysym of the Ctrl+Super local grab-release shortcut.
     pub escape_key: String,
+    pub scaling: super::scaling::ScalingPolicy,
 }
 
 #[derive(Debug)]
@@ -4749,6 +4750,7 @@ pub(super) mod tests {
             clipboard_direction: Default::default(),
             clipboard_file_limit: 0,
             escape_key: "F12".into(),
+            scaling: super::super::scaling::ScalingPolicy::Auto,
         };
         assert!(
             run_client(options)
@@ -7439,6 +7441,7 @@ mod native_viewer_permission_tests {
             clipboard_direction: Default::default(),
             clipboard_file_limit: 0,
             escape_key: "F12".into(),
+            scaling: super::super::scaling::ScalingPolicy::Auto,
         };
         assert_eq!(
             validate_viewer_backend(&options).is_ok(),

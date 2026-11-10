@@ -60,11 +60,13 @@ monorepo use independent Semantic Versions.
 
 - On NVIDIA's proprietary driver the remote view intermittently flashed the
   bare blurred wallpaper or blocky black-and-white noise, mostly across the
-  top of the screen: XRender reads of the GL-composited screen could return a
-  frame still being drawn. The host now reads the screen directly there
-  (`--scaling auto`, the default) and shrinks it with a new multi-threaded
-  area-average downscaler; measured flashes fell from 20 to 0 in 45 s.
-  `--scaling gpu|cpu` overrides the choice.
+  top of the screen: XRender operations on GL-composited or offscreen pixmaps
+  could return un-synchronized in-flight frames. Both the host and the viewer
+  now avoid XRender on NVIDIA systems under `--scaling auto` (the default).
+  The host reads the screen with core `GetImage` and downscales on the CPU;
+  the viewer upscales with multi-threaded CPU interpolation, eliminating the
+  noise jitter across target windows. `--scaling auto|gpu|cpu` is now supported
+  across `jwm-remote host`, `connect`, and `ssh`.
 
 ### One-command remote control over SSH
 
