@@ -15,6 +15,16 @@ pub(super) enum HostCapture {
 }
 
 impl HostCapture {
+    /// A retained native proof means read_frame can only service events, not
+    /// create a new capture. This is a scheduling hint, never input authority.
+    pub(super) fn retains_capture_proof(&self) -> bool {
+        #[cfg(feature = "remote-wayland")]
+        if let Self::Wayland(c) = self {
+            return c.retains_capture_proof();
+        }
+        false
+    }
+
     pub(super) fn enable_control(
         &mut self,
         scroll_enabled: bool,

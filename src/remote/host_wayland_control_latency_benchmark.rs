@@ -97,24 +97,28 @@ fn quantiles(values: &[f64]) -> Value {
     let mut sorted = values.to_vec();
     sorted.sort_by(f64::total_cmp);
     let nearest = |percent: usize| sorted[(sorted.len() * percent).div_ceil(100).saturating_sub(1)];
-    json!({"n": sorted.len(), "min_ms": sorted[0], "p50_ms": nearest(50), "p95_ms": nearest(95), "max_ms": sorted[sorted.len()-1], "method":"nearest-rank; n=16 is not a stable tail estimate"})
+    json!({"n": sorted.len(), "min_ms": sorted[0], "p50_ms": nearest(50), "p95_ms": nearest(95), "max_ms": sorted[sorted.len()-1], "method":"nearest-rank; small sample counts do not provide a stable tail estimate"})
 }
 struct Report {
     samples: Vec<Value>,
     success: bool,
     failure: String,
+    emit: bool,
+    measured: usize,
+    legacy_schedule: bool,
 }
 impl Report {
     fn new() -> Self {
         Self {
+            emit: true,
+            measured: MEASURED,
+            legacy_schedule: false,
             samples: Vec::new(),
             success: false,
             failure: "setup did not complete".into(),
         }
     }
-}
-impl Drop for Report {
-    fn drop(&mut self) {
+    fn value(&mut self) -> Value {
         for sample in &mut self.samples {
             if sample["status"] == "pending" {
                 sample["status"] = json!("failed");
@@ -140,7 +144,16 @@ impl Drop for Report {
         let report = json!({"schema_version":1, "success":self.success, "failure": if self.success { Value::Null } else { json!(self.failure) },
             "environment":{"os":std::env::consts::OS,"arch":std::env::consts::ARCH,"pid":std::process::id(),"libgl_always_software":std::env::var("LIBGL_ALWAYS_SOFTWARE").ok(),"mesa_driver_override":std::env::var("MESA_LOADER_DRIVER_OVERRIDE").ok(),"gl_renderer":"production headless Smithay GLES; driver identity not queried", "topology":"single-process owned dual Wayland displays and loopback authenticated TCP", "source_size":[SW,SH],"viewer_size":[VW,VH],"fps":30,"jpeg_quality":90,"poll_sleep_ms":1},
             "clock":"one process monotonic Instant", "scope":"one fixed selected native root identity and geometry; no source requests or shared sources; one control lease. Wire source/geometry epoch fields are not separately observed.", "endpoints":"injection before click wire requests; recipient observed after fixture dispatch; app commit request submitted; actual GL readback marker verified; exact client presentation feedback observed. Includes polling/readback/test feedback overhead, not physical input or scanout; no cross-machine claim.",
-            "budget":"25s checked including setup and after each sample; synchronous fixture operations and teardown have their own bounded waits, so this is not a strict wall-clock process cap", "warmup_requested":WARMUP,"measured_requested":MEASURED,"samples":self.samples,"quantiles":distributions});
+            "budget":"25s checked including setup and after each sample; synchronous fixture operations and teardown have their own bounded waits, so this is not a strict wall-clock process cap", "warmup_requested":WARMUP,"measured_requested":self.measured,"legacy_retained_schedule":self.legacy_schedule,"samples":self.samples,"quantiles":distributions});
+        report
+    }
+}
+impl Drop for Report {
+    fn drop(&mut self) {
+        if !self.emit {
+            return;
+        }
+        let report = self.value();
         let encoded = serde_json::to_string_pretty(&report).unwrap();
         eprintln!("JWM_REMOTE_LATENCY_REPORT\n{encoded}");
         if let Ok(path) = std::env::var("JWM_REMOTE_LATENCY_REPORT") {
@@ -158,10 +171,14 @@ impl Drop for Report {
 #[ignore = "owned TCP/Wayland/production GL latency benchmark; explicit CI only"]
 fn controlled_input_to_unique_visible_marker_latency() {
     let mut report = Report::new();
+    run_session(&mut report);
+}
+
+fn run_session(report: &mut Report) {
     let started = Instant::now();
     let mut gl = HeadlessSmithayGles::new()
         .expect("explicit latency benchmark requires real headless GL, never skip");
-    let mut h = Harness::new(&mut gl, false);
+    let mut h = Harness::new_with_legacy_schedule(&mut gl, false, report.legacy_schedule);
     let mut previous = h.activate(&mut gl);
     assert!(
         started.elapsed() < BUDGET,
@@ -172,7 +189,7 @@ fn controlled_input_to_unique_visible_marker_latency() {
     let target_surface = h.native.state.surface_for_window(h.target.window).unwrap();
     let run: u16 = rand::random();
     let ms = |duration: Duration| duration.as_secs_f64() * 1000.0;
-    for index in 0..WARMUP + MEASURED {
+    for index in 0..WARMUP + report.measured {
         report.failure = format!(
             "sample {index}: deadline, protocol, recipient, marker or presentation assertion failed"
         );
@@ -290,6 +307,138 @@ fn controlled_input_to_unique_visible_marker_latency() {
         .leave(400, &viewer_surface(&h.local));
     h.rejected(&mut gl, &[], &before, 1, "Wayland keyboard focus left");
     report.success = true;
+}
+
+// A is the historical retained-capture scheduling, B is the production fix.
+// Separate sessions prevent either arm from renewing a control lease.
+const AB_ORDER: [bool; 4] = [true, false, false, true];
+const AB_MEASURED_PER_SESSION: usize = MEASURED;
+
+fn ab_comparison(sessions: &[Value]) -> Value {
+    if sessions.len() != 4 || sessions.iter().any(|s| s["success"] != true) {
+        return Value::Null; // Never compare a partial or failed measurement.
+    }
+    let mut stages = serde_json::Map::new();
+    for name in [
+        "inject_to_recipient_observed_ms",
+        "recipient_observed_to_app_commit_ms",
+        "app_commit_to_gl_verified_ms",
+        "gl_verified_to_present_observed_ms",
+        "inject_to_present_observed_ms",
+    ] {
+        let mut arms = [Vec::new(), Vec::new()];
+        let mut medians = Vec::new();
+        for (index, session) in sessions.iter().enumerate() {
+            let values: Vec<f64> = session["samples"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|sample| sample["phase"] == "measured" && sample["status"] == "ok")
+                .map(|sample| sample[name].as_f64().unwrap())
+                .collect();
+            if values.len() != AB_MEASURED_PER_SESSION {
+                return Value::Null;
+            }
+            medians.push(quantiles(&values)["p50_ms"].as_f64().unwrap());
+            arms[usize::from(!AB_ORDER[index])].extend(values);
+        }
+        let baseline = quantiles(&arms[0]);
+        let candidate = quantiles(&arms[1]);
+        stages.insert(name.into(), json!({"baseline_A":baseline,"candidate_B":candidate,
+            "pooled_p50_delta_B_minus_A_ms":candidate["p50_ms"].as_f64().unwrap()-baseline["p50_ms"].as_f64().unwrap(),
+            "pooled_p95_delta_B_minus_A_ms":candidate["p95_ms"].as_f64().unwrap()-baseline["p95_ms"].as_f64().unwrap(),
+            "block_median_deltas_B_minus_A_ms":[medians[1]-medians[0],medians[2]-medians[3]]}));
+    }
+    json!({"stages":stages,"interpretation":"same process/binary/config AB then BA; negative B-A is lower observed latency, descriptive only, no performance pass threshold; no cross-CI-run comparison or causal effect/significance claim"})
+}
+struct AbReport {
+    sessions: Vec<Report>,
+    success: bool,
+}
+impl Drop for AbReport {
+    fn drop(&mut self) {
+        let sessions: Vec<Value> = self
+            .sessions
+            .iter_mut()
+            .enumerate()
+            .map(|(index, report)| {
+                let mut value = report.value();
+                value["session_order"] = json!(index);
+                value["arm"] = json!(if AB_ORDER[index] {
+                    "A_legacy"
+                } else {
+                    "B_candidate"
+                });
+                value["order_block"] = json!(index / 2);
+                value
+            })
+            .collect();
+        let comparison = if self.success {
+            ab_comparison(&sessions)
+        } else {
+            Value::Null
+        };
+        let report = json!({"schema_version":1,"benchmark":"retained_frame_schedule_abba","success":self.success,
+            "configuration":"identical source/viewer size, fps, JPEG quality, input workload, build and process; only per-host-thread test-only retained scheduling switch differs",
+            "order":["A_legacy","B_candidate","B_candidate","A_legacy"],"sessions_requested":4,"warmup_per_session":WARMUP,"measured_per_session":AB_MEASURED_PER_SESSION,"warmup_per_arm":4,"measured_per_arm":2 * AB_MEASURED_PER_SESSION,
+            "lease_policy":"new session per arm occurrence; per-session 25s checked budget includes setup, no renewal; bounded teardown excluded from measurement",
+            "failure":if self.success {Value::Null} else {json!("setup, sample or cleanup failed; inspect all retained session samples")},"sessions":sessions,"comparison":comparison});
+        let encoded = serde_json::to_string_pretty(&report).unwrap();
+        eprintln!("JWM_REMOTE_LATENCY_AB_REPORT\n{encoded}");
+        if let Ok(path) = std::env::var("JWM_REMOTE_LATENCY_REPORT") {
+            if let Err(error) = std::fs::write(&path, encoded) {
+                eprintln!("failed to write AB artifact {path:?}: {error}");
+                if !thread::panicking() {
+                    panic!("required AB artifact write failed: {error}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+#[ignore = "same-process ABBA owned TCP/Wayland/GL benchmark; explicit CI only"]
+fn controlled_input_to_unique_visible_marker_latency_abba() {
+    let mut report = AbReport {
+        sessions: Vec::new(),
+        success: false,
+    };
+    for legacy in AB_ORDER {
+        let mut session = Report::new();
+        session.emit = false;
+        session.measured = AB_MEASURED_PER_SESSION;
+        session.legacy_schedule = legacy;
+        report.sessions.push(session);
+        run_session(report.sessions.last_mut().unwrap());
+    }
+    report.success = true;
+}
+
+#[test]
+fn latency_ab_comparison_requires_complete_sessions_and_uses_same_run_blocks() {
+    assert_eq!(ab_comparison(&[]), Value::Null);
+    let mut sessions = Vec::new();
+    for (index, legacy) in AB_ORDER.into_iter().enumerate() {
+        let samples: Vec<Value> = (0..AB_MEASURED_PER_SESSION).map(|_| {
+            let ms = if legacy { 20.0 } else { 10.0 };
+            json!({"phase":"measured","status":"ok","inject_to_recipient_observed_ms":ms,"recipient_observed_to_app_commit_ms":ms,"app_commit_to_gl_verified_ms":ms,"gl_verified_to_present_observed_ms":ms,"inject_to_present_observed_ms":ms})
+        }).collect();
+        sessions.push(json!({"success":true,"session_order":index,"samples":samples}));
+    }
+    let comparison = ab_comparison(&sessions);
+    assert_eq!(
+        comparison["stages"]["inject_to_present_observed_ms"]["baseline_A"]["n"],
+        32
+    );
+    assert_eq!(
+        comparison["stages"]["inject_to_present_observed_ms"]["block_median_deltas_B_minus_A_ms"],
+        json!([-10.0, -10.0])
+    );
+    sessions[2]["success"] = json!(false);
+    assert_eq!(ab_comparison(&sessions), Value::Null);
+    sessions[2]["success"] = json!(true);
+    sessions[2]["samples"][0]["status"] = json!("failed");
+    assert_eq!(ab_comparison(&sessions), Value::Null);
 }
 
 #[test]
