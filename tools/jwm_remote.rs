@@ -325,8 +325,8 @@ enum Command {
         #[arg(long, requires_all=["wayland_select","once"], conflicts_with_all=["allow_input","allow_clipboard","allow_window_resize","allow_wayland_keyboard","allow_wayland_pointer","allow_wayland_control","allow_wayland_scroll","allow_wayland_horizontal_scroll","wayland_popups","wayland_resize_follow"])]
         allow_wayland_text: bool,
 
-        /// Allow bounded lossless static repairs, only in read-only sessions.
-        #[arg(long, conflicts_with_all=["allow_input","allow_clipboard","allow_window_resize","allow_wayland_keyboard","allow_wayland_pointer","allow_wayland_control","allow_wayland_text","allow_wayland_scroll","allow_wayland_horizontal_scroll"])]
+        /// Allow bounded lossless static repairs in read-only or explicit native keyboard sessions.
+        #[arg(long, conflicts_with_all=["allow_input","allow_clipboard","allow_window_resize","allow_wayland_pointer","allow_wayland_control","allow_wayland_text","allow_wayland_scroll","allow_wayland_horizontal_scroll"])]
         allow_static_lossless: bool,
 
         /// Experimentally encode exact bounded vertical screen shifts as copy plus changed pixels.
@@ -470,6 +470,7 @@ enum Command {
     #[command(group(clap::ArgGroup::new("native_viewer_mode")
         .args(["view_only", "wayland_keyboard", "wayland_pointer", "wayland_control", "wayland_text_stdin"]).multiple(false)))]
     #[command(group(clap::ArgGroup::new("viewer_scroll_lease").args(["wayland_pointer", "wayland_control"]).multiple(false)))]
+    #[command(group(clap::ArgGroup::new("lossless_session_mode").args(["view_only", "wayland_keyboard"]).multiple(false)))]
     Connect {
         /// Local backend; Wayland requires an explicit read-only or scoped input mode.
         #[arg(long, default_value_t=ViewerBackend::X11, requires_if("wayland", "native_viewer_mode"))]
@@ -525,7 +526,7 @@ enum Command {
         wayland_text_stdin: bool,
 
         /// Explicitly request bounded PNG repair of stable encoded RGB pixels.
-        #[arg(long, requires="view_only", conflicts_with_all=["wayland_text_stdin","wayland_keyboard","wayland_pointer","wayland_control","clipboard","grab_input","resize_source","follow_source_size"])]
+        #[arg(long, requires="lossless_session_mode", conflicts_with_all=["wayland_text_stdin","wayland_pointer","wayland_control","clipboard","grab_input","resize_source","follow_source_size"])]
         static_lossless: bool,
 
         /// Separately request single-notch vertical scroll; never smooth or horizontal.
@@ -1458,6 +1459,7 @@ fn run(command: Command) -> RemoteResult<()> {
             escape_key,
             scaling,
         } => {
+            validate_keyboard_lossless_cli(static_lossless, wayland_keyboard, viewer_backend)?;
             validate_follow_source_cli(
                 follow_source_size,
                 viewer_backend,
@@ -4115,9 +4117,59 @@ mod explicit_text_cli_tests {
     }
 }
 
+fn validate_keyboard_lossless_cli(
+    lossless: bool,
+    keyboard: bool,
+    backend: ViewerBackend,
+) -> RemoteResult<()> {
+    if lossless && keyboard && backend != ViewerBackend::Wayland {
+        return Err("keyboard plus static lossless requires --viewer-backend wayland".into());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod static_lossless_cli_tests {
     use super::*;
+    #[test]
+    fn keyboard_lossless_requires_explicit_native_viewer_and_native_host_selection() {
+        assert!(
+            Cli::try_parse_from([
+                "jwm-remote",
+                "host",
+                "--allow-static-lossless",
+                "--allow-wayland-keyboard",
+                "--wayland-select",
+                "--once"
+            ])
+            .is_ok()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "jwm-remote",
+                "host",
+                "--allow-static-lossless",
+                "--allow-wayland-keyboard"
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "jwm-remote",
+                "connect",
+                "host",
+                "--static-lossless",
+                "--wayland-keyboard",
+                "--viewer-backend",
+                "wayland"
+            ])
+            .is_ok()
+        );
+        assert!(validate_keyboard_lossless_cli(true, true, ViewerBackend::X11).is_err());
+        assert!(validate_keyboard_lossless_cli(true, true, ViewerBackend::Wayland).is_ok());
+        assert!(validate_keyboard_lossless_cli(true, false, ViewerBackend::X11).is_ok());
+        assert!(validate_keyboard_lossless_cli(false, true, ViewerBackend::X11).is_ok());
+    }
     #[test]
     fn capability_requires_explicit_readonly_and_is_not_saved() {
         assert!(matches!(
@@ -4164,7 +4216,6 @@ mod static_lossless_cli_tests {
             "--allow-input",
             "--allow-clipboard",
             "--allow-window-resize",
-            "--allow-wayland-keyboard",
             "--allow-wayland-pointer",
             "--allow-wayland-control",
             "--allow-wayland-text",

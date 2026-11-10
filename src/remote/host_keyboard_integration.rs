@@ -10,7 +10,7 @@ use crate::backend::wayland_udev::image_copy_capture::{
 };
 use crate::remote::keyboard_keymap::canonical_digest;
 use crate::remote::protocol::client_handshake;
-use crate::remote::source_wire::decode_source_payload;
+use crate::remote::source_wire::{FramePurpose, decode_frame_payload};
 use crate::remote::tile::TileDecoder;
 use crate::remote::wayland_capture::WaylandCapture;
 use crate::remote::wayland_keyboard_wire::{Key, LeaseRequest, LeaseStatusKind};
@@ -23,6 +23,8 @@ const TEST_KEY: [u8; 32] = [0x47; 32];
 #[derive(Clone, Copy, Debug)]
 enum Case {
     BadDrawnScope,
+    UnsentProof,
+    RepairReRequest,
     OldEpoch,
     Viewport,
     Disconnect,
@@ -45,7 +47,7 @@ impl Drop for ShutdownGuard {
     }
 }
 
-fn options() -> HostOptions {
+fn options(case: Case) -> HostOptions {
     HostOptions {
         frame_limits: Default::default(),
         listen: "127.0.0.1:0".into(),
@@ -71,7 +73,7 @@ fn options() -> HostOptions {
         allow_wayland_pointer: false,
         allow_wayland_control: false,
         allow_wayland_text: false,
-        allow_static_lossless: false,
+        allow_static_lossless: matches!(case, Case::RepairReRequest),
         allow_wayland_scroll: false,
         allow_wayland_horizontal_scroll: false,
         scroll_copy: false,
@@ -188,6 +190,7 @@ fn peer(
         &ClientHello {
             stream: super::super::messages::StreamCapabilities {
                 wayland_keyboard: true,
+                static_lossless: matches!(case, Case::RepairReRequest),
                 ..Default::default()
             },
             initial_viewport: None,
@@ -206,12 +209,14 @@ fn peer(
     assert!(hello.stream.wayland_keyboard);
     assert!(!hello.pointer_enabled && !hello.keyboard_enabled && !hello.clipboard_enabled);
     let mut decoder = TileDecoder::with_frame_limits(hello.stream.frame_limits)?;
+    decoder.set_lossless_enabled(hello.stream.static_lossless);
     note(trace, "peer waiting first frame");
     let frame_deadline = Instant::now() + Duration::from_secs(5);
     let scope = loop {
         let (kind, payload) = read_before(&mut reader, frame_deadline)?;
         if kind == MessageKind::Frame {
-            let (source_epoch, inner) = decode_source_payload(&payload)?;
+            let (source_epoch, purpose, inner) = decode_frame_payload(&payload)?;
+            assert_eq!(purpose, FramePurpose::NativeProof);
             let frame =
                 decoder.decode_into(inner, super::super::frame::new_decode_buffer_pool())?;
             assert_eq!(frame.dimensions(), (800, 600));
@@ -236,7 +241,7 @@ fn peer(
         keymap_digest: digest,
         source_epoch: scope.source_epoch,
         geometry_epoch: scope.geometry_epoch + u64::from(matches!(case, Case::BadDrawnScope)),
-        frame_sequence: scope.frame_sequence,
+        frame_sequence: scope.frame_sequence + u64::from(matches!(case, Case::UnsentProof)),
     };
     writer.write_message(MessageKind::WaylandKeyboardRequest, &request.encode()?)?;
     writer.flush()?;
@@ -249,13 +254,13 @@ fn peer(
             }
             Ok((MessageKind::Frame, _)) => continue,
             Ok((MessageKind::SessionClose | MessageKind::Close, _))
-                if matches!(case, Case::BadDrawnScope) =>
+                if matches!(case, Case::BadDrawnScope | Case::UnsentProof) =>
             {
                 let _ = events.send(PeerEvent::Denied);
                 return Ok(());
             }
             Err(ProtocolError::Io(error))
-                if matches!(case, Case::BadDrawnScope)
+                if matches!(case, Case::BadDrawnScope | Case::UnsentProof)
                     && matches!(
                         error.kind(),
                         io::ErrorKind::UnexpectedEof
@@ -271,7 +276,7 @@ fn peer(
             }
         }
     };
-    if matches!(case, Case::BadDrawnScope) {
+    if matches!(case, Case::BadDrawnScope | Case::UnsentProof) {
         assert_ne!(status.status, LeaseStatusKind::Granted);
         let _ = events.send(PeerEvent::Denied);
         return Ok(());
@@ -291,6 +296,51 @@ fn peer(
     );
     note(trace, "peer granted");
     events.send(PeerEvent::Granted)?;
+    if matches!(case, Case::RepairReRequest) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let (kind, payload) = read_before(&mut reader, deadline)?;
+            assert_eq!(kind, MessageKind::Frame);
+            let (epoch, purpose, inner) = decode_frame_payload(&payload)?;
+            let frame =
+                decoder.decode_into(inner, super::super::frame::new_decode_buffer_pool())?;
+            writer.write_message(
+                MessageKind::FrameAck,
+                &super::super::messages::encode_source_frame_ack(epoch, frame.sequence())?,
+            )?;
+            writer.write_message(MessageKind::Heartbeat, &[])?;
+            writer.flush()?;
+            if purpose == FramePurpose::VisualRepair {
+                assert!(decoder.last_frame_was_lossless());
+                writer.write_message(
+                    MessageKind::WaylandKeyboardRequest,
+                    &LeaseRequest {
+                        source_epoch: epoch,
+                        geometry_epoch: frame.geometry_epoch(),
+                        frame_sequence: frame.sequence(),
+                        keymap_digest: digest,
+                    }
+                    .encode()?,
+                )?;
+                writer.flush()?;
+                break;
+            }
+        }
+        loop {
+            let (kind, payload) = read_before(&mut reader, deadline)?;
+            if kind == MessageKind::Frame {
+                continue;
+            }
+            assert_eq!(kind, MessageKind::WaylandKeyboardStatus);
+            assert_eq!(
+                LeaseStatus::decode(&payload)?.status,
+                LeaseStatusKind::Revoked
+            );
+            events.send(PeerEvent::Finished)?;
+            return Ok(());
+        }
+    }
+
     assert!(matches!(
         commands.recv_timeout(Duration::from_secs(5))?,
         PeerCommand::Press
@@ -331,7 +381,7 @@ fn peer(
             events.send(PeerEvent::Finished)?;
             return Ok(());
         }
-        Case::BadDrawnScope => unreachable!(),
+        Case::BadDrawnScope | Case::UnsentProof | Case::RepairReRequest => unreachable!(),
     }
     writer.flush()?;
     let revoke_deadline = Instant::now() + Duration::from_secs(5);
@@ -357,6 +407,8 @@ fn actual_tcp_keyboard_host_requires_drawn_scope_and_cleans_only_original_recipi
     };
     for case in [
         Case::BadDrawnScope,
+        Case::UnsentProof,
+        Case::RepairReRequest,
         Case::OldEpoch,
         Case::Viewport,
         Case::Disconnect,
@@ -434,7 +486,7 @@ fn actual_tcp_keyboard_host_requires_drawn_scope_and_cleans_only_original_recipi
                     note(&host_trace, "host authenticated");
                     serve_authenticated(
                         peer,
-                        &options(),
+                        &options(case),
                         &shutdown,
                         &Mutex::new(Some(GrantedCapture::Wayland(Box::new(capture)))),
                     )
@@ -509,11 +561,36 @@ fn actual_tcp_keyboard_host_requires_drawn_scope_and_cleans_only_original_recipi
                 }
             },
         );
-        if matches!(case, Case::BadDrawnScope) {
+        if matches!(case, Case::BadDrawnScope | Case::UnsentProof) {
             assert!(matches!(first, Some(PeerEvent::Denied)));
+            assert_eq!(
+                crate::backend::wayland_udev::remote_keyboard::attempts_for_test(&server.state),
+                0
+            );
             let mut keys = Vec::new();
             collect_keys(&mut app, app_keyboard, &mut keys);
             assert!(keys.is_empty());
+            collect_keys(&mut other, other_keyboard, &mut keys);
+            assert!(keys.is_empty());
+        } else if matches!(case, Case::RepairReRequest) {
+            assert!(matches!(first, Some(PeerEvent::Granted)));
+            pump_until(
+                &mut server,
+                &mut gl,
+                &mut cache,
+                &probe,
+                "PNG duplicate lease denied",
+                || matches!(event_rx.try_recv(), Ok(PeerEvent::Finished)),
+            );
+            assert_eq!(
+                crate::backend::wayland_udev::remote_keyboard::attempts_for_test(&server.state),
+                1
+            );
+            assert!(!crate::backend::wayland_udev::remote_keyboard::active(
+                &server.state
+            ));
+            let mut keys = Vec::new();
+            collect_keys(&mut app, app_keyboard, &mut keys);
             collect_keys(&mut other, other_keyboard, &mut keys);
             assert!(keys.is_empty());
         } else {

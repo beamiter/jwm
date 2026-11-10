@@ -27,7 +27,8 @@ use super::protocol::{
 };
 use super::sender::{RecordWriter, Sender, reap_worker};
 use super::source_wire::{
-    SourceCatalog, SourceRequest, decode_source_changed, decode_source_payload,
+    FramePurpose, SourceCatalog, SourceRequest, decode_frame_payload, decode_source_changed,
+    decode_source_payload,
 };
 use super::tile::TileDecoder;
 use super::usability::{ClientStage, failure_hint, session_mode};
@@ -66,6 +67,24 @@ pub(crate) fn with_static_lossless_frame_observer<T>(
         }
     }
     let _restore = Restore(LOSSLESS_FRAME_OBSERVER.with(|slot| slot.replace(Some(observer))));
+    run()
+}
+#[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+type FramePurposeObserver = Arc<Mutex<Vec<(u64, FramePurpose)>>>;
+#[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+thread_local! {static FRAME_PURPOSE_OBSERVER: std::cell::RefCell<Option<FramePurposeObserver>>=const {std::cell::RefCell::new(None)};}
+#[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+pub(crate) fn with_frame_purpose_observer<T>(
+    observer: FramePurposeObserver,
+    run: impl FnOnce() -> T,
+) -> T {
+    struct Restore(Option<FramePurposeObserver>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            FRAME_PURPOSE_OBSERVER.with(|slot| *slot.borrow_mut() = self.0.take());
+        }
+    }
+    let _restore = Restore(FRAME_PURPOSE_OBSERVER.with(|slot| slot.replace(Some(observer))));
     run()
 }
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -421,9 +440,11 @@ fn suppress_reconnect(result: RemoteResult<()>, suppress: bool) -> RemoteResult<
 }
 
 fn validate_viewer_backend(options: &ClientOptions) -> RemoteResult<()> {
+    let lossless_keyboard = options.wayland_keyboard
+        && options.viewer_backend == ViewerBackend::Wayland
+        && !options.view_only;
     if options.static_lossless
-        && (!options.view_only
-            || options.wayland_keyboard
+        && (!(options.view_only || lossless_keyboard)
             || options.wayland_pointer
             || options.wayland_control
             || options.wayland_text.is_some()
@@ -432,7 +453,7 @@ fn validate_viewer_backend(options: &ClientOptions) -> RemoteResult<()> {
             || options.resize_source.is_some()
             || options.follow_source_size)
     {
-        return Err(invalid_data("static lossless requires explicit view-only mode without input, text, clipboard or remote resize").into());
+        return Err(invalid_data("static lossless requires view-only or Wayland keyboard-only mode without pointer, control, text, clipboard or remote resize").into());
     }
 
     if options.wayland_text.is_some()
@@ -755,13 +776,14 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
     // SessionReader exposes this payload only after its record MAC succeeds;
     // no decoded-image allocation is checked out before authentication.
     let mut tile_decoder = state.new_tile_decoder()?;
-    let (initial_epoch, initial_payload) = decode_source_payload(&payload)?;
+    let (initial_epoch, initial_purpose, initial_payload) = decode_frame_payload(&payload)?;
     if initial_epoch != 1 || state.catalog.lock().unwrap().is_none() {
         return Err(invalid_data("initial frame missing source catalog or initial epoch").into());
     }
     let mut first_frame = decode_queued_frame(
         &mut tile_decoder,
         initial_payload,
+        initial_purpose,
         &state.telemetry,
         &state.decode_pool,
     )?;
@@ -771,6 +793,13 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
             first_frame.frame.sequence(),
             tile_decoder.last_frame_was_lossless(),
         ));
+    }
+    #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+    if let Some(observer) = &state.purpose_observer {
+        observer
+            .lock()
+            .unwrap()
+            .push((first_frame.frame.sequence(), first_frame.purpose));
     }
     first_frame.frame = first_frame.frame.with_source_epoch(initial_epoch);
     reader
@@ -1957,6 +1986,11 @@ fn viewer_loop(
 
         apply_pending_cursor(viewer, state, source_epoch)?;
         for sequence in viewer.take_presented_sequences()? {
+            let purpose = pending_presentations
+                .iter()
+                .find(|timing| timing.sequence == sequence)
+                .ok_or_else(|| invalid_data("presentation lacks authenticated frame purpose"))?
+                .purpose;
             if let Some(timing) = pending_presentations
                 .iter()
                 .find(|timing| timing.sequence == sequence)
@@ -1964,17 +1998,26 @@ fn viewer_loop(
                 if timing.source_epoch != source_epoch {
                     continue;
                 }
-                presented_scope = (timing.source_epoch, timing.geometry_epoch);
-                if let Some(follow) = state.resize.lock().unwrap().follow.as_mut() {
-                    follow.presented(
-                        presented_scope,
-                        timing.source_size,
-                        timing.viewport_revision,
-                        Instant::now(),
-                    );
+                if purpose != FramePurpose::VisualRepair {
+                    presented_scope = (timing.source_epoch, timing.geometry_epoch);
+                    if let Some(follow) = state.resize.lock().unwrap().follow.as_mut() {
+                        follow.presented(
+                            presented_scope,
+                            timing.source_size,
+                            timing.viewport_revision,
+                            Instant::now(),
+                        );
+                    }
                 }
             }
             acknowledge_presentation(writer, sequence, pending_presentations, &state.telemetry)?;
+            // A repair is real display progress and returns video credit, but
+            // cannot create, renew, or revive any native-input authority.
+            // Existing keyboard lease/held releases continue through their
+            // unchanged event path and original deadline.
+            if purpose == FramePurpose::VisualRepair {
+                continue;
+            }
             if let Some(request) = state.wayland_text.lock().unwrap().presented(DrawnScope {
                 source_epoch: presented_scope.0,
                 geometry_epoch: presented_scope.1,
@@ -1993,7 +2036,7 @@ fn viewer_loop(
                         control.epoch,
                     )
                 };
-                if enabled {
+                if enabled && purpose == FramePurpose::NativeProof {
                     viewer.wayland_pointer_presented(sequence);
                     if needs_request {
                         #[cfg(feature = "remote-wayland")]
@@ -2027,9 +2070,12 @@ fn viewer_loop(
                 if keyboard.needs_request() {
                     #[cfg(feature = "remote-wayland")]
                     viewer.check_wayland_keyboard(true)?;
-                    if let Some(request) =
-                        keyboard.after_presentation(presented_scope, sequence, Instant::now())
-                    {
+                    if let Some(request) = keyboard.after_presentation_for_purpose(
+                        presented_scope,
+                        sequence,
+                        Instant::now(),
+                        purpose,
+                    ) {
                         writer.write_message(
                             MessageKind::WaylandKeyboardRequest,
                             &request.encode()?,
@@ -2064,34 +2110,39 @@ fn viewer_loop(
                         return Err(invalid_data("pointer geometry changed before grant").into());
                     }
                 }
-                if let Some(request) = pointer.presented(
-                    super::wayland_pointer_wire::DrawnScope {
-                        source_epoch: presented_scope.0,
-                        geometry_epoch: presented_scope.1,
-                        frame_sequence: sequence,
-                    },
-                    Instant::now(),
-                ) {
-                    writer.write_message(MessageKind::WaylandPointerRequest, &request.encode()?)?;
-                    writer.flush()?;
-                }
-                if pointer.enabled {
-                    viewer.wayland_pointer_presented(sequence);
-                    viewer.set_wayland_pointer_status(pointer.label(Instant::now()));
-                    #[cfg(test)]
-                    viewer.observe_pointer_candidate(
-                        pointer.click.map(|(scope, _, _, _)| scope.frame_sequence),
-                        pointer.left_down,
-                        pointer.sequence,
-                    )?;
-                    #[cfg(test)]
-                    viewer.observe_scroll(pointer.scroll_observed)?;
-                    #[cfg(test)]
-                    viewer.observe_pointer_ready(if pointer.fresh(Instant::now()) {
-                        pointer.ready.map(|scope| scope.frame_sequence)
-                    } else {
-                        None
-                    })?;
+                if purpose == FramePurpose::NativeProof {
+                    if let Some(request) = pointer.presented(
+                        super::wayland_pointer_wire::DrawnScope {
+                            source_epoch: presented_scope.0,
+                            geometry_epoch: presented_scope.1,
+                            frame_sequence: sequence,
+                        },
+                        Instant::now(),
+                    ) {
+                        writer.write_message(
+                            MessageKind::WaylandPointerRequest,
+                            &request.encode()?,
+                        )?;
+                        writer.flush()?;
+                    }
+                    if pointer.enabled {
+                        viewer.wayland_pointer_presented(sequence);
+                        viewer.set_wayland_pointer_status(pointer.label(Instant::now()));
+                        #[cfg(test)]
+                        viewer.observe_pointer_candidate(
+                            pointer.click.map(|(scope, _, _, _)| scope.frame_sequence),
+                            pointer.left_down,
+                            pointer.sequence,
+                        )?;
+                        #[cfg(test)]
+                        viewer.observe_scroll(pointer.scroll_observed)?;
+                        #[cfg(test)]
+                        viewer.observe_pointer_ready(if pointer.fresh(Instant::now()) {
+                            pointer.ready.map(|scope| scope.frame_sequence)
+                        } else {
+                            None
+                        })?;
+                    }
                 }
             }
             viewer.source_presented(presented_scope.1);
@@ -2413,6 +2464,7 @@ impl<W: RecordWriter> RecordWriter for ScopedInputWriter<'_, W> {
 }
 
 struct PendingFrameTiming {
+    purpose: FramePurpose,
     source_size: (u16, u16),
     viewport_revision: u64,
     source_epoch: u64,
@@ -2429,6 +2481,7 @@ fn submit_frame_with_revision(
     viewport_revision: u64,
 ) -> RemoteResult<bool> {
     let timing = PendingFrameTiming {
+        purpose: queued.purpose,
         source_size: (queued.frame.source_width(), queued.frame.source_height()),
         viewport_revision,
         source_epoch: queued.frame.source_epoch(),
@@ -2500,6 +2553,7 @@ fn draw_and_ack(
 }
 
 struct QueuedFrame {
+    purpose: FramePurpose,
     frame: RecyclableDecodedFrame,
     ready_at: Instant,
 }
@@ -3193,6 +3247,18 @@ impl ClientKeyboard {
     fn needs_request(&self) -> bool {
         self.configured() && self.request.is_none() && !self.ended
     }
+    fn after_presentation_for_purpose(
+        &mut self,
+        scope: (u64, u64),
+        sequence: u64,
+        now: Instant,
+        purpose: FramePurpose,
+    ) -> Option<super::wayland_keyboard_wire::LeaseRequest> {
+        if purpose != FramePurpose::NativeProof {
+            return None;
+        }
+        self.after_presentation(scope, sequence, now)
+    }
     fn after_presentation(
         &mut self,
         scope: (u64, u64),
@@ -3423,6 +3489,8 @@ impl ClientResize {
 struct ReceiveState {
     #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
     lossless_observer: Option<LosslessFrameObserver>,
+    #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+    purpose_observer: Option<FramePurposeObserver>,
     wayland_text: Mutex<ClientText>,
     wayland_control: Mutex<ClientControl>,
     resize: Mutex<ClientResize>,
@@ -3458,6 +3526,8 @@ impl ReceiveState {
         Self {
             #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
             lossless_observer: LOSSLESS_FRAME_OBSERVER.with(|slot| slot.borrow().clone()),
+            #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+            purpose_observer: FRAME_PURPOSE_OBSERVER.with(|slot| slot.borrow().clone()),
             wayland_text: Mutex::new(ClientText::default()),
             wayland_control: Mutex::new(ClientControl::default()),
             resize: Mutex::new(ClientResize::default()),
@@ -3575,6 +3645,7 @@ fn replace_latest<T>(latest: &Mutex<Option<T>>, next: T) -> Option<T> {
 fn decode_queued_frame(
     decoder: &mut TileDecoder,
     payload: &[u8],
+    purpose: FramePurpose,
     telemetry: &ClientTelemetry,
     pool: &SharedDecodeBufferPool,
 ) -> RemoteResult<QueuedFrame> {
@@ -3583,9 +3654,18 @@ fn decode_queued_frame(
     // frame the viewer later drops from its one-slot queue still contributes
     // its tiles. Only presentation is allowed to skip frames, never decoding.
     let frame = decoder.decode_into(payload, Arc::clone(pool))?;
+    if decoder.last_frame_was_lossless() != (purpose == FramePurpose::VisualRepair) {
+        return Err(
+            invalid_data("PNG codec and authenticated visual-repair purpose must match").into(),
+        );
+    }
     let ready_at = Instant::now();
     telemetry.record_decoded_at(decode_started, ready_at);
-    Ok(QueuedFrame { frame, ready_at })
+    Ok(QueuedFrame {
+        frame,
+        ready_at,
+        purpose,
+    })
 }
 
 struct ReceiveCompletion {
@@ -3769,7 +3849,7 @@ fn receive_frame_records(
                 completion.signal()?;
             }
             MessageKind::Frame => {
-                let (epoch, inner) = decode_source_payload(&payload)?;
+                let (epoch, purpose, inner) = decode_frame_payload(&payload)?;
                 if !accept_source_epoch(epoch, state.source_epoch.load(Ordering::Acquire))? {
                     continue;
                 }
@@ -3780,6 +3860,7 @@ fn receive_frame_records(
                 let mut queued = decode_queued_frame(
                     &mut tile_decoder,
                     inner,
+                    purpose,
                     &state.telemetry,
                     &state.decode_pool,
                 )?;
@@ -3789,6 +3870,12 @@ fn receive_frame_records(
                         queued.frame.sequence(),
                         tile_decoder.last_frame_was_lossless(),
                     ));
+                }
+                #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+                if let Some(observer) = &state.purpose_observer {
+                    let mut rows = observer.lock().unwrap();
+                    assert!(rows.len() < 4096);
+                    rows.push((queued.frame.sequence(), queued.purpose));
                 }
                 queued.frame = queued.frame.with_source_epoch(epoch);
                 let expected = last_sequence
@@ -3904,6 +3991,147 @@ fn invalid_data(message: impl Into<String>) -> io::Error {
 
 #[cfg(test)]
 pub(super) mod tests {
+    #[test]
+    fn visual_repair_never_grants_renews_or_revives_keyboard_lease() {
+        use super::super::wayland_keyboard_wire::{LeaseStatus, LeaseStatusKind};
+        use super::*;
+        let now = Instant::now();
+        let mut keyboard = ClientKeyboard {
+            digest: Some([7; 32]),
+            ..Default::default()
+        };
+        for purpose in [FramePurpose::Video, FramePurpose::VisualRepair] {
+            assert!(
+                keyboard
+                    .after_presentation_for_purpose((1, 1), 0, now, purpose)
+                    .is_none()
+            );
+            assert!(keyboard.request.is_none());
+            assert!(keyboard.needs_request());
+        }
+        let request = keyboard
+            .after_presentation_for_purpose((1, 1), 1, now, FramePurpose::NativeProof)
+            .unwrap();
+        keyboard
+            .receive(LeaseStatus {
+                lease_epoch: 9,
+                source_epoch: 1,
+                geometry_epoch: 1,
+                frame_sequence: request.frame_sequence,
+                status: LeaseStatusKind::Granted,
+            })
+            .unwrap();
+        keyboard.activated = true;
+        assert!(keyboard.key(38, true).unwrap().is_some());
+        assert!(
+            keyboard
+                .after_presentation_for_purpose(
+                    (1, 1),
+                    2,
+                    now + Duration::from_secs(20),
+                    FramePurpose::VisualRepair
+                )
+                .is_none()
+        );
+        assert_eq!(keyboard.request.unwrap().1, now);
+        assert!(
+            keyboard.key(38, false).unwrap().is_some(),
+            "existing held release survives repair"
+        );
+        assert!(
+            keyboard.key(38, true).unwrap().is_some(),
+            "existing valid lease continues typing"
+        );
+        assert!(keyboard.key(38, false).unwrap().is_some());
+        assert!(
+            keyboard
+                .check_timeout(now + super::super::wayland_keyboard_wire::LEASE_DURATION)
+                .is_err()
+        );
+        keyboard.cancel_for_local_event().unwrap();
+        assert!(
+            keyboard
+                .after_presentation_for_purpose((1, 1), 3, now, FramePurpose::NativeProof)
+                .is_none()
+        );
+        assert!(
+            keyboard
+                .after_presentation_for_purpose((1, 1), 4, now, FramePurpose::VisualRepair)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn authenticated_purpose_survives_decode_and_rejects_png_proof_confusion() {
+        use super::*;
+        use crate::remote::{
+            tile::{TileEncodeRequest, TileEncoder},
+            x11_capture::CapturedFrame,
+        };
+        let base = Instant::now();
+        let frame = CapturedFrame {
+            geometry_epoch: 1,
+            source_width: 32,
+            source_height: 32,
+            image: image::RgbImage::from_fn(32, 32, |x, y| {
+                image::Rgb([x as u8 * 7, y as u8 * 7, 51])
+            }),
+        };
+        let mut encoder = TileEncoder::new();
+        encoder.set_lossless_enabled(true);
+        encoder
+            .plan_at(&frame, TileEncodeRequest::Keyframe, base)
+            .unwrap();
+        let mut jpeg = Vec::new();
+        encoder.encode_into(&mut jpeg, 0, &frame, 60).unwrap();
+        encoder.commit(&frame);
+        encoder
+            .plan_at(
+                &frame,
+                TileEncodeRequest::LosslessRepair,
+                base + Duration::from_secs(3),
+            )
+            .unwrap();
+        let mut png = Vec::new();
+        encoder.encode_into(&mut png, 1, &frame, 60).unwrap();
+        for purpose in [
+            FramePurpose::Video,
+            FramePurpose::NativeProof,
+            FramePurpose::VisualRepair,
+        ] {
+            let mut decoder = TileDecoder::new();
+            decoder.set_lossless_enabled(true);
+            let telemetry = ClientTelemetry::default();
+            let pool = new_decode_buffer_pool();
+            let first = decode_queued_frame(
+                &mut decoder,
+                &jpeg,
+                FramePurpose::NativeProof,
+                &telemetry,
+                &pool,
+            )
+            .unwrap();
+            assert_eq!(first.purpose, FramePurpose::NativeProof);
+            let result = decode_queued_frame(&mut decoder, &png, purpose, &telemetry, &pool);
+            if purpose == FramePurpose::VisualRepair {
+                assert_eq!(result.unwrap().purpose, purpose);
+            } else {
+                assert!(result.is_err());
+            }
+        }
+        let mut decoder = TileDecoder::new();
+        assert!(
+            decode_queued_frame(
+                &mut decoder,
+                &jpeg,
+                FramePurpose::VisualRepair,
+                &ClientTelemetry::default(),
+                &new_decode_buffer_pool()
+            )
+            .is_err()
+        );
+    }
+
     fn pointer_fixture(now: std::time::Instant) -> super::ClientPointer {
         use super::super::wayland_pointer_wire::*;
         let mut pointer = super::ClientPointer {
@@ -5564,6 +5792,7 @@ pub(super) mod tests {
 
     fn queued_test_frame(sequence: u64) -> QueuedFrame {
         QueuedFrame {
+            purpose: FramePurpose::Video,
             frame: decoded_test_frame(sequence),
             ready_at: Instant::now(),
         }
@@ -6096,6 +6325,7 @@ pub(super) mod tests {
         let now = Instant::now();
         let mut pending = (40..=42)
             .map(|sequence| PendingFrameTiming {
+                purpose: FramePurpose::Video,
                 source_size: (1, 1),
                 viewport_revision: 0,
                 source_epoch: 1,
@@ -6123,6 +6353,7 @@ pub(super) mod tests {
         let telemetry = ClientTelemetry::default();
         let now = Instant::now();
         let mut pending = std::collections::VecDeque::from([PendingFrameTiming {
+            purpose: FramePurpose::Video,
             source_size: (1, 1),
             viewport_revision: 0,
             source_epoch: 7,
@@ -6183,6 +6414,7 @@ pub(super) mod tests {
         let telemetry = ClientTelemetry::default();
         let pool = new_decode_buffer_pool();
         let queued = QueuedFrame {
+            purpose: FramePurpose::Video,
             frame: decoded_test_frame_in_pool(20, Arc::clone(&pool)),
             ready_at: Instant::now(),
         };
@@ -6192,6 +6424,7 @@ pub(super) mod tests {
         assert_eq!(decode_pool_snapshot(&pool).0, 1);
 
         let queued = QueuedFrame {
+            purpose: FramePurpose::Video,
             frame: decoded_test_frame_in_pool(21, Arc::clone(&pool)),
             ready_at: Instant::now(),
         };
@@ -6268,6 +6501,7 @@ pub(super) mod tests {
             decode_queued_frame(
                 &mut TileDecoder::new(),
                 b"not a frame",
+                FramePurpose::Video,
                 &telemetry,
                 &new_decode_buffer_pool()
             )
@@ -6313,7 +6547,8 @@ pub(super) mod tests {
         writer
             .write_message(
                 MessageKind::Frame,
-                &crate::remote::source_wire::encode_source_payload(1, &payload).unwrap(),
+                &crate::remote::source_wire::encode_frame_payload(1, FramePurpose::Video, &payload)
+                    .unwrap(),
             )
             .unwrap();
         writer.flush().unwrap();
@@ -6363,7 +6598,8 @@ pub(super) mod tests {
         writer
             .write_message(
                 MessageKind::Frame,
-                &crate::remote::source_wire::encode_source_payload(1, &payload).unwrap(),
+                &crate::remote::source_wire::encode_frame_payload(1, FramePurpose::Video, &payload)
+                    .unwrap(),
             )
             .unwrap();
         writer.flush().unwrap();

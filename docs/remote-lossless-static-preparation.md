@@ -1,11 +1,11 @@
 # Opt-in static text fidelity
 
-The integrated JPEG/PNG path is available on master at `eb45d52e`. The earlier
+The integrated JPEG/PNG path is available on master, with the interaction-prioritizing scheduler merged at `204c4a5a`. The earlier
 standalone baseline remains separate evidence, not a production throughput claim.
 
 ## Using the read-only feature
 
-Both peers must run **application protocol v25**; older application versions are
+Both peers must run **application protocol v26**; older application versions are
 rejected rather than silently downgraded. Authenticated transport remains v3.
 
 Enable the host permission and request it explicitly in a read-only viewer:
@@ -24,9 +24,25 @@ jwm-remote connect HOST --viewer-backend wayland --view-only --static-lossless
 ```
 
 Both flags default off. This is a codec permission, not an input permission.
-The first release is read-only: keyboard, pointer/control, one-shot text,
-clipboard, input grabs and remote source-resize requests cannot be combined
-with it. The authorization cannot be saved into a connection profile. Existing
+Read-only mode remains supported. An explicit keyboard-only combination is also
+available with a native Wayland viewer and a locally selected native Wayland
+source (no popup or resize-follow selection):
+
+```sh
+jwm-remote host --wayland-select --once --allow-wayland-keyboard --allow-static-lossless
+jwm-remote connect HOST --viewer-backend wayland --wayland-keyboard --static-lossless
+```
+
+Both permissions must be explicitly enabled at both ends. Pointer/control,
+one-shot text, clipboard, input grabs and remote source-resize requests remain
+incompatible. X11 viewers retain read-only lossless and standalone keyboard
+support, but not the combined mode.
+
+Application v26 frames carry an authenticated purpose: ordinary video,
+native capture proof, or visual repair. PNG repairs are visual-only: their
+presentation ACK returns video credit but never grants or renews input authority.
+A native proof must come from an actual capture, not a cached JPEG or PNG repair.
+The transport remains Noise v3; v25 applications must upgrade together. The authorization cannot be saved into a connection profile. Existing
 read-only source selection and lifecycle restrictions still apply; this option
 never selects another source or grants access to previously hidden surfaces.
 
@@ -36,15 +52,15 @@ JPEG dirty work, bounded round-robin PNG batches repair eligible stable tiles;
 a changing neighbor does not reset the stable text tile's clock. Ordinary dirty
 work always takes JPEG priority, so continuously changing captures can still
 delay repairs. The stability gate is paid per changed tile, not per batch. The scheduling
-candidate adds 250 ms of quiet after any exact raw change and separates successful
+policy adds 250 ms of quiet after any exact raw change and separates successful
 batches by at least 250 ms from the preceding record's completed flush. Capture/FPS
 and transport credit still apply; a delayed writer never causes catch-up bursts.
-Before writing a PNG, the candidate compares any newer queued capture's full
+Before writing a PNG, the policy compares any newer queued capture's full
 source/geometry/dimensions/RGB and discards the repair if content was superseded.
 Identical newer captures do not cancel it. A discarded repair consumes no credit
 and does not clear exactness debt. This is best effort before writing, not
 preemption of an already-sent record. The former policy used a 100 ms batch gap;
-[real-pipeline comparison](remote-lossless-scheduling-ab.md) is still pending. The global quiet guard
+[two real-pipeline comparisons](remote-lossless-scheduling-ab.md) document the interaction/convergence tradeoff. The global quiet guard
 intentionally gives changing content priority: updates more frequent than every
 250 ms can indefinitely postpone repair of otherwise stable neighboring tiles.
 It is not guaranteed per-tile convergence during continuous animation. A failed PNG
@@ -103,10 +119,11 @@ these byte/count limits. Raw operation times are reported separately; JPEG
 materialization/measurement is outside decode time, whereas PNG's decode path
 includes output allocation. Do not turn their ratio into an optimization claim.
 
-## Minimum integration contract for a later decision
+## Integration safety contract
 
-These are proposed integration requirements, not properties established by the
-standalone PNG comparison above.
+These are the integrated path's design requirements. The standalone PNG
+comparison below is not evidence that integration satisfies them; separate
+codec and real-pipeline tests cover that boundary.
 
 ### Narrow negotiated record and decoder bounds
 
@@ -197,12 +214,13 @@ The run establishes a concrete fidelity gap even at JPEG quality 100 and a
 potentially useful text-like lossless repair. It also demonstrates why noisy
 content cannot be assumed cheap: the standalone lossless image is larger than
 JPEG 75/90 and takes longer to encode in this run. Atlas integration, idle
-scheduling, actual resource budgets and transport/presentation remain untested.
+scheduling, actual resource budgets and transport/presentation were not tested by
+that standalone run; subsequent integration evidence is described below.
 
 
-## Separate integration candidate
+## Integrated repair path
 
-The new candidate uses a negotiated PNG flag only for nonempty ordinary deltas;
+The integrated path uses a negotiated PNG flag only for nonempty ordinary deltas;
 initial and geometry/source-reset frames remain JPEG. It is restricted by the
 host to explicitly opted-in read-only sessions. The encoder tracks previous
 observed RGB only in this mode, so a ±1 channel change resets stability and exact
@@ -218,7 +236,8 @@ repairs are not native input proof records and never change input permissions.
 
 The earlier full-image standalone PNG sizes/timings are not measurements of this
 integrated atlas path. Integrated byte totals, convergence and actual presentation
-still require separate codec and authenticated transport tests.
+are covered separately by codec and authenticated transport tests, not by that
+standalone comparison.
 
 
 ## Verified integration boundary (2026-11-10)
@@ -241,8 +260,8 @@ desktop acceptance remain unverified.
 The [same-input offline policy comparison](benchmarks/static-lossless-tile-stability-2026-11-10/README.md)
 uses simulated convergence time and the same candidate codec in both arms. It
 is not a historical-binary or network performance comparison. Combined popup
-and passive source-resize behavior requires its own integration evidence;
-individual passing fixtures do not establish that combination.
+and passive source-resize behavior is covered by the separate integration
+regression described below, not inferred from individual passing fixtures.
 
 ## Selected-window family and passive resizing
 
@@ -259,10 +278,40 @@ active remote-resize request and remains incompatible with static lossless.
 Popup capture is restricted to the selected window family, not another top-level
 window. Lock and unmap remain terminal; remapping does not create a new grant.
 
-The dedicated combination regression is newly added and awaits its own CI result.
+The dedicated combination regression passed with the latest candidate's three CI workflows. All four post-merge mainline CI workflows have passed.
 It checks unscaled matched-size pixels, popup creation/movement/clipping/closure,
 size changes and a return to the original size with a new geometry epoch. A
 bounded test-only barrier suspends an already encoded PNG before the publication
 lock so a resize ABA can advance; successful-write evidence must exclude the old
 scope and identify a fresh JPEG keyframe before exact repair resumes. This is
 not a promise that bytes already sent before revocation disappear from the peer.
+
+
+## Current scheduling evidence
+
+The `204c4a5a` candidate passed Wayland, X11 and general CI and is merged on
+master; all four mainline CI workflows subsequently passed.
+[Two synthetic real-pipeline comparisons](benchmarks/static-lossless-scheduling-2026-11-10/README.md)
+show the intended tradeoff rather than an unconditional speedup: the new policy
+had no late generation in either comparison, while exact static convergence
+was slower than the legacy 100 ms scheduler. In the second run all three arms
+were on time, and maximum update latency did not improve in both paired
+sessions. Continuous changes faster than the 250 ms quiet period can still
+postpone repair indefinitely. Defaults and read-only authorization remain
+unchanged. These results are not hardware or physical input-to-visible claims.
+
+
+### Mainline scheduling counterexample
+
+All four mainline CI workflows passed for the merged scheduler, but the third
+[allowlisted comparison](benchmarks/static-lossless-scheduling-2026-11-10/README.md)
+showed worse maxima in both new-policy sessions: scheduled→presented 335/322 ms
+versus legacy 246/243 ms, and commit→presented 333/321 ms versus 245/242 ms.
+New-policy static convergence was also slower (5.584/5.602 s versus
+3.587/3.829 s from the post-initial-JPEG experiment origin). No stale PNG was
+dropped in this workload. The first run favored the new policy, the second was
+mixed, and the third regressed; passing CI must not be described as proof of an
+overall latency improvement. The option remains default off. Further scheduling
+work needs a quiet-time/pacing ablation, not a larger test deadline or a claim
+that the cause is already proven. This status does not change the independently
+documented permission or keyboard-combination boundaries.

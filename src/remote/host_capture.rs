@@ -180,6 +180,13 @@ impl HostCapture {
         let _ = (text, serial);
         Err(std::io::Error::other("text requires native Wayland source").into())
     }
+    pub(super) fn keyboard_proof_serial(&self) -> Option<u64> {
+        #[cfg(feature = "remote-wayland")]
+        if let Self::Wayland(c) = self {
+            return c.keyboard_proof_serial();
+        }
+        None
+    }
     pub(super) fn enable_keyboard(&mut self) -> RemoteResult<()> {
         #[cfg(feature = "remote-wayland")]
         if let Self::Wayland(c) = self {

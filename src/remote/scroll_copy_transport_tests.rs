@@ -4,7 +4,9 @@ use super::*;
 use crate::remote::messages::StreamCapabilities;
 use crate::remote::protocol::server_handshake;
 use crate::remote::source_session::{SourceId, SourceVersion};
-use crate::remote::source_wire::{SourceEntry, encode_source_changed, encode_source_payload};
+use crate::remote::source_wire::{
+    FramePurpose, SourceEntry, encode_frame_payload, encode_source_changed,
+};
 use crate::remote::tile::{TileEncodeRequest, TileEncoder};
 use crate::remote::x11_capture::CapturedFrame;
 use image::{Rgb, RgbImage};
@@ -190,7 +192,7 @@ fn authenticated_tcp_scroll_copy_permission_and_source_reset() {
             for payload in &first {
                 records.push((
                     MessageKind::Frame,
-                    encode_source_payload(1, payload).unwrap(),
+                    encode_frame_payload(1, FramePurpose::Video, payload).unwrap(),
                 ));
                 if (enabled && !malformed) || expected.is_empty() {
                     let decoded = reference.decode_into(payload, Arc::clone(&pool)).unwrap();
@@ -218,11 +220,14 @@ fn authenticated_tcp_scroll_copy_permission_and_source_reset() {
                     expected.push((2, decoded.sequence(), decoded.image().as_raw().clone()));
                     records.push((
                         MessageKind::Frame,
-                        encode_source_payload(2, &keyframe).unwrap(),
+                        encode_frame_payload(2, FramePurpose::Video, &keyframe).unwrap(),
                     ));
                     let mut old = first[1].clone();
                     old[..8].copy_from_slice(&4u64.to_be_bytes());
-                    records.push((MessageKind::Frame, encode_source_payload(2, &old).unwrap()));
+                    records.push((
+                        MessageKind::Frame,
+                        encode_frame_payload(2, FramePurpose::Video, &old).unwrap(),
+                    ));
                 } else {
                     reference = TileDecoder::new();
                     reference.set_scroll_copy_enabled(true);
@@ -231,7 +236,7 @@ fn authenticated_tcp_scroll_copy_permission_and_source_reset() {
                         expected.push((2, decoded.sequence(), decoded.image().as_raw().clone()));
                         records.push((
                             MessageKind::Frame,
-                            encode_source_payload(2, &payload).unwrap(),
+                            encode_frame_payload(2, FramePurpose::Video, &payload).unwrap(),
                         ));
                     }
                 }
@@ -467,7 +472,7 @@ fn authenticated_tcp_failed_band_write_discard_preserves_reference_and_base() {
             writer
                 .write_message(
                     MessageKind::Frame,
-                    &encode_source_payload(1, &failed).unwrap()
+                    &encode_frame_payload(1, FramePurpose::Video, &failed).unwrap()
                 )
                 .is_err()
         );

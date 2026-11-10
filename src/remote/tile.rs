@@ -39,7 +39,7 @@ use super::frame::{
     BoundedPayloadWriter, DamageRegions, FrameDamage, MAX_DIMENSION, RecyclableDecodedFrame,
     SharedDecodeBufferPool, TileSnapshot, invalid_data, validate_dimensions,
 };
-use super::source_wire::MAX_SOURCE_INNER_PAYLOAD_LEN;
+use super::source_wire::MAX_FRAME_INNER_PAYLOAD_LEN;
 use super::x11_capture::CapturedFrame;
 use image::codecs::jpeg::{JpegDecoder, JpegEncoder};
 use image::{ColorType, DynamicImage, ExtendedColorType, ImageDecoder, Limits, RgbImage};
@@ -763,7 +763,7 @@ impl TileEncoder {
             let pack_started = now();
             self.pack_atlas(&frame.image, planned.columns, rows);
             let jpeg_started = now();
-            let payload_limit = MAX_SOURCE_INNER_PAYLOAD_LEN;
+            let payload_limit = MAX_FRAME_INNER_PAYLOAD_LEN;
             #[cfg(test)]
             let payload_limit = self.jpeg_payload_limit.unwrap_or(payload_limit);
             if planned.lossless {
@@ -1039,7 +1039,6 @@ impl TileEncoder {
 #[derive(Debug, Default)]
 pub(crate) struct TileDecoder {
     lossless_enabled: bool,
-    #[cfg(test)]
     last_lossless: bool,
     scroll_copy_enabled: bool,
     tile_log2: Option<u8>,
@@ -1083,7 +1082,6 @@ impl TileDecoder {
         self.lossless_enabled = enabled;
     }
 
-    #[cfg(test)]
     pub(crate) fn last_frame_was_lossless(&self) -> bool {
         self.last_lossless
     }
@@ -1284,10 +1282,7 @@ impl TileDecoder {
         );
         self.snapshot = Some(snapshot.clone());
         self.last_sequence = Some(header.sequence);
-        #[cfg(test)]
-        {
-            self.last_lossless = header.lossless;
-        }
+        self.last_lossless = header.lossless;
         Ok(RecyclableDecodedFrame::from_tiles(
             header.sequence,
             header.source_width,
@@ -1755,14 +1750,14 @@ mod tests {
     fn jpeg_payload_cap_reserves_source_epoch_and_padding() {
         use std::io::Write;
         assert_eq!(
-            MAX_SOURCE_INNER_PAYLOAD_LEN + 8 + 1,
+            MAX_FRAME_INNER_PAYLOAD_LEN + 9 + 1,
             super::super::protocol::MAX_PAYLOAD_LEN
         );
-        let mut payload = vec![0; MAX_SOURCE_INNER_PAYLOAD_LEN - 1];
-        let mut writer = BoundedPayloadWriter::new(&mut payload, MAX_SOURCE_INNER_PAYLOAD_LEN);
+        let mut payload = vec![0; MAX_FRAME_INNER_PAYLOAD_LEN - 1];
+        let mut writer = BoundedPayloadWriter::new(&mut payload, MAX_FRAME_INNER_PAYLOAD_LEN);
         assert!(writer.write_all(&[1]).is_ok());
         assert!(writer.write_all(&[2]).is_err());
-        assert_eq!(payload.len(), MAX_SOURCE_INNER_PAYLOAD_LEN);
+        assert_eq!(payload.len(), MAX_FRAME_INNER_PAYLOAD_LEN);
         assert_eq!(payload.last(), Some(&1));
     }
 

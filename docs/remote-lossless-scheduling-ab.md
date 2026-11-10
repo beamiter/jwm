@@ -1,10 +1,61 @@
 # Read-only lossless scheduling: real-pipeline comparison design
 
-This document defines the next comparison, not a successful result. The earlier
-per-tile offline policy experiment established static-region fidelity under a
-model clock; it did not measure real transport or presentation deadlines.
-A subsequent real blinking-content regression exceeded its original 500 ms
-presentation deadline. That deadline remains unchanged in the regression test.
+The interaction-prioritizing policy is merged on master at `204c4a5a`.
+Its candidate passed Wayland, X11 and general CI; all four post-merge mainline
+CI workflows have also passed. The unchanged strict 500 ms blink regression
+and popup/resize integration gates passed in candidate CI.
+
+Three real-pipeline synthetic comparisons are preserved as
+[allowlisted aggregates](benchmarks/static-lossless-scheduling-2026-11-10/README.md).
+The first had one late generation under legacy scheduling and none under the
+new policy, with slower static convergence under the new policy. The second
+had all 96 generations on time under all policies, with no unknown markers or
+cleanup-only confirmations. Its legacy maximum scheduled-to-present times were
+239/278 ms versus 250/200 ms for the new policy: this is **not** a consistent
+per-session latency improvement. Static exact presentation moved from
+3.11/3.53 seconds to 5.59/5.46 seconds, measured from the post-initial-JPEG
+experiment origin. Neither enabled arm regressed after becoming exact.
+
+The implementation deliberately prioritizes content updates at the cost of
+slower exact-text convergence. These three small synthetic runs do not establish
+a general latency guarantee, physical GPU/DRM behavior or two-machine results.
+The protocol, bounds, test method and publication limits below remain applicable.
+
+## Mainline counterexample and next diagnostic comparison
+
+The third run makes the tradeoff more serious than slower text convergence:
+new-policy maximum scheduled→presented times were **335/322 ms**, versus
+**246/243 ms** for legacy. Commit→presented maxima were likewise **333/321 ms**
+versus **245/242 ms**. All met the unchanged 500 ms regression gate, but the new
+policy was slower in both sessions. The first run favored it, the second was
+mixed, and the third was a regression; no universal improvement is established.
+[All three allowlisted summaries](benchmarks/static-lossless-scheduling-2026-11-10/README.md)
+remain visible, including this counterexample.
+
+A plausible, unproven explanation is scheduling phase: the 250 ms quiet gate
+moves repairs into the latter half of each fixed 500 ms content period, while
+250 ms pacing starts from the previous successful flush, not from source time.
+Encode, presentation and ACK waits can therefore carry a repair toward the next
+content update. The current aggregate lacks the event-level ordering needed to
+prove that hypothesis. Equal PNG counts, similar encode costs and zero stale
+PNG drops do not identify which part of the bundle caused the regression.
+
+The smallest useful next causal comparison is a test-only 2×2 matrix:
+quiet time 0/250 ms crossed with successful-flush pacing 100/250 ms. Keep the
+supersession guard identical in all four arms, along with permissions, two-second
+tile stability, limits, content, FPS and credit rules. Label the 0/100 arm as a
+controlled reference with that guard, not as a byte-for-byte historical binary.
+Use a mirrored ordering to reduce fixed runner-order bias, preserve late/drop
+samples, and retain the original strict test unchanged. No such matrix has yet
+been run or approved as a production change by this document.
+
+Continue reporting update completion and static convergence together. Add only
+bounded aggregate repair-flush phase relative to the scheduled 500 ms source
+period if needed to test the phase hypothesis; do not publish raw event traces.
+If the two off-diagonal arms do not separate the effects, report the uncertainty
+rather than selecting a scheduler from a single favorable run. A separate
+non-harmonic workload period could later test generalization, but should not
+replace or relax the existing 500 ms regression.
 
 ## Arms and fixed workload
 
@@ -14,7 +65,7 @@ viewer with the same limits, FPS, credits, dimensions and content schedule:
 1. **Off:** neither endpoint negotiates static lossless repair.
 2. **Legacy:** explicitly negotiated lossless repair, successful PNG flushes
    separated by 100 ms, without the proposed quiet/discard policy.
-3. **Proposed:** explicitly negotiated repair with a 250 ms interval after a
+3. **Proposed (now the production policy):** explicitly negotiated repair with a 250 ms interval after a
    successful PNG flush, a 250 ms quiet period after any exact raw change, and
    pre-writer cancellation of an encoded PNG when a newer mailbox capture has
    different complete capture identity or RGB. Identical newer captures do not

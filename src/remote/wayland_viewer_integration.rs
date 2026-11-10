@@ -787,7 +787,12 @@ fn actual_wayland_viewer_tcp_ack_waits_for_presented_not_release() {
         peer.writer
             .write_message(
                 MessageKind::Frame,
-                &encode_source_payload(1, &payload).unwrap(),
+                &crate::remote::source_wire::encode_frame_payload(
+                    1,
+                    crate::remote::source_wire::FramePurpose::Video,
+                    &payload,
+                )
+                .unwrap(),
             )
             .unwrap();
         peer.writer.flush().unwrap();
@@ -1003,6 +1008,9 @@ mod keyboard_integration;
 
 #[path = "host_wayland_keyboard_viewer_integration.rs"]
 mod host_keyboard_integration;
+
+#[path = "host_wayland_keyboard_lossless_integration.rs"]
+mod host_keyboard_lossless_integration;
 
 #[path = "wayland_viewer_pointer_integration.rs"]
 mod pointer_integration;

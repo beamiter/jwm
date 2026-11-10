@@ -691,6 +691,15 @@ impl WaylandCapture {
         Ok(())
     }
 
+    /// Evidence only for the actual retained first native keyboard capture.
+    pub(super) fn keyboard_proof_serial(&self) -> Option<u64> {
+        (self.state.keyboard.enabled
+            && !self.state.keyboard.revoked
+            && !self.state.keyboard.requested
+            && self.state.frame_serial == 1
+            && self.retained_frame.is_some())
+        .then_some(self.state.frame_serial)
+    }
     pub(super) fn enable_keyboard(&mut self) -> RemoteResult<()> {
         if self.state.text.enabled
             || self.state.resize_follow

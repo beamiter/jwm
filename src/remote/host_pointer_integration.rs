@@ -9,7 +9,7 @@ use crate::backend::wayland_udev::image_copy_capture::{
     authority_tests::App, init_image_copy_capture, wire_test_client::Server,
 };
 use crate::remote::protocol::client_handshake;
-use crate::remote::source_wire::decode_source_payload;
+use crate::remote::source_wire::{FramePurpose, decode_frame_payload};
 use crate::remote::tile::TileDecoder;
 use crate::remote::wayland_capture::WaylandCapture;
 use crate::remote::wayland_pointer_wire::*;
@@ -244,7 +244,12 @@ fn peer(address: std::net::SocketAddr, case: Case, trace: &Trace) -> RemoteResul
         match kind {
             MessageKind::SourceCatalog => {}
             MessageKind::Frame => {
-                let (source_epoch, inner) = decode_source_payload(&payload)?;
+                let (source_epoch, purpose, inner) = decode_frame_payload(&payload)?;
+                assert_eq!(
+                    purpose,
+                    FramePurpose::NativeProof,
+                    "pointer gate requires a native capture proof"
+                );
                 let frame =
                     decoder.decode_into(inner, super::super::frame::new_decode_buffer_pool())?;
                 assert_eq!(frame.dimensions(), (800, 600));

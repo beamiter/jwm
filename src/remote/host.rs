@@ -1,5 +1,6 @@
 //! Trusted-LAN remote desktop host.
 
+use super::source_wire::FramePurpose;
 #[path = "host_control.rs"]
 mod control;
 #[path = "host_input_wake.rs"]
@@ -401,6 +402,7 @@ fn poisoned_writer() -> io::Error {
 }
 
 struct PendingFrame {
+    native_proof_serial: Option<u64>,
     pointer_serial: Option<u64>,
     source_version: SourceVersion,
     frame: CapturedFrame,
@@ -1221,6 +1223,7 @@ impl<T> LatestMailbox<T> {
 
 #[derive(Clone, Copy, Debug)]
 struct InFlightFrame {
+    purpose: FramePurpose,
     source_epoch: u64,
     geometry_epoch: u64,
     sequence: u64,
@@ -1233,6 +1236,7 @@ struct InFlightFrame {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct AckObservation {
+    purpose: FramePurpose,
     source_epoch: u64,
     geometry_epoch: u64,
     retired: u64,
@@ -1613,6 +1617,7 @@ impl FrameCredits {
         )
     }
 
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     fn mark_sent_scoped(
         &self,
@@ -1624,6 +1629,32 @@ impl FrameCredits {
         quality_epoch: u64,
         source_epoch: u64,
         geometry_epoch: u64,
+    ) -> io::Result<u64> {
+        self.mark_sent_scoped_purpose(
+            sequence,
+            captured_at,
+            sent_at,
+            bytes,
+            jpeg_quality,
+            quality_epoch,
+            source_epoch,
+            geometry_epoch,
+            FramePurpose::Video,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn mark_sent_scoped_purpose(
+        &self,
+        sequence: u64,
+        captured_at: Instant,
+        sent_at: Instant,
+        bytes: usize,
+        jpeg_quality: u8,
+        quality_epoch: u64,
+        source_epoch: u64,
+        geometry_epoch: u64,
+        purpose: FramePurpose,
     ) -> io::Result<u64> {
         let mut state = self
             .state
@@ -1651,6 +1682,7 @@ impl FrameCredits {
         }
         state.last_sent = Some(sequence);
         state.in_flight.push_back(InFlightFrame {
+            purpose,
             source_epoch,
             geometry_epoch,
             sequence,
@@ -1749,6 +1781,7 @@ impl FrameCredits {
         state.last_acked = Some(sequence);
         state.last_acked_epoch = Some(target.source_epoch);
         let observation = AckObservation {
+            purpose: target.purpose,
             source_epoch: target.source_epoch,
             geometry_epoch: target.geometry_epoch,
             retired,
@@ -1962,6 +1995,19 @@ struct HostSourceState {
     geometry_epoch: u64,
     presented_geometry: Option<u64>,
     presented_frame: Option<DrawnScope>,
+    presented_native_proof: Option<DrawnScope>,
+}
+
+impl HostSourceState {
+    fn observe_presentation(&mut self, scope: DrawnScope, purpose: FramePurpose) {
+        if purpose != FramePurpose::VisualRepair {
+            self.presented_geometry = Some(scope.geometry_epoch);
+            self.presented_frame = Some(scope);
+        }
+        if purpose == FramePurpose::NativeProof {
+            self.presented_native_proof = Some(scope);
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -2255,6 +2301,7 @@ impl SourceControl {
                 geometry_epoch,
                 presented_geometry: None,
                 presented_frame: None,
+                presented_native_proof: None,
             }),
             changed: Condvar::new(),
             resize_enabled: AtomicBool::new(false),
@@ -2336,12 +2383,16 @@ fn validate_window_policy(options: &HostOptions) -> RemoteResult<()> {
         && (options.allow_input
             || options.allow_clipboard
             || options.allow_window_resize
-            || options.allow_wayland_keyboard
             || options.allow_wayland_pointer
             || options.allow_wayland_control
             || options.allow_wayland_text
             || options.allow_wayland_scroll
-            || options.allow_wayland_horizontal_scroll)
+            || options.allow_wayland_horizontal_scroll
+            || (options.allow_wayland_keyboard
+                && (!options.wayland_select
+                    || !options.once
+                    || options.wayland_popups
+                    || options.wayland_resize_follow)))
     {
         return Err(invalid_data("static lossless requires a read-only host without input, text, clipboard or remote resize permissions").into());
     }
@@ -3888,7 +3939,7 @@ fn process_keyboard(
     };
     let result = match command {
         KeyboardCommand::Request(request) => {
-            let drawn = sources.state.lock().unwrap().presented_frame;
+            let drawn = sources.state.lock().unwrap().presented_native_proof;
             // A missing/stale presentation claim is a protocol violation, not
             // a native denial. End the session explicitly; otherwise a rejected
             // request with no recorded scope could silently stream forever.
@@ -4128,6 +4179,8 @@ fn stream_frames(
                             .store(state.geometry_epoch, Ordering::Release);
                     }
                     state.presented_geometry = None;
+                    state.presented_frame = None;
+                    state.presented_native_proof = None;
                     state
                         .policy
                         .finish_switch(version, |_| Ok::<(), io::Error>(()))??;
@@ -4158,6 +4211,8 @@ fn stream_frames(
                             .store(state.geometry_epoch, Ordering::Release);
                     }
                     state.presented_geometry = None;
+                    state.presented_frame = None;
+                    state.presented_native_proof = None;
                     mailbox.clear();
                 }
             }
@@ -4292,6 +4347,8 @@ fn stream_frames(
                             .store(state.geometry_epoch, Ordering::Release);
                     }
                     state.presented_geometry = None;
+                    state.presented_frame = None;
+                    state.presented_native_proof = None;
                     mailbox.clear();
                 }
             }
@@ -4337,6 +4394,7 @@ fn stream_frames(
                     serial
                 });
             let pending = PendingFrame {
+                native_proof_serial: pointer_serial.or_else(|| capture.keyboard_proof_serial()),
                 pointer_serial,
                 source_version,
                 frame,
@@ -4628,13 +4686,28 @@ fn send_frames_with_encoder_scoped<W: std::io::Write + SetWriteTimeout>(
         if let Some(stages) = sender.encoder.encode_timings() {
             telemetry.record_encode_stages(stages);
         }
+        let is_png = sender
+            .encoder
+            .encode_timings()
+            .is_some_and(|t| t.png.is_some());
+        let frame_purpose = match (pending.native_proof_serial, is_png) {
+            (Some(_), true) => {
+                return Err(invalid_data("native proof cannot use PNG repair encoding").into());
+            }
+            (Some(_), false) => FramePurpose::NativeProof,
+            (None, true) => FramePurpose::VisualRepair,
+            (None, false) => FramePurpose::Video,
+        };
         if sources.is_some() {
-            if payload.len() > super::source_wire::MAX_SOURCE_INNER_PAYLOAD_LEN {
+            if payload.len() > super::source_wire::MAX_FRAME_INNER_PAYLOAD_LEN {
                 return Err(invalid_data("source frame exceeds record budget").into());
             }
             // Reuse the encoded payload allocation instead of allocating and
             // copying a second frame-sized envelope on every frame.
-            payload.splice(..0, pending.source_version.epoch.to_be_bytes());
+            let mut prefix = [0u8; 9];
+            prefix[..8].copy_from_slice(&pending.source_version.epoch.to_be_bytes());
+            prefix[8] = frame_purpose as u8;
+            payload.splice(..0, prefix);
         }
         #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
         if sender
@@ -4705,7 +4778,7 @@ fn send_frames_with_encoder_scoped<W: std::io::Write + SetWriteTimeout>(
                 });
             }
             let sent_at = Instant::now();
-            let outstanding = credits.mark_sent_scoped(
+            let outstanding = credits.mark_sent_scoped_purpose(
                 sequence,
                 pending.captured_at,
                 sent_at,
@@ -4714,6 +4787,7 @@ fn send_frames_with_encoder_scoped<W: std::io::Write + SetWriteTimeout>(
                 quality.epoch,
                 pending.source_version.epoch,
                 pending.frame.geometry_epoch,
+                frame_purpose,
             )?;
             if let Some(state) = source_state.as_mut() {
                 if state.policy.needs_keyframe() {
@@ -5557,6 +5631,8 @@ fn receive_input_scoped(
                     }
                     let mut state = sources.state.lock().unwrap();
                     state.presented_geometry = None;
+                    state.presented_frame = None;
+                    state.presented_native_proof = None;
                     state.pending = Some((version, area));
                     sources.changed.notify_all();
                 }
@@ -5588,14 +5664,13 @@ fn receive_input_scoped(
                             if state.policy.awaiting_presentation() {
                                 state.policy.acknowledge_presentation(version, sequence)?;
                             }
-                            state.presented_geometry = Some(ack.geometry_epoch);
-                            state.presented_frame = Some(DrawnScope {
+                            let scope = DrawnScope {
                                 source_epoch: ack.source_epoch,
                                 geometry_epoch: ack.geometry_epoch,
                                 frame_sequence: sequence,
-                            });
+                            };
+                            state.observe_presentation(scope, ack.purpose);
                             sources.changed.notify_all();
-                            let scope = state.presented_frame.unwrap();
                             drop(state);
                             #[cfg(all(
                                 test,
@@ -5623,7 +5698,9 @@ fn receive_input_scoped(
                                     }
                                 }
                             }
-                            sources.notify_proof_ack(scope)?;
+                            if ack.purpose == FramePurpose::NativeProof {
+                                sources.notify_proof_ack(scope)?;
+                            }
                         }
                         telemetry.record_ack(ack);
                     }
@@ -6080,6 +6157,91 @@ mod tests {
                 .get_pixel(0, 0)[0],
             91
         );
+    }
+
+    #[test]
+    fn repair_ack_retires_credit_but_never_becomes_native_input_presentation() {
+        let sources =
+            SourceControl::new(vec![(SourceId(1), CaptureArea::Root)], (32, 32).into(), 1).unwrap();
+        let credits = FrameCredits::new();
+        let now = Instant::now();
+        credits
+            .mark_sent_scoped_purpose(0, now, now, 100, 70, 0, 1, 1, FramePurpose::VisualRepair)
+            .unwrap();
+        let ack = credits.acknowledge_at(0, now).unwrap().unwrap();
+        assert_eq!(ack.purpose, FramePurpose::VisualRepair);
+        assert_eq!(credits.outstanding(), 0);
+        let repair = DrawnScope {
+            source_epoch: 1,
+            geometry_epoch: 1,
+            frame_sequence: 0,
+        };
+        let mut state = sources.state.lock().unwrap();
+        state.observe_presentation(repair, ack.purpose);
+        assert!(state.presented_frame.is_none());
+        assert!(state.presented_native_proof.is_none());
+        assert!(state.presented_geometry.is_none());
+        let mut keyboard = HostKeyboardState::new();
+        let request = LeaseRequest {
+            keymap_digest: [1; 32],
+            source_epoch: 1,
+            geometry_epoch: 1,
+            frame_sequence: 0,
+        };
+        assert!(
+            admit_keyboard_request(&mut keyboard, request, state.presented_native_proof, repair)
+                .is_err()
+        );
+        assert!(keyboard.grant(1, now).is_err());
+        let proof = DrawnScope {
+            frame_sequence: 1,
+            ..repair
+        };
+        state.observe_presentation(proof, FramePurpose::NativeProof);
+        let late_repair = DrawnScope {
+            frame_sequence: 2,
+            ..repair
+        };
+        state.observe_presentation(late_repair, FramePurpose::VisualRepair);
+        assert_eq!(state.presented_native_proof, Some(proof));
+        assert_eq!(state.presented_frame, Some(proof));
+        state.observe_presentation(late_repair, FramePurpose::Video);
+        assert_eq!(state.presented_frame, Some(late_repair));
+        assert_eq!(state.presented_native_proof, Some(proof));
+        drop(state);
+        assert!(credits.acknowledge_at(0, now).unwrap().is_none());
+    }
+
+    #[test]
+    fn cumulative_repair_ack_cannot_present_retired_native_proof() {
+        let sources =
+            SourceControl::new(vec![(SourceId(1), CaptureArea::Root)], (32, 32).into(), 1).unwrap();
+        let credits = FrameCredits::new();
+        let now = Instant::now();
+        credits
+            .mark_sent_scoped_purpose(0, now, now, 100, 70, 0, 1, 1, FramePurpose::NativeProof)
+            .unwrap();
+        credits
+            .mark_sent_scoped_purpose(1, now, now, 100, 70, 0, 1, 1, FramePurpose::VisualRepair)
+            .unwrap();
+        let ack = credits.acknowledge_at(1, now).unwrap().unwrap();
+        assert_eq!(ack.purpose, FramePurpose::VisualRepair);
+        assert_eq!(credits.outstanding(), 0);
+        let mut state = sources.state.lock().unwrap();
+        state.observe_presentation(
+            DrawnScope {
+                source_epoch: 1,
+                geometry_epoch: 1,
+                frame_sequence: 1,
+            },
+            ack.purpose,
+        );
+        assert!(state.presented_native_proof.is_none());
+        assert!(state.presented_frame.is_none());
+        assert!(state.presented_geometry.is_none());
+        // Cumulative retirement is flow control, not evidence that seq 0 was drawn.
+        assert!(credits.acknowledge_at(0, now).unwrap().is_none());
+        assert!(state.presented_native_proof.is_none());
     }
 
     fn proof_test_frame() -> CapturedFrame {
@@ -6837,8 +6999,8 @@ mod tests {
         for sequence in [0, 1] {
             let (kind, payload) = reader.read_message().unwrap();
             assert_eq!(kind, MessageKind::Frame);
-            let (epoch, inner) =
-                super::super::source_wire::decode_source_payload(&payload).unwrap();
+            let (epoch, _, inner) =
+                super::super::source_wire::decode_frame_payload(&payload).unwrap();
             assert_eq!(epoch, 1);
             assert_eq!(decode_wire(&mut decoder, inner).0, sequence);
         }
@@ -6850,7 +7012,7 @@ mod tests {
         );
         let (kind, payload) = reader.read_message().unwrap();
         assert_eq!(kind, MessageKind::Frame);
-        let (epoch, inner) = super::super::source_wire::decode_source_payload(&payload).unwrap();
+        let (epoch, _, inner) = super::super::source_wire::decode_frame_payload(&payload).unwrap();
         assert_eq!(epoch, 2);
         let (sequence, image) = decode_wire(&mut TileDecoder::new(), inner);
         assert_eq!(sequence, 2);
@@ -9535,6 +9697,7 @@ mod tests {
 
     fn test_pending_frame(red: u8) -> PendingFrame {
         PendingFrame {
+            native_proof_serial: None,
             pointer_serial: None,
             source_version: SourceVersion {
                 source: SourceId(1),
@@ -10386,6 +10549,7 @@ mod tests {
         quality_epoch: u64,
     ) -> AckObservation {
         AckObservation {
+            purpose: FramePurpose::Video,
             source_epoch: 1,
             geometry_epoch: 0,
             retired,
@@ -10945,6 +11109,7 @@ mod tests {
     fn capture_start_ack_latency_includes_readback_but_queue_age_does_not() {
         let base = Instant::now();
         let pending = PendingFrame {
+            native_proof_serial: None,
             pointer_serial: None,
             source_version: SourceVersion {
                 source: SourceId(1),
