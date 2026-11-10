@@ -84,6 +84,7 @@ jobs:
         run: |
           python3 scripts/benchmark-software-h264.py --self-test
           python3 scripts/remote-codec-rate-distortion.py --self-test
+          cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib tile_scroll_copy_offline_ab_benchmark -- --ignored --nocapture --test-threads=1
       - name: Native source adapter, transport, and CLI regressions
         run: |
           export XDG_RUNTIME_DIR="$(mktemp -d)"

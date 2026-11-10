@@ -17,12 +17,18 @@ const QUALITY: u8 = 75;
 const WIDTH: u16 = 321;
 const HEIGHT: u16 = 193;
 const RGB_BUDGET: u64 = 64 * 1024 * 1024;
-const SCENES: [&str; 6] = [
+const SCENES: [&str; 12] = [
     "static",
     "up_7px",
     "down_7px",
     "random_change",
+    "repeated_static_local_change",
     "fixed_toolbar",
+    "fixed_toolbar_down",
+    "header_footer_up",
+    "header_footer_down",
+    "near_half_band",
+    "unsupported_narrow_region",
     "odd_resize",
 ];
 
@@ -36,12 +42,22 @@ fn input(scene: &str, index: u32) -> CapturedFrame {
     let (width, height) = if resized { (303, 181) } else { (WIDTH, HEIGHT) };
     let image = RgbImage::from_fn(u32::from(width), u32::from(height), |x, y| {
         let world_y = match scene {
+            "repeated_static_local_change" => 0,
             "up_7px" => y + index * 7,
             "down_7px" => y + 256 - index * 7,
             "fixed_toolbar" if y >= 24 => y + index * 7,
+            "fixed_toolbar_down" if y >= 24 => y + 256 - index * 7,
+            "header_footer_up" if (24..169).contains(&y) => y + index * 7,
+            "header_footer_down" if (24..169).contains(&y) => y + 256 - index * 7,
+            // 104 band rows minus seven newly exposed rows = 97 copied rows,
+            // just over half of this odd 193-row image.
+            "near_half_band" if (40..144).contains(&y) => y + index * 7,
+            "unsupported_narrow_region" if (32..200).contains(&x) => y + index * 7,
             _ => y,
         };
-        let phase = if scene == "random_change" {
+        let phase = if scene == "random_change"
+            || (scene == "repeated_static_local_change" && x < 32 && y < 16)
+        {
             u64::from(index)
         } else {
             0
@@ -96,6 +112,13 @@ fn tile_scroll_copy_offline_ab_benchmark() {
             let mut payload = Vec::new();
             let mut sequence = 0u64;
             let mut copies = 0usize;
+            let (mut scene_bytes, mut scene_sse, mut scene_samples) = (0u64, 0u64, 0u64);
+            let mut scene_worst = 0u8;
+            let mut scene_hash = Sha256::new();
+            let mut plan_samples = Vec::new();
+            let mut encode_samples = Vec::new();
+            let mut decode_samples = Vec::new();
+            let mut commit_samples = Vec::new();
             for index in 0..FRAMES {
                 // Generation, hash and distortion are outside measured codec work.
                 // One offered source frame at a time; no replay RGB history.
@@ -103,6 +126,10 @@ fn tile_scroll_copy_offline_ab_benchmark() {
                 offered_rgb += frame.image.as_raw().len() as u64;
                 assert!(offered_rgb <= RGB_BUDGET);
                 let digest = Sha256::digest(frame.image.as_raw());
+                scene_hash.update(frame.source_width.to_le_bytes());
+                scene_hash.update(frame.source_height.to_le_bytes());
+                scene_hash.update(frame.geometry_epoch.to_le_bytes());
+                scene_hash.update(digest);
                 if enabled {
                     assert_eq!(
                         fingerprints[scene_fingerprint], digest,
@@ -142,6 +169,10 @@ fn tile_scroll_copy_offline_ab_benchmark() {
                     // Materialization is outside decode timing.
                     assert_eq!(decoded.image().dimensions(), frame.image.dimensions());
                 }
+                plan_samples.push(plan_us);
+                encode_samples.push(encode_us);
+                decode_samples.push(decode_us);
+                commit_samples.push(commit_us);
                 total_plan_us += plan_us;
                 total_encode_us += encode_us.unwrap_or(0.0);
                 total_decode_us += decode_us.unwrap_or(0.0);
@@ -159,13 +190,17 @@ fn tile_scroll_copy_offline_ab_benchmark() {
                     max_error = max_error.max(error);
                 }
                 let samples = frame.image.as_raw().len() as u64;
+                scene_bytes += payload.len() as u64;
+                scene_sse += sse;
+                scene_samples += samples;
+                scene_worst = scene_worst.max(max_error);
                 total_bytes += payload.len() as u64;
                 total_sse += sse;
                 total_samples += samples;
                 worst = worst.max(max_error);
                 println!(
                     "{}",
-                    json!({"type":"scroll_copy_ab_frame", "schema_version":1,
+                    json!({"type":"scroll_copy_ab_frame", "schema_version":2,
                     "mode":mode,"scene":scene,"index":index,"quality":QUALITY,
                     "width":frame.source_width,"height":frame.source_height,
                     "geometry_epoch":frame.geometry_epoch,"sequence":sequence,
@@ -176,7 +211,17 @@ fn tile_scroll_copy_offline_ab_benchmark() {
                     "max_abs_error":max_error,"input_sha256":digest.iter().map(|byte| format!("{byte:02x}")).collect::<String>()})
                 );
             }
-            if enabled && matches!(scene, "up_7px" | "down_7px") {
+            let supported = matches!(
+                scene,
+                "up_7px"
+                    | "down_7px"
+                    | "fixed_toolbar"
+                    | "fixed_toolbar_down"
+                    | "header_footer_up"
+                    | "header_footer_down"
+                    | "near_half_band"
+            );
+            if enabled && supported {
                 assert!(
                     copies > 0,
                     "positive scroll workload must exercise production copy"
@@ -184,11 +229,26 @@ fn tile_scroll_copy_offline_ab_benchmark() {
             } else {
                 assert_eq!(copies, 0, "fallback workload must not use copy");
             }
+            let fingerprint = scene_hash.finalize();
+            println!(
+                "{}",
+                json!({
+                    "type":"scroll_copy_ab_scene", "schema_version":2,
+                    "scope":"offline CPU codec work only; not physical or end-to-end latency",
+                    "debug_assertions":cfg!(debug_assertions), "mode":mode, "scene":scene,
+                    "quality":QUALITY, "offered_frames":FRAMES, "payload_bytes":scene_bytes,
+                    "scroll_copy_frames":copies, "sse":scene_sse, "channel_samples":scene_samples,
+                    "mse":scene_sse as f64 / scene_samples as f64, "max_abs_error":scene_worst,
+                    "raw_plan_us_samples":plan_samples, "encode_us_samples":encode_samples,
+                    "decode_us_samples":decode_samples, "commit_us_samples":commit_samples,
+                    "input_sequence_sha256":fingerprint.iter().map(|byte|format!("{byte:02x}")).collect::<String>()
+                })
+            );
             all_copies += copies;
         }
         println!(
             "{}",
-            json!({"type":"scroll_copy_ab_total","schema_version":1,
+            json!({"type":"scroll_copy_ab_total","schema_version":2,
             "scope":"offline CPU codec work only; not capture, transport, GPU or presentation latency",
             "debug_assertions":cfg!(debug_assertions),"mode":mode,"quality":QUALITY,
             "offered_frames":SCENES.len() as u32 * FRAMES,"payload_bytes":total_bytes,

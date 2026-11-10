@@ -29,7 +29,7 @@
 //! atlas_columns  u16
 //! dirty_tiles    u32
 //! geometry_epoch u64
-//! [base_sequence u64, scroll_dy i16] only when FLAG_SCROLL_COPY is set
+//! [base_sequence u64, scroll_dy i16, top u16, bottom u16] only when FLAG_SCROLL_COPY is set
 //! bitmap         ceil(tiles_across * tiles_down / 8) bytes, raster order
 //! atlas          JPEG, present only when dirty_tiles > 0
 //! ```
@@ -70,7 +70,7 @@ pub(crate) const DEFAULT_TILE_TOLERANCE: u8 = 4;
 const FLAG_KEYFRAME: u8 = 1 << 0;
 const FLAG_SCROLL_COPY: u8 = 1 << 1;
 const KNOWN_FLAGS: u8 = FLAG_KEYFRAME | FLAG_SCROLL_COPY;
-const SCROLL_HEADER_LEN: usize = 10;
+const SCROLL_HEADER_LEN: usize = 14;
 const MAX_SCROLL_DY: i16 = 64;
 
 #[derive(Clone, Copy, Debug)]
@@ -78,6 +78,8 @@ struct ScrollCopy {
     base_sequence: u64,
     /// Destination row y reads old row y + dy.
     dy: i16,
+    top: u16,
+    bottom: u16,
 }
 
 /// Upper bound on atlas columns for a given tile size, keeping the packed
@@ -324,10 +326,10 @@ impl TileEncoder {
         let mut scroll = None;
         if !keyframe && self.scroll_copy_enabled && self.dirty.len() * 2 > total_tiles as usize {
             if let (Some(reference), Some(base_sequence)) = (&self.reference, self.last_sequence) {
-                if let Some(dy) = find_scroll_copy(&frame.image, reference) {
-                    // Only the exposed strip is dirty. The entire overlap was
-                    // compared exactly, not using the ordinary tile tolerance.
-                    let exposed: Vec<u32> = (0..total_tiles)
+                if let Some(mut copy) = find_scroll_copy(&frame.image, reference) {
+                    copy.base_sequence = base_sequence;
+                    let (dest, _, rows) = scroll_ranges(copy);
+                    let revised: Vec<u32> = (0..total_tiles)
                         .filter(|index| {
                             let (_, y0, _, y1) = tile_bounds(
                                 *index as usize,
@@ -336,16 +338,19 @@ impl TileEncoder {
                                 usize::from(encoded_width),
                                 usize::from(encoded_height),
                             );
-                            scroll_exposes_tile(y0, y1, usize::from(encoded_height), dy)
+                            // Only wholly proven copied tiles can leave the normal dirty set.
+                            scroll_exposes_tile(y0, y1, copy)
+                                || ((y0 < dest || y1 > dest + rows)
+                                    && self.bitmap[*index as usize / 8] & (1 << (*index % 8)) != 0)
                         })
                         .collect();
-                    if exposed.len() < self.dirty.len() {
-                        self.dirty = exposed;
+                    if revised.len() < self.dirty.len() {
+                        self.dirty = revised;
                         self.bitmap.fill(0);
                         for index in &self.dirty {
                             self.bitmap[*index as usize / 8] |= 1 << (*index % 8);
                         }
-                        scroll = Some(ScrollCopy { base_sequence, dy });
+                        scroll = Some(copy);
                     }
                 }
             }
@@ -411,7 +416,7 @@ impl TileEncoder {
                     self.grid,
                     usize::from(encoded_height),
                     tile,
-                    copy.dy,
+                    copy,
                 )
             });
             let (indices, next) = refinement_tiles(
@@ -583,6 +588,8 @@ impl TileEncoder {
             }
             payload.extend_from_slice(&copy.base_sequence.to_be_bytes());
             payload.extend_from_slice(&copy.dy.to_be_bytes());
+            payload.extend_from_slice(&copy.top.to_be_bytes());
+            payload.extend_from_slice(&copy.bottom.to_be_bytes());
         }
         payload.extend_from_slice(&self.bitmap);
         debug_assert_eq!(
@@ -641,11 +648,8 @@ impl TileEncoder {
         if let Some(copy) = self.pending_scroll.take() {
             let height = frame.image.height() as usize;
             self.qualities =
-                shifted_qualities(&self.qualities, self.grid, height, self.tile(), copy.dy);
-            shift_rgb_rows(
-                self.reference.as_mut().expect("scroll has reference"),
-                copy.dy,
-            );
+                shifted_qualities(&self.qualities, self.grid, height, self.tile(), copy);
+            shift_rgb_rows(self.reference.as_mut().expect("scroll has reference"), copy);
         }
         if let Some(cursor) = self.pending_refinement_cursor.take() {
             self.refinement_cursor = cursor;
@@ -934,8 +938,7 @@ impl TileDecoder {
                     usize::from(header.encoded_width),
                     usize::from(header.encoded_height),
                 );
-                if scroll_exposes_tile(y0, y1, usize::from(header.encoded_height), copy.dy)
-                    && bitmap[index / 8] & (1 << (index % 8)) == 0
+                if scroll_exposes_tile(y0, y1, copy) && bitmap[index / 8] & (1 << (index % 8)) == 0
                 {
                     return Err(invalid_data("scroll exposed strip is not fully supplied").into());
                 }
@@ -998,7 +1001,7 @@ impl TileDecoder {
             .as_mut()
             .expect("validated canvas or new keyframe");
         if let Some(copy) = header.scroll {
-            shift_rgb_rows(canvas, copy.dy);
+            shift_rgb_rows(canvas, copy);
         }
         if let Some((tile, columns, width)) = atlas_layout {
             scatter_atlas(
@@ -1218,13 +1221,24 @@ impl TileHeader {
             }
             let base_sequence = u64::from_be_bytes(payload[32..40].try_into().unwrap());
             let dy = i16::from_be_bytes(payload[40..42].try_into().unwrap());
-            if dy == 0
+            let top = u16::from_be_bytes(payload[42..44].try_into().unwrap());
+            let bottom = u16::from_be_bytes(payload[44..46].try_into().unwrap());
+            if top >= bottom
+                || bottom > encoded_height
+                || dy.unsigned_abs() >= bottom - top
+                || (bottom - top - dy.unsigned_abs()) < encoded_height.div_ceil(2)
+                || dy == 0
                 || dy.unsigned_abs() > MAX_SCROLL_DY as u16
                 || dy.unsigned_abs() >= encoded_height
             {
                 return Err(invalid_data("scroll displacement out of range").into());
             }
-            Some(ScrollCopy { base_sequence, dy })
+            Some(ScrollCopy {
+                base_sequence,
+                dy,
+                top,
+                bottom,
+            })
         } else {
             None
         };
@@ -1254,58 +1268,96 @@ impl TileHeader {
     }
 }
 
-/// At most 128 * 16 sampled pixels, then one exact contiguous overlap comparison.
-/// Search only after ordinary detection found over half the tiles dirty.
-fn find_scroll_copy(current: &RgbImage, previous: &RgbImage) -> Option<i16> {
+/// Fixed search budget: at most 128 * 64 * 3 pixels. Choose one displacement,
+/// then inspect at most one image of raw RGB for its longest exact row run.
+/// A failed candidate never triggers another full-image verification.
+fn find_scroll_copy(current: &RgbImage, previous: &RgbImage) -> Option<ScrollCopy> {
     if current.dimensions() != previous.dimensions() {
         return None;
     }
     let width = current.width() as usize;
     let height = current.height() as usize;
-    let limit = (height / 2).min(MAX_SCROLL_DY as usize);
-    let mut candidate = None;
-    'search: for magnitude in 1..=limit {
+    if width == 0 || height < 2 {
+        return None;
+    }
+    let mut best = None;
+    let mut best_run = 0;
+    for magnitude in 1..=(height / 2).min(MAX_SCROLL_DY as usize) {
         for dy in [magnitude as i16, -(magnitude as i16)] {
-            let (dest, source, rows) = scroll_ranges(height, dy);
-            let samples_match = (0..16).all(|sample| {
-                let y = sample * rows / 16;
-                let x = (sample * 7919) % width;
-                current.get_pixel(x as u32, (dest + y) as u32)
-                    == previous.get_pixel(x as u32, (source + y) as u32)
-            });
-            if samples_match {
-                candidate = Some(dy);
-                break 'search;
+            let first = if dy < 0 { magnitude } else { 0 };
+            let rows = height - magnitude;
+            let count = rows.min(64);
+            let mut run = 0;
+            for sample in 0..count {
+                let y = first + sample * rows / count;
+                let source = (y as isize + dy as isize) as usize;
+                let matches = [0, width / 2, width - 1].into_iter().all(|x| {
+                    current.get_pixel(x as u32, y as u32)
+                        == previous.get_pixel(x as u32, source as u32)
+                });
+                run = if matches { run + 1 } else { 0 };
+                if run > best_run {
+                    best_run = run;
+                    best = Some(dy);
+                }
             }
         }
     }
-    let dy = candidate?;
-    let (dest, source, rows) = scroll_ranges(height, dy);
+    let dy = best?;
+    let amount = usize::from(dy.unsigned_abs());
+    let first = if dy < 0 { amount } else { 0 };
     let stride = width * 3;
-    (current.as_raw()[dest * stride..(dest + rows) * stride]
-        == previous.as_raw()[source * stride..(source + rows) * stride])
-        .then_some(dy)
+    let mut run = 0;
+    let mut longest = (0, 0);
+    for y in first..first + height - amount {
+        let source = (y as isize + dy as isize) as usize;
+        if current.as_raw()[y * stride..(y + 1) * stride]
+            == previous.as_raw()[source * stride..(source + 1) * stride]
+        {
+            run += 1;
+            if run > longest.1 {
+                longest = (y + 1 - run, run);
+            }
+        } else {
+            run = 0;
+        }
+    }
+    if longest.1 < height.div_ceil(2) {
+        return None;
+    }
+    let top = if dy < 0 {
+        longest.0 - amount
+    } else {
+        longest.0
+    };
+    let bottom = longest.0 + longest.1 + if dy > 0 { amount } else { 0 };
+    Some(ScrollCopy {
+        base_sequence: 0,
+        dy,
+        top: top as u16,
+        bottom: bottom as u16,
+    })
 }
 
-fn scroll_ranges(height: usize, dy: i16) -> (usize, usize, usize) {
-    let amount = usize::from(dy.unsigned_abs());
-    if dy > 0 {
-        (0, amount, height - amount)
+fn scroll_ranges(copy: ScrollCopy) -> (usize, usize, usize) {
+    let top = usize::from(copy.top);
+    let amount = usize::from(copy.dy.unsigned_abs());
+    let rows = usize::from(copy.bottom - copy.top) - amount;
+    if copy.dy > 0 {
+        (top, top + amount, rows)
     } else {
-        (amount, 0, height - amount)
+        (top + amount, top, rows)
     }
 }
-fn scroll_exposes_tile(y0: usize, y1: usize, height: usize, dy: i16) -> bool {
-    let amount = usize::from(dy.unsigned_abs());
-    if dy > 0 {
-        y1 > height - amount
-    } else {
-        y0 < amount
-    }
+fn scroll_exposes_tile(y0: usize, y1: usize, copy: ScrollCopy) -> bool {
+    let (dest, _, rows) = scroll_ranges(copy);
+    // Every tile intersecting band but not wholly covered by the proven overlap
+    // is supplied in full, including band-boundary tiles with outside pixels.
+    y0 < usize::from(copy.bottom) && y1 > usize::from(copy.top) && (y0 < dest || y1 > dest + rows)
 }
-fn shift_rgb_rows(image: &mut RgbImage, dy: i16) {
+fn shift_rgb_rows(image: &mut RgbImage, copy: ScrollCopy) {
     let stride = image.width() as usize * 3;
-    let (dest, source, rows) = scroll_ranges(image.height() as usize, dy);
+    let (dest, source, rows) = scroll_ranges(copy);
     image
         .as_mut()
         .copy_within(source * stride..(source + rows) * stride, dest * stride);
@@ -1315,18 +1367,23 @@ fn shifted_qualities(
     grid: (usize, usize),
     height: usize,
     tile: usize,
-    dy: i16,
+    copy: ScrollCopy,
 ) -> Vec<u8> {
-    let mut result = vec![0; grid.0 * grid.1];
+    let mut result = old.to_vec();
+    let (dest, _, rows) = scroll_ranges(copy);
     for (index, quality) in result.iter_mut().enumerate() {
         let row = index / grid.0;
         let y0 = row * tile;
         let y1 = ((row + 1) * tile).min(height);
-        if scroll_exposes_tile(y0, y1, height, dy) {
+        if scroll_exposes_tile(y0, y1, copy) {
+            *quality = 0;
             continue;
         }
-        let source0 = (y0 as isize + dy as isize) as usize / tile;
-        let source1 = ((y1 - 1) as isize + dy as isize) as usize / tile;
+        if y0 < dest || y1 > dest + rows {
+            continue;
+        }
+        let source0 = (y0 as isize + copy.dy as isize) as usize / tile;
+        let source1 = ((y1 - 1) as isize + copy.dy as isize) as usize / tile;
         *quality = (source0..=source1)
             .map(|r| old.get(r * grid.0 + index % grid.0).copied().unwrap_or(0))
             .min()

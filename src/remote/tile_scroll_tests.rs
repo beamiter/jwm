@@ -112,7 +112,7 @@ fn scroll_copy_both_directions_odd_edges_preserve_decoded_overlap_and_snapshots(
         for y in 0..97_u32 {
             for x in 0..65_u32 {
                 let tile = (y / 16 * 65_u32.div_ceil(16) + x / 16) as usize;
-                if payload[42 + tile / 8] & (1 << (tile % 8)) == 0 {
+                if payload[46 + tile / 8] & (1 << (tile % 8)) == 0 {
                     let from = i32::try_from(y).unwrap() + i32::from(dy);
                     assert!(
                         (0..97).contains(&from),
@@ -202,7 +202,7 @@ fn scroll_copy_malformed_extension_and_jpeg_leave_decoder_unchanged() {
 }
 
 #[test]
-fn scroll_copy_discard_does_not_advance_base_or_reference_and_toolbar_falls_back() {
+fn scroll_copy_discard_does_not_advance_base_or_reference_and_toolbar_uses_bounded_copy() {
     let (mut encoder, mut decoder) = pair();
     let first = source(65, 97);
     let initial = encode_frame(&mut encoder, &first, 1, 40);
@@ -229,8 +229,8 @@ fn scroll_copy_discard_does_not_advance_base_or_reference_and_toolbar_falls_back
     let fallback = encode_frame(&mut encoder, &toolbar, 4, 40);
     assert_eq!(
         fallback[17] & 2,
-        0,
-        "a fixed toolbar invalidates exact full-width overlap"
+        2,
+        "fixed toolbar permits a bounded full-width overlap"
     );
 }
 
@@ -324,13 +324,196 @@ fn scroll_copy_requires_opt_in_and_complete_exposed_strip() {
     let mut bad = valid.clone();
     let tiles = 65_usize.div_ceil(16) * 145_usize.div_ceil(16);
     let tile = (0..tiles)
-        .find(|i| bad[42 + i / 8] & (1 << (i % 8)) != 0)
+        .find(|i| bad[46 + i / 8] & (1 << (i % 8)) != 0)
         .unwrap();
-    bad[42 + tile / 8] &= !(1 << (tile % 8));
+    bad[46 + tile / 8] &= !(1 << (tile % 8));
     let count = u32::from_be_bytes(bad[20..24].try_into().unwrap());
     bad[20..24].copy_from_slice(&(count - 1).to_be_bytes());
     assert_rejected_unchanged(&mut decoder, &bad);
     decoder
         .decode_into(&valid, new_decode_buffer_pool())
         .unwrap();
+}
+
+fn band_shifted(previous: &CapturedFrame, dy: i16, top: u32, bottom: u32) -> CapturedFrame {
+    let mut next = CapturedFrame {
+        image: previous.image.clone(),
+        geometry_epoch: previous.geometry_epoch,
+        source_width: previous.source_width,
+        source_height: previous.source_height,
+    };
+    for y in top..bottom {
+        let from = i64::from(y) + i64::from(dy);
+        for x in 0..previous.image.width() {
+            let pixel = if (i64::from(top)..i64::from(bottom)).contains(&from) {
+                *previous.image.get_pixel(x, from as u32)
+            } else {
+                Rgb([231, x as u8, y as u8])
+            };
+            next.image.put_pixel(x, y, pixel);
+        }
+    }
+    next
+}
+
+fn band_bounds(payload: &[u8]) -> (u32, u32) {
+    (
+        u16::from_be_bytes(payload[42..44].try_into().unwrap()) as u32,
+        u16::from_be_bytes(payload[44..46].try_into().unwrap()) as u32,
+    )
+}
+
+#[test]
+fn scroll_band_odd_edges_headers_footers_and_unmaterialized_history() {
+    for dy in [-16, -7, 7, 16] {
+        let (mut encoder, mut decoder) = pair();
+        let first = source(97, 195);
+        let initial = encode_frame(&mut encoder, &first, 1, 37);
+        let retained = decoder
+            .decode_into(&initial, new_decode_buffer_pool())
+            .unwrap();
+        let old = decoder.canvas().unwrap().clone();
+        encoder.commit(&first);
+        let next = band_shifted(&first, dy, 17, 178);
+        let payload = encode_frame(&mut encoder, &next, 2, 37);
+        assert_eq!(scroll_dy(&payload), dy);
+        let (top, bottom) = band_bounds(&payload);
+        assert!(top < bottom && bottom <= 195);
+        let decoded = decoder
+            .decode_into(&payload, new_decode_buffer_pool())
+            .unwrap();
+        assert!(decoded.damage().is_none());
+        let mut copied = 0;
+        let mut outside = 0;
+        for y in 0..195 {
+            for x in 0..97 {
+                let tile = (y / 16 * 97_u32.div_ceil(16) + x / 16) as usize;
+                if payload[46 + tile / 8] & (1 << (tile % 8)) != 0 {
+                    continue;
+                }
+                let from = i64::from(y) + i64::from(dy);
+                let copy = (top..bottom).contains(&y)
+                    && (i64::from(top)..i64::from(bottom)).contains(&from);
+                let expected_y = if copy {
+                    copied += 1;
+                    from as u32
+                } else {
+                    outside += 1;
+                    y
+                };
+                assert_eq!(
+                    decoded.image().get_pixel(x, y),
+                    old.get_pixel(x, expected_y),
+                    "dy={dy} at ({x},{y}), band={top}..{bottom}"
+                );
+            }
+        }
+        assert!(copied > 0 && outside > 0);
+        assert_eq!(retained.image(), &old);
+        encoder.discard();
+        assert_eq!(encoder.reference(), Some(&first.image));
+        let retry = encode_frame(&mut encoder, &next, 3, 37);
+        assert_eq!(u64::from_be_bytes(retry[32..40].try_into().unwrap()), 1);
+        assert_eq!(band_bounds(&retry), (top, bottom));
+    }
+}
+
+#[test]
+fn scroll_band_malformed_bounds_are_transactional() {
+    let (mut encoder, mut decoder) = pair();
+    let first = source(97, 195);
+    let initial = encode_frame(&mut encoder, &first, 1, 60);
+    decoder
+        .decode_into(&initial, new_decode_buffer_pool())
+        .unwrap();
+    encoder.commit(&first);
+    let next = band_shifted(&first, 7, 17, 178);
+    let valid = encode_frame(&mut encoder, &next, 2, 60);
+    assert_eq!(scroll_dy(&valid), 7);
+    for (top, bottom) in [
+        (0_u16, 0_u16),
+        (178, 17),
+        (17, 17),
+        (0, 196),
+        (0, u16::MAX),
+        (194, 195),
+        (17, 24),
+        (17, 114),
+    ] {
+        let mut bad = valid.clone();
+        bad[42..44].copy_from_slice(&top.to_be_bytes());
+        bad[44..46].copy_from_slice(&bottom.to_be_bytes());
+        assert_rejected_unchanged(&mut decoder, &bad);
+    }
+    // Remove an actually exposed boundary tile while keeping popcount valid.
+    // Decoder must reject before changing its base canvas, not merely because
+    // the original dirty-count field disagreed with the altered bitmap.
+    let mut missing = valid.clone();
+    let (top, bottom) = band_bounds(&valid);
+    let exposed_row = bottom - 1;
+    assert!(exposed_row >= top);
+    let tile = (exposed_row / 16 * 97_u32.div_ceil(16)) as usize;
+    assert_ne!(missing[46 + tile / 8] & (1 << (tile % 8)), 0);
+    missing[46 + tile / 8] &= !(1 << (tile % 8));
+    let count = u32::from_be_bytes(missing[20..24].try_into().unwrap());
+    missing[20..24].copy_from_slice(&(count - 1).to_be_bytes());
+    assert_rejected_unchanged(&mut decoder, &missing);
+    for end in [42, 43, 44, 45, 46, valid.len() / 2] {
+        assert_rejected_unchanged(&mut decoder, &valid[..end]);
+    }
+    decoder
+        .decode_into(&valid, new_decode_buffer_pool())
+        .unwrap();
+    assert_eq!(decoder.last_sequence, Some(2));
+}
+
+#[test]
+fn scroll_band_fragmented_fixed_rows_do_not_claim_large_overlap() {
+    let (mut encoder, _) = pair();
+    let first = source(97, 195);
+    encode_frame(&mut encoder, &first, 1, 60);
+    encoder.commit(&first);
+    let mut next = shifted(&first, 7, 231);
+    for y in (0..195).step_by(8) {
+        for x in 0..97 {
+            next.image.put_pixel(x, y, *first.image.get_pixel(x, y));
+        }
+    }
+    let payload = encode_frame(&mut encoder, &next, 2, 60);
+    assert_eq!(
+        payload[17] & 2,
+        0,
+        "no contiguous half-image overlap exists"
+    );
+}
+
+#[test]
+fn scroll_band_touching_image_edges_preserves_outside_dirty_updates() {
+    for (top, bottom, dy, outside_y) in [(0, 178, 7, 194), (17, 195, -7, 0)] {
+        let (mut encoder, mut decoder) = pair();
+        let first = source(97, 195);
+        let initial = encode_frame(&mut encoder, &first, 1, 60);
+        decoder
+            .decode_into(&initial, new_decode_buffer_pool())
+            .unwrap();
+        encoder.commit(&first);
+        let mut next = band_shifted(&first, dy, top, bottom);
+        for x in 0..97 {
+            next.image.put_pixel(x, outside_y, Rgb([250, 10, 90]));
+        }
+        let payload = encode_frame(&mut encoder, &next, 2, 60);
+        assert_eq!(scroll_dy(&payload), dy);
+        let outside_tile = (outside_y / 16 * 97_u32.div_ceil(16)) as usize;
+        assert_ne!(
+            payload[46 + outside_tile / 8] & (1 << (outside_tile % 8)),
+            0,
+            "ordinary changes outside band cannot be omitted"
+        );
+        decoder
+            .decode_into(&payload, new_decode_buffer_pool())
+            .unwrap();
+        encoder.commit(&next);
+        assert_eq!(encoder.reference(), Some(&next.image));
+        assert!(encoder.has_quality_debt(90));
+    }
 }

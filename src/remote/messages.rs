@@ -8,7 +8,7 @@ use super::x11_keymap::{KeymapTable, MAX_ENCODED_KEYMAP_LEN};
 use std::io;
 
 const APPLICATION_MAGIC: &[u8; 8] = b"JWMREM01";
-pub const APPLICATION_VERSION: u16 = 21;
+pub const APPLICATION_VERSION: u16 = 22;
 const HELLO_PREFIX_LEN: usize = 11;
 const STREAM_CAPABILITIES_LEN: usize = 31;
 const SERVER_HELLO_LEN: usize = HELLO_PREFIX_LEN + STREAM_CAPABILITIES_LEN;
@@ -1036,7 +1036,7 @@ mod tests {
             ClientHello::decode(&legacy).unwrap_err(),
             ServerHello::decode(&legacy).unwrap_err(),
         ] {
-            assert!(error.to_string().contains("version 6; expected 21"));
+            assert!(error.to_string().contains("version 6; expected 22"));
         }
     }
 
@@ -1194,14 +1194,14 @@ mod tests {
             clipboard_files_enabled: false,
         }
         .encode();
-        assert_eq!(&payload[8..10], &21_u16.to_be_bytes());
+        assert_eq!(&payload[8..10], &22_u16.to_be_bytes());
 
         // Version 5 had no clipboard transfer records: a version-5 peer
         // would end the session on the first copied image or file. It must
         // fail on its version instead. Version 4 sent one digest of the whole
         // keymap where later versions send a per-keycode table.
         for older in [
-            4_u16, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
+            4_u16, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21,
         ] {
             let mut previous = payload;
             previous[8..10].copy_from_slice(&older.to_be_bytes());
@@ -1209,11 +1209,11 @@ mod tests {
             assert!(
                 error
                     .to_string()
-                    .contains(&format!("application version {older}; expected 21"))
+                    .contains(&format!("application version {older}; expected 22"))
             );
         }
 
-        for rejected in [0_u16, 2, 3, 22, u16::MAX] {
+        for rejected in [0_u16, 2, 3, 23, u16::MAX] {
             let mut other = payload;
             other[8..10].copy_from_slice(&rejected.to_be_bytes());
             assert!(
@@ -1623,8 +1623,8 @@ mod tests {
 mod scroll_capability_tests {
     use super::*;
     #[test]
-    fn scroll_is_explicit_boolean_and_requires_pointer_or_control_in_version_21() {
-        assert_eq!(APPLICATION_VERSION, 21);
+    fn scroll_is_explicit_boolean_and_requires_pointer_or_control_in_version_22() {
+        assert_eq!(APPLICATION_VERSION, 22);
         assert_eq!(STREAM_CAPABILITIES_LEN, 31);
         let mut caps = StreamCapabilities::default();
         assert!(

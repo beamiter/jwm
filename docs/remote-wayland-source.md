@@ -78,7 +78,7 @@ source switching or automatic input grab. A saved profile cannot grant it.
 The default remains view-only. The selected target must already have exact
 native keyboard focus: the remote path never changes focus to obtain access.
 
-Current protocol v21 retains the independent keyboard capability introduced
+Current protocol v22 retains the independent keyboard capability introduced
 in v16 and the pointer capability introduced in v17; scrolling has its own v18
 opt-in. After the first frame is actually reported presented by the viewer, it
 requests one keyboard lease for
@@ -292,15 +292,18 @@ tests, two-computer network tests or proof of usability under WAN latency.
 
 ### Scroll-copy is not scroll permission
 
-The separate experimental host `--scroll-copy` flag enables a default-off v19
-software codec optimization, not a native input capability. It can optimize a
+The separate experimental host `--scroll-copy` flag enables a default-off
+software codec optimization (introduced in v19, extended in v22), not a native input capability. It can optimize a
 read-only source without allowing any keyboard, pointer or scroll events.
 The original explicit `--allow-wayland-scroll` / viewer opt-in, fresh-frame
 checks, exact receiver binding and 30-second nonrenewable lease remain unchanged.
 
 Only exact full-width RGB shifts of ±1..64 pixels with at least half-frame
-overlap qualify. Copies require the matching source, geometry and base sequence;
-fixed toolbars, other changes and unsupported resizes fall back to normal tiles.
+overlap qualify. In v22 the shift can be restricted to one bounded vertical band,
+so fixed top and bottom toolbars need not move. Copies require the matching
+source, geometry and base sequence; pixels outside the band still use ordinary
+dirty-tile detection. Unsupported or non-beneficial shifts and resizes fall back
+to normal tiles.
 Older peers are rejected, and profiles/SSH do not implicitly persist this flag.
 This CPU experiment does not establish GPU, physical-display or WAN latency
 improvements; copying existing decoded pixels also does not guarantee better
@@ -361,7 +364,7 @@ This is a separate, default-off authorization, not a combination of the old
 keyboard and pointer flags. The host explicitly selects one surface with
 `host --wayland-select --once --allow-wayland-control`. The viewer explicitly
 uses `connect HOST --viewer-backend wayland --wayland-control`. Both peers must
-use application protocol **v21** (31-byte capabilities). Older peers are rejected;
+use application protocol **v22** (31-byte capabilities). Older peers are rejected;
 there is no protocol downgrade. Transport encryption remains version 2.
 
 The bundle has one native resource, source owner/instance, epoch, cross-type
@@ -412,7 +415,7 @@ Add `--allow-wayland-scroll` to the host's `--allow-wayland-control` and
 `--wayland-scroll` to the native viewer's `--wayland-control` to opt in on both
 ends. Omitting either permission must not silently enable wheel input. The
 same flags still work with the separate pointer-only mode; a keyboard-only or
-read-only mode cannot request them. Protocol v21 is required on both network
+read-only mode cannot request them. Protocol v22 is required on both network
 peers. The native control manager must support version 2 for its separate
 `create_lease_with_scroll` request; an older manager is rejected, not treated as
 permission. Ordinary `create_lease` remains wheel-disabled even on version 2.
@@ -437,3 +440,38 @@ Dedicated owned-server regression fixtures exercise actual wheel recipients,
 both directions and new-pixel feedback, alongside old-permission, stale-frame,
 Waiting and held-input negative cases. As elsewhere, this is software-rendered
 protocol/transport verification, not physical input or two-machine acceptance.
+
+
+### Bounded-band scroll-copy codec (v22)
+
+The video-only `--scroll-copy` option remains default-off. Its wire extension is
+14 bytes: prior frame sequence (u64), signed vertical shift (i16), band top (u16)
+and exclusive bottom (u16). A band always spans the encoded width. Only the
+intersection where both old source row and new destination row are inside the
+band is copied. This does not authorize capturing a new region or any input.
+Both network peers must upgrade to v22; the capability block remains 31 bytes.
+
+Candidate search has a fixed sample budget and chooses at most one shift for a
+full-width row comparison. A contiguous candidate overlap must be pixel-exact
+against the committed raw reference and cover at least half the image. A copy
+that cannot reduce dirty-tile work is rejected. All exposed and mixed boundary
+tiles are transmitted completely; other pixels outside the copy band are left
+in place and still checked for ordinary updates. Quality debt follows copied
+pixels rather than being silently reset to the current JPEG quality.
+
+The receiver validates the whole extension, base sequence, source/geometry,
+bitmap coverage, atlas and budgets before committing a new image. Malformed
+bands, missing boundary tiles, invalid JPEG or stale bases cannot partially
+change its canvas. Existing immutable snapshots remain unchanged. The encoder
+commits only after the authenticated frame send and flush succeed; discard never
+advances its reference or sequence.
+
+Offline A/B measures identical source hashes, encoded bytes, distortion and CPU
+work for whole-frame scrolling, fixed toolbars/footers, threshold-sized bands,
+static/random content and unsupported regions. These measurements do not imply
+GPU or physical presentation speed, and copied JPEG pixels are not claimed to
+have the same quality as re-encoding. Exact results belong with the benchmark
+report for the tested revision.
+
+See [the bounded-band offline A/B report](remote-scroll-band-benchmark.md) for
+identical-input byte, quality and CPU measurements, including fallback cost.
