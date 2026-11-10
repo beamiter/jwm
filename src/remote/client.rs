@@ -50,6 +50,24 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+#[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+type LosslessFrameObserver = Arc<Mutex<Vec<(u64, bool)>>>;
+#[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+thread_local! {static LOSSLESS_FRAME_OBSERVER: std::cell::RefCell<Option<LosslessFrameObserver>>=const {std::cell::RefCell::new(None)};}
+#[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+pub(crate) fn with_static_lossless_frame_observer<T>(
+    observer: LosslessFrameObserver,
+    run: impl FnOnce() -> T,
+) -> T {
+    struct Restore(Option<LosslessFrameObserver>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            LOSSLESS_FRAME_OBSERVER.with(|slot| *slot.borrow_mut() = self.0.take());
+        }
+    }
+    let _restore = Restore(LOSSLESS_FRAME_OBSERVER.with(|slot| slot.replace(Some(observer))));
+    run()
+}
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(15);
@@ -71,6 +89,7 @@ pub struct ClientOptions {
     pub wayland_keyboard: bool,
     pub wayland_pointer: bool,
     pub wayland_control: bool,
+    pub static_lossless: bool,
     pub wayland_text: Option<super::wayland_text_wire::ExplicitText>,
     pub wayland_scroll: bool,
     pub wayland_horizontal_scroll: bool,
@@ -402,6 +421,20 @@ fn suppress_reconnect(result: RemoteResult<()>, suppress: bool) -> RemoteResult<
 }
 
 fn validate_viewer_backend(options: &ClientOptions) -> RemoteResult<()> {
+    if options.static_lossless
+        && (!options.view_only
+            || options.wayland_keyboard
+            || options.wayland_pointer
+            || options.wayland_control
+            || options.wayland_text.is_some()
+            || options.clipboard
+            || options.grab_input
+            || options.resize_source.is_some()
+            || options.follow_source_size)
+    {
+        return Err(invalid_data("static lossless requires explicit view-only mode without input, text, clipboard or remote resize").into());
+    }
+
     if options.wayland_text.is_some()
         && (options.viewer_backend != ViewerBackend::Wayland
             || options.view_only
@@ -589,6 +622,7 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
         options.wayland_horizontal_scroll,
         options.wayland_control,
         options.wayland_text.is_some(),
+        options.static_lossless,
         stream,
         &key,
         request_input,
@@ -680,6 +714,7 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
     initial_state.wayland_text.get_mut().unwrap().payload = options.wayland_text.clone();
     initial_state.frame_limits = hello.stream.frame_limits;
     initial_state.scroll_copy = hello.stream.scroll_copy;
+    initial_state.static_lossless = hello.stream.static_lossless;
     initial_state.resize.get_mut().unwrap().requested = options.resize_source;
     if options.follow_source_size {
         initial_state.resize.get_mut().unwrap().follow =
@@ -730,6 +765,13 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
         &state.telemetry,
         &state.decode_pool,
     )?;
+    #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+    if let Some(observer) = &state.lossless_observer {
+        observer.lock().unwrap().push((
+            first_frame.frame.sequence(),
+            tile_decoder.last_frame_was_lossless(),
+        ));
+    }
     first_frame.frame = first_frame.frame.with_source_epoch(initial_epoch);
     reader
         .get_ref()
@@ -1094,6 +1136,7 @@ fn negotiate_session(
     request_wayland_horizontal_scroll: bool,
     request_wayland_control: bool,
     request_wayland_text: bool,
+    request_static_lossless: bool,
     mut stream: TcpStream,
     key: &[u8],
     request_input: bool,
@@ -1145,6 +1188,7 @@ fn negotiate_session(
                 wayland_horizontal_scroll: request_wayland_horizontal_scroll,
                 wayland_control: request_wayland_control,
                 wayland_text: request_wayland_text,
+                static_lossless: request_static_lossless,
                 scroll_copy: true,
                 frame_limits,
                 clipboard_content: requested_policy.0,
@@ -1172,6 +1216,16 @@ fn negotiate_session(
     writer.flush()?;
     let hello = read_server_hello(&mut reader)?;
     validate_server_frame_limits(&hello, frame_limits)?;
+    if hello.stream.static_lossless != request_static_lossless
+        || (request_static_lossless
+            && (hello.pointer_enabled || hello.keyboard_enabled || hello.clipboard_enabled))
+    {
+        return Err(invalid_data(
+            "static lossless permission was not mutually negotiated exclusively",
+        )
+        .into());
+    }
+
     if hello.stream.wayland_control != request_wayland_control
         || (request_wayland_control
             && (hello.stream.wayland_keyboard
@@ -3367,6 +3421,8 @@ impl ClientResize {
 }
 
 struct ReceiveState {
+    #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+    lossless_observer: Option<LosslessFrameObserver>,
     wayland_text: Mutex<ClientText>,
     wayland_control: Mutex<ClientControl>,
     resize: Mutex<ClientResize>,
@@ -3377,6 +3433,7 @@ struct ReceiveState {
     source_epoch: AtomicU64,
     frame_limits: super::messages::FrameLimits,
     scroll_copy: bool,
+    static_lossless: bool,
     cursor_enabled: AtomicBool,
     cursor: Mutex<super::cursor::CursorInbox>,
     latest: Mutex<Option<QueuedFrame>>,
@@ -3393,11 +3450,14 @@ impl ReceiveState {
     fn new_tile_decoder(&self) -> RemoteResult<TileDecoder> {
         let mut decoder = TileDecoder::with_frame_limits(self.frame_limits)?;
         decoder.set_scroll_copy_enabled(self.scroll_copy);
+        decoder.set_lossless_enabled(self.static_lossless);
         Ok(decoder)
     }
 
     fn new() -> Self {
         Self {
+            #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+            lossless_observer: LOSSLESS_FRAME_OBSERVER.with(|slot| slot.borrow().clone()),
             wayland_text: Mutex::new(ClientText::default()),
             wayland_control: Mutex::new(ClientControl::default()),
             resize: Mutex::new(ClientResize::default()),
@@ -3408,6 +3468,7 @@ impl ReceiveState {
             source_epoch: AtomicU64::new(1),
             frame_limits: super::messages::FrameLimits::default(),
             scroll_copy: false,
+            static_lossless: false,
             cursor_enabled: AtomicBool::new(false),
             cursor: Mutex::new(super::cursor::CursorInbox::default()),
             latest: Mutex::new(None),
@@ -3722,6 +3783,13 @@ fn receive_frame_records(
                     &state.telemetry,
                     &state.decode_pool,
                 )?;
+                #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+                if let Some(observer) = &state.lossless_observer {
+                    observer.lock().unwrap().push((
+                        queued.frame.sequence(),
+                        tile_decoder.last_frame_was_lossless(),
+                    ));
+                }
                 queued.frame = queued.frame.with_source_epoch(epoch);
                 let expected = last_sequence
                     .checked_add(1)
@@ -4801,6 +4869,7 @@ pub(super) mod tests {
             wayland_pointer: false,
             wayland_control: false,
             wayland_text: None,
+            static_lossless: false,
             wayland_scroll: false,
             wayland_horizontal_scroll: false,
             resize_source: None,
@@ -6850,6 +6919,7 @@ pub(super) mod tests {
             false,
             false,
             false,
+            false,
             stream,
             &TEST_PSK,
             false,
@@ -6943,6 +7013,7 @@ pub(super) mod tests {
             false,
             false,
             false,
+            false,
             stream,
             &TEST_PSK,
             false,
@@ -7012,6 +7083,7 @@ pub(super) mod tests {
             false,
             false,
             false,
+            false,
             stream,
             &TEST_PSK,
             false,
@@ -7067,6 +7139,7 @@ pub(super) mod tests {
         });
         let stream = TcpStream::connect(address).unwrap();
         let result = negotiate_session(
+            false,
             false,
             false,
             false,
@@ -7137,6 +7210,7 @@ pub(super) mod tests {
             });
             let stream = TcpStream::connect(address).unwrap();
             let result = negotiate_session(
+                false,
                 false,
                 false,
                 false,
@@ -7241,6 +7315,7 @@ pub(super) mod tests {
         let started = Instant::now();
         let (mut reader, _writer, hello) = negotiate_session(
             true,
+            false,
             false,
             false,
             false,
@@ -7502,6 +7577,7 @@ mod native_viewer_permission_tests {
             wayland_pointer: false,
             wayland_control: false,
             wayland_text: None,
+            static_lossless: false,
             wayland_scroll: false,
             wayland_horizontal_scroll: false,
             resize_source: None,

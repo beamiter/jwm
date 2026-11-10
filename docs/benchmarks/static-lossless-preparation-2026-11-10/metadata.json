@@ -1,0 +1,22 @@
+{
+  "utc": "2026-11-10T16:31:20.829558+00:00",
+  "head": "7fb7b384268212b28335d9a9fb17e1260baec83f",
+  "dirty_status": [
+    " M src/remote/tile.rs",
+    "?? docs/remote-lossless-static-preparation.md",
+    "?? src/remote/tile_lossless_baseline.rs"
+  ],
+  "source_sha256": {
+    "src/remote/tile_lossless_baseline.rs": "24a0b1289d4e3156e767131ba72a175758d5d25fda0cf9148d123f38d0be8450",
+    "src/remote/tile.rs": "4d7593ff77d2bddff5df27181534c16ef16d81fe3b0b8356329089eca6feaab8",
+    "src/remote/frame.rs": "62095bf903d064db5893dd5d9e50e04938ada20c71ead15c362d899a2e685214",
+    "Cargo.lock": "cc32a6f2404f4c9ba3097b774437581c10c3382ca7f7e0941b2e475b659ff600"
+  },
+  "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.1\nLLVM version: 23.1.1\n",
+  "platform": "Linux-6.18.57-x86_64-with-glibc2.41",
+  "profile": "debug; cfg(debug_assertions)=true",
+  "command": "cargo test --locked --offline --no-default-features --features remote-x11 --lib remote::tile::lossless_baseline::offline_static_text_production_jpeg_and_separate_png_baseline -- --ignored --exact --nocapture --test-threads=1",
+  "environment": "jwm-native-env.sh plus LD_LIBRARY_PATH from existing LIBRARY_PATH; no installation",
+  "cpu": "AMD EPYC 9V74 80-Core Processor",
+  "verification": "one exact offline test passed; no display/socket/GL; PNG is standalone comparison, not integrated codec"
+}

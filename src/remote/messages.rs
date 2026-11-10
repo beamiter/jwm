@@ -8,9 +8,9 @@ use super::x11_keymap::{KeymapTable, MAX_ENCODED_KEYMAP_LEN};
 use std::io;
 
 const APPLICATION_MAGIC: &[u8; 8] = b"JWMREM01";
-pub const APPLICATION_VERSION: u16 = 24;
+pub const APPLICATION_VERSION: u16 = 25;
 const HELLO_PREFIX_LEN: usize = 11;
-const STREAM_CAPABILITIES_LEN: usize = 32;
+const STREAM_CAPABILITIES_LEN: usize = 33;
 const SERVER_HELLO_LEN: usize = HELLO_PREFIX_LEN + STREAM_CAPABILITIES_LEN;
 const CLIENT_HELLO_HEADER_LEN: usize = SERVER_HELLO_LEN + 4;
 /// Largest client hello: the shared prefix plus a full keymap table.
@@ -119,6 +119,7 @@ pub struct StreamCapabilities {
     pub wayland_horizontal_scroll: bool,
     /// Experimental video-only vertical copy deltas; no input authority.
     pub scroll_copy: bool,
+    pub static_lossless: bool,
     /// Explicit single combined authority, never inferred from old flags.
     pub wayland_control: bool,
     pub wayland_text: bool,
@@ -178,6 +179,7 @@ impl StreamCapabilities {
         payload[29] = u8::from(self.scroll_copy);
         payload[30] = u8::from(self.wayland_control);
         payload[31] = u8::from(self.wayland_text);
+        payload[32] = u8::from(self.static_lossless);
         payload
     }
 
@@ -197,6 +199,11 @@ impl StreamCapabilities {
             || payload[27] > 1
             || payload[28] > 3
             || payload[29] > 1
+            || payload[32] > 1
+            || (payload[32] == 1
+                && (payload[23..29].iter().any(|b| *b != 0)
+                    || payload[30] != 0
+                    || payload[31] != 0))
             || payload[31] > 1
             || (payload[31] == 1 && payload[23..29].iter().any(|b| *b != 0))
             || (payload[31] == 1 && payload[30] != 0)
@@ -231,6 +238,7 @@ impl StreamCapabilities {
             wayland_scroll: payload[28] & 1 != 0,
             wayland_horizontal_scroll: payload[28] & 2 != 0,
             scroll_copy: payload[29] == 1,
+            static_lossless: payload[32] == 1,
             wayland_control: payload[30] == 1,
             wayland_text: payload[31] == 1,
             ..Self::default()
@@ -367,7 +375,8 @@ impl ServerHello {
 }
 
 fn validate_clipboard_flags(flags: u8, stream: StreamCapabilities) -> RemoteResult<()> {
-    if stream.wayland_control && flags & (INPUT_FLAGS | FLAG_CLIPBOARD | FLAG_CLIPBOARD_FILES) != 0
+    if (stream.wayland_control || stream.wayland_text || stream.static_lossless)
+        && flags & (INPUT_FLAGS | FLAG_CLIPBOARD | FLAG_CLIPBOARD_FILES) != 0
     {
         return Err(invalid_data("control cannot combine legacy input or clipboard flags").into());
     }
@@ -1072,7 +1081,7 @@ mod tests {
             ClientHello::decode(&legacy).unwrap_err(),
             ServerHello::decode(&legacy).unwrap_err(),
         ] {
-            assert!(error.to_string().contains("version 6; expected 24"));
+            assert!(error.to_string().contains("version 6; expected 25"));
         }
     }
 
@@ -1230,14 +1239,14 @@ mod tests {
             clipboard_files_enabled: false,
         }
         .encode();
-        assert_eq!(&payload[8..10], &24_u16.to_be_bytes());
+        assert_eq!(&payload[8..10], &25_u16.to_be_bytes());
 
         // Version 5 had no clipboard transfer records: a version-5 peer
         // would end the session on the first copied image or file. It must
         // fail on its version instead. Version 4 sent one digest of the whole
         // keymap where later versions send a per-keycode table.
         for older in [
-            4_u16, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
+            4_u16, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
         ] {
             let mut previous = payload;
             previous[8..10].copy_from_slice(&older.to_be_bytes());
@@ -1245,11 +1254,11 @@ mod tests {
             assert!(
                 error
                     .to_string()
-                    .contains(&format!("application version {older}; expected 24"))
+                    .contains(&format!("application version {older}; expected 25"))
             );
         }
 
-        for rejected in [0_u16, 2, 3, 25, u16::MAX] {
+        for rejected in [0_u16, 2, 3, 26, u16::MAX] {
             let mut other = payload;
             other[8..10].copy_from_slice(&rejected.to_be_bytes());
             assert!(
@@ -1660,8 +1669,8 @@ mod scroll_capability_tests {
     use super::*;
     #[test]
     fn scroll_is_explicit_boolean_and_requires_pointer_or_control_in_version_23() {
-        assert_eq!(APPLICATION_VERSION, 24);
-        assert_eq!(STREAM_CAPABILITIES_LEN, 32);
+        assert_eq!(APPLICATION_VERSION, 25);
+        assert_eq!(STREAM_CAPABILITIES_LEN, 33);
         let mut caps = StreamCapabilities::default();
         assert!(
             !StreamCapabilities::decode(&caps.encode())
@@ -1717,7 +1726,7 @@ mod control_capability_tests {
             ..Default::default()
         };
         let bytes = caps.encode();
-        assert_eq!(bytes.len(), 32);
+        assert_eq!(bytes.len(), 33);
         assert_eq!(StreamCapabilities::decode(&bytes).unwrap(), caps);
         for v in [2, 255] {
             let mut bad = bytes;
@@ -1763,7 +1772,7 @@ mod text_capability_tests {
             ..Default::default()
         };
         let bytes = c.encode();
-        assert_eq!(bytes.len(), 32);
+        assert_eq!(bytes.len(), 33);
         assert_eq!(StreamCapabilities::decode(&bytes).unwrap(), c);
         for i in [23, 24, 25, 26, 27, 28, 30] {
             let mut b = bytes;
@@ -1774,6 +1783,39 @@ mod text_capability_tests {
             let mut b = bytes;
             b[31] = v;
             assert!(StreamCapabilities::decode(&b).is_err());
+        }
+    }
+}
+
+#[cfg(test)]
+mod static_lossless_capability_tests {
+    use super::*;
+    #[test]
+    fn explicit_readonly_and_bounded_boolean() {
+        assert!(!StreamCapabilities::default().static_lossless);
+        let c = StreamCapabilities {
+            static_lossless: true,
+            ..Default::default()
+        };
+        let bytes = c.encode();
+        assert_eq!(StreamCapabilities::decode(&bytes).unwrap(), c);
+        for i in [23, 24, 25, 26, 27, 28, 30, 31] {
+            let mut b = bytes;
+            b[i] = 1;
+            assert!(StreamCapabilities::decode(&b).is_err(), "{i}");
+        }
+        for v in [2, 255] {
+            let mut b = bytes;
+            b[32] = v;
+            assert!(StreamCapabilities::decode(&b).is_err());
+        }
+        for flags in [
+            FLAG_POINTER,
+            FLAG_KEYBOARD,
+            FLAG_CLIPBOARD,
+            FLAG_CLIPBOARD_FILES,
+        ] {
+            assert!(ServerHello::decode(&encode_hello(flags, c)).is_err());
         }
     }
 }

@@ -808,6 +808,7 @@ fn actual_wayland_viewer_tcp_ack_waits_for_presented_not_release() {
             wayland_pointer: false,
             wayland_control: false,
             wayland_text: None,
+            static_lossless: false,
             wayland_scroll: false,
             wayland_horizontal_scroll: false,
             resize_source: None,
@@ -1023,3 +1024,6 @@ mod host_popup_integration;
 
 #[path = "host_wayland_text_viewer_integration.rs"]
 mod host_text_integration;
+
+#[path = "host_wayland_lossless_viewer_integration.rs"]
+mod host_lossless_integration;

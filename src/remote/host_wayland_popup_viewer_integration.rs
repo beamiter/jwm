@@ -55,6 +55,7 @@ fn options(popups: bool, follow: bool) -> host::HostOptions {
         allow_wayland_horizontal_scroll: false,
         allow_wayland_control: false,
         allow_wayland_text: false,
+        allow_static_lossless: false,
         scroll_copy: false,
         allow_clipboard: false,
         clipboard_mode: Default::default(),
@@ -247,6 +248,7 @@ impl Harness {
                 wayland_horizontal_scroll: false,
                 wayland_control: false,
                 wayland_text: None,
+                static_lossless: false,
                 resize_source: None,
                 follow_source_size: false,
                 window_size: Some(WindowSize {

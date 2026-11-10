@@ -1,0 +1,428 @@
+//! Opt-in static PNG refinement through authenticated TCP and actual viewer GL.
+//! Exact pixels and real controlled presentation, not physical display latency.
+use super::*;
+use crate::remote::{
+    client::{ClientOptions, run_client, with_static_lossless_frame_observer},
+    host,
+    viewer_backend::{ViewerBackend, with_wayland_test_stream},
+    wayland_capture::WaylandCapture,
+    wayland_viewer::with_wayland_control_frame_observer,
+};
+use std::{
+    io::Write,
+    sync::{
+        Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+};
+const KEY: [u8; 32] = [0x94; 32];
+struct Stop(Arc<AtomicBool>);
+impl Drop for Stop {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Release);
+    }
+}
+fn host_options(allow: bool) -> host::HostOptions {
+    host::HostOptions {
+        allow_static_lossless: allow,
+        frame_limits: Default::default(),
+        listen: "127.0.0.1:0".into(),
+        key: crate::remote::key::KeySource::Bytes(KEY.to_vec()),
+        display: None,
+        wayland_select: true,
+        wayland_popups: false,
+        wayland_resize_follow: false,
+        wayland_display: None,
+        fps: 12,
+        jpeg_quality: 60,
+        jpeg_quality_floor: 60,
+        fixed_jpeg_quality: true,
+        max_width: 0,
+        capture_source: Default::default(),
+        capture_area: crate::remote::x11_capture::CaptureArea::Root,
+        shared_sources: Vec::new(),
+        scaling: Default::default(),
+        allow_lan: false,
+        allow_input: false,
+        allow_window_resize: false,
+        allow_wayland_keyboard: false,
+        allow_wayland_text: false,
+        allow_wayland_pointer: false,
+        allow_wayland_control: false,
+        allow_wayland_scroll: false,
+        allow_wayland_horizontal_scroll: false,
+        scroll_copy: false,
+        allow_clipboard: false,
+        clipboard_mode: Default::default(),
+        clipboard_direction: Default::default(),
+        clipboard_file_limit: 0,
+        once: true,
+        stats_json: false,
+    }
+}
+
+fn pattern(revised: bool) -> Vec<u8> {
+    let mut bytes = vec![0; 800 * 600 * 4];
+    for y in 0..600usize {
+        for x in 0..800usize {
+            // Repeated glyph-like strokes, chromatic fine lines, and smooth areas.
+            // Values avoid clipping so a +1 edit is exact and below JPEG tolerance.
+            let stroke = (x % 13 == 0 || y % 19 == 0) || ((x % 13 == 8) && y % 19 < 12);
+            let rgb = if stroke {
+                [23, 191, 47]
+            } else {
+                [211, 35, 173]
+            };
+            let i = (y * 800 + x) * 4;
+            bytes[i..i + 4].copy_from_slice(&[rgb[2], rgb[1], rgb[0], 255]);
+            if revised && x < 64 && y < 64 {
+                bytes[i + 2] += 1;
+            }
+        }
+    }
+    bytes
+}
+fn repaint(server: &mut Server, app: &mut App, bytes: &[u8]) {
+    let (buffer, mut file) = shm_buffer_file(server, &mut app.client, [0, 0, 0, 255]);
+    file.seek(SeekFrom::Start(0)).unwrap();
+    file.write_all(bytes).unwrap();
+    app.client.request(app.surface, 1, &[buffer, 0, 0]);
+    app.client.request(app.surface, 2, &[0, 0, 800, 600]);
+    app.client.request(app.surface, 6, &[]);
+    server.roundtrip();
+    server.roundtrip();
+}
+fn read_pixels(
+    local: &mut Server,
+    gl: &mut HeadlessSmithayGles,
+    reader: &mut Option<Capture>,
+) -> Vec<u8> {
+    if reader.is_none() {
+        *reader = Some(Capture::new(local));
+    }
+    let capture = reader.as_mut().unwrap();
+    let (buffer, mut file) = shm_buffer_file(local, &mut capture.client, [0x5a; 4]);
+    let frame = capture.client.new_id();
+    capture.client.request(capture.session, 0, &[frame]);
+    capture.client.request(frame, 1, &[buffer]);
+    capture.client.request(frame, 3, &[]);
+    local.roundtrip();
+    local.roundtrip();
+    fulfill_test_toplevel_capture(
+        &mut gl.renderer,
+        &mut None,
+        &local.state,
+        local.state.image_capture_pending.as_ref().unwrap(),
+    );
+    local.roundtrip();
+    local.roundtrip();
+    let events = capture.client.events();
+    assert!(!events.iter().any(|e| e.sender == 1 && e.opcode == 0));
+    assert!(events.iter().any(|e| e.sender == frame && e.opcode == 3));
+    file.seek(SeekFrom::Start(0)).unwrap();
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).unwrap();
+    assert_eq!(bytes.len(), 800 * 600 * 4);
+    capture.client.request(frame, 0, &[]);
+    local.roundtrip();
+    bytes
+}
+fn sse(actual: &[u8], expected: &[u8]) -> u64 {
+    assert_eq!(actual.len(), expected.len());
+    actual
+        .iter()
+        .zip(expected)
+        .map(|(&a, &b)| {
+            let d = i64::from(a) - i64::from(b);
+            (d * d) as u64
+        })
+        .sum()
+}
+fn pump(native: &mut Server, local: &mut Server, gl: &mut HeadlessSmithayGles) {
+    native.roundtrip();
+    fulfill_test_toplevel_capture(
+        &mut gl.renderer,
+        &mut None,
+        &native.state,
+        native.state.image_capture_pending.as_ref().unwrap(),
+    );
+    native.roundtrip();
+    local.roundtrip();
+    for (&window, top) in &local.state.toplevels {
+        if !top.is_initial_configure_sent() {
+            let geo = local.state.window_geometry.get_mut(&window).unwrap();
+            geo.w = 800;
+            geo.h = 600;
+            top.with_pending_state(|s| s.size = Some((800, 600).into()));
+            top.send_configure();
+        }
+    }
+    local.roundtrip();
+}
+fn exercise(host_permission: bool, client_permission: bool) {
+    let Some(mut gl) = HeadlessSmithayGles::new() else {
+        return;
+    };
+    let mut native = Server::new();
+    let mut local = Server::new();
+    native.state.image_capture_pending = Some(init_image_copy_capture(&native.display.handle()));
+    local.state.image_capture_pending = Some(init_image_copy_capture(&local.display.handle()));
+    register_test_presentation(&mut local);
+    let mut target = App::with_color(&mut native, [0, 0, 255, 255]);
+    let mut expected = pattern(false);
+    repaint(&mut native, &mut target, &expected);
+    let (server, stream) = UnixStream::pair().unwrap();
+    native
+        .display
+        .handle()
+        .insert_client(server, Arc::new(JwmClientState::default()))
+        .unwrap();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let _stop = Stop(stop.clone());
+    let stopping = stop.clone();
+    let (selected_tx, selected) = mpsc::channel();
+    let (host_tx, host_done) = mpsc::channel();
+    let host_thread = thread::spawn(move || {
+        let result = (|| -> crate::remote::RemoteResult<()> {
+            let capture = WaylandCapture::connect_test_stream(stream, 1, 0)?;
+            selected_tx.send(())?;
+            let deadline = Instant::now() + Duration::from_secs(8);
+            let stream = loop {
+                assert!(Instant::now() < deadline && !stopping.load(Ordering::Acquire));
+                match listener.accept() {
+                    Ok((s, _)) => break s,
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(1))
+                    }
+                    Err(e) => return Err(e.into()),
+                }
+            };
+            let peer = host::authenticate_peer(stream, &KEY)?;
+            host::serve_authenticated(
+                peer,
+                &host_options(host_permission),
+                &stopping,
+                &Mutex::new(Some(host::GrantedCapture::Wayland(Box::new(capture)))),
+            )
+        })()
+        .map_err(|e| e.to_string());
+        let _ = host_tx.send(result);
+    });
+    let deadline = Instant::now() + Duration::from_secs(18);
+    loop {
+        pump(&mut native, &mut local, &mut gl);
+        if selected.try_recv().is_ok() {
+            break;
+        }
+        assert!(Instant::now() < deadline);
+        thread::sleep(Duration::from_millis(1));
+    }
+    let (server, viewer_stream) = UnixStream::pair().unwrap();
+    local
+        .display
+        .handle()
+        .insert_client(server, Arc::new(JwmClientState::default()))
+        .unwrap();
+    let frames = Arc::new(Mutex::new((None, None)));
+    let observer = frames.clone();
+    let codecs = Arc::new(Mutex::new(Vec::new()));
+    let codec_observer = codecs.clone();
+    let (client_tx, client_done) = mpsc::channel();
+    let client_thread = thread::spawn(move || {
+        let opts = ClientOptions {
+            viewer_backend: ViewerBackend::Wayland,
+            viewer_wayland_display: None,
+            wayland_keyboard: false,
+            wayland_text: None,
+            static_lossless: client_permission,
+            wayland_pointer: false,
+            wayland_control: false,
+            wayland_scroll: false,
+            wayland_horizontal_scroll: false,
+            resize_source: None,
+            follow_source_size: false,
+            window_size: None,
+            window_position: None,
+            frame_limits: Default::default(),
+            address: address.to_string(),
+            peer_label: "owned static lossless".into(),
+            key: crate::remote::key::KeySource::Bytes(KEY.to_vec()),
+            display: None,
+            view_only: true,
+            grab_input: false,
+            clipboard: false,
+            clipboard_mode: Default::default(),
+            clipboard_direction: Default::default(),
+            clipboard_file_limit: 0,
+            escape_key: "Escape".into(),
+            scaling: Default::default(),
+        };
+        let result = with_static_lossless_frame_observer(codec_observer, || {
+            with_wayland_control_frame_observer(observer, || {
+                with_wayland_test_stream(viewer_stream, || run_client(opts))
+            })
+        })
+        .map_err(|error| {
+            let diagnostic = crate::remote::client::classify_failure(error.as_ref());
+            // Keep the actual causal message separate from ClientFailure's
+            // user-facing stage and troubleshooting-hint formatting.
+            let mut cause: &(dyn std::error::Error + 'static) = error.as_ref();
+            for _ in 0..32 {
+                match cause.source() {
+                    Some(source) => cause = source,
+                    None => return (diagnostic, cause.to_string()),
+                }
+            }
+            panic!("unexpected cyclic/oversized client error chain");
+        });
+        let _ = client_tx.send(result);
+    });
+
+    let mut reader = None;
+    let mut feedback = Vec::new();
+    let mut last = None;
+    let mut first = None;
+    let mut exact = None;
+    let mut phase = 0;
+    let mut host_result = None;
+    let mut client_result = None;
+    loop {
+        assert!(
+            Instant::now() < deadline,
+            "bounded static-lossless TCP/GL completion"
+        );
+        pump(&mut native, &mut local, &mut gl);
+        if let Some(top) = local.state.toplevels.values().next() {
+            feedback.extend(take_feedback(top.wl_surface()));
+        }
+        let seq = frames.lock().unwrap().0;
+        if !feedback.is_empty() && seq.is_some_and(|s| last.is_none_or(|old| s > old)) {
+            assert_eq!(feedback.len(), 1);
+            let seq = seq.unwrap();
+            let pixels = read_pixels(&mut local, &mut gl, &mut reader);
+            assert_eq!(frames.lock().unwrap().0, Some(seq));
+            let encoded = codecs.lock().unwrap();
+            let is_png = encoded
+                .iter()
+                .find(|(s, _)| *s == seq)
+                .expect("actual decoded frame codec evidence")
+                .1;
+            if first.is_none() {
+                assert!(!is_png, "initial frame must remain JPEG");
+                assert!(
+                    sse(&pixels, &expected) > 0,
+                    "workload must expose real JPEG loss"
+                );
+                first = Some(Instant::now());
+            }
+            if sse(&pixels, &expected) == 0 {
+                assert!(host_permission && client_permission);
+                assert!(
+                    encoded.iter().any(|(_, png)| *png),
+                    "exact recovery requires negotiated PNG evidence"
+                );
+                exact = Some(seq);
+            }
+            drop(encoded);
+            present(&mut local, std::mem::take(&mut feedback));
+            last = Some(seq);
+        }
+        if let Some(seq) = exact {
+            if frames.lock().unwrap().1 == Some(seq) {
+                if phase == 0 {
+                    phase = 1;
+                    expected = pattern(true);
+                    repaint(&mut native, &mut target, &expected);
+                    exact = None;
+                } else {
+                    break;
+                }
+            }
+        }
+        if !client_permission && first.is_some_and(|at| at.elapsed() > Duration::from_secs(3)) {
+            assert!(codecs.lock().unwrap().iter().all(|(_, png)| !*png));
+            assert!(frames.lock().unwrap().1.is_some());
+            break;
+        }
+        if host_result.is_none() {
+            host_result = host_done.try_recv().ok();
+        }
+        if client_result.is_none() {
+            client_result = client_done.try_recv().ok();
+        }
+        if client_permission && !host_permission && host_result.is_some() && client_result.is_some()
+        {
+            let (diagnostic, reason) = client_result.as_ref().unwrap().as_ref().unwrap_err();
+            assert_eq!(diagnostic.stage, Some("negotiate"));
+            assert_eq!(diagnostic.category, "io");
+            assert_eq!(diagnostic.io_kind, Some("invalid_data"));
+            assert_eq!(
+                reason,
+                "static lossless permission was not mutually negotiated exclusively"
+            );
+            assert!(codecs.lock().unwrap().is_empty());
+            assert!(first.is_none());
+            break;
+        }
+        if host_permission || !client_permission {
+            assert!(
+                host_result.is_none() && client_result.is_none(),
+                "live test endpoints ended early: {host_result:?} {client_result:?}"
+            );
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+    stop.store(true, Ordering::Release);
+    let cleanup = Instant::now() + Duration::from_secs(6);
+    while host_result.is_none() || client_result.is_none() {
+        assert!(Instant::now() < cleanup, "bounded owned endpoint shutdown");
+        pump(&mut native, &mut local, &mut gl);
+        if host_result.is_none() {
+            host_result = host_done.try_recv().ok();
+        }
+        if client_result.is_none() {
+            client_result = client_done.try_recv().ok();
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+    host_thread.join().unwrap();
+    client_thread.join().unwrap();
+    if client_permission && !host_permission {
+        return;
+    }
+    assert!(host_result.unwrap().is_ok());
+    let (diagnostic, reason) = client_result.unwrap().unwrap_err();
+    assert_eq!(diagnostic.stage, Some("session"));
+    assert_eq!(
+        diagnostic.peer_close_code,
+        Some(crate::remote::close_wire::SessionCloseCode::HostStopping)
+    );
+    assert_eq!(
+        reason,
+        "host closed the remote session: the host stopped sharing its desktop"
+    );
+}
+#[test]
+fn actual_static_lossless_tcp_recovers_exact_gl_and_subtolerance_edit() {
+    exercise(true, true);
+}
+#[test]
+fn actual_static_lossless_tcp_default_off_never_sends_png() {
+    exercise(false, false);
+    exercise(true, false);
+}
+#[test]
+fn actual_static_lossless_tcp_requires_host_permission() {
+    exercise(false, true);
+}
+
+#[test]
+fn exact_pixel_sse_detects_single_channel_subtolerance_edit() {
+    let a = pattern(false);
+    let b = pattern(true);
+    assert_eq!(sse(&a, &a), 0);
+    assert_eq!(sse(&a, &b), 64 * 64);
+}

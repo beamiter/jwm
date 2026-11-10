@@ -325,6 +325,10 @@ enum Command {
         #[arg(long, requires_all=["wayland_select","once"], conflicts_with_all=["allow_input","allow_clipboard","allow_window_resize","allow_wayland_keyboard","allow_wayland_pointer","allow_wayland_control","allow_wayland_scroll","allow_wayland_horizontal_scroll","wayland_popups","wayland_resize_follow"])]
         allow_wayland_text: bool,
 
+        /// Allow bounded lossless static repairs, only in read-only sessions.
+        #[arg(long, conflicts_with_all=["allow_input","allow_clipboard","allow_window_resize","allow_wayland_keyboard","allow_wayland_pointer","allow_wayland_control","allow_wayland_text","allow_wayland_scroll","allow_wayland_horizontal_scroll"])]
+        allow_static_lossless: bool,
+
         /// Experimentally encode exact bounded vertical screen shifts as copy plus changed pixels.
         /// Codec optimization only; grants no input or scrolling permission.
         #[arg(long)]
@@ -519,6 +523,10 @@ enum Command {
         /// Requires a native Wayland viewer; no keyboard or clipboard fallback.
         #[arg(long, requires="viewer_backend", conflicts_with_all=["view_only","wayland_keyboard","wayland_pointer","wayland_control","wayland_scroll","wayland_horizontal_scroll","clipboard","grab_input","resize_source","follow_source_size","reconnect_attempts"])]
         wayland_text_stdin: bool,
+
+        /// Explicitly request bounded PNG repair of stable encoded RGB pixels.
+        #[arg(long, requires="view_only", conflicts_with_all=["wayland_text_stdin","wayland_keyboard","wayland_pointer","wayland_control","clipboard","grab_input","resize_source","follow_source_size"])]
+        static_lossless: bool,
 
         /// Separately request single-notch vertical scroll; never smooth or horizontal.
         #[arg(long, requires = "viewer_scroll_lease")]
@@ -728,6 +736,7 @@ fn profile_from_command(command: Command) -> RemoteResult<Profile> {
             wayland_pointer,
             wayland_control,
             wayland_text_stdin,
+            static_lossless,
             wayland_scroll,
             wayland_horizontal_scroll,
             window_position,
@@ -759,6 +768,7 @@ fn profile_from_command(command: Command) -> RemoteResult<Profile> {
                 || wayland_horizontal_scroll
                 || wayland_control
                 || wayland_text_stdin
+                || static_lossless
             {
                 return Err(profile_error(
                     "Wayland input authorization cannot be saved in a profile",
@@ -1303,6 +1313,7 @@ fn run(command: Command) -> RemoteResult<()> {
             allow_wayland_pointer,
             allow_wayland_control,
             allow_wayland_text,
+            allow_static_lossless,
             allow_wayland_scroll,
             allow_wayland_horizontal_scroll,
             scroll_copy,
@@ -1356,6 +1367,7 @@ fn run(command: Command) -> RemoteResult<()> {
                 allow_wayland_pointer,
                 allow_wayland_control,
                 allow_wayland_text,
+                allow_static_lossless,
                 allow_wayland_scroll,
                 allow_wayland_horizontal_scroll,
                 scroll_copy,
@@ -1432,6 +1444,7 @@ fn run(command: Command) -> RemoteResult<()> {
             wayland_pointer,
             wayland_control,
             wayland_text_stdin,
+            static_lossless,
             wayland_scroll,
             wayland_horizontal_scroll,
             window_position,
@@ -1464,6 +1477,7 @@ fn run(command: Command) -> RemoteResult<()> {
                     wayland_keyboard,
                     wayland_pointer,
                     wayland_control,
+                    static_lossless,
                     wayland_text: if wayland_text_stdin {
                         Some(read_explicit_text(std::io::stdin().lock())?)
                     } else {
@@ -3790,6 +3804,7 @@ mod scroll_copy_cli_tests {
                 allow_wayland_pointer,
                 allow_wayland_control,
                 allow_wayland_text,
+                allow_static_lossless,
                 allow_wayland_scroll,
                 allow_clipboard,
                 ..
@@ -3803,6 +3818,7 @@ mod scroll_copy_cli_tests {
                     && !allow_wayland_pointer
                     && !allow_wayland_control
                     && !allow_wayland_text
+                    && !allow_static_lossless
                     && !allow_wayland_scroll
                     && !allow_clipboard
             );
@@ -4095,6 +4111,69 @@ mod explicit_text_cli_tests {
             let mut a = args.to_vec();
             a.push(extra);
             assert!(Cli::try_parse_from(a).is_err(), "{extra}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod static_lossless_cli_tests {
+    use super::*;
+    #[test]
+    fn capability_requires_explicit_readonly_and_is_not_saved() {
+        assert!(matches!(
+            Cli::try_parse_from(["jwm-remote", "host"]).unwrap().command,
+            Command::Host {
+                allow_static_lossless: false,
+                ..
+            }
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["jwm-remote", "host", "--allow-static-lossless"])
+                .unwrap()
+                .command,
+            Command::Host {
+                allow_static_lossless: true,
+                ..
+            }
+        ));
+        let base = [
+            "jwm-remote",
+            "connect",
+            "host",
+            "--view-only",
+            "--static-lossless",
+        ];
+        assert!(profile_from_command(Cli::try_parse_from(base).unwrap().command).is_err());
+        assert!(
+            Cli::try_parse_from(["jwm-remote", "connect", "host", "--static-lossless"]).is_err()
+        );
+        for flag in [
+            "--wayland-keyboard",
+            "--wayland-pointer",
+            "--wayland-control",
+            "--wayland-text-stdin",
+            "--clipboard",
+            "--grab-input",
+            "--follow-source-size",
+        ] {
+            let mut args = base.to_vec();
+            args.push(flag);
+            assert!(Cli::try_parse_from(args).is_err(), "{flag}");
+        }
+        for flag in [
+            "--allow-input",
+            "--allow-clipboard",
+            "--allow-window-resize",
+            "--allow-wayland-keyboard",
+            "--allow-wayland-pointer",
+            "--allow-wayland-control",
+            "--allow-wayland-text",
+        ] {
+            assert!(
+                Cli::try_parse_from(["jwm-remote", "host", "--allow-static-lossless", flag])
+                    .is_err(),
+                "{flag}"
+            );
         }
     }
 }

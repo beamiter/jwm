@@ -43,6 +43,7 @@ use super::source_wire::MAX_SOURCE_INNER_PAYLOAD_LEN;
 use super::x11_capture::CapturedFrame;
 use image::codecs::jpeg::{JpegDecoder, JpegEncoder};
 use image::{ColorType, DynamicImage, ExtendedColorType, ImageDecoder, Limits, RgbImage};
+use sha2::{Digest, Sha256};
 use std::io::Cursor;
 use std::time::{Duration, Instant};
 
@@ -69,7 +70,8 @@ pub(crate) const DEFAULT_TILE_TOLERANCE: u8 = 4;
 /// Set when every tile is present, so a viewer may (re)initialise its canvas.
 const FLAG_KEYFRAME: u8 = 1 << 0;
 const FLAG_SCROLL_COPY: u8 = 1 << 1;
-const KNOWN_FLAGS: u8 = FLAG_KEYFRAME | FLAG_SCROLL_COPY;
+const FLAG_LOSSLESS: u8 = 1 << 2;
+const KNOWN_FLAGS: u8 = FLAG_KEYFRAME | FLAG_SCROLL_COPY | FLAG_LOSSLESS;
 const SCROLL_HEADER_LEN: usize = 14;
 const MAX_SCROLL_DY: i16 = 64;
 
@@ -93,6 +95,8 @@ fn max_atlas_columns(tile: usize) -> usize {
 pub(crate) enum TileEncodeRequest {
     /// Ordinary frame: send nothing when nothing changed.
     Delta,
+    /// Explicit idle-only exact repair; dynamic captures remain JPEG.
+    LosslessRepair,
     /// Send a frame even with nothing dirty, to keep the session's video
     /// liveness timer fed. An empty tile frame is a few dozen bytes.
     Keepalive,
@@ -116,6 +120,7 @@ pub(crate) struct TilePlan {
 /// Geometry the planner resolved, consumed by the matching encode.
 #[derive(Debug, Clone, Copy)]
 struct PlannedFrame {
+    lossless: bool,
     scroll: Option<ScrollCopy>,
     geometry_epoch: u64,
     keyframe: bool,
@@ -145,11 +150,20 @@ struct DetectedFrame {
 pub(crate) struct EncodeStageTimings {
     pub(crate) atlas_pack: Duration,
     pub(crate) jpeg: Duration,
+    /// Present only for a PNG atlas; `jpeg` is then zero.
+    pub(crate) png: Option<Duration>,
 }
 
 /// Host-side delta encoder holding the host's model of the viewer's canvas.
 #[derive(Debug)]
 pub(crate) struct TileEncoder {
+    lossless_enabled: bool,
+    exact: Vec<bool>,
+    observed: Option<RgbImage>,
+    exact_changed: bool,
+    lossless_rejected: bool,
+    pending_lossless: bool,
+    pending_hash: Option<[u8; 32]>,
     scroll_copy_enabled: bool,
     last_sequence: Option<u64>,
     pending_sequence: Option<u64>,
@@ -193,6 +207,13 @@ impl TileEncoder {
 
     pub(crate) fn with_settings(tile_log2: u8, tolerance: u8) -> Self {
         Self {
+            lossless_enabled: false,
+            exact: Vec::new(),
+            observed: None,
+            exact_changed: false,
+            lossless_rejected: false,
+            pending_lossless: false,
+            pending_hash: None,
             scroll_copy_enabled: false,
             last_sequence: None,
             pending_sequence: None,
@@ -233,6 +254,26 @@ impl TileEncoder {
             self.qualities.clear();
             self.scroll_copy_enabled = enabled;
         }
+    }
+
+    pub(crate) fn set_lossless_enabled(&mut self, enabled: bool) {
+        if self.lossless_enabled != enabled {
+            self.discard();
+            self.exact.clear();
+            self.observed = None;
+            self.lossless_enabled = enabled;
+        }
+    }
+
+    pub(crate) fn has_exact_debt(&self) -> bool {
+        self.lossless_enabled && self.exact.iter().any(|exact| !exact)
+    }
+
+    pub(crate) fn detected_exact_change(&self) -> bool {
+        self.exact_changed
+    }
+    pub(crate) fn lossless_encode_rejected(&self) -> bool {
+        self.lossless_rejected
     }
 
     fn tile(&self) -> usize {
@@ -276,6 +317,8 @@ impl TileEncoder {
     }
 
     fn detect(&mut self, frame: &CapturedFrame, request: TileEncodeRequest) -> RemoteResult<()> {
+        self.pending_lossless = false;
+        self.pending_hash = None;
         self.pending_scroll = None;
         self.pending_sequence = None;
         self.detected = None;
@@ -302,6 +345,35 @@ impl TileEncoder {
         self.dirty.clear();
 
         let keyframe = request == TileEncodeRequest::Keyframe || self.needs_keyframe(frame);
+        self.exact_changed = false;
+        if self.lossless_enabled {
+            if keyframe
+                || self
+                    .observed
+                    .as_ref()
+                    .is_none_or(|old| old.dimensions() != frame.image.dimensions())
+            {
+                self.exact = vec![false; total_tiles as usize];
+                self.exact_changed = true;
+            } else {
+                let mut changed = Vec::new();
+                let mut bits = vec![0; self.bitmap.len()];
+                collect_dirty(
+                    &frame.image,
+                    self.observed.as_ref().unwrap(),
+                    self.grid,
+                    tile,
+                    0,
+                    &mut bits,
+                    &mut changed,
+                );
+                self.exact_changed = !changed.is_empty();
+                for index in changed {
+                    self.exact[index as usize] = false;
+                }
+            }
+            self.observed = Some(frame.image.clone());
+        }
         if keyframe {
             self.bitmap.iter_mut().for_each(|byte| *byte = 0xff);
             trim_bitmap_tail(&mut self.bitmap, total_tiles);
@@ -361,6 +433,9 @@ impl TileEncoder {
                     }
                 }
             }
+        }
+        if scroll.is_some() {
+            self.exact.fill(false);
         }
         self.detected_dirty.clone_from(&self.dirty);
         self.detected = Some(DetectedFrame {
@@ -447,6 +522,25 @@ impl TileEncoder {
             self.dirty.sort_unstable();
         }
 
+        let lossless = self.lossless_enabled
+            && request == TileEncodeRequest::LosslessRepair
+            && !keyframe
+            && !self.exact_changed
+            && scroll.is_none();
+        if lossless {
+            // Single-column packing has no unused cells, so the actual padded
+            // atlas, not merely selected source pixels, is strictly bounded.
+            let limit = (65_536 / (tile * tile)).min(usize::from(MAX_DIMENSION) / tile);
+            let debts: Vec<u8> = self.exact.iter().map(|exact| u8::from(*exact)).collect();
+            let (indices, next) = refinement_tiles(&debts, 1, limit, self.refinement_cursor);
+            self.dirty = indices.into_iter().map(|i| i as u32).collect();
+            self.bitmap.fill(0);
+            for index in &self.dirty {
+                self.bitmap[*index as usize / 8] |= 1 << (*index % 8);
+            }
+            refinement_cursor = Some(next);
+        }
+
         let dirty_tiles = u32::try_from(self.dirty.len())
             .map_err(|_| invalid_data("dirty tile count exceeds protocol range"))?;
         // A full repair carries every pixel anyway; do not charge an unused
@@ -471,7 +565,9 @@ impl TileEncoder {
         let (columns, atlas) = if dirty_tiles == 0 {
             (0, None)
         } else {
-            let columns = if keyframe {
+            let columns = if lossless {
+                1
+            } else if keyframe {
                 grid_w
             } else {
                 atlas_columns(self.dirty.len(), tile)
@@ -490,6 +586,7 @@ impl TileEncoder {
         };
 
         self.planned = Some(PlannedFrame {
+            lossless,
             scroll,
             geometry_epoch,
             keyframe,
@@ -537,6 +634,7 @@ impl TileEncoder {
         mut now: impl FnMut() -> Instant,
     ) -> RemoteResult<()> {
         self.encode_timings = None;
+        self.lossless_rejected = false;
         self.detected = None;
         payload.clear();
         let result = self.encode_inner(payload, sequence, frame, quality, &mut now);
@@ -580,6 +678,7 @@ impl TileEncoder {
         payload.push(self.tile_log2);
         payload.push(
             if planned.keyframe { FLAG_KEYFRAME } else { 0 }
+                | if planned.lossless { FLAG_LOSSLESS } else { 0 }
                 | if planned.scroll.is_some() {
                     FLAG_SCROLL_COPY
                 } else {
@@ -621,26 +720,52 @@ impl TileEncoder {
             let payload_limit = MAX_SOURCE_INNER_PAYLOAD_LEN;
             #[cfg(test)]
             let payload_limit = self.jpeg_payload_limit.unwrap_or(payload_limit);
-            JpegEncoder::new_with_quality(
-                BoundedPayloadWriter::new(payload, payload_limit),
-                quality.clamp(1, 100),
-            )
-            .encode(
-                &self.atlas,
-                u32::from(atlas_width),
-                u32::from(atlas_height),
-                ExtendedColorType::Rgb8,
-            )?;
+            if planned.lossless {
+                match super::png_atlas::encode_rgb8(
+                    u32::from(atlas_width),
+                    u32::from(atlas_height),
+                    &self.atlas,
+                ) {
+                    Ok(encoded) => payload.extend_from_slice(&encoded),
+                    Err(error) => {
+                        self.lossless_rejected = true;
+                        return Err(error.into());
+                    }
+                }
+            } else {
+                JpegEncoder::new_with_quality(
+                    BoundedPayloadWriter::new(payload, payload_limit),
+                    quality.clamp(1, 100),
+                )
+                .encode(
+                    &self.atlas,
+                    u32::from(atlas_width),
+                    u32::from(atlas_height),
+                    ExtendedColorType::Rgb8,
+                )?;
+            }
+            let codec_elapsed = now().saturating_duration_since(jpeg_started);
             self.encode_timings = Some(EncodeStageTimings {
                 atlas_pack: jpeg_started.saturating_duration_since(pack_started),
-                jpeg: now().saturating_duration_since(jpeg_started),
+                jpeg: if planned.lossless {
+                    Duration::ZERO
+                } else {
+                    codec_elapsed
+                },
+                png: planned.lossless.then_some(codec_elapsed),
             });
         }
 
+        self.pending_lossless = planned.lossless;
+        self.pending_hash = planned.lossless.then(|| capture_digest(frame));
         self.pending = true;
         self.pending_sequence = Some(sequence);
         self.pending_scroll = planned.scroll;
-        self.pending_quality = quality.clamp(1, 100);
+        self.pending_quality = if planned.lossless {
+            100
+        } else {
+            quality.clamp(1, 100)
+        };
         self.pending_refinement_cursor = planned.refinement_cursor;
         self.planned = None;
         Ok(())
@@ -652,6 +777,18 @@ impl TileEncoder {
     /// touches a few percent of the reference instead of cloning it.
     pub(crate) fn commit(&mut self, frame: &CapturedFrame) {
         if !self.pending {
+            return;
+        }
+        if self
+            .pending_hash
+            .is_some_and(|hash| hash != capture_digest(frame))
+        {
+            // Caller violated the immutable planned-capture contract. The
+            // already-sent record cannot be rolled back: force recovery, never
+            // claim current pixels exact or adopt them as the sent reference.
+            self.discard();
+            self.reference = None;
+            self.exact.fill(false);
             return;
         }
         self.pending = false;
@@ -670,6 +807,12 @@ impl TileEncoder {
         let tile = self.tile();
         let (grid_w, grid_h) = self.grid;
         self.qualities.resize(grid_w * grid_h, 0);
+        if self.lossless_enabled {
+            self.exact.resize(grid_w * grid_h, false);
+            for index in &self.dirty {
+                self.exact[*index as usize] = self.pending_lossless;
+            }
+        }
         for index in &self.dirty {
             self.qualities[*index as usize] = self.pending_quality;
         }
@@ -698,6 +841,8 @@ impl TileEncoder {
 
     /// Drop an encoded-but-unsent frame without advancing the reference.
     pub(crate) fn discard(&mut self) {
+        self.pending_lossless = false;
+        self.pending_hash = None;
         self.pending_scroll = None;
         self.pending_sequence = None;
         self.detected = None;
@@ -713,6 +858,19 @@ impl TileEncoder {
     pub(crate) fn reference(&self) -> Option<&RgbImage> {
         self.reference.as_ref()
     }
+}
+
+// Bind the pending repair to the complete immutable capture identity, not
+// just an equal byte vector under a changed geometry/source interpretation.
+fn capture_digest(frame: &CapturedFrame) -> [u8; 32] {
+    let mut hash = Sha256::new();
+    hash.update(frame.geometry_epoch.to_be_bytes());
+    hash.update(frame.source_width.to_be_bytes());
+    hash.update(frame.source_height.to_be_bytes());
+    hash.update(frame.image.width().to_be_bytes());
+    hash.update(frame.image.height().to_be_bytes());
+    hash.update(frame.image.as_raw());
+    hash.finalize().into()
 }
 
 /// Bounded round-robin selection avoids starving the tail while quality rises.
@@ -834,6 +992,9 @@ impl TileEncoder {
 /// Viewer-side canvas that reassembles dirty tiles into whole frames.
 #[derive(Debug, Default)]
 pub(crate) struct TileDecoder {
+    lossless_enabled: bool,
+    #[cfg(test)]
+    last_lossless: bool,
     scroll_copy_enabled: bool,
     tile_log2: Option<u8>,
     frame_limits: super::messages::FrameLimits,
@@ -872,6 +1033,15 @@ impl TileDecoder {
         }
     }
 
+    pub(crate) fn set_lossless_enabled(&mut self, enabled: bool) {
+        self.lossless_enabled = enabled;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn last_frame_was_lossless(&self) -> bool {
+        self.last_lossless
+    }
+
     /// Decode one authenticated tile-frame payload into a complete frame.
     pub(crate) fn decode_into(
         &mut self,
@@ -879,6 +1049,15 @@ impl TileDecoder {
         pool: SharedDecodeBufferPool,
     ) -> RemoteResult<RecyclableDecodedFrame> {
         let header = TileHeader::parse(payload)?;
+        if header.lossless
+            && (!self.lossless_enabled
+                || self.tile_log2 != Some(header.tile_log2)
+                || self
+                    .last_sequence
+                    .is_none_or(|last| header.sequence <= last))
+        {
+            return Err(invalid_data("lossless atlas was not negotiated").into());
+        }
         self.frame_limits
             .validate_dimensions(header.encoded_width, header.encoded_height)?;
         if header.geometry_epoch < self.geometry_epoch {
@@ -978,13 +1157,21 @@ impl TileDecoder {
             if payload.len() <= body_start {
                 return Err(invalid_data("tile frame is missing its atlas body").into());
             }
-            decode_atlas(
-                &mut self.atlas,
-                &payload[body_start..],
-                width,
-                height,
-                payload.len(),
-            )?;
+            if header.lossless {
+                self.atlas = super::png_atlas::decode_rgb8(
+                    &payload[body_start..],
+                    u32::from(width),
+                    u32::from(height),
+                )?;
+            } else {
+                decode_atlas(
+                    &mut self.atlas,
+                    &payload[body_start..],
+                    width,
+                    height,
+                    payload.len(),
+                )?;
+            }
             Some((tile, columns, width))
         } else {
             if header.scroll.is_some() || header.atlas_columns != 0 || payload.len() != body_start {
@@ -1051,6 +1238,10 @@ impl TileDecoder {
         );
         self.snapshot = Some(snapshot.clone());
         self.last_sequence = Some(header.sequence);
+        #[cfg(test)]
+        {
+            self.last_lossless = header.lossless;
+        }
         Ok(RecyclableDecodedFrame::from_tiles(
             header.sequence,
             header.source_width,
@@ -1180,6 +1371,7 @@ fn decode_atlas(
 
 #[derive(Debug, Clone, Copy)]
 struct TileHeader {
+    lossless: bool,
     scroll: Option<ScrollCopy>,
     geometry_epoch: u64,
     sequence: u64,
@@ -1226,6 +1418,10 @@ impl TileHeader {
         if flags & !KNOWN_FLAGS != 0 {
             return Err(invalid_data("tile frame sets unknown flags").into());
         }
+        let lossless = flags & FLAG_LOSSLESS != 0;
+        if lossless && (flags & (FLAG_KEYFRAME | FLAG_SCROLL_COPY) != 0 || dirty_tiles == 0) {
+            return Err(invalid_data("lossless atlas requires a nonempty plain delta").into());
+        }
         let scroll = if flags & FLAG_SCROLL_COPY != 0 {
             if flags & FLAG_KEYFRAME != 0 || payload.len() < TILE_HEADER_LEN + SCROLL_HEADER_LEN {
                 return Err(invalid_data("invalid scroll copy header").into());
@@ -1263,6 +1459,7 @@ impl TileHeader {
             return Err(invalid_data("tile frame declares more dirty tiles than exist").into());
         }
         Ok(Self {
+            lossless,
             scroll,
             geometry_epoch,
             sequence,
@@ -1668,6 +1865,254 @@ mod tests {
         frame(width, height, |_, _| Rgb([value, value, value]))
     }
 
+    #[test]
+    fn lossless_repair_converges_exactly_in_bounded_fair_batches() {
+        let source = busy(513, 257);
+        let mut encoder = TileEncoder::new();
+        let mut decoder = TileDecoder::new();
+        encoder.set_lossless_enabled(true);
+        decoder.set_lossless_enabled(true);
+        let mut payload = Vec::new();
+        encode(
+            &mut encoder,
+            &mut payload,
+            1,
+            &source,
+            100,
+            TileEncodeRequest::Keyframe,
+        );
+        assert_eq!(payload[17] & FLAG_LOSSLESS, 0);
+        decoder
+            .decode_into(&payload, new_decode_buffer_pool())
+            .unwrap();
+        encoder.commit(&source);
+        assert!(!encoder.has_quality_debt(100));
+        assert!(encoder.has_exact_debt());
+        let mut sequence = 2;
+        while encoder.has_exact_debt() {
+            assert!(sequence < 20);
+            encode(
+                &mut encoder,
+                &mut payload,
+                sequence,
+                &source,
+                85,
+                TileEncodeRequest::LosslessRepair,
+            );
+            let timings = encoder.encode_timings().unwrap();
+            assert_eq!(timings.jpeg, Duration::ZERO);
+            assert!(timings.png.is_some());
+            let header = TileHeader::parse(&payload).unwrap();
+            assert!(header.lossless && !header.keyframe && header.scroll.is_none());
+            let edge = 1usize << header.tile_log2;
+            let pixels = usize::from(header.atlas_columns)
+                * edge
+                * (header.dirty_tiles as usize).div_ceil(usize::from(header.atlas_columns))
+                * edge;
+            assert!(pixels <= 65_536);
+            let decoded = decoder
+                .decode_into(&payload, new_decode_buffer_pool())
+                .unwrap();
+            encoder.commit(&source);
+            if !encoder.has_exact_debt() {
+                assert_eq!(decoded.image(), &source.image);
+            }
+            sequence += 1;
+        }
+        assert!(
+            !encoder
+                .plan(&source, TileEncodeRequest::LosslessRepair)
+                .unwrap()
+                .emit
+        );
+    }
+
+    #[test]
+    fn lossless_debt_survives_discard_and_tolerance_changes_and_resets() {
+        let mut source = busy(33, 19);
+        let mut encoder = TileEncoder::new();
+        encoder.set_lossless_enabled(true);
+        let mut payload = Vec::new();
+        encode(
+            &mut encoder,
+            &mut payload,
+            1,
+            &source,
+            100,
+            TileEncodeRequest::Keyframe,
+        );
+        encoder.commit(&source);
+        encode(
+            &mut encoder,
+            &mut payload,
+            2,
+            &source,
+            100,
+            TileEncodeRequest::LosslessRepair,
+        );
+        encoder.discard(); // Includes a caller's failed/partial write path.
+        assert!(encoder.has_exact_debt());
+        encode(
+            &mut encoder,
+            &mut payload,
+            3,
+            &source,
+            100,
+            TileEncodeRequest::LosslessRepair,
+        );
+        encoder.commit(&source);
+        assert!(!encoder.has_exact_debt());
+        source.image.get_pixel_mut(0, 0).0[0] ^= 1;
+        assert!(
+            !encoder
+                .plan(&source, TileEncodeRequest::Delta)
+                .unwrap()
+                .emit
+        );
+        assert!(encoder.detected_exact_change());
+        assert!(encoder.has_exact_debt());
+        encode(
+            &mut encoder,
+            &mut payload,
+            4,
+            &source,
+            85,
+            TileEncodeRequest::LosslessRepair,
+        );
+        assert!(!encoder.detected_exact_change());
+        assert_ne!(payload[17] & FLAG_LOSSLESS, 0);
+        source.image.get_pixel_mut(0, 0).0[0] ^= 1;
+        encoder.commit(&source); // Changed immutable input cannot discharge debt.
+        assert!(encoder.has_exact_debt());
+        assert!(
+            encoder
+                .plan(&source, TileEncodeRequest::Delta)
+                .unwrap()
+                .keyframe
+        );
+        source.geometry_epoch += 1;
+        assert!(
+            encoder
+                .plan(&source, TileEncodeRequest::LosslessRepair)
+                .unwrap()
+                .keyframe
+        );
+    }
+
+    #[test]
+    fn lossless_source_geometry_scroll_and_encode_failure_keep_debt() {
+        let mut source = busy(96, 160);
+        let mut encoder = TileEncoder::new();
+        encoder.set_lossless_enabled(true);
+        encoder.set_scroll_copy_enabled(true);
+        let mut payload = Vec::new();
+        encode(
+            &mut encoder,
+            &mut payload,
+            1,
+            &source,
+            100,
+            TileEncodeRequest::Keyframe,
+        );
+        encoder.commit(&source);
+        encode(
+            &mut encoder,
+            &mut payload,
+            2,
+            &source,
+            100,
+            TileEncodeRequest::LosslessRepair,
+        );
+        encoder.commit(&source);
+        assert!(!encoder.has_exact_debt());
+        let old = source.image.clone();
+        for y in 0..153 {
+            for x in 0..96 {
+                source.image.put_pixel(x, y, *old.get_pixel(x, y + 7));
+            }
+        }
+        encoder.plan(&source, TileEncodeRequest::Delta).unwrap();
+        assert!(encoder.detected.unwrap().scroll.is_some());
+        assert!(encoder.has_exact_debt());
+        encoder.discard();
+        source.geometry_epoch += 1;
+        assert!(
+            encoder
+                .plan(&source, TileEncodeRequest::LosslessRepair)
+                .unwrap()
+                .keyframe
+        );
+        encoder.encode_into(&mut payload, 3, &source, 100).unwrap();
+        encoder.commit(&source);
+        encoder
+            .plan(&source, TileEncodeRequest::LosslessRepair)
+            .unwrap();
+        let epoch = source.geometry_epoch;
+        source.geometry_epoch += 1;
+        assert!(encoder.encode_into(&mut payload, 4, &source, 100).is_err());
+        assert!(payload.is_empty());
+        assert!(encoder.has_exact_debt());
+        source.geometry_epoch = epoch;
+        source.source_width += 1;
+        assert!(
+            encoder
+                .plan(&source, TileEncodeRequest::LosslessRepair)
+                .unwrap()
+                .keyframe
+        );
+        assert!(encoder.exact.iter().all(|exact| !exact));
+    }
+
+    #[test]
+    fn lossless_is_opt_in_and_rejected_records_do_not_mutate_canvas() {
+        let source = busy(33, 19);
+        let mut encoder = TileEncoder::new();
+        let mut decoder = TileDecoder::new();
+        let mut payload = Vec::new();
+        encode(
+            &mut encoder,
+            &mut payload,
+            1,
+            &source,
+            85,
+            TileEncodeRequest::LosslessRepair,
+        );
+        assert_eq!(payload[17] & FLAG_LOSSLESS, 0);
+        encoder.commit(&source);
+        decoder
+            .decode_into(&payload, new_decode_buffer_pool())
+            .unwrap();
+        encoder.set_lossless_enabled(true);
+        encoder.plan(&source, TileEncodeRequest::Delta).unwrap();
+        encode(
+            &mut encoder,
+            &mut payload,
+            2,
+            &source,
+            85,
+            TileEncodeRequest::LosslessRepair,
+        );
+        assert!(
+            decoder
+                .decode_into(&payload, new_decode_buffer_pool())
+                .is_err()
+        );
+        assert_eq!(decoder.last_sequence, Some(1));
+        decoder.set_lossless_enabled(true);
+        let valid = payload.clone();
+        payload[17] |= FLAG_KEYFRAME;
+        assert!(
+            decoder
+                .decode_into(&payload, new_decode_buffer_pool())
+                .is_err()
+        );
+        assert_eq!(decoder.last_sequence, Some(1));
+        decoder
+            .decode_into(&valid, new_decode_buffer_pool())
+            .unwrap();
+        assert_eq!(decoder.last_sequence, Some(2));
+    }
+
     /// Deterministic high-frequency content. A flat fill compresses so well
     /// that it cannot show what delta coding saves on a real desktop.
     fn busy_shade(x: u32, y: u32) -> u8 {
@@ -1756,6 +2201,7 @@ mod tests {
             Some(EncodeStageTimings {
                 atlas_pack: Duration::from_millis(3),
                 jpeg: Duration::from_millis(7),
+                png: None,
             })
         );
         encoder.commit(&captured);
@@ -2760,3 +3206,7 @@ mod atlas_envelope_tests {
         assert_eq!(atlas.len(), 16 * 16 * 3);
     }
 }
+
+#[cfg(test)]
+#[path = "tile_lossless_baseline.rs"]
+mod lossless_baseline;

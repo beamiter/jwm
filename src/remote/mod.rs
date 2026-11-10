@@ -79,3 +79,5 @@ pub mod viewer_backend;
 mod wayland_viewer;
 
 mod follow_source_size;
+
+mod png_atlas;

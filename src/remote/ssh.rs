@@ -155,6 +155,7 @@ pub fn run_ssh(options: SshOptions) -> RemoteResult<()> {
                 wayland_pointer: false,
                 wayland_control: false,
                 wayland_text: None,
+                static_lossless: false,
                 wayland_scroll: false,
                 wayland_horizontal_scroll: false,
                 resize_source: None,

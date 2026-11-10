@@ -514,6 +514,7 @@ pub(super) fn with_proof_delta<T>(
 /// must remain strictly inside the viewer's shared video idle timeout.
 struct FrameSender {
     scroll_copy: bool,
+    static_lossless: bool,
     encoder: TileEncoder,
     committed_at: Option<Instant>,
     last_content_change: Option<Instant>,
@@ -528,11 +529,18 @@ impl FrameSender {
         Self::with_scroll_copy(false)
     }
 
+    #[cfg(test)]
     fn with_scroll_copy(enabled: bool) -> Self {
+        Self::with_codecs(enabled, false)
+    }
+
+    fn with_codecs(enabled: bool, static_lossless: bool) -> Self {
         let mut encoder = TileEncoder::new();
         encoder.set_scroll_copy_enabled(enabled);
+        encoder.set_lossless_enabled(static_lossless);
         Self {
             scroll_copy: enabled,
+            static_lossless,
             encoder,
             committed_at: None,
             last_content_change: None,
@@ -555,7 +563,7 @@ impl FrameSender {
         legacy_keyframe: bool,
     ) -> RemoteResult<TilePlan> {
         if mandatory && legacy_keyframe {
-            *self = Self::with_scroll_copy(self.scroll_copy);
+            *self = Self::with_codecs(self.scroll_copy, self.static_lossless);
         }
         let request = match self.committed_at {
             None => TileEncodeRequest::Keyframe,
@@ -569,7 +577,31 @@ impl FrameSender {
         };
         self.pending_refinement = false;
         self.pending_refinement_at = None;
-        let plan = self.encoder.plan(frame, request)?;
+        if self.static_lossless && mandatory {
+            return Err(
+                invalid_data("lossless repairs cannot be used as native input proofs").into(),
+            );
+        }
+        let mut plan = self.encoder.plan(frame, request)?;
+        if self.static_lossless {
+            if self.encoder.detected_exact_change() {
+                self.last_content_change = Some(now);
+                self.last_refinement = None;
+            }
+            let stable = self
+                .last_content_change
+                .is_some_and(|at| now.saturating_duration_since(at) >= STATIC_REFINEMENT_INTERVAL);
+            let retry = self
+                .last_refinement
+                .is_none_or(|at| now.saturating_duration_since(at) >= STATIC_REFINEMENT_INTERVAL);
+            if !plan.keyframe && stable && retry && self.encoder.has_exact_debt() {
+                plan = self
+                    .encoder
+                    .plan(frame, TileEncodeRequest::LosslessRepair)?;
+                self.pending_refinement_at = Some(now);
+            }
+            return Ok(plan);
+        }
         if plan.dirty_tiles > 0 {
             // Anchor the first repair deadline once. Repeated local damage
             // before the first repair must not postpone it indefinitely.
@@ -708,6 +740,12 @@ struct HostTelemetryWindow {
     atlas_encoded: u64,
     atlas_pack_elapsed: Duration,
     jpeg_elapsed: Duration,
+    jpeg_encoded: u64,
+    png_encoded: u64,
+    png_elapsed: Duration,
+    codec_elapsed: Duration,
+    png_samples: StageSamples,
+    codec_samples: StageSamples,
     atlas_pack_samples: StageSamples,
     jpeg_samples: StageSamples,
     writer_wait_samples: StageSamples,
@@ -865,9 +903,20 @@ impl HostTelemetry {
         self.update(|window| {
             window.atlas_encoded = window.atlas_encoded.saturating_add(1);
             window.atlas_pack_elapsed = window.atlas_pack_elapsed.saturating_add(stages.atlas_pack);
-            window.jpeg_elapsed = window.jpeg_elapsed.saturating_add(stages.jpeg);
             window.atlas_pack_samples.record(stages.atlas_pack);
-            window.jpeg_samples.record(stages.jpeg);
+            let codec = if let Some(png) = stages.png {
+                window.png_encoded = window.png_encoded.saturating_add(1);
+                window.png_elapsed = window.png_elapsed.saturating_add(png);
+                window.png_samples.record(png);
+                png
+            } else {
+                window.jpeg_encoded = window.jpeg_encoded.saturating_add(1);
+                window.jpeg_elapsed = window.jpeg_elapsed.saturating_add(stages.jpeg);
+                window.jpeg_samples.record(stages.jpeg);
+                stages.jpeg
+            };
+            window.codec_elapsed = window.codec_elapsed.saturating_add(codec);
+            window.codec_samples.record(codec);
         });
     }
 
@@ -1756,6 +1805,7 @@ pub struct HostOptions {
     pub allow_wayland_horizontal_scroll: bool,
     /// Experimental video codec optimization, independent of input grants.
     pub scroll_copy: bool,
+    pub allow_static_lossless: bool,
     pub allow_clipboard: bool,
     pub clipboard_mode: ClipboardMode,
     pub clipboard_direction: ClipboardDirection,
@@ -1936,6 +1986,7 @@ struct SourceControl {
     control_revoke: AtomicBool,
     control_queue: Mutex<VecDeque<ControlCommand>>,
     scroll_copy: AtomicBool,
+    static_lossless: AtomicBool,
     pointer_enabled: AtomicBool,
     scroll_enabled: AtomicBool,
     horizontal_scroll_enabled: AtomicBool,
@@ -2013,6 +2064,7 @@ impl SourceControl {
             control_revoke: AtomicBool::new(false),
             control_queue: Mutex::new(VecDeque::new()),
             scroll_copy: AtomicBool::new(false),
+            static_lossless: AtomicBool::new(false),
             pointer_enabled: AtomicBool::new(false),
             scroll_enabled: AtomicBool::new(false),
             horizontal_scroll_enabled: AtomicBool::new(false),
@@ -2103,6 +2155,20 @@ fn listener_security_notice(address: IpAddr) -> Option<&'static str> {
 }
 
 fn validate_window_policy(options: &HostOptions) -> RemoteResult<()> {
+    if options.allow_static_lossless
+        && (options.allow_input
+            || options.allow_clipboard
+            || options.allow_window_resize
+            || options.allow_wayland_keyboard
+            || options.allow_wayland_pointer
+            || options.allow_wayland_control
+            || options.allow_wayland_text
+            || options.allow_wayland_scroll
+            || options.allow_wayland_horizontal_scroll)
+    {
+        return Err(invalid_data("static lossless requires a read-only host without input, text, clipboard or remote resize permissions").into());
+    }
+
     if options.allow_wayland_text
         && (!options.wayland_select
             || !options.once
@@ -2695,6 +2761,17 @@ fn serve_authenticated(
     let mut negotiated_stream = hello.stream;
     negotiated_stream.frame_limits = frame_limits;
     negotiated_stream.scroll_copy = hello.stream.negotiate_scroll_copy(options.scroll_copy);
+    negotiated_stream.static_lossless =
+        hello.stream.static_lossless && options.allow_static_lossless;
+    if hello.stream.static_lossless
+        && (hello.request_input || hello.request_clipboard || hello.request_clipboard_files)
+    {
+        return Err(invalid_data(
+            "static lossless cannot combine legacy input or clipboard requests",
+        )
+        .into());
+    }
+
     negotiated_stream.window_resize = hello.stream.window_resize && options.allow_window_resize;
     negotiated_stream.wayland_keyboard =
         hello.stream.wayland_keyboard && options.allow_wayland_keyboard;
@@ -2924,6 +3001,9 @@ fn serve_authenticated(
             negotiated_stream.wayland_horizontal_scroll,
             Ordering::Release,
         );
+        sources
+            .static_lossless
+            .store(negotiated_stream.static_lossless, Ordering::Release);
         sources
             .scroll_copy
             .store(negotiated_stream.scroll_copy, Ordering::Release);
@@ -4204,8 +4284,9 @@ fn send_frames_scoped<W: std::io::Write + SetWriteTimeout>(
     jpeg_quality: &JpegQualityController,
     sources: Option<&SourceControl>,
 ) -> RemoteResult<()> {
-    let mut sender = FrameSender::with_scroll_copy(
+    let mut sender = FrameSender::with_codecs(
         sources.is_some_and(|source| source.scroll_copy.load(Ordering::Acquire)),
+        sources.is_some_and(|source| source.static_lossless.load(Ordering::Acquire)),
     );
     send_frames_with_encoder_scoped(
         mailbox,
@@ -4250,7 +4331,7 @@ fn send_frames_with_encoder_scoped<W: std::io::Write + SetWriteTimeout>(
                 continue;
             }
             if source_epoch != Some(pending.source_version.epoch) {
-                *sender = FrameSender::with_scroll_copy(sender.scroll_copy);
+                *sender = FrameSender::with_codecs(sender.scroll_copy, sender.static_lossless);
                 source_epoch = Some(pending.source_version.epoch);
             }
         }
@@ -4271,7 +4352,7 @@ fn send_frames_with_encoder_scoped<W: std::io::Write + SetWriteTimeout>(
                 legacy_keyframe,
             )
             .map_err(LocalRuntimeFailure::encoding)?;
-        if !plan.keyframe && sender.refinement_due(planned_at) {
+        if !sender.static_lossless && !plan.keyframe && sender.refinement_due(planned_at) {
             let current = jpeg_quality.current_quality();
             if sender.encoder.has_quality_debt(current) {
                 plan = sender
@@ -4316,10 +4397,18 @@ fn send_frames_with_encoder_scoped<W: std::io::Write + SetWriteTimeout>(
             continue;
         }
         let encode_started = Instant::now();
-        sender
-            .encoder
-            .encode_into(&mut payload, sequence, &pending.frame, quality.quality)
-            .map_err(LocalRuntimeFailure::encoding)?;
+        if let Err(error) =
+            sender
+                .encoder
+                .encode_into(&mut payload, sequence, &pending.frame, quality.quality)
+        {
+            if sender.static_lossless && sender.encoder.lossless_encode_rejected() {
+                sender.discard();
+                sender.last_refinement = Some(Instant::now());
+                continue;
+            }
+            return Err(LocalRuntimeFailure::encoding(error));
+        }
         telemetry.record_encoded(encode_started.elapsed(), plan);
         if let Some(stages) = sender.encoder.encode_timings() {
             telemetry.record_encode_stages(stages);
@@ -4774,6 +4863,8 @@ fn host_telemetry_json(snapshot: HostTelemetrySnapshot, outstanding: u64) -> ser
         "scheduled": w.scheduled, "captured": w.captured, "sent": w.sent, "bytes": w.bytes,
         "replaced": w.replaced, "unchanged_suppressed": w.unchanged_suppressed,
         "dirty_tiles": w.dirty_tiles, "total_tiles": w.total_tiles,
+        "jpeg_atlases": w.jpeg_encoded, "png_atlases": w.png_encoded,
+        "legacy_stage_aliases": {"atlas_pack_and_jpeg_ms": "atlas_pack_and_codec_ms; historical name includes all codecs and empty-frame encode work"},
         "drawn_acks": w.drawn_acks, "viewer_superseded": w.viewer_superseded,
         "outstanding": outstanding, "max_outstanding": w.max_outstanding,
         "quantile_policy": "nearest-rank, most recent 128 observations per stage per window",
@@ -4783,7 +4874,10 @@ fn host_telemetry_json(snapshot: HostTelemetrySnapshot, outstanding: u64) -> ser
             "credit_wait_ms": {"mean": average_millis(w.credit_wait_elapsed, w.dequeued), "quantiles": w.credit_samples.json()},
             "dirty_scan_ms": {"mean": average_millis(w.dirty_scan_elapsed, w.dirty_scans), "quantiles": w.dirty_scan_samples.json()},
             "atlas_pack_ms": {"mean": average_millis(w.atlas_pack_elapsed, w.atlas_encoded), "quantiles": w.atlas_pack_samples.json()},
-            "jpeg_ms": {"mean": average_millis(w.jpeg_elapsed, w.atlas_encoded), "quantiles": w.jpeg_samples.json()},
+            "jpeg_ms": {"mean": average_millis(w.jpeg_elapsed, w.jpeg_encoded), "quantiles": w.jpeg_samples.json()},
+            "png_ms": {"mean": average_millis(w.png_elapsed, w.png_encoded), "quantiles": w.png_samples.json()},
+            "codec_ms": {"mean": average_millis(w.codec_elapsed, w.atlas_encoded), "quantiles": w.codec_samples.json()},
+            "atlas_pack_and_codec_ms": {"mean": average_millis(w.encode_elapsed, w.encoded), "quantiles": w.encode_samples.json()},
             "atlas_pack_and_jpeg_ms": {"mean": average_millis(w.encode_elapsed, w.encoded), "quantiles": w.encode_samples.json()},
             "writer_wait_ms": {"mean": average_millis(w.writer_wait_elapsed, w.sent), "quantiles": w.writer_wait_samples.json()},
             "socket_write_ms": {"mean": average_millis(w.socket_write_elapsed, w.sent), "quantiles": w.socket_write_samples.json()},
@@ -5430,6 +5524,60 @@ fn permission_denied(message: impl Into<String>) -> io::Error {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn static_lossless_requires_two_seconds_exact_stability_and_committed_repair() {
+        let at = Instant::now();
+        let mut frame = proof_test_frame();
+        let mut sender = FrameSender::with_codecs(false, true);
+        let mut decoder = TileDecoder::new();
+        decoder.set_lossless_enabled(true);
+        let pool = super::super::frame::new_decode_buffer_pool();
+        let mut bytes = Vec::new();
+        sender.plan_at(&frame, at).unwrap();
+        sender
+            .encoder
+            .encode_into(&mut bytes, 0, &frame, 70)
+            .unwrap();
+        decoder.decode_into(&bytes, Arc::clone(&pool)).unwrap();
+        assert!(!decoder.last_frame_was_lossless());
+        sender.commit_at(&frame, at);
+        assert!(sender.encoder.has_exact_debt());
+        frame.image.as_mut()[0] += 1;
+        sender.plan_at(&frame, at + Duration::from_secs(1)).unwrap();
+        assert_eq!(
+            sender.last_content_change,
+            Some(at + Duration::from_secs(1))
+        );
+        sender
+            .plan_at(&frame, at + Duration::from_millis(2999))
+            .unwrap();
+        assert!(sender.pending_refinement_at.is_none());
+        sender.plan_at(&frame, at + Duration::from_secs(3)).unwrap();
+        assert!(sender.pending_refinement_at.is_some());
+        sender
+            .encoder
+            .encode_into(&mut bytes, 1, &frame, 70)
+            .unwrap();
+        assert!(sender.encoder.has_exact_debt());
+        sender.discard();
+        assert!(sender.encoder.has_exact_debt());
+        sender.plan_at(&frame, at + Duration::from_secs(3)).unwrap();
+        sender
+            .encoder
+            .encode_into(&mut bytes, 1, &frame, 70)
+            .unwrap();
+        let repaired = decoder.decode_into(&bytes, pool).unwrap();
+        assert!(decoder.last_frame_was_lossless());
+        assert_eq!(repaired.image(), &frame.image);
+        sender.commit_at(&frame, at + Duration::from_secs(3));
+        assert!(!sender.encoder.has_exact_debt());
+        assert!(
+            sender
+                .plan_record_at(&frame, at + Duration::from_secs(4), true, false)
+                .is_err()
+        );
+    }
+
     fn proof_test_frame() -> CapturedFrame {
         CapturedFrame {
             geometry_epoch: 1,
@@ -5552,7 +5700,7 @@ mod tests {
                 .unwrap()
                 .keyframe
         );
-        sender = FrameSender::with_scroll_copy(sender.scroll_copy); // source-switch reset
+        sender = FrameSender::with_codecs(sender.scroll_copy, sender.static_lossless); // source-switch reset
         assert!(
             sender
                 .plan_record_at(&source, now, true, false)
@@ -6637,6 +6785,7 @@ mod tests {
             allow_wayland_pointer: false,
             allow_wayland_control: false,
             allow_wayland_text: false,
+            allow_static_lossless: false,
             allow_wayland_scroll: false,
             allow_wayland_horizontal_scroll: false,
             scroll_copy: false,
@@ -8560,7 +8709,7 @@ mod tests {
             // preserving immutable copy permission. Native proofs do not reset.
             for reset in 0..3 {
                 if reset != 0 {
-                    sender = FrameSender::with_scroll_copy(sender.scroll_copy);
+                    sender = FrameSender::with_codecs(sender.scroll_copy, sender.static_lossless);
                 }
                 for (step, offset) in [14u32, 21, 14].into_iter().enumerate() {
                     let frame = CapturedFrame {
@@ -9322,6 +9471,7 @@ mod tests {
             allow_wayland_pointer: false,
             allow_wayland_control: false,
             allow_wayland_text: false,
+            allow_static_lossless: false,
             allow_wayland_scroll: false,
             allow_wayland_horizontal_scroll: false,
             scroll_copy: false,
@@ -10212,6 +10362,46 @@ mod tests {
     }
 
     #[test]
+    fn png_stage_samples_do_not_pollute_jpeg_means_or_quantiles() {
+        let base = Instant::now();
+        let telemetry = HostTelemetry::new_at(base);
+        telemetry.record_encode_stages(super::super::tile::EncodeStageTimings {
+            atlas_pack: Duration::from_millis(1),
+            jpeg: Duration::from_millis(4),
+            png: None,
+        });
+        telemetry.record_encode_stages(super::super::tile::EncodeStageTimings {
+            atlas_pack: Duration::from_millis(2),
+            jpeg: Duration::ZERO,
+            png: Some(Duration::from_millis(12)),
+        });
+        let snapshot = telemetry.take_due_at(base + TELEMETRY_INTERVAL).unwrap();
+        let json = host_telemetry_json(snapshot, 0);
+        assert_eq!(json["jpeg_atlases"], 1);
+        assert_eq!(json["png_atlases"], 1);
+        assert_eq!(json["stages"]["jpeg_ms"]["mean"], 4.0);
+        assert_eq!(json["stages"]["jpeg_ms"]["quantiles"]["p99_ms"], 4.0);
+        assert_eq!(json["stages"]["png_ms"]["mean"], 12.0);
+        assert_eq!(json["stages"]["codec_ms"]["mean"], 8.0);
+        assert_eq!(json["stages"]["atlas_pack_ms"]["mean"], 1.5);
+        telemetry.record_encode_stages(super::super::tile::EncodeStageTimings {
+            atlas_pack: Duration::ZERO,
+            jpeg: Duration::ZERO,
+            png: Some(Duration::from_millis(5)),
+        });
+        let only_png = host_telemetry_json(
+            telemetry
+                .take_due_at(base + TELEMETRY_INTERVAL * 2)
+                .unwrap(),
+            0,
+        );
+        assert_eq!(only_png["jpeg_atlases"], 0);
+        assert_eq!(only_png["png_atlases"], 1);
+        assert_eq!(only_png["stages"]["jpeg_ms"]["mean"], 0.0);
+        assert_eq!(only_png["stages"]["png_ms"]["mean"], 5.0);
+    }
+
+    #[test]
     fn telemetry_json_reports_distinct_pipeline_stages_and_resets_samples() {
         let base = Instant::now();
         let telemetry = HostTelemetry::new_at(base);
@@ -10223,6 +10413,7 @@ mod tests {
         telemetry.record_encode_stages(super::super::tile::EncodeStageTimings {
             atlas_pack: Duration::from_millis(2),
             jpeg: Duration::from_millis(4),
+            png: None,
         });
         telemetry.record_sent(100, Duration::from_millis(2), Duration::from_millis(3));
         let snapshot = telemetry.take_due_at(base + TELEMETRY_INTERVAL).unwrap();
