@@ -63,3 +63,22 @@ execution environment. Passing those tests will not establish physical DRM,
 two-machine performance or arbitrary toolkit compatibility. A subsequent
 GTK/Qt integration must actually bind the isolated seat and open/select a real
 menu, with no synthetic action callback or local-seat fallback.
+
+## Dynamic global filtering prerequisite
+
+The first native CI candidate passed the three cross-lease/export cases but all
+12 main fixtures stopped at the private-seat visibility precondition. The
+system backend called `wl_global_create` before registering the resulting global,
+so synchronous registry advertisements treated it as an unknown foreign global
+and bypassed its visibility callback. The separate bind check was still present;
+this result does not establish unauthorized input delivery.
+
+The candidate now includes a documented local patch to the same official
+`wayland-backend` 0.3.17 release. It identifies only the exact in-progress Rust
+global by display/state, type and userdata identity, preserves genuinely foreign
+global handling, and guards lifecycle operations during creation/destruction.
+Callback-owned data is cloned before reentrant code runs. An isolated harness
+executes three production FFI-free guard tests; a separate real owned-display
+regression checks callback reentrancy and registered handler retrieval in CI.
+The registry visibility assertions remain strict. These fixes still require
+successful real CI before the native foundation is considered validated.

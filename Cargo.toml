@@ -26,8 +26,10 @@ members = [
 ]
 exclude = [
     "tests/glib_backport",
+    "tests/wayland_backend_pending",
     "vendor/glib",
     "vendor/smithay",
+    "vendor/wayland-backend",
     # Every bar package (and its vendored/src-tauri crates): exclude must name
     # exact package dirs — globs only work in `members`.
     "bars/dioxus_bar",
@@ -268,3 +270,7 @@ strip = "none"
 # local touch cancellation correctness patch; see vendor/smithay/JWM_BACKPORT.md.
 [patch."https://github.com/Smithay/smithay.git"]
 smithay = { path = "vendor/smithay" }
+
+# Local dynamic filtered-global lifecycle fix; see vendor/wayland-backend/JWM_PATCH.md.
+[patch.crates-io]
+wayland-backend = { path = "vendor/wayland-backend" }

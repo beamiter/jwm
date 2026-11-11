@@ -61,6 +61,26 @@ jobs:
           export XDG_RUNTIME_DIR="$(mktemp -d)"
           cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib image_copy_capture::popup_tests -- --test-threads=1 --nocapture
           cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib host_popup_integration -- --test-threads=1 --nocapture
+      - name: Backend pending callback guard pure regressions
+        run: |
+          set -euo pipefail
+          manifest='tests/wayland_backend_pending/Cargo.toml'
+          test -f tests/wayland_backend_pending/Cargo.lock
+          listed="$(cargo test --locked --manifest-path "$manifest" --lib -- --list)"
+          test "$(printf '%s\n' "$listed" | grep -c ': test$')" -eq 3
+          ignored="$(cargo test --locked --manifest-path "$manifest" --lib -- --ignored --list)"
+          test "$(printf '%s\n' "$ignored" | grep -c ': test$' || true)" -eq 0
+          cargo test --locked --manifest-path "$manifest" --lib -- --test-threads=1
+      - name: Actual backend callback getter reentry on owned display
+        run: |
+          set -euo pipefail
+          export XDG_RUNTIME_DIR="$(mktemp -d)"
+          filter='backend::wayland_udev::remote_popup::backend_tests::'
+          listed="$(env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --list)"
+          test "$(printf '%s\n' "$listed" | grep -c ': test$')" -eq 1
+          ignored="$(env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --ignored --list)"
+          test "$(printf '%s\n' "$ignored" | grep -c ': test$' || true)" -eq 0
+          env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --test-threads=1 --nocapture
       - name: Native popup isolated-seat authority and actual pixels
         env:
           JWM_REQUIRE_HEADLESS_GL: '1'

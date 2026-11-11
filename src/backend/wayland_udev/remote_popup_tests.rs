@@ -132,12 +132,17 @@ impl Fixture {
             .filter(|g| g.1 == "wl_seat")
             .collect();
         assert_eq!(seats.len(), 1, "one newly advertised target-only seat");
+        let foreign_globals: Vec<_> = fence(&mut server, &mut other.client)
+            .iter()
+            .filter_map(global)
+            .collect();
         assert!(
-            !fence(&mut server, &mut other.client)
-                .iter()
-                .filter_map(global)
-                .any(|g| g.1 == "wl_seat"),
-            "foreign client must not see the lease seat"
+            !foreign_globals.iter().any(|g| g.0 == seats[0].0),
+            "foreign client saw the exact new lease global: target={seats:?}, foreign={foreign_globals:?}"
+        );
+        assert!(
+            !foreign_globals.iter().any(|g| g.1 == "wl_seat"),
+            "unexpected newly advertised foreign seat: target={seats:?}, foreign={foreign_globals:?}"
         );
         let seat = bind_global(&mut app.client, seats[0].0, "wl_seat", seats[0].2.min(7));
         let pointer = app.client.new_id();
