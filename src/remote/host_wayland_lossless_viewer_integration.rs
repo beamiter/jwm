@@ -500,6 +500,15 @@ fn exercise_workload(host_permission: bool, client_permission: bool, blinking: b
                 .find(|(s, _)| *s == seq)
                 .expect("actual decoded frame codec evidence")
                 .1;
+            let has_png_evidence = encoded.iter().any(|(seen, png)| *seen <= seq && *png);
+            drop(encoded);
+            // The owned snapshot and its unique feedback belong to this exact
+            // completed GL commit. Compositor presentation is not gated by the
+            // test oracle's subsequent CPU cost; every oracle assertion remains.
+            let feedback_started = Instant::now();
+            present(&mut local, std::mem::take(&mut feedback));
+            let feedback_completed = Instant::now();
+            let check_started = Instant::now();
             let error = if blinking {
                 static_sse(&pixels, &expected)
             } else {
@@ -543,16 +552,12 @@ fn exercise_workload(host_permission: bool, client_permission: bool, blinking: b
             if error == 0 {
                 assert!(host_permission && client_permission);
                 assert!(
-                    encoded.iter().any(|(_, png)| *png),
+                    has_png_evidence,
                     "exact recovery requires negotiated PNG evidence"
                 );
                 exact = Some(seq);
             }
-            drop(encoded);
             let checked = Instant::now();
-            let feedback_started = Instant::now();
-            present(&mut local, std::mem::take(&mut feedback));
-            let feedback_completed = Instant::now();
             if let Some(trace) = diagnostic.as_mut() {
                 if trace.draws.len() < 256 {
                     trace.draws.push(serde_json::json!({"generation_observed":blink_generation,
@@ -560,7 +565,7 @@ fn exercise_workload(host_permission: bool, client_permission: bool, blinking: b
                         "matched_candidate":blink_candidate == Some((blink_generation,seq)),
                         "scheduled_deadline_ns":blink_next.map(|at|trace.ns(at)),
                         "gl_started_ns":trace.ns(gl_started),"gl_completed_ns":trace.ns(gl_completed),
-                        "check_started_ns":trace.ns(gl_completed),"check_completed_ns":trace.ns(checked),
+                        "check_started_ns":trace.ns(check_started),"check_completed_ns":trace.ns(checked),
                         "feedback_started_ns":trace.ns(feedback_started),
                         "feedback_completed_ns":trace.ns(feedback_completed),"actual_presented_ns":null}));
                 } else {
@@ -576,7 +581,13 @@ fn exercise_workload(host_permission: bool, client_permission: bool, blinking: b
                 &presented_times.lock().unwrap(),
                 &mut blink_observed,
             );
-            if exact.is_some_and(|seq| frames.lock().unwrap().1 == Some(seq)) {
+            if exact.is_some_and(|seq| {
+                presented_times
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|(seen, _)| *seen == seq)
+            }) {
                 static_recovered = true;
             }
             if static_recovered && blink_generation >= 7 && blink_observed == Some(blink_generation)
@@ -584,7 +595,12 @@ fn exercise_workload(host_permission: bool, client_permission: bool, blinking: b
                 break;
             }
         } else if let Some(seq) = exact {
-            if frames.lock().unwrap().1 == Some(seq) {
+            if presented_times
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(seen, _)| *seen == seq)
+            {
                 if phase == 0 {
                     phase = 1;
                     expected = pattern(true);
@@ -709,7 +725,10 @@ fn blink_actual_timestamp_not_poll_order_decides_deadline() {
     observe_blink_presentation(
         Some((8, 16)),
         Some(deadline),
-        &[(16, deadline - Duration::from_millis(1))],
+        &[
+            (16, deadline - Duration::from_millis(1)),
+            (17, deadline + Duration::from_millis(2)),
+        ],
         &mut observed,
     );
     assert_eq!(observed, Some(8));
@@ -718,7 +737,10 @@ fn blink_actual_timestamp_not_poll_order_decides_deadline() {
         observe_blink_presentation(
             Some((8, 16)),
             Some(deadline),
-            &[(16, deadline + Duration::from_nanos(1))],
+            &[
+                (16, deadline + Duration::from_nanos(1)),
+                (17, deadline + Duration::from_millis(2)),
+            ],
             &mut observed,
         );
     });

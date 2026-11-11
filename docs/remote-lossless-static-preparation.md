@@ -316,9 +316,9 @@ work needs a quiet-time/pacing ablation, not a larger test deadline or a claim
 that the cause is already proven. This status does not change the independently
 documented permission or keyboard-combination boundaries.
 
-## Candidate: preserving committed exactness across scroll-copy
+## Implemented: preserving committed exactness across scroll-copy
 
-This candidate keeps application protocol v26, existing explicit scroll-copy
+This implementation keeps application protocol v26, existing explicit scroll-copy
 and static-lossless negotiation, and their existing permission boundaries.
 It adds no input authority and changes no defaults. The optimization concerns
 video copy records, not scroll input authorization.
@@ -350,8 +350,15 @@ transport traffic. The revised local pure suite reported 51 passed and three ign
 The initial `44ff992a` candidate passed the real authenticated TCP/GL
 bidirectional scroll regression, but its separate strict 500 ms blink
 regression missed the deadline by 9.68 ms in Wayland run 42912464865.
-That candidate is not being merged, and the deadline is unchanged. The
-replacement identity-check design still requires its own complete CI run. The result is a smaller repair workload, not a latency or speed guarantee.
+That candidate was not merged, and the deadline is unchanged. The replacement
+`43e7` candidate passed all three required CI workflows and its integration on
+master has been verified. Its mainline general-CI strict blink rerun then
+failed generation 13 by 5.388 ms; mainline verification is therefore not all
+green. Other mainline workflow outcomes are not asserted here. The candidate
+coverage includes actual authenticated TCP/software-GL scroll, ABA safety and
+the 30-second regression. This remains experimental, explicit opt-in and
+default off. The result is a smaller repair workload, not a hardware validation
+or general latency guarantee.
 
 ### Identity-check cost correction
 
@@ -389,7 +396,8 @@ The earlier pure codec test's combined scroll-and-repair samples were
 initial checking design, not a measurement of its replacement. Their timer
 included planning, encoding, decoding, commit and assertions. The demonstrated
 repair-byte reduction and final SSE=0 must not be turned into a latency promise;
-the revised implementation requires its own integration validation.
+the revised implementation's candidate integration results are stated above,
+not inferred from these earlier timing samples.
 
 
 ### Follow-up candidate and actual PNG transaction cost
@@ -418,5 +426,32 @@ The isolated comparison passed. Its timer includes the complete repair
 transaction, including commit, unlike `encode_ns`. These are debug CPU-side
 elapsed observations, not separate stage timings, transport or presentation
 latency. The sample count is small, and the result does not establish that the
-strict 500 ms failure is fixed. Complete CI validation of the new candidate is
-still required; raw logs and runtime details are not published here.
+strict 500 ms failure is fixed in general. The subsequent `43e7` candidate
+passed its strict regressions and all three CI workflows, but the subsequent
+mainline strict failure is recorded above. These are software-GL CI results, not physical
+GPU or general scheduling guarantees. Raw logs and runtime details are not
+published here.
+
+### Mainline fixture timing failure and pending measurement correction
+
+The `43e7` mainline general-CI failure preserves an important measurement
+boundary. For the same captured frame sequence 21 and generation 13, scheduled
+source update to completed owned GL readback took 377.622 ms. The full-pixel
+correctness oracle then took 127.471 ms before the fixture sent presentation
+feedback; actual client presentation missed the original deadline by 5.388 ms.
+The source repaint itself completed 26.562 ms after its scheduled time.
+These allowlisted stage aggregates show that fixture scheduling and oracle
+work contributed to this failure. They do not prove a production network or
+codec latency guarantee, nor retroactively make the failed test pass.
+
+A test-only correction has been implemented following independent review:
+after the complete owned GL readback and fixed frame-sequence association, the
+view-only fixture sends genuine presentation feedback before running the
+full-pixel oracle. Every pixel assertion remains required, and the unchanged
+500 ms deadline still uses the actual client presentation ledger, not a
+fabricated or backdated timestamp. This separates validation CPU time from the
+fixture's presentation notification without skipping correctness validation.
+The correction awaits CI; no passing result is claimed yet. Production
+scheduling, permissions and deadline limits are unchanged. Earlier failed
+candidates and cost findings above remain part of the record. No raw traces
+are published here.
