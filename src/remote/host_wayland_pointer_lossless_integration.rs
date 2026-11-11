@@ -700,3 +700,6 @@ fn actual_pointer_lossless_800x600_multibatch_reaches_exact_and_remains_clickabl
 
 #[path = "host_wayland_pointer_lossless_expiry_integration.rs"]
 mod expiry_integration;
+
+#[path = "host_wayland_pointer_lossless_scroll_integration.rs"]
+mod scroll_integration;

@@ -11,7 +11,7 @@ use text::ClientText;
 mod pointer_repair;
 use pointer_repair::PointerRepair;
 #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
-pub(crate) use pointer_repair::with_pointer_lifetime_observer;
+pub(crate) use pointer_repair::{with_pointer_lifetime_observer, with_pointer_repair_observer};
 
 use super::clipboard_policy::{self, ClipboardDirection, ClipboardMode};
 use super::clipboard_sync::{
@@ -552,11 +552,11 @@ fn validate_viewer_backend(options: &ClientOptions) -> RemoteResult<()> {
         && options.viewer_backend == ViewerBackend::Wayland
         && !options.view_only
         && !options.wayland_keyboard
-        && !options.wayland_scroll
         && !options.wayland_horizontal_scroll;
     if options.static_lossless
         && (!(options.view_only || lossless_keyboard || lossless_pointer)
             || (options.wayland_pointer && !lossless_pointer)
+            || (options.wayland_scroll && !lossless_pointer)
             || options.wayland_control
             || options.wayland_text.is_some()
             || options.clipboard
@@ -564,7 +564,7 @@ fn validate_viewer_backend(options: &ClientOptions) -> RemoteResult<()> {
             || options.resize_source.is_some()
             || options.follow_source_size)
     {
-        return Err(invalid_data("static lossless requires view-only or exclusive Wayland keyboard/pointer mode without scroll, control, text, clipboard or remote resize").into());
+        return Err(invalid_data("static lossless requires view-only or exclusive Wayland keyboard/pointer mode without horizontal scroll, control, text, clipboard or remote resize; vertical scroll requires exclusive pointer mode").into());
     }
 
     if options.wayland_text.is_some()
@@ -957,6 +957,8 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
         let mut pointer = state.wayland_pointer.lock().unwrap();
         pointer.enabled = true;
         pointer.repair.enabled = hello.stream.static_lossless;
+        #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+        pointer.capture_repair_observer();
         pointer.repair_frame(
             initial_purpose,
             super::pointer_repair_phase::Scope {
@@ -1402,7 +1404,10 @@ fn negotiate_session(
                 || hello.stream.wayland_control
                 || hello.stream.wayland_text
                 || hello.stream.window_resize
-                || hello.stream.wayland_scroll
+                || (hello.stream.wayland_scroll
+                    && (!request_wayland_pointer
+                        || !hello.stream.wayland_pointer
+                        || hello.stream.wayland_keyboard))
                 || hello.stream.wayland_horizontal_scroll))
     {
         return Err(invalid_data(
@@ -2008,7 +2013,9 @@ fn viewer_loop(
                         }
                     }
                 }
-                if let Some((kind, token)) = pointer.repair_outgoing(Instant::now())? {
+                if let Some((kind, token)) =
+                    pointer.repair_outgoing(Instant::now(), viewer.wayland_pointer_repair_busy())?
+                {
                     if let Err(error) = (|| -> RemoteResult<()> {
                         writer.write_message(kind, &token.encode()?)?;
                         writer.flush()?;
@@ -3413,6 +3420,7 @@ impl ClientPointer {
                 self.scroll_enabled
             }) || self.left_down
                 || self.click.is_some()
+                || self.repair_scroll_held()
             {
                 self.click = None;
                 return Ok(None);

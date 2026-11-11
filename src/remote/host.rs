@@ -2439,7 +2439,7 @@ fn validate_window_policy(options: &HostOptions) -> RemoteResult<()> {
                     || options.allow_wayland_keyboard))
             || options.allow_wayland_control
             || options.allow_wayland_text
-            || options.allow_wayland_scroll
+            || (options.allow_wayland_scroll && !options.allow_wayland_pointer)
             || options.allow_wayland_horizontal_scroll
             || (options.allow_wayland_keyboard
                 && (!options.wayland_select
@@ -2447,7 +2447,7 @@ fn validate_window_policy(options: &HostOptions) -> RemoteResult<()> {
                     || options.wayland_popups
                     || options.wayland_resize_follow)))
     {
-        return Err(invalid_data("static lossless requires a read-only host without input, text, clipboard or remote resize permissions").into());
+        return Err(invalid_data("static lossless requires read-only or exclusive native keyboard/pointer permissions without text, clipboard, control, horizontal scroll or remote resize").into());
     }
 
     if options.allow_wayland_text
@@ -7616,6 +7616,36 @@ mod tests {
         options.allow_input = false;
         options.allow_window_resize = true;
         assert!(validate_window_policy(&options).is_err());
+    }
+
+    #[test]
+    fn lossless_vertical_scroll_requires_exclusive_native_pointer() {
+        let mut options = test_host_source_options();
+        options.capture_area = CaptureArea::Root;
+        options.wayland_select = true;
+        options.allow_static_lossless = true;
+        options.allow_wayland_pointer = true;
+        options.allow_wayland_scroll = true;
+        assert_eq!(
+            validate_window_policy(&options).is_ok(),
+            cfg!(feature = "remote-wayland")
+        );
+        for case in 0..10 {
+            let mut denied = options.clone();
+            match case {
+                0 => denied.allow_wayland_pointer = false,
+                1 => denied.allow_wayland_horizontal_scroll = true,
+                2 => denied.allow_wayland_control = true,
+                3 => denied.allow_wayland_keyboard = true,
+                4 => denied.allow_wayland_text = true,
+                5 => denied.wayland_resize_follow = true,
+                6 => denied.wayland_popups = true,
+                7 => denied.allow_window_resize = true,
+                8 => denied.allow_clipboard = true,
+                _ => denied.once = false,
+            }
+            assert!(validate_window_policy(&denied).is_err(), "case {case}");
+        }
     }
 
     #[test]

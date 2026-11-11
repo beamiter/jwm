@@ -877,6 +877,10 @@ impl WaylandViewer {
     pub(crate) fn scroll_frames_observed_for_test(&self) -> u64 {
         self.state.pointer.scroll_frames_observed
     }
+    /// Snapshot after normal event polling; no dispatch, focus change or release.
+    pub(super) fn wayland_pointer_repair_busy(&self) -> bool {
+        self.state.pointer.repair_busy()
+    }
     pub(super) fn wayland_pointer_presented(&mut self, sequence: u64) {
         self.state.pointer.confirm(sequence);
     }

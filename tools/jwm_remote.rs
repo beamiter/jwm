@@ -326,7 +326,7 @@ enum Command {
         allow_wayland_text: bool,
 
         /// Allow bounded lossless repairs in read-only or explicit native keyboard/pointer sessions.
-        #[arg(long, conflicts_with_all=["allow_input","allow_clipboard","allow_window_resize","allow_wayland_control","allow_wayland_text","allow_wayland_scroll","allow_wayland_horizontal_scroll"])]
+        #[arg(long, conflicts_with_all=["allow_input","allow_clipboard","allow_window_resize","allow_wayland_control","allow_wayland_text","allow_wayland_horizontal_scroll"])]
         allow_static_lossless: bool,
 
         /// Experimentally encode exact bounded vertical screen shifts as copy plus changed pixels.
@@ -526,7 +526,7 @@ enum Command {
         wayland_text_stdin: bool,
 
         /// Explicitly request bounded PNG repair of stable encoded RGB pixels.
-        #[arg(long, requires="lossless_session_mode", conflicts_with_all=["wayland_text_stdin","wayland_control","wayland_scroll","wayland_horizontal_scroll","clipboard","grab_input","resize_source","follow_source_size"])]
+        #[arg(long, requires="lossless_session_mode", conflicts_with_all=["wayland_text_stdin","wayland_control","wayland_horizontal_scroll","clipboard","grab_input","resize_source","follow_source_size"])]
         static_lossless: bool,
 
         /// Separately request single-notch vertical scroll; never smooth or horizontal.
@@ -4199,7 +4199,6 @@ mod static_lossless_cli_tests {
         for flag in [
             "--allow-wayland-keyboard",
             "--allow-wayland-control",
-            "--allow-wayland-scroll",
             "--allow-wayland-horizontal-scroll",
             "--wayland-popups",
             "--wayland-resize-follow",
@@ -4214,7 +4213,6 @@ mod static_lossless_cli_tests {
         for flag in [
             "--wayland-keyboard",
             "--wayland-control",
-            "--wayland-scroll",
             "--wayland-horizontal-scroll",
             "--view-only",
             "--clipboard",
@@ -4225,6 +4223,100 @@ mod static_lossless_cli_tests {
             args.push(flag);
             assert!(Cli::try_parse_from(args).is_err(), "{flag}");
         }
+    }
+    #[test]
+    fn pointer_lossless_vertical_scroll_requires_explicit_scoped_mode() {
+        let host = [
+            "jwm-remote",
+            "host",
+            "--once",
+            "--wayland-select",
+            "--allow-wayland-pointer",
+            "--allow-static-lossless",
+            "--allow-wayland-scroll",
+        ];
+        let client = [
+            "jwm-remote",
+            "connect",
+            "host",
+            "--viewer-backend",
+            "wayland",
+            "--wayland-pointer",
+            "--static-lossless",
+            "--wayland-scroll",
+        ];
+        assert!(matches!(
+            Cli::try_parse_from(host).unwrap().command,
+            Command::Host {
+                allow_static_lossless: true,
+                allow_wayland_pointer: true,
+                allow_wayland_scroll: true,
+                allow_wayland_horizontal_scroll: false,
+                ..
+            }
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(client).unwrap().command,
+            Command::Connect {
+                static_lossless: true,
+                wayland_pointer: true,
+                wayland_scroll: true,
+                wayland_horizontal_scroll: false,
+                ..
+            }
+        ));
+        assert!(profile_from_command(Cli::try_parse_from(client).unwrap().command).is_err());
+        for flag in ["--allow-wayland-pointer", "--wayland-select", "--once"] {
+            let args: Vec<_> = host.iter().copied().filter(|arg| *arg != flag).collect();
+            assert!(Cli::try_parse_from(args).is_err(), "missing {flag}");
+        }
+        for flag in [
+            "--allow-wayland-horizontal-scroll",
+            "--allow-wayland-control",
+            "--allow-wayland-keyboard",
+            "--allow-wayland-text",
+            "--allow-input",
+            "--allow-clipboard",
+            "--allow-window-resize",
+            "--wayland-popups",
+            "--wayland-resize-follow",
+        ] {
+            let mut args = host.to_vec();
+            args.push(flag);
+            assert!(Cli::try_parse_from(args).is_err(), "{flag}");
+        }
+        for flag in [
+            "--wayland-horizontal-scroll",
+            "--wayland-control",
+            "--wayland-keyboard",
+            "--wayland-text-stdin",
+            "--view-only",
+            "--clipboard",
+            "--grab-input",
+            "--follow-source-size",
+        ] {
+            let mut args = client.to_vec();
+            args.push(flag);
+            assert!(Cli::try_parse_from(args).is_err(), "{flag}");
+        }
+        for replacement in ["--view-only", "--wayland-keyboard", "--wayland-control"] {
+            let args: Vec<_> = client
+                .iter()
+                .map(|arg| {
+                    if *arg == "--wayland-pointer" {
+                        replacement
+                    } else {
+                        *arg
+                    }
+                })
+                .collect();
+            assert!(Cli::try_parse_from(args).is_err(), "{replacement}");
+        }
+        let mut reconnect = client.to_vec();
+        reconnect.extend(["--reconnect-attempts", "1"]);
+        assert!(Cli::try_parse_from(reconnect).is_err());
+        // The backend requirement is checked at dispatch, not inferred from the flags.
+        assert!(validate_native_lossless_cli(true, true, ViewerBackend::X11).is_err());
     }
     #[test]
     fn capability_requires_explicit_readonly_and_is_not_saved() {

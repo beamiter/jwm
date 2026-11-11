@@ -323,6 +323,13 @@ impl Viewer {
             Self::Wayland(v) => v.set_wayland_pointer_status(status),
         }
     }
+    pub(super) fn wayland_pointer_repair_busy(&self) -> bool {
+        match self {
+            Self::X11(_) => false,
+            #[cfg(feature = "remote-wayland")]
+            Self::Wayland(v) => v.wayland_pointer_repair_busy(),
+        }
+    }
     pub(super) fn wayland_pointer_presented(&mut self, sequence: u64) {
         match self {
             Self::X11(v) => v.wayland_pointer_presented(sequence),

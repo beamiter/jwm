@@ -229,6 +229,7 @@ struct Harness {
     wire_events: Vec<(u16, Vec<u32>)>,
     unexpected_wire: Vec<(u16, Vec<u32>)>,
     blue_presented: bool,
+    repair_observation: Arc<Mutex<Vec<(&'static str, crate::remote::pointer_repair_phase::Token)>>>,
     pointer_lifetime: Arc<Mutex<Option<(Instant, Instant)>>>,
     button_dispatch: Arc<Mutex<(u64, u64)>>,
     frames: Arc<Mutex<(Option<u64>, Option<u64>)>>,
@@ -401,6 +402,8 @@ impl Harness {
             .unwrap();
         let ready = Arc::new(Mutex::new(None));
         let candidate = Arc::new(Mutex::new((None, false, 0)));
+        let repair_observation = Arc::new(Mutex::new(Vec::new()));
+        let observed_repair = repair_observation.clone();
         let pointer_lifetime = Arc::new(Mutex::new(None));
         let observed_lifetime = pointer_lifetime.clone();
         let button_dispatch = Arc::new(Mutex::new((0, 0)));
@@ -450,7 +453,7 @@ impl Harness {
                         crate::remote::wayland_viewer::with_wayland_control_frame_observer(
                             observed_frames,
                             || crate::remote::wayland_viewer::with_pointer_button_dispatch_observer(
-                                observed_buttons, || crate::remote::client::with_pointer_lifetime_observer(observed_lifetime, || with_wayland_test_stream(stream, || run_client(opts)))),
+                                observed_buttons, || crate::remote::client::with_pointer_lifetime_observer(observed_lifetime, || crate::remote::client::with_pointer_repair_observer(observed_repair, || with_wayland_test_stream(stream, || run_client(opts))))),
                         )
                     })
                 })
@@ -475,6 +478,7 @@ impl Harness {
             wire_events: Vec::new(),
             unexpected_wire: Vec::new(),
             blue_presented: false,
+            repair_observation,
             pointer_lifetime,
             button_dispatch,
             frames,

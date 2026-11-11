@@ -38,6 +38,26 @@ pub(super) fn observe_pointer_lifetime(requested: Instant) {
         }
     });
 }
+#[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+type PhaseObserver = std::sync::Arc<std::sync::Mutex<Vec<(&'static str, Token)>>>;
+#[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+thread_local! { static PHASE_OBSERVER: std::cell::RefCell<Option<PhaseObserver>> = const { std::cell::RefCell::new(None) }; }
+#[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+pub(crate) fn with_pointer_repair_observer<T>(
+    observer: PhaseObserver,
+    run: impl FnOnce() -> T,
+) -> T {
+    struct Restore(Option<PhaseObserver>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            PHASE_OBSERVER.with(|slot| {
+                slot.replace(self.0.take());
+            });
+        }
+    }
+    let _restore = Restore(PHASE_OBSERVER.with(|slot| slot.replace(Some(observer))));
+    run()
+}
 const DEADLINE: Duration = Duration::from_secs(5);
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PhaseKind {
@@ -57,6 +77,8 @@ struct Phase {
 }
 #[derive(Default)]
 pub(super) struct PointerRepair {
+    #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+    observer: Option<PhaseObserver>,
     pub(super) enabled: bool,
     lease: Option<(u64, Instant)>,
     fence: Option<ActionCompletionFence>,
@@ -211,6 +233,19 @@ fn repair_error() -> RemoteError {
     invalid_data("pointer repair ordering, scope or deadline invalid").into()
 }
 impl ClientPointer {
+    #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+    pub(super) fn capture_repair_observer(&mut self) {
+        self.repair.observer = PHASE_OBSERVER.with(|slot| slot.borrow().clone());
+    }
+    #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+    fn observe_repair(&self, kind: &'static str, token: Token) {
+        if let Some(observer) = &self.repair.observer {
+            let mut rows = observer.lock().unwrap();
+            assert!(rows.len() < 512, "bounded repair observation ledger");
+            rows.push((kind, token));
+        }
+    }
+
     fn repair_retire(&mut self, token: Token) -> RemoteResult<()> {
         if self.repair.retired.contains(&token) {
             return Ok(());
@@ -428,6 +463,9 @@ impl ClientPointer {
                 .pointer_status(value)
         })
     }
+    pub(super) fn repair_scroll_held(&self) -> bool {
+        self.repair.enabled && !self.repair.held_keys.is_empty()
+    }
     pub(super) fn repair_input(&mut self, event: &ViewerEvent, now: Instant) {
         if !self.repair.enabled {
             return;
@@ -539,14 +577,22 @@ impl ClientPointer {
         }
         self.repair.last_phase = token.phase;
         self.repair.offer = Some(token);
+        #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+        self.observe_repair("offered", token);
         Ok(())
     }
     /// Called after draining this pass's local events, before enqueueing Request.
     pub(super) fn repair_outgoing(
         &mut self,
         now: Instant,
+        viewer_busy: bool,
     ) -> RemoteResult<Option<(MessageKind, Token)>> {
         if !self.repair_check(now)? {
+            return Ok(None);
+        }
+        // An open native axis frame has not emitted a ViewerEvent yet. Keep
+        // its offer untouched until the real group finishes or is discarded.
+        if viewer_busy {
             return Ok(None);
         }
         // Request AND Decline share the native action's single ordered slot.
@@ -587,6 +633,8 @@ impl ClientPointer {
                 confirmed: None,
                 recovery_after: token.ready.sequence,
             });
+            #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+            self.observe_repair("requested", token);
             Ok(Some((MessageKind::WaylandPointerRepairRequest, token)))
         } else {
             self.repair_retire(token)?;
@@ -731,6 +779,10 @@ impl ClientPointer {
             }
             _ => return Err(repair_error()),
         }
+        #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+        if status.kind == RepairStatusKind::Accepted {
+            self.observe_repair("accepted", status.token);
+        }
         self.repair_resolve(now);
         Ok(())
     }
@@ -817,7 +869,7 @@ mod tests {
         let (mut p, t) = fixture(now);
         p.repair_offer(t, now).unwrap();
         assert_eq!(
-            p.repair_outgoing(now).unwrap(),
+            p.repair_outgoing(now, false).unwrap(),
             Some((MessageKind::WaylandPointerRepairRequest, t))
         );
         assert!(!p.fresh(now));
@@ -862,12 +914,12 @@ mod tests {
             p.repair.last_input = Some(now); // Fresh proof, but human input is not idle.
             p.repair_offer(t, now).unwrap();
             assert_eq!(
-                p.repair_outgoing(now).unwrap(),
+                p.repair_outgoing(now, false).unwrap(),
                 Some((MessageKind::WaylandPointerRepairDecline, t))
             );
             assert!(p.event(&motion(5), now).unwrap().is_none());
             assert_eq!(p.sequence, 0);
-            assert!(p.repair_outgoing(now).unwrap().is_none());
+            assert!(p.repair_outgoing(now, false).unwrap().is_none());
             match invalidate {
                 1 => p.before_frame(),
                 2 => p
@@ -912,7 +964,7 @@ mod tests {
         let (mut p, t) = fixture(now);
         p.repair.last_input = Some(now);
         p.repair_offer(t, now).unwrap();
-        p.repair_outgoing(now).unwrap();
+        p.repair_outgoing(now, false).unwrap();
         let deadline = p.repair.declining.unwrap().1;
         p.event(
             &ViewerEvent::WaylandPointerButtonCancel { pressed: true },
@@ -949,7 +1001,7 @@ mod tests {
         let (mut p, t) = fixture(now);
         p.repair.last_input = Some(now);
         p.repair_offer(t, now).unwrap();
-        p.repair_outgoing(now).unwrap();
+        p.repair_outgoing(now, false).unwrap();
         assert!(p.repair_check(p.repair.declining.unwrap().1).is_err());
         assert!(p.ended);
     }
@@ -1122,6 +1174,144 @@ mod tests {
         p.presented(scope(7).into(), now);
         assert!(p.fresh(now));
     }
+    fn wheel(sequence: u64, up: bool) -> ViewerEvent {
+        let mut event = motion(sequence);
+        if let ViewerEvent::WaylandPointer { kind, .. } = &mut event {
+            *kind = if up {
+                crate::remote::x11_viewer::WaylandPointerEventKind::ScrollUp
+            } else {
+                crate::remote::x11_viewer::WaylandPointerEventKind::ScrollDown
+            };
+        }
+        event
+    }
+    #[test]
+    fn repair_unclosed_native_input_group_defers_offer_without_dequeue_or_renewal() {
+        let now = Instant::now();
+        let (mut p, t) = fixture(now);
+        p.repair_offer(t, now).unwrap();
+        let lease = p.repair.lease;
+        assert!(p.repair_outgoing(now, true).unwrap().is_none());
+        assert_eq!(p.repair.offer, Some(t));
+        assert!(p.repair.phase.is_none() && p.repair.declining.is_none());
+        assert_eq!(p.repair.lease, lease);
+        assert_eq!(
+            p.repair_outgoing(now, false).unwrap(),
+            Some((MessageKind::WaylandPointerRepairRequest, t))
+        );
+    }
+    #[test]
+    fn repair_vertical_scroll_needs_permission_and_exact_action_completion() {
+        let now = Instant::now();
+        for up in [false, true] {
+            let (mut p, t) = fixture(now);
+            assert!(p.event(&wheel(5, up), now).unwrap().is_none());
+            p.scroll_enabled = true;
+            let action = p.event(&wheel(5, up), now).unwrap().unwrap();
+            assert_eq!(
+                action.kind,
+                if up {
+                    PointerActionKind::ScrollUp
+                } else {
+                    PointerActionKind::ScrollDown
+                }
+            );
+            assert!(p.repair_sent(&action, now).unwrap());
+            assert!(p.event(&wheel(5, !up), now).unwrap().is_none());
+            assert_eq!(p.repair.fence.as_ref().unwrap().repair_watermark(), None);
+            p.repair_offer(t, now).unwrap();
+            assert!(p.repair_outgoing(now, false).unwrap().is_none());
+            let receipt = ActionReceipt {
+                lease: action.lease_epoch,
+                sequence: action.sequence,
+                consumed: action.scope.into(),
+            };
+            // A malformed receipt terminally poisons its completion fence;
+            // test that negative session separately, never recover it in-place.
+            let (mut invalid, _) = fixture(now);
+            invalid.scroll_enabled = true;
+            let invalid_action = invalid.event(&wheel(5, up), now).unwrap().unwrap();
+            invalid.repair_sent(&invalid_action, now).unwrap();
+            assert!(
+                invalid
+                    .repair_completed(
+                        ActionReceipt {
+                            sequence: receipt.sequence + 1,
+                            ..receipt
+                        },
+                        now
+                    )
+                    .is_err()
+            );
+            assert!(invalid.repair_completed(receipt, now).is_err());
+            p.repair_completed(receipt, now).unwrap();
+            assert_eq!(p.repair.fence.as_ref().unwrap().repair_watermark(), Some(1));
+            assert!(p.repair_completed(receipt, now).is_err());
+            assert!(!p.fresh(now));
+        }
+    }
+    #[test]
+    fn repair_vertical_scroll_during_phase_hold_or_expiry_is_dropped_not_queued() {
+        let now = Instant::now();
+        for state in 0..6 {
+            let (mut p, t) = match state {
+                0 => requested(now),
+                1 => accepted(now),
+                _ => fixture(now),
+            };
+            p.scroll_enabled = true;
+            match state {
+                2 => {
+                    p.repair.last_input = Some(now);
+                    p.repair_offer(t, now).unwrap();
+                    assert_eq!(
+                        p.repair_outgoing(now, false).unwrap().unwrap().0,
+                        MessageKind::WaylandPointerRepairDecline
+                    );
+                }
+                3 => {
+                    p.event(
+                        &ViewerEvent::Key {
+                            keycode: 38,
+                            pressed: true,
+                        },
+                        now,
+                    )
+                    .unwrap();
+                }
+                4 => {
+                    p.left_down = true;
+                }
+                5 => {
+                    p.repair.lease.as_mut().unwrap().1 = now;
+                }
+                _ => {}
+            }
+            let before = p.sequence;
+            assert!(p.event(&wheel(5, true), now).unwrap().is_none());
+            assert!(p.event(&wheel(5, false), now).unwrap().is_none());
+            assert_eq!(p.sequence, before);
+            assert_eq!(p.repair.last_input, Some(now));
+            assert!(p.repair.action_deadline.is_none());
+            if state == 3 {
+                p.event(
+                    &ViewerEvent::Key {
+                        keycode: 38,
+                        pressed: false,
+                    },
+                    now,
+                )
+                .unwrap();
+                assert_eq!(p.sequence, before, "release does not replay dropped wheels");
+                assert!(p.event(&wheel(5, true), now).unwrap().is_some());
+            }
+            if state == 5 {
+                assert!(p.ended);
+                p.presented(scope(6).into(), now);
+                assert!(p.event(&wheel(6, true), now).unwrap().is_none());
+            }
+        }
+    }
     #[test]
     fn every_action_needs_exact_completion_receipt_not_waiting_or_queued_send() {
         let now = Instant::now();
@@ -1150,7 +1340,7 @@ mod tests {
                 .is_none()
         );
         p.repair_offer(t, now).unwrap();
-        assert_eq!(p.repair_outgoing(now).unwrap(), None);
+        assert_eq!(p.repair_outgoing(now, false).unwrap(), None);
         assert_eq!(
             p.repair.offer,
             Some(t),
@@ -1163,7 +1353,7 @@ mod tests {
         };
         p.repair_completed(receipt, now).unwrap();
         assert_eq!(
-            p.repair_outgoing(now).unwrap(),
+            p.repair_outgoing(now, false).unwrap(),
             Some((MessageKind::WaylandPointerRepairDecline, t)),
             "only after the actual completion may the stale offer be declined"
         );
@@ -1346,7 +1536,7 @@ mod tests {
         p.repair_status(cancelled, now).unwrap();
         assert!(p.repair_status(cancelled, now).is_err());
         assert!(p.ended && p.ready.is_none() && p.repair.phase.is_none());
-        assert!(p.repair_outgoing(now).unwrap().is_none());
+        assert!(p.repair_outgoing(now, false).unwrap().is_none());
         assert!(
             p.repair
                 .fence
@@ -1418,11 +1608,11 @@ mod tests {
                 1 => {
                     p.repair.last_input = Some(near);
                     p.repair_offer(t, near).unwrap();
-                    p.repair_outgoing(near).unwrap();
+                    p.repair_outgoing(near, false).unwrap();
                 }
                 _ => {
                     p.repair_offer(t, near).unwrap();
-                    p.repair_outgoing(near).unwrap();
+                    p.repair_outgoing(near, false).unwrap();
                     if mode == 3 {
                         p.repair_status(
                             RepairStatus {
@@ -1504,7 +1694,7 @@ mod tests {
         let (mut p, t) = fixture(now);
         p.presented = Some((t.ready.into(), near));
         p.repair_offer(t, near).unwrap();
-        p.repair_outgoing(near).unwrap();
+        p.repair_outgoing(near, false).unwrap();
         p.repair_check(lease).unwrap();
         let mut wrong = t;
         wrong.phase += 1;
@@ -1663,7 +1853,7 @@ mod tests {
             }
             p.repair_offer(t, now).unwrap();
             assert_eq!(
-                p.repair_outgoing(now).unwrap(),
+                p.repair_outgoing(now, false).unwrap(),
                 Some((MessageKind::WaylandPointerRepairDecline, t))
             );
             assert!(p.repair.phase.is_none());
@@ -1712,7 +1902,7 @@ mod tests {
         let mut current = old;
         current.phase = 2;
         p.repair_offer(current, now).unwrap();
-        p.repair_outgoing(now).unwrap();
+        p.repair_outgoing(now, false).unwrap();
         p.repair_status(
             RepairStatus {
                 kind: RepairStatusKind::Accepted,

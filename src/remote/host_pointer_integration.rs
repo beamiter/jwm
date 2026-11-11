@@ -28,6 +28,19 @@ enum Case {
     Viewport,
     Disconnect,
     UnnegotiatedScroll,
+    LosslessUnnegotiatedScrollUp,
+    LosslessUnnegotiatedScrollDown,
+}
+impl Case {
+    fn lossless(self) -> bool {
+        matches!(
+            self,
+            Self::LosslessUnnegotiatedScrollUp | Self::LosslessUnnegotiatedScrollDown
+        )
+    }
+    fn unnegotiated_scroll(self) -> bool {
+        self.lossless() || matches!(self, Self::UnnegotiatedScroll)
+    }
 }
 struct ShutdownGuard(Arc<AtomicBool>);
 impl Drop for ShutdownGuard {
@@ -189,6 +202,7 @@ fn peer(address: std::net::SocketAddr, case: Case, trace: &Trace) -> RemoteResul
         &ClientHello {
             stream: super::super::messages::StreamCapabilities {
                 wayland_pointer: true,
+                static_lossless: case.lossless(),
                 wayland_control: false,
                 wayland_text: false,
                 ..Default::default()
@@ -206,12 +220,15 @@ fn peer(address: std::net::SocketAddr, case: Case, trace: &Trace) -> RemoteResul
     assert_eq!(kind, MessageKind::HelloAck);
     let hello = ServerHello::decode(&payload)?;
     assert!(hello.stream.wayland_pointer);
+    assert_eq!(hello.stream.static_lossless, case.lossless());
     assert!(
         !hello.stream.wayland_scroll,
         "this peer negotiates pointer only"
     );
     assert!(!hello.pointer_enabled && !hello.keyboard_enabled);
     let mut decoder = TileDecoder::with_frame_limits(hello.stream.frame_limits)?;
+    decoder.set_lossless_enabled(hello.stream.static_lossless);
+    let mut completion_seen = false;
     let mut first: Option<DrawnScope> = None;
     let mut requested = false;
     let mut negative_sent = false;
@@ -225,7 +242,12 @@ fn peer(address: std::net::SocketAddr, case: Case, trace: &Trace) -> RemoteResul
             Err(ProtocolError::Io(error))
                 if matches!(
                     case,
-                    Case::BadAck | Case::StaleScope | Case::Viewport | Case::UnnegotiatedScroll
+                    Case::BadAck
+                        | Case::StaleScope
+                        | Case::Viewport
+                        | Case::UnnegotiatedScroll
+                        | Case::LosslessUnnegotiatedScrollUp
+                        | Case::LosslessUnnegotiatedScrollDown
                 ) && matches!(
                     error.kind(),
                     io::ErrorKind::UnexpectedEof
@@ -294,6 +316,27 @@ fn peer(address: std::net::SocketAddr, case: Case, trace: &Trace) -> RemoteResul
                 }
                 note(trace, format!("ACK scope={scope:?} actions={actions}"));
             }
+            MessageKind::WaylandPointerActionCompleted => {
+                assert!(case.lossless());
+                let receipt = crate::remote::pointer_repair_phase::ActionReceipt::decode(&payload)?;
+                assert_eq!(receipt.sequence, 1);
+                assert_eq!(receipt.consumed, first.unwrap().into());
+                assert!(!completion_seen);
+                completion_seen = true;
+            }
+            MessageKind::WaylandPointerRepairOffer => {
+                assert!(case.lossless());
+                // An advisory offer does not make a request or authorize input.
+                let _ = crate::remote::pointer_repair_phase::Token::decode(&payload)?;
+            }
+            MessageKind::WaylandPointerRepairStatus => {
+                let status = crate::remote::pointer_repair_wire::RepairStatus::decode(&payload)?;
+                assert!(case.lossless());
+                assert_eq!(
+                    status.kind,
+                    crate::remote::pointer_repair_wire::RepairStatusKind::Cancelled
+                );
+            }
             MessageKind::WaylandPointerStatus => {
                 let status = PointerStatus::decode(&payload)?;
                 match status.status {
@@ -325,7 +368,7 @@ fn peer(address: std::net::SocketAddr, case: Case, trace: &Trace) -> RemoteResul
                             lease_epoch: status.lease_epoch,
                             sequence: actions,
                             scope,
-                            kind: if actions == 2 && matches!(case, Case::UnnegotiatedScroll) {
+                            kind: if actions == 2 && case.unnegotiated_scroll() {
                                 // A successful click and a second actual Ready
                                 // establish the live lease, next sequence, fresh
                                 // drawn scope and valid target coordinates. Only
@@ -333,7 +376,17 @@ fn peer(address: std::net::SocketAddr, case: Case, trace: &Trace) -> RemoteResul
                                 assert_eq!(scope, status.scope);
                                 assert_eq!(Some(scope), expected_scope);
                                 assert!(scope.frame_sequence > first.unwrap().frame_sequence);
-                                PointerActionKind::ScrollUp
+                                if case.lossless() {
+                                    assert!(
+                                        completion_seen,
+                                        "first native click must complete before malicious scroll"
+                                    );
+                                }
+                                if matches!(case, Case::LosslessUnnegotiatedScrollDown) {
+                                    PointerActionKind::ScrollDown
+                                } else {
+                                    PointerActionKind::ScrollUp
+                                }
                             } else {
                                 PointerActionKind::ClickLeft
                             },
@@ -344,7 +397,7 @@ fn peer(address: std::net::SocketAddr, case: Case, trace: &Trace) -> RemoteResul
                             .write_message(MessageKind::WaylandPointerAction, &action.encode()?)?;
                         writer.flush()?;
                         if actions == 2
-                            && matches!(case, Case::StaleScope | Case::UnnegotiatedScroll)
+                            && (matches!(case, Case::StaleScope) || case.unnegotiated_scroll())
                         {
                             negative_sent = true;
                         }
@@ -359,6 +412,8 @@ fn peer(address: std::net::SocketAddr, case: Case, trace: &Trace) -> RemoteResul
                                     | Case::StaleScope
                                     | Case::Viewport
                                     | Case::UnnegotiatedScroll
+                                    | Case::LosslessUnnegotiatedScrollUp
+                                    | Case::LosslessUnnegotiatedScrollDown
                             ),
                             "unexpected denial {status:?}"
                         );
@@ -374,7 +429,12 @@ fn peer(address: std::net::SocketAddr, case: Case, trace: &Trace) -> RemoteResul
                 assert!(
                     matches!(
                         case,
-                        Case::BadAck | Case::StaleScope | Case::Viewport | Case::UnnegotiatedScroll
+                        Case::BadAck
+                            | Case::StaleScope
+                            | Case::Viewport
+                            | Case::UnnegotiatedScroll
+                            | Case::LosslessUnnegotiatedScrollUp
+                            | Case::LosslessUnnegotiatedScrollDown
                     ),
                     "unexpected close"
                 );
@@ -409,6 +469,8 @@ fn actual_tcp_pointer_host_requires_new_drawn_frame_for_every_action() {
         Case::Viewport,
         Case::Disconnect,
         Case::UnnegotiatedScroll,
+        Case::LosslessUnnegotiatedScrollUp,
+        Case::LosslessUnnegotiatedScrollDown,
     ] {
         let mut server = Server::new();
         server.state.image_capture_pending =
@@ -463,9 +525,11 @@ fn actual_tcp_pointer_host_requires_new_drawn_frame_for_every_action() {
                     };
                     let peer = authenticate_peer(stream, &TEST_KEY)?;
                     note(&host_trace, "host authenticated");
+                    let mut options = options();
+                    options.allow_static_lossless = case.lossless();
                     serve_authenticated(
                         peer,
-                        &options(),
+                        &options,
                         &shutdown,
                         &Mutex::new(Some(GrantedCapture::Wayland(Box::new(capture)))),
                     )
@@ -542,6 +606,16 @@ fn actual_tcp_pointer_host_requires_new_drawn_frame_for_every_action() {
                         Some("host worker panicked"),
                         "{trace:?}"
                     );
+                    if case.lossless() {
+                        assert!(
+                            result
+                                .as_ref()
+                                .err()
+                                .is_some_and(|error| error
+                                    .eq("Wayland scroll was not separately negotiated")),
+                            "expected independent scroll permission rejection, got {result:?}"
+                        );
+                    }
                     ended = true;
                 }
                 ended

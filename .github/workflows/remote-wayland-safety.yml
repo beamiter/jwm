@@ -81,7 +81,7 @@ jobs:
           cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib pointer_repair -- --test-threads=1
           filter='remote::host::wayland_viewer_integration::host_pointer_integration::pointer_lossless_integration::'
           listed="$(env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --list)"
-          test "$(printf '%s\n' "$listed" | grep -c ': test$')" -eq 9
+          test "$(printf '%s\n' "$listed" | grep -c ': test$')" -eq 15
           ignored="$(env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --ignored --list)"
           test "$(printf '%s\n' "$ignored" | grep -c ': test$')" -eq 1
           printf '%s\n' "$ignored" | grep -F 'expiry_integration::actual_pointer_lossless_1080p_partial_progress_and_natural_lease_expiry: test'

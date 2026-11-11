@@ -113,6 +113,21 @@ pub(super) fn stopped(s: &SourceControl) {
         r.mode = Mode::Stopped;
     }
 }
+// Called only after the native adapter returns Accepted and destroys the
+// consumed proof. All kinds, including a vertical notch, share this watermark.
+fn record_completed_action(
+    s: &SourceControl,
+    action: PointerAction,
+    now: Instant,
+) -> RemoteResult<Option<Token>> {
+    let mut r = s.pointer_repair.lock().unwrap();
+    if r.mode != Mode::Normal || r.completed_action.checked_add(1) != Some(action.sequence) {
+        return Err(phase_error().into());
+    }
+    r.completed_action = action.sequence;
+    r.last_input = now;
+    Ok(r.phase.as_mut().and_then(RepairPhase::cancel_offer))
+}
 pub(super) fn after_action(
     s: &SourceControl,
     writer: &SharedWriter,
@@ -121,15 +136,7 @@ pub(super) fn after_action(
     if !enabled(s) {
         return Ok(());
     }
-    let cancelled = {
-        let mut r = s.pointer_repair.lock().unwrap();
-        if r.mode != Mode::Normal || r.completed_action.checked_add(1) != Some(action.sequence) {
-            return Err(phase_error().into());
-        }
-        r.completed_action = action.sequence;
-        r.last_input = Instant::now();
-        r.phase.as_mut().and_then(RepairPhase::cancel_offer)
-    };
+    let cancelled = record_completed_action(s, action, Instant::now())?;
     if let Some(t) = cancelled {
         status(writer, RepairStatusKind::Cancelled, t, None)?;
     }
@@ -724,6 +731,74 @@ mod tests {
                 assert_eq!(capture_stamp(&s), None);
                 assert_eq!(s.pointer_repair.lock().unwrap().mode, Mode::Stopped);
             }
+        }
+    }
+    #[test]
+    fn vertical_native_completion_cancels_offer_and_advances_one_watermark() {
+        use crate::remote::wayland_pointer_wire::PointerActionKind;
+        for kind in [PointerActionKind::ScrollUp, PointerActionKind::ScrollDown] {
+            let (s, token, at) = quiesced();
+            s.scroll_enabled.store(true, Ordering::Release);
+            let mut phase = RepairPhase::new(token.lease, at + Duration::from_secs(30));
+            let offer = phase
+                .offer(
+                    token.ready,
+                    0,
+                    at + Duration::from_secs(2),
+                    at,
+                    true,
+                    at + Duration::from_millis(2100),
+                )
+                .unwrap()
+                .unwrap();
+            {
+                let mut r = s.pointer_repair.lock().unwrap();
+                r.phase = Some(phase);
+                r.mode = Mode::Normal;
+            }
+            let action = PointerAction {
+                lease_epoch: token.lease,
+                sequence: 1,
+                scope: token.ready.into(),
+                kind,
+                x: 4,
+                y: 5,
+            };
+            let completed_at = at + Duration::from_millis(2200);
+            assert_eq!(
+                record_completed_action(&s, action, completed_at).unwrap(),
+                Some(offer)
+            );
+            {
+                let r = s.pointer_repair.lock().unwrap();
+                assert_eq!(r.completed_action, 1);
+                assert_eq!(r.last_input, completed_at);
+                assert_eq!(r.phase.as_ref().unwrap().offered_token(), None);
+            }
+            assert!(record_completed_action(&s, action, completed_at).is_err());
+            // Completion never creates a new Ready ticket or grants a lease.
+            assert!(s.pointer_frame.lock().unwrap().is_none());
+        }
+    }
+    #[test]
+    fn vertical_action_cannot_complete_during_an_accepted_repair() {
+        use crate::remote::wayland_pointer_wire::PointerActionKind;
+        for kind in [PointerActionKind::ScrollUp, PointerActionKind::ScrollDown] {
+            let (s, token, at) = quiesced();
+            let action = PointerAction {
+                lease_epoch: token.lease,
+                sequence: 1,
+                scope: token.ready.into(),
+                kind,
+                x: 4,
+                y: 5,
+            };
+            assert!(record_completed_action(&s, action, at + Duration::from_secs(3)).is_err());
+            assert_eq!(s.pointer_repair.lock().unwrap().completed_action, 0);
+            assert_eq!(
+                s.pointer_repair.lock().unwrap().mode,
+                Mode::NeedVisual(token)
+            );
         }
     }
 }

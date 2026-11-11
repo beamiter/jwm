@@ -8,9 +8,10 @@ use super::x11_keymap::{KeymapTable, MAX_ENCODED_KEYMAP_LEN};
 use std::io;
 
 const APPLICATION_MAGIC: &[u8; 8] = b"JWMREM01";
-/// v27 adds explicit pointer repair phases and native action completion receipts.
+/// v28 permits separately authorized vertical scroll with pointer-only PNG repair.
+/// Native action receipts and proof-gated repair phases remain mandatory.
 /// Both peers must upgrade; no fallback to an older authorization contract.
-pub const APPLICATION_VERSION: u16 = 27;
+pub const APPLICATION_VERSION: u16 = 28;
 const HELLO_PREFIX_LEN: usize = 11;
 const STREAM_CAPABILITIES_LEN: usize = 33;
 const SERVER_HELLO_LEN: usize = HELLO_PREFIX_LEN + STREAM_CAPABILITIES_LEN;
@@ -1672,7 +1673,7 @@ mod scroll_capability_tests {
     use super::*;
     #[test]
     fn scroll_is_explicit_boolean_and_requires_pointer_or_control_in_version_23() {
-        assert_eq!(APPLICATION_VERSION, 27);
+        assert_eq!(APPLICATION_VERSION, 28);
         assert_eq!(STREAM_CAPABILITIES_LEN, 33);
         let mut caps = StreamCapabilities::default();
         assert!(

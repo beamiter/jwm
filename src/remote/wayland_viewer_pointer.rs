@@ -101,6 +101,18 @@ pub(super) struct Pointer {
     frame_started: Option<Instant>,
 }
 impl Pointer {
+    /// Local evidence only: an unfinished Wayland frame is not idle even when
+    /// it has not produced a client-visible event. Never synthesize a release.
+    pub(super) fn repair_busy(&self) -> bool {
+        self.requested
+            && (self.revoked.is_some()
+                || self.left_down
+                || self.frame_started.is_some()
+                || !self.frame_events.is_empty()
+                || !self.completed.is_empty()
+                || self.frame_button
+                || self.frame_axis)
+    }
     pub(super) fn control_busy(&self) -> bool {
         self.left_down || !self.frame_events.is_empty() || self.frame_button || self.frame_axis
     }
@@ -682,6 +694,52 @@ mod tests {
         p.axis_discrete(WEnum::Value(wl_pointer::Axis::VerticalScroll), notch);
         p.axis_source(WEnum::Value(wl_pointer::AxisSource::Wheel));
     }
+    #[test]
+    fn repair_busy_tracks_partial_axis_without_changing_its_deadline() {
+        let mut p = scroll_pointer();
+        assert!(!p.repair_busy());
+        p.axis_source(WEnum::Value(wl_pointer::AxisSource::Wheel));
+        let started = p.frame_started;
+        let count = p.frame_count;
+        assert!(p.repair_busy());
+        assert!(p.take_events().is_empty());
+        assert!(p.repair_busy());
+        p.set_ready(None);
+        p.invalidate_mapping();
+        p.presented(mapping());
+        p.confirm(1);
+        p.set_ready(Some(1));
+        assert_eq!(p.frame_started, started);
+        assert_eq!(p.frame_count, count);
+        assert!(p.repair_busy());
+        p.axis_value(WEnum::Value(wl_pointer::Axis::VerticalScroll), 10.0);
+        p.axis_discrete(WEnum::Value(wl_pointer::Axis::VerticalScroll), 1);
+        p.finish_frame();
+        assert!(p.repair_busy()); // Cancellation still awaits normal delivery.
+        assert!(
+            p.take_events()
+                .iter()
+                .all(|e| !matches!(e, ViewerEvent::WaylandPointer { .. }))
+        );
+        assert!(!p.repair_busy());
+    }
+
+    #[test]
+    fn repair_busy_preserves_physical_hold_and_revocation() {
+        assert!(!Pointer::default().repair_busy());
+        let mut p = pointer();
+        p.left_down = true;
+        p.invalidate_mapping();
+        p.take_events();
+        assert!(p.repair_busy());
+        assert!(p.left_down);
+        p.left_down = false;
+        assert!(!p.repair_busy());
+        p.revoke("test local revocation");
+        p.take_events();
+        assert!(p.repair_busy());
+    }
+
     #[test]
     fn scroll_late_source_and_motion_emit_one_action_only_at_frame() {
         for notch in [-1, 1] {

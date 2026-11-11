@@ -1,5 +1,9 @@
 # Native pointer-only plus static lossless repair
 
+The v27 baseline and its validation history are recorded below. The final
+section describes the separate v28 vertical-scroll combination now under
+development; its new permission combination has not yet been validated in CI.
+
 ## Candidate scope and status
 
 This candidate combines explicit native Wayland pointer-only control with
@@ -250,3 +254,68 @@ Local strict Clippy and 62 focused pure regressions pass for this ordering
 follow-up, including the actual-receipt/ACK race, newer-frame invalidation,
 exact old Ready retirement, replay rejection and existing pointer/scroll/repair
 cases. This is preparation for the mandatory real rerun, not its result.
+
+
+## Validated natural-expiry baseline (`c16db981`)
+
+The subsequent `c16db981` baseline passed all four mainline CI workflows,
+including the mandatory optimized 1080p test. The actual 1080p run completed
+14 repair cycles and observed natural expiry at 30.166 seconds, with remaining
+full-image SSE 68,789,192. This is partial progress followed by expiry, not
+whole-frame exactness within the input lease. The observed expiry timestamp is
+a test observation, not permission to submit input beyond the 30-second lease.
+
+This completes the real rerun required by the earlier failed candidates above;
+their failures remain part of the history. The test establishes the safe
+transition to read-only operation and does not renew input authority. It does
+not alter the 32-batch / 64-second ideal 1080p bound during active pointer mode.
+All results are from owned software-GL CI, not physical display or hardware
+latency acceptance.
+
+## Next candidate: explicit vertical discrete scroll with PNG (v28)
+
+The next candidate permits the existing native pointer-only PNG mode to request
+vertical wheel input separately on both peers:
+
+```sh
+jwm-remote host --wayland-select --once --allow-wayland-pointer --allow-static-lossless --allow-wayland-scroll
+jwm-remote connect HOST --viewer-backend wayland --wayland-pointer --static-lossless --wayland-scroll
+```
+
+The CLI accepts this combination and retains the native Wayland viewer
+requirement. Neither static lossless nor pointer permission implies scroll
+permission. Horizontal scroll, unified control, keyboard, text, clipboard,
+input grab, popup capture and resize-follow remain excluded from this
+combination. View-only is not added to this command. Reconnect and saved-profile
+authorization remain prohibited. Existing separate modes do not silently gain
+permissions.
+
+Application v28 makes the changed combination contract explicit. Both endpoints
+must match; v27 and other application versions are rejected without fallback.
+The existing capability fields and scroll action encoding are reused. Transport
+v3 and native protocol versions do not change merely to enable this combination.
+
+The intended interaction remains single-axis discrete vertical Wheel input,
+one notch per fresh native proof and actual presentation. Repair feedback
+cannot create a scroll ticket. Input during repair or Waiting must not be
+queued for replay when Ready returns. Action completion receipts, phase
+cancellation, held-input rejection and natural-expiry terminal handling all
+need to cover scroll as well as motion/click. The original 30-second lease,
+repair budget and cooldown remain unchanged.
+
+The CLI/version changes and new pure positive/negative cases are implemented;
+centralized execution and real combined recipient/PNG/presentation tests are
+pending. The `c16db981` green results validate the prior baseline only, not this
+new combination. Required evidence includes actual up/down recipient events
+and changed captured content, new proof after repair, no replay of full or
+partial axis groups across Waiting, denial of malicious unnegotiated scroll,
+and permanent input revocation while read-only repair can continue. No v28
+functional success, performance improvement or hardware acceptance is claimed.
+
+The vertical-scroll candidate passes local compilation, strict Clippy and 106
+pure regressions across repair ordering, viewer pointer grouping, explicit host
+policy, CLI validation and versioned messages. One new test initially tried to
+reuse a fence after a deliberately invalid receipt; it was corrected to prove
+that the invalid session remains terminal, without changing production logic.
+The six new real display/TCP cases and two malicious-record scenarios still
+require CI; local pure checks are not recipient or pixel acceptance.
