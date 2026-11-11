@@ -25,9 +25,9 @@ jobs:
         with:
           persist-credentials: false
       - name: Install native build and software renderer dependencies
+        timeout-minutes: 10
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends build-essential pkg-config \
+          bash scripts/ci-install-deps.sh build-essential pkg-config \
             libudev-dev libinput-dev libseat-dev libdrm-dev libgbm-dev \
             libegl1-mesa-dev libgl1-mesa-dev libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev \
             libegl-mesa0 libgl1-mesa-dri xvfb xauth libx11-dev libx11-xcb-dev \
@@ -452,9 +452,9 @@ jobs:
         with:
           persist-credentials: false
       - name: Install native build and software renderer dependencies
+        timeout-minutes: 10
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends build-essential pkg-config \
+          bash scripts/ci-install-deps.sh build-essential pkg-config \
             libudev-dev libinput-dev libseat-dev libdrm-dev libgbm-dev \
             libegl1-mesa-dev libgl1-mesa-dev libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev \
             libegl-mesa0 libgl1-mesa-dri xvfb xauth libx11-dev libx11-xcb-dev \
