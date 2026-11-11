@@ -813,3 +813,6 @@ fn actual_popup_owner_duplicate_source_export_permanently_revokes() {
 
 #[path = "remote_popup_export_tests.rs"]
 mod export_tests;
+
+#[path = "remote_popup_prepared_tests.rs"]
+mod prepared_tests;

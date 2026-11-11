@@ -2,7 +2,7 @@ name: Remote Wayland source safety
 
 on:
   push:
-    branches: [master, dot/remote-window-plan, dot/remote-readback-snapshot, dot/remote-popup-v2]
+    branches: [master, dot/remote-window-plan, dot/remote-readback-snapshot, dot/remote-popup-v2, dot/remote-popup-controlled]
   workflow_dispatch:
 
 permissions:
@@ -91,7 +91,7 @@ jobs:
           export XDG_RUNTIME_DIR="$(mktemp -d)"
           filter='backend::wayland_udev::remote_popup::tests::'
           listed="$(env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --list)"
-          test "$(printf '%s\n' "$listed" | grep -c ': test$')" -eq 21
+          test "$(printf '%s\n' "$listed" | grep -c ': test$')" -eq 25
           ignored="$(env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --ignored --list)"
           test "$(printf '%s\n' "$ignored" | grep -c ': test$' || true)" -eq 0
           env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --test-threads=1 --nocapture
@@ -110,6 +110,11 @@ jobs:
           ignored="$(cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$layout" -- --ignored --list)"
           test "$(printf '%s\n' "$ignored" | grep -c ': test$' || true)" -eq 0
           cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$layout" -- --test-threads=1
+          prepared='backend::wayland_udev::remote_popup::tests::prepared_tests::'
+          listed="$(env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$prepared" -- --list)"
+          test "$(printf '%s\n' "$listed" | grep -c ': test$')" -eq 4
+          ignored="$(env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$prepared" -- --ignored --list)"
+          test "$(printf '%s\n' "$ignored" | grep -c ': test$' || true)" -eq 0
       - name: Actual scoped keyboard lease recipient and revocation tests
         run: |
           export XDG_RUNTIME_DIR="$(mktemp -d)"

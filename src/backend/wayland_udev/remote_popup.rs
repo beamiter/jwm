@@ -19,6 +19,7 @@ use smithay::reexports::{
     },
     wayland_server::{
         Client, DataInit, Dispatch, DisplayHandle, GlobalDispatch, New, Resource, Weak,
+        backend::ClientId,
         protocol::{wl_seat::WlSeat, wl_surface::WlSurface},
     },
 };
@@ -42,6 +43,85 @@ const EXPIRED: u32 = 5;
 pub(crate) struct RemotePopupState {
     next_epoch: u32,
     active: Option<Lease>,
+    prepared: Option<PreparedSeat>,
+    prepared_owners: Vec<ClientId>,
+}
+const PREPARE_TTL: Duration = Duration::from_secs(10);
+struct PreparedSeat {
+    owner: ClientId,
+    seat: Seat<JwmWaylandState>,
+    created: Instant,
+}
+/// Trusted controlled-launch experiment only. Call after exact client insertion
+/// and before dispatching its first registry request. This does not grant input.
+#[cfg(test)]
+pub(crate) fn prepare_dormant(
+    state: &mut JwmWaylandState,
+    owner: ClientId,
+) -> Option<Seat<JwmWaylandState>> {
+    if state.remote_popup.active.is_some()
+        || state.remote_popup.prepared.is_some()
+        || state.remote_popup.prepared_owners.len() >= 64
+        || state.remote_popup.prepared_owners.contains(&owner)
+        || state
+            .display_handle
+            .backend_handle()
+            .get_client_data(owner.clone())
+            .is_err()
+    {
+        return None;
+    }
+    // Record before allocation: failure/expiry/consumption never permits revival.
+    state.remote_popup.prepared_owners.push(owner.clone());
+    let mut seat = state.seat_state.new_client_wl_seat(
+        &state.display_handle,
+        "jwm-remote-popup",
+        owner.clone(),
+    );
+    seat.add_pointer();
+    state.remote_popup.prepared = Some(PreparedSeat {
+        owner: owner.clone(),
+        seat: seat.clone(),
+        created: Instant::now(),
+    });
+    if state
+        .loop_handle
+        .insert_source(
+            Timer::from_duration(Duration::from_millis(50)),
+            move |_, _, state| {
+                let Some(prepared) = state.remote_popup.prepared.as_ref() else {
+                    return TimeoutAction::Drop;
+                };
+                if prepared.owner != owner {
+                    return TimeoutAction::Drop;
+                }
+                if prepared.created.elapsed() >= PREPARE_TTL
+                    || state
+                        .display_handle
+                        .backend_handle()
+                        .get_client_data(owner.clone())
+                        .is_err()
+                {
+                    let prepared = state.remote_popup.prepared.take().unwrap();
+                    state
+                        .seat_state
+                        .retire_wl_seat(&state.display_handle, &prepared.seat);
+                    state.request_client_flush();
+                    TimeoutAction::Drop
+                } else {
+                    TimeoutAction::ToDuration(Duration::from_millis(50))
+                }
+            },
+        )
+        .is_err()
+    {
+        let prepared = state.remote_popup.prepared.take().unwrap();
+        state
+            .seat_state
+            .retire_wl_seat(&state.display_handle, &prepared.seat);
+        return None;
+    }
+    Some(seat)
 }
 struct Lease {
     resource: JwmRemotePopupLeaseV1,
@@ -397,10 +477,29 @@ impl Dispatch<JwmRemotePopupManagerV1, ManagerData> for JwmWaylandState {
             resource.revoked(SOURCE);
             return;
         };
-        let mut seat = state
-            .seat_state
-            .new_client_wl_seat(dh, "jwm-remote-popup", owner.id());
-        seat.add_pointer();
+        let seat = if state.remote_popup.prepared_owners.contains(&owner.id()) {
+            let valid = state
+                .remote_popup
+                .prepared
+                .as_ref()
+                .is_some_and(|p| p.owner == owner.id() && p.created.elapsed() < PREPARE_TTL);
+            if !valid {
+                resource.revoked(DENIED);
+                return;
+            }
+            state.remote_popup.prepared.take().unwrap().seat
+        } else {
+            // Never consume or retire a different application's preparation.
+            if state.remote_popup.prepared.is_some() {
+                resource.revoked(DENIED);
+                return;
+            }
+            let mut seat = state
+                .seat_state
+                .new_client_wl_seat(dh, "jwm-remote-popup", owner.id());
+            seat.add_pointer();
+            seat
+        };
         state.remote_popup.active = Some(Lease {
             resource: resource.clone(),
             epoch,
@@ -744,3 +843,7 @@ pub(crate) fn lease_timing_for_test(state: &JwmWaylandState) -> Option<(u32, Ins
 #[cfg(all(test, feature = "backend-wayland-udev"))]
 #[path = "remote_popup_backend_tests.rs"]
 mod backend_tests;
+
+#[cfg(all(test, feature = "backend-wayland-udev"))]
+#[path = "remote_popup_gtk_tests.rs"]
+mod gtk_tests;

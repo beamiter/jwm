@@ -7,6 +7,7 @@ on:
       - dot/remote-window-plan
       - dot/remote-readback-snapshot
       - dot/remote-popup-v2
+      - dot/remote-popup-controlled
   pull_request:
     branches:
       - master
