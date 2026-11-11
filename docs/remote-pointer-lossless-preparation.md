@@ -414,7 +414,7 @@ This first unified repair slice rejects both scroll axes, legacy input, separate
 
 For this first unified-control slice, natural expiry of the original 30-second lease may close the entire session. Continued read-only repair after expiry, as supported by pointer-only plus PNG, is not promised here. Existing held-key and repair-phase short deadlines remain separate failure conditions; reaching one does not demonstrate natural lease expiry. Locking or local takeover still revokes authority immediately.
 
-Implementation and static regression checks are in progress. Real unified-control repair CI has not passed yet; prior pointer-only software-GL results do not validate this new combination or physical hardware.
+Real unified-control repair CI has not fully passed yet; prior pointer-only software-GL results do not validate this new combination or physical hardware.
 
 The first v30 candidate passes strict Clippy and 147 local pure regressions for
 control completion/repair, existing pointer repair, the complete Hello capability
@@ -422,7 +422,22 @@ matrix, non-socket transport records, viewer busy state and CLI policy. The two
 socket-based handshake tests are reserved for CI, not included in that local
 count. Independent static review checks distinct native proof ownership, bounded
 32-action completion order, finite terminal receipts and actual presentation
-before ACK. Six real owned-display/TCP scenarios are compiled and listed but
-remain unvalidated until CI: 800×600 click/key/release/repair/click, held release,
+before ACK. Six real owned-display/TCP scenarios cover: 800×600 click/key/release/repair/click, held release,
 Accepted input rejection, denied host permission, lock/unmap ABA, and the original
 30-second lease deadline. Local pure results do not substitute for these checks.
+
+The first real `304a` combination run passed two of six scenarios. Three fixtures
+withheld an earlier NativeProof before repair acceptance, so they could not reach
+the intended Accepted/5-second test stage. The TTL scenario also failed when a
+generic terminal error obscured its expiry classification. The general full suite
+passed 8,330 tests with three failures and 38 ignored: the same three fixtures
+failed there, while TTL passed. X11 and mandatory optimized 1080p passed.
+
+The pending rerun keeps all assertions and deadlines. The fixture correction
+holds only the exact VisualRepair sequence, rather than a prerequisite native
+proof. The terminal correction freezes the earlier applicable deadline in its
+receipt and gives expiry classification precedence only when local receipt time
+has already reached that deadline. That classification alone does not prove
+natural expiry: the real TTL test separately checks the original native and
+client deadlines and a single lease. These corrections await rerun; no complete
+v30 acceptance or physical-hardware validation is claimed.

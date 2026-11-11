@@ -19,6 +19,7 @@ pub(super) struct ClientControl {
     pub(super) activated: bool,
     pub(super) ended: bool,
     terminal_seen: bool,
+    terminal_failure: Option<&'static str>,
     sequence: u64,
     held: std::collections::BTreeSet<u16>,
     presented: Option<(DrawnScope, Instant)>,
@@ -35,6 +36,9 @@ impl ClientControl {
         self.configured() && !self.ended && self.request.is_none()
     }
     pub(super) fn check(&self, scope: (u64, u64), now: Instant) -> RemoteResult<()> {
+        if let Some(reason) = self.terminal_failure {
+            return Err(invalid_data(reason).into());
+        }
         if self.ended {
             return Ok(());
         }
@@ -133,6 +137,9 @@ impl ClientControl {
                 if self.epoch != Some(status.lease_epoch) {
                     return Err(invalid_data("control revoke epoch mismatch").into());
                 }
+                // Freeze the cause at receipt time, before clearing phase deadlines.
+                // An early peer revoke must never become TTL merely by waiting.
+                self.record_host_terminal(Instant::now());
                 self.ended = true;
             }
             ControlStatusKind::Waiting | ControlStatusKind::PointerReady => {

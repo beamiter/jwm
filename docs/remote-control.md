@@ -385,7 +385,8 @@ sequence can never be retried out of sync.
 
 The released `02f` baseline uses application version 29 and passed all four
 mainline CI workflows. The next candidate uses version 30; its unified-control
-PNG path still awaits real CI. For that candidate, earlier versions are
+PNG path has incomplete first-run CI results and awaits a corrected rerun (see
+[the bounded validation summary](remote-pointer-lossless-preparation.md#unified-control-plus-png-v30-candidate)). For that candidate, earlier versions are
 deliberately incompatible, so update `jwm-remote` on both machines together;
 negotiation rejects an older peer before screen or input data is exchanged.
 Version 7 introduced initial viewport and explicit stream selectors. Version 8
@@ -574,7 +575,7 @@ All handshake flights have fixed small bounds and share the existing absolute
 negotiation deadline. Wrong keys, versions, malformed flights or missing
 confirmation close the connection. There is no downgrade or v2 fallback.
 Upgrade both endpoints together. This transport update originally accompanied
-application v23; the released baseline is application v29 and the next candidate is v30 (unified-control repair CI pending). Transport v3 and the
+application v23; the released baseline is application v29 and the next candidate is v30 (unified-control repair rerun pending). Transport v3 and the
 native Wayland extension versions are separate version domains.
 
 Each record is `kind || sequence || ciphertext_len || ciphertext || tag(16)`.

@@ -130,10 +130,7 @@ impl ClientControl {
             .map(|(_, at)| at + LEASE_DURATION)
             .ok_or_else(failure)
     }
-    pub(in crate::remote::client) fn repair_check(&self, now: Instant) -> RemoteResult<()> {
-        if !self.repair.enabled || self.ended {
-            return Ok(());
-        }
+    fn deadline_failure(&self, now: Instant) -> Option<&'static str> {
         let lease = self.request.map(|(_, at)| at + LEASE_DURATION);
         let first = [
             self.repair.pending.front().map(|(_, at)| *at),
@@ -146,10 +143,27 @@ impl ClientControl {
         // A five-second protocol timeout cannot be relabelled as natural TTL
         // just because the event loop observes it after the later lease end.
         if first.is_some_and(|at| now >= at && lease.is_none_or(|end| at < end)) {
-            return Err(failure());
+            return Some("control repair ordering, scope or deadline invalid");
         }
         if lease.is_some_and(|at| now >= at) {
-            return Err(invalid_data("control lease expired").into());
+            return Some("control lease expired");
+        }
+        None
+    }
+    pub(in crate::remote::client) fn record_host_terminal(&mut self, now: Instant) {
+        if self.repair.enabled {
+            self.terminal_failure = Some(
+                self.deadline_failure(now)
+                    .unwrap_or("control lease revoked"),
+            );
+        }
+    }
+    pub(in crate::remote::client) fn repair_check(&self, now: Instant) -> RemoteResult<()> {
+        if !self.repair.enabled || self.ended {
+            return Ok(());
+        }
+        if let Some(reason) = self.deadline_failure(now) {
+            return Err(invalid_data(reason).into());
         }
         Ok(())
     }
@@ -571,6 +585,47 @@ mod tests {
             sequence: action.sequence,
             consumed: scoped(action.scope),
         }
+    }
+    #[test]
+    fn control_host_terminal_freezes_exact_ttl_without_relabelling_early_revoke() {
+        let now = Instant::now();
+        for delta in [None, Some(Duration::from_nanos(1))] {
+            let (mut c, _) = fixture(now);
+            let end = c.lease_deadline().unwrap();
+            c.record_host_terminal(delta.map_or(end, |early| end - early));
+            c.ended = true;
+            c.repair_end();
+            let expected = if delta.is_none() {
+                "control lease expired"
+            } else {
+                "control lease revoked"
+            };
+            assert_eq!(
+                c.check((1, 2), end + Duration::from_secs(1))
+                    .unwrap_err()
+                    .to_string(),
+                expected
+            );
+            assert!(c.ready_sequence().is_none());
+        }
+        let (mut c, t) = fixture(now);
+        let end = c.lease_deadline().unwrap();
+        c.repair.declining = Some((t, now + COMMAND_TIMEOUT));
+        c.record_host_terminal(end);
+        c.ended = true;
+        c.repair_end();
+        assert_eq!(
+            c.check((1, 2), end).unwrap_err().to_string(),
+            "control repair ordering, scope or deadline invalid"
+        );
+        let (mut legacy, _) = fixture(now);
+        legacy.repair.enabled = false;
+        legacy.record_host_terminal(legacy.lease_deadline().unwrap());
+        legacy.ended = true;
+        assert!(
+            legacy.check((1, 2), now).is_ok(),
+            "legacy terminal behavior unchanged"
+        );
     }
     #[test]
     fn control_natural_ttl_is_distinct_from_an_earlier_protocol_failure() {

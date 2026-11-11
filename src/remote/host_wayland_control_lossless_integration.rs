@@ -280,14 +280,17 @@ fn actual_control_lossless_requires_explicit_host_permission() {
 // Observe the actual host Accepted status, not a label or elapsed idle delay.
 fn accepted_without_presenting(h: &mut Harness, gl: &mut HeadlessSmithayGles) {
     let deadline = Instant::now() + Duration::from_secs(5);
+    h.hold_visual_repair = true;
     loop {
-        h.tick(gl, false);
+        h.tick(gl, true);
         h.received.assert_no_input();
         h.unexpected.assert_no_input();
-        assert!(
-            h.client_done.try_recv().is_err(),
-            "client ended before Accepted"
-        );
+        if let Ok(result) = h.client_done.try_recv() {
+            panic!(
+                "client ended before Accepted: {result:?}; repair={:?}",
+                h.repair_observation.lock().unwrap()
+            );
+        }
         let records = h.repair_observation.lock().unwrap();
         if let Some(accepted) = records.iter().find(|r| r.0 == "accepted") {
             assert_eq!(accepted.2, 0);
@@ -297,7 +300,9 @@ fn accepted_without_presenting(h: &mut Harness, gl: &mut HeadlessSmithayGles) {
                     .iter()
                     .any(|r| r.0 == "requested" && r.1 == accepted.1)
             );
-            break;
+            if h.ready.lock().unwrap().is_none() {
+                break;
+            }
         }
         assert!(
             Instant::now() < deadline,
@@ -416,19 +421,23 @@ fn actual_control_lossless_held_shift_release_completes_before_repair() {
         );
     }
     h.key(110, 42, false);
+    h.hold_visual_repair = true;
     loop {
-        // Withhold new presentation only after release. Actual native keyup and
-        // its exact completion must precede the first real repair request.
-        h.tick(&mut gl, false);
+        // Keep real proof/keepalive presentation flowing after keyup. Only the
+        // actual VisualRepair commit is withheld, never the proof needed to
+        // make the Offer eligible for acceptance.
+        h.tick(&mut gl, true);
         h.unexpected.assert_no_input();
         assert!(
             Instant::now() < deadline,
             "release/repair transition timed out"
         );
-        assert!(
-            h.client_done.try_recv().is_err(),
-            "client ended during release"
-        );
+        if let Ok(result) = h.client_done.try_recv() {
+            panic!(
+                "client ended during release: {result:?}; repair={:?}",
+                h.repair_observation.lock().unwrap()
+            );
+        }
         let records = h.repair_observation.lock().unwrap();
         if let Some(index) = records.iter().position(|r| r.0 == "accepted") {
             assert_eq!(h.received.keys, [(42, 1), (42, 0)]);

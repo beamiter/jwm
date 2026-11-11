@@ -294,6 +294,7 @@ type RepairObservation = Arc<
 >;
 
 struct Harness {
+    hold_visual_repair: bool,
     layout: FixtureLayout,
     repair_observation: RepairObservation,
     control_lifetime: Arc<Mutex<Option<(Instant, Instant)>>>,
@@ -640,6 +641,7 @@ impl Harness {
             let _ = client_tx.send(result);
         });
         Self {
+            hold_visual_repair: false,
             layout,
             repair_observation,
             control_lifetime,
@@ -783,7 +785,15 @@ impl Harness {
         // its read-only sequence observation. Wait for that exact new commit;
         // never label the current pixels with an older Ready or guessed seq.
         let committed = self.frames.lock().unwrap().0;
+        let withhold_repair = self.hold_visual_repair
+            && committed.is_some_and(|sequence| {
+                self.purposes.lock().unwrap().iter().any(|&(seq, purpose)| {
+                    seq == sequence
+                        && purpose == crate::remote::source_wire::FramePurpose::VisualRepair
+                })
+            });
         if drawn
+            && !withhold_repair
             && !self.feedback.is_empty()
             && let Some(sequence) =
                 committed.filter(|n| self.presented_sequence.is_none_or(|old| *n > old))
