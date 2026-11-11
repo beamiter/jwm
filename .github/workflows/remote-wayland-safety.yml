@@ -333,6 +333,7 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
         with:
           shared-key: remote-wayland-optimized-expiry
+          cache-on-failure: true
       - name: Run the exact 1080p lease test with production-grade optimization
         run: |
           set -euo pipefail

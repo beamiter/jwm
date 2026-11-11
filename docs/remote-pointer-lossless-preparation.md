@@ -227,3 +227,26 @@ while retaining its complete pixel checks. There is no fabricated presentation
 timestamp or relaxed timing gate. Results for this revised CI execution are
 still pending; this is neither a verified performance fix nor physical-hardware
 acceptance. The successful `9b3105` baseline remains separate from this work.
+
+
+The mandatory optimized run for `f35d24ee` did execute the 1080p test. It
+obtained the real native grant and completed eight repair batches, increasing
+exact pixels from 65,536 to 524,288 while full-image SSE decreased from
+121,125,364 to 93,749,548. The test still failed after about 20.68 seconds,
+before natural expiry, when an ordinary Ready reached the client before its
+local presentation bookkeeping. This partial progress is not a passing expiry
+result. General and X11 CI and the ordinary Wayland job passed separately.
+
+The follow-up fixes the ordering at the actual presentation callback: record
+the exact NativeProof receipt before publishing its ACK, while keeping the
+initial input request after ACK. A bounded exact-receipt history retires a late
+old Ready without authorizing an older frame, and later decoded frames remain
+invalidating even if their predecessor's feedback is processed afterward.
+Neither Video nor PNG repair creates this receipt. In the active flow, Ready
+requires exact actual-presentation evidence and Ready replay is rejected. The
+same mandatory optimized test must pass before
+this candidate can be accepted; no safety deadline is increased.
+Local strict Clippy and 62 focused pure regressions pass for this ordering
+follow-up, including the actual-receipt/ACK race, newer-frame invalidation,
+exact old Ready retirement, replay rejection and existing pointer/scroll/repair
+cases. This is preparation for the mandatory real rerun, not its result.

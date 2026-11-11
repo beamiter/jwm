@@ -2190,6 +2190,29 @@ fn viewer_loop(
                     }
                 }
             }
+            // Publish actual NativeProof presentation evidence before its ACK
+            // can cause the host to reply Ready on the independent reader thread.
+            // Keep the initial Request after ACK, and never record this receipt
+            // a second time after a newer decoded frame invalidates its gate.
+            let pointer_request = if purpose == FramePurpose::NativeProof {
+                let mut pointer = state.wayland_pointer.lock().unwrap();
+                if pointer.requested.is_none_or(|(initial, _)| {
+                    (initial.source_epoch, initial.geometry_epoch) == presented_scope
+                }) {
+                    pointer.presented(
+                        super::wayland_pointer_wire::DrawnScope {
+                            source_epoch: presented_scope.0,
+                            geometry_epoch: presented_scope.1,
+                            frame_sequence: sequence,
+                        },
+                        Instant::now(),
+                    )
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
             acknowledge_presentation(writer, sequence, pending_presentations, &state.telemetry)?;
             // A repair is real display progress and returns video credit, but
             // cannot create, renew, or revive any native-input authority.
@@ -2291,14 +2314,7 @@ fn viewer_loop(
                     }
                 }
                 if purpose == FramePurpose::NativeProof {
-                    if let Some(request) = pointer.presented(
-                        super::wayland_pointer_wire::DrawnScope {
-                            source_epoch: presented_scope.0,
-                            geometry_epoch: presented_scope.1,
-                            frame_sequence: sequence,
-                        },
-                        Instant::now(),
-                    ) {
+                    if let Some(request) = pointer_request {
                         writer.write_message(
                             MessageKind::WaylandPointerRequest,
                             &request.encode()?,
@@ -3149,6 +3165,11 @@ struct ClientPointer {
     enabled: bool,
     requested: Option<(super::wayland_pointer_wire::DrawnScope, Instant)>,
     presented: Option<(super::wayland_pointer_wire::DrawnScope, Instant)>,
+    latest_decoded: Option<super::wayland_pointer_wire::DrawnScope>,
+    // Exact actual NativeProof receipts, bounded independently of peer input.
+    // The bool records a received Ready, including one retired without authority.
+    presentation_receipts:
+        std::collections::VecDeque<(super::wayland_pointer_wire::DrawnScope, bool)>,
     ready: Option<super::wayland_pointer_wire::DrawnScope>,
     consumed: Option<super::wayland_pointer_wire::DrawnScope>,
     epoch: Option<u64>,
@@ -3175,7 +3196,21 @@ impl ClientPointer {
         }
         self.ready = None;
         self.click = None;
-        self.newer_frame = false;
+        self.newer_frame = self.latest_decoded.is_some_and(|decoded| {
+            (decoded.source_epoch, decoded.geometry_epoch)
+                != (scope.source_epoch, scope.geometry_epoch)
+                || decoded.frame_sequence > scope.frame_sequence
+        });
+        if !self
+            .presentation_receipts
+            .iter()
+            .any(|(seen, _)| *seen == scope)
+        {
+            if self.presentation_receipts.len() == 256 {
+                self.presentation_receipts.pop_front();
+            }
+            self.presentation_receipts.push_back((scope, false));
+        }
         self.presented = Some((scope, now));
         self.repair_resolve(now);
         if self.requested.is_none() {
@@ -3245,12 +3280,33 @@ impl ClientPointer {
         }
         self.epoch = Some(value.lease_epoch);
         if value.scope != presented {
+            let receipt = self
+                .presentation_receipts
+                .iter_mut()
+                .find(|(scope, _)| *scope == value.scope)
+                .ok_or_else(|| invalid_data("pointer status lacks exact presentation receipt"))?;
+            if value.status == S::Ready {
+                if receipt.1 {
+                    return Err(invalid_data("pointer Ready replay").into());
+                }
+                receipt.1 = true;
+            }
             return Ok(());
-        } // stale status never changes current gate
+        } // exact stale receipt only; never changes current gate
         match value.status {
             S::Ready => {
                 if self.consumed == Some(value.scope) || self.ready == Some(value.scope) {
                     return Err(invalid_data("pointer Ready replay").into());
+                }
+                if let Some((_, seen)) = self
+                    .presentation_receipts
+                    .iter_mut()
+                    .find(|(scope, _)| *scope == value.scope)
+                {
+                    if *seen {
+                        return Err(invalid_data("pointer Ready replay").into());
+                    }
+                    *seen = true;
                 }
                 if !self.newer_frame && at.elapsed() < super::wayland_pointer_wire::FRAME_MAX_AGE {
                     self.ready = Some(value.scope);
@@ -4129,6 +4185,11 @@ fn receive_frame_records(
                 state.wayland_control.lock().unwrap().before_frame();
                 {
                     let mut pointer = state.wayland_pointer.lock().unwrap();
+                    pointer.latest_decoded = Some(super::wayland_pointer_wire::DrawnScope {
+                        source_epoch: epoch,
+                        geometry_epoch: queued.frame.geometry_epoch(),
+                        frame_sequence: queued.frame.sequence(),
+                    });
                     pointer.repair_frame(
                         purpose,
                         super::pointer_repair_phase::Scope {
@@ -4403,6 +4464,112 @@ pub(super) mod tests {
         pointer
     }
     #[test]
+    fn pointer_actual_receipt_precedes_ack_ready_and_survives_later_invalidation() {
+        use super::super::wayland_pointer_wire::*;
+        let now = std::time::Instant::now();
+        for invalidate_before_ready in [false, true] {
+            let mut pointer = pointer_fixture(now);
+            let old = pointer.presented.unwrap().0;
+            let next = DrawnScope {
+                frame_sequence: 1,
+                ..old
+            };
+            pointer.latest_decoded = Some(next);
+            pointer.before_frame();
+            // Actual feedback is saved before ACK is made visible to the host.
+            assert!(pointer.presented(next, now).is_none());
+            if invalidate_before_ready {
+                pointer.latest_decoded = Some(DrawnScope {
+                    frame_sequence: 2,
+                    ..old
+                });
+                pointer.before_frame();
+            }
+            // Simulates the independent receiver replying immediately at ACK.
+            pointer
+                .receive(PointerStatus {
+                    lease_epoch: 7,
+                    scope: next,
+                    status: PointerStatusKind::Ready,
+                })
+                .unwrap();
+            assert_eq!(pointer.fresh(now), !invalidate_before_ready);
+            pointer.before_frame();
+            assert!(!pointer.fresh(now));
+            // Foreground must not call presented(next) again after ACK.
+            assert!(
+                pointer
+                    .receive(PointerStatus {
+                        lease_epoch: 7,
+                        scope: next,
+                        status: PointerStatusKind::Ready
+                    })
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn pointer_late_exact_ready_retires_without_reviving_and_unknown_replays_fail() {
+        use super::super::wayland_pointer_wire::*;
+        let now = std::time::Instant::now();
+        let mut pointer = pointer_fixture(now);
+        let initial = pointer.presented.unwrap().0;
+        let older = DrawnScope {
+            frame_sequence: 1,
+            ..initial
+        };
+        let latest = DrawnScope {
+            frame_sequence: 3,
+            ..initial
+        };
+        pointer.presented(older, now);
+        pointer.latest_decoded = Some(latest);
+        pointer.before_frame();
+        // A receipt for N cannot clear an already-decoded N+2 invalidation.
+        pointer.presented(older, now);
+        assert!(pointer.newer_frame && !pointer.fresh(now));
+        pointer.presented(latest, now);
+        let ready = PointerStatus {
+            lease_epoch: 7,
+            scope: older,
+            status: PointerStatusKind::Ready,
+        };
+        pointer.receive(ready).unwrap();
+        assert!(pointer.ready.is_none());
+        assert!(pointer.receive(ready).is_err());
+        assert!(
+            pointer
+                .receive(PointerStatus {
+                    scope: DrawnScope {
+                        frame_sequence: 2,
+                        ..initial
+                    },
+                    ..ready
+                })
+                .is_err()
+        );
+        assert!(
+            pointer
+                .receive(PointerStatus {
+                    scope: DrawnScope {
+                        frame_sequence: 4,
+                        ..initial
+                    },
+                    ..ready
+                })
+                .is_err()
+        );
+        pointer
+            .receive(PointerStatus {
+                scope: latest,
+                ..ready
+            })
+            .unwrap();
+        assert!(pointer.fresh(now));
+    }
+
+    #[test]
     fn pointer_local_revoke_drains_only_known_inflight_status_without_reviving() {
         use super::super::wayland_pointer_wire::*;
         use super::super::x11_viewer::WaylandPointerEventKind as E;
@@ -4635,6 +4802,10 @@ pub(super) mod tests {
             );
             assert!(pointer.left_down);
             assert!(pointer.click.is_none());
+            let scope = super::super::wayland_pointer_wire::DrawnScope {
+                frame_sequence: scope.frame_sequence + 1,
+                ..scope
+            };
             pointer.presented(scope, now);
             pointer
                 .receive(PointerStatus {
