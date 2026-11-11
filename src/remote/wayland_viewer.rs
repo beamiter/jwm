@@ -305,6 +305,16 @@ fn plan_slot(slots: &[SlotMeta], size: (u16, u16)) -> RemoteResult<SlotPlan> {
         None => Err("both Wayland SHM slots remain busy".into()),
     }
 }
+fn control_repair_busy(
+    keyboard: &keyboard::Keyboard,
+    pointer: &pointer::Pointer,
+    collected: &[ViewerEvent],
+) -> bool {
+    keyboard.revoked.is_some()
+        || keyboard.pending_keys()
+        || pointer.repair_busy()
+        || !collected.is_empty()
+}
 impl State {
     fn control_collect(&mut self) {
         if !self.control_mode {
@@ -880,6 +890,18 @@ impl WaylandViewer {
     /// Snapshot after normal event polling; no dispatch, focus change or release.
     pub(super) fn wayland_pointer_repair_busy(&self) -> bool {
         self.state.pointer.repair_busy()
+    }
+    /// Read-only local state after polling. Pending releases remain queued and
+    /// unfinished device frames retain their original timeout.
+    pub(super) fn wayland_control_repair_busy(&self) -> bool {
+        self.state.control_mode
+            && (self.state.closed
+                || self.state.failure.is_some()
+                || control_repair_busy(
+                    &self.state.keyboard,
+                    &self.state.pointer,
+                    &self.state.control_events,
+                ))
     }
     pub(super) fn wayland_pointer_presented(&mut self, sequence: u64) {
         self.state.pointer.confirm(sequence);
@@ -1582,6 +1604,30 @@ wayland_client::delegate_noop!(State: ignore wp_presentation::WpPresentation);
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn control_repair_busy_preserves_collected_release_and_revocation() {
+        let mut keyboard = keyboard::Keyboard::default();
+        let pointer = pointer::Pointer::default();
+        assert!(!control_repair_busy(&keyboard, &pointer, &[]));
+        let events = vec![ViewerEvent::Key {
+            keycode: 50,
+            pressed: false,
+        }];
+        for _ in 0..2 {
+            assert!(control_repair_busy(&keyboard, &pointer, &events));
+        }
+        assert_eq!(
+            events,
+            vec![ViewerEvent::Key {
+                keycode: 50,
+                pressed: false
+            }]
+        );
+        keyboard.revoke("test local revocation");
+        assert!(control_repair_busy(&keyboard, &pointer, &[]));
+        assert!(control_repair_busy(&keyboard, &pointer, &[]));
+    }
+
     #[test]
     fn pointer_title_status_cache_only_updates_for_final_display_changes() {
         let mut cached = None;

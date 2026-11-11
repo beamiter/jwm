@@ -23,6 +23,7 @@ pub mod clipboard_staging_budget;
 pub mod clipboard_sync;
 pub mod clipboard_wire;
 pub mod close_wire;
+mod control_repair_wire;
 pub mod cursor;
 mod deadline;
 mod downscale;

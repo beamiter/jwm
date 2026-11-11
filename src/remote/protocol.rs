@@ -175,6 +175,11 @@ pub enum MessageKind {
     WaylandPointerRepairRequest = 41,
     WaylandPointerRepairDecline = 42,
     WaylandPointerRepairStatus = 43,
+    WaylandControlActionCompleted = 44,
+    WaylandControlRepairOffer = 45,
+    WaylandControlRepairRequest = 46,
+    WaylandControlRepairDecline = 47,
+    WaylandControlRepairStatus = 48,
 }
 
 impl TryFrom<u8> for MessageKind {
@@ -223,6 +228,11 @@ impl TryFrom<u8> for MessageKind {
             41 => Ok(Self::WaylandPointerRepairRequest),
             42 => Ok(Self::WaylandPointerRepairDecline),
             43 => Ok(Self::WaylandPointerRepairStatus),
+            44 => Ok(Self::WaylandControlActionCompleted),
+            45 => Ok(Self::WaylandControlRepairOffer),
+            46 => Ok(Self::WaylandControlRepairRequest),
+            47 => Ok(Self::WaylandControlRepairDecline),
+            48 => Ok(Self::WaylandControlRepairStatus),
             21 => Ok(Self::ClipboardRestrict),
             22 => Ok(Self::ClipboardRestricted),
             other => Err(ProtocolError::UnknownMessageKind(other)),
@@ -757,11 +767,16 @@ mod tests {
             (41, MessageKind::WaylandPointerRepairRequest),
             (42, MessageKind::WaylandPointerRepairDecline),
             (43, MessageKind::WaylandPointerRepairStatus),
+            (44, MessageKind::WaylandControlActionCompleted),
+            (45, MessageKind::WaylandControlRepairOffer),
+            (46, MessageKind::WaylandControlRepairRequest),
+            (47, MessageKind::WaylandControlRepairDecline),
+            (48, MessageKind::WaylandControlRepairStatus),
         ] {
             assert_eq!(MessageKind::try_from(tag).unwrap(), kind);
             assert_eq!(u8::from(kind), tag);
         }
-        for tag in (0..=u8::MAX).filter(|tag| !(1..=43).contains(tag)) {
+        for tag in (0..=u8::MAX).filter(|tag| !(1..=48).contains(tag)) {
             assert!(
                 matches!(MessageKind::try_from(tag), Err(ProtocolError::UnknownMessageKind(rejected)) if rejected == tag),
                 "unallocated application message kind {tag} must be rejected"

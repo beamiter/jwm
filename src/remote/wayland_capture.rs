@@ -1042,6 +1042,18 @@ impl WaylandCapture {
     pub(super) fn frame(&mut self) -> RemoteResult<CaptureOutcome> {
         self.frame_with_pointer_visual(false)
     }
+    pub(super) fn frame_with_control_visual(&mut self) -> RemoteResult<CaptureOutcome> {
+        if !self.state.control.enabled
+            || self.control_revoked()
+            || self.retained_frame.is_some()
+            || self.state.pointer.enabled
+            || self.state.text.enabled
+            || self.state.keyboard.enabled
+        {
+            return Err(invalid("visual control repair lacks quiesced capture authority").into());
+        }
+        self.frame_with_visual_inner(true)
+    }
     pub(super) fn frame_with_pointer_visual(
         &mut self,
         visual_only: bool,
@@ -1056,6 +1068,9 @@ impl WaylandCapture {
         {
             return Err(invalid("visual pointer repair lacks quiesced capture authority").into());
         }
+        self.frame_with_visual_inner(visual_only)
+    }
+    fn frame_with_visual_inner(&mut self, visual_only: bool) -> RemoteResult<CaptureOutcome> {
         let result = self.read_frame_with_pointer_visual(visual_only);
         if result.is_err() {
             self.revoke_keyboard();
@@ -1213,7 +1228,7 @@ impl WaylandCapture {
         if self.state.text.enabled && !self.state.text.ended && !self.state.text.revoked {
             self.retained_frame = Some(ready_frame);
             self.pointer_ready_at = Some(Instant::now());
-        } else if self.state.control.enabled && !self.control_revoked() {
+        } else if self.state.control.enabled && !self.control_revoked() && !visual_only {
             self.retained_frame = Some(ready_frame);
             self.pointer_ready_at = Some(Instant::now());
             if self.state.frame_serial == 1 {

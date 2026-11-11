@@ -3,6 +3,8 @@
 use super::source_wire::FramePurpose;
 #[path = "host_control.rs"]
 mod control;
+#[path = "host_control_repair.rs"]
+mod control_repair;
 #[path = "host_input_wake.rs"]
 mod input_wake;
 #[path = "host_pointer_repair.rs"]
@@ -405,6 +407,7 @@ fn poisoned_writer() -> io::Error {
 
 struct PendingFrame {
     pointer_repair: Option<pointer_repair::Stamp>,
+    control_repair: Option<control_repair::Stamp>,
     native_proof_serial: Option<u64>,
     pointer_serial: Option<u64>,
     source_version: SourceVersion,
@@ -2258,6 +2261,7 @@ struct SourceControl {
     pointer_revoke: AtomicBool,
     pointer_queue: Mutex<VecDeque<PointerCommand>>,
     pointer_repair: Mutex<pointer_repair::Control>,
+    control_repair: Mutex<control_repair::Control>,
     pointer_frame: Mutex<Option<PointerFrame>>,
     state: Mutex<HostSourceState>,
     changed: Condvar,
@@ -2341,6 +2345,7 @@ impl SourceControl {
             pointer_revoke: AtomicBool::new(false),
             pointer_queue: Mutex::new(VecDeque::new()),
             pointer_repair: Mutex::new(pointer_repair::Control::default()),
+            control_repair: Mutex::new(control_repair::Control::default()),
             pointer_frame: Mutex::new(None),
             state: Mutex::new(HostSourceState {
                 policy: SourceSession::new(grants, SourceId(1))?,
@@ -2437,7 +2442,15 @@ fn validate_window_policy(options: &HostOptions) -> RemoteResult<()> {
                     || options.wayland_popups
                     || options.wayland_resize_follow
                     || options.allow_wayland_keyboard))
-            || options.allow_wayland_control
+            || (options.allow_wayland_control
+                && (!options.wayland_select
+                    || !options.once
+                    || options.wayland_popups
+                    || options.wayland_resize_follow
+                    || options.allow_wayland_keyboard
+                    || options.allow_wayland_pointer
+                    || options.allow_wayland_scroll
+                    || options.allow_wayland_horizontal_scroll))
             || options.allow_wayland_text
             || (options.allow_wayland_scroll && !options.allow_wayland_pointer)
             || (options.allow_wayland_horizontal_scroll && !options.allow_wayland_pointer)
@@ -2447,7 +2460,7 @@ fn validate_window_policy(options: &HostOptions) -> RemoteResult<()> {
                     || options.wayland_popups
                     || options.wayland_resize_follow)))
     {
-        return Err(invalid_data("static lossless requires read-only or exclusive native keyboard/pointer permissions without text, clipboard, control or remote resize").into());
+        return Err(invalid_data("static lossless requires read-only or exclusive native keyboard/pointer permissions without text, clipboard or remote resize").into());
     }
 
     if options.allow_wayland_text
@@ -4326,7 +4339,9 @@ fn stream_frames(
                 next_cursor_poll = Instant::now() + cursor_interval;
             }
 
-            if matches!(pointer_repair::capture_stamp(sources), Some(Err(()))) {
+            if matches!(pointer_repair::capture_stamp(sources), Some(Err(())))
+                || matches!(control_repair::capture_stamp(sources), Some(Err(())))
+            {
                 capture
                     .wait_for_activity_with_wake(
                         CAPTURE_RATE_LIMIT_SLICE,
@@ -4394,11 +4409,20 @@ fn stream_frames(
                 Some(Err(())) => continue,
                 None => None,
             };
+            let control_repair_stamp = match control_repair::capture_stamp(sources) {
+                Some(Ok(stamp)) => Some(stamp),
+                Some(Err(())) => continue,
+                None => None,
+            };
             let capture_started = Instant::now();
             let outcome = if repair_stamp
                 .is_some_and(|stamp| matches!(stamp.intent, pointer_repair::Intent::Visual(_)))
             {
                 capture.frame_with_pointer_visual()
+            } else if control_repair_stamp
+                .is_some_and(|s| matches!(s.intent, control_repair::Intent::Visual(_)))
+            {
+                capture.frame_with_control_visual()
             } else {
                 capture.frame()
             }
@@ -4487,8 +4511,12 @@ fn stream_frames(
             if let Some(stamp) = repair_stamp {
                 pointer_repair::capture_queued(sources, stamp)?;
             }
+            if let Some(stamp) = control_repair_stamp {
+                control_repair::capture_queued(sources, stamp)?;
+            }
             let pending = PendingFrame {
                 pointer_repair: repair_stamp,
+                control_repair: control_repair_stamp,
                 native_proof_serial: pointer_serial.or_else(|| capture.keyboard_proof_serial()),
                 pointer_serial,
                 source_version,
@@ -4718,6 +4746,12 @@ fn send_frames_with_encoder_scoped<W: std::io::Write + SetWriteTimeout>(
                 continue;
             }
         }
+        if let (Some(sources), Some(stamp)) = (sources, pending.control_repair) {
+            if !control_repair::permits_write(sources, stamp) {
+                sender.discard();
+                continue;
+            }
+        }
         let planned_at = Instant::now();
         let mut plan = sender
             .plan_record_at(
@@ -4729,10 +4763,14 @@ fn send_frames_with_encoder_scoped<W: std::io::Write + SetWriteTimeout>(
             .map_err(LocalRuntimeFailure::encoding)?;
         if let Some(sources) = sources {
             pointer_repair::observe_debt(sources, sender.encoder.has_stable_exact_debt(planned_at));
+            control_repair::observe_debt(sources, sender.encoder.has_stable_exact_debt(planned_at));
         }
-        if pending
+        if (pending
             .pointer_repair
             .is_some_and(|s| matches!(s.intent, pointer_repair::Intent::Visual(_)))
+            || pending
+                .control_repair
+                .is_some_and(|s| matches!(s.intent, control_repair::Intent::Visual(_))))
             && !plan.emit
         {
             plan =
@@ -4890,6 +4928,12 @@ fn send_frames_with_encoder_scoped<W: std::io::Write + SetWriteTimeout>(
                     continue;
                 }
             }
+            if let (Some(sources), Some(stamp)) = (sources, pending.control_repair) {
+                if !control_repair::permits_write(sources, stamp) {
+                    sender.discard();
+                    continue;
+                }
+            }
             let mut source_state = sources.map(|sources| sources.state.lock().unwrap());
             if source_state.as_ref().is_some_and(|state| {
                 !state.policy.accepts_capture(pending.source_version)
@@ -4965,6 +5009,21 @@ fn send_frames_with_encoder_scoped<W: std::io::Write + SetWriteTimeout>(
         sender.commit_at(&pending.frame, flushed_at);
         if let (Some(sources), Some(stamp)) = (sources, pending.pointer_repair) {
             pointer_repair::flushed(
+                sources,
+                stamp,
+                DrawnScope {
+                    source_epoch: pending.source_version.epoch,
+                    geometry_epoch: pending.frame.geometry_epoch,
+                    frame_sequence: sequence,
+                },
+                frame_purpose,
+                pending.captured_at,
+                flushed_at,
+            )?;
+            sources.notify_input()?;
+        }
+        if let (Some(sources), Some(stamp)) = (sources, pending.control_repair) {
+            control_repair::flushed(
                 sources,
                 stamp,
                 DrawnScope {
@@ -5647,6 +5706,31 @@ fn receive_input_scoped(
                     *sources.text_request.lock().unwrap() = Some(request);
                     sources.notify_input()?;
                 }
+                MessageKind::WaylandControlRepairRequest
+                | MessageKind::WaylandControlRepairDecline => {
+                    let sources =
+                        sources.ok_or_else(|| invalid_data("control repair unavailable"))?;
+                    if !sources.static_lossless.load(Ordering::Acquire)
+                        || !sources.control_enabled.load(Ordering::Acquire)
+                        || sources.control_revoke.load(Ordering::Acquire)
+                    {
+                        return Err(invalid_data("control repair not negotiated or revoked").into());
+                    }
+                    let token = super::pointer_repair_phase::Token::decode(&payload)?;
+                    let command = if kind == MessageKind::WaylandControlRepairRequest {
+                        ControlCommand::RepairRequest(token)
+                    } else {
+                        ControlCommand::RepairDecline(token)
+                    };
+                    let mut queue = sources.control_queue.lock().unwrap();
+                    if queue.len() >= 32 {
+                        sources.control_revoke.store(true, Ordering::Release);
+                        return Err(invalid_data("control queue exceeded").into());
+                    }
+                    queue.push_back(command);
+                    drop(queue);
+                    sources.notify_input()?;
+                }
                 MessageKind::WaylandControlRevoke => {
                     let _ = super::wayland_control_wire::ControlRevoke::decode(&payload)?;
                     let sources = sources.ok_or_else(|| invalid_data("control unavailable"))?;
@@ -5885,6 +5969,9 @@ fn receive_input_scoped(
                 | MessageKind::Frame
                 | MessageKind::CursorShape
                 | MessageKind::CursorPosition
+                | MessageKind::WaylandControlActionCompleted
+                | MessageKind::WaylandControlRepairOffer
+                | MessageKind::WaylandControlRepairStatus
                 | MessageKind::WaylandPointerActionCompleted
                 | MessageKind::WaylandPointerRepairOffer
                 | MessageKind::WaylandPointerRepairStatus
@@ -7616,6 +7703,37 @@ mod tests {
         options.allow_input = false;
         options.allow_window_resize = true;
         assert!(validate_window_policy(&options).is_err());
+    }
+
+    #[test]
+    fn lossless_control_is_exclusive_and_without_either_scroll_axis() {
+        let mut options = test_host_source_options();
+        options.capture_area = CaptureArea::Root;
+        options.wayland_select = true;
+        options.allow_static_lossless = true;
+        options.allow_wayland_control = true;
+        assert_eq!(
+            validate_window_policy(&options).is_ok(),
+            cfg!(feature = "remote-wayland")
+        );
+        for case in 0..12 {
+            let mut bad = options.clone();
+            match case {
+                0 => bad.allow_wayland_scroll = true,
+                1 => bad.allow_wayland_horizontal_scroll = true,
+                2 => bad.allow_wayland_keyboard = true,
+                3 => bad.allow_wayland_pointer = true,
+                4 => bad.allow_wayland_text = true,
+                5 => bad.allow_input = true,
+                6 => bad.allow_clipboard = true,
+                7 => bad.allow_window_resize = true,
+                8 => bad.wayland_resize_follow = true,
+                9 => bad.wayland_popups = true,
+                10 => bad.once = false,
+                _ => bad.wayland_select = false,
+            }
+            assert!(validate_window_policy(&bad).is_err(), "case {case}");
+        }
     }
 
     #[test]
@@ -9983,6 +10101,7 @@ mod tests {
     fn test_pending_frame(red: u8) -> PendingFrame {
         PendingFrame {
             pointer_repair: None,
+            control_repair: None,
             native_proof_serial: None,
             pointer_serial: None,
             source_version: SourceVersion {
@@ -11396,6 +11515,7 @@ mod tests {
         let base = Instant::now();
         let pending = PendingFrame {
             pointer_repair: None,
+            control_repair: None,
             native_proof_serial: None,
             pointer_serial: None,
             source_version: SourceVersion {

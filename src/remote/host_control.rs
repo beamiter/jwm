@@ -7,6 +7,8 @@ use crate::remote::wayland_control_wire::{
 pub(super) enum ControlCommand {
     Request(ControlRequest),
     Action(ControlAction),
+    RepairRequest(super::super::pointer_repair_phase::Token),
+    RepairDecline(super::super::pointer_repair_phase::Token),
 }
 #[derive(Default)]
 pub(super) struct HostControl {
@@ -18,6 +20,20 @@ pub(super) struct HostControl {
     held: std::collections::BTreeSet<u16>,
     tokens: f64,
     rate_at: Option<Instant>,
+}
+impl HostControl {
+    pub(super) fn held_empty(&self) -> bool {
+        self.held.is_empty()
+    }
+    pub(super) fn epoch(&self) -> Option<u64> {
+        self.epoch
+    }
+    pub(super) fn active(&self, now: Instant) -> bool {
+        !self.ended
+            && self
+                .started
+                .is_some_and(|at| now.saturating_duration_since(at) < LEASE_DURATION)
+    }
 }
 fn status(
     writer: &SharedWriter,
@@ -38,7 +54,7 @@ fn status(
     writer.flush()?;
     Ok(())
 }
-fn stop(
+pub(super) fn stop(
     sources: &SourceControl,
     capture: &mut HostCapture,
     writer: &SharedWriter,
@@ -54,6 +70,13 @@ fn stop(
     sources.control_queue.lock().unwrap().clear();
     sources.pointer_frame.lock().unwrap().take();
     capture.revoke_control();
+    control_repair::stopped(sources);
+    {
+        let mut s = sources.state.lock().unwrap();
+        s.presented_frame = None;
+        s.presented_native_proof = None;
+        s.presented_geometry = None;
+    }
     if let Some(request) = state.request {
         status(
             writer,
@@ -85,12 +108,22 @@ pub(super) fn process(
             .started
             .is_some_and(|at| now.saturating_duration_since(at) >= LEASE_DURATION)
     {
-        return stop(sources, capture, writer, state);
+        let validation = control_repair::validate_expiry(sources, now);
+        stop(sources, capture, writer, state)?;
+        return validation;
     }
     let tracked = *sources.pointer_frame.lock().unwrap();
-    let drawn = sources.state.lock().unwrap().presented_frame;
+    let drawn = sources.state.lock().unwrap().presented_native_proof;
     let command = sources.control_queue.lock().unwrap().pop_front();
     if let Some(command) = command {
+        let command = match control_repair::intercept(sources, capture, writer, state, command) {
+            Ok(Some(command)) => command,
+            Ok(None) => return Ok(()),
+            Err(error) => {
+                stop(sources, capture, writer, state)?;
+                return Err(error);
+            }
+        };
         let result = (|| -> RemoteResult<()> {
             match command {
                 ControlCommand::Request(request) => {
@@ -112,6 +145,7 @@ pub(super) fn process(
                     let epoch = capture.arm_control(request.keymap_digest)?;
                     state.epoch = Some(epoch);
                     state.started = Some(now);
+                    control_repair::granted(sources, epoch, now);
                     state.tokens = 32.0;
                     state.rate_at = Some(now);
                     // Initial native arm consumed its frame; keyboard approval is not pointer Ready.
@@ -208,6 +242,7 @@ pub(super) fn process(
                     };
                     capture.control_action(&action, serial)?;
                     state.sequence = action.sequence;
+                    control_repair::after_action(sources, writer, action)?;
                     sources.pointer_frame.lock().unwrap().take();
                     status(
                         writer,
@@ -215,6 +250,9 @@ pub(super) fn process(
                         action.lease_epoch,
                         ControlStatusKind::Waiting,
                     )?;
+                }
+                ControlCommand::RepairRequest(_) | ControlCommand::RepairDecline(_) => {
+                    unreachable!("repair commands intercepted")
                 }
             }
             Ok(())
@@ -224,6 +262,14 @@ pub(super) fn process(
             return Err(error);
         }
         return Ok(());
+    }
+    match control_repair::poll_active(sources, capture, writer, state) {
+        Ok(true) => return Ok(()),
+        Ok(false) => {}
+        Err(error) => {
+            stop(sources, capture, writer, state)?;
+            return Err(error);
+        }
     }
     if let Some(frame) = tracked {
         if now.saturating_duration_since(frame.at) >= FRAME_MAX_AGE {
@@ -262,5 +308,6 @@ pub(super) fn process(
             }
         }
     }
+    control_repair::maybe_offer(sources, writer, state)?;
     Ok(())
 }

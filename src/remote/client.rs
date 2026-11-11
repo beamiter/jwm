@@ -3,6 +3,8 @@
 #[path = "client_control.rs"]
 mod control;
 use control::ClientControl;
+#[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+pub(crate) use control::{with_control_lifetime_observer, with_control_repair_observer};
 #[path = "client_text.rs"]
 mod text;
 use super::wayland_keyboard_wire::DrawnScope;
@@ -548,22 +550,29 @@ fn validate_viewer_backend(options: &ClientOptions) -> RemoteResult<()> {
     let lossless_keyboard = options.wayland_keyboard
         && options.viewer_backend == ViewerBackend::Wayland
         && !options.view_only;
+    let lossless_control = options.wayland_control
+        && options.viewer_backend == ViewerBackend::Wayland
+        && !options.view_only
+        && !options.wayland_keyboard
+        && !options.wayland_pointer
+        && !options.wayland_scroll
+        && !options.wayland_horizontal_scroll;
     let lossless_pointer = options.wayland_pointer
         && options.viewer_backend == ViewerBackend::Wayland
         && !options.view_only
         && !options.wayland_keyboard;
     if options.static_lossless
-        && (!(options.view_only || lossless_keyboard || lossless_pointer)
+        && (!(options.view_only || lossless_keyboard || lossless_pointer || lossless_control)
             || (options.wayland_pointer && !lossless_pointer)
             || ((options.wayland_scroll || options.wayland_horizontal_scroll) && !lossless_pointer)
-            || options.wayland_control
+            || (options.wayland_control && !lossless_control)
             || options.wayland_text.is_some()
             || options.clipboard
             || options.grab_input
             || options.resize_source.is_some()
             || options.follow_source_size)
     {
-        return Err(invalid_data("static lossless requires view-only or exclusive Wayland keyboard/pointer mode without control, text, clipboard or remote resize; each scroll axis requires exclusive pointer mode and its own permission").into());
+        return Err(invalid_data("static lossless requires view-only or exclusive Wayland keyboard, pointer or control mode without text, clipboard or remote resize; scroll requires exclusive pointer mode").into());
     }
 
     if options.wayland_text.is_some()
@@ -943,6 +952,9 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
             .enable_wayland_control(options.wayland_scroll, options.wayland_horizontal_scroll)?;
         let mut control = state.wayland_control.lock().unwrap();
         control.digest = Some(digest);
+        control.repair.enabled = hello.stream.static_lossless;
+        #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+        control.capture_repair_observer();
         control.scroll_enabled = options.wayland_scroll;
         control.horizontal_enabled = options.wayland_horizontal_scroll;
     }
@@ -1400,7 +1412,12 @@ fn negotiate_session(
             && (hello.pointer_enabled
                 || hello.keyboard_enabled
                 || hello.clipboard_enabled
-                || hello.stream.wayland_control
+                || (hello.stream.wayland_control
+                    && (!request_wayland_control
+                        || hello.stream.wayland_keyboard
+                        || hello.stream.wayland_pointer
+                        || hello.stream.wayland_scroll
+                        || hello.stream.wayland_horizontal_scroll))
                 || hello.stream.wayland_text
                 || hello.stream.window_resize
                 || ((hello.stream.wayland_scroll || hello.stream.wayland_horizontal_scroll)
@@ -1905,7 +1922,7 @@ fn viewer_loop(
                             | ViewerEvent::CycleSource
                             | ViewerEvent::WaylandPointerRevoke
                     ) {
-                        if let Some(revoke) = control.revoke() {
+                        if let Some(revoke) = control.revoke_local() {
                             writer.write_message(
                                 MessageKind::WaylandControlRevoke,
                                 &revoke.encode()?,
@@ -1914,11 +1931,37 @@ fn viewer_loop(
                         }
                         #[cfg(feature = "remote-wayland")]
                         viewer.disable_wayland_control();
-                    } else if let Some(action) = control.event(event, Instant::now())? {
-                        writer
-                            .write_message(MessageKind::WaylandControlAction, &action.encode()?)?;
-                        writer.flush()?;
+                    } else {
+                        let action = match control.event(event, Instant::now()) {
+                            Ok(action) => action,
+                            Err(error) => {
+                                // A real input during a closed repair phase is
+                                // terminal, never retained for later replay.
+                                if let Some(revoke) = control.revoke() {
+                                    writer.write_message(
+                                        MessageKind::WaylandControlRevoke,
+                                        &revoke.encode()?,
+                                    )?;
+                                    writer.flush()?;
+                                }
+                                return Err(error);
+                            }
+                        };
+                        if let Some(action) = action {
+                            control.repair_sent(&action, Instant::now())?;
+                            writer.write_message(
+                                MessageKind::WaylandControlAction,
+                                &action.encode()?,
+                            )?;
+                            writer.flush()?;
+                        }
                     }
+                }
+                if let Some((kind, token)) =
+                    control.repair_outgoing(Instant::now(), viewer.wayland_control_repair_busy())?
+                {
+                    writer.write_message(kind, &token.encode()?)?;
+                    writer.flush()?;
                 }
                 #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
                 viewer.observe_control_state(control.ready_sequence());
@@ -2218,6 +2261,20 @@ fn viewer_loop(
             } else {
                 None
             };
+            let control_request = if purpose == FramePurpose::NativeProof {
+                let mut control = state.wayland_control.lock().unwrap();
+                control.check(presented_scope, Instant::now())?;
+                control.presented(
+                    super::wayland_control_wire::DrawnScope {
+                        source_epoch: presented_scope.0,
+                        geometry_epoch: presented_scope.1,
+                        frame_sequence: sequence,
+                    },
+                    Instant::now(),
+                )
+            } else {
+                None
+            };
             acknowledge_presentation(writer, sequence, pending_presentations, &state.telemetry)?;
             // A repair is real display progress and returns video credit, but
             // cannot create, renew, or revive any native-input authority.
@@ -2246,23 +2303,16 @@ fn viewer_loop(
                 };
                 if enabled && purpose == FramePurpose::NativeProof {
                     viewer.wayland_pointer_presented(sequence);
-                    if needs_request {
+                    if needs_request || control_request.is_some() {
                         #[cfg(feature = "remote-wayland")]
                         viewer.check_wayland_control(true)?;
                     }
-                    let mut control = state.wayland_control.lock().unwrap();
+                    let control = state.wayland_control.lock().unwrap();
                     control.check(presented_scope, Instant::now())?;
                     if control.ended || control.epoch != epoch {
                         continue;
                     }
-                    if let Some(request) = control.presented(
-                        super::wayland_control_wire::DrawnScope {
-                            source_epoch: presented_scope.0,
-                            geometry_epoch: presented_scope.1,
-                            frame_sequence: sequence,
-                        },
-                        Instant::now(),
-                    ) {
+                    if let Some(request) = control_request {
                         writer.write_message(
                             MessageKind::WaylandControlRequest,
                             &request.encode()?,
@@ -4040,6 +4090,27 @@ fn receive_frame_records(
             })?;
         let kind = read_record(&mut payload, remaining)?;
         match kind {
+            MessageKind::WaylandControlActionCompleted => {
+                state.wayland_control.lock().unwrap().repair_completed(
+                    super::control_repair_wire::ActionReceipt::decode(&payload)?,
+                    Instant::now(),
+                )?;
+                completion.signal()?;
+            }
+            MessageKind::WaylandControlRepairOffer => {
+                state.wayland_control.lock().unwrap().repair_offer(
+                    super::control_repair_wire::Token::decode(&payload)?,
+                    Instant::now(),
+                )?;
+                completion.signal()?;
+            }
+            MessageKind::WaylandControlRepairStatus => {
+                state.wayland_control.lock().unwrap().repair_status(
+                    super::control_repair_wire::RepairStatus::decode(&payload)?,
+                    Instant::now(),
+                )?;
+                completion.signal()?;
+            }
             MessageKind::WaylandControlStatus => {
                 state.wayland_control.lock().unwrap().receive(
                     super::wayland_control_wire::ControlStatus::decode(&payload)?,
@@ -4188,7 +4259,18 @@ fn receive_frame_records(
                 );
                 last_sequence = queued.frame.sequence();
                 last_video_at = Instant::now();
-                state.wayland_control.lock().unwrap().before_frame();
+                {
+                    let mut control = state.wayland_control.lock().unwrap();
+                    control.note_decoded(
+                        purpose,
+                        super::wayland_control_wire::DrawnScope {
+                            source_epoch: epoch,
+                            geometry_epoch: queued.frame.geometry_epoch(),
+                            frame_sequence: queued.frame.sequence(),
+                        },
+                    )?;
+                    control.before_frame();
+                }
                 {
                     let mut pointer = state.wayland_pointer.lock().unwrap();
                     pointer.latest_decoded = Some(super::wayland_pointer_wire::DrawnScope {
@@ -4245,6 +4327,8 @@ fn receive_frame_records(
             | MessageKind::WaylandPointerRevoke
             | MessageKind::WaylandPointerRepairRequest
             | MessageKind::WaylandPointerRepairDecline
+            | MessageKind::WaylandControlRepairRequest
+            | MessageKind::WaylandControlRepairDecline
             | MessageKind::WaylandControlRequest
             | MessageKind::WaylandControlAction
             | MessageKind::WaylandControlRevoke

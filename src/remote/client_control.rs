@@ -1,8 +1,16 @@
 //! A single client bundle state, not two parallel legacy leases.
 use super::*;
 use crate::remote::wayland_control_wire::*;
+#[path = "client_control_repair.rs"]
+mod repair;
+use repair::ControlRepair;
+#[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+pub(crate) use repair::{with_control_lifetime_observer, with_control_repair_observer};
 #[derive(Default)]
 pub(super) struct ClientControl {
+    pub(super) repair: ControlRepair,
+    latest_decoded: Option<DrawnScope>,
+    receipts: std::collections::VecDeque<(DrawnScope, bool)>,
     pub(super) scroll_enabled: bool,
     pub(super) horizontal_enabled: bool,
     pub(super) digest: Option<[u8; 32]>,
@@ -10,6 +18,7 @@ pub(super) struct ClientControl {
     pub(super) epoch: Option<u64>,
     pub(super) activated: bool,
     pub(super) ended: bool,
+    terminal_seen: bool,
     sequence: u64,
     held: std::collections::BTreeSet<u16>,
     presented: Option<(DrawnScope, Instant)>,
@@ -29,6 +38,7 @@ impl ClientControl {
         if self.ended {
             return Ok(());
         }
+        self.repair_check(now)?;
         if let Some((request, at)) = self.request {
             if (request.scope.source_epoch, request.scope.geometry_epoch) != scope
                 || now.saturating_duration_since(at)
@@ -51,15 +61,28 @@ impl ClientControl {
         if !self.configured() || self.ended {
             return None;
         }
+        if !self.receipts.iter().any(|(seen, _)| *seen == scope) {
+            if self.receipts.len() == 256 {
+                self.receipts.pop_front();
+            }
+            self.receipts.push_back((scope, false));
+        }
         self.presented = Some((scope, now));
         self.ready = None;
         self.click = None;
+        // Resolution uses this actual receipt; the reader may already have
+        // decoded a newer frame, which must keep the pointer gate invalid.
+        if self.repair_resolve(now).is_err() {
+            self.revoke();
+        }
         if self.request.is_none() {
             let request = ControlRequest {
                 scope,
                 keymap_digest: self.digest.unwrap(),
             };
             self.request = Some((request, now));
+            #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+            repair::observe_lifetime(now);
             Some(request)
         } else {
             None
@@ -69,6 +92,17 @@ impl ClientControl {
         let (request, _) = self
             .request
             .ok_or_else(|| invalid_data("unsolicited control status"))?;
+        if self.ended
+            && !self.terminal_seen
+            && status.status == ControlStatusKind::Revoked
+            && self.epoch == Some(status.lease_epoch)
+            && (status.scope.source_epoch, status.scope.geometry_epoch)
+                == (request.scope.source_epoch, request.scope.geometry_epoch)
+        {
+            self.terminal_seen = true;
+            self.repair_end();
+            return Ok(());
+        }
         if self.ended
             || (status.scope.source_epoch, status.scope.geometry_epoch)
                 != (request.scope.source_epoch, request.scope.geometry_epoch)
@@ -109,17 +143,32 @@ impl ClientControl {
                     self.ready = None;
                     self.click = None;
                 } else {
+                    if self.repair_ordinary_ready(status.scope, Instant::now())? {
+                        return Ok(());
+                    }
                     let (scope, at) = self
                         .presented
                         .ok_or_else(|| invalid_data("control Ready before presentation"))?;
                     if status.scope.frame_sequence > scope.frame_sequence {
                         return Err(invalid_data("control Ready from future frame").into());
                     }
+                    let receipt = self
+                        .receipts
+                        .iter_mut()
+                        .find(|(seen, _)| *seen == status.scope)
+                        .ok_or_else(|| {
+                            invalid_data("control Ready lacks exact actual presentation")
+                        })?;
+                    if receipt.1 {
+                        return Err(invalid_data("control Ready replay").into());
+                    }
+                    receipt.1 = true;
                     if status.scope == scope {
                         if self.ready == Some(scope) || self.consumed == Some(scope) {
                             return Err(invalid_data("control Ready replay").into());
                         }
                         if self.held.is_empty()
+                            && self.latest_decoded.is_none_or(|decoded| decoded == scope)
                             && at.elapsed() < super::super::wayland_pointer_wire::FRAME_MAX_AGE
                         {
                             self.ready = Some(scope);
@@ -129,6 +178,8 @@ impl ClientControl {
             }
         }
         if self.ended {
+            self.terminal_seen = true;
+            self.repair_end();
             self.ready = None;
             self.click = None;
             self.held.clear();
@@ -136,12 +187,13 @@ impl ClientControl {
         Ok(())
     }
     pub(super) fn ready_sequence(&self) -> Option<u64> {
-        if !self.activated || self.ended || !self.held.is_empty() {
+        if !self.activated || self.ended || !self.held.is_empty() || self.repair_blocked() {
             return None;
         }
         self.presented
             .filter(|(scope, at)| {
                 Some(*scope) == self.ready
+                    && self.latest_decoded.is_none_or(|decoded| decoded == *scope)
                     && at.elapsed() < super::super::wayland_pointer_wire::FRAME_MAX_AGE
             })
             .map(|(s, _)| s.frame_sequence)
@@ -151,6 +203,7 @@ impl ClientControl {
             return None;
         }
         self.ended = true;
+        self.repair_end();
         self.ready = None;
         self.click = None;
         self.held.clear();
@@ -162,6 +215,7 @@ impl ClientControl {
         now: Instant,
     ) -> RemoteResult<Option<ControlAction>> {
         use super::super::x11_viewer::WaylandPointerEventKind as P;
+        self.repair_event(event, now)?;
         if self.ended {
             return Ok(None);
         }

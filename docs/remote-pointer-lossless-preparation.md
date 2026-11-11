@@ -341,9 +341,9 @@ completed 13 cycles and observed expiry at 30,150 ms, with remaining SSE
 acceptance or a general latency bound. The 1080p result remains partial; input
 authority is not extended to finish all repair debt.
 
-## Next candidate: independent horizontal scroll with PNG (v29)
+## Validated baseline: independent horizontal scroll with PNG (v29)
 
-The next combination uses application v29 with strict matching peers. Older
+This combination was validated with application v29 with strict matching peers. Older
 v28 endpoints are rejected without downgrade. Transport v3, capability payload
 size and the existing native action encodings remain unchanged. Horizontal
 scroll is a separate explicit permission at both endpoints; vertical consent
@@ -369,17 +369,16 @@ PNG/pointer mode, while unknown bits and scroll without the required native
 pointer mode remain invalid. Pure regression cases exercise actual client and
 server Hello encoding/decoding, all 64 native-mode/axis combinations,
 horizontal-only and both-axis round trips, old/future version rejection,
-legacy/clipboard/resize restrictions, and CLI/profile/SSH guards. These new
-cases await centralized execution and real recipient/presentation CI; the
-successful `fa8` results apply only to the prior vertical-scroll baseline.
-No v29 functional success or physical acceptance is claimed yet.
+legacy/clipboard/resize restrictions, and CLI/profile/SSH guards. These cases subsequently passed the `02f` validation below. The successful
+`fa8` results describe the prior vertical-scroll baseline; neither result
+constitutes physical-hardware acceptance.
 
 The horizontal candidate passes local strict Clippy and 118 pure regressions,
 including all message capability sibling modules and both actual Hello decoders.
 Independent static review found no remaining contract mismatch. The combined
 fixture list now contains 22 tests, including the unchanged independently required
 optimized 1080p test; seven new horizontal cases and two additional malicious raw
-records await actual CI. No local display, socket or renderer acceptance is claimed.
+records were included in the subsequent CI validation. No local display, socket or renderer acceptance is claimed.
 
 The first horizontal candidate passed general CI (8,308 tests), X11, the new
 real horizontal scenarios and the mandatory optimized 1080p case. The final
@@ -398,4 +397,32 @@ differences, with identical SSE in each case. Boundary, alpha, last-pixel and
 maximum-error reference comparisons cover the oracle. Fixed cadence, 500 ms,
 18-second total deadline, actual presentation timestamps and production code are
 unchanged. This demonstrates fixture CPU cost, not the sole cause of the missed
-deadline or a production latency improvement; real CI must still pass.
+deadline or a production latency improvement.
+
+The follow-up `02f` candidate passed CI and was fast-forwarded to master. All
+four mainline reruns then passed: general 42970624553, X11 42970624415,
+Wayland 42970624389 and Eva 42970624410. Remote tests passed 1,051 and CLI
+tests 55; all three mainline blink executions retained and met the original
+deadline. These results validate the v29 baseline in owned software-GL tests,
+not the new v30 unified-control repair combination or physical hardware.
+
+## Unified control plus PNG: v30 candidate
+
+The next explicit combination uses host `--wayland-select --once --allow-wayland-control --allow-static-lossless` and viewer `connect HOST --viewer-backend wayland --wayland-control --static-lossless`. Both ends must match application v30; transport v3 is unchanged. This is a single unified lease, not simultaneous keyboard-only and pointer-only leases. Existing pointer-only independently authorized scroll plus PNG remains supported.
+
+This first unified repair slice rejects both scroll axes, legacy input, separate keyboard/pointer flags, text, clipboard, resize/follow, popup capture, saved profiles and SSH authorization forwarding. The original 30-second lease is not renewed. Repair requires released keys, no click candidate and completed actions; repair presentation cannot grant input. Resuming input requires a new native proof and its actual presentation. Control completion and repair messages use distinct kinds 44–48; sharing a bounded payload layout does not share pointer authorization.
+
+For this first unified-control slice, natural expiry of the original 30-second lease may close the entire session. Continued read-only repair after expiry, as supported by pointer-only plus PNG, is not promised here. Existing held-key and repair-phase short deadlines remain separate failure conditions; reaching one does not demonstrate natural lease expiry. Locking or local takeover still revokes authority immediately.
+
+Implementation and static regression checks are in progress. Real unified-control repair CI has not passed yet; prior pointer-only software-GL results do not validate this new combination or physical hardware.
+
+The first v30 candidate passes strict Clippy and 147 local pure regressions for
+control completion/repair, existing pointer repair, the complete Hello capability
+matrix, non-socket transport records, viewer busy state and CLI policy. The two
+socket-based handshake tests are reserved for CI, not included in that local
+count. Independent static review checks distinct native proof ownership, bounded
+32-action completion order, finite terminal receipts and actual presentation
+before ACK. Six real owned-display/TCP scenarios are compiled and listed but
+remain unvalidated until CI: 800×600 click/key/release/repair/click, held release,
+Accepted input rejection, denied host permission, lock/unmap ABA, and the original
+30-second lease deadline. Local pure results do not substitute for these checks.

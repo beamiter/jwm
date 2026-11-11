@@ -255,6 +255,13 @@ impl HostCapture {
             Self::Wayland(c) => c.frame(),
         }
     }
+    pub(super) fn frame_with_control_visual(&mut self) -> RemoteResult<CaptureOutcome> {
+        match self {
+            #[cfg(feature = "remote-wayland")]
+            Self::Wayland(c) => c.frame_with_control_visual(),
+            _ => Err(std::io::Error::other("native control visual capture unavailable").into()),
+        }
+    }
     pub(super) fn frame_with_pointer_visual(&mut self) -> RemoteResult<CaptureOutcome> {
         match self {
             #[cfg(feature = "remote-wayland")]

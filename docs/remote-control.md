@@ -39,9 +39,9 @@ no exit remains.
 
 ## Built-in JWM remote control
 
-`jwm-remote` shares one JWM X11 desktop with another JWM X11 session. It is
+The initial X11 compatibility target shares one JWM X11 desktop with another JWM X11 session. It is
 implemented once for the X Composite surface used by both the `x11rb` and
-`xcb` backends. Windows/macOS, Wayland sessions, and other Linux window
+`xcb` backends. Scoped native Wayland capture and viewing were added later (see below). Windows/macOS and other Linux window
 managers are outside this first compatibility target.
 
 The helper is a separate process: X11 readback, JPEG encoding, a slow peer,
@@ -383,14 +383,16 @@ gives each complete authenticated video record, including its final flush, one
 budget; a partial or timed-out record closes the whole session so its wire
 sequence can never be retried out of sync.
 
-The current application protocol is version 19. Versions 2 to 18 are
+The released `02f` baseline uses application version 29 and passed all four
+mainline CI workflows. The next candidate uses version 30; its unified-control
+PNG path still awaits real CI. For that candidate, earlier versions are
 deliberately incompatible, so update `jwm-remote` on both machines together;
 negotiation rejects an older peer before screen or input data is exchanged.
 Version 7 introduced initial viewport and explicit stream selectors. Version 8
 adds an independently negotiated cursor plane and a video geometry epoch;
 it does not silently reinterpret v7 video or cursor selector semantics.
 
-The v19 hello prefix is the existing 8-byte magic, big-endian `u16` version,
+Historically, the v19 hello prefix is the existing 8-byte magic, big-endian `u16` version,
 and capability flags. Both hellos append three one-byte selectors in order:
 codec `1` (JPEG tiles), cursor `1` (composited) or `2` (independent), input `1`
 (X11 keycodes). A viewer advertises independent cursor only after verifying local XRender
@@ -572,7 +574,7 @@ All handshake flights have fixed small bounds and share the existing absolute
 negotiation deadline. Wrong keys, versions, malformed flights or missing
 confirmation close the connection. There is no downgrade or v2 fallback.
 Upgrade both endpoints together. This transport update originally accompanied
-application v23; the current application protocol is v27. Transport v3 and the
+application v23; the released baseline is application v29 and the next candidate is v30 (unified-control repair CI pending). Transport v3 and the
 native Wayland extension versions are separate version domains.
 
 Each record is `kind || sequence || ciphertext_len || ciphertext || tag(16)`.
@@ -1871,7 +1873,7 @@ existing scoped keyboard lease, and requires the host's separate
 `--wayland-select --once --allow-wayland-keyboard` consent. Use the same private
 session key at both endpoints. A third alternative, `connect HOST --viewer-backend wayland --wayland-pointer`,
 requests the existing motion/atomic-left-click lease with separate host
-`--allow-wayland-pointer` consent. Exactly one of these three viewer modes is
+`--allow-wayland-pointer` consent. Alongside these modes, explicit unified control and one-shot text are available. Exactly one of the five native viewer modes is
 required; they cannot be combined, and omitting all native modes is rejected; choosing Wayland never implicitly
 permits legacy input.
 
@@ -1914,7 +1916,7 @@ not renewed. Default read-only viewing does not bind input devices.
 
 ### Explicit native pointer-only plus static lossless (application v27)
 
-Both peers must use matching application v27. A host may explicitly combine
+This combination was introduced in v27; both peers must now use the same current application version. A host may explicitly combine
 `--wayland-select --once --allow-wayland-pointer --allow-static-lossless`, and
 the viewer must separately request
 `connect HOST --viewer-backend wayland --wayland-pointer --static-lossless`.

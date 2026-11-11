@@ -198,11 +198,12 @@ fn shm(s: &mut Server, c: &mut Client, color: [u8; 4], w: u32, h: u32) -> (u32, 
     (buffer, file)
 }
 struct Readback {
+    size: (u32, u32),
     client: Client,
     session: u32,
 }
 impl Readback {
-    fn new(s: &mut Server) -> Self {
+    fn new(s: &mut Server, size: (u32, u32)) -> Self {
         let mut c = s.connect();
         let list = c.bind("ext_foreign_toplevel_list_v1", 1);
         let sources = c.bind("ext_foreign_toplevel_image_capture_source_manager_v1", 1);
@@ -224,12 +225,16 @@ impl Readback {
         assert!(
             c.events()
                 .iter()
-                .any(|e| e.sender == session && e.opcode == 0 && e.args == [VW, VH])
+                .any(|e| e.sender == session && e.opcode == 0 && e.args == [size.0, size.1])
         );
-        Self { client: c, session }
+        Self {
+            client: c,
+            session,
+            size,
+        }
     }
     fn pixels(&mut self, s: &mut Server, gl: &mut HeadlessSmithayGles) -> Vec<u8> {
-        let (buffer, mut file) = shm(s, &mut self.client, [0x5a; 4], VW, VH);
+        let (buffer, mut file) = shm(s, &mut self.client, [0x5a; 4], self.size.0, self.size.1);
         let frame = self.client.new_id();
         self.client.request(self.session, 0, &[frame]);
         self.client.request(frame, 1, &[buffer]);
@@ -254,13 +259,45 @@ impl Readback {
         file.seek(SeekFrom::Start(0)).unwrap();
         let mut pixels = Vec::new();
         file.read_to_end(&mut pixels).unwrap();
-        assert_eq!(pixels.len(), (VW * VH * 4) as usize);
+        assert_eq!(pixels.len(), (self.size.0 * self.size.1 * 4) as usize);
         self.client.request(frame, 0, &[]);
         s.roundtrip();
         pixels
     }
 }
+type ProofFixtureConfig = Option<(bool, bool, bool, Arc<host::ProofDeltaProbe>)>;
+
+#[derive(Clone, Copy)]
+struct FixtureLayout {
+    source: (u32, u32),
+    viewer: (u32, u32),
+    lossless: (bool, bool),
+}
+impl Default for FixtureLayout {
+    fn default() -> Self {
+        Self {
+            source: (SW, SH),
+            viewer: (VW, VH),
+            lossless: (false, false),
+        }
+    }
+}
+type RepairObservation = Arc<
+    Mutex<
+        Vec<(
+            &'static str,
+            Option<crate::remote::control_repair_wire::Token>,
+            u64,
+            usize,
+        )>,
+    >,
+>;
+
 struct Harness {
+    layout: FixtureLayout,
+    repair_observation: RepairObservation,
+    control_lifetime: Arc<Mutex<Option<(Instant, Instant)>>>,
+    purposes: Arc<Mutex<Vec<(u64, crate::remote::source_wire::FramePurpose)>>>,
     native: Server,
     local: Server,
     target: App,
@@ -286,7 +323,7 @@ struct Harness {
     shutdown: Arc<AtomicBool>,
     _stop: Stop,
     client_done: mpsc::Receiver<Result<(), String>>,
-    host_done: mpsc::Receiver<Result<(), String>>,
+    host_done: mpsc::Receiver<crate::remote::RemoteResult<()>>,
     client: Option<thread::JoinHandle<()>>,
     host: Option<thread::JoinHandle<()>>,
 }
@@ -385,8 +422,39 @@ impl Harness {
         viewer_scroll: (bool, bool),
         recipient_version: u32,
         wake_config: Option<(bool, Arc<host::InputWakeProbe>)>,
-        proof_config: Option<(bool, bool, bool, Arc<host::ProofDeltaProbe>)>,
+        proof_config: ProofFixtureConfig,
     ) -> Self {
+        Self::new_configured(
+            gl,
+            held_on_enter,
+            host_scroll,
+            viewer_scroll,
+            recipient_version,
+            wake_config,
+            (proof_config, FixtureLayout::default()),
+        )
+    }
+    fn new_lossless(gl: &mut HeadlessSmithayGles, layout: FixtureLayout) -> Self {
+        Self::new_configured(
+            gl,
+            false,
+            (false, false),
+            (false, false),
+            7,
+            None,
+            (None, layout),
+        )
+    }
+    fn new_configured(
+        gl: &mut HeadlessSmithayGles,
+        held_on_enter: bool,
+        host_scroll: (bool, bool),
+        viewer_scroll: (bool, bool),
+        recipient_version: u32,
+        wake_config: Option<(bool, Arc<host::InputWakeProbe>)>,
+        config: (ProofFixtureConfig, FixtureLayout),
+    ) -> Self {
+        let (proof_config, layout) = config;
         let mut native = Server::new();
         let mut local = Server::new();
         native.state.image_capture_pending =
@@ -394,7 +462,12 @@ impl Harness {
         local.state.image_capture_pending = Some(init_image_copy_capture(&local.display.handle()));
         register_test_presentation(&mut local);
         let shift_mask = install_keymaps(&mut native, &mut local);
-        let mut target = App::with_size_color(&mut native, [0, 0, 255, 255], SW, SH);
+        let mut target = App::with_size_color(
+            &mut native,
+            [0, 0, 255, 255],
+            layout.source.0,
+            layout.source.1,
+        );
         let (target_pointer, target_keyboard) =
             bind_inputs(&mut native, &mut target, recipient_version);
         focus(&mut native, &target);
@@ -432,9 +505,11 @@ impl Harness {
                     }
                 };
                 let peer = host::authenticate_peer(stream, &KEY)?;
+                let mut opts = options(host_scroll.0, host_scroll.1);
+                opts.allow_static_lossless = layout.lossless.0;
                 host::serve_authenticated(
                     peer,
-                    &options(host_scroll.0, host_scroll.1),
+                    &opts,
                     &stopping,
                     &Mutex::new(Some(host::GrantedCapture::Wayland(Box::new(capture)))),
                 )
@@ -452,8 +527,7 @@ impl Harness {
                     })
                 }
                 None => run_with_wake(),
-            }
-            .map_err(|e| e.to_string());
+            };
             let _ = host_tx.send(result);
         });
         let deadline = Instant::now() + Duration::from_secs(10);
@@ -476,7 +550,12 @@ impl Harness {
         }
         // Add a different, green app only after the real capture selected red.
         // Neither red nor the click-triggered blue phase can be this bystander.
-        let mut other = App::with_size_color(&mut native, [0, 255, 0, 255], SW, SH);
+        let mut other = App::with_size_color(
+            &mut native,
+            [0, 255, 0, 255],
+            layout.source.0,
+            layout.source.1,
+        );
         let (other_pointer, other_keyboard) =
             bind_inputs(&mut native, &mut other, recipient_version);
         focus(&mut native, &target);
@@ -488,6 +567,12 @@ impl Harness {
             .handle()
             .insert_client(ls, Arc::new(JwmClientState::default()))
             .unwrap();
+        let purposes = Arc::new(Mutex::new(Vec::new()));
+        let observed_purposes = purposes.clone();
+        let repair_observation = Arc::new(Mutex::new(Vec::new()));
+        let observed_repair = repair_observation.clone();
+        let control_lifetime = Arc::new(Mutex::new(None));
+        let observed_lifetime = control_lifetime.clone();
         let ready = Arc::new(Mutex::new(None));
         let observer = ready.clone();
         let frames = Arc::new(Mutex::new((None, None)));
@@ -505,12 +590,12 @@ impl Harness {
                 wayland_horizontal_scroll: viewer_scroll.1,
                 wayland_control: true,
                 wayland_text: None,
-                static_lossless: false,
+                static_lossless: layout.lossless.1,
                 resize_source: None,
                 follow_source_size: false,
                 window_size: Some(WindowSize {
-                    width: VW as u16,
-                    height: VH as u16,
+                    width: layout.viewer.0 as u16,
+                    height: layout.viewer.1 as u16,
                 }),
                 window_position: None,
                 frame_limits: Default::default(),
@@ -530,7 +615,24 @@ impl Harness {
             let result = with_wayland_control_observer(observer, || {
                 with_wayland_control_frame_observer(frame_observer, || {
                     with_wayland_control_scroll_observer(scroll_observer, || {
-                        with_wayland_test_stream(stream, || run_client(opts))
+                        crate::remote::client::with_frame_purpose_observer(
+                            observed_purposes,
+                            || {
+                                crate::remote::client::with_control_repair_observer(
+                                    observed_repair,
+                                    || {
+                                        crate::remote::client::with_control_lifetime_observer(
+                                            observed_lifetime,
+                                            || {
+                                                with_wayland_test_stream(stream, || {
+                                                    run_client(opts)
+                                                })
+                                            },
+                                        )
+                                    },
+                                )
+                            },
+                        )
                     })
                 })
             })
@@ -538,6 +640,10 @@ impl Harness {
             let _ = client_tx.send(result);
         });
         Self {
+            layout,
+            repair_observation,
+            control_lifetime,
+            purposes,
             native,
             local,
             target,
@@ -605,10 +711,11 @@ impl Harness {
         for (&window, top) in &self.local.state.toplevels {
             if !top.is_initial_configure_sent() {
                 let geo = self.local.state.window_geometry.get_mut(&window).unwrap();
-                geo.w = VW;
-                geo.h = VH;
+                geo.w = self.layout.viewer.0;
+                geo.h = self.layout.viewer.1;
                 top.with_pending_state(|s| {
-                    s.size = Some((VW as i32, VH as i32).into());
+                    s.size =
+                        Some((self.layout.viewer.0 as i32, self.layout.viewer.1 as i32).into());
                     s.states.set(TopState::Activated);
                 });
                 top.send_configure();
@@ -683,7 +790,7 @@ impl Harness {
         {
             assert_eq!(self.feedback.len(), 1, "one actual pending viewer frame");
             if self.readback.is_none() {
-                self.readback = Some(Readback::new(&mut self.local));
+                self.readback = Some(Readback::new(&mut self.local, self.layout.viewer));
             }
             let pixels = self.readback.as_mut().unwrap().pixels(&mut self.local, gl);
             self.blue_presented = inspect(&pixels, sequence);
@@ -792,15 +899,17 @@ impl Harness {
             } else {
                 [0, 0, 255, 255]
             },
-            SW,
-            SH,
+            self.layout.source.0,
+            self.layout.source.1,
         );
         self.target
             .client
             .request(self.target.surface, 1, &[buffer, 0, 0]);
-        self.target
-            .client
-            .request(self.target.surface, 2, &[0, 0, SW, SH]);
+        self.target.client.request(
+            self.target.surface,
+            2,
+            &[0, 0, self.layout.source.0, self.layout.source.1],
+        );
         self.target.client.request(self.target.surface, 6, &[]);
         self.native.roundtrip();
         self.native.roundtrip();
@@ -1620,3 +1729,6 @@ fn exercise_zero_dirty_proof_after_hold(hold: Duration) {
 
 #[path = "host_wayland_control_latency_benchmark.rs"]
 mod latency_benchmark;
+
+#[path = "host_wayland_control_lossless_integration.rs"]
+mod lossless_integration;

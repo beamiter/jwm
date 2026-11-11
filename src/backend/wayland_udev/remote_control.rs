@@ -103,6 +103,15 @@ fn finish(state: &mut JwmWaylandState, mut lease: Lease, reason: u32, cleanup: b
     }
     state.request_client_flush();
 }
+/// Read-only native lease timing; does not refresh or alter authority.
+#[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+pub(crate) fn lease_timing_for_test(state: &JwmWaylandState) -> Option<(u32, Instant, Instant)> {
+    state
+        .remote_control
+        .active
+        .as_ref()
+        .map(|lease| (lease.epoch, lease.created, lease.created + TTL))
+}
 pub(crate) fn active(state: &JwmWaylandState) -> bool {
     state.remote_control.active.is_some()
 }
