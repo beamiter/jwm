@@ -916,6 +916,111 @@ mod tests {
     }
 
     #[test]
+    fn popup_local_close_before_terminal_delivery_still_requires_revoke_ack() {
+        use crate::remote::x11_viewer::WaylandPointerEventKind as E;
+        let now = Instant::now();
+        let mut p = ready(now);
+        p.event(&edge(1, E::LeftDown), now).unwrap();
+        let click = p.event(&edge(1, E::LeftUp), now).unwrap().unwrap();
+        let pending = p.pending;
+        let lease_deadline = p.deadline;
+        let mut terminal = status(StatusKind::DeliveredTerminal, 1, click.sequence);
+        terminal.ttl_ms = 0;
+        // The authenticated status was read before local close, but its final
+        // state commit occurs afterward under the same popup mutex.
+        let in_flight = terminal.encode().unwrap();
+        let binding = p.revoke().unwrap();
+        let close_deadline = p.close_deadline().unwrap();
+        p.status_or_drain(&in_flight, now).unwrap();
+        assert!(p.ended && !p.close_confirmed());
+        assert_eq!(p.pending, pending, "draining is not action completion");
+        assert_eq!(p.deadline, lease_deadline);
+        assert_eq!(p.close_deadline(), Some(close_deadline));
+        assert!(p.ready_sequence(now).is_none());
+        assert!(p.candidate.is_none());
+        for kind in [E::LeftDown, E::LeftUp] {
+            assert!(p.event(&edge(1, kind), now).is_err());
+        }
+        assert_eq!(p.sequence, click.sequence);
+        // Neither a terminal-delivery status nor generic Close is a RevokeAck.
+        assert!(p.drain_close_record(MessageKind::Close, &[], now).is_err());
+        assert!(
+            !p.status(terminal, now)
+                .unwrap_err()
+                .is::<PopupDeliveredThenRevoked>()
+        );
+        // Without an on-time exact Ack this remains unsuccessful. Even the
+        // correct binding cannot confirm closure at the original boundary.
+        assert!(
+            p.drain_close_record(
+                MessageKind::WaylandPopupRevokeAck,
+                &binding.encode().unwrap(),
+                close_deadline,
+            )
+            .is_err()
+        );
+        assert!(!p.close_confirmed());
+        assert!(p.check(close_deadline).is_err());
+        assert!(p.revoke().is_none());
+    }
+
+    #[test]
+    fn popup_terminal_delivery_before_close_and_ttl_never_reopens_either_gate() {
+        use crate::remote::x11_viewer::WaylandPointerEventKind as E;
+        let now = Instant::now();
+        let mut p = ready(now);
+        p.event(&edge(1, E::LeftDown), now).unwrap();
+        let click = p.event(&edge(1, E::LeftUp), now).unwrap().unwrap();
+        let binding = click.key.binding;
+        let lease_deadline = p.deadline.unwrap();
+        let mut terminal = status(StatusKind::DeliveredTerminal, 1, click.sequence);
+        terminal.ttl_ms = 0;
+        let bytes = terminal.encode().unwrap();
+        assert!(
+            p.status_or_drain(&bytes, now)
+                .unwrap_err()
+                .is::<PopupDeliveredThenRevoked>()
+        );
+        for at in [
+            now,
+            lease_deadline,
+            lease_deadline + Duration::from_nanos(1),
+        ] {
+            assert!(
+                p.revoke().is_none(),
+                "no second close request may be minted"
+            );
+            assert!(p.close_deadline().is_none());
+            assert!(!p.close_confirmed());
+            assert!(
+                !p.status_or_drain(&bytes, at)
+                    .unwrap_err()
+                    .is::<PopupDeliveredThenRevoked>(),
+                "terminal delivery is observable only once",
+            );
+            assert!(
+                p.drain_close_record(
+                    MessageKind::WaylandPopupRevokeAck,
+                    &binding.encode().unwrap(),
+                    at,
+                )
+                .is_err()
+            );
+            assert!(
+                p.status(status(StatusKind::Ready, 1, click.sequence), at)
+                    .is_err()
+            );
+            for kind in [E::LeftDown, E::LeftUp] {
+                assert!(p.event(&edge(1, kind), at).is_err());
+            }
+            assert!(p.ended && p.pending.is_none() && p.pending_metadata.is_none());
+            assert!(p.ready_sequence(at).is_none() && p.candidate.is_none());
+            assert_eq!(p.sequence, click.sequence);
+            assert_eq!(p.deadline, Some(lease_deadline));
+        }
+    }
+
+    #[test]
     fn popup_terminal_delivery_rejects_altered_late_and_completed_commands() {
         use crate::remote::x11_viewer::WaylandPointerEventKind as E;
         let now = Instant::now();
