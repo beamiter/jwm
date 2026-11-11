@@ -517,6 +517,11 @@ impl Harness {
             self.native.state.image_capture_pending.as_ref().unwrap(),
         );
         self.native.roundtrip();
+        // Serialize only the test's local compositor snapshot with the viewer's
+        // test-observed commit. The viewer flush is nonblocking and never waits
+        // for this server while holding this lock. All real TTL clocks continue.
+        let frame_observer = self.frames.clone();
+        let frame_snapshot = frame_observer.lock().unwrap();
         self.local.roundtrip();
         for (&window, top) in &self.local.state.toplevels {
             if !top.is_initial_configure_sent() {
@@ -556,15 +561,10 @@ impl Harness {
             if self.readback.is_none() {
                 self.readback = Some(Readback::new(&mut self.local, self.viewer_size));
             }
-            let sequence = self
-                .frames
-                .lock()
-                .unwrap()
-                .0
-                .expect("actual committed viewer sequence");
+            let sequence = frame_snapshot.0.expect("actual committed viewer sequence");
             let pixels = self.readback.as_mut().unwrap().pixels(&mut self.local, gl);
             assert_eq!(
-                self.frames.lock().unwrap().0,
+                frame_snapshot.0,
                 Some(sequence),
                 "readback must describe the same commit"
             );
@@ -596,6 +596,7 @@ impl Harness {
                 );
             }
         }
+        drop(frame_snapshot);
         collect(
             &mut self.target,
             self.target_pointer,

@@ -1097,17 +1097,22 @@ impl WaylandViewer {
             presented: false,
             started: Instant::now(),
         });
+        // Test capture observers can hold this same lock while dispatching and
+        // reading back the owned compositor. Acquire before emitting commit,
+        // so its sequence cannot race ahead of the pixels being inspected.
+        #[cfg(all(test, feature = "backend-wayland-udev"))]
+        let commit_observer = CONTROL_FRAME_OBSERVER.with(|slot| slot.borrow().clone());
+        #[cfg(all(test, feature = "backend-wayland-udev"))]
+        let mut commit_observation = commit_observer.as_ref().map(|o| o.lock().unwrap());
         self.surface.attach(Some(&buffer), 0, 0);
         self.surface
             .damage_buffer(0, 0, i32::from(width), i32::from(height));
         self.surface.commit();
         self.prepare_wait()?;
         #[cfg(all(test, feature = "backend-wayland-udev"))]
-        CONTROL_FRAME_OBSERVER.with(|slot| {
-            if let Some(observer) = slot.borrow().as_ref() {
-                observer.lock().unwrap().0 = Some(frame.sequence());
-            }
-        });
+        if let Some(observation) = commit_observation.as_mut() {
+            observation.0 = Some(frame.sequence());
+        }
         Ok(true)
     }
     fn retire_slot(&mut self, index: usize) -> RemoteResult<()> {

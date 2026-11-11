@@ -2,7 +2,7 @@ name: Remote Wayland source safety
 
 on:
   push:
-    branches: [master, dot/remote-window-plan]
+    branches: [master, dot/remote-window-plan, dot/remote-readback-snapshot]
   workflow_dispatch:
 
 permissions:

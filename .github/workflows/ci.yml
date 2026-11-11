@@ -5,6 +5,7 @@ on:
     branches:
       - master
       - dot/remote-window-plan
+      - dot/remote-readback-snapshot
   pull_request:
     branches:
       - master
