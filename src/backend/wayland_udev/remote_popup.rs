@@ -212,6 +212,15 @@ fn current(state: &JwmWaylandState, l: &Lease) -> bool {
         })
 }
 fn finish(state: &mut JwmWaylandState, mut l: Lease, reason: u32) {
+    #[cfg(test)]
+    eprintln!(
+        "JWM_POPUP_GATE=finish reason={} armed={} child={} grabbed={} mapped={}",
+        reason,
+        l.receivers.is_some(),
+        l.popup.is_some(),
+        l.grabbed,
+        l.popup_mapped
+    );
     l.family.revoke();
     // End only this lease's exact child; never touch the compositor's local
     // popup-grab state or another application's popup resources.
@@ -278,6 +287,11 @@ pub(crate) fn surface_committed(state: &mut JwmWaylandState, surface: &WlSurface
         })
         .unwrap_or(false);
         if (mapped && !l.grabbed) || (!mapped && l.popup_mapped) {
+            #[cfg(test)]
+            eprintln!(
+                "JWM_POPUP_GATE=surface_lifecycle mapped={} grabbed={} previously_mapped={}",
+                mapped, l.grabbed, l.popup_mapped
+            );
             revoke(state, SOURCE);
             return;
         }
@@ -322,6 +336,22 @@ pub(crate) fn popup_created(state: &mut JwmWaylandState, popup: &PopupSurface) -
                 .is_some_and(|root| root.id() == c.id())
         })
         && l.click.is_some_and(|(_, at)| at.elapsed() <= FRESH);
+    #[cfg(test)]
+    eprintln!(
+        "JWM_POPUP_GATE=create allowed={} current={} first_child={} armed={} direct_parent={} same_owner={} fresh_click={}",
+        allowed,
+        current(state, l),
+        l.popup.is_none(),
+        l.receivers.is_some(),
+        popup.get_parent_surface().as_ref() == Some(&l.family.root.surface),
+        popup.wl_surface().client().is_some_and(|c| l
+            .family
+            .root
+            .surface
+            .client()
+            .is_some_and(|r| c.id() == r.id())),
+        l.click.is_some_and(|(_, at)| at.elapsed() <= FRESH)
+    );
     if !allowed {
         revoke(state, SOURCE);
         return false;
@@ -342,6 +372,11 @@ pub(crate) fn popup_grab(
         return false;
     };
     if Seat::<JwmWaylandState>::from_resource(seat).as_ref() != Some(&l.seat) {
+        #[cfg(test)]
+        eprintln!(
+            "JWM_POPUP_GATE=grab_wrong_seat exact_child={}",
+            l.popup.as_ref() == Some(popup.wl_surface())
+        );
         if l.popup.as_ref() == Some(popup.wl_surface()) {
             revoke(state, DENIED);
             return true;
@@ -355,6 +390,19 @@ pub(crate) fn popup_grab(
         && !l.grabbed
         && popup.get_parent_surface().as_ref() == Some(&l.family.root.surface)
         && click_serial_valid(l.click, serial, Instant::now());
+    #[cfg(test)]
+    eprintln!(
+        "JWM_POPUP_GATE=grab allowed={} current={} owns_seat={} same_owner={} exact_child={} unused={} direct_parent={} exact_serial={} fresh_click={}",
+        valid,
+        current(state, l),
+        l.seat.owns(seat),
+        seat.id().same_client_as(&popup.wl_surface().id()),
+        l.popup.as_ref() == Some(popup.wl_surface()),
+        !l.grabbed,
+        popup.get_parent_surface().as_ref() == Some(&l.family.root.surface),
+        l.click.is_some_and(|(expected, _)| expected == serial),
+        l.click.is_some_and(|(_, at)| at.elapsed() <= FRESH)
+    );
     if valid {
         let l = state.remote_popup.active.as_mut().unwrap();
         l.click = None;

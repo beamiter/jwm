@@ -101,6 +101,29 @@ jobs:
           for stage in stages:
               if ("JWM_GTK_STAGE=" + stage).encode("ascii") in lines:
                   print("GTK_PROBE_COMPLETED_STAGE=" + stage)
+          # Only fixed gate names/keys and literal booleans may become public.
+          # Never echo the source line or numeric reason/serial/resource values.
+          gates = {
+              "finish": ("armed", "child", "grabbed", "mapped"),
+              "surface_lifecycle": ("mapped", "grabbed", "previously_mapped"),
+              "create": ("allowed", "current", "first_child", "armed", "direct_parent", "same_owner", "fresh_click"),
+              "grab_wrong_seat": ("exact_child",),
+              "grab": ("allowed", "current", "owns_seat", "same_owner", "exact_child", "unused", "direct_parent", "exact_serial", "fresh_click"),
+          }
+          observed = set()
+          for line in raw.splitlines():
+              fields = line.split()
+              if not fields:
+                  continue
+              for gate, keys in gates.items():
+                  if fields[0] != ("JWM_POPUP_GATE=" + gate).encode("ascii"):
+                      continue
+                  for key in keys:
+                      for value in ("true", "false"):
+                          if (key + "=" + value).encode("ascii") in fields[1:]:
+                              observed.add((gate, key, value))
+          for gate, key, value in sorted(observed):
+              print("GTK_PROBE_GATE_" + gate + "_" + key + "=" + value)
           matches = [label for needle, label in labels.items() if needle in raw]
           for label in matches or ["unclassified_failure"]:
               print("GTK_PROBE_FAILURE_CATEGORY=" + label)
