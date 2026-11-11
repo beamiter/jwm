@@ -34,6 +34,8 @@ pub mod key;
 mod keyboard_keymap;
 pub mod messages;
 mod pacing;
+mod pointer_repair_phase;
+mod pointer_repair_wire;
 pub mod profiles;
 pub mod protocol;
 pub mod replay_benchmark;

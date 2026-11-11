@@ -5,6 +5,8 @@ use super::source_wire::FramePurpose;
 mod control;
 #[path = "host_input_wake.rs"]
 mod input_wake;
+#[path = "host_pointer_repair.rs"]
+mod pointer_repair;
 #[path = "host_text.rs"]
 mod text;
 use control::{ControlCommand, HostControl};
@@ -402,6 +404,7 @@ fn poisoned_writer() -> io::Error {
 }
 
 struct PendingFrame {
+    pointer_repair: Option<pointer_repair::Stamp>,
     native_proof_serial: Option<u64>,
     pointer_serial: Option<u64>,
     source_version: SourceVersion,
@@ -697,11 +700,6 @@ impl FrameSender {
         };
         self.pending_refinement = false;
         self.pending_refinement_at = None;
-        if self.static_lossless && mandatory {
-            return Err(
-                invalid_data("lossless repairs cannot be used as native input proofs").into(),
-            );
-        }
         let mut plan = self.encoder.plan_at(frame, request, now)?;
         if self.static_lossless {
             if self.encoder.detected_exact_change() {
@@ -717,6 +715,7 @@ impl FrameSender {
             let retry = self.lossless_retry_after.is_none_or(|at| now >= at)
                 && self.lossless_next_batch.is_none_or(|at| now >= at);
             if quiet
+                && !mandatory
                 && !plan.keyframe
                 && plan.dirty_tiles == 0
                 && retry
@@ -2095,6 +2094,8 @@ enum KeyboardCommand {
 enum PointerCommand {
     Request(PointerRequest),
     Action(PointerAction),
+    RepairRequest(super::pointer_repair_phase::Token),
+    RepairDecline(super::pointer_repair_phase::Token),
 }
 #[derive(Clone, Copy)]
 struct PointerFrame {
@@ -2256,6 +2257,7 @@ struct SourceControl {
     horizontal_scroll_enabled: AtomicBool,
     pointer_revoke: AtomicBool,
     pointer_queue: Mutex<VecDeque<PointerCommand>>,
+    pointer_repair: Mutex<pointer_repair::Control>,
     pointer_frame: Mutex<Option<PointerFrame>>,
     state: Mutex<HostSourceState>,
     changed: Condvar,
@@ -2338,6 +2340,7 @@ impl SourceControl {
             horizontal_scroll_enabled: AtomicBool::new(false),
             pointer_revoke: AtomicBool::new(false),
             pointer_queue: Mutex::new(VecDeque::new()),
+            pointer_repair: Mutex::new(pointer_repair::Control::default()),
             pointer_frame: Mutex::new(None),
             state: Mutex::new(HostSourceState {
                 policy: SourceSession::new(grants, SourceId(1))?,
@@ -2428,7 +2431,12 @@ fn validate_window_policy(options: &HostOptions) -> RemoteResult<()> {
         && (options.allow_input
             || options.allow_clipboard
             || options.allow_window_resize
-            || options.allow_wayland_pointer
+            || (options.allow_wayland_pointer
+                && (!options.wayland_select
+                    || !options.once
+                    || options.wayland_popups
+                    || options.wayland_resize_follow
+                    || options.allow_wayland_keyboard))
             || options.allow_wayland_control
             || options.allow_wayland_text
             || options.allow_wayland_scroll
@@ -3798,6 +3806,7 @@ fn stop_pointer(
     let frame = sources.pointer_frame.lock().unwrap().take();
     state.revoke();
     capture.revoke_pointer();
+    pointer_repair::stopped(sources);
     if let Some(scope) = frame.and_then(|frame| frame.scope).or(state.scope()) {
         send_pointer_status(
             writer,
@@ -3838,6 +3847,14 @@ fn process_pointer(
     let drawn = sources.state.lock().unwrap().presented_frame;
     let command = sources.pointer_queue.lock().unwrap().pop_front();
     if let Some(command) = command {
+        let command = match pointer_repair::intercept(sources, capture, writer, state, command) {
+            Ok(Some(command)) => command,
+            Ok(None) => return Ok(()),
+            Err(error) => {
+                stop_pointer(sources, capture, writer, state)?;
+                return Err(error);
+            }
+        };
         let result = (|| -> RemoteResult<()> {
             let frame = tracked.ok_or_else(|| invalid_data("missing pointer capture proof"))?;
             let scope = frame
@@ -3853,7 +3870,9 @@ fn process_pointer(
                 PointerCommand::Request(request) => {
                     state.request(request, scope)?;
                     let epoch = capture.grant_pointer()?;
-                    state.grant(epoch, Instant::now())?;
+                    let granted_at = Instant::now();
+                    state.grant(epoch, granted_at)?;
+                    pointer_repair::granted(sources, epoch, granted_at);
                     let ready = state.ready(scope, frame.serial, frame.at, Instant::now())?;
                     if let Some(frame) = sources.pointer_frame.lock().unwrap().as_mut() {
                         frame.announced = true;
@@ -3867,6 +3886,7 @@ fn process_pointer(
                     let serial = state.consume(action, size, Instant::now())?;
                     capture.pointer_action(&action, serial)?;
                     sources.pointer_frame.lock().unwrap().take();
+                    pointer_repair::after_action(sources, writer, action)?;
                     send_pointer_status(
                         writer,
                         PointerStatus {
@@ -3876,6 +3896,9 @@ fn process_pointer(
                         },
                     )?;
                 }
+                PointerCommand::RepairRequest(_) | PointerCommand::RepairDecline(_) => {
+                    unreachable!("repair commands intercepted")
+                }
             }
             Ok(())
         })();
@@ -3884,6 +3907,14 @@ fn process_pointer(
             return Err(error);
         }
         return Ok(());
+    }
+    match pointer_repair::poll_active(sources, capture, writer, state) {
+        Ok(true) => return Ok(()),
+        Ok(false) => {}
+        Err(error) => {
+            stop_pointer(sources, capture, writer, state)?;
+            return Err(error);
+        }
     }
     if let Some(frame) = tracked {
         let expired = now.saturating_duration_since(frame.at) >= FRAME_MAX_AGE;
@@ -3922,6 +3953,7 @@ fn process_pointer(
             send_pointer_status(writer, status)?;
         }
     }
+    pointer_repair::maybe_offer(sources, writer)?;
     Ok(())
 }
 
@@ -4283,6 +4315,15 @@ fn stream_frames(
                 next_cursor_poll = Instant::now() + cursor_interval;
             }
 
+            if matches!(pointer_repair::capture_stamp(sources), Some(Err(()))) {
+                capture
+                    .wait_for_activity_with_wake(
+                        CAPTURE_RATE_LIMIT_SLICE,
+                        sources.input_wake.get().map(input_wake::InputWake::as_fd),
+                    )
+                    .map_err(LocalRuntimeFailure::capture)?;
+                continue;
+            }
             if let Some(wait) = capture_rate_limit_wait(
                 Instant::now(),
                 next_capture_allowed,
@@ -4337,8 +4378,20 @@ fn stream_frames(
                 }
                 version
             };
+            let repair_stamp = match pointer_repair::capture_stamp(sources) {
+                Some(Ok(stamp)) => Some(stamp),
+                Some(Err(())) => continue,
+                None => None,
+            };
             let capture_started = Instant::now();
-            let outcome = capture.frame().map_err(LocalRuntimeFailure::capture)?;
+            let outcome = if repair_stamp
+                .is_some_and(|stamp| matches!(stamp.intent, pointer_repair::Intent::Visual(_)))
+            {
+                capture.frame_with_pointer_visual()
+            } else {
+                capture.frame()
+            }
+            .map_err(LocalRuntimeFailure::capture)?;
             #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
             let legacy_retained_slots = sources.legacy_retained_proof_slots;
             #[cfg(not(all(test, feature = "remote-wayland", feature = "backend-wayland-udev")))]
@@ -4420,7 +4473,11 @@ fn stream_frames(
                     });
                     serial
                 });
+            if let Some(stamp) = repair_stamp {
+                pointer_repair::capture_queued(sources, stamp)?;
+            }
             let pending = PendingFrame {
+                pointer_repair: repair_stamp,
                 native_proof_serial: pointer_serial.or_else(|| capture.keyboard_proof_serial()),
                 pointer_serial,
                 source_version,
@@ -4644,6 +4701,12 @@ fn send_frames_with_encoder_scoped<W: std::io::Write + SetWriteTimeout>(
             sources.is_some_and(|s| s.proof_delta.as_ref().is_some_and(|(legacy, _)| *legacy));
         #[cfg(not(all(test, feature = "remote-wayland", feature = "backend-wayland-udev")))]
         let legacy_keyframe = false;
+        if let (Some(sources), Some(stamp)) = (sources, pending.pointer_repair) {
+            if !pointer_repair::permits_write(sources, stamp) {
+                sender.discard();
+                continue;
+            }
+        }
         let planned_at = Instant::now();
         let mut plan = sender
             .plan_record_at(
@@ -4653,6 +4716,19 @@ fn send_frames_with_encoder_scoped<W: std::io::Write + SetWriteTimeout>(
                 legacy_keyframe,
             )
             .map_err(LocalRuntimeFailure::encoding)?;
+        if let Some(sources) = sources {
+            pointer_repair::observe_debt(sources, sender.encoder.has_stable_exact_debt(planned_at));
+        }
+        if pending
+            .pointer_repair
+            .is_some_and(|s| matches!(s.intent, pointer_repair::Intent::Visual(_)))
+            && !plan.emit
+        {
+            plan =
+                sender
+                    .encoder
+                    .plan_at(&pending.frame, TileEncodeRequest::Keepalive, planned_at)?;
+        }
         if !sender.static_lossless && !plan.keyframe && sender.refinement_due(planned_at) {
             let current = jpeg_quality.current_quality();
             if sender.encoder.has_quality_debt(current) {
@@ -4797,6 +4873,12 @@ fn send_frames_with_encoder_scoped<W: std::io::Write + SetWriteTimeout>(
             // The writer is the source publication barrier. A sender already
             // encoding old pixels must recheck before reserving credit or
             // writing, and can never appear after SourceChanged.
+            if let (Some(sources), Some(stamp)) = (sources, pending.pointer_repair) {
+                if !pointer_repair::permits_write(sources, stamp) {
+                    sender.discard();
+                    continue;
+                }
+            }
             let mut source_state = sources.map(|sources| sources.state.lock().unwrap());
             if source_state.as_ref().is_some_and(|state| {
                 !state.policy.accepts_capture(pending.source_version)
@@ -4862,15 +4944,29 @@ fn send_frames_with_encoder_scoped<W: std::io::Write + SetWriteTimeout>(
             sender.discard();
             return Err(error.into());
         }
-        #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
-        let flushed_at = Instant::now();
         if unchanged_keepalive {
             telemetry.record_unchanged_keepalive();
         }
         // Commit by move only after the complete authenticated record and its
         // flush succeeded. A partial/failed write therefore cannot suppress a
         // future frame in a replacement session or test harness.
-        sender.commit_at(&pending.frame, Instant::now());
+        let flushed_at = Instant::now();
+        sender.commit_at(&pending.frame, flushed_at);
+        if let (Some(sources), Some(stamp)) = (sources, pending.pointer_repair) {
+            pointer_repair::flushed(
+                sources,
+                stamp,
+                DrawnScope {
+                    source_epoch: pending.source_version.epoch,
+                    geometry_epoch: pending.frame.geometry_epoch,
+                    frame_sequence: sequence,
+                },
+                frame_purpose,
+                pending.captured_at,
+                flushed_at,
+            )?;
+            sources.notify_input()?;
+        }
         #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
         if let Some((_, probe)) = sources.and_then(|s| s.lossless_schedule_test.as_ref()) {
             probe.stats.lock().unwrap().sent_bytes += wire_payload.len() as u64;
@@ -5583,6 +5679,30 @@ fn receive_input_scoped(
                     drop(queue);
                     sources.notify_input()?;
                 }
+                MessageKind::WaylandPointerRepairRequest
+                | MessageKind::WaylandPointerRepairDecline => {
+                    let sources =
+                        sources.ok_or_else(|| invalid_data("pointer repair unavailable"))?;
+                    if !sources.static_lossless.load(Ordering::Acquire)
+                        || !sources.pointer_enabled.load(Ordering::Acquire)
+                    {
+                        return Err(invalid_data("pointer repair was not negotiated").into());
+                    }
+                    let token = super::pointer_repair_phase::Token::decode(&payload)?;
+                    let command = if kind == MessageKind::WaylandPointerRepairRequest {
+                        PointerCommand::RepairRequest(token)
+                    } else {
+                        PointerCommand::RepairDecline(token)
+                    };
+                    let mut queue = sources.pointer_queue.lock().unwrap();
+                    if !queue.is_empty() {
+                        sources.pointer_revoke.store(true, Ordering::Release);
+                        return Err(invalid_data("pointer repair inflight budget exceeded").into());
+                    }
+                    queue.push_back(command);
+                    drop(queue);
+                    sources.notify_input()?;
+                }
                 MessageKind::WaylandPointerRevoke => {
                     let _ = PointerRevoke::decode(&payload)?;
                     let sources =
@@ -5754,6 +5874,9 @@ fn receive_input_scoped(
                 | MessageKind::Frame
                 | MessageKind::CursorShape
                 | MessageKind::CursorPosition
+                | MessageKind::WaylandPointerActionCompleted
+                | MessageKind::WaylandPointerRepairOffer
+                | MessageKind::WaylandPointerRepairStatus
                 | MessageKind::SourceCatalog
                 | MessageKind::SourceChanged
                 | MessageKind::SessionClose
@@ -5989,10 +6112,20 @@ mod tests {
         assert_eq!(repaired.image(), &frame.image);
         sender.commit_at(&frame, at + Duration::from_secs(3));
         assert!(!sender.encoder.has_exact_debt());
+        let proof = sender
+            .plan_record_at(&frame, at + Duration::from_secs(4), true, false)
+            .unwrap();
+        assert!(proof.emit && proof.dirty_tiles == 0);
+        sender
+            .encoder
+            .encode_into(&mut bytes, 2, &frame, 70)
+            .unwrap();
+        decoder
+            .decode_into(&bytes, super::super::frame::new_decode_buffer_pool())
+            .unwrap();
         assert!(
-            sender
-                .plan_record_at(&frame, at + Duration::from_secs(4), true, false)
-                .is_err()
+            !decoder.last_frame_was_lossless(),
+            "mandatory proof must never be PNG"
         );
     }
 
@@ -9795,6 +9928,7 @@ mod tests {
 
     fn test_pending_frame(red: u8) -> PendingFrame {
         PendingFrame {
+            pointer_repair: None,
             native_proof_serial: None,
             pointer_serial: None,
             source_version: SourceVersion {
@@ -11207,6 +11341,7 @@ mod tests {
     fn capture_start_ack_latency_includes_readback_but_queue_age_does_not() {
         let base = Instant::now();
         let pending = PendingFrame {
+            pointer_repair: None,
             native_proof_serial: None,
             pointer_serial: None,
             source_version: SourceVersion {

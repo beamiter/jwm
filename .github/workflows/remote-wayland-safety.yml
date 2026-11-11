@@ -73,6 +73,15 @@ jobs:
           listed="$(env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --list)"
           test "$(printf '%s\n' "$listed" | grep -c ': test$')" -eq 5
           env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --test-threads=1 --nocapture
+      - name: Explicit pointer plus lossless phase and real presentation safety
+        run: |
+          set -euo pipefail
+          export XDG_RUNTIME_DIR="$(mktemp -d)"
+          cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib pointer_repair -- --test-threads=1
+          filter='remote::host::wayland_viewer_integration::host_pointer_integration::pointer_lossless_integration::'
+          listed="$(env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --list)"
+          test "$(printf '%s\n' "$listed" | grep -c ': test$')" -eq 6
+          env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --test-threads=1 --nocapture
       - name: Actual scoped pointer recipients, fresh-frame coordinates and revocation
         run: |
           export XDG_RUNTIME_DIR="$(mktemp -d)"

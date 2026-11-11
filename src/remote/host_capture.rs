@@ -255,6 +255,13 @@ impl HostCapture {
             Self::Wayland(c) => c.frame(),
         }
     }
+    pub(super) fn frame_with_pointer_visual(&mut self) -> RemoteResult<CaptureOutcome> {
+        match self {
+            #[cfg(feature = "remote-wayland")]
+            Self::Wayland(c) => c.frame_with_pointer_visual(true),
+            _ => Err(std::io::Error::other("pointer visual repair requires native Wayland").into()),
+        }
+    }
     pub(super) fn set_frame_limits(&mut self, limits: FrameLimits) -> bool {
         match self {
             Self::Desktop(c) => c.set_frame_limits(limits),

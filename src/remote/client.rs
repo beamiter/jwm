@@ -7,6 +7,9 @@ use control::ClientControl;
 mod text;
 use super::wayland_keyboard_wire::DrawnScope;
 use text::ClientText;
+#[path = "client_pointer_repair.rs"]
+mod pointer_repair;
+use pointer_repair::PointerRepair;
 
 use super::clipboard_policy::{self, ClipboardDirection, ClipboardMode};
 use super::clipboard_sync::{
@@ -543,9 +546,15 @@ fn validate_viewer_backend(options: &ClientOptions) -> RemoteResult<()> {
     let lossless_keyboard = options.wayland_keyboard
         && options.viewer_backend == ViewerBackend::Wayland
         && !options.view_only;
+    let lossless_pointer = options.wayland_pointer
+        && options.viewer_backend == ViewerBackend::Wayland
+        && !options.view_only
+        && !options.wayland_keyboard
+        && !options.wayland_scroll
+        && !options.wayland_horizontal_scroll;
     if options.static_lossless
-        && (!(options.view_only || lossless_keyboard)
-            || options.wayland_pointer
+        && (!(options.view_only || lossless_keyboard || lossless_pointer)
+            || (options.wayland_pointer && !lossless_pointer)
             || options.wayland_control
             || options.wayland_text.is_some()
             || options.clipboard
@@ -553,7 +562,7 @@ fn validate_viewer_backend(options: &ClientOptions) -> RemoteResult<()> {
             || options.resize_source.is_some()
             || options.follow_source_size)
     {
-        return Err(invalid_data("static lossless requires view-only or Wayland keyboard-only mode without pointer, control, text, clipboard or remote resize").into());
+        return Err(invalid_data("static lossless requires view-only or exclusive Wayland keyboard/pointer mode without scroll, control, text, clipboard or remote resize").into());
     }
 
     if options.wayland_text.is_some()
@@ -945,6 +954,15 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
         viewer.enable_wayland_pointer(options.wayland_scroll, options.wayland_horizontal_scroll)?;
         let mut pointer = state.wayland_pointer.lock().unwrap();
         pointer.enabled = true;
+        pointer.repair.enabled = hello.stream.static_lossless;
+        pointer.repair_frame(
+            initial_purpose,
+            super::pointer_repair_phase::Scope {
+                source: initial_epoch,
+                geometry: first_frame.frame.geometry_epoch(),
+                sequence: first_frame.frame.sequence(),
+            },
+        )?;
         pointer.scroll_enabled = options.wayland_scroll;
         pointer.horizontal_enabled = options.wayland_horizontal_scroll;
     }
@@ -1376,7 +1394,14 @@ fn negotiate_session(
     validate_server_frame_limits(&hello, frame_limits)?;
     if hello.stream.static_lossless != request_static_lossless
         || (request_static_lossless
-            && (hello.pointer_enabled || hello.keyboard_enabled || hello.clipboard_enabled))
+            && (hello.pointer_enabled
+                || hello.keyboard_enabled
+                || hello.clipboard_enabled
+                || hello.stream.wayland_control
+                || hello.stream.wayland_text
+                || hello.stream.window_resize
+                || hello.stream.wayland_scroll
+                || hello.stream.wayland_horizontal_scroll))
     {
         return Err(invalid_data(
             "static lossless permission was not mutually negotiated exclusively",
@@ -1742,6 +1767,7 @@ fn viewer_loop(
         {
             let mut pointer = state.wayland_pointer.lock().unwrap();
             if pointer.enabled {
+                pointer.repair_check(Instant::now())?;
                 if pointer.expired(Instant::now()) {
                     #[cfg(test)]
                     eprintln!("viewer pointer revoke: lease expiry");
@@ -1959,12 +1985,29 @@ fn viewer_loop(
                 } else {
                     for event in &events {
                         if let Some(action) = pointer.event(event, Instant::now())? {
-                            writer.write_message(
-                                MessageKind::WaylandPointerAction,
-                                &action.encode()?,
-                            )?;
-                            writer.flush()?;
+                            pointer.repair_sent(&action, Instant::now())?;
+                            if let Err(error) = (|| -> RemoteResult<()> {
+                                writer.write_message(
+                                    MessageKind::WaylandPointerAction,
+                                    &action.encode()?,
+                                )?;
+                                writer.flush()?;
+                                Ok(())
+                            })() {
+                                pointer.revoke();
+                                return Err(error);
+                            }
                         }
+                    }
+                }
+                if let Some((kind, token)) = pointer.repair_outgoing(Instant::now())? {
+                    if let Err(error) = (|| -> RemoteResult<()> {
+                        writer.write_message(kind, &token.encode()?)?;
+                        writer.flush()?;
+                        Ok(())
+                    })() {
+                        pointer.revoke();
+                        return Err(error);
                     }
                 }
                 viewer.set_wayland_pointer_status(pointer.label(Instant::now()));
@@ -3090,6 +3133,7 @@ fn average_millis(duration: Duration, count: u64) -> f64 {
 
 #[derive(Default)]
 struct ClientPointer {
+    repair: PointerRepair,
     scroll_enabled: bool,
     horizontal_enabled: bool,
     #[cfg(test)]
@@ -3125,6 +3169,7 @@ impl ClientPointer {
         self.click = None;
         self.newer_frame = false;
         self.presented = Some((scope, now));
+        self.repair_resolve(now);
         if self.requested.is_none() {
             self.requested = Some((scope, now));
             Some(super::wayland_pointer_wire::PointerRequest { scope })
@@ -3152,10 +3197,19 @@ impl ClientPointer {
             #[cfg(test)]
             eprintln!("viewer pointer terminal host status: {value:?}");
             self.ended = true;
+            self.repair_end();
             self.terminal_seen = true;
             self.ready = None;
             self.click = None;
             return Ok(());
+        }
+        if !self.ended {
+            self.repair_granted(value.lease_epoch)?;
+            if value.status == S::Ready
+                && self.repair_ordinary_ready(value.scope.into(), Instant::now())?
+            {
+                return Ok(());
+            }
         }
         let Some((presented, at)) = self.presented else {
             return Err(invalid_data("pointer status before presentation").into());
@@ -3196,6 +3250,7 @@ impl ClientPointer {
     }
     fn fresh(&self, now: Instant) -> bool {
         !self.ended
+            && !self.repair_blocked()
             && !self.newer_frame
             && self.ready.is_some()
             && self.presented.is_some_and(|(scope, at)| {
@@ -3227,6 +3282,7 @@ impl ClientPointer {
             return None;
         }
         self.ended = true;
+        self.repair_end();
         self.ready = None;
         self.click = None;
         self.left_down = false;
@@ -3238,6 +3294,8 @@ impl ClientPointer {
         event: &ViewerEvent,
         now: Instant,
     ) -> RemoteResult<Option<super::wayland_pointer_wire::PointerAction>> {
+        self.repair_input(event, now);
+        self.repair_check(now)?;
         use super::wayland_pointer_wire::PointerActionKind as A;
         use super::x11_viewer::WaylandPointerEventKind as E;
         if let ViewerEvent::WaylandPointerButtonCancel { pressed } = event {
@@ -3918,6 +3976,27 @@ fn receive_frame_records(
                     .receive(super::wayland_text_wire::TextResult::decode(&payload)?)?;
                 completion.signal()?;
             }
+            MessageKind::WaylandPointerActionCompleted => {
+                state.wayland_pointer.lock().unwrap().repair_completed(
+                    super::pointer_repair_phase::ActionReceipt::decode(&payload)?,
+                    Instant::now(),
+                )?;
+                completion.signal()?;
+            }
+            MessageKind::WaylandPointerRepairOffer => {
+                state.wayland_pointer.lock().unwrap().repair_offer(
+                    super::pointer_repair_phase::Token::decode(&payload)?,
+                    Instant::now(),
+                )?;
+                completion.signal()?;
+            }
+            MessageKind::WaylandPointerRepairStatus => {
+                state.wayland_pointer.lock().unwrap().repair_status(
+                    super::pointer_repair_wire::RepairStatus::decode(&payload)?,
+                    Instant::now(),
+                )?;
+                completion.signal()?;
+            }
             MessageKind::WaylandPointerStatus => {
                 state.wayland_pointer.lock().unwrap().receive(
                     super::wayland_pointer_wire::PointerStatus::decode(&payload)?,
@@ -4032,7 +4111,18 @@ fn receive_frame_records(
                 last_sequence = queued.frame.sequence();
                 last_video_at = Instant::now();
                 state.wayland_control.lock().unwrap().before_frame();
-                state.wayland_pointer.lock().unwrap().before_frame();
+                {
+                    let mut pointer = state.wayland_pointer.lock().unwrap();
+                    pointer.repair_frame(
+                        purpose,
+                        super::pointer_repair_phase::Scope {
+                            source: epoch,
+                            geometry: queued.frame.geometry_epoch(),
+                            sequence: queued.frame.sequence(),
+                        },
+                    )?;
+                    pointer.before_frame();
+                }
                 let replaced = replace_latest(&state.latest, queued);
                 if replaced.is_some() {
                     state.telemetry.record_replaced();
@@ -4070,6 +4160,8 @@ fn receive_frame_records(
             | MessageKind::WaylandPointerRequest
             | MessageKind::WaylandPointerAction
             | MessageKind::WaylandPointerRevoke
+            | MessageKind::WaylandPointerRepairRequest
+            | MessageKind::WaylandPointerRepairDecline
             | MessageKind::WaylandControlRequest
             | MessageKind::WaylandControlAction
             | MessageKind::WaylandControlRevoke

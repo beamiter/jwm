@@ -175,7 +175,7 @@ impl Readback {
         );
         Self { client: c, session }
     }
-    fn blue(&mut self, s: &mut Server, gl: &mut HeadlessSmithayGles) -> bool {
+    fn pixels(&mut self, s: &mut Server, gl: &mut HeadlessSmithayGles) -> Vec<u8> {
         let (buffer, mut file) = shm(s, &mut self.client, [0x5a; 4], VW, VH);
         let frame = self.client.new_id();
         self.client.request(self.session, 0, &[frame]);
@@ -202,19 +202,9 @@ impl Readback {
         let mut pixels = Vec::new();
         file.read_to_end(&mut pixels).unwrap();
         assert_eq!(pixels.len(), (VW * VH * 4) as usize);
-        let blue = pixels
-            .chunks_exact(4)
-            .all(|p| p[0] >= 250 && p[1] <= 3 && p[2] <= 3 && p[3] == 255);
-        let red = pixels
-            .chunks_exact(4)
-            .all(|p| p[2] >= 250 && p[1] <= 3 && p[0] <= 3 && p[3] == 255);
-        assert!(
-            blue || red,
-            "actual viewer pixels must equal selected red/blue source"
-        );
         self.client.request(frame, 0, &[]);
         s.roundtrip();
-        blue
+        pixels
     }
 }
 struct Harness {
@@ -232,6 +222,8 @@ struct Harness {
     wire_events: Vec<(u16, Vec<u32>)>,
     unexpected_wire: Vec<(u16, Vec<u32>)>,
     blue_presented: bool,
+    frames: Arc<Mutex<(Option<u64>, Option<u64>)>>,
+    purposes: Arc<Mutex<Vec<(u64, crate::remote::source_wire::FramePurpose)>>>,
     presentation_count: u64,
     latest_ready: Option<u64>,
     presented_ready_floor: Option<u64>,
@@ -241,7 +233,7 @@ struct Harness {
     shutdown: Arc<AtomicBool>,
     _stop: Stop,
     client_done: mpsc::Receiver<Result<(), String>>,
-    host_done: mpsc::Receiver<Result<(), String>>,
+    host_done: mpsc::Receiver<crate::remote::RemoteResult<()>>,
     client: Option<thread::JoinHandle<()>>,
     host: Option<thread::JoinHandle<()>>,
 }
@@ -260,6 +252,28 @@ impl Harness {
         gl: &mut HeadlessSmithayGles,
         host_scroll: (bool, bool),
         viewer_scroll: (bool, bool),
+    ) -> Self {
+        Self::new_configured(gl, host_scroll, viewer_scroll, false, false)
+    }
+    fn new_with_lossless(
+        gl: &mut HeadlessSmithayGles,
+        host_lossless: bool,
+        viewer_lossless: bool,
+    ) -> Self {
+        Self::new_configured(
+            gl,
+            (false, false),
+            (false, false),
+            host_lossless,
+            viewer_lossless,
+        )
+    }
+    fn new_configured(
+        gl: &mut HeadlessSmithayGles,
+        host_scroll: (bool, bool),
+        viewer_scroll: (bool, bool),
+        host_lossless: bool,
+        viewer_lossless: bool,
     ) -> Self {
         // Keep old vertical v7 coverage. Horizontal tests independently verify
         // the real selected recipient's v9 value120 group, not viewer metadata.
@@ -311,15 +325,16 @@ impl Harness {
                         }
                     };
                     let peer = host::authenticate_peer(stream, &KEY)?;
+                    let mut host_options = options(host_scroll.0, host_scroll.1);
+                    host_options.allow_static_lossless = host_lossless;
                     host::serve_authenticated(
                         peer,
-                        &options(host_scroll.0, host_scroll.1),
+                        &host_options,
                         &stopping,
                         &Mutex::new(Some(host::GrantedCapture::Wayland(Box::new(capture)))),
                     )
                 })()
-            })
-            .map_err(|e| e.to_string());
+            });
             host_tx.send(result).unwrap();
         });
         let deadline = Instant::now() + Duration::from_secs(10);
@@ -350,6 +365,10 @@ impl Harness {
             .unwrap();
         let ready = Arc::new(Mutex::new(None));
         let candidate = Arc::new(Mutex::new((None, false, 0)));
+        let frames = Arc::new(Mutex::new((None, None)));
+        let purposes = Arc::new(Mutex::new(Vec::new()));
+        let observed_frames = frames.clone();
+        let observed_purposes = purposes.clone();
         let observed = ready.clone();
         let observed_candidate = candidate.clone();
         let (client_tx, client_done) = mpsc::channel();
@@ -361,7 +380,7 @@ impl Harness {
                 wayland_pointer: true,
                 wayland_control: false,
                 wayland_text: None,
-                static_lossless: false,
+                static_lossless: viewer_lossless,
                 wayland_scroll: viewer_scroll.0,
                 wayland_horizontal_scroll: viewer_scroll.1,
                 resize_source: None,
@@ -387,7 +406,12 @@ impl Harness {
             };
             let result = with_wayland_pointer_observer(observed, || {
                 with_wayland_pointer_candidate_observer(observed_candidate, || {
-                    with_wayland_test_stream(stream, || run_client(opts))
+                    crate::remote::client::with_frame_purpose_observer(observed_purposes, || {
+                        crate::remote::wayland_viewer::with_wayland_control_frame_observer(
+                            observed_frames,
+                            || with_wayland_test_stream(stream, || run_client(opts)),
+                        )
+                    })
                 })
             })
             .map_err(|e| e.to_string());
@@ -408,6 +432,8 @@ impl Harness {
             wire_events: Vec::new(),
             unexpected_wire: Vec::new(),
             blue_presented: false,
+            frames,
+            purposes,
             presentation_count: 0,
             latest_ready: None,
             presented_ready_floor: None,
@@ -423,6 +449,14 @@ impl Harness {
         }
     }
     fn tick(&mut self, gl: &mut HeadlessSmithayGles, drawn: bool) {
+        self.tick_with_inspector(gl, drawn, None);
+    }
+    fn tick_with_inspector(
+        &mut self,
+        gl: &mut HeadlessSmithayGles,
+        drawn: bool,
+        mut inspector: Option<&mut dyn FnMut(&[u8], u64) -> bool>,
+    ) {
         if let Some(sequence) = *self.ready.lock().unwrap() {
             self.latest_ready = Some(self.latest_ready.map_or(sequence, |old| old.max(sequence)));
         }
@@ -473,16 +507,45 @@ impl Harness {
             if self.readback.is_none() {
                 self.readback = Some(Readback::new(&mut self.local));
             }
-            self.blue_presented = self.readback.as_mut().unwrap().blue(&mut self.local, gl);
-            let feedback = std::mem::take(&mut self.feedback);
-            self.presentation_count += feedback.len() as u64;
-            self.presented_ready_floor = self.latest_ready;
-            present(&mut self.local, feedback);
-            eprintln!(
-                "owned viewer presentation ordinal={} actual_GL_color={}",
-                self.presentation_count,
-                if self.blue_presented { "blue" } else { "red" }
+            let sequence = self
+                .frames
+                .lock()
+                .unwrap()
+                .0
+                .expect("actual committed viewer sequence");
+            let pixels = self.readback.as_mut().unwrap().pixels(&mut self.local, gl);
+            assert_eq!(
+                self.frames.lock().unwrap().0,
+                Some(sequence),
+                "readback must describe the same commit"
             );
+            let allow_feedback = if let Some(inspect) = inspector.as_mut() {
+                inspect(&pixels, sequence)
+            } else {
+                let blue = pixels
+                    .chunks_exact(4)
+                    .all(|p| p[0] >= 250 && p[1] <= 3 && p[2] <= 3 && p[3] == 255);
+                let red = pixels
+                    .chunks_exact(4)
+                    .all(|p| p[2] >= 250 && p[1] <= 3 && p[0] <= 3 && p[3] == 255);
+                assert!(
+                    blue || red,
+                    "actual viewer pixels must equal selected red/blue source"
+                );
+                self.blue_presented = blue;
+                true
+            };
+            if allow_feedback {
+                let feedback = std::mem::take(&mut self.feedback);
+                self.presentation_count += feedback.len() as u64;
+                self.presented_ready_floor = self.latest_ready;
+                present(&mut self.local, feedback);
+                eprintln!(
+                    "owned viewer presentation ordinal={} actual_GL_color={}",
+                    self.presentation_count,
+                    if self.blue_presented { "blue" } else { "red" }
+                );
+            }
         }
         collect(
             &mut self.target,
@@ -1068,3 +1131,6 @@ fn actual_wayland_horizontal_scroll_viewer_tcp_mixed_axes_revoke_without_input()
     }
     h.close(&mut gl);
 }
+
+#[path = "host_wayland_pointer_lossless_integration.rs"]
+mod pointer_lossless_integration;

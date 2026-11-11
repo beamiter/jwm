@@ -8,7 +8,9 @@ use super::x11_keymap::{KeymapTable, MAX_ENCODED_KEYMAP_LEN};
 use std::io;
 
 const APPLICATION_MAGIC: &[u8; 8] = b"JWMREM01";
-pub const APPLICATION_VERSION: u16 = 26;
+/// v27 adds explicit pointer repair phases and native action completion receipts.
+/// Both peers must upgrade; no fallback to an older authorization contract.
+pub const APPLICATION_VERSION: u16 = 27;
 const HELLO_PREFIX_LEN: usize = 11;
 const STREAM_CAPABILITIES_LEN: usize = 33;
 const SERVER_HELLO_LEN: usize = HELLO_PREFIX_LEN + STREAM_CAPABILITIES_LEN;
@@ -201,8 +203,8 @@ impl StreamCapabilities {
             || payload[29] > 1
             || payload[32] > 1
             || (payload[32] == 1
-                && ((payload[23..26].iter().any(|b| *b != 0)
-                    || payload[27..29].iter().any(|b| *b != 0))
+                && (payload[23..26].iter().any(|b| *b != 0)
+                    || payload[28] != 0
                     || payload[30] != 0
                     || payload[31] != 0))
             || payload[31] > 1
@@ -1670,7 +1672,7 @@ mod scroll_capability_tests {
     use super::*;
     #[test]
     fn scroll_is_explicit_boolean_and_requires_pointer_or_control_in_version_23() {
-        assert_eq!(APPLICATION_VERSION, 26);
+        assert_eq!(APPLICATION_VERSION, 27);
         assert_eq!(STREAM_CAPABILITIES_LEN, 33);
         let mut caps = StreamCapabilities::default();
         assert!(
@@ -1800,7 +1802,7 @@ mod static_lossless_capability_tests {
         };
         let bytes = c.encode();
         assert_eq!(StreamCapabilities::decode(&bytes).unwrap(), c);
-        for i in [23, 24, 25, 27, 28, 30, 31] {
+        for i in [23, 24, 25, 28, 30, 31] {
             let mut b = bytes;
             b[i] = 1;
             assert!(StreamCapabilities::decode(&b).is_err(), "{i}");
@@ -1812,6 +1814,25 @@ mod static_lossless_capability_tests {
                 .unwrap()
                 .wayland_keyboard
         );
+        let mut pointer = bytes;
+        pointer[27] = 1;
+        assert!(
+            StreamCapabilities::decode(&pointer)
+                .unwrap()
+                .wayland_pointer
+        );
+        // Only native pointer motion/atomic click is added. Every other
+        // input/clipboard/resize combination remains explicitly rejected.
+        for i in [23, 24, 25, 26, 28, 30, 31] {
+            let mut mixed = pointer;
+            mixed[i] = 1;
+            assert!(StreamCapabilities::decode(&mixed).is_err(), "mixed {i}");
+        }
+        for v in [2, 3] {
+            let mut scroll = pointer;
+            scroll[28] = v;
+            assert!(StreamCapabilities::decode(&scroll).is_err());
+        }
         for v in [2, 255] {
             let mut b = bytes;
             b[32] = v;

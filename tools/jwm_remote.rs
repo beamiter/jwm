@@ -325,8 +325,8 @@ enum Command {
         #[arg(long, requires_all=["wayland_select","once"], conflicts_with_all=["allow_input","allow_clipboard","allow_window_resize","allow_wayland_keyboard","allow_wayland_pointer","allow_wayland_control","allow_wayland_scroll","allow_wayland_horizontal_scroll","wayland_popups","wayland_resize_follow"])]
         allow_wayland_text: bool,
 
-        /// Allow bounded lossless static repairs in read-only or explicit native keyboard sessions.
-        #[arg(long, conflicts_with_all=["allow_input","allow_clipboard","allow_window_resize","allow_wayland_pointer","allow_wayland_control","allow_wayland_text","allow_wayland_scroll","allow_wayland_horizontal_scroll"])]
+        /// Allow bounded lossless repairs in read-only or explicit native keyboard/pointer sessions.
+        #[arg(long, conflicts_with_all=["allow_input","allow_clipboard","allow_window_resize","allow_wayland_control","allow_wayland_text","allow_wayland_scroll","allow_wayland_horizontal_scroll"])]
         allow_static_lossless: bool,
 
         /// Experimentally encode exact bounded vertical screen shifts as copy plus changed pixels.
@@ -470,7 +470,7 @@ enum Command {
     #[command(group(clap::ArgGroup::new("native_viewer_mode")
         .args(["view_only", "wayland_keyboard", "wayland_pointer", "wayland_control", "wayland_text_stdin"]).multiple(false)))]
     #[command(group(clap::ArgGroup::new("viewer_scroll_lease").args(["wayland_pointer", "wayland_control"]).multiple(false)))]
-    #[command(group(clap::ArgGroup::new("lossless_session_mode").args(["view_only", "wayland_keyboard"]).multiple(false)))]
+    #[command(group(clap::ArgGroup::new("lossless_session_mode").args(["view_only", "wayland_keyboard", "wayland_pointer"]).multiple(false)))]
     Connect {
         /// Local backend; Wayland requires an explicit read-only or scoped input mode.
         #[arg(long, default_value_t=ViewerBackend::X11, requires_if("wayland", "native_viewer_mode"))]
@@ -526,7 +526,7 @@ enum Command {
         wayland_text_stdin: bool,
 
         /// Explicitly request bounded PNG repair of stable encoded RGB pixels.
-        #[arg(long, requires="lossless_session_mode", conflicts_with_all=["wayland_text_stdin","wayland_pointer","wayland_control","clipboard","grab_input","resize_source","follow_source_size"])]
+        #[arg(long, requires="lossless_session_mode", conflicts_with_all=["wayland_text_stdin","wayland_control","wayland_scroll","wayland_horizontal_scroll","clipboard","grab_input","resize_source","follow_source_size"])]
         static_lossless: bool,
 
         /// Separately request single-notch vertical scroll; never smooth or horizontal.
@@ -1459,7 +1459,11 @@ fn run(command: Command) -> RemoteResult<()> {
             escape_key,
             scaling,
         } => {
-            validate_keyboard_lossless_cli(static_lossless, wayland_keyboard, viewer_backend)?;
+            validate_native_lossless_cli(
+                static_lossless,
+                wayland_keyboard || wayland_pointer,
+                viewer_backend,
+            )?;
             validate_follow_source_cli(
                 follow_source_size,
                 viewer_backend,
@@ -4117,13 +4121,13 @@ mod explicit_text_cli_tests {
     }
 }
 
-fn validate_keyboard_lossless_cli(
+fn validate_native_lossless_cli(
     lossless: bool,
-    keyboard: bool,
+    native_input: bool,
     backend: ViewerBackend,
 ) -> RemoteResult<()> {
-    if lossless && keyboard && backend != ViewerBackend::Wayland {
-        return Err("keyboard plus static lossless requires --viewer-backend wayland".into());
+    if lossless && native_input && backend != ViewerBackend::Wayland {
+        return Err("native input plus static lossless requires --viewer-backend wayland".into());
     }
     Ok(())
 }
@@ -4165,10 +4169,62 @@ mod static_lossless_cli_tests {
             ])
             .is_ok()
         );
-        assert!(validate_keyboard_lossless_cli(true, true, ViewerBackend::X11).is_err());
-        assert!(validate_keyboard_lossless_cli(true, true, ViewerBackend::Wayland).is_ok());
-        assert!(validate_keyboard_lossless_cli(true, false, ViewerBackend::X11).is_ok());
-        assert!(validate_keyboard_lossless_cli(false, true, ViewerBackend::X11).is_ok());
+        assert!(validate_native_lossless_cli(true, true, ViewerBackend::X11).is_err());
+        assert!(validate_native_lossless_cli(true, true, ViewerBackend::Wayland).is_ok());
+        assert!(validate_native_lossless_cli(true, false, ViewerBackend::X11).is_ok());
+        assert!(validate_native_lossless_cli(false, true, ViewerBackend::X11).is_ok());
+    }
+    #[test]
+    fn pointer_lossless_is_explicit_native_and_rejects_other_combinations() {
+        let host = [
+            "jwm-remote",
+            "host",
+            "--once",
+            "--wayland-select",
+            "--allow-wayland-pointer",
+            "--allow-static-lossless",
+        ];
+        let client = [
+            "jwm-remote",
+            "connect",
+            "host",
+            "--viewer-backend",
+            "wayland",
+            "--wayland-pointer",
+            "--static-lossless",
+        ];
+        assert!(Cli::try_parse_from(host).is_ok());
+        assert!(Cli::try_parse_from(client).is_ok());
+        assert!(profile_from_command(Cli::try_parse_from(client).unwrap().command).is_err());
+        for flag in [
+            "--allow-wayland-keyboard",
+            "--allow-wayland-control",
+            "--allow-wayland-scroll",
+            "--allow-wayland-horizontal-scroll",
+            "--wayland-popups",
+            "--wayland-resize-follow",
+            "--allow-clipboard",
+            "--allow-input",
+            "--allow-window-resize",
+        ] {
+            let mut args = host.to_vec();
+            args.push(flag);
+            assert!(Cli::try_parse_from(args).is_err(), "{flag}");
+        }
+        for flag in [
+            "--wayland-keyboard",
+            "--wayland-control",
+            "--wayland-scroll",
+            "--wayland-horizontal-scroll",
+            "--view-only",
+            "--clipboard",
+            "--grab-input",
+            "--follow-source-size",
+        ] {
+            let mut args = client.to_vec();
+            args.push(flag);
+            assert!(Cli::try_parse_from(args).is_err(), "{flag}");
+        }
     }
     #[test]
     fn capability_requires_explicit_readonly_and_is_not_saved() {
