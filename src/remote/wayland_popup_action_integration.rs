@@ -18,9 +18,11 @@ use crate::remote::wayland_capture::interactive_popup::PopupPresentationCandidat
 use crate::remote::wayland_viewer::popup_presentation::PopupPresentationReceipt;
 use crate::remote::{wayland_capture::WaylandCapture, wayland_viewer::WaylandViewer};
 use std::{
+    cell::RefCell,
     fs::File,
     io::{Read, Seek, SeekFrom, Write},
     os::{fd::AsRawFd, unix::net::UnixStream},
+    rc::Rc,
     sync::{Arc, Mutex, mpsc},
     thread,
     time::{Duration, Instant},
@@ -175,7 +177,7 @@ struct Harness {
     viewer: Server,
     app: App,
     other: Option<App>,
-    gl: HeadlessSmithayGles,
+    gl: Rc<RefCell<HeadlessSmithayGles>>,
     seat: u32,
     pointer: u32,
     other_pointer: u32,
@@ -188,6 +190,9 @@ struct Harness {
 }
 impl Harness {
     fn new(gl: HeadlessSmithayGles) -> Self {
+        Self::with_shared_gl(Rc::new(RefCell::new(gl)))
+    }
+    fn with_shared_gl(gl: Rc<RefCell<HeadlessSmithayGles>>) -> Self {
         let mut native = Server::new();
         native.state.image_capture_pending =
             Some(init_image_copy_capture(&native.display.handle()));
@@ -445,7 +450,7 @@ impl Harness {
             self.viewer.roundtrip();
             let queue = self.native.state.image_capture_pending.as_ref().unwrap();
             fulfill_test_toplevel_capture(
-                &mut self.gl.renderer,
+                &mut self.gl.borrow_mut().renderer,
                 &mut None,
                 &self.native.state,
                 queue,
@@ -498,7 +503,7 @@ impl Harness {
         let surface = viewer_surface(&self.viewer);
         let feedback = take_feedback(&surface);
         assert_eq!(feedback.len(), 1);
-        viewer_pixels(&mut self.viewer, &mut self.gl, popup);
+        viewer_pixels(&mut self.viewer, &mut self.gl.borrow_mut(), popup);
         present(&mut self.viewer, feedback);
         if !self.released {
             committed_buffer(&surface).release();
@@ -728,14 +733,15 @@ fn transfer_receipt(from: &Harness, to: &Harness) {
 #[test]
 fn actual_popup_receipt_cannot_cross_capture_or_bound_viewer_connections() {
     for cross_viewer in [false, true] {
-        let Some(gl_a) = HeadlessSmithayGles::new() else {
+        let Some(gl) = HeadlessSmithayGles::new() else {
             return;
         };
-        let Some(gl_b) = HeadlessSmithayGles::new() else {
-            return;
-        };
-        let mut a = Harness::new(gl_a);
-        let mut b = Harness::new(gl_b);
+        // HeadlessSmithayGles owns the process-wide GL guard for its lifetime.
+        // Keep the two native/viewer connections independent, but fulfill and
+        // read back their frames sequentially using one real renderer.
+        let gl = Rc::new(RefCell::new(gl));
+        let mut a = Harness::with_shared_gl(Rc::clone(&gl));
+        let mut b = Harness::with_shared_gl(gl);
         a.done(Command::Draw);
         a.presented(false);
         if cross_viewer {
