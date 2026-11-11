@@ -9,6 +9,58 @@ use crate::remote::wayland_popup_wire::{
 };
 use std::sync::mpsc::{self, TryRecvError};
 
+#[cfg(test)]
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PopupHostLifetimeSnapshot {
+    pub created: Instant,
+    pub deadline: Instant,
+    pub binding: Binding,
+    pub current_captured_at: Option<Instant>,
+    pub current_sequence: Option<u64>,
+    pub current_acked: bool,
+    pub exited_at: Option<Instant>,
+}
+
+#[cfg(test)]
+thread_local! {
+    static LIFETIME_OBSERVER: std::cell::RefCell<Option<Arc<Mutex<Option<PopupHostLifetimeSnapshot>>>>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn with_popup_lifetime_observer<T>(
+    observer: Arc<Mutex<Option<PopupHostLifetimeSnapshot>>>,
+    run: impl FnOnce() -> T,
+) -> T {
+    struct Restore(Option<Arc<Mutex<Option<PopupHostLifetimeSnapshot>>>>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            LIFETIME_OBSERVER.with(|slot| *slot.borrow_mut() = self.0.take());
+        }
+    }
+    let _restore = Restore(LIFETIME_OBSERVER.with(|slot| slot.replace(Some(observer))));
+    run()
+}
+
+#[cfg(test)]
+fn observe_lifetime(update: impl FnOnce(&mut Option<PopupHostLifetimeSnapshot>)) {
+    LIFETIME_OBSERVER.with(|slot| {
+        if let Some(observer) = slot.borrow().as_ref() {
+            update(&mut observer.lock().unwrap());
+        }
+    });
+}
+
+#[cfg(test)]
+fn observe_current(current: Option<(u64, Instant)>, acked: bool) {
+    observe_lifetime(|snapshot| {
+        if let Some(snapshot) = snapshot {
+            snapshot.current_captured_at = current.map(|(_, at)| at);
+            snapshot.current_sequence = current.map(|(sequence, _)| sequence);
+            snapshot.current_acked = acked;
+        }
+    });
+}
+
 pub(super) fn serve(
     mut reader: SessionReader<TcpStream>,
     mut writer: SessionWriter<DeadlineWriter<TcpStream>>,
@@ -54,6 +106,18 @@ pub(super) fn serve(
             source_epoch: 1,
             lease_epoch: epoch,
         };
+        #[cfg(test)]
+        observe_lifetime(|snapshot| {
+            *snapshot = Some(PopupHostLifetimeSnapshot {
+                created,
+                deadline,
+                binding,
+                current_captured_at: None,
+                current_sequence: None,
+                current_acked: false,
+                exited_at: None,
+            });
+        });
         stream.cursor = stream.cursor.negotiate(false);
         let header = ServerHello {
             stream,
@@ -170,6 +234,8 @@ pub(super) fn serve(
                 authority.commit_write(meta.key, Instant::now())?;
                 codec.commit(&frame);
                 current = Some((meta, captured_at));
+                #[cfg(test)]
+                observe_current(Some((meta.key.wire_sequence, captured_at)), false);
                 wire_sequence = wire_sequence
                     .checked_add(1)
                     .ok_or_else(|| invalid_data("popup sequence overflow"))?;
@@ -201,6 +267,11 @@ pub(super) fn serve(
                             return Err(invalid_data("popup ACK source mismatch").into());
                         }
                         authority.acknowledge_exact(binding, sequence, Instant::now())?;
+                        #[cfg(test)]
+                        observe_current(
+                            current.map(|(meta, at)| (meta.key.wire_sequence, at)),
+                            true,
+                        );
                         match authority.ready(Instant::now())? {
                             Some(Opportunity::Arm(key)) => {
                                 let permit = authority.authorize_arm(key, Instant::now())?;
@@ -208,6 +279,8 @@ pub(super) fn serve(
                                 authority.complete_arm(binding, Instant::now())?;
                                 status(&mut writer, StatusKind::Armed, meta, 0, deadline)?;
                                 current = None;
+                                #[cfg(test)]
+                                observe_current(None, false);
                             }
                             Some(Opportunity::Click(_)) => {
                                 status(
@@ -241,6 +314,8 @@ pub(super) fn serve(
                             deadline,
                         )?;
                         current = None;
+                        #[cfg(test)]
+                        observe_current(None, false);
                         announced = false;
                     }
                     MessageKind::WaylandPopupRevoke => {
@@ -281,6 +356,8 @@ pub(super) fn serve(
                         .refresh_presented(meta.key, Instant::now())?;
                     capture.discard_popup_frame();
                     current = None;
+                    #[cfg(test)]
+                    observe_current(None, false);
                     announced = false;
                 }
             }
@@ -290,6 +367,12 @@ pub(super) fn serve(
             )?;
         }
     })();
+    #[cfg(test)]
+    observe_lifetime(|snapshot| {
+        if let Some(snapshot) = snapshot {
+            snapshot.exited_at = Some(Instant::now());
+        }
+    });
     // Revoke native authority on every exit, before joining the network reader.
     capture.finish_interactive_popup();
     if result.is_err() && !broken.load(Ordering::Acquire) {

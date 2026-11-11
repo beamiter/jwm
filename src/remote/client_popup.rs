@@ -3,9 +3,55 @@ use super::*;
 use crate::remote::wayland_popup_wire::{Binding, Click, Metadata, Status, StatusKind};
 const FRESH: Duration = Duration::from_secs(1);
 const LEASE: Duration = Duration::from_secs(30);
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PopupLifetimeFailureReason {
+    Ended,
+    LeaseExpired,
+    ActionTimeout,
+}
+#[cfg(test)]
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PopupLifetimeFailure {
+    pub at: Instant,
+    pub ended: bool,
+    pub deadline: Option<Instant>,
+    pub pending_deadline: Option<Instant>,
+    pub reason: PopupLifetimeFailureReason,
+}
+#[cfg(test)]
+#[derive(Default, Debug)]
+pub(crate) struct PopupLifetimeObservation {
+    pub requested_at: Option<Instant>,
+    pub deadline: Option<Instant>,
+    pub ttl_fixed: bool,
+    pub first_failure: Option<PopupLifetimeFailure>,
+}
+#[cfg(test)]
+type LifetimeObserver = Arc<Mutex<PopupLifetimeObservation>>;
+#[cfg(test)]
+thread_local! {
+    static LIFETIME_OBSERVER: std::cell::RefCell<Option<LifetimeObserver>> = const { std::cell::RefCell::new(None) };
+}
+#[cfg(test)]
+pub(crate) fn with_popup_lifetime_observer<T>(
+    observer: LifetimeObserver,
+    run: impl FnOnce() -> T,
+) -> T {
+    struct Restore(Option<LifetimeObserver>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            LIFETIME_OBSERVER.with(|slot| *slot.borrow_mut() = self.0.take());
+        }
+    }
+    let _restore = Restore(LIFETIME_OBSERVER.with(|slot| slot.replace(Some(observer))));
+    run()
+}
 #[derive(Default)]
 pub(super) struct ClientPopup {
     pub(super) enabled: bool,
+    #[cfg(test)]
+    lifetime_observer: Option<LifetimeObserver>,
     binding: Option<Binding>,
     requested_at: Option<Instant>,
     armed: bool,
@@ -27,6 +73,11 @@ impl ClientPopup {
         self.enabled = true;
         self.requested_at = Some(requested_at);
         self.deadline = requested_at.checked_add(LEASE);
+        #[cfg(test)]
+        {
+            self.lifetime_observer = LIFETIME_OBSERVER.with(|slot| slot.borrow().clone());
+            self.observe_lifetime();
+        }
     }
     pub(super) fn check(&self, now: Instant) -> RemoteResult<()> {
         if self.enabled
@@ -36,9 +87,39 @@ impl ClientPopup {
                     now.saturating_duration_since(at) >= Duration::from_secs(5)
                 }))
         {
+            #[cfg(test)]
+            if let Some(observer) = &self.lifetime_observer {
+                let mut observation = observer.lock().unwrap();
+                if observation.first_failure.is_none() {
+                    observation.first_failure = Some(PopupLifetimeFailure {
+                        at: now,
+                        ended: self.ended,
+                        deadline: self.deadline,
+                        pending_deadline: self
+                            .pending
+                            .and_then(|(_, at)| at.checked_add(Duration::from_secs(5))),
+                        reason: if self.ended {
+                            PopupLifetimeFailureReason::Ended
+                        } else if self.deadline.is_some_and(|d| now >= d) {
+                            PopupLifetimeFailureReason::LeaseExpired
+                        } else {
+                            PopupLifetimeFailureReason::ActionTimeout
+                        },
+                    });
+                }
+            }
             return Err(invalid_data("popup pointer session ended or expired").into());
         }
         Ok(())
+    }
+    #[cfg(test)]
+    fn observe_lifetime(&self) {
+        if let Some(observer) = &self.lifetime_observer {
+            let mut observation = observer.lock().unwrap();
+            observation.requested_at = self.requested_at;
+            observation.deadline = self.deadline;
+            observation.ttl_fixed = self.ttl_fixed;
+        }
     }
     pub(super) fn decoded(
         &mut self,
@@ -174,6 +255,8 @@ impl ClientPopup {
                 self.deadline = self.deadline.map(|original| original.min(remaining));
             }
             self.ttl_fixed = true;
+            #[cfg(test)]
+            self.observe_lifetime();
         }
         Ok(())
     }
@@ -380,6 +463,30 @@ mod tests {
             local_y: 8,
             kind,
         }
+    }
+    #[test]
+    fn popup_lifetime_observer_records_actual_first_failure_without_changing_deadline() {
+        let observer = Arc::new(Mutex::new(PopupLifetimeObservation::default()));
+        let now = Instant::now();
+        let mut p = with_popup_lifetime_observer(Arc::clone(&observer), || ready(now));
+        let deadline = p.deadline.unwrap();
+        {
+            let observed = observer.lock().unwrap();
+            assert_eq!(observed.requested_at, Some(now));
+            assert_eq!(observed.deadline, Some(deadline));
+            assert!(observed.ttl_fixed);
+            assert!(observed.first_failure.is_none());
+        }
+        assert!(p.check(deadline).is_err());
+        p.revoke();
+        assert!(p.check(deadline + Duration::from_secs(1)).is_err());
+        let failure = observer.lock().unwrap().first_failure.unwrap();
+        assert_eq!(failure.at, deadline);
+        assert_eq!(failure.deadline, Some(deadline));
+        assert!(!failure.ended);
+        assert_eq!(failure.pending_deadline, None);
+        assert_eq!(failure.reason, PopupLifetimeFailureReason::LeaseExpired);
+        assert_eq!(p.deadline, Some(deadline));
     }
     #[test]
     fn popup_requires_exact_initial_and_post_arm_presentation() {

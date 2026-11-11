@@ -160,13 +160,15 @@ jobs:
           real='remote::host::wayland_viewer_integration::host_pointer_integration::popup_action_integration::'
           wire='remote::wayland_popup_wire::'
           client='remote::client::popup::tests::'
+          hello='remote::client::popup_hello_policy_tests::'
           cli='popup_pointer_cli_tests::'
-          for filter in "$real" "$wire" "$client" "$cli"; do
+          for filter in "$real" "$wire" "$client" "$hello" "$cli"; do
             target=(--lib)
             case "$filter" in
-              "$real") expected=6 ;;
+              "$real") expected=7 ;;
               "$wire") expected=13 ;;
-              "$client") expected=5 ;;
+              "$client") expected=6 ;;
+              "$hello") expected=1 ;;
               "$cli") expected=1; target=(--bin jwm-remote) ;;
             esac
             listed="$(env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev "${target[@]}" "$filter" -- --list)"

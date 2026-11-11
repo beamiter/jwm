@@ -153,6 +153,8 @@ struct PopupHarness {
     last_visual: Option<(bool, bool)>,
     shutdown: Arc<AtomicBool>,
     raw_ready: Arc<AtomicBool>,
+    popup_client_lifetime: Arc<Mutex<crate::remote::client::PopupLifetimeObservation>>,
+    popup_host_lifetime: Arc<Mutex<Option<host::popup::PopupHostLifetimeSnapshot>>>,
     _stop: Stop,
     client_done: mpsc::Receiver<crate::remote::RemoteResult<()>>,
     host_done: mpsc::Receiver<crate::remote::RemoteResult<()>>,
@@ -202,6 +204,8 @@ impl PopupHarness {
         let stopping = shutdown.clone();
         let (selected_tx, selected) = mpsc::channel();
         let (host_tx, host_done) = mpsc::channel();
+        let popup_host_lifetime = Arc::new(Mutex::new(None));
+        let host_lifetime = popup_host_lifetime.clone();
         let host = thread::spawn(move || {
             let result = (|| -> crate::remote::RemoteResult<()> {
                 let capture = WaylandCapture::connect_test_stream_popup_pointer(capture_stream, 1)?;
@@ -219,12 +223,14 @@ impl PopupHarness {
                 let mut opts = options(false, false);
                 opts.allow_wayland_pointer = false;
                 opts.allow_wayland_popup_pointer = host_permission;
-                host::serve_authenticated(
-                    peer,
-                    &opts,
-                    &stopping,
-                    &Mutex::new(Some(host::GrantedCapture::Wayland(Box::new(capture)))),
-                )
+                host::popup::with_popup_lifetime_observer(host_lifetime, || {
+                    host::serve_authenticated(
+                        peer,
+                        &opts,
+                        &stopping,
+                        &Mutex::new(Some(host::GrantedCapture::Wayland(Box::new(capture)))),
+                    )
+                })
             })();
             let _ = host_tx.send(result);
         });
@@ -297,6 +303,10 @@ impl PopupHarness {
         let (client_tx, client_done) = mpsc::channel();
         let raw_ready = Arc::new(AtomicBool::new(false));
         let observed_raw_ready = raw_ready.clone();
+        let popup_client_lifetime = Arc::new(Mutex::new(
+            crate::remote::client::PopupLifetimeObservation::default(),
+        ));
+        let client_lifetime = popup_client_lifetime.clone();
         let client = thread::spawn(move || {
             if let Some(case) = raw {
                 let _ = client_tx.send(raw_peer(address, case, observed_raw_ready));
@@ -334,17 +344,22 @@ impl PopupHarness {
                 escape_key: "Escape".into(),
                 scaling: Default::default(),
             };
-            let result = with_wayland_pointer_observer(observed_ready, || {
-                crate::remote::wayland_viewer::with_wayland_control_frame_observer(
-                    observed_frames,
-                    || {
-                        crate::remote::wayland_viewer::with_pointer_button_dispatch_observer(
-                            observed_dispatch,
-                            || with_wayland_test_stream(stream, || run_client(opts)),
+            let result = crate::remote::client::with_popup_lifetime_observer(
+                client_lifetime,
+                || {
+                    with_wayland_pointer_observer(observed_ready, || {
+                        crate::remote::wayland_viewer::with_wayland_control_frame_observer(
+                            observed_frames,
+                            || {
+                                crate::remote::wayland_viewer::with_pointer_button_dispatch_observer(
+                                    observed_dispatch,
+                                    || with_wayland_test_stream(stream, || run_client(opts)),
+                                )
+                            },
                         )
-                    },
-                )
-            });
+                    })
+                },
+            );
             let _ = client_tx.send(result);
         });
         Self {
@@ -370,6 +385,8 @@ impl PopupHarness {
             _stop: Stop(shutdown.clone()),
             shutdown,
             raw_ready,
+            popup_client_lifetime,
+            popup_host_lifetime,
             client_done,
             host_done,
             client: Some(client),
@@ -1235,4 +1252,249 @@ fn authenticated_popup_lock_or_root_unmap_ends_current_lease_without_new_input()
         h.host.take().unwrap().join().unwrap();
         drop(locker);
     }
+}
+
+#[test]
+fn authenticated_popup_periodic_real_presentation_does_not_renew_original_lease() {
+    use crate::remote::client::PopupLifetimeFailureReason;
+    let Some(mut gl) = HeadlessSmithayGles::new() else {
+        return;
+    };
+    let mut h = PopupHarness::new(&mut gl, true, true);
+    h.wait(
+        &mut gl,
+        "initial and post-arm real presentation",
+        Some((false, false)),
+        |s| s.ready.lock().unwrap().is_some(),
+    );
+    let native_original = remote_popup::lease_timing_for_test(&h.native.state)
+        .expect("actual native lease must already exist");
+    let host_original = h
+        .popup_host_lifetime
+        .lock()
+        .unwrap()
+        .expect("actual host lease clock");
+    let (requested, fixed_deadline) = {
+        let observed = h.popup_client_lifetime.lock().unwrap();
+        assert!(observed.ttl_fixed);
+        assert!(observed.first_failure.is_none());
+        (observed.requested_at.unwrap(), observed.deadline.unwrap())
+    };
+    assert_eq!(
+        host_original.deadline.duration_since(host_original.created),
+        Duration::from_secs(30)
+    );
+    assert_eq!(
+        native_original.2.duration_since(native_original.1),
+        Duration::from_secs(30)
+    );
+    assert_eq!(host_original.binding.lease_epoch, native_original.0);
+    assert!(requested <= host_original.created && host_original.created <= native_original.1);
+    assert!(fixed_deadline > requested && fixed_deadline <= requested + Duration::from_secs(30));
+    // The first server TTL is conservatively anchored to the original client
+    // request, not its later receipt. This case deliberately verifies that
+    // actual earlier client limit; it does not pretend the native timer fired.
+    assert!(fixed_deadline < host_original.deadline && host_original.deadline <= native_original.2);
+    let midpoint = requested + fixed_deadline.duration_since(requested) / 2;
+    let overall_deadline = fixed_deadline + Duration::from_secs(5);
+    let mut ready_observations: Vec<(Instant, u64)> = Vec::new();
+    let mut last_ready = None;
+    let mut terminal_tail: Option<(Instant, u64, Instant)> = None;
+    let mut client_result = None;
+    let mut host_result = None;
+    loop {
+        // Once an exact acknowledged, actually displayed proof covers the
+        // fixed expiry, stop expensive GL sampling during the final half-second.
+        // Event pumping continues; no clock/deadline/lease is changed. This also
+        // avoids reading a viewer surface concurrently with its natural teardown.
+        h.tick(
+            &mut gl,
+            if terminal_tail.is_none() {
+                Some((false, false))
+            } else {
+                None
+            },
+        );
+        let now = Instant::now();
+        assert!(
+            now < overall_deadline,
+            "original deadline plus five seconds cleanup only"
+        );
+        let host = h
+            .popup_host_lifetime
+            .lock()
+            .unwrap()
+            .expect("host observation persists");
+        assert_eq!(
+            (host.created, host.deadline, host.binding),
+            (
+                host_original.created,
+                host_original.deadline,
+                host_original.binding
+            ),
+            "host must never renew identity or lifetime"
+        );
+        let (failure, observed_deadline) = {
+            let observed = h.popup_client_lifetime.lock().unwrap();
+            assert_eq!(observed.requested_at, Some(requested));
+            assert!(observed.ttl_fixed);
+            (observed.first_failure, observed.deadline)
+        };
+        assert_eq!(
+            observed_deadline,
+            Some(fixed_deadline),
+            "refresh statuses must not renew the client deadline"
+        );
+        if let Some(native) = remote_popup::lease_timing_for_test(&h.native.state) {
+            assert_eq!(
+                native, native_original,
+                "same real native lease throughout refreshes"
+            );
+        } else {
+            let failure =
+                failure.expect("native cannot end before the observed client deadline failure");
+            assert!(failure.at >= fixed_deadline);
+        }
+        if let Some(sequence) = *h.ready.lock().unwrap() {
+            let frames = *h.frames.lock().unwrap();
+            if frames.1 == Some(sequence)
+                && h.last_presented == Some(sequence)
+                && last_ready.is_none_or(|old| sequence > old)
+            {
+                assert_eq!(h.last_visual, Some((false, false)));
+                ready_observations.push((now, sequence));
+                last_ready = Some(sequence);
+                if terminal_tail.is_none()
+                    && now < fixed_deadline
+                    && fixed_deadline.duration_since(now) <= Duration::from_millis(500)
+                    && host.current_acked
+                    && host.current_sequence == Some(sequence)
+                {
+                    let captured_at = host
+                        .current_captured_at
+                        .expect("ACK must name a real retained proof");
+                    if captured_at + Duration::from_secs(1) > fixed_deadline {
+                        terminal_tail = Some((now, sequence, captured_at));
+                    }
+                }
+            }
+        }
+        if client_result.is_none() {
+            client_result = h.client_done.try_recv().ok();
+        }
+        if host_result.is_none() {
+            host_result = h.host_done.try_recv().ok();
+        }
+        assert!(
+            !h.private_events
+                .iter()
+                .any(|e| matches!(e.0, 3 | 4 | 6 | 7 | 8 | 9)),
+            "refresh and expiry must not inject buttons or axes"
+        );
+        if client_result.is_some() || host_result.is_some() {
+            let failure =
+                failure.expect("only the actual client check deadline may end this session");
+            assert_eq!(failure.reason, PopupLifetimeFailureReason::LeaseExpired);
+            assert!(!failure.ended);
+            assert_eq!(
+                failure.pending_deadline, None,
+                "no outstanding action can masquerade as TTL"
+            );
+            assert_eq!(failure.deadline, Some(fixed_deadline));
+            assert!(failure.at >= fixed_deadline);
+            assert!(
+                terminal_tail.is_some(),
+                "must have fresh actual Ready evidence near the original deadline"
+            );
+        }
+        if client_result.is_some()
+            && host_result.is_some()
+            && !remote_popup::active(&h.native.state)
+        {
+            break;
+        }
+        thread::yield_now();
+    }
+    assert!(
+        ready_observations.len() >= 3,
+        "must actually refresh, not wait on one frame"
+    );
+    assert!(
+        ready_observations
+            .windows(2)
+            .all(|pair| pair[1].1 > pair[0].1)
+    );
+    assert!(ready_observations.iter().any(|(at, _)| *at >= midpoint));
+    let (tail_at, tail_sequence, tail_capture) = terminal_tail.unwrap();
+    assert!(tail_at < fixed_deadline && tail_capture + Duration::from_secs(1) > fixed_deadline);
+    assert!(
+        tail_at.duration_since(ready_observations[0].0) >= Duration::from_secs(1),
+        "separate periodic refreshes, not one startup batch"
+    );
+    let failed = h
+        .popup_client_lifetime
+        .lock()
+        .unwrap()
+        .first_failure
+        .unwrap();
+    let error = client_result
+        .unwrap()
+        .expect_err("fixed original client lifetime is terminal");
+    let diagnostic = crate::remote::client::classify_failure(error.as_ref());
+    assert_ne!(
+        diagnostic.cleanup, "incomplete",
+        "expiry must not conceal a cleanup failure"
+    );
+    let expiry = error
+        .source()
+        .and_then(|cause| cause.downcast_ref::<std::io::Error>())
+        .expect("ClientFailure must directly wrap the original expiry, not a cleanup wrapper");
+    assert_eq!(expiry.kind(), std::io::ErrorKind::InvalidData);
+    assert_eq!(expiry.to_string(), "popup pointer session ended or expired");
+    let final_host = h.popup_host_lifetime.lock().unwrap().unwrap();
+    assert!(final_host.exited_at.expect("actual host exit") >= failed.at);
+    if let Some(captured) = final_host.current_captured_at {
+        assert!(
+            final_host
+                .current_sequence
+                .is_some_and(|sequence| sequence >= tail_sequence),
+            "host exit proof must not precede the actual displayed tail"
+        );
+        assert!(
+            captured >= tail_capture && captured + Duration::from_secs(1) > fixed_deadline,
+            "a prior expired proof cannot be counted as natural TTL"
+        );
+    }
+    if final_host.current_captured_at.is_none() {
+        assert!(final_host.current_sequence.is_none());
+    }
+    // None here means a retired slot between captures, never proof of freshness.
+    // The positive freshness evidence is the Some+ACK+actual Ready tail above.
+    let error = host_result
+        .unwrap()
+        .expect_err("client deadline closes its authenticated transport");
+    assert!(
+        matches!(
+            error.to_string().as_str(),
+            "popup transport closed" | "popup reader ended"
+        ),
+        "unexpected host termination (especially Stale is not TTL): {error}"
+    );
+    assert_eq!(
+        h.private_events.iter().filter(|e| e.0 == 0).count(),
+        1,
+        "one native Arm only"
+    );
+    assert_eq!(
+        h.private_events.iter().filter(|e| e.0 == 1).count(),
+        1,
+        "exact private focus cleanup"
+    );
+    assert_eq!(
+        h.private_events.iter().filter(|e| e.0 == 2).count(),
+        1,
+        "only Arm's initial motion"
+    );
+    h.client.take().unwrap().join().unwrap();
+    h.host.take().unwrap().join().unwrap();
 }

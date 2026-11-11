@@ -8,6 +8,10 @@ use control::ClientControl;
 #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
 pub(crate) use control::{with_control_lifetime_observer, with_control_repair_observer};
 use popup::ClientPopup;
+#[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+pub(crate) use popup::{
+    PopupLifetimeFailureReason, PopupLifetimeObservation, with_popup_lifetime_observer,
+};
 #[path = "client_text.rs"]
 mod text;
 use super::wayland_keyboard_wire::DrawnScope;
@@ -1357,6 +1361,19 @@ fn validate_scroll_negotiation(
     Ok(())
 }
 
+// Popup-family frames have their own fixed-canvas proof envelope. They do
+// not negotiate the ordinary scroll-copy codec extension.
+fn requested_frame_stream(
+    popup_pointer: bool,
+    frame_limits: super::messages::FrameLimits,
+) -> super::messages::StreamCapabilities {
+    super::messages::StreamCapabilities {
+        scroll_copy: !popup_pointer,
+        frame_limits,
+        ..Default::default()
+    }
+}
+
 fn negotiate_session(
     request_window_resize: bool,
     request_wayland_keyboard: bool,
@@ -1420,8 +1437,6 @@ fn negotiate_session(
                 wayland_popup_pointer: request_wayland_popup_pointer,
                 wayland_text: request_wayland_text,
                 static_lossless: request_static_lossless,
-                scroll_copy: true,
-                frame_limits,
                 clipboard_content: requested_policy.0,
                 clipboard_directions: requested_policy.1,
                 clipboard_file_limit: if request_clipboard_files {
@@ -1434,7 +1449,7 @@ fn negotiate_session(
                 } else {
                     super::messages::CursorMode::Composited
                 },
-                ..Default::default()
+                ..requested_frame_stream(request_wayland_popup_pointer, frame_limits)
             },
             initial_viewport,
             request_input,
@@ -8994,3 +9009,41 @@ mod follow_viewport_policy_tests {
 #[cfg(test)]
 #[path = "scroll_copy_transport_tests.rs"]
 mod scroll_copy_transport_tests;
+
+#[cfg(test)]
+mod popup_hello_policy_tests {
+    use super::*;
+
+    #[test]
+    fn popup_production_frame_offer_roundtrips_without_legacy_codec_or_clipboard() {
+        for popup in [false, true] {
+            let mut hello = ClientHello {
+                stream: super::super::messages::StreamCapabilities {
+                    wayland_popup_pointer: popup,
+                    ..requested_frame_stream(popup, Default::default())
+                },
+                initial_viewport: Some((320, 240)),
+                request_input: false,
+                request_clipboard: false,
+                request_clipboard_files: false,
+                keymap: KeymapTable::empty(),
+            };
+            let decoded = ClientHello::decode(&hello.encode()).unwrap();
+            assert_eq!(decoded.stream.wayland_popup_pointer, popup);
+            assert_eq!(decoded.stream.scroll_copy, !popup);
+            assert_eq!(decoded.stream.clipboard_content, 0);
+            assert_eq!(decoded.stream.clipboard_directions, 0);
+            assert!(!decoded.request_input && !decoded.request_clipboard);
+            if popup {
+                // The previous production offer failed exactly this check.
+                hello.stream.scroll_copy = true;
+                assert!(ClientHello::decode(&hello.encode()).is_err());
+                hello.stream.scroll_copy = false;
+                hello.stream.clipboard_content = 1;
+                hello.stream.clipboard_directions = 1;
+                hello.request_clipboard = true;
+                assert!(ClientHello::decode(&hello.encode()).is_err());
+            }
+        }
+    }
+}
