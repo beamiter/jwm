@@ -8,6 +8,7 @@ on:
       - dot/remote-readback-snapshot
       - dot/remote-popup-v2
       - dot/remote-popup-adapter
+      - dot/remote-popup-action
   pull_request:
     branches:
       - master

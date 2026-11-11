@@ -2,7 +2,7 @@ name: Remote window safety
 
 on:
   push:
-    branches: [master, dot/remote-window-plan, dot/remote-readback-snapshot, dot/remote-popup-v2, dot/remote-popup-adapter]
+    branches: [master, dot/remote-window-plan, dot/remote-readback-snapshot, dot/remote-popup-v2, dot/remote-popup-adapter, dot/remote-popup-action]
   workflow_dispatch:
 
 permissions:

@@ -1035,3 +1035,6 @@ mod host_text_integration;
 
 #[path = "host_wayland_lossless_viewer_integration.rs"]
 mod host_lossless_integration;
+
+#[path = "wayland_popup_action_integration.rs"]
+mod popup_action_integration;

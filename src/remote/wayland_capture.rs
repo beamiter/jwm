@@ -6,7 +6,7 @@
 #[path = "wayland_capture_control.rs"]
 mod control;
 #[path = "wayland_capture_popup.rs"]
-mod interactive_popup;
+pub(super) mod interactive_popup;
 #[path = "wayland_capture_text.rs"]
 mod text;
 use super::RemoteResult;
@@ -1229,6 +1229,9 @@ impl WaylandCapture {
             .ok_or_else(|| invalid("Wayland frame sequence exhausted"))?;
         self.state.frame_ready = false;
         self.state.normal_transform = false;
+        if self.state.interactive_popup.enabled {
+            self.state.interactive_popup.frame_started_at = Some(Instant::now());
+        }
         let frame = self
             .session
             .as_ref()
@@ -1432,7 +1435,9 @@ impl Drop for WaylandCapture {
         if let Some(buffer) = self.buffer.take() {
             buffer.destroy();
         }
-        let _ = self.conn.backend().flush();
+        if !self.state.interactive_popup.transport_aborted {
+            let _ = self.conn.backend().flush();
+        }
     }
 }
 

@@ -2,7 +2,7 @@ name: Remote Wayland source safety
 
 on:
   push:
-    branches: [master, dot/remote-window-plan, dot/remote-readback-snapshot, dot/remote-popup-v2, dot/remote-popup-adapter]
+    branches: [master, dot/remote-window-plan, dot/remote-readback-snapshot, dot/remote-popup-v2, dot/remote-popup-adapter, dot/remote-popup-action]
   workflow_dispatch:
 
 permissions:
@@ -122,7 +122,26 @@ jobs:
           real='remote::wayland_popup_capture_integration::'
           pure='remote::wayland_capture::interactive_popup::tests::'
           for filter in "$real" "$pure"; do
-            if test "$filter" = "$real"; then expected=4; else expected=6; fi
+            if test "$filter" = "$real"; then expected=4; else expected=8; fi
+            listed="$(env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --list)"
+            test "$(printf '%s\n' "$listed" | grep -c ': test$')" -eq "$expected"
+            ignored="$(env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --ignored --list)"
+            test "$(printf '%s\n' "$ignored" | grep -c ': test$' || true)" -eq 0
+            env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --test-threads=1
+          done
+      - name: Popup actions require exact real viewer presentation
+        env:
+          JWM_REQUIRE_HEADLESS_GL: '1'
+          EGL_PLATFORM: surfaceless
+          LIBGL_ALWAYS_SOFTWARE: '1'
+        run: |
+          set -euo pipefail
+          export XDG_RUNTIME_DIR="$(mktemp -d)"
+          trap 'rm -rf "$XDG_RUNTIME_DIR"' EXIT
+          real='remote::host::wayland_viewer_integration::popup_action_integration::'
+          bridge='remote::wayland_viewer::popup_presentation::tests::'
+          for filter in "$real" "$bridge"; do
+            if test "$filter" = "$real"; then expected=5; else expected=3; fi
             listed="$(env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --list)"
             test "$(printf '%s\n' "$listed" | grep -c ': test$')" -eq "$expected"
             ignored="$(env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --ignored --list)"

@@ -26,6 +26,9 @@ use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_ba
 mod keyboard;
 #[path = "wayland_viewer_pointer.rs"]
 mod pointer;
+#[cfg(all(test, feature = "backend-wayland-udev"))]
+#[path = "wayland_viewer_popup_presentation.rs"]
+pub(crate) mod popup_presentation;
 
 #[cfg(all(test, feature = "backend-wayland-udev"))]
 thread_local! {
@@ -354,6 +357,8 @@ struct Retirement {
     started: Instant,
 }
 struct State {
+    #[cfg(all(test, feature = "backend-wayland-udev"))]
+    popup_live: std::sync::Arc<popup_presentation::Live>,
     control_mode: bool,
     control_events: Vec<ViewerEvent>,
     pointer: pointer::Pointer,
@@ -409,6 +414,8 @@ impl State {
         Ok(())
     }
     fn advance_generation(&mut self) {
+        #[cfg(all(test, feature = "backend-wayland-udev"))]
+        self.popup_live.invalidate();
         self.pointer.revoke("Wayland pointer geometry changed");
         if self.keyboard.requested {
             self.keyboard.revoke("Wayland viewer geometry changed");
@@ -430,6 +437,8 @@ impl State {
 }
 
 pub(super) struct WaylandViewer {
+    #[cfg(all(test, feature = "backend-wayland-udev"))]
+    popup_presentation: popup_presentation::Bridge,
     registry: wl_registry::WlRegistry,
     conn: Connection,
     queue: EventQueue<State>,
@@ -483,6 +492,8 @@ impl WaylandViewer {
         let qh = queue.handle();
         let registry = conn.display().get_registry(&qh, ());
         let mut state = State {
+            #[cfg(all(test, feature = "backend-wayland-udev"))]
+            popup_live: std::sync::Arc::new(popup_presentation::Live::default()),
             control_mode: false,
             control_events: Vec::new(),
             pointer: pointer::Pointer::default(),
@@ -559,10 +570,17 @@ impl WaylandViewer {
             slot_identity: 0,
             upload_scratch: vec![0; MAX_UPLOAD_SCRATCH_BYTES].into_boxed_slice(),
             write_pending: std::cell::Cell::new(false),
+            #[cfg(all(test, feature = "backend-wayland-udev"))]
+            popup_presentation: popup_presentation::Bridge::default(),
         })
     }
     fn pump(&mut self) -> RemoteResult<bool> {
-        let work = pump_connection(&self.conn, &mut self.queue, &mut self.state)?;
+        let pumped = pump_connection(&self.conn, &mut self.queue, &mut self.state);
+        #[cfg(all(test, feature = "backend-wayland-udev"))]
+        if pumped.is_err() || self.state.closed {
+            self.state.popup_live.end();
+        }
+        let work = pumped?;
         self.state.control_collect();
         #[cfg(all(test, feature = "backend-wayland-udev"))]
         CONTROL_SCROLL_OBSERVER.with(|slot| {
@@ -1017,6 +1035,12 @@ impl WaylandViewer {
             && self.state.failure.is_none()
     }
     pub(super) fn draw_recyclable(&mut self, frame: RecyclableDecodedFrame) -> RemoteResult<bool> {
+        #[cfg(all(test, feature = "backend-wayland-udev"))]
+        self.state.popup_live.invalidate();
+        #[cfg(all(test, feature = "backend-wayland-udev"))]
+        if self.popup_presentation.occupied() {
+            return Ok(false);
+        }
         self.pump()?;
         if !self.can_submit_frame() {
             return Ok(false);
@@ -1215,6 +1239,13 @@ impl WaylandViewer {
                 }
             });
         }
+        #[cfg(all(test, feature = "backend-wayland-udev"))]
+        self.popup_presentation.observe_presented(
+            &sequences,
+            self.token,
+            self.state.generation,
+            self.state.scope,
+        )?;
         Ok(sequences)
     }
     pub(super) fn prepare_wait(&self) -> RemoteResult<()> {
@@ -1451,6 +1482,8 @@ impl Dispatch<xdg_toplevel::XdgToplevel, ()> for State {
                 height,
                 states,
             } => {
+                #[cfg(all(test, feature = "backend-wayland-udev"))]
+                state.popup_live.invalidate();
                 state.pointer.activation(&states);
                 if state.pointer.requested
                     && state.configured
@@ -1476,7 +1509,11 @@ impl Dispatch<xdg_toplevel::XdgToplevel, ()> for State {
                     _ => state.failure = Some("invalid Wayland configured dimensions".into()),
                 }
             }
-            xdg_toplevel::Event::Close => state.closed = true,
+            xdg_toplevel::Event::Close => {
+                #[cfg(all(test, feature = "backend-wayland-udev"))]
+                state.popup_live.end();
+                state.closed = true;
+            }
             _ => {}
         }
     }

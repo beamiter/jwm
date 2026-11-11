@@ -4,6 +4,8 @@ use crate::remote_popup_protocol::client::{
     jwm_remote_popup_lease_v1::{self as lease, JwmRemotePopupLeaseV1},
     jwm_remote_popup_manager_v1::JwmRemotePopupManagerV1,
 };
+#[cfg(all(test, feature = "backend-wayland-udev"))]
+use std::sync::Arc;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct PopupFrameProof {
     pub(crate) epoch: u32,
@@ -19,6 +21,41 @@ pub(crate) struct PopupCapturedFrame {
     pub(crate) frame: CapturedFrame,
     pub(crate) proof: PopupFrameProof,
 }
+/// An owned captured image and an opaque binding, never constructed from a
+/// caller-supplied proof or a claimed presentation boolean.
+#[cfg(all(test, feature = "backend-wayland-udev"))]
+pub(crate) struct PopupPresentationCandidate {
+    frame: CapturedFrame,
+    binding: PopupPresentationBinding,
+}
+#[cfg(all(test, feature = "backend-wayland-udev"))]
+impl PopupPresentationCandidate {
+    pub(crate) fn proof(&self) -> &PopupFrameProof {
+        &self.binding.proof
+    }
+    pub(crate) fn into_parts(self) -> (CapturedFrame, PopupPresentationBinding) {
+        (self.frame, self.binding)
+    }
+}
+#[cfg(all(test, feature = "backend-wayland-udev"))]
+pub(crate) struct PopupPresentationBinding {
+    identity: Arc<()>,
+    frame: ExtImageCopyCaptureFrameV1,
+    proof: PopupFrameProof,
+    capture_started_at: Instant,
+}
+#[cfg(all(test, feature = "backend-wayland-udev"))]
+impl PopupPresentationBinding {
+    pub(crate) fn proof(&self) -> &PopupFrameProof {
+        &self.proof
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PopupOperation {
+    Arm,
+    Click(u32),
+}
+
 #[derive(Default)]
 pub(super) struct NativePopup {
     pub(super) enabled: bool,
@@ -29,7 +66,20 @@ pub(super) struct NativePopup {
     deadline: Option<Instant>,
     epoch: Option<u32>,
     revoked: bool,
+    pub(super) transport_aborted: bool,
     cookie: u32,
+    #[cfg(all(test, feature = "backend-wayland-udev"))]
+    identity: Arc<()>,
+    #[cfg(all(test, feature = "backend-wayland-udev"))]
+    viewer_identity: Option<Arc<()>>,
+    pub(super) frame_started_at: Option<Instant>,
+    operation: Option<PopupOperation>,
+    armed: bool,
+    accepted_sequence: u32,
+    #[cfg(all(test, feature = "backend-wayland-udev"))]
+    last_consumed_serial: u64,
+    #[cfg(all(test, feature = "backend-wayland-udev"))]
+    last_completion: Option<Instant>,
     pending: Option<(ExtImageCopyCaptureFrameV1, u32, u64)>,
     proof: Option<PopupFrameProof>,
     previous: Option<PopupFrameProof>,
@@ -41,10 +91,27 @@ impl NativePopup {
             ..Self::default()
         }
     }
+    fn complete_operation(&mut self, epoch: u32, operation: PopupOperation) -> bool {
+        if self.revoked || self.epoch != Some(epoch) || self.operation != Some(operation) {
+            return false;
+        }
+        match operation {
+            PopupOperation::Arm if !self.armed => self.armed = true,
+            PopupOperation::Click(sequence)
+                if self.armed && self.accepted_sequence.checked_add(1) == Some(sequence) =>
+            {
+                self.accepted_sequence = sequence;
+            }
+            _ => return false,
+        }
+        self.operation = None;
+        true
+    }
     fn terminate(&mut self) {
         self.revoked = true;
         self.pending = None;
         self.proof = None;
+        self.operation = None;
     }
     pub(super) fn check(&self) -> RemoteResult<()> {
         self.check_at(Instant::now())
@@ -79,6 +146,14 @@ fn valid_layout(root: (u32, u32), present: u32, rect: (u32, u32, u32, u32)) -> b
         }
         _ => false,
     }
+}
+#[cfg(all(test, feature = "backend-wayland-udev"))]
+fn popup_click_inside(proof: &PopupFrameProof, x: u32, y: u32) -> bool {
+    x < proof.root_size.0
+        && y < proof.root_size.1
+        && proof
+            .popup_rect
+            .is_none_or(|(px, py, w, h)| x >= px && y >= py && x - px < w && y - py < h)
 }
 fn matches_pending(
     epoch: Option<u32>,
@@ -228,6 +303,156 @@ impl WaylandCapture {
             source.destroy();
         }
     }
+    #[cfg(all(test, feature = "backend-wayland-udev"))]
+    pub(crate) fn capture_popup_presentation_candidate(
+        &mut self,
+    ) -> RemoteResult<PopupPresentationCandidate> {
+        let captured = self.capture_interactive_popup_frame()?;
+        let binding = PopupPresentationBinding {
+            identity: self.state.interactive_popup.identity.clone(),
+            frame: self
+                .retained_frame
+                .as_ref()
+                .ok_or_else(|| invalid("missing retained popup frame"))?
+                .clone(),
+            proof: captured.proof,
+            capture_started_at: self
+                .state
+                .interactive_popup
+                .frame_started_at
+                .ok_or_else(|| invalid("missing popup capture clock"))?,
+        };
+        Ok(PopupPresentationCandidate {
+            frame: captured.frame,
+            binding,
+        })
+    }
+    #[cfg(all(test, feature = "backend-wayland-udev"))]
+    pub(crate) fn arm_popup_presented(
+        &mut self,
+        receipt: crate::remote::wayland_viewer::popup_presentation::PopupPresentationReceipt,
+    ) -> RemoteResult<()> {
+        self.popup_presented_operation(receipt, None)
+    }
+    #[cfg(all(test, feature = "backend-wayland-udev"))]
+    pub(crate) fn click_popup_presented(
+        &mut self,
+        receipt: crate::remote::wayland_viewer::popup_presentation::PopupPresentationReceipt,
+        x: u32,
+        y: u32,
+    ) -> RemoteResult<()> {
+        self.popup_presented_operation(receipt, Some((x, y)))
+    }
+    #[cfg(all(test, feature = "backend-wayland-udev"))]
+    fn popup_presented_operation(
+        &mut self,
+        receipt: crate::remote::wayland_viewer::popup_presentation::PopupPresentationReceipt,
+        point: Option<(u32, u32)>,
+    ) -> RemoteResult<()> {
+        let result = self.popup_presented_operation_inner(receipt, point);
+        if result.is_err() {
+            self.fail_interactive_popup();
+        }
+        result
+    }
+    #[cfg(all(test, feature = "backend-wayland-udev"))]
+    fn popup_presented_operation_inner(
+        &mut self,
+        receipt: crate::remote::wayland_viewer::popup_presentation::PopupPresentationReceipt,
+        point: Option<(u32, u32)>,
+    ) -> RemoteResult<()> {
+        let (binding, viewer_identity, presented_at, validity) = receipt.into_parts();
+        self.state.check()?;
+        let now = Instant::now();
+        let p = &mut self.state.interactive_popup;
+        if !p.enabled
+            || p.operation.is_some()
+            || p.pending.is_some()
+            || !Arc::ptr_eq(&binding.identity, &p.identity)
+            || self.retained_frame.as_ref() != Some(&binding.frame)
+            || p.proof.as_ref() != Some(&binding.proof)
+            || p.viewer_identity
+                .as_ref()
+                .is_some_and(|v| !Arc::ptr_eq(v, &viewer_identity))
+            || presented_at < binding.capture_started_at
+            || presented_at > now
+            || binding.proof.native_ready_serial <= p.last_consumed_serial
+            || p.last_completion
+                .is_some_and(|t| binding.capture_started_at <= t)
+        {
+            return Err(invalid("invalid popup presentation binding").into());
+        }
+        let operation = match point {
+            None if !p.armed && binding.proof.popup_rect.is_none() => PopupOperation::Arm,
+            Some((x, y)) if p.armed && popup_click_inside(&binding.proof, x, y) => {
+                PopupOperation::Click(
+                    p.accepted_sequence
+                        .checked_add(1)
+                        .filter(|s| *s <= 60000)
+                        .ok_or_else(|| invalid("popup action sequence exhausted"))?,
+                )
+            }
+            _ => return Err(invalid("invalid popup presented operation").into()),
+        };
+        let deadline = (binding.capture_started_at + Duration::from_secs(1))
+            .min(
+                p.deadline
+                    .ok_or_else(|| invalid("missing popup lease deadline"))?,
+            )
+            .min(now + PROTOCOL_TIMEOUT);
+        require_before_deadline(now, deadline)?;
+        // Serialize authority validation and actual request flushing against
+        // viewer replacement/resize/close. Never hold this lock while waiting
+        // for native processing or any protocol roundtrip.
+        let presentation_guard = validity.lock_current()?;
+        require_before_deadline(Instant::now(), deadline)?;
+        p.operation = Some(operation); // Register before dispatch can produce a completion.
+        let lease = p
+            .lease
+            .as_ref()
+            .ok_or_else(|| invalid("missing popup lease"))?;
+        let epoch = p.epoch.ok_or_else(|| invalid("missing popup epoch"))?;
+        match operation {
+            PopupOperation::Arm => lease.arm(epoch, &binding.frame),
+            PopupOperation::Click(sequence) => {
+                let (x, y) = point.unwrap();
+                lease.action(epoch, sequence, &binding.frame, 1, x, y);
+            }
+        }
+        if let Err(error) = self.conn.flush() {
+            // A nonblocking flush may leave this action queued. Prevent later
+            // cleanup/Drop from flushing it after presentation invalidation.
+            // Delivery may already be partial: terminate, never replay.
+            self.abort_interactive_popup_transport();
+            return Err(error.into());
+        }
+        drop(presentation_guard);
+        self.drive_until(deadline, |s| s.interactive_popup.operation.is_none())?;
+        self.sync_until(deadline)?;
+        require_before_deadline(Instant::now(), deadline)?;
+        self.state.check()?;
+        let p = &mut self.state.interactive_popup;
+        p.viewer_identity.get_or_insert(viewer_identity);
+        p.last_consumed_serial = binding.proof.native_ready_serial;
+        p.last_completion = Some(Instant::now());
+        self.discard_popup_frame();
+        Ok(())
+    }
+    fn abort_interactive_popup_transport(&mut self) {
+        if self.state.interactive_popup.transport_aborted {
+            return;
+        }
+        // Lock out all future adapter/Drop flushes before touching the socket.
+        self.state.interactive_popup.transport_aborted = true;
+        use std::os::fd::AsRawFd;
+        let backend = self.conn.backend();
+        let fd = backend.poll_fd();
+        // SAFETY: this is a borrowed descriptor of our own live native Wayland
+        // connection. shutdown does not take ownership or close another fd.
+        unsafe {
+            nix::libc::shutdown(fd.as_raw_fd(), nix::libc::SHUT_RDWR);
+        }
+    }
     pub(super) fn fail_interactive_popup(&mut self) {
         self.state.interactive_popup.terminate();
         if let Some(frame) = self.inflight.take() {
@@ -247,6 +472,12 @@ impl WaylandCapture {
         }
         if let Some(source) = self.state.interactive_popup.original.take() {
             source.destroy();
+        }
+        // Revoke promptly even when the caller retains this failed adapter.
+        // A prior action-flush failure has already shut down this connection;
+        // never give its queued bytes another chance during cleanup.
+        if !self.state.interactive_popup.transport_aborted && self.conn.flush().is_err() {
+            self.abort_interactive_popup_transport();
         }
     }
 }
@@ -287,6 +518,16 @@ impl Dispatch<JwmRemotePopupLeaseV1, ()> for State {
             }
             lease::Event::Revoked { .. } => {
                 p.revoked = true;
+            }
+            lease::Event::Armed { epoch } => {
+                if !p.complete_operation(epoch, PopupOperation::Arm) {
+                    state.fail("unexpected popup arm completion");
+                }
+            }
+            lease::Event::Accepted { epoch, sequence } => {
+                if !p.complete_operation(epoch, PopupOperation::Click(sequence)) {
+                    state.fail("unexpected popup action completion");
+                }
             }
             lease::Event::FrameProof {
                 epoch,
@@ -438,5 +679,45 @@ mod tests {
         assert!(state.check().is_err());
         state.terminate();
         assert!(state.check().is_err());
+    }
+    #[test]
+    fn popup_operation_completion_is_exact_once_and_never_spontaneous() {
+        let mut p = NativePopup::new(true);
+        p.epoch = Some(7);
+        assert!(!p.complete_operation(7, PopupOperation::Arm));
+        p.operation = Some(PopupOperation::Arm);
+        assert!(!p.complete_operation(8, PopupOperation::Arm));
+        assert!(!p.complete_operation(7, PopupOperation::Click(1)));
+        assert!(p.complete_operation(7, PopupOperation::Arm));
+        assert!(!p.complete_operation(7, PopupOperation::Arm));
+        p.operation = Some(PopupOperation::Click(1));
+        assert!(!p.complete_operation(7, PopupOperation::Click(2)));
+        assert!(p.complete_operation(7, PopupOperation::Click(1)));
+        assert!(!p.complete_operation(7, PopupOperation::Click(1)));
+        p.operation = Some(PopupOperation::Click(2));
+        p.terminate();
+        assert!(!p.complete_operation(7, PopupOperation::Click(2)));
+        assert_eq!(p.accepted_sequence, 1);
+    }
+    #[cfg(feature = "backend-wayland-udev")]
+    #[test]
+    fn popup_click_bounds_never_fall_through_a_popup_to_root() {
+        let mut p = PopupFrameProof {
+            epoch: 1,
+            cookie: 1,
+            capture_sequence: 1,
+            native_ready_serial: 1,
+            generation: 1,
+            root_size: (320, 240),
+            popup_rect: None,
+        };
+        assert!(popup_click_inside(&p, 319, 239));
+        assert!(!popup_click_inside(&p, 320, 239));
+        p.popup_rect = Some((100, 50, 20, 30));
+        assert!(popup_click_inside(&p, 100, 50));
+        assert!(popup_click_inside(&p, 119, 79));
+        for (x, y) in [(99, 50), (120, 50), (100, 49), (100, 80), (u32::MAX, 0)] {
+            assert!(!popup_click_inside(&p, x, y));
+        }
     }
 }
