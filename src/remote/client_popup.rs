@@ -85,6 +85,7 @@ pub(super) struct ClientPopup {
     pending_metadata: Option<Metadata>,
     rejection_floor: Option<u64>,
     ended: bool,
+    delivered_terminal: bool,
     close_deadline: Option<Instant>,
     close_confirmed: bool,
 }
@@ -100,6 +101,12 @@ impl ClientPopup {
         }
     }
     pub(super) fn check(&self, now: Instant) -> RemoteResult<()> {
+        // Preserve the already validated terminal result across the receiver
+        // and UI threads. This is observation of an ended session, not another
+        // receipt acceptance, and does not create or extend authority.
+        if self.delivered_terminal {
+            return Err(Box::new(PopupDeliveredThenRevoked));
+        }
         if self.enabled
             && (self.ended
                 || self.deadline.is_some_and(|d| now >= d)
@@ -226,6 +233,11 @@ impl ClientPopup {
         Ok(())
     }
     pub(super) fn status(&mut self, value: Status, now: Instant) -> RemoteResult<()> {
+        // Network records must still reject replay after termination rather
+        // than reinterpret it as another successful delivery receipt.
+        if self.ended {
+            return Err(invalid_data("popup status after terminal state").into());
+        }
         self.check(now)?;
         if !self.enabled || self.binding != Some(value.metadata.key.binding) {
             return Err(invalid_data("unsolicited popup pointer status").into());
@@ -275,6 +287,7 @@ impl ClientPopup {
                     return Err(invalid_data("popup terminal delivery proof mismatch").into());
                 }
                 self.ended = true;
+                self.delivered_terminal = true;
                 self.pending = None;
                 self.pending_metadata = None;
                 self.ready = None;
@@ -913,6 +926,33 @@ mod tests {
         assert!(p.status(status(StatusKind::Ready, 1, 1), now).is_err());
         assert!(p.event(&edge(1, E::LeftDown), now).is_err());
         assert!(p.revoke().is_none());
+    }
+
+    #[test]
+    fn popup_terminal_result_survives_ui_check_before_receiver_publication() {
+        use crate::remote::x11_viewer::WaylandPointerEventKind as E;
+        let now = Instant::now();
+        let mut p = ready(now);
+        p.event(&edge(1, E::LeftDown), now).unwrap();
+        p.event(&edge(1, E::LeftUp), now).unwrap().unwrap();
+        let deadline = p.deadline.unwrap();
+        let mut receipt = status(StatusKind::DeliveredTerminal, 1, 1);
+        receipt.ttl_ms = 0;
+        // Receiver has committed the exact receipt under the popup lock but
+        // has not yet published its error to ReceiveCompletion/state.error.
+        let receiver_result = p.status(receipt, now).unwrap_err();
+        assert!(receiver_result.is::<PopupDeliveredThenRevoked>());
+        for at in [now, deadline, deadline + Duration::from_secs(1)] {
+            assert!(p.check(at).unwrap_err().is::<PopupDeliveredThenRevoked>());
+            assert!(p.ready_sequence(at).is_none());
+        }
+        assert!(
+            !p.status(receipt, now)
+                .unwrap_err()
+                .is::<PopupDeliveredThenRevoked>()
+        );
+        assert!(p.pending.is_none() && p.ready.is_none() && p.candidate.is_none());
+        assert_eq!(p.deadline, Some(deadline));
     }
 
     #[test]
