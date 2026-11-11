@@ -145,11 +145,12 @@ fn collect(a: &mut App, id: u32, out: &mut Vec<(u16, Vec<u32>)>, wire: &mut Vec<
     }
 }
 struct Readback {
+    size: (u32, u32),
     client: Client,
     session: u32,
 }
 impl Readback {
-    fn new(s: &mut Server) -> Self {
+    fn new(s: &mut Server, size: (u32, u32)) -> Self {
         let mut c = s.connect();
         let list = c.bind("ext_foreign_toplevel_list_v1", 1);
         let sources = c.bind("ext_foreign_toplevel_image_capture_source_manager_v1", 1);
@@ -171,12 +172,16 @@ impl Readback {
         assert!(
             c.events()
                 .iter()
-                .any(|e| e.sender == session && e.opcode == 0 && e.args == [VW, VH])
+                .any(|e| e.sender == session && e.opcode == 0 && e.args == [size.0, size.1])
         );
-        Self { client: c, session }
+        Self {
+            client: c,
+            session,
+            size,
+        }
     }
     fn pixels(&mut self, s: &mut Server, gl: &mut HeadlessSmithayGles) -> Vec<u8> {
-        let (buffer, mut file) = shm(s, &mut self.client, [0x5a; 4], VW, VH);
+        let (buffer, mut file) = shm(s, &mut self.client, [0x5a; 4], self.size.0, self.size.1);
         let frame = self.client.new_id();
         self.client.request(self.session, 0, &[frame]);
         self.client.request(frame, 1, &[buffer]);
@@ -201,13 +206,15 @@ impl Readback {
         file.seek(SeekFrom::Start(0)).unwrap();
         let mut pixels = Vec::new();
         file.read_to_end(&mut pixels).unwrap();
-        assert_eq!(pixels.len(), (VW * VH * 4) as usize);
+        assert_eq!(pixels.len(), (self.size.0 * self.size.1 * 4) as usize);
         self.client.request(frame, 0, &[]);
         s.roundtrip();
         pixels
     }
 }
 struct Harness {
+    source_size: (u32, u32),
+    viewer_size: (u32, u32),
     native: Server,
     local: Server,
     target: App,
@@ -275,6 +282,25 @@ impl Harness {
         host_lossless: bool,
         viewer_lossless: bool,
     ) -> Self {
+        Self::new_sized(
+            gl,
+            host_scroll,
+            viewer_scroll,
+            host_lossless,
+            viewer_lossless,
+            (SW, SH),
+            (VW, VH),
+        )
+    }
+    fn new_sized(
+        gl: &mut HeadlessSmithayGles,
+        host_scroll: (bool, bool),
+        viewer_scroll: (bool, bool),
+        host_lossless: bool,
+        viewer_lossless: bool,
+        source_size: (u32, u32),
+        viewer_size: (u32, u32),
+    ) -> Self {
         // Keep old vertical v7 coverage. Horizontal tests independently verify
         // the real selected recipient's v9 value120 group, not viewer metadata.
         let recipient_version = if host_scroll.1 || viewer_scroll.1 {
@@ -288,7 +314,8 @@ impl Harness {
             Some(init_image_copy_capture(&native.display.handle()));
         local.state.image_capture_pending = Some(init_image_copy_capture(&local.display.handle()));
         register_test_presentation(&mut local);
-        let mut target = App::with_size_color(&mut native, [0, 0, 255, 255], SW, SH);
+        let mut target =
+            App::with_size_color(&mut native, [0, 0, 255, 255], source_size.0, source_size.1);
         let target_pointer = bind(&mut native, &mut target, recipient_version);
         focus(&mut native, &target);
         target.client.events();
@@ -352,7 +379,8 @@ impl Harness {
         }
         // Distinct from both target phases (red, then blue): a fallback to the
         // unrelated surface cannot masquerade as the click-triggered repaint.
-        let mut other = App::with_size_color(&mut native, [0, 255, 0, 255], SW, SH);
+        let mut other =
+            App::with_size_color(&mut native, [0, 255, 0, 255], source_size.0, source_size.1);
         let other_pointer = bind(&mut native, &mut other, recipient_version);
         focus(&mut native, &target);
         target.client.events();
@@ -386,8 +414,8 @@ impl Harness {
                 resize_source: None,
                 follow_source_size: false,
                 window_size: Some(WindowSize {
-                    width: VW as u16,
-                    height: VH as u16,
+                    width: viewer_size.0 as u16,
+                    height: viewer_size.1 as u16,
                 }),
                 window_position: None,
                 frame_limits: Default::default(),
@@ -418,6 +446,8 @@ impl Harness {
             client_tx.send(result).unwrap();
         });
         Self {
+            source_size,
+            viewer_size,
             native,
             local,
             target,
@@ -472,10 +502,10 @@ impl Harness {
         for (&window, top) in &self.local.state.toplevels {
             if !top.is_initial_configure_sent() {
                 let geo = self.local.state.window_geometry.get_mut(&window).unwrap();
-                geo.w = VW;
-                geo.h = VH;
+                geo.w = self.viewer_size.0;
+                geo.h = self.viewer_size.1;
                 top.with_pending_state(|s| {
-                    s.size = Some((VW as i32, VH as i32).into());
+                    s.size = Some((self.viewer_size.0 as i32, self.viewer_size.1 as i32).into());
                     s.states.set(TopState::Activated);
                 });
                 top.send_configure();
@@ -505,7 +535,7 @@ impl Harness {
         }
         if drawn && !self.feedback.is_empty() {
             if self.readback.is_none() {
-                self.readback = Some(Readback::new(&mut self.local));
+                self.readback = Some(Readback::new(&mut self.local, self.viewer_size));
             }
             let sequence = self
                 .frames
@@ -620,13 +650,21 @@ impl Harness {
         } else {
             [0, 0, 255, 255]
         };
-        let (buffer, _file) = shm(&mut self.native, &mut self.target.client, color, SW, SH);
+        let (buffer, _file) = shm(
+            &mut self.native,
+            &mut self.target.client,
+            color,
+            self.source_size.0,
+            self.source_size.1,
+        );
         self.target
             .client
             .request(self.target.surface, 1, &[buffer, 0, 0]);
-        self.target
-            .client
-            .request(self.target.surface, 2, &[0, 0, SW, SH]);
+        self.target.client.request(
+            self.target.surface,
+            2,
+            &[0, 0, self.source_size.0, self.source_size.1],
+        );
         self.target.client.request(self.target.surface, 6, &[]);
         self.native.roundtrip();
         self.native.roundtrip();

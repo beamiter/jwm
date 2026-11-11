@@ -27,6 +27,7 @@ pub(super) struct PointerRepair {
     pub(super) enabled: bool,
     lease: Option<(u64, Instant)>,
     fence: Option<ActionCompletionFence>,
+    terminal_receipt: Option<ActionReceipt>,
     action_deadline: Option<Instant>,
     last_input: Option<Instant>,
     held_keys: std::collections::BTreeSet<u8>,
@@ -65,8 +66,28 @@ impl ClientPointer {
         self.repair.phase = None;
         self.repair.offer = None;
         self.repair.declining = None;
+        self.repair.terminal_receipt = None;
     }
 
+    pub(super) fn revoke_local(
+        &mut self,
+    ) -> Option<crate::remote::wayland_pointer_wire::PointerRevoke> {
+        if self.ended {
+            return None;
+        }
+        let pending = self
+            .repair
+            .fence
+            .as_ref()
+            .and_then(ActionCompletionFence::pending_receipt);
+        let revoke = self.revoke();
+        // Only explicit local input/focus cancellation may drain this one
+        // already-sent action. TTL, protocol failure, and server terminal do not.
+        if !self.terminal_seen {
+            self.repair.terminal_receipt = pending;
+        }
+        revoke
+    }
     pub(super) fn repair_granted(&mut self, lease: u64) -> RemoteResult<()> {
         if !self.repair.enabled {
             return Ok(());
@@ -150,7 +171,14 @@ impl ClientPointer {
         receipt: ActionReceipt,
         now: Instant,
     ) -> RemoteResult<()> {
-        if !self.repair.enabled || self.ended {
+        if !self.repair.enabled {
+            return Err(repair_error());
+        }
+        if self.ended {
+            if !self.terminal_seen && self.repair.terminal_receipt == Some(receipt) {
+                self.repair.terminal_receipt = None;
+                return Ok(());
+            }
             return Err(repair_error());
         }
         self.repair_check(now)?;
@@ -788,6 +816,101 @@ mod tests {
         );
         assert_eq!(p.repair.fence.as_ref().unwrap().repair_watermark(), Some(1));
         assert!(p.repair_completed(receipt, now).is_err());
+    }
+    #[test]
+    fn local_revoke_drains_only_exact_pending_receipt_once_without_authority() {
+        let now = Instant::now();
+        for case in 0..5 {
+            let (mut p, t) = fixture(now);
+            let action = PointerAction {
+                lease_epoch: 9,
+                sequence: 1,
+                scope: t.ready.into(),
+                kind: PointerActionKind::ClickLeft,
+                x: 4,
+                y: 5,
+            };
+            p.repair_sent(&action, now).unwrap();
+            let deadline = p.repair.lease.unwrap().1;
+            let receipt = ActionReceipt {
+                lease: 9,
+                sequence: 1,
+                consumed: t.ready,
+            };
+            assert!(p.revoke_local().is_some());
+            assert!(p.ended);
+            assert!(!p.terminal_seen);
+            let mut incoming = receipt;
+            match case {
+                1 => incoming.sequence += 1,
+                2 => incoming.consumed.sequence += 1,
+                3 => incoming.lease += 1,
+                4 => p
+                    .receive(PointerStatus {
+                        lease_epoch: 9,
+                        scope: t.ready.into(),
+                        status: PointerStatusKind::Revoked,
+                    })
+                    .unwrap(),
+                _ => {}
+            }
+            assert_eq!(p.repair_completed(incoming, now).is_ok(), case == 0);
+            assert!(p.ended);
+            assert!(!p.fresh(now));
+            assert!(p.ready.is_none() && p.click.is_none());
+            assert_eq!(p.repair.lease.unwrap().1, deadline);
+            assert_eq!(p.repair.fence.as_ref().unwrap().repair_watermark(), None);
+            if case == 0 {
+                assert!(
+                    p.repair_completed(receipt, now).is_err(),
+                    "consumed tombstone cannot replay"
+                );
+                p.receive(PointerStatus {
+                    lease_epoch: 9,
+                    scope: t.ready.into(),
+                    status: PointerStatusKind::Revoked,
+                })
+                .unwrap();
+                assert!(p.repair_completed(receipt, now).is_err());
+            }
+        }
+        let (mut p, t) = fixture(now);
+        p.revoke_local();
+        assert!(
+            p.repair_completed(
+                ActionReceipt {
+                    lease: 9,
+                    sequence: 1,
+                    consumed: t.ready
+                },
+                now
+            )
+            .is_err(),
+            "no pending action means no terminal receipt allowance"
+        );
+        let (mut p, t) = fixture(now);
+        let action = PointerAction {
+            lease_epoch: 9,
+            sequence: 1,
+            scope: t.ready.into(),
+            kind: PointerActionKind::ClickLeft,
+            x: 4,
+            y: 5,
+        };
+        p.repair_sent(&action, now).unwrap();
+        p.revoke(); // Ordinary expiry/protocol cancellation is not local drain.
+        assert!(p.repair.terminal_receipt.is_none());
+        assert!(
+            p.repair_completed(
+                ActionReceipt {
+                    lease: 9,
+                    sequence: 1,
+                    consumed: t.ready
+                },
+                now
+            )
+            .is_err()
+        );
     }
     #[test]
     fn action_and_phase_deadlines_are_not_refreshed_by_status_or_lease_regrant() {

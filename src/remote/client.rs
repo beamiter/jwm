@@ -1973,7 +1973,7 @@ fn viewer_loop(
                 }) {
                     #[cfg(test)]
                     eprintln!("viewer pointer revoke: local event batch {events:?}");
-                    if let Some(revoke) = pointer.revoke() {
+                    if let Some(revoke) = pointer.revoke_local() {
                         writer
                             .write_message(MessageKind::WaylandPointerRevoke, &revoke.encode()?)?;
                         writer.flush()?;

@@ -93,6 +93,11 @@ impl ActionCompletionFence {
         self.pending = None;
         Ok(())
     }
+    /// Snapshot only the actual in-flight action; observing it never completes
+    /// the action or advances the ordering watermark.
+    pub(crate) fn pending_receipt(&self) -> Option<ActionReceipt> {
+        if self.ended { None } else { self.pending }
+    }
     /// A usable ordering watermark, not proof that scope/focus remains valid.
     pub(crate) fn repair_watermark(&self) -> Option<u64> {
         (!self.ended && self.pending.is_none()).then_some(self.completed)
@@ -989,5 +994,32 @@ mod tests {
             ),
             Err(Error::NonceExhausted)
         );
+    }
+    #[test]
+    fn pending_receipt_is_read_only_and_disappears_on_complete_or_revoke() {
+        let (_, token, _) = setup();
+        let action = ActionReceipt {
+            lease: token.lease,
+            sequence: 1,
+            consumed: token.ready,
+        };
+        let mut fence = ActionCompletionFence::new(token.lease);
+        assert_eq!(fence.pending_receipt(), None);
+        fence.sent(action).unwrap();
+        assert_eq!(fence.pending_receipt(), Some(action));
+        assert_eq!(fence.pending_receipt(), Some(action));
+        assert_eq!(fence.repair_watermark(), None);
+        fence.complete(action).unwrap();
+        assert_eq!(fence.pending_receipt(), None);
+        assert_eq!(fence.repair_watermark(), Some(1));
+        fence
+            .sent(ActionReceipt {
+                sequence: 2,
+                ..action
+            })
+            .unwrap();
+        fence.revoke();
+        assert_eq!(fence.pending_receipt(), None);
+        assert_eq!(fence.repair_watermark(), None);
     }
 }
