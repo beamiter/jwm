@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <protocol name="jwm_remote_popup_v1">
   <copyright>Copyright 2026 JWM contributors. MIT license.</copyright>
-  <interface name="jwm_remote_popup_manager_v1" version="1">
+  <interface name="jwm_remote_popup_manager_v1" version="2">
     <description summary="explicit trusted-local root and popup interaction">
       Private opt-in capability, not an unrestricted virtual pointer or a portal.
       Binding the manager grants no input authority. Creation is a single attempt
@@ -16,7 +16,7 @@
       <arg name="source" type="object" interface="ext_image_capture_source_v1"/>
     </request>
   </interface>
-  <interface name="jwm_remote_popup_lease_v1" version="1">
+  <interface name="jwm_remote_popup_lease_v1" version="2">
     <description summary="one nonrenewable isolated-seat lease">
       The original 30-second budget starts at creation, not at arm. The independent
       seat is visible only to the selected root application client. The application
@@ -72,6 +72,20 @@
       <arg name="x" type="uint"/>
       <arg name="y" type="uint"/>
     </request>
+    <request name="export_frame_proof" since="2">
+      <description summary="export bounded metadata from one successfully captured frame">
+        Returns only metadata frozen with this exact successful frame, not a fresh
+        snapshot of the current scene. The frame must belong to this lease's
+        exported source, still be current and no older than one second. This does
+        not arm, consume an input action, renew the lease or prove presentation.
+        At most 1024 exports are allowed per lease, with strictly increasing native
+        ready serials. Re-exporting a frame or any invalid request revokes only
+        the matching lease. Cookie is an opaque correlation value, not authority.
+      </description>
+      <arg name="epoch" type="uint"/>
+      <arg name="frame" type="object" interface="ext_image_copy_capture_frame_v1"/>
+      <arg name="cookie" type="uint"/>
+    </request>
     <event name="granted">
       <arg name="epoch" type="uint"/>
       <arg name="ttl_ms" type="uint"/>
@@ -82,5 +96,22 @@
       <arg name="sequence" type="uint"/>
     </event>
     <event name="revoked"><arg name="reason" type="uint"/></event>
+    <event name="frame_proof" since="2">
+      <description summary="immutable root and optional direct-child capture metadata">
+        All u64 values use high and low 32-bit words. Root coordinates start at
+        zero. Popup coordinates are root-local. With popup_present zero, all popup
+        rectangle fields are zero. No surface identifier or additional target is
+        granted. The echoed frame resource is the exact request frame.
+      </description>
+      <arg name="epoch" type="uint"/>
+      <arg name="frame" type="object" interface="ext_image_copy_capture_frame_v1"/>
+      <arg name="cookie" type="uint"/>
+      <arg name="ready_hi" type="uint"/><arg name="ready_lo" type="uint"/>
+      <arg name="generation_hi" type="uint"/><arg name="generation_lo" type="uint"/>
+      <arg name="root_width" type="uint"/><arg name="root_height" type="uint"/>
+      <arg name="popup_present" type="uint"/>
+      <arg name="popup_x" type="uint"/><arg name="popup_y" type="uint"/>
+      <arg name="popup_width" type="uint"/><arg name="popup_height" type="uint"/>
+    </event>
   </interface>
 </protocol>

@@ -123,3 +123,96 @@ impl FamilyProof {
                 == Some(&self.layout)
     }
 }
+
+/// Scalar metadata from the immutable layout actually used to render a frame.
+/// Target 0 denotes the root and target 1 its sole direct popup, scoped to this
+/// generation. These are not Wayland object IDs or independent input authority.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ExportedFamilyLayout {
+    pub(crate) generation: u64,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) popup: Option<(u32, u32, u32, u32)>,
+}
+
+fn export_layout(
+    generation: u64,
+    width: u32,
+    height: u32,
+    popup: Option<(i32, i32, i32, i32)>,
+) -> Option<ExportedFamilyLayout> {
+    if generation == 0 || width == 0 || height == 0 || width > 16384 || height > 16384 {
+        return None;
+    }
+    let popup = match popup {
+        None => None,
+        Some((x, y, w, h)) => {
+            let (x, y, w, h) = (
+                u32::try_from(x).ok()?,
+                u32::try_from(y).ok()?,
+                u32::try_from(w).ok()?,
+                u32::try_from(h).ok()?,
+            );
+            if w == 0 || h == 0 || x.checked_add(w)? > width || y.checked_add(h)? > height {
+                return None;
+            }
+            Some((x, y, w, h))
+        }
+    };
+    Some(ExportedFamilyLayout {
+        generation,
+        width,
+        height,
+        popup,
+    })
+}
+
+impl FamilyProof {
+    pub(crate) fn export_layout(&self) -> Option<ExportedFamilyLayout> {
+        if self.layout.root != self.authority.root.surface
+            || self.layout.width != self.authority.root.width
+            || self.layout.height != self.authority.root.height
+        {
+            return None;
+        }
+        export_layout(
+            self.generation,
+            self.layout.width,
+            self.layout.height,
+            self.layout.popup.as_ref().map(|p| p.rect),
+        )
+    }
+}
+
+#[cfg(test)]
+mod export_tests {
+    use super::export_layout;
+    #[test]
+    fn family_export_layout_preserves_exact_frozen_region() {
+        let root = export_layout(7, 320, 240, None).unwrap();
+        assert_eq!(
+            (root.generation, root.width, root.height, root.popup),
+            (7, 320, 240, None)
+        );
+        let popup = export_layout(8, 320, 240, Some((200, 140, 120, 100))).unwrap();
+        assert_eq!(popup.popup, Some((200, 140, 120, 100)));
+        assert_ne!(root.generation, popup.generation);
+    }
+    #[test]
+    fn family_export_layout_rejects_unbounded_or_invalid_regions() {
+        for rect in [
+            (-1, 0, 1, 1),
+            (0, -1, 1, 1),
+            (0, 0, 0, 1),
+            (0, 0, 1, -1),
+            (319, 0, 2, 1),
+            (0, 239, 1, 2),
+            (i32::MAX, 0, i32::MAX, 1),
+        ] {
+            assert!(export_layout(1, 320, 240, Some(rect)).is_none());
+        }
+        for (g, w, h) in [(0, 320, 240), (1, 0, 240), (1, 320, 0), (1, 16385, 240)] {
+            assert!(export_layout(g, w, h, None).is_none());
+        }
+    }
+}

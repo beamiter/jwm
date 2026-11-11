@@ -2998,3 +2998,70 @@ fn popup_root_origin(
     origin.1.checked_neg()?;
     Some(origin)
 }
+
+/// Read-only v2 export validation. The caller must additionally validate its
+/// live lease/epoch and popup admission. This never consumes a frame or renews
+/// a lease, and never reconstructs rendered metadata from current scene state.
+pub(crate) fn export_interactive_family_frame(
+    state: &JwmWaylandState,
+    family: &Arc<super::capture_popup_authority::FamilyAuthority>,
+    source: &ExtImageCaptureSourceV1,
+    frame: &ExtImageCopyCaptureFrameV1,
+    owner: &ClientId,
+) -> Option<(
+    u64,
+    Instant,
+    Arc<super::capture_popup_authority::FamilyProof>,
+)> {
+    if !source.is_alive()
+        || !frame.is_alive()
+        || source.client()?.id() != *owner
+        || frame.client()?.id() != *owner
+    {
+        return None;
+    }
+    let CaptureSource::Toplevel(expected) =
+        source.data::<ImageCaptureSourceData>()?.source.as_ref()?
+    else {
+        return None;
+    };
+    if !expected.owned_by(owner)
+        || expected
+            .family
+            .as_ref()
+            .is_none_or(|f| !Arc::ptr_eq(f, family))
+    {
+        return None;
+    }
+    let data = frame.data::<CaptureFrameData>()?;
+    if !data.captured.load(Ordering::Acquire) || !data.ready.load(Ordering::Acquire) {
+        return None;
+    }
+    let CaptureSource::Toplevel(actual) = data.source.as_ref()? else {
+        return None;
+    };
+    if !Arc::ptr_eq(expected, actual) {
+        return None;
+    }
+    let session = data.session.upgrade().ok()?;
+    if !session.is_alive() || session.client()?.id() != *owner {
+        return None;
+    }
+    let session_data = session.data::<CaptureSessionData>()?;
+    if session_data.stopped.load(Ordering::Acquire)
+        || !matches!(&session_data.source, Some(CaptureSource::Toplevel(a)) if Arc::ptr_eq(a, expected))
+    {
+        return None;
+    }
+    let proof = data.family_proof.lock().unwrap().clone()?;
+    if !Arc::ptr_eq(&proof.authority, family) || !proof.current(state) {
+        return None;
+    }
+    proof.export_layout()?;
+    let (serial, at) = (*data.ready_stamp.lock().unwrap())?;
+    if serial == 0 || Instant::now().checked_duration_since(at)? > std::time::Duration::from_secs(1)
+    {
+        return None;
+    }
+    Some((serial, at, proof))
+}

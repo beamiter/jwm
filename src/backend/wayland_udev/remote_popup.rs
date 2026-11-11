@@ -3,7 +3,7 @@ use super::{
     capture_popup_authority::{FamilyAuthority, FamilyProof},
     image_copy_capture::{
         CaptureFrameData, CaptureSessionData, CaptureSource, ImageCaptureSourceData,
-        create_interactive_family_source,
+        create_interactive_family_source, export_interactive_family_frame,
     },
 };
 use crate::backend::wayland::state::JwmWaylandState;
@@ -54,6 +54,7 @@ struct Lease {
     receivers: Option<PrivatePointerSnapshot>,
     sequence: u32,
     last_ready: u64,
+    exports: ExportLedger,
     last_action: Option<Instant>,
     popup: Option<WlSurface>,
     grabbed: bool,
@@ -61,6 +62,27 @@ struct Lease {
     click: Option<(Serial, Instant)>,
     tokens: f64,
     refill: Instant,
+}
+#[derive(Default)]
+struct ExportLedger {
+    count: u32,
+    last_serial: u64,
+}
+impl ExportLedger {
+    fn accept(&mut self, serial: u64) -> bool {
+        if self.count >= 1024 || serial <= self.last_serial {
+            return false;
+        }
+        let Some(next) = self.count.checked_add(1) else {
+            return false;
+        };
+        self.count = next;
+        self.last_serial = serial;
+        true
+    }
+}
+fn words(value: u64) -> (u32, u32) {
+    ((value >> 32) as u32, value as u32)
 }
 fn next_epoch(previous: &mut u32) -> Option<u32> {
     let next = previous.checked_add(1)?;
@@ -307,7 +329,7 @@ fn proof(
     Some((serial, at, proof))
 }
 pub(crate) fn init(dh: &DisplayHandle) {
-    dh.create_global::<JwmWaylandState, JwmRemotePopupManagerV1, _>(1, ManagerData);
+    dh.create_global::<JwmWaylandState, JwmRemotePopupManagerV1, _>(2, ManagerData);
 }
 impl GlobalDispatch<JwmRemotePopupManagerV1, ManagerData> for JwmWaylandState {
     fn bind(
@@ -390,6 +412,7 @@ impl Dispatch<JwmRemotePopupManagerV1, ManagerData> for JwmWaylandState {
             receivers: None,
             sequence: 0,
             last_ready: 0,
+            exports: ExportLedger::default(),
             last_action: None,
             popup: None,
             grabbed: false,
@@ -482,6 +505,56 @@ impl Dispatch<JwmRemotePopupLeaseV1, LeaseData> for JwmWaylandState {
             return;
         }
         let accepted = match request {
+            jwm_remote_popup_lease_v1::Request::ExportFrameProof {
+                epoch,
+                frame,
+                cookie,
+            } => {
+                let exported = (|| {
+                    if epoch != l.epoch {
+                        return None;
+                    }
+                    let (serial, at, frozen) = proof(state, &l, &frame)?;
+                    let source = l.source.as_ref()?.upgrade().ok()?;
+                    let owner = resource.client()?.id();
+                    let (checked_serial, checked_at, checked_proof) =
+                        export_interactive_family_frame(state, &l.family, &source, &frame, &owner)?;
+                    if checked_serial != serial
+                        || checked_at != at
+                        || !Arc::ptr_eq(&frozen, &checked_proof)
+                    {
+                        return None;
+                    }
+                    Some((serial, frozen.export_layout()?))
+                })();
+                if let Some((serial, layout)) =
+                    exported.filter(|(serial, _)| l.exports.accept(*serial))
+                {
+                    let (ready_hi, ready_lo) = words(serial);
+                    let (generation_hi, generation_lo) = words(layout.generation);
+                    let present = u32::from(layout.popup.is_some());
+                    let (x, y, width, height) = layout.popup.unwrap_or((0, 0, 0, 0));
+                    resource.frame_proof(
+                        epoch,
+                        &frame,
+                        cookie,
+                        ready_hi,
+                        ready_lo,
+                        generation_hi,
+                        generation_lo,
+                        layout.width,
+                        layout.height,
+                        present,
+                        x,
+                        y,
+                        width,
+                        height,
+                    );
+                    true
+                } else {
+                    false
+                }
+            }
             jwm_remote_popup_lease_v1::Request::Arm { epoch, frame } => {
                 if epoch != l.epoch || l.receivers.is_some() {
                     false
@@ -611,6 +684,24 @@ mod tests;
 #[cfg(test)]
 mod primitive_tests {
     use super::*;
+    #[test]
+    fn export_ledger_is_bounded_monotonic_and_does_not_truncate_serials() {
+        let mut ledger = ExportLedger::default();
+        assert!(!ledger.accept(0));
+        let first = (1u64 << 40) + 3;
+        assert!(ledger.accept(first));
+        assert!(!ledger.accept(first));
+        assert!(!ledger.accept(first - 1));
+        assert_eq!(ledger.count, 1);
+        for offset in 1..1024 {
+            assert!(ledger.accept(first + offset));
+        }
+        assert!(!ledger.accept(first + 1024));
+        assert_eq!(ledger.last_serial, first + 1023);
+        let (hi, lo) = words(u64::MAX - 1);
+        assert_eq!((u64::from(hi) << 32) | u64::from(lo), u64::MAX - 1);
+    }
+
     #[test]
     fn private_click_serial_is_exact_bounded_and_not_future() {
         let now = Instant::now();

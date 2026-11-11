@@ -107,6 +107,9 @@ struct Fixture {
 }
 impl Fixture {
     fn new() -> Self {
+        Self::new_with_version(1)
+    }
+    fn new_with_version(version: u32) -> Self {
         let mut server = Server::new();
         server.state.image_capture_pending =
             Some(init_image_copy_capture(&server.display.handle()));
@@ -115,7 +118,7 @@ impl Fixture {
         let mut other = App::with_size_color(&mut server, [0, 255, 255, 255], W, H);
         fence(&mut server, &mut app.client);
         fence(&mut server, &mut other.client);
-        let manager = capture.client.bind("jwm_remote_popup_manager_v1", 1);
+        let manager = capture.client.bind("jwm_remote_popup_manager_v1", version);
         let lease = capture.client.new_id();
         let source = capture.client.new_id();
         capture.client.request(manager, 1, &[lease, capture.source]);
@@ -807,3 +810,6 @@ fn actual_popup_owner_duplicate_source_export_permanently_revokes() {
         "revoked owner cannot use its original successful proof"
     );
 }
+
+#[path = "remote_popup_export_tests.rs"]
+mod export_tests;
