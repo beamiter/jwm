@@ -25,10 +25,13 @@ fn fence(server: &mut Server, client: &mut Client) -> Vec<Event> {
     loop {
         server.roundtrip();
         let events = client.events();
-        assert!(
-            !events.iter().any(|e| e.sender == 1 && e.opcode == 0),
-            "wl_display error"
-        );
+        if let Some(error) = events.iter().find(|e| e.sender == 1 && e.opcode == 0) {
+            panic!(
+                "unexpected wl_display.error: object={:?} code={:?}",
+                error.args.first(),
+                error.args.get(1)
+            );
+        }
         let finished = events.iter().any(|e| e.sender == done && e.opcode == 0);
         all.extend(events);
         if finished {
@@ -260,7 +263,6 @@ impl Fixture {
 struct Popup {
     surface: u32,
     xdg: u32,
-    role: u32,
 }
 fn popup(f: &mut Fixture, serial: u32) -> Popup {
     popup_with_grab(f, Some(serial))
@@ -305,7 +307,7 @@ fn popup_with_grab(f: &mut Fixture, serial: Option<u32>) -> Popup {
     c.request(surface, 1, &[buf, 0, 0]);
     c.request(surface, 6, &[]);
     fence(&mut f.server, c);
-    Popup { surface, xdg, role }
+    Popup { surface, xdg }
 }
 #[test]
 fn actual_popup_root_serial_direct_child_pixels_and_exact_recipient() {
@@ -487,12 +489,11 @@ fn actual_popup_mapping_requires_restricted_grab_and_unmap_is_terminal() {
             f.app.client.request(popup.surface, 1, &[0, 0, 0]);
             f.app.client.request(popup.surface, 6, &[]);
             fence(&mut f.server, &mut f.app.client);
-            // Attach the same dimensions again: the lease cannot fall back to
-            // root targeting or accept the pre-unmap family snapshot.
-            let (buf, _file) = buffer(&mut f.server, &mut f.app.client, (12, 10), [0, 255, 0, 255]);
-            f.app.client.request(popup.surface, 1, &[buf, 0, 0]);
-            f.app.client.request(popup.surface, 6, &[]);
-            fence(&mut f.server, &mut f.app.client);
+            // Unmap is itself terminal. Reattaching to the dismissed role
+            // without a new configure would test xdg protocol failure instead
+            // of this lease's authority. Keep the app connection valid and
+            // challenge the original successful frame on its original lease.
+            assert!(!super::active(&f.server.state));
             let events = f.action(frame, 2, 1, 7, 8);
             f.revoked(&events);
         }
@@ -541,9 +542,25 @@ fn actual_popup_reusing_consumed_grab_serial_revokes() {
     };
     let mut f = Fixture::new();
     let serial = root_click(&mut f, &mut gl);
-    let popup = popup(&mut f, serial);
-    f.app.client.request(popup.role, 1, &[f.seat, serial]);
-    f.app.client.request(popup.surface, 6, &[]);
+    let parent = f.app.xdg;
+    let (surface, _xdg, role) = create_role(&mut f.app.client, parent);
+    f.app.client.request(role, 1, &[f.seat, serial]);
+    f.app.client.request(surface, 6, &[]);
+    fence(&mut f.server, &mut f.app.client);
+    assert!(
+        f.server
+            .state
+            .remote_popup
+            .active
+            .as_ref()
+            .is_some_and(|lease| lease.grabbed && !lease.popup_mapped),
+        "first real pre-map grab consumed the serial"
+    );
+    // Do not ACK the initial configure or attach a buffer: Smithay treats
+    // last_acked as mapped for grab validation. This second real request must
+    // reach the native consumed-serial gate, not xdg InvalidGrab disconnect.
+    f.app.client.request(role, 1, &[f.seat, serial]);
+    f.app.client.request(surface, 6, &[]);
     fence(&mut f.server, &mut f.app.client);
     let events = fence(&mut f.server, &mut f.capture.client);
     f.revoked(&events);
