@@ -202,3 +202,161 @@ mod tests {
         assert_eq!(add((i32::MIN + 1, 0), (i32::MAX, 0)), None);
     }
 }
+
+/// Interactive capture deliberately supports only unscaled, uncropped roots
+/// and one fully contained direct popup. Unsupported mappings fail closed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct InteractivePopup {
+    pub(crate) surface: WlSurface,
+    pub(crate) rect: (i32, i32, i32, i32),
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ImmutableLayout {
+    pub(crate) root: WlSurface,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) popup: Option<InteractivePopup>,
+}
+fn popup_inside(rect: (i32, i32, i32, i32), width: u32, height: u32) -> bool {
+    rect.0 >= 0
+        && rect.1 >= 0
+        && rect.2 > 0
+        && rect.3 > 0
+        && i64::from(rect.0) + i64::from(rect.2) <= i64::from(width)
+        && i64::from(rect.1) + i64::from(rect.3) <= i64::from(height)
+}
+fn popup_point(rect: (i32, i32, i32, i32), x: u32, y: u32) -> Option<(f64, f64)> {
+    let (px, py, w, h) = rect;
+    let (x, y) = (i64::from(x), i64::from(y));
+    (w > 0
+        && h > 0
+        && x >= i64::from(px)
+        && y >= i64::from(py)
+        && x < i64::from(px) + i64::from(w)
+        && y < i64::from(py) + i64::from(h))
+    .then_some(((x - i64::from(px)) as f64, (y - i64::from(py)) as f64))
+}
+impl ImmutableLayout {
+    pub(crate) fn target_at(&self, x: u32, y: u32) -> Option<(WlSurface, f64, f64)> {
+        if x >= self.width || y >= self.height {
+            return None;
+        }
+        if let Some(popup) = &self.popup {
+            if let Some((local_x, local_y)) = popup_point(popup.rect, x, y) {
+                return Some((popup.surface.clone(), local_x, local_y));
+            }
+        }
+        Some((self.root.clone(), f64::from(x), f64::from(y)))
+    }
+}
+fn interactive_mapping(surface: &WlSurface, width: i32, height: i32) -> bool {
+    use smithay::backend::renderer::utils::with_renderer_surface_state;
+    use smithay::reexports::wayland_server::protocol::wl_output::Transform;
+    use smithay::wayland::{compositor::SurfaceAttributes, viewporter::ViewportCachedState};
+    if width <= 0 || height <= 0 || !surface.is_alive() || !get_children(surface).is_empty() {
+        return false;
+    }
+    let mapped = with_renderer_surface_state(surface, |s| {
+        s.buffer_size()
+            .is_some_and(|b| (b.w, b.h) == (width, height))
+            && s.view().is_some_and(|v| {
+                v.offset.x == 0
+                    && v.offset.y == 0
+                    && v.src.loc.x == 0.0
+                    && v.src.loc.y == 0.0
+                    && (v.src.size.w, v.src.size.h) == (f64::from(width), f64::from(height))
+                    && (v.dst.w, v.dst.h) == (width, height)
+            })
+    })
+    .unwrap_or(false);
+    mapped
+        && with_states(surface, |s| {
+            let mut a = s.cached_state.get::<SurfaceAttributes>();
+            let a = a.current();
+            let mut v = s.cached_state.get::<ViewportCachedState>();
+            let v = v.current();
+            let mut g = s.cached_state.get::<SurfaceCachedState>();
+            let g = g.current();
+            a.buffer_scale == 1
+                && a.buffer_transform == Transform::Normal
+                && a.input_region.is_none()
+                && a.buffer_delta.is_none_or(|d| d.x == 0 && d.y == 0)
+                && v.src.is_none()
+                && v.dst.is_none()
+                && g.geometry
+                    .is_none_or(|r| (r.loc.x, r.loc.y, r.size.w, r.size.h) == (0, 0, width, height))
+        })
+}
+pub(crate) fn interactive_snapshot(
+    state: &JwmWaylandState,
+    root: &WlSurface,
+    width: u32,
+    height: u32,
+) -> Option<ImmutableLayout> {
+    if width == 0
+        || height == 0
+        || width > 16384
+        || height > 16384
+        || !interactive_mapping(root, width as i32, height as i32)
+    {
+        return None;
+    }
+    let trees = snapshot(state, root, (0, 0))?;
+    if trees.is_empty() || trees.len() > 2 || trees.iter().any(|t| t.mapped != 1) {
+        return None;
+    }
+    let popup = if trees.len() == 2 {
+        let t = &trees[0];
+        let popup = state.popups.get(&t.surface.id())?;
+        if popup.get_parent_surface().as_ref() != Some(root)
+            || t.surface.client()?.id() != root.client()?.id()
+        {
+            return None;
+        }
+        let geo = popup.with_committed_state(|s| s.map(|s| s.geometry))?;
+        let rect = (geo.loc.x, geo.loc.y, geo.size.w, geo.size.h);
+        if !popup_inside(rect, width, height)
+            || t.origin != (rect.0, rect.1)
+            || !interactive_mapping(&t.surface, rect.2, rect.3)
+        {
+            return None;
+        }
+        Some(InteractivePopup {
+            surface: t.surface.clone(),
+            rect,
+        })
+    } else {
+        None
+    };
+    Some(ImmutableLayout {
+        root: root.clone(),
+        width,
+        height,
+        popup,
+    })
+}
+
+#[cfg(test)]
+mod interactive_tests {
+    use super::{popup_inside, popup_point};
+    #[test]
+    fn interactive_popup_is_fully_contained_and_half_open() {
+        assert!(popup_inside((4, 7, 12, 9), 16, 16));
+        assert_eq!(popup_point((4, 7, 12, 9), 4, 7), Some((0.0, 0.0)));
+        assert_eq!(popup_point((4, 7, 12, 9), 15, 15), Some((11.0, 8.0)));
+        for (x, y) in [(3, 7), (4, 6), (16, 7), (4, 16)] {
+            assert_eq!(popup_point((4, 7, 12, 9), x, y), None);
+        }
+        for r in [
+            (-1, 0, 1, 1),
+            (0, -1, 1, 1),
+            (0, 0, 0, 1),
+            (0, 0, 1, 0),
+            (0, 0, 17, 1),
+            (0, 0, 1, 17),
+            (i32::MAX, 0, i32::MAX, 1),
+        ] {
+            assert!(!popup_inside(r, 16, 16));
+        }
+    }
+}

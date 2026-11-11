@@ -148,6 +148,7 @@ impl<D: SeatHandler> Inner<D> {
 /// Global data of WlSeat
 pub struct SeatGlobalData<D: SeatHandler> {
     arc: Arc<SeatRc<D>>,
+    owner: Option<ClientId>,
 }
 
 impl<D: SeatHandler> fmt::Debug for SeatGlobalData<D> {
@@ -174,9 +175,54 @@ impl<D: SeatHandler + 'static> SeatState<D> {
     {
         let Seat { arc } = self.new_seat(name);
 
-        let global_id = display.create_global::<D, _, _>(9, SeatGlobalData { arc: arc.clone() });
+        let global_id = display.create_global::<D, _, _>(
+            9,
+            SeatGlobalData {
+                arc: arc.clone(),
+                owner: None,
+            },
+        );
         arc.inner.lock().unwrap().global = Some(global_id);
 
+        Seat { arc }
+    }
+
+    /// Retire a compositor-owned seat global and its advertised capabilities.
+    /// Existing protocol resources become inert; no registry seat is retained.
+    pub fn retire_wl_seat(&mut self, display: &DisplayHandle, seat: &Seat<D>)
+    where
+        D: 'static,
+    {
+        let mut inner = seat.arc.inner.lock().unwrap();
+        if let Some(global) = inner.global.take() {
+            display.remove_global::<D>(global);
+        }
+        inner.pointer = None;
+        inner.keyboard = None;
+        inner.touch = None;
+        inner.send_all_caps();
+        drop(inner);
+        self.seats.retain(|known| !Arc::ptr_eq(&known.arc, &seat.arc));
+    }
+
+    /// Create a compositor-owned seat visible only to one exact client.
+    /// This grants no input authority; callers own lifetime and delivery policy.
+    pub fn new_client_wl_seat<N>(&mut self, display: &DisplayHandle, name: N, owner: ClientId) -> Seat<D>
+    where
+        D: GlobalDispatch<WlSeat, SeatGlobalData<D>> + SeatHandler + 'static,
+        <D as SeatHandler>::PointerFocus: WaylandFocus,
+        <D as SeatHandler>::KeyboardFocus: WaylandFocus,
+        N: Into<String>,
+    {
+        let Seat { arc } = self.new_seat(name);
+        let global = display.create_global::<D, _, _>(
+            9,
+            SeatGlobalData {
+                arc: arc.clone(),
+                owner: Some(owner),
+            },
+        );
+        arc.inner.lock().unwrap().global = Some(global);
         Seat { arc }
     }
 }
@@ -332,14 +378,22 @@ where
     D: SeatHandler,
     D: 'static,
 {
+    fn can_view(&self, client: &Client) -> bool {
+        self.owner.as_ref().is_none_or(|owner| *owner == client.id())
+    }
+
     fn bind(
         &self,
         _state: &mut D,
         _dh: &DisplayHandle,
-        _client: &wayland_server::Client,
+        client: &wayland_server::Client,
         resource: New<WlSeat>,
         data_init: &mut DataInit<'_, D>,
     ) {
+        if !self.can_view(client) {
+            data_init.post_error(resource, 0u32, "seat is not available to this client");
+            return;
+        }
         let data = SeatUserData {
             arc: self.arc.clone(),
         };

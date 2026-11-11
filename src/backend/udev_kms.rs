@@ -1,5 +1,4 @@
-#[path = "capture_popup_snapshot.rs"]
-mod capture_popup_snapshot;
+use crate::backend::wayland_udev::capture_popup_snapshot;
 
 #[path = "presentation_batch.rs"]
 mod presentation_batch;
@@ -7739,6 +7738,25 @@ impl KmsState {
                 frame_info.frame.failed(FailureReason::Stopped);
                 continue;
             }
+            // Freeze the interactive layout before rendering any pixel. The
+            // same immutable proof is checked again by every write/ready fence.
+            let family_proof = if let Some(family) = &authority.family {
+                let Some(proof) = family.snapshot(state) else {
+                    Self::note_image_capture_frame_failed(counters, FailureReason::Stopped);
+                    frame_info.frame.failed(FailureReason::Stopped);
+                    continue;
+                };
+                let Some(data) = frame_info
+                    .frame
+                    .data::<crate::backend::wayland_udev::image_copy_capture::CaptureFrameData>(
+                ) else {
+                    continue;
+                };
+                *data.family_proof.lock().unwrap() = Some(proof.clone());
+                Some(proof)
+            } else {
+                None
+            };
             let surface = &authority.surface;
             // Session authorities are immutable snapshots, including for a
             // resize-follow source. Never render using the mutable root layout.
@@ -7767,39 +7785,58 @@ impl KmsState {
                 continue;
             };
             let location: Point<i32, Physical> = (x, y).into();
-            let elements: Vec<KmsRenderElement> = if authority.include_popups {
-                let Some(trees) = capture_popup_snapshot::snapshot(state, surface, (x, y)) else {
-                    Self::note_image_capture_frame_failed(
-                        counters,
-                        FailureReason::BufferConstraints,
-                    );
-                    frame_info.frame.failed(FailureReason::BufferConstraints);
-                    continue;
-                };
-                let mut elements = Vec::new();
-                let mut complete = true;
-                for item in trees {
-                    let tree = SurfaceTree::from_surface(&item.surface);
-                    let location: Point<i32, Physical> = item.origin.into();
-                    let rendered: Vec<KmsRenderElement> =
-                        AsRenderElements::<GlesRenderer>::render_elements(
-                            &tree, renderer, location, scale, 1.0,
+            let elements: Vec<KmsRenderElement> =
+                if authority.include_popups || family_proof.is_some() {
+                    let trees = if let Some(proof) = &family_proof {
+                        let mut trees = Vec::new();
+                        if let Some(popup) = &proof.layout.popup {
+                            trees.push(capture_popup_snapshot::CaptureTree {
+                                surface: popup.surface.clone(),
+                                origin: (popup.rect.0, popup.rect.1),
+                                mapped: 1,
+                            });
+                        }
+                        trees.push(capture_popup_snapshot::CaptureTree {
+                            surface: proof.layout.root.clone(),
+                            origin: (0, 0),
+                            mapped: 1,
+                        });
+                        Some(trees)
+                    } else {
+                        capture_popup_snapshot::snapshot(state, surface, (x, y))
+                    };
+                    let Some(trees) = trees else {
+                        Self::note_image_capture_frame_failed(
+                            counters,
+                            FailureReason::BufferConstraints,
                         );
-                    complete &= rendered.len() == item.mapped;
-                    elements.extend(rendered);
-                }
-                if !complete {
-                    Self::note_image_capture_frame_failed(counters, FailureReason::Unknown);
-                    frame_info.frame.failed(FailureReason::Unknown);
-                    continue;
-                }
-                elements
-            } else {
-                let tree = SurfaceTree::from_surface(surface);
-                AsRenderElements::<GlesRenderer>::render_elements(
-                    &tree, renderer, location, scale, 1.0,
-                )
-            };
+                        frame_info.frame.failed(FailureReason::BufferConstraints);
+                        continue;
+                    };
+                    let mut elements = Vec::new();
+                    let mut complete = true;
+                    for item in trees {
+                        let tree = SurfaceTree::from_surface(&item.surface);
+                        let location: Point<i32, Physical> = item.origin.into();
+                        let rendered: Vec<KmsRenderElement> =
+                            AsRenderElements::<GlesRenderer>::render_elements(
+                                &tree, renderer, location, scale, 1.0,
+                            );
+                        complete &= rendered.len() == item.mapped;
+                        elements.extend(rendered);
+                    }
+                    if !complete {
+                        Self::note_image_capture_frame_failed(counters, FailureReason::Unknown);
+                        frame_info.frame.failed(FailureReason::Unknown);
+                        continue;
+                    }
+                    elements
+                } else {
+                    let tree = SurfaceTree::from_surface(surface);
+                    AsRenderElements::<GlesRenderer>::render_elements(
+                        &tree, renderer, location, scale, 1.0,
+                    )
+                };
 
             // dmabuf fast path: render the window straight into the client buffer.
             if let Some(dmabuf) = get_dmabuf(&frame_info.buffer).ok().cloned() {

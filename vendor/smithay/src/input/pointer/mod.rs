@@ -13,7 +13,7 @@ use crate::{
 };
 
 #[cfg(feature = "wayland_frontend")]
-pub use crate::wayland::seat::pointer::AuthorizedPointerSnapshot;
+pub use crate::wayland::seat::pointer::{AuthorizedPointerSnapshot, PrivatePointerSnapshot};
 
 mod cursor_image;
 pub use cursor_icon::CursorIcon;
@@ -199,6 +199,11 @@ impl<D: SeatHandler + 'static> PointerHandle<D> {
     pub fn is_grabbed(&self) -> bool {
         let guard = self.inner.lock().unwrap();
         !matches!(guard.grab, GrabStatus::None)
+    }
+
+    /// Whether physical button state is empty, without changing focus or grabs.
+    pub fn has_pressed_buttons(&self) -> bool {
+        !self.inner.lock().unwrap().pressed_buttons.is_empty()
     }
 
     /// Returns the start data for the grab, if any.

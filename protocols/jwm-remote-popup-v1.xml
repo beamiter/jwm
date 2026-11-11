@@ -1,0 +1,86 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<protocol name="jwm_remote_popup_v1">
+  <copyright>Copyright 2026 JWM contributors. MIT license.</copyright>
+  <interface name="jwm_remote_popup_manager_v1" version="1">
+    <description summary="explicit trusted-local root and popup interaction">
+      Private opt-in capability, not an unrestricted virtual pointer or a portal.
+      Binding the manager grants no input authority. Creation is a single attempt
+      against an exact live selected root owned by its application client. Existing
+      read-only derived sources cannot be upgraded. The root family is consumed
+      for other input grants. A capture source exported from the lease belongs to
+      that lease and does not grant input independently.
+    </description>
+    <request name="destroy" type="destructor"/>
+    <request name="create_lease">
+      <arg name="id" type="new_id" interface="jwm_remote_popup_lease_v1"/>
+      <arg name="source" type="object" interface="ext_image_capture_source_v1"/>
+    </request>
+  </interface>
+  <interface name="jwm_remote_popup_lease_v1" version="1">
+    <description summary="one nonrenewable isolated-seat lease">
+      The original 30-second budget starts at creation, not at arm. The independent
+      seat is visible only to the selected root application client. The application
+      must actually bind its pointer before arm can succeed; clients that do not
+      support this seat are rejected without a main-seat fallback. This protocol
+      does not promise general toolkit or dynamically added seat compatibility.
+      Captured content stays clipped to the fixed root canvas. Only authorized
+      same-client popup targeting is limited to at most one direct child of the
+      selected root; nested popups and siblings are not authorized. Admission
+      requires the dedicated seat's valid popup-grab serial before first mapping.
+      A changed capture proof does not grant authority to a new popup.
+      Lock, local takeover,
+      root lifecycle invalidation, disconnect or invalid requests revoke the lease.
+      No keyboard, scroll, drag, independent button edges or global input is granted.
+    </description>
+    <request name="destroy" type="destructor"/>
+    <request name="get_capture_source">
+      <description summary="export the frozen capture authority exactly once">
+        Creates the capture source from the family authority frozen by create_lease.
+        This request is allowed only once per lease. It does not select a new root,
+        create a new input grant, renew expiry or reset a consumed authority.
+        An invalid or repeated request must fail closed; no replacement source is
+        granted. Arming requires a successful frame from this exported source.
+      </description>
+      <arg name="capture_source" type="new_id" interface="ext_image_capture_source_v1"/>
+    </request>
+    <request name="arm">
+      <description summary="arm against a real captured root proof">
+        Requires the exact epoch and a fresh successful frame for this lease's
+        capture source, plus the application's actual pointer receiver. The trusted
+        host must first verify actual presentation. This is a trusted-host
+        obligation, not a presentation check implemented by this native protocol;
+        the initial native-only slice has no end-to-end viewer verification.
+        Arming freezes the receivers
+        and establishes root pointer focus; it does not extend the original expiry.
+      </description>
+      <arg name="epoch" type="uint"/>
+      <arg name="frame" type="object" interface="ext_image_copy_capture_frame_v1"/>
+    </request>
+    <request name="action">
+      <description summary="consume a fresh presentation-bound input opportunity">
+        Each action requires a new same-source frame rendered after the previous
+        action, no older than one second, and verified as actually presented by
+        the trusted host. Root-canvas coordinates are checked against the captured
+        target snapshot. Changed popup identity, geometry or stacking invalidates
+        stale targeting. Sequences increase strictly within the original epoch.
+        accepted reports input dispatch, not application completion or persistence.
+      </description>
+      <arg name="epoch" type="uint"/>
+      <arg name="sequence" type="uint"/>
+      <arg name="frame" type="object" interface="ext_image_copy_capture_frame_v1"/>
+      <arg name="kind" type="uint" summary="0 motion, 1 atomic left click; all other values rejected"/>
+      <arg name="x" type="uint"/>
+      <arg name="y" type="uint"/>
+    </request>
+    <event name="granted">
+      <arg name="epoch" type="uint"/>
+      <arg name="ttl_ms" type="uint"/>
+    </event>
+    <event name="armed"><arg name="epoch" type="uint"/></event>
+    <event name="accepted">
+      <arg name="epoch" type="uint"/>
+      <arg name="sequence" type="uint"/>
+    </event>
+    <event name="revoked"><arg name="reason" type="uint"/></event>
+  </interface>
+</protocol>

@@ -611,6 +611,7 @@ pub struct JwmWaylandState {
     pub(crate) remote_pointer: crate::backend::wayland_udev::remote_pointer::RemotePointerState,
     pub(crate) remote_text: crate::backend::wayland_udev::remote_text::RemoteTextState,
     pub(crate) remote_control: crate::backend::wayland_udev::remote_control::RemoteControlState,
+    pub(crate) remote_popup: crate::backend::wayland_udev::remote_popup::RemotePopupState,
     pub(crate) remote_keyboard: crate::backend::wayland_udev::remote_keyboard::RemoteKeyboardState,
     pub(crate) toplevel_capture_authorities:
         crate::backend::wayland_udev::image_copy_capture::ToplevelCaptureAuthorities,
@@ -1395,6 +1396,10 @@ delegate_dispatch2!(JwmWaylandState);
 // ---------------------------------------------------------------------------
 impl PointerConstraintsHandler for JwmWaylandState {
     fn new_constraint(&mut self, surface: &WlSurface, pointer: &PointerHandle<Self>) {
+        crate::backend::wayland_udev::remote_popup::revoke(
+            self,
+            crate::backend::wayland_udev::remote_popup::SEAT,
+        );
         crate::backend::wayland_udev::remote_pointer::revoke(
             self,
             crate::backend::wayland_udev::remote_pointer::SEAT,
@@ -1429,6 +1434,10 @@ impl PointerConstraintsHandler for JwmWaylandState {
         _pointer: &PointerHandle<Self>,
         location: Point<f64, Logical>,
     ) {
+        crate::backend::wayland_udev::remote_popup::revoke(
+            self,
+            crate::backend::wayland_udev::remote_popup::SEAT,
+        );
         crate::backend::wayland_udev::remote_pointer::revoke(
             self,
             crate::backend::wayland_udev::remote_pointer::SEAT,
@@ -1644,9 +1653,11 @@ impl JwmWaylandState {
     ) -> bool {
         // XWayland is one Wayland keyboard client for many X windows. Native
         // surface focus cannot constrain its separate internal X focus.
-        self.toplevels
-            .get(&authority.window)
-            .is_some_and(|toplevel| toplevel.wl_surface() == &authority.surface)
+        !crate::backend::wayland_udev::remote_popup::active(self)
+            && self
+                .toplevels
+                .get(&authority.window)
+                .is_some_and(|toplevel| toplevel.wl_surface() == &authority.surface)
             && PopupManager::popups_for_surface(&authority.surface)
                 .next()
                 .is_none()
@@ -3442,6 +3453,7 @@ impl JwmWaylandState {
         crate::backend::wayland_udev::remote_keyboard::init(dh);
         crate::backend::wayland_udev::remote_pointer::init(dh);
         crate::backend::wayland_udev::remote_control::init(dh);
+        crate::backend::wayland_udev::remote_popup::init(dh);
         crate::backend::wayland_udev::remote_text::init(dh);
         let image_capture_pending = if frame_capture_supported
             && optional_global_enabled(
@@ -3718,6 +3730,7 @@ impl JwmWaylandState {
                 toplevel_capture_sessions: HashMap::new(),
                 toplevel_capture_authorities: Default::default(),
                 remote_control: Default::default(),
+                remote_popup: Default::default(),
                 remote_text: Default::default(),
                 remote_keyboard: Default::default(),
                 remote_pointer: Default::default(),
@@ -4727,12 +4740,14 @@ impl CompositorHandler for JwmWaylandState {
 
     fn new_subsurface(&mut self, _surface: &WlSurface, parent: &WlSurface) {
         crate::backend::wayland_udev::remote_pointer::new_subsurface(self, parent);
+        crate::backend::wayland_udev::remote_popup::new_subsurface(self, parent);
         crate::backend::wayland_udev::image_copy_capture::readonly_resize_new_subsurface(
             self, parent,
         );
     }
     fn commit(&mut self, surface: &WlSurface) {
         crate::backend::wayland_udev::remote_pointer::surface_committed(self, surface);
+        crate::backend::wayland_udev::remote_popup::surface_committed(self, surface);
         crate::backend::wayland_udev::image_copy_capture::toplevel_capture_surface_committed(
             self, surface,
         );
@@ -4795,6 +4810,7 @@ impl CompositorHandler for JwmWaylandState {
             self, surface,
         );
         crate::backend::wayland_udev::remote_pointer::surface_committed(self, surface);
+        crate::backend::wayland_udev::remote_popup::surface_committed(self, surface);
 
         // Legacy XWayland (< 23.1) associates content via the WL_SURFACE_ID atom. smithay records
         // it as `wl_surface_id` but, unlike the modern xwayland_shell path, never calls
@@ -5846,10 +5862,16 @@ impl XdgShellHandler for JwmWaylandState {
     }
 
     fn new_popup(&mut self, surface: PopupSurface, positioner: PositionerState) {
-        crate::backend::wayland_udev::remote_keyboard::revoke(
-            self,
-            crate::backend::wayland_udev::remote_keyboard::SEAT,
-        );
+        if crate::backend::wayland_udev::remote_popup::popup_created(self, &surface) {
+            crate::backend::wayland_udev::remote_keyboard::revoke_other_inputs_for_authorized_popup(
+                self,
+            );
+        } else {
+            crate::backend::wayland_udev::remote_keyboard::revoke(
+                self,
+                crate::backend::wayland_udev::remote_keyboard::SEAT,
+            );
+        }
         // Store the initial positioner state and compute a constrained geometry.
         surface.with_pending_state(|state| {
             state.positioner = positioner;
@@ -5873,6 +5895,14 @@ impl XdgShellHandler for JwmWaylandState {
         seat_resource: smithay::reexports::wayland_server::protocol::wl_seat::WlSeat,
         serial: Serial,
     ) {
+        if crate::backend::wayland_udev::remote_popup::popup_grab(
+            self,
+            &surface,
+            &seat_resource,
+            serial,
+        ) {
+            return;
+        }
         let popup = PopupKind::Xdg(surface.clone());
         let seat = self.seat.clone();
         let Ok(root) = find_popup_root_surface(&popup) else {
@@ -5976,6 +6006,7 @@ impl XdgShellHandler for JwmWaylandState {
         positioner: PositionerState,
         token: u32,
     ) {
+        crate::backend::wayland_udev::remote_popup::popup_destroyed(self, surface.wl_surface());
         surface.with_pending_state(|state| {
             state.positioner = positioner;
             state.geometry = state.positioner.get_geometry();
@@ -6095,6 +6126,7 @@ impl XdgShellHandler for JwmWaylandState {
     }
 
     fn popup_destroyed(&mut self, surface: PopupSurface) {
+        crate::backend::wayland_udev::remote_popup::popup_destroyed(self, surface.wl_surface());
         self.popup_manager.cleanup();
         if let Some(grab) = self.active_popup_grab.clone() {
             if grab.has_ended() {

@@ -87,6 +87,14 @@ pub(crate) fn active(state: &JwmWaylandState) -> bool {
     state.remote_keyboard.active.is_some()
 }
 pub(crate) fn revoke(state: &mut JwmWaylandState, reason: u32) {
+    super::remote_popup::revoke(state, reason);
+    revoke_other_inputs(state, reason);
+}
+/// Only used after the isolated popup authority validated its direct child.
+pub(crate) fn revoke_other_inputs_for_authorized_popup(state: &mut JwmWaylandState) {
+    revoke_other_inputs(state, SEAT);
+}
+fn revoke_other_inputs(state: &mut JwmWaylandState, reason: u32) {
     super::remote_pointer::revoke(state, reason);
     if let Some(lease) = state.remote_keyboard.active.take() {
         finish(state, lease, reason, true);
@@ -95,6 +103,7 @@ pub(crate) fn revoke(state: &mut JwmWaylandState, reason: u32) {
 /// SeatHandler::focus_changed is invoked under Smithay's keyboard lock. It
 /// must not reenter that lock. wl_keyboard.leave ends the old focus's keys.
 pub(crate) fn focus_changed(state: &mut JwmWaylandState) {
+    super::remote_popup::revoke(state, SEAT);
     super::remote_control::focus_changed(state);
     super::remote_pointer::revoke(state, SEAT);
     if let Some(lease) = state.remote_keyboard.active.take() {
@@ -106,6 +115,7 @@ pub(crate) fn revoke_for_window(
     window: crate::backend::common_define::WindowId,
 ) {
     super::remote_pointer::revoke_for_window(state, window);
+    super::remote_popup::revoke_for_window(state, window);
     if state
         .remote_keyboard
         .active
@@ -177,6 +187,7 @@ impl Dispatch<JwmRemoteKeyboardManagerV1, ManagerData> for JwmWaylandState {
                 || super::remote_pointer::active(state)
                 || super::remote_control::active(state)
                 || super::remote_text::active(state)
+                || super::remote_popup::active(state)
                 || !authority_is_current(state, &authority)
                 || !state.remote_keyboard_seat_eligible()
                 || !state.remote_keyboard_target_eligible(&authority)

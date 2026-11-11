@@ -69,6 +69,152 @@ pub struct AuthorizedPointerSnapshot {
     receivers: Vec<WlPointer>,
 }
 
+/// Exact receiver set for a compositor-owned private seat with no ordinary
+/// focus, buttons or grab. Raw delivery never creates general serial authority.
+#[derive(Debug)]
+pub struct PrivatePointerSnapshot {
+    owner: ClientId,
+    generation: u64,
+    receivers: Vec<WlPointer>,
+    focused: Option<WlSurface>,
+}
+
+impl<D: SeatHandler + 'static> PointerHandle<D>
+where
+    D::PointerFocus: WaylandFocus,
+{
+    /// Freeze all current receivers of an otherwise unused private pointer.
+    pub fn snapshot_private_pointer(&self, owner: ClientId) -> Option<PrivatePointerSnapshot> {
+        let inner = self.inner.lock().unwrap();
+        if inner.authority_generation == u64::MAX
+            || inner.focus.is_some()
+            || !matches!(inner.grab, GrabStatus::None)
+            || !inner.pressed_buttons.is_empty()
+        {
+            return None;
+        }
+        let pointers = self.wl_pointer.known_pointers.lock().unwrap();
+        let receivers: Vec<_> = pointers.iter().filter_map(|p| p.upgrade().ok()).collect();
+        if receivers.is_empty()
+            || receivers.len() > 16
+            || receivers.iter().any(|p| {
+                !p.is_alive()
+                    || p.client().is_none_or(|c| c.id() != owner)
+                    || p.data::<PointerUserData<D>>()
+                        .is_none_or(|d| d.client_scale.load(Ordering::Acquire) != 1.0)
+            })
+        {
+            return None;
+        }
+        Some(PrivatePointerSnapshot {
+            owner,
+            generation: inner.authority_generation,
+            receivers,
+            focused: None,
+        })
+    }
+
+    /// Check the frozen private receiver set without creating seat focus.
+    pub fn private_pointer_is_current(&self, snapshot: &PrivatePointerSnapshot) -> bool {
+        self.with_private_pointer(snapshot, |_| {})
+    }
+
+    fn with_private_pointer(
+        &self,
+        snapshot: &PrivatePointerSnapshot,
+        send: impl FnOnce(&[WlPointer]),
+    ) -> bool {
+        let inner = self.inner.lock().unwrap();
+        if inner.authority_generation == u64::MAX
+            || inner.authority_generation != snapshot.generation
+            || inner.focus.is_some()
+            || !matches!(inner.grab, GrabStatus::None)
+            || !inner.pressed_buttons.is_empty()
+        {
+            return false;
+        }
+        let pointers = self.wl_pointer.known_pointers.lock().unwrap();
+        let live: Vec<_> = pointers.iter().filter_map(|p| p.upgrade().ok()).collect();
+        if live.len() != snapshot.receivers.len()
+            || snapshot.receivers.is_empty()
+            || snapshot.receivers.iter().any(|p| {
+                !p.is_alive()
+                    || !live.contains(p)
+                    || p.client().is_none_or(|c| c.id() != snapshot.owner)
+                    || p.data::<PointerUserData<D>>()
+                        .is_none_or(|d| d.client_scale.load(Ordering::Acquire) != 1.0)
+            })
+        {
+            return false;
+        }
+        send(&snapshot.receivers);
+        true
+    }
+
+    /// Deliver one exact family-target event group. The compositor must validate
+    /// the target, fresh captured hit-test proof and bounded coordinates first.
+    /// Enter and click serials are NOT installed in last_enter or implicit grab.
+    pub fn send_private_pointer(
+        &self,
+        snapshot: &mut PrivatePointerSnapshot,
+        target: &WlSurface,
+        position: (f64, f64),
+        click: bool,
+        serial: Serial,
+        time: InputTime,
+    ) -> bool {
+        let (x, y) = position;
+        if !target.is_alive()
+            || target.client().is_none_or(|c| c.id() != snapshot.owner)
+            || !x.is_finite()
+            || !y.is_finite()
+            || !(0.0..=16384.0).contains(&x)
+            || !(0.0..=16384.0).contains(&y)
+        {
+            return false;
+        }
+        let changed = snapshot.focused.as_ref() != Some(target);
+        let sent = self.with_private_pointer(snapshot, |receivers| {
+            for pointer in receivers {
+                if changed {
+                    if let Some(old) = &snapshot.focused {
+                        if old.is_alive() {
+                            pointer.leave(serial.into(), old);
+                        }
+                    }
+                    pointer.enter(serial.into(), target, x, y);
+                }
+                pointer.motion(time.millis(), x, y);
+                if click {
+                    pointer.button(serial.into(), time.millis(), 0x110, WlButtonState::Pressed);
+                    pointer.button(serial.into(), time.millis(), 0x110, WlButtonState::Released);
+                }
+                if pointer.version() >= 5 {
+                    pointer.frame();
+                }
+            }
+        });
+        if sent {
+            snapshot.focused = Some(target.clone());
+        }
+        sent
+    }
+
+    /// End only this private focus. No physical or newly bound receiver is touched.
+    pub fn cleanup_private_pointer(&self, snapshot: &mut PrivatePointerSnapshot, serial: Serial) {
+        if let Some(surface) = snapshot.focused.take() {
+            if surface.is_alive() {
+                for pointer in snapshot.receivers.iter().filter(|p| p.is_alive()) {
+                    pointer.leave(serial.into(), &surface);
+                    if pointer.version() >= 5 {
+                        pointer.frame();
+                    }
+                }
+            }
+        }
+    }
+}
+
 impl<D: SeatHandler + 'static> PointerHandle<D>
 where
     D::PointerFocus: WaylandFocus,

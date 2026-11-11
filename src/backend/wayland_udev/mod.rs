@@ -42,3 +42,8 @@ pub mod color_management;
 pub mod icc;
 
 pub mod color_pipeline;
+
+pub(crate) mod capture_popup_authority;
+#[path = "../capture_popup_snapshot.rs"]
+pub(crate) mod capture_popup_snapshot;
+pub(crate) mod remote_popup;

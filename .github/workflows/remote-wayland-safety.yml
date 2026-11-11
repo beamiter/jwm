@@ -61,6 +61,26 @@ jobs:
           export XDG_RUNTIME_DIR="$(mktemp -d)"
           cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib image_copy_capture::popup_tests -- --test-threads=1 --nocapture
           cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib host_popup_integration -- --test-threads=1 --nocapture
+      - name: Native popup isolated-seat authority and actual pixels
+        env:
+          JWM_REQUIRE_HEADLESS_GL: '1'
+          EGL_PLATFORM: surfaceless
+          LIBGL_ALWAYS_SOFTWARE: '1'
+        run: |
+          set -euo pipefail
+          export XDG_RUNTIME_DIR="$(mktemp -d)"
+          filter='backend::wayland_udev::remote_popup::tests::'
+          listed="$(env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --list)"
+          test "$(printf '%s\n' "$listed" | grep -c ': test$')" -eq 15
+          ignored="$(env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --ignored --list)"
+          test "$(printf '%s\n' "$ignored" | grep -c ': test$' || true)" -eq 0
+          env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --test-threads=1 --nocapture
+          primitive='backend::wayland_udev::remote_popup::primitive_tests::'
+          listed="$(env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$primitive" -- --list)"
+          test "$(printf '%s\n' "$listed" | grep -c ': test$')" -eq 2
+          ignored="$(env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$primitive" -- --ignored --list)"
+          test "$(printf '%s\n' "$ignored" | grep -c ': test$' || true)" -eq 0
+          env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$primitive" -- --test-threads=1
       - name: Actual scoped keyboard lease recipient and revocation tests
         run: |
           export XDG_RUNTIME_DIR="$(mktemp -d)"
