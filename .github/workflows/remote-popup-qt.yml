@@ -1,0 +1,75 @@
+name: Experimental Qt6 dynamic isolated-seat menu
+
+on:
+  push:
+    branches: [dot/remote-popup-qt-probe]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: remote-popup-qt-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  qt-native-menu:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      EGL_PLATFORM: surfaceless
+      LIBGL_ALWAYS_SOFTWARE: '1'
+      JWM_REQUIRE_HEADLESS_GL: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Install official Qt Widgets and native software-renderer dependencies
+        timeout-minutes: 10
+        run: |
+          bash scripts/ci-install-deps.sh build-essential pkg-config qt6-base-dev qt6-wayland \
+            libudev-dev libinput-dev libseat-dev libdrm-dev libgbm-dev \
+            libegl1-mesa-dev libgl1-mesa-dev libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev \
+            libegl-mesa0 libgl1-mesa-dri libx11-dev libx11-xcb-dev \
+            libxcb-composite0-dev libxcb-damage0-dev libxcb-present-dev libxcb-randr0-dev \
+            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxcb-screensaver0-dev
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          components: rustfmt,clippy
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
+      - name: Compile real Qt Widgets client
+        run: |
+          c++ -std=c++17 -Wall -Wextra -Werror -fPIC scripts/remote-popup-qt-probe.cpp \
+            $(pkg-config --cflags --libs Qt6Widgets) -o "$RUNNER_TEMP/remote-popup-qt-probe"
+      - name: Compile and statically check native fixture
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib --tests --no-deps -- -D warnings
+          cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib --no-run
+      - name: Mandatory real Qt dynamic-seat menu and terminal retirement
+        run: |
+          set -euo pipefail
+          export XDG_RUNTIME_DIR="$(mktemp -d)"
+          export JWM_REMOTE_POPUP_QT_PROBE="$RUNNER_TEMP/remote-popup-qt-probe"
+          trap 'rm -rf "$XDG_RUNTIME_DIR"' EXIT
+          test_name='backend::wayland_udev::remote_popup::qt_tests::actual_qt_dynamic_private_seat_menu_selection_and_terminal_retirement'
+          listed="$(cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$test_name" -- --ignored --exact --list)"
+          test "$(printf '%s\n' "$listed" | grep -c ': test$')" -eq 1
+          set +e
+          env -u DISPLAY -u WAYLAND_DISPLAY timeout 120s cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$test_name" -- --ignored --exact --test-threads=1 > "$RUNNER_TEMP/qt-native-result.log" 2>&1
+          result=$?
+          set -e
+          # Never publish raw toolkit output, wire data, panic messages or paths.
+          python3 - "$RUNNER_TEMP/qt-native-result.log" <<'PY'
+          import pathlib, sys
+          text = pathlib.Path(sys.argv[1]).read_text(errors="replace")
+          allowed = ("root_mapped", "initial_capture", "private_pointer_bound", "root_clicked",
+                     "popup_captured", "selection_delivered", "activation_and_retirement_verified")
+          lines = set(text.splitlines())
+          for stage in allowed:
+              if "JWM_QT_STAGE=" + stage in lines:
+                  print("qt_stage=" + stage)
+          print("qt_exact_test_passed=" + str("test result: ok. 1 passed; 0 failed; 0 ignored;" in text).lower())
+          PY
+          test "$result" -eq 0
+          grep -q 'test result: ok. 1 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/qt-native-result.log"
