@@ -20,7 +20,35 @@ fn exactness(pixels: &[u8], expected: &[u8]) -> (usize, u64) {
     (exact, sse)
 }
 
+// Keep diagnostics local to the optimized case; no old fixture semantics change.
+fn expiry_tick(
+    h: &mut Harness,
+    gl: &mut HeadlessSmithayGles,
+    inspect: &mut dyn FnMut(&[u8], u64) -> bool,
+    deadline: Instant,
+    phase: &str,
+) {
+    assert!(Instant::now() < deadline, "{phase}: bounded wait expired");
+    h.tick_with_inspector(gl, true, Some(inspect));
+    if let Ok(result) = h.host_done.try_recv() {
+        panic!("{phase}: unexpected actual host completion: {result:?}");
+    }
+    if let Ok(result) = h.client_done.try_recv() {
+        let host_result = h.host_done.try_recv();
+        panic!(
+            "{phase}: unexpected client completion: {result:?}; actual host result: {host_result:?}"
+        );
+    }
+    assert!(h.unexpected_wire.is_empty());
+    assert!(
+        Instant::now() < deadline,
+        "{phase}: bounded wait expired after tick"
+    );
+    thread::yield_now();
+}
+
 #[test]
+#[ignore = "mandatory optimized CI: profiling build, exact test, real 1080p freshness and natural TTL"]
 fn actual_pointer_lossless_1080p_partial_progress_and_natural_lease_expiry() {
     let Some(mut gl) = HeadlessSmithayGles::new() else {
         return;
@@ -34,7 +62,41 @@ fn actual_pointer_lossless_1080p_partial_progress_and_natural_lease_expiry() {
         (1920, 1080),
         (1920, 1080),
     );
-    h.ready_after(&mut gl, None);
+    let initial_deadline = Instant::now() + Duration::from_secs(8);
+    let mut initial_presented = false;
+    loop {
+        let mut readback = None;
+        expiry_tick(
+            &mut h,
+            &mut gl,
+            &mut |pixels, seq| {
+                // The shared inspector already binds this GL readback to the exact
+                // real committed sequence. Send actual feedback before CPU oracle.
+                readback = Some((seq, pixels.to_vec()));
+                true
+            },
+            initial_deadline,
+            "1080p initial actual presentation and Ready",
+        );
+        if let Some((seq, pixels)) = readback {
+            assert_eq!(pixels.len(), 1920 * 1080 * 4);
+            assert!(
+                pixels
+                    .chunks_exact(4)
+                    .all(|p| p[0] <= 3 && p[1] <= 3 && p[2] >= 250 && p[3] == 255),
+                "initial real GL frame {seq} must be red at every pixel"
+            );
+            initial_presented = true;
+        }
+        assert!(
+            Instant::now() < initial_deadline,
+            "initial presentation/oracle exceeded original deadline"
+        );
+        if h.ready.lock().unwrap().is_some() {
+            assert!(initial_presented);
+            break;
+        }
+    }
     let timing = remote_pointer::lease_timing_for_test(&h.native.state)
         .expect("real native lease must exist");
     assert_eq!(timing.2.duration_since(timing.1), Duration::from_secs(30));
@@ -56,9 +118,17 @@ fn actual_pointer_lossless_1080p_partial_progress_and_natural_lease_expiry() {
     // teardown allowance. This does not change any earlier 24-second test.
     let deadline = first_deadline + Duration::from_secs(5);
     click(&mut h);
-    h.wait(&mut gl, "1080p actual initial click", true, |s| {
-        s.events.len() == 3
-    });
+    let click_deadline = (Instant::now() + Duration::from_secs(8)).min(deadline);
+    while h.events.len() < 3 {
+        expiry_tick(
+            &mut h,
+            &mut gl,
+            &mut |_, _| true,
+            click_deadline,
+            "1080p actual initial click",
+        );
+    }
+    assert_eq!(h.events.len(), 3);
     assert_eq!(h.events[1].1[2..], [0x110, 1]);
     assert_eq!(h.events[2].1[2..], [0x110, 0]);
     let (source, expected) = sized_pattern((1920, 1080), (1920, 1080));
@@ -69,7 +139,7 @@ fn actual_pointer_lossless_1080p_partial_progress_and_natural_lease_expiry() {
     let mut completed_cycles = 0usize;
     loop {
         let mut observed_repair = None;
-        checked_tick(
+        expiry_tick(
             &mut h,
             &mut gl,
             &mut |pixels, seq| {
@@ -156,7 +226,7 @@ fn actual_pointer_lossless_1080p_partial_progress_and_natural_lease_expiry() {
     // No feedback is intentionally delayed across a one-second proof deadline.
     // This checks natural expiry with normal feedback, not an invented race.
     while h.ready.lock().unwrap().is_some() {
-        checked_tick(
+        expiry_tick(
             &mut h,
             &mut gl,
             &mut |_, _| true,
@@ -174,7 +244,7 @@ fn actual_pointer_lossless_1080p_partial_progress_and_natural_lease_expiry() {
     repaint_pixels(&mut h, &red);
     let mut red_sequence = None;
     loop {
-        checked_tick(
+        expiry_tick(
             &mut h,
             &mut gl,
             &mut |pixels, seq| {

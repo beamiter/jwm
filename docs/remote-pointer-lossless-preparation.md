@@ -185,7 +185,7 @@ not be described as fixing a confirmed capture-freeze defect or as validated
 merely because ordinary stop already changes the flag.
 
 The expanded module contains seven real fixtures and two pure tests, nine in
-total, which have not yet been executed for this candidate. The successful
+total. Its unsuccessful candidate runs are recorded below. The successful
 `9b3105` results above describe the baseline only; they do not validate these
 new client/host changes or the 1080p expiry path. Real tests must establish
 partial progress before expiry, permanent loss of input authority, safe
@@ -205,3 +205,25 @@ A fixed-size owned 1920×1080 test constructor now checks its stride and byte
 allocation explicitly; all old constructors retain their original limits. This
 is a test-infrastructure correction, not a production-size-limit change. The
 new real path still requires a successful rerun before acceptance.
+
+
+The second run (`3057fe0c`) again passed eight module checks and failed one.
+The 1080p fixture completed its initial GL frame but had not obtained an input
+grant. It failed on the host freshness precondition path, before the intended
+expiry assertions. The observed capture-start-to-ACK interval was approximately
+1.52 seconds; that interval is not the exact age from native proof readiness
+to the lease request and does not establish a unique error message or sole
+cause. This run does not validate the expiry behavior.
+
+The next candidate keeps the same 1080p test body, one-second proof freshness,
+30-second lease and all assertions. It schedules this test in a mandatory
+independent job using the existing release-grade profiling build. The ordinary
+debug suite explicitly reports this one test as ignored; the mandatory job
+must select it with `--ignored --exact` and verify **one passed, zero ignored**.
+The debug ignore is not counted as a passing test or a substitute for that job.
+
+The initial full-frame CPU oracle is moved after actual presentation feedback,
+while retaining its complete pixel checks. There is no fabricated presentation
+timestamp or relaxed timing gate. Results for this revised CI execution are
+still pending; this is neither a verified performance fix nor physical-hardware
+acceptance. The successful `9b3105` baseline remains separate from this work.
