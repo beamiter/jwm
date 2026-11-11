@@ -1609,6 +1609,7 @@ pub(crate) mod wire_test_client {
 
     impl Client {
         /// Count only the actual initial registry advertisements in this test client.
+        #[cfg(feature = "remote-wayland")]
         pub(crate) fn global_count(&self, interface: &str) -> usize {
             self.globals
                 .iter()
