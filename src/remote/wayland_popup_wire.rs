@@ -1572,6 +1572,169 @@ mod codec_tests {
         }
     }
     #[test]
+    fn every_fixed_popup_codec_rejects_all_truncations_and_extra_lengths() {
+        fn check(bytes: &[u8], decode: impl Fn(&[u8]) -> bool) {
+            assert!(decode(bytes));
+            for length in 0..bytes.len() {
+                assert!(!decode(&bytes[..length]), "truncated length {length}");
+            }
+            // Include transport padding size: padding must be removed by the
+            // authenticated record layer, never accepted by an inner codec.
+            for length in bytes.len() + 1..=512 {
+                let mut extra = bytes.to_vec();
+                extra.resize(length, 0);
+                assert!(!decode(&extra), "extra length {length}");
+            }
+        }
+        let m = sample();
+        check(&m.key.binding.encode().unwrap(), |b| {
+            Binding::decode(b).is_ok()
+        });
+        check(&m.key.encode().unwrap(), |b| FrameKey::decode(b).is_ok());
+        check(&m.encode().unwrap(), |b| Metadata::decode(b).is_ok());
+        check(
+            &Click {
+                key: m.key,
+                sequence: 1,
+                x: 0,
+                y: 0,
+            }
+            .encode()
+            .unwrap(),
+            |b| Click::decode(b).is_ok(),
+        );
+        check(
+            &Status {
+                kind: StatusKind::Ready,
+                metadata: m,
+                action_sequence: 1,
+                ttl_ms: 1,
+            }
+            .encode()
+            .unwrap(),
+            |b| Status::decode(b).is_ok(),
+        );
+    }
+
+    #[test]
+    fn popup_wire_all_byte_tags_have_exact_closed_sets() {
+        let m = sample();
+        let status = Status {
+            kind: StatusKind::Ready,
+            metadata: m,
+            action_sequence: 1,
+            ttl_ms: 1,
+        }
+        .encode()
+        .unwrap();
+        for tag in 0..=u8::MAX {
+            let mut bytes = status;
+            bytes[0] = tag;
+            if tag == 7 {
+                bytes[98..102].fill(0);
+            }
+            let decoded = Status::decode(&bytes);
+            assert_eq!(decoded.is_ok(), tag <= 7, "status tag {tag}");
+            if let Ok(value) = decoded {
+                assert_eq!(value.encode().unwrap(), bytes);
+            }
+            let mut metadata = m.encode().unwrap();
+            metadata[76] = tag;
+            if tag == 0 {
+                metadata[77..].fill(0);
+            }
+            let decoded = Metadata::decode(&metadata);
+            assert_eq!(decoded.is_ok(), tag <= 1, "popup tag {tag}");
+            if let Ok(value) = decoded {
+                assert_eq!(value.encode().unwrap(), metadata);
+            }
+        }
+    }
+
+    #[test]
+    fn popup_wire_integer_limits_are_checked_without_truncation_or_overflow() {
+        let m = sample();
+        for (offset, width) in [
+            (0, 8),
+            (8, 8),
+            (16, 4),
+            (20, 8),
+            (36, 8),
+            (44, 8),
+            (52, 8),
+            (60, 8),
+        ] {
+            let mut bytes = m.key.encode().unwrap();
+            bytes[offset..offset + width].fill(0);
+            assert!(FrameKey::decode(&bytes).is_err());
+            bytes[offset..offset + width].fill(255);
+            assert_eq!(FrameKey::decode(&bytes).unwrap().encode().unwrap(), bytes);
+        }
+        for sequence in [0, 1, MAX_ACTIONS, MAX_ACTIONS + 1, u32::MAX] {
+            let mut bytes = Click {
+                key: m.key,
+                sequence: 1,
+                x: u32::MAX,
+                y: u32::MAX,
+            }
+            .encode()
+            .unwrap();
+            bytes[68..72].copy_from_slice(&sequence.to_be_bytes());
+            // Coordinates are structurally u32; native/ledger bounds are a
+            // separate authority gate, not silently narrowed in decoding.
+            assert_eq!(
+                Click::decode(&bytes).is_ok(),
+                (1..=MAX_ACTIONS).contains(&sequence)
+            );
+            for tag in 0..=7 {
+                for ttl in [0u32, 1, 30000, 30001, u32::MAX] {
+                    let mut bytes = Status {
+                        kind: StatusKind::Ready,
+                        metadata: m,
+                        action_sequence: 1,
+                        ttl_ms: 1,
+                    }
+                    .encode()
+                    .unwrap();
+                    bytes[0] = tag;
+                    bytes[94..98].copy_from_slice(&sequence.to_be_bytes());
+                    bytes[98..102].copy_from_slice(&ttl.to_be_bytes());
+                    let valid = sequence <= MAX_ACTIONS
+                        && if tag == 7 {
+                            sequence > 0 && ttl == 0
+                        } else {
+                            (1..=30000).contains(&ttl)
+                        };
+                    assert_eq!(
+                        Status::decode(&bytes).is_ok(),
+                        valid,
+                        "tag={tag} sequence={sequence} ttl={ttl}"
+                    );
+                }
+            }
+        }
+        for (w, h, valid) in [
+            (1, 1, true),
+            (16384, 4096, true),
+            (16384, 4097, false),
+            (16385, 1, false),
+            (0, 1, false),
+            (1, 0, false),
+            (u32::MAX, u32::MAX, false),
+        ] {
+            let mut bytes = Metadata { popup: None, ..m }.encode().unwrap();
+            bytes[68..72].copy_from_slice(&w.to_be_bytes());
+            bytes[72..76].copy_from_slice(&h.to_be_bytes());
+            assert_eq!(Metadata::decode(&bytes).is_ok(), valid);
+        }
+        for offset in [77, 81, 85, 89] {
+            let mut bytes = m.encode().unwrap();
+            bytes[offset..offset + 4].copy_from_slice(&u32::MAX.to_be_bytes());
+            assert!(Metadata::decode(&bytes).is_err());
+        }
+    }
+
+    #[test]
     fn popup_wire_exact_layout_roundtrips_without_truncating_scope() {
         let m = sample();
         assert_eq!(Metadata::decode(&m.encode().unwrap()).unwrap(), m);

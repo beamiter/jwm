@@ -398,3 +398,51 @@ mod frame_purpose_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod popup_envelope_boundary_tests {
+    use super::*;
+    #[test]
+    fn every_purpose_tag_and_exact_frame_budget_is_checked_before_slicing() {
+        let mut bytes =
+            encode_frame_payload(u64::MAX, FramePurpose::PopupFamilyProof, &[42]).unwrap();
+        for tag in 0..=u8::MAX {
+            bytes[8] = tag;
+            let decoded = decode_frame_payload(&bytes);
+            assert_eq!(decoded.is_ok(), tag <= 3, "purpose {tag}");
+            if let Ok((epoch, purpose, inner)) = decoded {
+                assert_eq!(epoch, u64::MAX);
+                assert_eq!(inner, [42]);
+                assert_eq!(encode_frame_payload(epoch, purpose, inner).unwrap(), bytes);
+            }
+        }
+        bytes[8] = 3;
+        for length in 0..=FRAME_PREFIX_LEN {
+            assert!(decode_frame_payload(&bytes[..length]).is_err());
+        }
+        bytes[..8].fill(0);
+        assert!(decode_frame_payload(&bytes).is_err());
+        let mut boundary = vec![0; MAX_PAYLOAD_LEN + 1];
+        boundary[..8].copy_from_slice(&1u64.to_be_bytes());
+        boundary[8] = 3;
+        assert_eq!(
+            decode_frame_payload(&boundary[..MAX_PAYLOAD_LEN - 1])
+                .unwrap()
+                .2
+                .len(),
+            MAX_FRAME_INNER_PAYLOAD_LEN
+        );
+        assert!(decode_frame_payload(&boundary[..MAX_PAYLOAD_LEN]).is_err());
+        assert!(decode_frame_payload(&boundary).is_err());
+        assert!(
+            encode_frame_payload(
+                1,
+                FramePurpose::PopupFamilyProof,
+                &boundary[..MAX_FRAME_INNER_PAYLOAD_LEN + 1]
+            )
+            .is_err()
+        );
+        // Unlike fixed metadata, the envelope intentionally owns a variable
+        // inner payload. Its trailing bytes are not a canonicality violation.
+    }
+}
