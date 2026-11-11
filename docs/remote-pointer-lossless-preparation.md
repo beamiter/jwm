@@ -197,3 +197,11 @@ execution of the new real protocol/GL test or physical-hardware acceptance.
 Terminal handling drains only bounded, exactly identified in-flight evidence;
 unmatched messages still fail closed, so arbitrary stalls are not promised to
 preserve the video session.
+
+The first new-candidate run (`ea4b7648`) passed eight module checks but failed
+the 1080p fixture during initialization: the shared test SHM helper still had
+its original 800×600 capacity. It did not reach the new lease-expiry assertions.
+A fixed-size owned 1920×1080 test constructor now checks its stride and byte
+allocation explicitly; all old constructors retain their original limits. This
+is a test-infrastructure correction, not a production-size-limit change. The
+new real path still requires a successful rerun before acceptance.

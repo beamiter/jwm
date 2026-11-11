@@ -316,8 +316,11 @@ impl Harness {
             Some(init_image_copy_capture(&native.display.handle()));
         local.state.image_capture_pending = Some(init_image_copy_capture(&local.display.handle()));
         register_test_presentation(&mut local);
-        let mut target =
-            App::with_size_color(&mut native, [0, 0, 255, 255], source_size.0, source_size.1);
+        let mut target = if source_size == (1920, 1080) {
+            App::with_owned_1080p_color(&mut native, [0, 0, 255, 255])
+        } else {
+            App::with_size_color(&mut native, [0, 0, 255, 255], source_size.0, source_size.1)
+        };
         let target_pointer = bind(&mut native, &mut target, recipient_version);
         focus(&mut native, &target);
         target.client.events();
@@ -381,8 +384,11 @@ impl Harness {
         }
         // Distinct from both target phases (red, then blue): a fallback to the
         // unrelated surface cannot masquerade as the click-triggered repaint.
-        let mut other =
-            App::with_size_color(&mut native, [0, 255, 0, 255], source_size.0, source_size.1);
+        let mut other = if source_size == (1920, 1080) {
+            App::with_owned_1080p_color(&mut native, [0, 255, 0, 255])
+        } else {
+            App::with_size_color(&mut native, [0, 255, 0, 255], source_size.0, source_size.1)
+        };
         let other_pointer = bind(&mut native, &mut other, recipient_version);
         focus(&mut native, &target);
         target.client.events();
