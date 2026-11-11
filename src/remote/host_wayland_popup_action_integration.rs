@@ -577,7 +577,8 @@ impl PopupHarness {
             }
             assert!(Instant::now() < deadline, "client close deadline");
         }
-        self.shutdown.store(true, Ordering::Release);
+        // Let the host consume the client's flushed Revoke and retire native
+        // authority. Setting the emergency stop here would race that dequeue.
         let mut host_result = None;
         loop {
             self.tick(gl, None);
@@ -592,6 +593,7 @@ impl PopupHarness {
         host_result
             .unwrap()
             .expect("normal authenticated host teardown");
+        self.shutdown.store(true, Ordering::Release);
         self.client.take().unwrap().join().unwrap();
         self.host.take().unwrap().join().unwrap();
     }
