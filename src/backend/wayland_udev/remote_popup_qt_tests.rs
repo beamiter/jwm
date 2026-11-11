@@ -182,7 +182,7 @@ fn actual_qt_dynamic_private_seat_menu_selection_and_terminal_retirement() {
     let (tx, rx) = mpsc::sync_channel(4);
     let reader = thread::spawn(move || {
         let mut input = BufReader::new(stdout);
-        for _ in 0..4 {
+        for _ in 0..8 {
             let mut line = Vec::new();
             let n = input
                 .by_ref()
@@ -193,11 +193,14 @@ fn actual_qt_dynamic_private_seat_menu_selection_and_terminal_retirement() {
                 return;
             }
             assert!(n < 128, "bounded Qt probe output");
-            assert_eq!(
-                line, b"QT_PROBE_ACTIVATED_ONCE\n",
-                "Qt probe unexpected event"
-            );
-            assert!(tx.try_send(()).is_ok());
+            match line.as_slice() {
+                b"QT_PROBE_ACTIVATED_ONCE\n" => assert!(tx.try_send(()).is_ok()),
+                b"QT_PROBE_BUTTON_PRESSED\n" => eprintln!("JWM_QT_STAGE=toolkit_button_pressed"),
+                b"QT_PROBE_MENU_ABOUT_TO_SHOW\n" => {
+                    eprintln!("JWM_QT_STAGE=toolkit_menu_about_to_show")
+                }
+                _ => panic!("Qt probe unexpected event"),
+            }
         }
         panic!("too many Qt events");
     });
@@ -309,6 +312,7 @@ fn actual_qt_dynamic_private_seat_menu_selection_and_terminal_retirement() {
     );
     proof.retire(&mut server, &mut capture);
     eprintln!("JWM_QT_STAGE=root_clicked");
+    let mut observed_popup_states = 0u8;
     let popup = loop {
         server.roundtrip();
         let active = server
@@ -317,20 +321,41 @@ fn actual_qt_dynamic_private_seat_menu_selection_and_terminal_retirement() {
             .active
             .as_ref()
             .expect("Qt seat or serial incompatible");
+        // Fixed one-time milestones only, never identity, geometry or serial.
+        for (bit, observed, label) in [
+            (1, active.popup.is_some(), "popup_role_created"),
+            (2, active.grabbed, "popup_grab_accepted"),
+            (4, active.popup_mapped, "popup_buffer_mapped"),
+            (
+                8,
+                active
+                    .popup
+                    .as_ref()
+                    .and_then(|surface| server.state.popups.get(&surface.id()))
+                    .is_some_and(|popup| popup.is_initial_configure_sent()),
+                "popup_initial_configure_sent",
+            ),
+        ] {
+            if observed && observed_popup_states & bit == 0 {
+                observed_popup_states |= bit;
+                eprintln!("JWM_QT_STAGE={label}");
+            }
+        }
         assert!(Instant::now() < deadline, "Qt menu mapping timeout");
         if active.grabbed && active.popup_mapped {
             break active
                 .family
                 .snapshot(&server.state)
-                .unwrap()
+                .expect("Qt mapped family snapshot invalid")
                 .layout
                 .popup
                 .clone()
-                .unwrap();
+                .expect("Qt mapped popup snapshot missing");
         }
         assert!(Instant::now() < deadline, "Qt menu mapping timeout");
         thread::yield_now();
     };
+    eprintln!("JWM_QT_STAGE=popup_snapshot_ready");
     assert_eq!(popup.surface.client().unwrap().id(), qt_id);
     let (left, top, width, height) = popup.rect;
     assert!(
@@ -342,8 +367,11 @@ fn actual_qt_dynamic_private_seat_menu_selection_and_terminal_retirement() {
             && top + height <= H as i32,
         "Qt menu outside canvas"
     );
+    eprintln!("JWM_QT_STAGE=popup_geometry_valid");
     let root_pixels = frame(&mut server, &mut capture, original, &mut gl);
+    eprintln!("JWM_QT_STAGE=popup_root_comparison_rendered");
     let proof = frame(&mut server, &mut capture, family, &mut gl);
+    eprintln!("JWM_QT_STAGE=popup_family_rendered");
     let mut changed = 0;
     let mut unchanged = 0;
     for y in 48..H as i32 {
@@ -359,7 +387,10 @@ fn actual_qt_dynamic_private_seat_menu_selection_and_terminal_retirement() {
             }
         }
     }
-    assert!(changed > 0 && unchanged > 0);
+    assert!(
+        changed > 0 && unchanged > 0,
+        "Qt popup pixel evidence missing"
+    );
     callbacks(&surface);
     callbacks(&popup.surface);
     root_pixels.retire(&mut server, &mut capture);

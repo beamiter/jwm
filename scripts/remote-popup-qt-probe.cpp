@@ -40,6 +40,13 @@ int main(int argc, char **argv) {
     menu->setStyleSheet(QStringLiteral("QMenu { background: #e0d040; margin: 0px; border: 1px solid black; } QMenu::item { padding: 10px 24px; }"));
     auto *item = menu->addAction(QStringLiteral("Select owned item"));
     button->setMenu(menu);
+    // Observation only: these signals never open or activate the menu.
+    QObject::connect(button, &QToolButton::pressed, &app, [] {
+        std::puts("QT_PROBE_BUTTON_PRESSED");
+    });
+    QObject::connect(menu, &QMenu::aboutToShow, &app, [] {
+        std::puts("QT_PROBE_MENU_ABOUT_TO_SHOW");
+    });
     unsigned activations = 0;
     QObject::connect(item, &QAction::triggered, &app, [&] {
         if (++activations != 1) {

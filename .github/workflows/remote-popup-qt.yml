@@ -64,11 +64,31 @@ jobs:
           import pathlib, sys
           text = pathlib.Path(sys.argv[1]).read_text(errors="replace")
           allowed = ("root_mapped", "initial_capture", "private_pointer_bound", "root_clicked",
-                     "popup_captured", "selection_delivered", "activation_and_retirement_verified")
+                     "popup_captured", "selection_delivered", "activation_and_retirement_verified",
+                     "toolkit_button_pressed", "toolkit_menu_about_to_show", "popup_role_created",
+                     "popup_grab_accepted", "popup_buffer_mapped", "popup_initial_configure_sent", "popup_snapshot_ready",
+                     "popup_geometry_valid", "popup_root_comparison_rendered", "popup_family_rendered")
           lines = set(text.splitlines())
           for stage in allowed:
               if "JWM_QT_STAGE=" + stage in lines:
                   print("qt_stage=" + stage)
+          failures = {
+              "Qt seat or serial incompatible": "lease_inactive_before_popup_snapshot",
+              "Qt menu mapping timeout": "menu_mapping_deadline",
+              "Qt mapped family snapshot invalid": "mapped_family_snapshot_invalid",
+              "Qt mapped popup snapshot missing": "mapped_popup_snapshot_missing",
+              "Qt menu outside canvas": "menu_outside_fixed_canvas",
+              "Qt canvas constraints": "capture_constraints_rejected",
+              "Qt real render not ready": "capture_not_ready",
+              "Qt pixels outside popup": "outside_popup_pixels_changed",
+              "Qt popup pixel evidence missing": "popup_pixel_evidence_missing",
+              "Qt probe protocol failure": "protocol_failure",
+              "Qt probe sync timeout": "display_sync_deadline",
+              "Qt probe unexpected event": "unexpected_probe_event",
+          }
+          for assertion, category in failures.items():
+              if assertion in text:
+                  print("qt_failure=" + category)
           print("qt_exact_test_passed=" + str("test result: ok. 1 passed; 0 failed; 0 ignored;" in text).lower())
           PY
           test "$result" -eq 0
