@@ -586,6 +586,7 @@ fn actual_control_lossless_original_lease_expires_without_renewal() {
     h.key(140, 30, true);
     h.key(142, 30, false);
     let mut repaired = false;
+    let mut host_result = None;
     let client_result = loop {
         assert!(Instant::now() < deadline, "natural lease cleanup deadline");
         let mut frame = None;
@@ -624,15 +625,29 @@ fn actual_control_lossless_original_lease_expires_without_renewal() {
         if let Ok(result) = h.client_done.try_recv() {
             break result;
         }
-        if let Ok(result) = h.host_done.try_recv() {
-            panic!("host ended before observed client natural TTL: {result:?}");
+        if host_result.is_none()
+            && let Ok(result) = h.host_done.try_recv()
+        {
+            assert!(
+                Instant::now() >= expires,
+                "host ended before either original lease deadline: {result:?}"
+            );
+            // Client cancellation shuts down TCP before joining its workers and
+            // publishing client_done. The resulting host EOF may therefore be
+            // observed first. Retain it, but require the client's independent
+            // natural-TTL result below before treating teardown as successful.
+            host_result = Some(result);
         }
         thread::yield_now();
     };
     assert!(Instant::now() >= expires, "premature client termination");
     let error = client_result.expect_err("this control API closes strictly at its deadline");
-    assert!(
-        error.contains("control lease expired"),
+    // ClientFailure displays the direct cause on its first line, followed by
+    // a user hint. Exact matching also rejects a cleanup-error wrapper that
+    // merely contains the natural-expiry text among other failures.
+    assert_eq!(
+        error.lines().next(),
+        Some("Session: control lease expired"),
         "not a verified natural control deadline: {error}"
     );
     assert!(
@@ -647,7 +662,7 @@ fn actual_control_lossless_original_lease_expires_without_renewal() {
         assert!(h.received.pointer_actions.is_empty());
         h.unexpected
             .assert_no_input_for("distinct bystander client");
-        if let Ok(result) = h.host_done.try_recv() {
+        if let Some(result) = host_result.take().or_else(|| h.host_done.try_recv().ok()) {
             if let Err(error) = result {
                 assert!(
                     host::is_end_of_stream(&error),
