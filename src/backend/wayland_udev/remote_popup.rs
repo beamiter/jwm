@@ -653,3 +653,7 @@ pub(crate) fn lease_timing_for_test(state: &JwmWaylandState) -> Option<(u32, Ins
 #[cfg(all(test, feature = "backend-wayland-udev"))]
 #[path = "remote_popup_backend_tests.rs"]
 mod backend_tests;
+
+#[cfg(all(test, feature = "backend-wayland-udev"))]
+#[path = "remote_popup_gtk_tests.rs"]
+mod gtk_tests;
