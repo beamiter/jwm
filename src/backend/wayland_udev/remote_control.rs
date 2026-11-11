@@ -87,8 +87,17 @@ fn current(state: &JwmWaylandState, lease: &Lease) -> bool {
             keyboard.authorized_keyboard_snapshot_is_current(&lease.snapshot)
         })
 }
+fn needs_keyboard_cleanup(cleanup: bool, held_count: usize) -> bool {
+    cleanup && held_count != 0
+}
 fn finish(state: &mut JwmWaylandState, mut lease: Lease, reason: u32, cleanup: bool) {
-    if cleanup && let Some(keyboard) = state.seat.get_keyboard() {
+    // Held records only successfully delivered remote key presses. A balanced
+    // release already delivered its modifiers; an unused/pointer-only lease
+    // must not emit a synthetic modifiers event merely because it is revoked.
+    // Failed releases keep their held entry and still receive exact cleanup.
+    if needs_keyboard_cleanup(cleanup, lease.held.len())
+        && let Some(keyboard) = state.seat.get_keyboard()
+    {
         let keys: Vec<_> = lease.held.iter().map(|code| (*code + 8).into()).collect();
         keyboard.cleanup_authorized_keyboard(
             &lease.snapshot,
@@ -578,6 +587,16 @@ pub(crate) fn source_destroyed(state: &mut JwmWaylandState, source: &ExtImageCap
 #[cfg(test)]
 mod primitive_tests {
     use super::*;
+    #[test]
+    fn revoke_cleanup_only_balances_delivered_held_keys() {
+        assert!(!needs_keyboard_cleanup(true, 0));
+        assert!(!needs_keyboard_cleanup(false, 0));
+        for held in [1, 2, 32] {
+            assert!(needs_keyboard_cleanup(true, held));
+            // Focus-change cleanup remains suppressed: leave already ends keys.
+            assert!(!needs_keyboard_cleanup(false, held));
+        }
+    }
     #[test]
     fn wheel_requires_explicit_grant_and_unknown_actions_always_fail() {
         for axes in 0..=3 {

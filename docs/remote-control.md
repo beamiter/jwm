@@ -385,7 +385,8 @@ sequence can never be retried out of sync.
 
 The released `02f` baseline uses application version 29 and passed all four
 mainline CI workflows. The next candidate uses version 30; its unified-control
-PNG path has incomplete first-run CI results and awaits a corrected rerun (see
+PNG path passed five of six new second-round scenarios and awaits third-round
+CI for a minimal no-held-key cleanup correction (see
 [the bounded validation summary](remote-pointer-lossless-preparation.md#unified-control-plus-png-v30-candidate)). For that candidate, earlier versions are
 deliberately incompatible, so update `jwm-remote` on both machines together;
 negotiation rejects an older peer before screen or input data is exchanged.

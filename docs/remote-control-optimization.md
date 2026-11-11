@@ -7,9 +7,12 @@ It is not completion of the entire remote-control roadmap.
 This document retains historical implementation stages and their introduction
 versions. For current usage and compatibility, see [remote-control.md](remote-control.md);
 the released baseline is application v29 (`02f`, all four mainline CI workflows passed).
-The next candidate uses application v30; its first real unified-control repair
-run passed two of six scenarios. Selective-feedback fixture and terminal-expiry
-classification corrections await rerun, without relaxed assertions or deadlines. Transport v3 is unchanged.
+The next candidate uses application v30; its second real unified-control repair
+run passed five of six scenarios. A no-held-key cleanup modifiers notification
+failed the remaining zero-event assertion. A minimal held-state cleanup fix
+passed static review; third-round CI remains pending, with assertions and
+deadlines unchanged. The generic original failure did not identify the receiver
+and does not establish a bystander leak. Transport v3 is unchanged.
 The v27 explicit native pointer-only plus PNG baseline (`9b3105`) passed its
 three candidate and four mainline workflows; see the
 [pointer/lossless evidence](remote-pointer-lossless-preparation.md). The separate

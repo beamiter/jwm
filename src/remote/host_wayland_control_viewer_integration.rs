@@ -169,13 +169,16 @@ impl Recipient {
         }
     }
     fn assert_no_input(&self) {
+        self.assert_no_input_for("unselected");
+    }
+    fn assert_no_input_for(&self, recipient: &str) {
         assert!(
             self.pointer_wire.is_empty(),
-            "unselected pointer received {self:?}"
+            "{recipient} pointer received {self:?}"
         );
         assert!(
             self.keyboard_wire.is_empty(),
-            "unselected keyboard received {self:?}"
+            "{recipient} keyboard received {self:?}"
         );
     }
 }

@@ -439,5 +439,18 @@ proof. The terminal correction freezes the earlier applicable deadline in its
 receipt and gives expiry classification precedence only when local receipt time
 has already reached that deadline. That classification alone does not prove
 natural expiry: the real TTL test separately checks the original native and
-client deadlines and a single lease. These corrections await rerun; no complete
-v30 acceptance or physical-hardware validation is claimed.
+client deadlines and a single lease. Those corrections were exercised in the second `8ed` run: five of the six new
+scenarios passed. The Accepted-input rejection case failed its zero-event
+assertion on an empty-modifiers notification. The earlier generic assertion did
+not identify whether the receiver was the target or the bystander, so it does
+not establish a bystander leak. The confirmed mechanism was native cleanup
+sending modifiers-zero to the original authorized snapshot even with no held
+keys.
+
+The minimal third-round correction performs cleanup only when the held set is
+nonempty. Successful key-up already sends modifiers/release; a failed release
+retains held state for cleanup. Independent static review passed. Zero-event and
+deadline assertions are unchanged; receiver labels are now explicit. Third-round
+CI has not run yet. Mandatory optimized 1080p passed in the second round; general
+and X11 results remain under verification. No complete v30 acceptance or
+physical-hardware validation is claimed.

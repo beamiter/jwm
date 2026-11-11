@@ -57,7 +57,8 @@ fn tick(
     if let Ok(result) = h.host_done.try_recv() {
         panic!("{phase}: host ended {result:?}");
     }
-    h.unexpected.assert_no_input();
+    h.unexpected
+        .assert_no_input_for("distinct bystander client");
     thread::yield_now();
     readback
 }
@@ -239,7 +240,7 @@ fn actual_control_lossless_requires_explicit_host_permission() {
     let deadline = Instant::now() + Duration::from_secs(8);
     loop {
         h.tick(&mut gl, false);
-        h.received.assert_no_input();
+        h.received.assert_no_input_for("original selected target");
         if let Ok(result) = h.client_done.try_recv() {
             let error = result.expect_err("missing explicit host lossless consent");
             assert!(
@@ -269,8 +270,9 @@ fn actual_control_lossless_requires_explicit_host_permission() {
         assert!(Instant::now() < deadline, "host denial teardown timeout");
         thread::yield_now();
     }
-    h.received.assert_no_input();
-    h.unexpected.assert_no_input();
+    h.received.assert_no_input_for("original selected target");
+    h.unexpected
+        .assert_no_input_for("distinct bystander client");
     assert_eq!(remote_control::attempts_for_test(&h.native.state), 0);
     assert!(!remote_control::active(&h.native.state));
     h.client.take().unwrap().join().unwrap();
@@ -283,8 +285,9 @@ fn accepted_without_presenting(h: &mut Harness, gl: &mut HeadlessSmithayGles) {
     h.hold_visual_repair = true;
     loop {
         h.tick(gl, true);
-        h.received.assert_no_input();
-        h.unexpected.assert_no_input();
+        h.received.assert_no_input_for("original selected target");
+        h.unexpected
+            .assert_no_input_for("distinct bystander client");
         if let Ok(result) = h.client_done.try_recv() {
             panic!(
                 "client ended before Accepted: {result:?}; repair={:?}",
@@ -337,8 +340,9 @@ fn terminal_repair_input(mut h: Harness, gl: &mut HeadlessSmithayGles) {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         h.tick(gl, false);
-        h.received.assert_no_input();
-        h.unexpected.assert_no_input();
+        h.received.assert_no_input_for("original selected target");
+        h.unexpected
+            .assert_no_input_for("distinct bystander client");
         if let Ok(result) = h.client_done.try_recv() {
             let error = result.expect_err("input during accepted repair must terminate");
             assert!(
@@ -356,8 +360,9 @@ fn terminal_repair_input(mut h: Harness, gl: &mut HeadlessSmithayGles) {
     h.shutdown.store(true, Ordering::Release);
     loop {
         h.tick(gl, false);
-        h.received.assert_no_input();
-        h.unexpected.assert_no_input();
+        h.received.assert_no_input_for("original selected target");
+        h.unexpected
+            .assert_no_input_for("distinct bystander client");
         if let Ok(result) = h.host_done.try_recv() {
             if let Err(error) = result {
                 assert!(
@@ -427,7 +432,8 @@ fn actual_control_lossless_held_shift_release_completes_before_repair() {
         // actual VisualRepair commit is withheld, never the proof needed to
         // make the Offer eligible for acceptance.
         h.tick(&mut gl, true);
-        h.unexpected.assert_no_input();
+        h.unexpected
+            .assert_no_input_for("distinct bystander client");
         assert!(
             Instant::now() < deadline,
             "release/repair transition timed out"
@@ -521,7 +527,8 @@ fn actual_control_lossless_lock_and_unmap_aba_terminate_one_resource() {
                 h.received.pointer_wire
             );
             assert!(h.received.keys.is_empty());
-            h.unexpected.assert_no_input();
+            h.unexpected
+                .assert_no_input_for("distinct bystander client");
             assert!(!remote_control::active(&h.native.state));
             assert_eq!(remote_control::attempts_for_test(&h.native.state), 1);
             if !client_finished && let Ok(result) = h.client_done.try_recv() {
@@ -600,7 +607,8 @@ fn actual_control_lossless_original_lease_expires_without_renewal() {
                 repaired = true;
             }
         }
-        h.unexpected.assert_no_input();
+        h.unexpected
+            .assert_no_input_for("distinct bystander client");
         assert!(h.received.pointer_actions.is_empty());
         assert!([(30, 1), (30, 0)].starts_with(&h.received.keys));
         assert_eq!(*h.control_lifetime.lock().unwrap(), Some(client));
@@ -637,7 +645,8 @@ fn actual_control_lossless_original_lease_expires_without_renewal() {
         h.tick(&mut gl, false);
         assert_eq!(h.received.keys, [(30, 1), (30, 0)]);
         assert!(h.received.pointer_actions.is_empty());
-        h.unexpected.assert_no_input();
+        h.unexpected
+            .assert_no_input_for("distinct bystander client");
         if let Ok(result) = h.host_done.try_recv() {
             if let Err(error) = result {
                 assert!(
