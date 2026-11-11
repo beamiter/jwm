@@ -2440,14 +2440,14 @@ fn validate_window_policy(options: &HostOptions) -> RemoteResult<()> {
             || options.allow_wayland_control
             || options.allow_wayland_text
             || (options.allow_wayland_scroll && !options.allow_wayland_pointer)
-            || options.allow_wayland_horizontal_scroll
+            || (options.allow_wayland_horizontal_scroll && !options.allow_wayland_pointer)
             || (options.allow_wayland_keyboard
                 && (!options.wayland_select
                     || !options.once
                     || options.wayland_popups
                     || options.wayland_resize_follow)))
     {
-        return Err(invalid_data("static lossless requires read-only or exclusive native keyboard/pointer permissions without text, clipboard, control, horizontal scroll or remote resize").into());
+        return Err(invalid_data("static lossless requires read-only or exclusive native keyboard/pointer permissions without text, clipboard, control or remote resize").into());
     }
 
     if options.allow_wayland_text
@@ -7619,7 +7619,7 @@ mod tests {
     }
 
     #[test]
-    fn lossless_vertical_scroll_requires_exclusive_native_pointer() {
+    fn lossless_scroll_axes_require_exclusive_native_pointer() {
         let mut options = test_host_source_options();
         options.capture_area = CaptureArea::Root;
         options.wayland_select = true;
@@ -7630,11 +7630,24 @@ mod tests {
             validate_window_policy(&options).is_ok(),
             cfg!(feature = "remote-wayland")
         );
+        for (vertical, horizontal) in [(false, false), (true, false), (false, true), (true, true)] {
+            options.allow_wayland_scroll = vertical;
+            options.allow_wayland_horizontal_scroll = horizontal;
+            assert_eq!(
+                validate_window_policy(&options).is_ok(),
+                cfg!(feature = "remote-wayland")
+            );
+            if vertical || horizontal {
+                let mut no_pointer = options.clone();
+                no_pointer.allow_wayland_pointer = false;
+                assert!(validate_window_policy(&no_pointer).is_err());
+            }
+        }
         for case in 0..10 {
             let mut denied = options.clone();
             match case {
                 0 => denied.allow_wayland_pointer = false,
-                1 => denied.allow_wayland_horizontal_scroll = true,
+                1 => denied.allow_input = true,
                 2 => denied.allow_wayland_control = true,
                 3 => denied.allow_wayland_keyboard = true,
                 4 => denied.allow_wayland_text = true,

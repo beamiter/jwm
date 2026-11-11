@@ -1200,6 +1200,129 @@ mod tests {
             Some((MessageKind::WaylandPointerRepairRequest, t))
         );
     }
+    fn horizontal_wheel(sequence: u64, left: bool) -> ViewerEvent {
+        let mut event = motion(sequence);
+        if let ViewerEvent::WaylandPointer { kind, .. } = &mut event {
+            *kind = if left {
+                crate::remote::x11_viewer::WaylandPointerEventKind::ScrollLeft
+            } else {
+                crate::remote::x11_viewer::WaylandPointerEventKind::ScrollRight
+            };
+        }
+        event
+    }
+    #[test]
+    fn repair_scroll_axes_are_independent_and_all_directions_complete_exactly_once() {
+        let now = Instant::now();
+        for vertical in [false, true] {
+            for horizontal in [false, true] {
+                for direction in 0..4 {
+                    let (mut p, _) = fixture(now);
+                    p.scroll_enabled = vertical;
+                    p.horizontal_enabled = horizontal;
+                    let event = match direction {
+                        0 => wheel(5, true),
+                        1 => wheel(5, false),
+                        2 => horizontal_wheel(5, true),
+                        _ => horizontal_wheel(5, false),
+                    };
+                    let action = p.event(&event, now).unwrap();
+                    if !(if direction < 2 { vertical } else { horizontal }) {
+                        assert!(action.is_none());
+                        assert_eq!(p.sequence, 0);
+                        assert_eq!(p.repair.fence.as_ref().unwrap().repair_watermark(), Some(0));
+                        continue;
+                    }
+                    let action = action.unwrap();
+                    assert_eq!(
+                        action.kind,
+                        [
+                            PointerActionKind::ScrollUp,
+                            PointerActionKind::ScrollDown,
+                            PointerActionKind::ScrollLeft,
+                            PointerActionKind::ScrollRight
+                        ][direction]
+                    );
+                    let deadline = p.repair.lease;
+                    assert!(p.repair_sent(&action, now).unwrap());
+                    assert!(p.event(&event, now).unwrap().is_none());
+                    assert_eq!(p.repair.fence.as_ref().unwrap().repair_watermark(), None);
+                    let receipt = ActionReceipt {
+                        lease: action.lease_epoch,
+                        sequence: action.sequence,
+                        consumed: action.scope.into(),
+                    };
+                    p.repair_completed(receipt, now).unwrap();
+                    assert_eq!(p.repair.fence.as_ref().unwrap().repair_watermark(), Some(1));
+                    assert_eq!(p.repair.lease, deadline);
+                    assert!(!p.fresh(now));
+                    assert!(p.repair_completed(receipt, now).is_err());
+                }
+            }
+        }
+    }
+    #[test]
+    fn repair_horizontal_wheels_during_phase_hold_or_expiry_are_never_replayed() {
+        let now = Instant::now();
+        for state in 0..6 {
+            let (mut p, t) = match state {
+                0 => requested(now),
+                1 => accepted(now),
+                _ => fixture(now),
+            };
+            p.horizontal_enabled = true;
+            match state {
+                2 => {
+                    p.repair.last_input = Some(now);
+                    p.repair_offer(t, now).unwrap();
+                    assert_eq!(
+                        p.repair_outgoing(now, false).unwrap().unwrap().0,
+                        MessageKind::WaylandPointerRepairDecline
+                    );
+                }
+                3 => {
+                    p.event(
+                        &ViewerEvent::Key {
+                            keycode: 38,
+                            pressed: true,
+                        },
+                        now,
+                    )
+                    .unwrap();
+                }
+                4 => {
+                    p.left_down = true;
+                }
+                5 => {
+                    p.repair.lease.as_mut().unwrap().1 = now;
+                }
+                _ => {}
+            }
+            for left in [false, true] {
+                assert!(p.event(&horizontal_wheel(5, left), now).unwrap().is_none());
+            }
+            assert_eq!(p.sequence, 0);
+            assert!(p.repair.action_deadline.is_none());
+            assert_eq!(p.repair.last_input, Some(now));
+            if state == 3 {
+                p.event(
+                    &ViewerEvent::Key {
+                        keycode: 38,
+                        pressed: false,
+                    },
+                    now,
+                )
+                .unwrap();
+                assert_eq!(p.sequence, 0);
+                assert!(p.event(&horizontal_wheel(5, true), now).unwrap().is_some());
+            }
+            if state == 5 {
+                assert!(p.ended);
+                p.presented(scope(6).into(), now);
+                assert!(p.event(&horizontal_wheel(6, false), now).unwrap().is_none());
+            }
+        }
+    }
     #[test]
     fn repair_vertical_scroll_needs_permission_and_exact_action_completion() {
         let now = Instant::now();

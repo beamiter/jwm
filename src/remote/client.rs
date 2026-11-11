@@ -551,12 +551,11 @@ fn validate_viewer_backend(options: &ClientOptions) -> RemoteResult<()> {
     let lossless_pointer = options.wayland_pointer
         && options.viewer_backend == ViewerBackend::Wayland
         && !options.view_only
-        && !options.wayland_keyboard
-        && !options.wayland_horizontal_scroll;
+        && !options.wayland_keyboard;
     if options.static_lossless
         && (!(options.view_only || lossless_keyboard || lossless_pointer)
             || (options.wayland_pointer && !lossless_pointer)
-            || (options.wayland_scroll && !lossless_pointer)
+            || ((options.wayland_scroll || options.wayland_horizontal_scroll) && !lossless_pointer)
             || options.wayland_control
             || options.wayland_text.is_some()
             || options.clipboard
@@ -564,7 +563,7 @@ fn validate_viewer_backend(options: &ClientOptions) -> RemoteResult<()> {
             || options.resize_source.is_some()
             || options.follow_source_size)
     {
-        return Err(invalid_data("static lossless requires view-only or exclusive Wayland keyboard/pointer mode without horizontal scroll, control, text, clipboard or remote resize; vertical scroll requires exclusive pointer mode").into());
+        return Err(invalid_data("static lossless requires view-only or exclusive Wayland keyboard/pointer mode without control, text, clipboard or remote resize; each scroll axis requires exclusive pointer mode and its own permission").into());
     }
 
     if options.wayland_text.is_some()
@@ -1404,11 +1403,10 @@ fn negotiate_session(
                 || hello.stream.wayland_control
                 || hello.stream.wayland_text
                 || hello.stream.window_resize
-                || (hello.stream.wayland_scroll
+                || ((hello.stream.wayland_scroll || hello.stream.wayland_horizontal_scroll)
                     && (!request_wayland_pointer
                         || !hello.stream.wayland_pointer
-                        || hello.stream.wayland_keyboard))
-                || hello.stream.wayland_horizontal_scroll))
+                        || hello.stream.wayland_keyboard))))
     {
         return Err(invalid_data(
             "static lossless permission was not mutually negotiated exclusively",

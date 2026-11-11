@@ -734,11 +734,19 @@ mod tests {
         }
     }
     #[test]
-    fn vertical_native_completion_cancels_offer_and_advances_one_watermark() {
+    fn scroll_native_completion_cancels_offer_and_advances_one_watermark() {
         use crate::remote::wayland_pointer_wire::PointerActionKind;
-        for kind in [PointerActionKind::ScrollUp, PointerActionKind::ScrollDown] {
+        for kind in [
+            PointerActionKind::ScrollUp,
+            PointerActionKind::ScrollDown,
+            PointerActionKind::ScrollLeft,
+            PointerActionKind::ScrollRight,
+        ] {
             let (s, token, at) = quiesced();
-            s.scroll_enabled.store(true, Ordering::Release);
+            s.scroll_enabled
+                .store(!kind.is_horizontal(), Ordering::Release);
+            s.horizontal_scroll_enabled
+                .store(kind.is_horizontal(), Ordering::Release);
             let mut phase = RepairPhase::new(token.lease, at + Duration::from_secs(30));
             let offer = phase
                 .offer(
@@ -781,9 +789,14 @@ mod tests {
         }
     }
     #[test]
-    fn vertical_action_cannot_complete_during_an_accepted_repair() {
+    fn scroll_action_cannot_complete_during_an_accepted_repair() {
         use crate::remote::wayland_pointer_wire::PointerActionKind;
-        for kind in [PointerActionKind::ScrollUp, PointerActionKind::ScrollDown] {
+        for kind in [
+            PointerActionKind::ScrollUp,
+            PointerActionKind::ScrollDown,
+            PointerActionKind::ScrollLeft,
+            PointerActionKind::ScrollRight,
+        ] {
             let (s, token, at) = quiesced();
             let action = PointerAction {
                 lease_epoch: token.lease,

@@ -326,7 +326,7 @@ enum Command {
         allow_wayland_text: bool,
 
         /// Allow bounded lossless repairs in read-only or explicit native keyboard/pointer sessions.
-        #[arg(long, conflicts_with_all=["allow_input","allow_clipboard","allow_window_resize","allow_wayland_control","allow_wayland_text","allow_wayland_horizontal_scroll"])]
+        #[arg(long, conflicts_with_all=["allow_input","allow_clipboard","allow_window_resize","allow_wayland_control","allow_wayland_text"])]
         allow_static_lossless: bool,
 
         /// Experimentally encode exact bounded vertical screen shifts as copy plus changed pixels.
@@ -526,7 +526,7 @@ enum Command {
         wayland_text_stdin: bool,
 
         /// Explicitly request bounded PNG repair of stable encoded RGB pixels.
-        #[arg(long, requires="lossless_session_mode", conflicts_with_all=["wayland_text_stdin","wayland_control","wayland_horizontal_scroll","clipboard","grab_input","resize_source","follow_source_size"])]
+        #[arg(long, requires="lossless_session_mode", conflicts_with_all=["wayland_text_stdin","wayland_control","clipboard","grab_input","resize_source","follow_source_size"])]
         static_lossless: bool,
 
         /// Separately request single-notch vertical scroll; never smooth or horizontal.
@@ -4199,7 +4199,6 @@ mod static_lossless_cli_tests {
         for flag in [
             "--allow-wayland-keyboard",
             "--allow-wayland-control",
-            "--allow-wayland-horizontal-scroll",
             "--wayland-popups",
             "--wayland-resize-follow",
             "--allow-clipboard",
@@ -4213,7 +4212,6 @@ mod static_lossless_cli_tests {
         for flag in [
             "--wayland-keyboard",
             "--wayland-control",
-            "--wayland-horizontal-scroll",
             "--view-only",
             "--clipboard",
             "--grab-input",
@@ -4271,7 +4269,6 @@ mod static_lossless_cli_tests {
             assert!(Cli::try_parse_from(args).is_err(), "missing {flag}");
         }
         for flag in [
-            "--allow-wayland-horizontal-scroll",
             "--allow-wayland-control",
             "--allow-wayland-keyboard",
             "--allow-wayland-text",
@@ -4286,7 +4283,6 @@ mod static_lossless_cli_tests {
             assert!(Cli::try_parse_from(args).is_err(), "{flag}");
         }
         for flag in [
-            "--wayland-horizontal-scroll",
             "--wayland-control",
             "--wayland-keyboard",
             "--wayland-text-stdin",
@@ -4318,6 +4314,109 @@ mod static_lossless_cli_tests {
         // The backend requirement is checked at dispatch, not inferred from the flags.
         assert!(validate_native_lossless_cli(true, true, ViewerBackend::X11).is_err());
     }
+    #[test]
+    fn horizontal_pointer_lossless_is_independent_and_not_saved_or_ssh() {
+        for vertical in [false, true] {
+            let mut h = vec![
+                "jwm-remote",
+                "host",
+                "--wayland-select",
+                "--once",
+                "--allow-wayland-pointer",
+                "--allow-static-lossless",
+                "--allow-wayland-horizontal-scroll",
+            ];
+            let mut c = vec![
+                "jwm-remote",
+                "connect",
+                "host",
+                "--viewer-backend",
+                "wayland",
+                "--wayland-pointer",
+                "--static-lossless",
+                "--wayland-horizontal-scroll",
+            ];
+            if vertical {
+                h.push("--allow-wayland-scroll");
+                c.push("--wayland-scroll");
+            }
+            match Cli::try_parse_from(&h).unwrap().command {
+                Command::Host {
+                    allow_wayland_scroll,
+                    allow_wayland_horizontal_scroll,
+                    ..
+                } => {
+                    assert_eq!(allow_wayland_scroll, vertical);
+                    assert!(allow_wayland_horizontal_scroll);
+                }
+                _ => panic!("host"),
+            }
+            match Cli::try_parse_from(&c).unwrap().command {
+                Command::Connect {
+                    wayland_scroll,
+                    wayland_horizontal_scroll,
+                    ..
+                } => {
+                    assert_eq!(wayland_scroll, vertical);
+                    assert!(wayland_horizontal_scroll);
+                }
+                _ => panic!("client"),
+            }
+            assert!(profile_from_command(Cli::try_parse_from(&c).unwrap().command).is_err());
+            for flag in ["--allow-wayland-pointer", "--wayland-select", "--once"] {
+                assert!(Cli::try_parse_from(h.iter().copied().filter(|arg| *arg != flag)).is_err());
+            }
+            for flag in [
+                "--allow-wayland-keyboard",
+                "--allow-wayland-control",
+                "--allow-wayland-text",
+                "--allow-clipboard",
+                "--allow-window-resize",
+                "--wayland-popups",
+                "--wayland-resize-follow",
+            ] {
+                let mut mixed = h.clone();
+                mixed.push(flag);
+                assert!(Cli::try_parse_from(mixed).is_err());
+            }
+            for flag in [
+                "--wayland-keyboard",
+                "--wayland-control",
+                "--view-only",
+                "--wayland-text-stdin",
+                "--clipboard",
+                "--grab-input",
+                "--follow-source-size",
+            ] {
+                let mut mixed = c.clone();
+                mixed.push(flag);
+                assert!(Cli::try_parse_from(mixed).is_err());
+            }
+            let mut reconnect = c.clone();
+            reconnect.extend(["--reconnect-attempts", "1"]);
+            assert!(Cli::try_parse_from(reconnect).is_err());
+        }
+        for flag in [
+            "--wayland-horizontal-scroll",
+            "--static-lossless",
+            "--wayland-pointer",
+        ] {
+            assert!(Cli::try_parse_from(["jwm-remote", "ssh", "host", flag]).is_err());
+        }
+        assert!(
+            Cli::try_parse_from([
+                "jwm-remote",
+                "connect",
+                "host",
+                "--view-only",
+                "--static-lossless",
+                "--wayland-horizontal-scroll"
+            ])
+            .is_err()
+        );
+        assert!(validate_native_lossless_cli(true, true, ViewerBackend::X11).is_err());
+    }
+
     #[test]
     fn capability_requires_explicit_readonly_and_is_not_saved() {
         assert!(matches!(

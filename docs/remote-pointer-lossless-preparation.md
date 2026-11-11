@@ -1,8 +1,8 @@
 # Native pointer-only plus static lossless repair
 
-The v27 baseline and its validation history are recorded below. The final
-section describes the separate v28 vertical-scroll combination now under
-development; its new permission combination has not yet been validated in CI.
+The v27 baseline and its validation history are recorded below. The v28 vertical-scroll baseline is validated below. The final section
+describes the separate v29 horizontal-scroll combination under development;
+its new permission combination has not yet been validated in CI.
 
 ## Candidate scope and status
 
@@ -329,3 +329,54 @@ but this does not accept the scroll combination. The follow-up permits only the
 vertical pointer-only combination in that shared decoder and adds actual client
 and server Hello round trips, a 64-combination permission matrix, and malformed
 flag/version negatives. Production native authorization is not relaxed.
+
+
+## Validated vertical-scroll baseline (`fa8`)
+
+The `fa8` mainline passed all four CI workflows. Three 800×600 executions
+completed eight repair batches to full-image SSE=0 and delivered two actual
+notches, taking 17,980 / 17,976 / 18,009 ms. The mandatory optimized 1080p run
+completed 13 cycles and observed expiry at 30,150 ms, with remaining SSE
+73,065,117. These are owned software-GL observations, not physical-hardware
+acceptance or a general latency bound. The 1080p result remains partial; input
+authority is not extended to finish all repair debt.
+
+## Next candidate: independent horizontal scroll with PNG (v29)
+
+The next combination uses application v29 with strict matching peers. Older
+v28 endpoints are rejected without downgrade. Transport v3, capability payload
+size and the existing native action encodings remain unchanged. Horizontal
+scroll is a separate explicit permission at both endpoints; vertical consent
+does not grant it, and horizontal-only use does not require vertical consent:
+
+```sh
+jwm-remote host --wayland-select --once --allow-wayland-pointer --allow-static-lossless --allow-wayland-horizontal-scroll
+jwm-remote connect HOST --viewer-backend wayland --wayland-pointer --static-lossless --wayland-horizontal-scroll
+```
+
+To authorize both directions, also add `--allow-wayland-scroll` on the host and
+`--wayland-scroll` on the viewer. The two permissions allow separate single-axis
+notches, never mixed axes in one actual pointer frame. No Shift translation,
+smooth scrolling, multinotch batching, drag or modifier-click is added.
+Keyboard, unified control, text, legacy input, clipboard, popup capture and
+resize combinations remain prohibited. The native Wayland viewer requirement,
+no reconnect/profile authorization, one-notch-per-fresh-proof rule and original
+30-second nonrenewable lease remain in force. SSH mode does not acquire these
+new CLI permissions.
+
+The shared capability decoder now accepts axis bits 0, 1, 2 or 3 for the
+PNG/pointer mode, while unknown bits and scroll without the required native
+pointer mode remain invalid. Pure regression cases exercise actual client and
+server Hello encoding/decoding, all 64 native-mode/axis combinations,
+horizontal-only and both-axis round trips, old/future version rejection,
+legacy/clipboard/resize restrictions, and CLI/profile/SSH guards. These new
+cases await centralized execution and real recipient/presentation CI; the
+successful `fa8` results apply only to the prior vertical-scroll baseline.
+No v29 functional success or physical acceptance is claimed yet.
+
+The horizontal candidate passes local strict Clippy and 118 pure regressions,
+including all message capability sibling modules and both actual Hello decoders.
+Independent static review found no remaining contract mismatch. The combined
+fixture list now contains 22 tests, including the unchanged independently required
+optimized 1080p test; seven new horizontal cases and two additional malicious raw
+records await actual CI. No local display, socket or renderer acceptance is claimed.

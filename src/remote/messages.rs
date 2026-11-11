@@ -8,10 +8,10 @@ use super::x11_keymap::{KeymapTable, MAX_ENCODED_KEYMAP_LEN};
 use std::io;
 
 const APPLICATION_MAGIC: &[u8; 8] = b"JWMREM01";
-/// v28 permits separately authorized vertical scroll with pointer-only PNG repair.
+/// v29 permits independently authorized vertical/horizontal scroll with pointer-only PNG repair.
 /// Native action receipts and proof-gated repair phases remain mandatory.
 /// Both peers must upgrade; no fallback to an older authorization contract.
-pub const APPLICATION_VERSION: u16 = 28;
+pub const APPLICATION_VERSION: u16 = 29;
 const HELLO_PREFIX_LEN: usize = 11;
 const STREAM_CAPABILITIES_LEN: usize = 33;
 const SERVER_HELLO_LEN: usize = HELLO_PREFIX_LEN + STREAM_CAPABILITIES_LEN;
@@ -205,7 +205,7 @@ impl StreamCapabilities {
             || payload[32] > 1
             || (payload[32] == 1
                 && (payload[23..26].iter().any(|b| *b != 0)
-                    || (payload[28] != 0 && (payload[28] != 1 || payload[27] != 1))
+                    || (payload[28] != 0 && payload[27] != 1)
                     || payload[30] != 0
                     || payload[31] != 0))
             || payload[31] > 1
@@ -1673,7 +1673,7 @@ mod scroll_capability_tests {
     use super::*;
     #[test]
     fn scroll_is_explicit_boolean_and_requires_pointer_or_control_in_version_23() {
-        assert_eq!(APPLICATION_VERSION, 28);
+        assert_eq!(APPLICATION_VERSION, 29);
         assert_eq!(STREAM_CAPABILITIES_LEN, 33);
         let mut caps = StreamCapabilities::default();
         assert!(
@@ -1822,7 +1822,7 @@ mod static_lossless_capability_tests {
                 .unwrap()
                 .wayland_pointer
         );
-        // Vertical scroll is independently allowed with native pointer only.
+        // Each scroll axis is independently allowed with native pointer only.
         // Every other input/clipboard/resize combination remains rejected.
         let mut vertical = pointer;
         vertical[28] = 1;
@@ -1839,7 +1839,9 @@ mod static_lossless_capability_tests {
         for v in [2, 3] {
             let mut scroll = pointer;
             scroll[28] = v;
-            assert!(StreamCapabilities::decode(&scroll).is_err());
+            let decoded = StreamCapabilities::decode(&scroll).unwrap();
+            assert!(decoded.wayland_horizontal_scroll);
+            assert_eq!(decoded.wayland_scroll, v == 3);
         }
         for v in [2, 255] {
             let mut b = bytes;
@@ -1893,13 +1895,35 @@ mod lossless_scroll_hello_tests {
         let s = server(caps);
         assert_eq!(ClientHello::decode(&c.encode()).unwrap(), c);
         assert_eq!(ServerHello::decode(&s.encode()).unwrap(), s);
-        for version in [27_u16, 29] {
+        for version in [27_u16, 28, 30] {
             let mut cb = c.encode();
             cb[8..10].copy_from_slice(&version.to_be_bytes());
             assert!(ClientHello::decode(&cb).is_err());
             let mut sb = s.encode();
             sb[8..10].copy_from_slice(&version.to_be_bytes());
             assert!(ServerHello::decode(&sb).is_err());
+        }
+    }
+
+    #[test]
+    fn horizontal_only_and_both_axes_roundtrip_without_implicit_vertical_permission() {
+        for vertical in [false, true] {
+            let caps = StreamCapabilities {
+                static_lossless: true,
+                wayland_pointer: true,
+                wayland_scroll: vertical,
+                wayland_horizontal_scroll: true,
+                ..Default::default()
+            };
+            assert_eq!(StreamCapabilities::decode(&caps.encode()).unwrap(), caps);
+            assert_eq!(
+                ClientHello::decode(&client(caps).encode()).unwrap(),
+                client(caps)
+            );
+            assert_eq!(
+                ServerHello::decode(&server(caps).encode()).unwrap(),
+                server(caps)
+            );
         }
     }
 
@@ -1919,9 +1943,9 @@ mod lossless_scroll_hello_tests {
             };
             let permitted = !caps.wayland_control
                 && !caps.wayland_text
-                && !caps.wayland_horizontal_scroll
                 && !(caps.wayland_keyboard && caps.wayland_pointer)
-                && (!caps.wayland_scroll || (caps.wayland_pointer && !caps.wayland_keyboard));
+                && (!(caps.wayland_scroll || caps.wayland_horizontal_scroll)
+                    || (caps.wayland_pointer && !caps.wayland_keyboard));
             assert_eq!(
                 ClientHello::decode(&client(caps).encode()).is_ok(),
                 permitted,
@@ -1969,7 +1993,7 @@ mod lossless_scroll_hello_tests {
             assert!(ClientHello::decode(&c.encode()).is_err());
             assert!(ServerHello::decode(&s.encode()).is_err());
         }
-        for bits in [2, 3, 4, 128, 255] {
+        for bits in [4, 5, 6, 7, 128, 255] {
             let mut cb = client(caps).encode();
             cb[HELLO_PREFIX_LEN + 28] = bits;
             assert!(ClientHello::decode(&cb).is_err());

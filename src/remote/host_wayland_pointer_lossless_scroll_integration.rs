@@ -1,27 +1,53 @@
 //! Vertical wheel consent remains independent while PNG repairs are video only.
 use super::*;
 
-fn assert_wheel_800(events: &[(u16, Vec<u32>)], step: i32) {
+fn wheel_axis_kind(horizontal: bool) -> Axis {
+    if horizontal {
+        Axis::HorizontalScroll
+    } else {
+        Axis::VerticalScroll
+    }
+}
+
+fn assert_wheel_800(events: &[(u16, Vec<u32>)], step: i32, horizontal: bool) {
     assert_eq!(
         events.iter().map(|e| e.0).collect::<Vec<_>>(),
-        [2, 6, 8, 4, 5]
+        if horizontal {
+            [2, 6, 9, 4, 5]
+        } else {
+            [2, 6, 8, 4, 5]
+        }
     );
     assert_eq!(&events[0].1[1..], &[160 * 256, 120 * 256]);
     assert_eq!(events[1].1, [0]);
-    assert_eq!(events[2].1, [0, step as u32]);
-    assert_eq!(&events[3].1[1..], &[0, (step * 10 * 256) as u32]);
+    assert_eq!(
+        events[2].1,
+        if horizontal {
+            vec![1, (step * 120) as u32]
+        } else {
+            vec![0, step as u32]
+        }
+    );
+    assert_eq!(
+        &events[3].1[1..],
+        &[u32::from(horizontal), (step * 10 * 256) as u32]
+    );
     assert!(events[4].1.is_empty());
 }
 
 #[test]
 fn actual_pointer_scroll_lossless_800x600_multibatch_exact_then_opposite_notch() {
+    exercise_800x600_multibatch_exact_then_opposite_notch(false);
+}
+
+fn exercise_800x600_multibatch_exact_then_opposite_notch(horizontal: bool) {
     let Some(mut gl) = HeadlessSmithayGles::new() else {
         return;
     };
     let mut h = Harness::new_sized(
         &mut gl,
-        (true, false),
-        (true, false),
+        (!horizontal, horizontal),
+        (!horizontal, horizontal),
         true,
         true,
         (800, 600),
@@ -30,17 +56,17 @@ fn actual_pointer_scroll_lossless_800x600_multibatch_exact_then_opposite_notch()
     // Same bounded test budget as the small fixture, never a lease extension.
     let deadline = Instant::now() + Duration::from_secs(24);
     let initial = h.ready_after(&mut gl, None);
-    h.wheel_axis(-1, Axis::VerticalScroll);
+    h.wheel_axis(-1, wheel_axis_kind(horizontal));
     h.wait(&mut gl, "large first target notch", false, |s| {
         s.wire_events.len() >= 5
     });
-    assert_wheel_800(&h.wire_events, -1);
+    assert_wheel_800(&h.wire_events, -1, horizontal);
     let first_wire = h.wire_events.clone();
     h.wait(&mut gl, "scroll consumes original Ready", false, |s| {
         s.ready.lock().unwrap().is_none()
     });
-    h.wheel_axis(1, Axis::VerticalScroll);
-    h.wheel_axis(-1, Axis::VerticalScroll);
+    h.wheel_axis(1, wheel_axis_kind(horizontal));
+    h.wheel_axis(-1, wheel_axis_kind(horizontal));
     let (source, expected) = sized_pattern((800, 600), (800, 600));
     repaint_pixels(&mut h, &source);
     let started = Instant::now();
@@ -149,7 +175,7 @@ fn actual_pointer_scroll_lossless_800x600_multibatch_exact_then_opposite_notch()
         "representative image must exercise multiple PNG batches"
     );
     let convergence = started.elapsed();
-    h.wheel_axis(1, Axis::VerticalScroll);
+    h.wheel_axis(1, wheel_axis_kind(horizontal));
     while h.wire_events.len() < 10 {
         checked_tick(
             &mut h,
@@ -163,7 +189,7 @@ fn actual_pointer_scroll_lossless_800x600_multibatch_exact_then_opposite_notch()
         );
     }
     assert_eq!(h.wire_events.len(), 10);
-    assert_wheel_800(&h.wire_events[5..], 1);
+    assert_wheel_800(&h.wire_events[5..], 1, horizontal);
     assert_eq!(h.candidate.lock().unwrap().2, 2);
     assert!(remote_pointer::active(&h.native.state));
     eprintln!(
@@ -175,13 +201,17 @@ fn actual_pointer_scroll_lossless_800x600_multibatch_exact_then_opposite_notch()
 
 #[test]
 fn actual_pointer_scroll_lossless_waiting_half_group_never_replays() {
+    exercise_waiting_half_group_never_replays(false);
+}
+
+fn exercise_waiting_half_group_never_replays(horizontal: bool) {
     let Some(mut gl) = HeadlessSmithayGles::new() else {
         return;
     };
     let mut h = Harness::new_sized(
         &mut gl,
-        (true, false),
-        (true, false),
+        (!horizontal, horizontal),
+        (!horizontal, horizontal),
         true,
         true,
         (SW, SH),
@@ -190,14 +220,14 @@ fn actual_pointer_scroll_lossless_waiting_half_group_never_replays() {
     h.wait(&mut gl, "real unpresented scroll viewer", false, |s| {
         s.pointer.is_some() && !s.feedback.is_empty()
     });
-    h.wheel_axis(-1, Axis::VerticalScroll); // full unready group
+    h.wheel_axis(-1, wheel_axis_kind(horizontal)); // full unready group
     let p = h.pointer.as_ref().unwrap().clone();
     p.axis_source(AxisSource::Wheel);
-    p.axis_discrete(Axis::VerticalScroll, 1); // incomplete unready group
+    p.axis_discrete(wheel_axis_kind(horizontal), 1); // incomplete unready group
     h.local.roundtrip();
     let ready = h.ready_after(&mut gl, None);
     assert!(h.wire_events.is_empty());
-    p.axis(31, Axis::VerticalScroll, 10.0);
+    p.axis(31, wheel_axis_kind(horizontal), 10.0);
     p.frame(); // must finish discarding the old group, not upgrade it to Ready
     h.local.roundtrip();
     let until = Instant::now() + Duration::from_millis(100);
@@ -207,24 +237,32 @@ fn actual_pointer_scroll_lossless_waiting_half_group_never_replays() {
         assert_eq!(h.candidate.lock().unwrap().2, 0);
     }
     assert_eq!(*h.ready.lock().unwrap(), Some(ready));
-    h.wheel_axis(-1, Axis::VerticalScroll);
+    h.wheel_axis(-1, wheel_axis_kind(horizontal));
     h.wait(&mut gl, "new complete authorized wheel group", false, |s| {
         s.wire_events.len() >= 5
     });
-    assert_one_wheel(&h.wire_events, -1);
+    if horizontal {
+        assert_one_horizontal_wheel_120(&h.wire_events, -1);
+    } else {
+        assert_one_wheel(&h.wire_events, -1);
+    }
     h.close(&mut gl);
 }
 
 #[test]
 fn actual_pointer_scroll_lossless_disabled_or_held_wheel_revokes_without_delivery() {
+    exercise_disabled_or_held_wheel_revokes_without_delivery(false);
+}
+
+fn exercise_disabled_or_held_wheel_revokes_without_delivery(horizontal: bool) {
     let Some(mut gl) = HeadlessSmithayGles::new() else {
         return;
     };
     for viewer_scroll in [false, true] {
         let mut h = Harness::new_sized(
             &mut gl,
-            (true, false),
-            (viewer_scroll, false),
+            (!horizontal, horizontal),
+            (viewer_scroll && !horizontal, viewer_scroll && horizontal),
             true,
             true,
             (SW, SH),
@@ -238,7 +276,7 @@ fn actual_pointer_scroll_lossless_disabled_or_held_wheel_revokes_without_deliver
                 c.0 == Some(ready) && c.1 && c.2 == 0
             });
         }
-        h.wheel_axis(1, Axis::VerticalScroll);
+        h.wheel_axis(1, wheel_axis_kind(horizontal));
         h.wait(
             &mut gl,
             "disabled or held wheel terminates pointer",
@@ -249,7 +287,7 @@ fn actual_pointer_scroll_lossless_disabled_or_held_wheel_revokes_without_deliver
         if viewer_scroll {
             h.button(false);
         }
-        h.wheel_axis(-1, Axis::VerticalScroll);
+        h.wheel_axis(-1, wheel_axis_kind(horizontal));
         let until = Instant::now() + Duration::from_millis(100);
         while Instant::now() < until {
             h.tick(&mut gl, true);
@@ -262,13 +300,17 @@ fn actual_pointer_scroll_lossless_disabled_or_held_wheel_revokes_without_deliver
 
 #[test]
 fn actual_pointer_scroll_lossless_requires_host_scroll_permission() {
+    exercise_requires_host_scroll_permission(false);
+}
+
+fn exercise_requires_host_scroll_permission(horizontal: bool) {
     let Some(mut gl) = HeadlessSmithayGles::new() else {
         return;
     };
     let mut h = Harness::new_sized(
         &mut gl,
-        (false, false),
-        (true, false),
+        (horizontal, false),
+        (true, horizontal),
         true,
         true,
         (SW, SH),
@@ -280,7 +322,11 @@ fn actual_pointer_scroll_lossless_requires_host_scroll_permission() {
         if let Ok(result) = h.client_done.try_recv() {
             let error = result.expect_err("host must explicitly deny unapproved scroll");
             assert!(
-                error.contains("Wayland scroll permission was not mutually negotiated"),
+                error.contains(if horizontal {
+                    "Wayland horizontal scroll permission was not mutually negotiated"
+                } else {
+                    "Wayland scroll permission was not mutually negotiated"
+                }),
                 "wrong denial: {error}"
             );
             break;
@@ -309,14 +355,18 @@ fn actual_pointer_scroll_lossless_requires_host_scroll_permission() {
 
 #[test]
 fn actual_pointer_scroll_lossless_lock_and_unmap_aba_cannot_restore_authority() {
+    exercise_lock_and_unmap_aba_cannot_restore_authority(false);
+}
+
+fn exercise_lock_and_unmap_aba_cannot_restore_authority(horizontal: bool) {
     let Some(mut gl) = HeadlessSmithayGles::new() else {
         return;
     };
     for lock in [true, false] {
         let mut h = Harness::new_sized(
             &mut gl,
-            (true, false),
-            (true, false),
+            (!horizontal, horizontal),
+            (!horizontal, horizontal),
             true,
             true,
             (SW, SH),
@@ -426,13 +476,17 @@ fn actual_pointer_scroll_lossless_lock_and_unmap_aba_cannot_restore_authority() 
 
 #[test]
 fn actual_pointer_scroll_lossless_offer_partial_and_accepted_groups_never_replay() {
+    exercise_offer_partial_and_accepted_groups_never_replay(false);
+}
+
+fn exercise_offer_partial_and_accepted_groups_never_replay(horizontal: bool) {
     let Some(mut gl) = HeadlessSmithayGles::new() else {
         return;
     };
     let mut h = Harness::new_sized(
         &mut gl,
-        (true, false),
-        (true, false),
+        (!horizontal, horizontal),
+        (!horizontal, horizontal),
         true,
         true,
         (SW, SH),
@@ -469,8 +523,8 @@ fn actual_pointer_scroll_lossless_offer_partial_and_accepted_groups_never_replay
         thread::yield_now();
     }
     // Complete the poisoned old group. This is not a new valid detent.
-    p.axis_discrete(Axis::VerticalScroll, 1);
-    p.axis(41, Axis::VerticalScroll, 10.0);
+    p.axis_discrete(wheel_axis_kind(horizontal), 1);
+    p.axis(41, wheel_axis_kind(horizontal), 10.0);
     p.frame();
     h.local.roundtrip();
     let phase_deadline = Instant::now() + Duration::from_secs(4);
@@ -501,9 +555,9 @@ fn actual_pointer_scroll_lossless_offer_partial_and_accepted_groups_never_replay
             .any(|(kind, token)| *kind == "requested" && *token == accepted)
     );
     assert!(h.ready.lock().unwrap().is_none());
-    h.wheel_axis(-1, Axis::VerticalScroll); // complete group while phase closed
+    h.wheel_axis(-1, wheel_axis_kind(horizontal)); // complete group while phase closed
     p.axis_source(AxisSource::Wheel);
-    p.axis_discrete(Axis::VerticalScroll, 1); // partial group across RepairReady
+    p.axis_discrete(wheel_axis_kind(horizontal), 1); // partial group across RepairReady
     h.local.roundtrip();
     let recovery_deadline = Instant::now() + Duration::from_secs(4);
     loop {
@@ -521,19 +575,26 @@ fn actual_pointer_scroll_lossless_offer_partial_and_accepted_groups_never_replay
         );
         thread::yield_now();
     }
-    p.axis(42, Axis::VerticalScroll, 10.0);
+    p.axis(42, wheel_axis_kind(horizontal), 10.0);
     p.frame();
     h.local.roundtrip();
     // Ordered tail followed by a new whole notch: if the old partial upgrades
     // into a down notch, exact recipient direction/count below must fail.
-    h.wheel_axis(-1, Axis::VerticalScroll);
+    h.wheel_axis(-1, wheel_axis_kind(horizontal));
     h.wait(
         &mut gl,
         "new notch only after accepted repair",
         false,
         |s| s.wire_events.len() >= 5,
     );
-    assert_one_wheel(&h.wire_events, -1);
+    if horizontal {
+        assert_one_horizontal_wheel_120(&h.wire_events, -1);
+    } else {
+        assert_one_wheel(&h.wire_events, -1);
+    }
     assert_eq!(h.candidate.lock().unwrap().2, 1);
     h.close(&mut gl);
 }
+
+#[path = "host_wayland_pointer_lossless_horizontal_integration.rs"]
+mod horizontal_integration;

@@ -30,12 +30,23 @@ enum Case {
     UnnegotiatedScroll,
     LosslessUnnegotiatedScrollUp,
     LosslessUnnegotiatedScrollDown,
+    LosslessUnnegotiatedScrollLeft,
+    LosslessUnnegotiatedScrollRight,
 }
 impl Case {
     fn lossless(self) -> bool {
         matches!(
             self,
-            Self::LosslessUnnegotiatedScrollUp | Self::LosslessUnnegotiatedScrollDown
+            Self::LosslessUnnegotiatedScrollUp
+                | Self::LosslessUnnegotiatedScrollDown
+                | Self::LosslessUnnegotiatedScrollLeft
+                | Self::LosslessUnnegotiatedScrollRight
+        )
+    }
+    fn vertical_allowed(self) -> bool {
+        matches!(
+            self,
+            Self::LosslessUnnegotiatedScrollLeft | Self::LosslessUnnegotiatedScrollRight
         )
     }
     fn unnegotiated_scroll(self) -> bool {
@@ -203,6 +214,7 @@ fn peer(address: std::net::SocketAddr, case: Case, trace: &Trace) -> RemoteResul
             stream: super::super::messages::StreamCapabilities {
                 wayland_pointer: true,
                 static_lossless: case.lossless(),
+                wayland_scroll: case.vertical_allowed(),
                 wayland_control: false,
                 wayland_text: false,
                 ..Default::default()
@@ -221,10 +233,8 @@ fn peer(address: std::net::SocketAddr, case: Case, trace: &Trace) -> RemoteResul
     let hello = ServerHello::decode(&payload)?;
     assert!(hello.stream.wayland_pointer);
     assert_eq!(hello.stream.static_lossless, case.lossless());
-    assert!(
-        !hello.stream.wayland_scroll,
-        "this peer negotiates pointer only"
-    );
+    assert_eq!(hello.stream.wayland_scroll, case.vertical_allowed());
+    assert!(!hello.stream.wayland_horizontal_scroll);
     assert!(!hello.pointer_enabled && !hello.keyboard_enabled);
     let mut decoder = TileDecoder::with_frame_limits(hello.stream.frame_limits)?;
     decoder.set_lossless_enabled(hello.stream.static_lossless);
@@ -248,6 +258,8 @@ fn peer(address: std::net::SocketAddr, case: Case, trace: &Trace) -> RemoteResul
                         | Case::UnnegotiatedScroll
                         | Case::LosslessUnnegotiatedScrollUp
                         | Case::LosslessUnnegotiatedScrollDown
+                        | Case::LosslessUnnegotiatedScrollLeft
+                        | Case::LosslessUnnegotiatedScrollRight
                 ) && matches!(
                     error.kind(),
                     io::ErrorKind::UnexpectedEof
@@ -382,10 +394,17 @@ fn peer(address: std::net::SocketAddr, case: Case, trace: &Trace) -> RemoteResul
                                         "first native click must complete before malicious scroll"
                                     );
                                 }
-                                if matches!(case, Case::LosslessUnnegotiatedScrollDown) {
-                                    PointerActionKind::ScrollDown
-                                } else {
-                                    PointerActionKind::ScrollUp
+                                match case {
+                                    Case::LosslessUnnegotiatedScrollDown => {
+                                        PointerActionKind::ScrollDown
+                                    }
+                                    Case::LosslessUnnegotiatedScrollLeft => {
+                                        PointerActionKind::ScrollLeft
+                                    }
+                                    Case::LosslessUnnegotiatedScrollRight => {
+                                        PointerActionKind::ScrollRight
+                                    }
+                                    _ => PointerActionKind::ScrollUp,
                                 }
                             } else {
                                 PointerActionKind::ClickLeft
@@ -414,6 +433,8 @@ fn peer(address: std::net::SocketAddr, case: Case, trace: &Trace) -> RemoteResul
                                     | Case::UnnegotiatedScroll
                                     | Case::LosslessUnnegotiatedScrollUp
                                     | Case::LosslessUnnegotiatedScrollDown
+                                    | Case::LosslessUnnegotiatedScrollLeft
+                                    | Case::LosslessUnnegotiatedScrollRight
                             ),
                             "unexpected denial {status:?}"
                         );
@@ -435,6 +456,8 @@ fn peer(address: std::net::SocketAddr, case: Case, trace: &Trace) -> RemoteResul
                             | Case::UnnegotiatedScroll
                             | Case::LosslessUnnegotiatedScrollUp
                             | Case::LosslessUnnegotiatedScrollDown
+                            | Case::LosslessUnnegotiatedScrollLeft
+                            | Case::LosslessUnnegotiatedScrollRight
                     ),
                     "unexpected close"
                 );
@@ -471,6 +494,8 @@ fn actual_tcp_pointer_host_requires_new_drawn_frame_for_every_action() {
         Case::UnnegotiatedScroll,
         Case::LosslessUnnegotiatedScrollUp,
         Case::LosslessUnnegotiatedScrollDown,
+        Case::LosslessUnnegotiatedScrollLeft,
+        Case::LosslessUnnegotiatedScrollRight,
     ] {
         let mut server = Server::new();
         server.state.image_capture_pending =
@@ -527,6 +552,7 @@ fn actual_tcp_pointer_host_requires_new_drawn_frame_for_every_action() {
                     note(&host_trace, "host authenticated");
                     let mut options = options();
                     options.allow_static_lossless = case.lossless();
+                    options.allow_wayland_scroll = case.vertical_allowed();
                     serve_authenticated(
                         peer,
                         &options,
