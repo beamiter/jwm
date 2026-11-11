@@ -15,10 +15,13 @@ fn fence(server: &mut Server, client: &mut Client) -> Vec<Event> {
     loop {
         server.roundtrip();
         let events = client.events();
-        assert!(
-            !events.iter().any(|e| e.sender == 1 && e.opcode == 0),
-            "unexpected protocol error"
-        );
+        if let Some(error) = events.iter().find(|e| e.sender == 1 && e.opcode == 0) {
+            panic!(
+                "unexpected protocol error: object={:?} code={:?}",
+                error.args.first(),
+                error.args.get(1)
+            );
+        }
         let complete = events.iter().any(|e| e.sender == done && e.opcode == 0);
         all.extend(events);
         if complete {
@@ -272,7 +275,9 @@ impl PopupHarness {
                             .iter()
                             .any(|e| e.sender == lock && e.opcode == 0)
                     );
-                    locker.request(lock, 1, &[]);
+                    // ext_session_lock_v1: get_lock_surface is opcode 1;
+                    // the real unlock_and_destroy request is opcode 2.
+                    locker.request(lock, 2, &[]);
                     fence(&mut native, &mut locker);
                 }
             }
@@ -878,7 +883,8 @@ fn authenticated_popup_unpresented_proof_expires_without_native_arm() {
         .expect_err("unpresented proof must expire before the lease");
     assert_eq!(
         error.downcast_ref::<crate::remote::wayland_popup_wire::Failure>(),
-        Some(&crate::remote::wayland_popup_wire::Failure::Stale)
+        Some(&crate::remote::wayland_popup_wire::Failure::Stale),
+        "unexpected host termination: {error:?}; client result: {client_result:?}"
     );
     let error = client_result
         .unwrap()
@@ -1315,6 +1321,12 @@ fn authenticated_popup_periodic_real_presentation_does_not_renew_original_lease(
                 None
             },
         );
+        if client_result.is_none() {
+            client_result = h.client_done.try_recv().ok();
+        }
+        if host_result.is_none() {
+            host_result = h.host_done.try_recv().ok();
+        }
         let now = Instant::now();
         assert!(
             now < overall_deadline,
@@ -1351,8 +1363,9 @@ fn authenticated_popup_periodic_real_presentation_does_not_renew_original_lease(
                 "same real native lease throughout refreshes"
             );
         } else {
-            let failure =
-                failure.expect("native cannot end before the observed client deadline failure");
+            let failure = failure.unwrap_or_else(|| panic!(
+                "native ended before actual client deadline check: client={client_result:?}; host={host_result:?}; host observation={host:?}"
+            ));
             assert!(failure.at >= fixed_deadline);
         }
         if let Some(sequence) = *h.ready.lock().unwrap() {
@@ -1379,12 +1392,6 @@ fn authenticated_popup_periodic_real_presentation_does_not_renew_original_lease(
                 }
             }
         }
-        if client_result.is_none() {
-            client_result = h.client_done.try_recv().ok();
-        }
-        if host_result.is_none() {
-            host_result = h.host_done.try_recv().ok();
-        }
         assert!(
             !h.private_events
                 .iter()
@@ -1392,8 +1399,9 @@ fn authenticated_popup_periodic_real_presentation_does_not_renew_original_lease(
             "refresh and expiry must not inject buttons or axes"
         );
         if client_result.is_some() || host_result.is_some() {
-            let failure =
-                failure.expect("only the actual client check deadline may end this session");
+            let failure = failure.unwrap_or_else(|| panic!(
+                "session ended without actual client deadline check: client={client_result:?}; host={host_result:?}; host observation={host:?}"
+            ));
             assert_eq!(failure.reason, PopupLifetimeFailureReason::LeaseExpired);
             assert!(!failure.ended);
             assert_eq!(

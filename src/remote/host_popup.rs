@@ -9,7 +9,13 @@ use crate::remote::wayland_popup_wire::{
 };
 use std::sync::mpsc::{self, TryRecvError};
 
-#[cfg(test)]
+// SessionReader caps sealed plaintext (including padding), not the decoded
+// application payload. The largest allowed request is the 80-byte Click,
+// which occupies the protocol's 256-byte bucket. Per-kind decoders below
+// still enforce their exact unpadded lengths.
+const POPUP_REQUEST_RECORD_LIMIT: usize = 256;
+
+#[cfg(all(test, feature = "backend-wayland-udev"))]
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct PopupHostLifetimeSnapshot {
     pub created: Instant,
@@ -21,12 +27,12 @@ pub(crate) struct PopupHostLifetimeSnapshot {
     pub exited_at: Option<Instant>,
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "backend-wayland-udev"))]
 thread_local! {
     static LIFETIME_OBSERVER: std::cell::RefCell<Option<Arc<Mutex<Option<PopupHostLifetimeSnapshot>>>>> = const { std::cell::RefCell::new(None) };
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "backend-wayland-udev"))]
 pub(crate) fn with_popup_lifetime_observer<T>(
     observer: Arc<Mutex<Option<PopupHostLifetimeSnapshot>>>,
     run: impl FnOnce() -> T,
@@ -41,7 +47,7 @@ pub(crate) fn with_popup_lifetime_observer<T>(
     run()
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "backend-wayland-udev"))]
 fn observe_lifetime(update: impl FnOnce(&mut Option<PopupHostLifetimeSnapshot>)) {
     LIFETIME_OBSERVER.with(|slot| {
         if let Some(observer) = slot.borrow().as_ref() {
@@ -50,7 +56,7 @@ fn observe_lifetime(update: impl FnOnce(&mut Option<PopupHostLifetimeSnapshot>))
     });
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "backend-wayland-udev"))]
 fn observe_current(current: Option<(u64, Instant)>, acked: bool) {
     observe_lifetime(|snapshot| {
         if let Some(snapshot) = snapshot {
@@ -72,7 +78,7 @@ pub(super) fn serve(
     let socket = reader.get_ref().try_clone()?;
     let broken = Arc::new(AtomicBool::new(false));
     let (tx, rx) = mpsc::sync_channel(32);
-    reader.set_max_payload_len(102);
+    reader.set_max_payload_len(POPUP_REQUEST_RECORD_LIMIT);
     reader
         .get_ref()
         .set_read_timeout(Some(Duration::from_secs(31)))?;
@@ -106,7 +112,7 @@ pub(super) fn serve(
             source_epoch: 1,
             lease_epoch: epoch,
         };
-        #[cfg(test)]
+        #[cfg(all(test, feature = "backend-wayland-udev"))]
         observe_lifetime(|snapshot| {
             *snapshot = Some(PopupHostLifetimeSnapshot {
                 created,
@@ -234,7 +240,7 @@ pub(super) fn serve(
                 authority.commit_write(meta.key, Instant::now())?;
                 codec.commit(&frame);
                 current = Some((meta, captured_at));
-                #[cfg(test)]
+                #[cfg(all(test, feature = "backend-wayland-udev"))]
                 observe_current(Some((meta.key.wire_sequence, captured_at)), false);
                 wire_sequence = wire_sequence
                     .checked_add(1)
@@ -267,7 +273,7 @@ pub(super) fn serve(
                             return Err(invalid_data("popup ACK source mismatch").into());
                         }
                         authority.acknowledge_exact(binding, sequence, Instant::now())?;
-                        #[cfg(test)]
+                        #[cfg(all(test, feature = "backend-wayland-udev"))]
                         observe_current(
                             current.map(|(meta, at)| (meta.key.wire_sequence, at)),
                             true,
@@ -279,7 +285,7 @@ pub(super) fn serve(
                                 authority.complete_arm(binding, Instant::now())?;
                                 status(&mut writer, StatusKind::Armed, meta, 0, deadline)?;
                                 current = None;
-                                #[cfg(test)]
+                                #[cfg(all(test, feature = "backend-wayland-udev"))]
                                 observe_current(None, false);
                             }
                             Some(Opportunity::Click(_)) => {
@@ -314,7 +320,7 @@ pub(super) fn serve(
                             deadline,
                         )?;
                         current = None;
-                        #[cfg(test)]
+                        #[cfg(all(test, feature = "backend-wayland-udev"))]
                         observe_current(None, false);
                         announced = false;
                     }
@@ -325,15 +331,7 @@ pub(super) fn serve(
                         return Ok(());
                     }
                     MessageKind::Heartbeat => {
-                        if !bytes.is_empty() {
-                            return Err(invalid_data("invalid popup heartbeat").into());
-                        }
-                        write_session_record(
-                            &mut writer,
-                            MessageKind::Heartbeat,
-                            &[],
-                            remaining(deadline)?,
-                        )?;
+                        accept_popup_heartbeat(&bytes)?;
                     }
                     _ => return Err(invalid_data("unexpected popup session message").into()),
                 }
@@ -356,7 +354,7 @@ pub(super) fn serve(
                         .refresh_presented(meta.key, Instant::now())?;
                     capture.discard_popup_frame();
                     current = None;
-                    #[cfg(test)]
+                    #[cfg(all(test, feature = "backend-wayland-udev"))]
                     observe_current(None, false);
                     announced = false;
                 }
@@ -367,7 +365,7 @@ pub(super) fn serve(
             )?;
         }
     })();
-    #[cfg(test)]
+    #[cfg(all(test, feature = "backend-wayland-udev"))]
     observe_lifetime(|snapshot| {
         if let Some(snapshot) = snapshot {
             snapshot.exited_at = Some(Instant::now());
@@ -396,6 +394,16 @@ pub(super) fn serve(
     }
     result
 }
+// Heartbeats are authenticated client-to-host activity only, as in the
+// ordinary host reader. There is deliberately no writer or authority argument:
+// accepting one neither echoes a record nor extends proof/lease deadlines.
+fn accept_popup_heartbeat(bytes: &[u8]) -> RemoteResult<()> {
+    if !bytes.is_empty() {
+        return Err(invalid_data("invalid popup heartbeat").into());
+    }
+    Ok(())
+}
+
 fn remaining(deadline: Instant) -> RemoteResult<Duration> {
     deadline
         .checked_duration_since(Instant::now())
@@ -424,4 +432,100 @@ fn status(
         remaining(deadline)?,
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod record_budget_tests {
+    use super::*;
+    use crate::remote::protocol::ProtocolError;
+    use std::io::Cursor;
+
+    fn click() -> Click {
+        Click {
+            key: FrameKey {
+                binding: Binding {
+                    source_instance: 1,
+                    source_epoch: 1,
+                    lease_epoch: 1,
+                },
+                geometry_epoch: 1,
+                wire_sequence: 0,
+                proof_id: 1,
+                native_frame_id: 1,
+                native_ready_serial: 1,
+                family_generation: 1,
+            },
+            sequence: 1,
+            x: 10,
+            y: 10,
+        }
+    }
+    fn record(payload: &[u8]) -> Vec<u8> {
+        let mut writer = SessionWriter::new(Vec::new(), [0x42; 32]);
+        writer
+            .write_message(MessageKind::WaylandPopupClick, payload)
+            .unwrap();
+        writer.flush().unwrap();
+        writer.into_inner()
+    }
+
+    #[test]
+    fn popup_authenticated_heartbeat_is_one_way_and_payload_strict() {
+        let key = [0x42; 32];
+        let mut writer = SessionWriter::new(Vec::new(), key);
+        writer.write_message(MessageKind::Heartbeat, &[]).unwrap();
+        writer.write_message(MessageKind::Heartbeat, &[0]).unwrap();
+        let mut reader = SessionReader::new(Cursor::new(writer.into_inner()), key);
+        reader.set_max_payload_len(POPUP_REQUEST_RECORD_LIMIT);
+        let (kind, payload) = reader.read_message().unwrap();
+        assert_eq!(kind, MessageKind::Heartbeat);
+        accept_popup_heartbeat(&payload).unwrap();
+        // Use the same production handler: it has no output channel and no
+        // mutable ledger/clock access. The next record is still authenticated.
+        let (kind, payload) = reader.read_message().unwrap();
+        assert_eq!(kind, MessageKind::Heartbeat);
+        let error = accept_popup_heartbeat(&payload).unwrap_err();
+        assert_eq!(error.to_string(), "invalid popup heartbeat");
+    }
+
+    #[test]
+    fn popup_click_real_record_reproduces_old_cap_and_round_trips() {
+        let expected = click();
+        let bytes = record(&expected.encode().unwrap());
+        let mut old = SessionReader::new(Cursor::new(bytes.clone()), [0x42; 32]);
+        old.set_max_payload_len(102);
+        assert!(matches!(
+            old.read_message(),
+            Err(ProtocolError::PayloadTooLarge { len: 256, max: 102 })
+        ));
+        let mut reader = SessionReader::new(Cursor::new(bytes), [0x42; 32]);
+        reader.set_max_payload_len(POPUP_REQUEST_RECORD_LIMIT);
+        let (kind, payload) = reader.read_message().unwrap();
+        assert_eq!(kind, MessageKind::WaylandPopupClick);
+        assert_eq!(payload.len(), 80);
+        assert_eq!(Click::decode(&payload).unwrap(), expected);
+    }
+
+    #[test]
+    fn popup_record_budget_does_not_widen_click_plaintext() {
+        let mut payload = click().encode().unwrap().to_vec();
+        payload.push(0);
+        let mut reader = SessionReader::new(Cursor::new(record(&payload)), [0x42; 32]);
+        reader.set_max_payload_len(POPUP_REQUEST_RECORD_LIMIT);
+        let (_, decoded) = reader.read_message().unwrap();
+        assert!(Click::decode(&decoded).is_err());
+    }
+
+    #[test]
+    fn popup_oversized_sealed_record_rejected_before_body_read() {
+        let mut bytes = record(&[0; 256]); // marker requires the 704-byte bucket
+        bytes.truncate(13); // real authenticated-record header, no body/tag
+        let mut reader = SessionReader::new(Cursor::new(bytes), [0x42; 32]);
+        reader.set_max_payload_len(POPUP_REQUEST_RECORD_LIMIT);
+        assert!(matches!(
+            reader.read_message(),
+            Err(ProtocolError::PayloadTooLarge { len: 704, max: 256 })
+        ));
+        assert_eq!(reader.into_inner().position(), 13);
+    }
 }
