@@ -1086,9 +1086,10 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
     *stage = ClientStage::Session;
     eprintln!(
         "jwm-remote: connected; {}; clipboard {}",
-        session_mode(
+        negotiated_session_label(
+            hello.stream.wayland_popup_pointer,
             hello.pointer_enabled && request_input,
-            hello.keyboard_enabled && request_input
+            hello.keyboard_enabled && request_input,
         ),
         clipboard_policy::label(
             hello.stream.clipboard_content,
@@ -1347,6 +1348,14 @@ fn finish_session(
             primary: foreground.err(),
             failures,
         }))
+    }
+}
+
+fn negotiated_session_label(popup: bool, pointer: bool, keyboard: bool) -> &'static str {
+    if popup {
+        "popup pointer negotiated; awaiting presented-frame authorization"
+    } else {
+        session_mode(pointer, keyboard)
     }
 }
 
@@ -9013,6 +9022,22 @@ mod scroll_copy_transport_tests;
 #[cfg(test)]
 mod popup_hello_policy_tests {
     use super::*;
+
+    #[test]
+    fn popup_session_label_precedes_legacy_mode_without_claiming_authorization() {
+        for pointer in [false, true] {
+            for keyboard in [false, true] {
+                assert_eq!(
+                    negotiated_session_label(true, pointer, keyboard),
+                    "popup pointer negotiated; awaiting presented-frame authorization"
+                );
+                assert_eq!(
+                    negotiated_session_label(false, pointer, keyboard),
+                    session_mode(pointer, keyboard)
+                );
+            }
+        }
+    }
 
     #[test]
     fn popup_production_frame_offer_roundtrips_without_legacy_codec_or_clipboard() {

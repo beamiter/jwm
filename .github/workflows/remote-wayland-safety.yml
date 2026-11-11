@@ -169,8 +169,8 @@ jobs:
               "$real") expected=7 ;;
               "$wire") expected=13 ;;
               "$client") expected=6 ;;
-              "$hello") expected=1 ;;
-              "$budget") expected=4 ;;
+              "$hello") expected=2 ;;
+              "$budget") expected=7 ;;
               "$cli") expected=1; target=(--bin jwm-remote) ;;
             esac
             listed="$(env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev "${target[@]}" "$filter" -- --list)"

@@ -85,20 +85,10 @@ pub(super) fn serve(
     let failed = broken.clone();
     let reader_socket = socket.try_clone()?;
     let receiver = thread::spawn(move || {
-        loop {
-            let message = match reader.read_message() {
-                Ok(message) => message,
-                Err(_) => {
-                    failed.store(true, Ordering::Release);
-                    break;
-                }
-            };
-            if tx.try_send(message).is_err() {
-                failed.store(true, Ordering::Release);
-                break;
-            }
+        if !receive_popup_requests(&mut reader, &tx) {
+            failed.store(true, Ordering::Release);
+            let _ = reader_socket.shutdown(Shutdown::Both);
         }
-        let _ = reader_socket.shutdown(Shutdown::Both);
     });
     let result = (|| -> RemoteResult<()> {
         let mut stream = hello.stream;
@@ -262,6 +252,7 @@ pub(super) fn serve(
                         return Err(invalid_data("popup reader ended").into());
                     }
                 };
+                check_popup_transport(&broken)?;
                 let authority = ledger.as_mut().unwrap();
                 let meta = current
                     .ok_or_else(|| invalid_data("popup message without current proof"))?
@@ -281,6 +272,7 @@ pub(super) fn serve(
                         match authority.ready(Instant::now())? {
                             Some(Opportunity::Arm(key)) => {
                                 let permit = authority.authorize_arm(key, Instant::now())?;
+                                check_popup_transport(&broken)?;
                                 capture.dispatch_host_popup(permit)?;
                                 authority.complete_arm(binding, Instant::now())?;
                                 status(&mut writer, StatusKind::Armed, meta, 0, deadline)?;
@@ -309,6 +301,7 @@ pub(super) fn serve(
                         }
                         let request = Click::decode(&bytes)?;
                         let permit = authority.authorize_click(request, Instant::now())?;
+                        check_popup_transport(&broken)?;
                         capture.dispatch_host_popup(permit)?;
                         authority.complete_click(binding, request.sequence, Instant::now())?;
                         action_sequence = request.sequence;
@@ -325,9 +318,7 @@ pub(super) fn serve(
                         announced = false;
                     }
                     MessageKind::WaylandPopupRevoke => {
-                        if Binding::decode(&bytes)? != binding {
-                            return Err(invalid_data("popup revoke binding mismatch").into());
-                        }
+                        validate_popup_revoke(&bytes, binding)?;
                         return Ok(());
                     }
                     MessageKind::Heartbeat => {
@@ -394,6 +385,44 @@ pub(super) fn serve(
     }
     result
 }
+// Re-check after dequeue and immediately before native dispatch. This rejects
+// an already observed read/authentication failure, not a future concurrent EOF.
+fn check_popup_transport(broken: &AtomicBool) -> RemoteResult<()> {
+    if broken.load(Ordering::Acquire) {
+        return Err(invalid_data("popup transport closed").into());
+    }
+    Ok(())
+}
+
+// Stop only after an authenticated terminal record is successfully queued.
+// Its binding is still checked by the main loop. Reading beyond it could turn
+// an orderly peer EOF into `broken` before that queued revoke was processed.
+fn receive_popup_requests<R: io::Read>(
+    reader: &mut SessionReader<R>,
+    tx: &mpsc::SyncSender<(MessageKind, Vec<u8>)>,
+) -> bool {
+    loop {
+        let message = match reader.read_message() {
+            Ok(message) => message,
+            Err(_) => return false,
+        };
+        let terminal = message.0 == MessageKind::WaylandPopupRevoke;
+        if tx.try_send(message).is_err() {
+            return false;
+        }
+        if terminal {
+            return true;
+        }
+    }
+}
+
+fn validate_popup_revoke(bytes: &[u8], binding: Binding) -> RemoteResult<()> {
+    if Binding::decode(bytes)? != binding {
+        return Err(invalid_data("popup revoke binding mismatch").into());
+    }
+    Ok(())
+}
+
 // Heartbeats are authenticated client-to-host activity only, as in the
 // ordinary host reader. There is deliberately no writer or authority argument:
 // accepting one neither echoes a record nor extends proof/lease deadlines.
@@ -467,6 +496,75 @@ mod record_budget_tests {
             .unwrap();
         writer.flush().unwrap();
         writer.into_inner()
+    }
+
+    #[test]
+    fn popup_observed_transport_failure_blocks_queued_dispatch() {
+        let broken = AtomicBool::new(false);
+        check_popup_transport(&broken).unwrap(); // outer loop was healthy
+        broken.store(true, Ordering::Release); // reader fails after that check
+        let mut dispatched = false;
+        let result = (|| -> RemoteResult<()> {
+            check_popup_transport(&broken)?; // production post-dequeue gate
+            dispatched = true;
+            Ok(())
+        })();
+        assert_eq!(result.unwrap_err().to_string(), "popup transport closed");
+        assert!(!dispatched);
+        // Once observed, consuming a different queued record cannot clear it.
+        assert!(check_popup_transport(&broken).is_err());
+    }
+
+    #[test]
+    fn popup_authenticated_revoke_stops_before_eof_but_checks_binding() {
+        let binding = click().key.binding;
+        for wrong in [false, true] {
+            let mut sent = binding;
+            if wrong {
+                sent.source_instance += 1;
+            }
+            let mut writer = SessionWriter::new(Vec::new(), [0x42; 32]);
+            writer
+                .write_message(MessageKind::WaylandPopupRevoke, &sent.encode().unwrap())
+                .unwrap();
+            let bytes = writer.into_inner();
+            let length = bytes.len();
+            let mut reader = SessionReader::new(Cursor::new(bytes), [0x42; 32]);
+            reader.set_max_payload_len(POPUP_REQUEST_RECORD_LIMIT);
+            let (tx, rx) = mpsc::sync_channel(32);
+            assert!(receive_popup_requests(&mut reader, &tx));
+            assert_eq!(reader.into_inner().position(), length as u64);
+            let (kind, payload) = rx.try_recv().unwrap();
+            assert_eq!(kind, MessageKind::WaylandPopupRevoke);
+            assert_eq!(validate_popup_revoke(&payload, binding).is_err(), wrong);
+            assert!(rx.try_recv().is_err());
+        }
+    }
+
+    #[test]
+    fn popup_unverified_revoke_and_full_queue_remain_fail_closed() {
+        let mut writer = SessionWriter::new(Vec::new(), [0x42; 32]);
+        writer
+            .write_message(
+                MessageKind::WaylandPopupRevoke,
+                &click().key.binding.encode().unwrap(),
+            )
+            .unwrap();
+        let bytes = writer.into_inner();
+        let mut truncated = bytes.clone();
+        truncated.pop(); // no complete authentication tag
+        let (tx, rx) = mpsc::sync_channel(32);
+        assert!(!receive_popup_requests(
+            &mut SessionReader::new(Cursor::new(truncated), [0x42; 32]),
+            &tx
+        ));
+        assert!(rx.try_recv().is_err());
+        let (tx, _rx) = mpsc::sync_channel(0);
+        assert!(!receive_popup_requests(
+            &mut SessionReader::new(Cursor::new(bytes), [0x42; 32]),
+            &tx
+        ));
+        assert!(validate_popup_revoke(&[0; 19], click().key.binding).is_err());
     }
 
     #[test]
