@@ -170,7 +170,7 @@ jobs:
             case "$filter" in
               "$real") expected=9 ;;
               "$wire") expected=20 ;;
-              "$client") expected=8 ;;
+              "$client") expected=13 ;;
               "$hello") expected=2 ;;
               "$budget") expected=7 ;;
               "$capabilities") expected=1 ;;

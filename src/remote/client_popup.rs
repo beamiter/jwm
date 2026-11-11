@@ -70,6 +70,8 @@ pub(super) struct ClientPopup {
     pending_metadata: Option<Metadata>,
     rejection_floor: Option<u64>,
     ended: bool,
+    close_deadline: Option<Instant>,
+    close_confirmed: bool,
 }
 impl ClientPopup {
     pub(super) fn enable(&mut self, requested_at: Instant) {
@@ -165,6 +167,34 @@ impl ClientPopup {
         self.ready = None;
         self.candidate = None;
         Ok(())
+    }
+    pub(super) fn commit_decoded_or_drain(
+        &mut self,
+        metadata: Metadata,
+        epoch: u64,
+        purpose: FramePurpose,
+        frame: &RecyclableDecodedFrame,
+        now: Instant,
+    ) -> RemoteResult<()> {
+        if self.close_deadline.is_some() {
+            let envelope = super::super::source_wire::encode_frame_payload(
+                epoch,
+                purpose,
+                &metadata.encode()?,
+            )?;
+            self.drain_close_record(MessageKind::Frame, &envelope, now)?;
+            Ok(())
+        } else {
+            self.decoded(metadata, epoch, frame, now)
+        }
+    }
+    pub(super) fn status_or_drain(&mut self, payload: &[u8], now: Instant) -> RemoteResult<()> {
+        if self.close_deadline.is_some() {
+            self.drain_close_record(MessageKind::WaylandPopupStatus, payload, now)?;
+            Ok(())
+        } else {
+            self.status(Status::decode(payload)?, now)
+        }
     }
     pub(super) fn presented(&mut self, sequence: u64, now: Instant) -> RemoteResult<()> {
         if !self.enabled {
@@ -320,6 +350,56 @@ impl ClientPopup {
             (a, b) => a.or(b),
         }
     }
+    pub(super) fn close_deadline(&self) -> Option<Instant> {
+        self.close_deadline
+    }
+    pub(super) fn close_confirmed(&self) -> bool {
+        self.close_confirmed
+    }
+    pub(super) fn drain_close_record(
+        &mut self,
+        kind: MessageKind,
+        payload: &[u8],
+        now: Instant,
+    ) -> RemoteResult<bool> {
+        let deadline = self
+            .close_deadline
+            .ok_or_else(|| invalid_data("unsolicited popup close acknowledgement"))?;
+        if now >= deadline || self.close_confirmed {
+            return Err(invalid_data("popup close acknowledgement expired or duplicated").into());
+        }
+        match kind {
+            MessageKind::WaylandPopupRevokeAck => {
+                if Some(Binding::decode(payload)?) != self.binding {
+                    return Err(invalid_data("popup close acknowledgement binding mismatch").into());
+                }
+                self.close_confirmed = true;
+                Ok(true)
+            }
+            MessageKind::Frame => {
+                let (epoch, purpose, inner) = decode_frame_payload(payload)?;
+                let metadata = Metadata::decode(
+                    inner
+                        .get(..super::super::wayland_popup_wire::METADATA_LEN)
+                        .ok_or_else(|| invalid_data("truncated closing popup frame"))?,
+                )?;
+                if purpose != FramePurpose::PopupFamilyProof
+                    || Some(metadata.key.binding) != self.binding
+                    || epoch != metadata.key.binding.source_epoch
+                {
+                    return Err(invalid_data("unexpected frame during popup close").into());
+                }
+                Ok(false)
+            }
+            MessageKind::WaylandPopupStatus => {
+                if Some(Status::decode(payload)?.metadata.key.binding) != self.binding {
+                    return Err(invalid_data("unexpected status during popup close").into());
+                }
+                Ok(false)
+            }
+            _ => Err(invalid_data("popup close lacks exact revocation acknowledgement").into()),
+        }
+    }
     pub(super) fn revoke(&mut self) -> Option<Binding> {
         if !self.enabled || self.ended {
             return None;
@@ -327,6 +407,11 @@ impl ClientPopup {
         self.ended = true;
         self.ready = None;
         self.candidate = None;
+        if self.binding.is_some() {
+            self.close_deadline = self
+                .deadline
+                .map(|deadline| deadline.min(Instant::now() + Duration::from_secs(2)));
+        }
         self.binding
     }
     pub(super) fn event(
@@ -632,6 +717,143 @@ mod tests {
         assert!(p.status(status(StatusKind::Accepted, 1, 1), now).is_err());
         assert!(p.ready_sequence(now).is_none());
     }
+    #[test]
+    fn popup_close_requires_exact_ack_and_never_restores_input() {
+        let now = Instant::now();
+        let mut p = ready(now);
+        let binding = p.revoke().unwrap();
+        let deadline = p.close_deadline().unwrap();
+        assert!(
+            !p.drain_close_record(
+                MessageKind::WaylandPopupStatus,
+                &status(StatusKind::Ready, 1, 0).encode().unwrap(),
+                now
+            )
+            .unwrap()
+        );
+        assert!(p.ready_sequence(now).is_none());
+        assert!(
+            p.drain_close_record(
+                MessageKind::WaylandPopupRevokeAck,
+                &binding.encode().unwrap(),
+                now
+            )
+            .unwrap()
+        );
+        assert!(p.close_confirmed());
+        assert!(
+            p.drain_close_record(
+                MessageKind::WaylandPopupRevokeAck,
+                &binding.encode().unwrap(),
+                now
+            )
+            .is_err()
+        );
+        assert_eq!(p.close_deadline(), Some(deadline));
+        assert!(p.check(now).is_err());
+    }
+    #[test]
+    fn popup_close_rejects_unknown_wrong_binding_timeout_and_generic_close() {
+        let now = Instant::now();
+        let mut p = ready(now);
+        let binding = p.binding.unwrap();
+        assert!(
+            p.drain_close_record(
+                MessageKind::WaylandPopupRevokeAck,
+                &binding.encode().unwrap(),
+                now
+            )
+            .is_err()
+        );
+        p.revoke();
+        let mut wrong = binding;
+        wrong.lease_epoch += 1;
+        assert!(
+            p.drain_close_record(
+                MessageKind::WaylandPopupRevokeAck,
+                &wrong.encode().unwrap(),
+                now
+            )
+            .is_err()
+        );
+        assert!(p.drain_close_record(MessageKind::Close, &[], now).is_err());
+        assert!(
+            p.drain_close_record(
+                MessageKind::WaylandPopupRevokeAck,
+                &binding.encode().unwrap(),
+                p.close_deadline().unwrap()
+            )
+            .is_err()
+        );
+        assert!(!p.close_confirmed());
+    }
+    #[test]
+    fn popup_close_drains_only_bound_popup_frames_without_presentation() {
+        let now = Instant::now();
+        let mut p = ready(now);
+        p.revoke();
+        let meta = status(StatusKind::Waiting, 2, 0).metadata;
+        let bytes = super::super::super::source_wire::encode_frame_payload(
+            meta.key.binding.source_epoch,
+            FramePurpose::PopupFamilyProof,
+            &meta.encode().unwrap(),
+        )
+        .unwrap();
+        assert!(
+            !p.drain_close_record(MessageKind::Frame, &bytes, now)
+                .unwrap()
+        );
+        assert_eq!(p.presented.unwrap().key.wire_sequence, 1);
+        assert_eq!(p.decoded.unwrap().0.key.wire_sequence, 1);
+        assert!(!p.close_confirmed());
+        let wrong = super::super::super::source_wire::encode_frame_payload(
+            meta.key.binding.source_epoch,
+            FramePurpose::Video,
+            &meta.encode().unwrap(),
+        )
+        .unwrap();
+        assert!(
+            p.drain_close_record(MessageKind::Frame, &wrong, now)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn popup_close_between_status_read_and_commit_drains_without_grant() {
+        let now = Instant::now();
+        let mut p = ready(now);
+        let in_flight = status(StatusKind::Ready, 1, 0).encode().unwrap();
+        p.revoke();
+        p.status_or_drain(&in_flight, now).unwrap();
+        assert!(p.ready.is_none() && p.ended && !p.close_confirmed());
+        let mut wrong = status(StatusKind::Ready, 1, 0);
+        wrong.metadata.key.binding.lease_epoch += 1;
+        assert!(p.status_or_drain(&wrong.encode().unwrap(), now).is_err());
+    }
+    #[test]
+    fn popup_close_during_decode_discards_final_metadata_commit() {
+        let now = Instant::now();
+        let mut p = ready(now);
+        let frame = RecyclableDecodedFrame::new(
+            2,
+            32,
+            24,
+            image::RgbImage::new(32, 24),
+            new_decode_buffer_pool(),
+        )
+        .with_geometry_epoch(1);
+        p.revoke();
+        p.commit_decoded_or_drain(metadata(2), 1, FramePurpose::PopupFamilyProof, &frame, now)
+            .unwrap();
+        assert_eq!(p.decoded.unwrap().0.key.wire_sequence, 1);
+        assert_eq!(p.presented.unwrap().key.wire_sequence, 1);
+        assert!(p.ready.is_none() && !p.close_confirmed());
+        assert!(
+            p.commit_decoded_or_drain(metadata(2), 2, FramePurpose::PopupFamilyProof, &frame, now)
+                .is_err()
+        );
+    }
+
     #[test]
     fn popup_new_frame_cancels_held_candidate_without_replay() {
         use crate::remote::x11_viewer::WaylandPointerEventKind as E;

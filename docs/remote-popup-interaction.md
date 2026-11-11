@@ -6,9 +6,9 @@ permission prompt or a claim of general GTK/Qt menu compatibility. Existing
 read-only `--wayland-popups` capture remains read-only. The existing keyboard,
 pointer and unified-control modes retain their single-surface restrictions.
 
-## Explicit network use (application protocol v32)
+## Explicit network use (application protocol v33)
 
-Upgrade both endpoints together: application protocol v32 requires an exact
+Upgrade both endpoints together: application protocol v33 requires an exact
 match and rejects older peers rather than falling back to ordinary input.
 Transport v3 is unchanged; the host compositor must provide the native popup
 protocol v2 capability. Both helpers need native Wayland support.
@@ -78,17 +78,29 @@ The viewer does not replay the old click and requires a new complete press and
 release after the replacement is Ready. Revocation, local takeover, lock, source
 loss and original expiry terminate authority without reconnect or regrant.
 
+## Explicit close acknowledgement (v33 candidate)
+
+An orderly viewer close sends the existing authenticated Revoke with its exact
+20-byte binding. The host sends `WaylandPopupRevokeAck` carrying that same
+binding only after native authority has been retired and a native synchronization
+has confirmed the cleanup. Merely queueing or flushing Revoke is not proof of
+that cleanup, and EOF is not a successful acknowledgement.
+
+The viewer's close wait is bounded by two seconds intersected with the original
+lease deadline. It accepts only the matching acknowledgement within that bound;
+late, unsolicited or mismatched replies do not certify closure. No ACK renews
+the lease, restores input, or permits automatic reconnect. Both endpoints must
+upgrade to v33: v32 is rejected rather than silently using its older close
+behavior. This close receipt is not an application-action completion receipt.
+
 ## Current network verification status
 
-The v32 cancellation candidate is being implemented and independently tested.
-It preserves the earlier one-way keepalive, authenticated-record padding budget,
-and original lease/proof deadlines. New deterministic real-network tests must
-exercise both orderings: refresh before a queued click produces zero native
-input and requires a new presented proof; a click processed first is accepted
-only once. These new results are **not yet claimed to have passed** here.
-Pure codec or CLI checks do not substitute for receiver, capture, presentation
-and unchanged-deadline evidence. Both peers must upgrade from v31; there is no
-automatic downgrade for the new rejection state.
+The v33 close candidate is being verified separately. It retains v32's narrow
+stale-click rejection, real-presentation gates and unchanged lease/proof
+limits. The CI gate preserves all nine real network cases and adds strict client
+close-state coverage; these candidate results are **not yet claimed to have
+passed** here. Pure checks do not substitute for native cleanup and actual
+network acknowledgement evidence.
 
 All presentation evidence is from owned software-GL test environments, not
 physical display hardware, two-machine latency or arbitrary toolkit acceptance.
@@ -131,7 +143,7 @@ receivers invalidates the old authority. Each action consumes a fresh frame;
 arming or acting never extends the lease.
 
 The native capture protocol proves captured pixels and native dispatch. Actual
-viewer presentation remains an obligation of the trusted host. The v32 network
+viewer presentation remains an obligation of the trusted host. The v33 network
 path adds the exact viewer-presentation ACK gate described above; native capture
 `ready` by itself must still not be described as actual viewer presentation.
 
@@ -172,4 +184,4 @@ Callback-owned data is cloned before reentrant code runs. An isolated harness
 executes three production FFI-free guard tests; a separate real owned-display
 regression checks callback reentrancy and registered handler retrieval in CI.
 The registry visibility assertions remain strict. At that stage, these fixes required successful real CI before validation; this
-historical failure is not evidence that the new v32 network candidate has passed.
+historical failure is not evidence that the new v33 network candidate has passed.

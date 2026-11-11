@@ -3263,19 +3263,52 @@ impl SessionCancel {
             return Ok(());
         }
         self.cancelled = true;
-        self.state.stopping.store(true, Ordering::Release);
-
+        let await_popup_ack = graceful_close
+            && self
+                .state
+                .wayland_popup
+                .lock()
+                .unwrap()
+                .close_deadline()
+                .is_some();
+        if !await_popup_ack {
+            self.state.stopping.store(true, Ordering::Release);
+        }
         let mut first_error = None;
         if graceful_close && !self.close_attempted {
             self.close_attempted = true;
             let close_result: RemoteResult<()> = (|| {
                 writer.close()?;
+                let mut popup = self.state.wayland_popup.lock().unwrap();
+                if let Some(deadline) = popup.close_deadline() {
+                    while !popup.close_confirmed() {
+                        if !self.state.alive.load(Ordering::Acquire) {
+                            return Err(invalid_data(
+                                "popup closed without exact revocation acknowledgement",
+                            )
+                            .into());
+                        }
+                        let remaining = deadline
+                            .checked_duration_since(Instant::now())
+                            .filter(|left| !left.is_zero())
+                            .ok_or_else(|| {
+                                invalid_data("popup revocation acknowledgement timed out")
+                            })?;
+                        popup = self
+                            .state
+                            .popup_close_wake
+                            .wait_timeout(popup, remaining)
+                            .unwrap()
+                            .0;
+                    }
+                }
                 Ok(())
             })();
             if let Err(error) = close_result {
                 first_error = Some(error);
             }
         }
+        self.state.stopping.store(true, Ordering::Release);
         if let Err(error) = self.shutdown_once()
             && first_error.is_none()
         {
@@ -3963,6 +3996,7 @@ struct ReceiveState {
     wayland_text: Mutex<ClientText>,
     wayland_control: Mutex<ClientControl>,
     wayland_popup: Mutex<ClientPopup>,
+    popup_close_wake: std::sync::Condvar,
     resize: Mutex<ClientResize>,
     wayland_keyboard: Mutex<ClientKeyboard>,
     wayland_pointer: Mutex<ClientPointer>,
@@ -4003,6 +4037,7 @@ impl ReceiveState {
             wayland_text: Mutex::new(ClientText::default()),
             wayland_control: Mutex::new(ClientControl::default()),
             wayland_popup: Mutex::new(ClientPopup::default()),
+            popup_close_wake: std::sync::Condvar::new(),
             resize: Mutex::new(ClientResize::default()),
             wayland_keyboard: Mutex::new(ClientKeyboard::default()),
             wayland_pointer: Mutex::new(ClientPointer::default()),
@@ -4148,12 +4183,11 @@ fn decode_popup_queued_frame(
         &state.decode_pool,
     )?;
     if let Some(metadata) = metadata {
-        state.wayland_popup.lock().unwrap().decoded(
-            metadata,
-            epoch,
-            &queued.frame,
-            Instant::now(),
-        )?;
+        state
+            .wayland_popup
+            .lock()
+            .unwrap()
+            .commit_decoded_or_drain(metadata, epoch, purpose, &queued.frame, Instant::now())?;
     }
     Ok(queued)
 }
@@ -4225,6 +4259,7 @@ impl ReceiveCompletion {
             *slot = Some(error);
         }
         self.state.alive.store(false, Ordering::Release);
+        self.state.popup_close_wake.notify_all();
         let _ = self.wake.signal();
     }
 }
@@ -4285,13 +4320,37 @@ fn receive_frame_records(
             .ok_or_else(|| {
                 io::Error::new(io::ErrorKind::TimedOut, "host stopped sending video frames")
             })?;
+        let remaining = state
+            .wayland_popup
+            .lock()
+            .unwrap()
+            .close_deadline()
+            .map_or(remaining, |deadline| {
+                remaining.min(deadline.saturating_duration_since(Instant::now()))
+            });
+        if remaining.is_zero() {
+            return Err(invalid_data("popup close acknowledgement timed out").into());
+        }
         let kind = read_record(&mut payload, remaining)?;
+        {
+            let mut popup = state.wayland_popup.lock().unwrap();
+            if popup.close_deadline().is_some() {
+                let done = popup.drain_close_record(kind, &payload, Instant::now())?;
+                drop(popup);
+                state.popup_close_wake.notify_all();
+                if done {
+                    return Ok(());
+                }
+                continue;
+            }
+        }
         match kind {
             MessageKind::WaylandPopupStatus => {
-                state.wayland_popup.lock().unwrap().status(
-                    super::wayland_popup_wire::Status::decode(&payload)?,
-                    Instant::now(),
-                )?;
+                state
+                    .wayland_popup
+                    .lock()
+                    .unwrap()
+                    .status_or_drain(&payload, Instant::now())?;
                 completion.signal()?;
             }
             MessageKind::WaylandControlActionCompleted => {
@@ -4429,6 +4488,18 @@ fn receive_frame_records(
                 state.telemetry.record_received();
                 let mut queued =
                     decode_popup_queued_frame(&state, &mut tile_decoder, inner, purpose, epoch)?;
+                // Serialize the final publication with local revoke. Decode
+                // can run outside this lock, but a close during decode must
+                // never publish a new frame or mutate input proof state.
+                let mut popup_publication = state.wayland_popup.lock().unwrap();
+                if popup_publication.close_deadline().is_some() {
+                    popup_publication.drain_close_record(
+                        MessageKind::Frame,
+                        &payload,
+                        Instant::now(),
+                    )?;
+                    continue;
+                }
                 #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
                 if let Some(observer) = &state.lossless_observer {
                     observer.lock().unwrap().push((
@@ -4493,6 +4564,7 @@ fn receive_frame_records(
                     pointer.before_frame();
                 }
                 let replaced = replace_latest(&state.latest, queued);
+                drop(popup_publication);
                 if replaced.is_some() {
                     state.telemetry.record_replaced();
                 }
@@ -4528,6 +4600,7 @@ fn receive_frame_records(
             | MessageKind::WaylandKeyboardRevoke
             | MessageKind::WaylandPopupClick
             | MessageKind::WaylandPopupRevoke
+            | MessageKind::WaylandPopupRevokeAck
             | MessageKind::WaylandPointerRequest
             | MessageKind::WaylandPointerAction
             | MessageKind::WaylandPointerRevoke

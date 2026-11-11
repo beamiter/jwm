@@ -641,6 +641,19 @@ impl WaylandCapture {
         }
         self.finish_interactive_popup();
     }
+    pub(in crate::remote) fn finish_interactive_popup_confirmed(
+        &mut self,
+        deadline: Instant,
+    ) -> RemoteResult<()> {
+        self.finish_interactive_popup();
+        if self.state.interactive_popup.transport_aborted {
+            return Err(invalid("popup cleanup transport failed").into());
+        }
+        // The display callback follows lease.destroy on this exact native
+        // connection. Flush alone would not prove the compositor processed it.
+        self.sync_until(deadline)?;
+        require_before_deadline(Instant::now(), deadline)
+    }
     pub(in crate::remote) fn finish_interactive_popup(&mut self) {
         if !self.state.interactive_popup.enabled {
             return;

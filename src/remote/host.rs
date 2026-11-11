@@ -6027,6 +6027,7 @@ fn receive_input_scoped(
                 | MessageKind::WaylandPopupStatus
                 | MessageKind::WaylandPopupClick
                 | MessageKind::WaylandPopupRevoke
+                | MessageKind::WaylandPopupRevokeAck
                 | MessageKind::WaylandControlActionCompleted
                 | MessageKind::WaylandControlRepairOffer
                 | MessageKind::WaylandControlRepairStatus

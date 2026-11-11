@@ -579,7 +579,16 @@ impl PopupHarness {
             thread::yield_now();
         }
     }
-    fn finish(mut self, gl: &mut HeadlessSmithayGles) {
+    fn finish(self, gl: &mut HeadlessSmithayGles) {
+        self.finish_with_ack_barrier(gl, None);
+    }
+    fn finish_with_ack_barrier(
+        mut self,
+        gl: &mut HeadlessSmithayGles,
+        barrier: Option<&PopupCloseBarrier>,
+    ) {
+        let binding = self.popup_host_lifetime.lock().unwrap().unwrap().binding;
+        let mut released = false;
         self.local
             .state
             .toplevels
@@ -591,8 +600,42 @@ impl PopupHarness {
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
             self.tick(gl, None);
+            if let Some(barrier) = barrier {
+                if !released {
+                    let confirmed = barrier.events.lock().unwrap().iter().find_map(|e| match e {
+                        host::popup::PopupHostTestEvent::NativeCleanupConfirmed {
+                            binding,
+                            at,
+                            deadline,
+                        } => Some((*binding, *at, *deadline)),
+                        _ => None,
+                    });
+                    if let Some((observed, at, native_deadline)) = confirmed {
+                        assert_eq!(observed, binding);
+                        assert!(at < native_deadline && Instant::now() < native_deadline);
+                        assert!(
+                            !remote_popup::active(&self.native.state),
+                            "native destroy sync must precede ACK"
+                        );
+                        assert!(
+                            matches!(self.client_done.try_recv(), Err(mpsc::TryRecvError::Empty)),
+                            "client cannot complete close before real RevokeAck"
+                        );
+                        assert!(!barrier.events.lock().unwrap().iter().any(|e| matches!(
+                            e,
+                            host::popup::PopupHostTestEvent::AckWritten { .. }
+                        )));
+                        barrier.release.send(()).unwrap();
+                        released = true;
+                    }
+                }
+            }
             match self.client_done.try_recv() {
                 Ok(result) => {
+                    assert!(
+                        barrier.is_none() || released,
+                        "ACK barrier was not exercised"
+                    );
                     result.expect("normal viewer close");
                     break;
                 }
@@ -617,6 +660,34 @@ impl PopupHarness {
         host_result
             .unwrap()
             .expect("normal authenticated host teardown");
+        if let Some(barrier) = barrier {
+            let events = barrier.events.lock().unwrap();
+            let confirmations: Vec<_> = events
+                .iter()
+                .filter_map(|e| match e {
+                    host::popup::PopupHostTestEvent::NativeCleanupConfirmed {
+                        binding,
+                        at,
+                        deadline,
+                    } => Some((*binding, *at, *deadline)),
+                    _ => None,
+                })
+                .collect();
+            let acknowledgements: Vec<_> = events
+                .iter()
+                .filter_map(|e| match e {
+                    host::popup::PopupHostTestEvent::AckWritten { binding, at } => {
+                        Some((*binding, *at))
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(confirmations.len(), 1);
+            assert_eq!(acknowledgements.len(), 1);
+            assert_eq!(acknowledgements[0].0, binding);
+            assert!(acknowledgements[0].1 >= confirmations[0].1);
+            assert!(acknowledgements[0].1 < confirmations[0].2);
+        }
         self.shutdown.store(true, Ordering::Release);
         self.client.take().unwrap().join().unwrap();
         self.host.take().unwrap().join().unwrap();
@@ -649,7 +720,15 @@ fn authenticated_popup_click_requires_arm_new_proof_and_actual_family_presentati
     let Some(mut gl) = HeadlessSmithayGles::new() else {
         return;
     };
-    let mut h = PopupHarness::new(&mut gl, true, true);
+    let barrier = PopupCloseBarrier::new();
+    let mut h = PopupHarness::configured_with_schedule(
+        &mut gl,
+        true,
+        true,
+        None,
+        None,
+        Some(barrier.hook.clone()),
+    );
     h.wait(&mut gl, "initial real commit withheld", None, |s| {
         s.private_pointer.is_some() && s.input.is_some() && !s.feedback.is_empty()
     });
@@ -800,7 +879,7 @@ fn authenticated_popup_click_requires_arm_new_proof_and_actual_family_presentati
         Some((true, true)),
         |s| s.last_visual == Some((true, true)) && s.frames.lock().unwrap().1 == s.last_presented,
     );
-    h.finish(&mut gl);
+    h.finish_with_ack_barrier(&mut gl, Some(&barrier));
 }
 
 #[test]
@@ -1881,4 +1960,41 @@ fn authenticated_popup_refresh_before_click_rejects_without_replay_then_new_pres
 #[test]
 fn authenticated_popup_click_before_refresh_is_accepted_exactly_once() {
     popup_refresh_click_order(false);
+}
+
+struct PopupCloseBarrier {
+    events: Arc<Mutex<Vec<host::popup::PopupHostTestEvent>>>,
+    release: mpsc::SyncSender<()>,
+    hook: Arc<dyn Fn(host::popup::PopupHostTestEvent) + Send + Sync>,
+}
+impl PopupCloseBarrier {
+    fn new() -> Self {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let recorded = events.clone();
+        let (release, resume) = mpsc::sync_channel(1);
+        let resume = Mutex::new(resume);
+        let hook = Arc::new(move |event| {
+            {
+                let mut events = recorded.lock().unwrap();
+                assert!(events.len() < 512);
+                events.push(event);
+            }
+            if let host::popup::PopupHostTestEvent::NativeCleanupConfirmed { deadline, .. } = event
+            {
+                let remaining = deadline
+                    .checked_duration_since(Instant::now())
+                    .expect("original native close deadline");
+                resume
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(remaining)
+                    .expect("release before original close deadline");
+            }
+        });
+        Self {
+            events,
+            release,
+            hook,
+        }
+    }
 }

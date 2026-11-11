@@ -592,12 +592,18 @@ impl Sender {
                         );
                     }
                 }
+                let popup_flushed =
+                    queue.popup_terminal == Some(PopupTerminal::Flushed) && queue.error.is_none();
                 drop(queue);
                 worker_shared.1.notify_all();
                 if let Ok(watchdog) = watchdog {
                     let _ = watchdog.join();
                 }
-                let _ = writer.get_ref().shutdown(Shutdown::Both);
+                let _ = writer.get_ref().shutdown(if popup_flushed {
+                    Shutdown::Write
+                } else {
+                    Shutdown::Both
+                });
                 let _ = done_tx.send(());
             })?;
         Ok(Self {

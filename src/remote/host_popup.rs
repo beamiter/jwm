@@ -70,6 +70,15 @@ fn observe_current(current: Option<(u64, Instant)>, acked: bool) {
 #[cfg(all(test, feature = "backend-wayland-udev"))]
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum PopupHostTestEvent {
+    NativeCleanupConfirmed {
+        binding: Binding,
+        at: Instant,
+        deadline: Instant,
+    },
+    AckWritten {
+        binding: Binding,
+        at: Instant,
+    },
     ReadyPublished(FrameKey),
     BeforeIdleRefresh(FrameKey),
     DiscardedAck {
@@ -440,6 +449,25 @@ pub(super) fn serve(
                     }
                     MessageKind::WaylandPopupRevoke => {
                         validate_popup_revoke(&bytes, binding)?;
+                        let close_deadline = deadline.min(Instant::now() + Duration::from_secs(2));
+                        capture.finish_interactive_popup_confirmed(close_deadline)?;
+                        #[cfg(all(test, feature = "backend-wayland-udev"))]
+                        observe_schedule(PopupHostTestEvent::NativeCleanupConfirmed {
+                            binding,
+                            at: Instant::now(),
+                            deadline: close_deadline,
+                        });
+                        write_session_record(
+                            &mut writer,
+                            MessageKind::WaylandPopupRevokeAck,
+                            &binding.encode()?,
+                            remaining(close_deadline)?,
+                        )?;
+                        #[cfg(all(test, feature = "backend-wayland-udev"))]
+                        observe_schedule(PopupHostTestEvent::AckWritten {
+                            binding,
+                            at: Instant::now(),
+                        });
                         return Ok(());
                     }
                     MessageKind::Heartbeat => {

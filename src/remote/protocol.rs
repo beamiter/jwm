@@ -183,6 +183,7 @@ pub enum MessageKind {
     WaylandPopupStatus = 49,
     WaylandPopupClick = 50,
     WaylandPopupRevoke = 51,
+    WaylandPopupRevokeAck = 52,
 }
 
 impl TryFrom<u8> for MessageKind {
@@ -239,6 +240,7 @@ impl TryFrom<u8> for MessageKind {
             49 => Ok(Self::WaylandPopupStatus),
             50 => Ok(Self::WaylandPopupClick),
             51 => Ok(Self::WaylandPopupRevoke),
+            52 => Ok(Self::WaylandPopupRevokeAck),
             21 => Ok(Self::ClipboardRestrict),
             22 => Ok(Self::ClipboardRestricted),
             other => Err(ProtocolError::UnknownMessageKind(other)),
@@ -781,11 +783,12 @@ mod tests {
             (49, MessageKind::WaylandPopupStatus),
             (50, MessageKind::WaylandPopupClick),
             (51, MessageKind::WaylandPopupRevoke),
+            (52, MessageKind::WaylandPopupRevokeAck),
         ] {
             assert_eq!(MessageKind::try_from(tag).unwrap(), kind);
             assert_eq!(u8::from(kind), tag);
         }
-        for tag in (0..=u8::MAX).filter(|tag| !(1..=51).contains(tag)) {
+        for tag in (0..=u8::MAX).filter(|tag| !(1..=52).contains(tag)) {
             assert!(
                 matches!(MessageKind::try_from(tag), Err(ProtocolError::UnknownMessageKind(rejected)) if rejected == tag),
                 "unallocated application message kind {tag} must be rejected"
