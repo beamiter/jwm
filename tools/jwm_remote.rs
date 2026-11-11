@@ -325,6 +325,11 @@ enum Command {
         #[arg(long, requires_all=["wayland_select","once"], conflicts_with_all=["allow_input","allow_clipboard","allow_window_resize","allow_wayland_keyboard","allow_wayland_pointer","allow_wayland_control","allow_wayland_scroll","allow_wayland_horizontal_scroll","wayland_popups","wayland_resize_follow"])]
         allow_wayland_text: bool,
 
+        /// Experimental 30s isolated-seat atomic left clicks in one root/direct popup.
+        /// Unlike --wayland-popups this permits input; GTK compatibility is not promised.
+        #[arg(long, requires_all=["wayland_select","once"], conflicts_with_all=["allow_input","allow_clipboard","allow_window_resize","allow_wayland_keyboard","allow_wayland_pointer","allow_wayland_control","allow_wayland_text","allow_wayland_scroll","allow_wayland_horizontal_scroll","allow_static_lossless","wayland_popups","wayland_resize_follow","scroll_copy"])]
+        allow_wayland_popup_pointer: bool,
+
         /// Allow bounded lossless repairs in read-only or explicit native keyboard/pointer sessions.
         #[arg(long, conflicts_with_all=["allow_input","allow_clipboard","allow_window_resize","allow_wayland_text"])]
         allow_static_lossless: bool,
@@ -468,7 +473,7 @@ enum Command {
     },
     /// Open a remote JWM desktop in an explicitly selected local viewer.
     #[command(group(clap::ArgGroup::new("native_viewer_mode")
-        .args(["view_only", "wayland_keyboard", "wayland_pointer", "wayland_control", "wayland_text_stdin"]).multiple(false)))]
+        .args(["view_only", "wayland_keyboard", "wayland_pointer", "wayland_control", "wayland_text_stdin", "wayland_popup_pointer"]).multiple(false)))]
     #[command(group(clap::ArgGroup::new("viewer_scroll_lease").args(["wayland_pointer", "wayland_control"]).multiple(false)))]
     #[command(group(clap::ArgGroup::new("lossless_session_mode").args(["view_only", "wayland_keyboard", "wayland_pointer", "wayland_control"]).multiple(false)))]
     Connect {
@@ -524,6 +529,11 @@ enum Command {
         /// Requires a native Wayland viewer; no keyboard or clipboard fallback.
         #[arg(long, requires="viewer_backend", conflicts_with_all=["view_only","wayland_keyboard","wayland_pointer","wayland_control","wayland_scroll","wayland_horizontal_scroll","clipboard","grab_input","resize_source","follow_source_size","reconnect_attempts"])]
         wayland_text_stdin: bool,
+
+        /// Experimental 30s root/direct-popup atomic left clicks, no input fallback.
+        /// This is not read-only popup capture; GTK compatibility is not promised.
+        #[arg(long, requires="viewer_backend", conflicts_with_all=["view_only","wayland_keyboard","wayland_pointer","wayland_control","wayland_text_stdin","wayland_scroll","wayland_horizontal_scroll","static_lossless","clipboard","grab_input","resize_source","follow_source_size","reconnect_attempts"])]
+        wayland_popup_pointer: bool,
 
         /// Explicitly request bounded PNG repair of stable encoded RGB pixels.
         #[arg(long, requires="lossless_session_mode", conflicts_with_all=["wayland_text_stdin","clipboard","grab_input","resize_source","follow_source_size"])]
@@ -737,6 +747,7 @@ fn profile_from_command(command: Command) -> RemoteResult<Profile> {
             wayland_pointer,
             wayland_control,
             wayland_text_stdin,
+            wayland_popup_pointer,
             static_lossless,
             wayland_scroll,
             wayland_horizontal_scroll,
@@ -769,6 +780,7 @@ fn profile_from_command(command: Command) -> RemoteResult<Profile> {
                 || wayland_horizontal_scroll
                 || wayland_control
                 || wayland_text_stdin
+                || wayland_popup_pointer
                 || static_lossless
             {
                 return Err(profile_error(
@@ -1314,6 +1326,7 @@ fn run(command: Command) -> RemoteResult<()> {
             allow_wayland_pointer,
             allow_wayland_control,
             allow_wayland_text,
+            allow_wayland_popup_pointer,
             allow_static_lossless,
             allow_wayland_scroll,
             allow_wayland_horizontal_scroll,
@@ -1374,6 +1387,7 @@ fn run(command: Command) -> RemoteResult<()> {
                 allow_wayland_pointer,
                 allow_wayland_control,
                 allow_wayland_text,
+                allow_wayland_popup_pointer,
                 allow_static_lossless,
                 allow_wayland_scroll,
                 allow_wayland_horizontal_scroll,
@@ -1451,6 +1465,7 @@ fn run(command: Command) -> RemoteResult<()> {
             wayland_pointer,
             wayland_control,
             wayland_text_stdin,
+            wayland_popup_pointer,
             static_lossless,
             wayland_scroll,
             wayland_horizontal_scroll,
@@ -1471,6 +1486,7 @@ fn run(command: Command) -> RemoteResult<()> {
                 wayland_scroll,
                 wayland_horizontal_scroll,
             )?;
+            validate_popup_viewer_cli(wayland_popup_pointer, viewer_backend)?;
             validate_native_lossless_cli(
                 static_lossless,
                 wayland_keyboard || wayland_pointer || wayland_control,
@@ -1495,6 +1511,7 @@ fn run(command: Command) -> RemoteResult<()> {
                     wayland_keyboard,
                     wayland_pointer,
                     wayland_control,
+                    wayland_popup_pointer,
                     static_lossless,
                     wayland_text: if wayland_text_stdin {
                         Some(read_explicit_text(std::io::stdin().lock())?)
@@ -4582,4 +4599,117 @@ fn validate_control_lossless_cli(
         return Err("unified control with static lossless repair does not support scroll".into());
     }
     Ok(())
+}
+
+fn validate_popup_viewer_cli(enabled: bool, backend: ViewerBackend) -> RemoteResult<()> {
+    if enabled && backend != ViewerBackend::Wayland {
+        return Err("popup pointer requires --viewer-backend wayland".into());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod popup_pointer_cli_tests {
+    use super::*;
+    #[test]
+    fn popup_is_explicit_native_exclusive_and_not_saved() {
+        let h = [
+            "jwm-remote",
+            "host",
+            "--wayland-select",
+            "--once",
+            "--allow-wayland-popup-pointer",
+        ];
+        let c = [
+            "jwm-remote",
+            "connect",
+            "host",
+            "--viewer-backend",
+            "wayland",
+            "--wayland-popup-pointer",
+        ];
+        assert!(matches!(
+            Cli::try_parse_from(h).unwrap().command,
+            Command::Host {
+                allow_wayland_popup_pointer: true,
+                ..
+            }
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(c).unwrap().command,
+            Command::Connect {
+                wayland_popup_pointer: true,
+                ..
+            }
+        ));
+        assert!(profile_from_command(Cli::try_parse_from(c).unwrap().command).is_err());
+        for flag in [
+            "--allow-input",
+            "--allow-clipboard",
+            "--allow-window-resize",
+            "--allow-wayland-keyboard",
+            "--allow-wayland-pointer",
+            "--allow-wayland-control",
+            "--allow-wayland-text",
+            "--allow-wayland-scroll",
+            "--allow-wayland-horizontal-scroll",
+            "--allow-static-lossless",
+            "--wayland-popups",
+            "--wayland-resize-follow",
+            "--scroll-copy",
+        ] {
+            let mut a = h.to_vec();
+            a.push(flag);
+            assert!(Cli::try_parse_from(a).is_err(), "{flag}");
+        }
+        for flag in [
+            "--view-only",
+            "--wayland-keyboard",
+            "--wayland-pointer",
+            "--wayland-control",
+            "--wayland-text-stdin",
+            "--wayland-scroll",
+            "--wayland-horizontal-scroll",
+            "--static-lossless",
+            "--clipboard",
+            "--grab-input",
+            "--follow-source-size",
+        ] {
+            let mut a = c.to_vec();
+            a.push(flag);
+            assert!(Cli::try_parse_from(a).is_err(), "{flag}");
+        }
+        for args in [
+            vec!["--reconnect-attempts", "1"],
+            vec!["--resize-source", "320x240"],
+        ] {
+            let mut a = c.to_vec();
+            a.extend(args);
+            assert!(Cli::try_parse_from(a).is_err());
+        }
+        for absent in ["--wayland-select", "--once"] {
+            assert!(Cli::try_parse_from(h.into_iter().filter(|a| *a != absent)).is_err());
+        }
+        for flag in ["--wayland-popup-pointer", "--allow-wayland-popup-pointer"] {
+            assert!(Cli::try_parse_from(["jwm-remote", "ssh", "host", flag]).is_err());
+        }
+        assert!(validate_popup_viewer_cli(true, ViewerBackend::X11).is_err());
+        assert!(validate_popup_viewer_cli(true, ViewerBackend::Wayland).is_ok());
+        assert!(matches!(
+            Cli::try_parse_from(["jwm-remote", "host"]).unwrap().command,
+            Command::Host {
+                allow_wayland_popup_pointer: false,
+                ..
+            }
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["jwm-remote", "connect", "host"])
+                .unwrap()
+                .command,
+            Command::Connect {
+                wayland_popup_pointer: false,
+                ..
+            }
+        ));
+    }
 }

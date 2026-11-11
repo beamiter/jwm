@@ -122,6 +122,7 @@ fn actual_scroll_copy_preserves_exact_interior_and_repairs_exposed_edges() {
             wayland_control: false,
             wayland_scroll: false,
             wayland_horizontal_scroll: false,
+            wayland_popup_pointer: false,
             resize_source: None,
             follow_source_size: false,
             window_size: None,

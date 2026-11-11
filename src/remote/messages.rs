@@ -8,12 +8,12 @@ use super::x11_keymap::{KeymapTable, MAX_ENCODED_KEYMAP_LEN};
 use std::io;
 
 const APPLICATION_MAGIC: &[u8; 8] = b"JWMREM01";
-/// v30 adds explicitly negotiated unified control with proof-gated PNG repair (no scroll).
+/// v31 adds explicit isolated-seat popup pointer authorization and family proof records.
 /// Native action receipts and proof-gated repair phases remain mandatory.
 /// Both peers must upgrade; no fallback to an older authorization contract.
-pub const APPLICATION_VERSION: u16 = 30;
+pub const APPLICATION_VERSION: u16 = 31;
 const HELLO_PREFIX_LEN: usize = 11;
-const STREAM_CAPABILITIES_LEN: usize = 33;
+const STREAM_CAPABILITIES_LEN: usize = 34;
 const SERVER_HELLO_LEN: usize = HELLO_PREFIX_LEN + STREAM_CAPABILITIES_LEN;
 const CLIENT_HELLO_HEADER_LEN: usize = SERVER_HELLO_LEN + 4;
 /// Largest client hello: the shared prefix plus a full keymap table.
@@ -126,6 +126,7 @@ pub struct StreamCapabilities {
     /// Explicit single combined authority, never inferred from old flags.
     pub wayland_control: bool,
     pub wayland_text: bool,
+    pub wayland_popup_pointer: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -183,6 +184,7 @@ impl StreamCapabilities {
         payload[30] = u8::from(self.wayland_control);
         payload[31] = u8::from(self.wayland_text);
         payload[32] = u8::from(self.static_lossless);
+        payload[33] = u8::from(self.wayland_popup_pointer);
         payload
     }
 
@@ -195,7 +197,9 @@ impl StreamCapabilities {
             [1, 2, 1] => CursorMode::Independent,
             _ => return Err(invalid_data("unsupported remote codec, cursor or input mode").into()),
         };
-        if !matches!(payload[23], 0 | 1 | 3 | 7)
+        if payload[33] > 1
+            || (payload[33] == 1 && payload[23..33].iter().any(|b| *b != 0))
+            || !matches!(payload[23], 0 | 1 | 3 | 7)
             || payload[24] > 3
             || payload[25] > 1
             || payload[26] > 1
@@ -244,6 +248,7 @@ impl StreamCapabilities {
             static_lossless: payload[32] == 1,
             wayland_control: payload[30] == 1,
             wayland_text: payload[31] == 1,
+            wayland_popup_pointer: payload[33] == 1,
             ..Self::default()
         })
     }
@@ -378,7 +383,10 @@ impl ServerHello {
 }
 
 fn validate_clipboard_flags(flags: u8, stream: StreamCapabilities) -> RemoteResult<()> {
-    if (stream.wayland_control || stream.wayland_text || stream.static_lossless)
+    if (stream.wayland_control
+        || stream.wayland_text
+        || stream.static_lossless
+        || stream.wayland_popup_pointer)
         && flags & (INPUT_FLAGS | FLAG_CLIPBOARD | FLAG_CLIPBOARD_FILES) != 0
     {
         return Err(invalid_data("control cannot combine legacy input or clipboard flags").into());
@@ -1672,8 +1680,8 @@ mod scroll_capability_tests {
     use super::*;
     #[test]
     fn scroll_is_explicit_boolean_and_requires_pointer_or_control_in_version_23() {
-        assert_eq!(APPLICATION_VERSION, 30);
-        assert_eq!(STREAM_CAPABILITIES_LEN, 33);
+        assert_eq!(APPLICATION_VERSION, 31);
+        assert_eq!(STREAM_CAPABILITIES_LEN, 34);
         let mut caps = StreamCapabilities::default();
         assert!(
             !StreamCapabilities::decode(&caps.encode())
@@ -1729,7 +1737,7 @@ mod control_capability_tests {
             ..Default::default()
         };
         let bytes = caps.encode();
-        assert_eq!(bytes.len(), 33);
+        assert_eq!(bytes.len(), 34);
         assert_eq!(StreamCapabilities::decode(&bytes).unwrap(), caps);
         for v in [2, 255] {
             let mut bad = bytes;
@@ -1775,7 +1783,7 @@ mod text_capability_tests {
             ..Default::default()
         };
         let bytes = c.encode();
-        assert_eq!(bytes.len(), 33);
+        assert_eq!(bytes.len(), 34);
         assert_eq!(StreamCapabilities::decode(&bytes).unwrap(), c);
         for i in [23, 24, 25, 26, 27, 28, 30] {
             let mut b = bytes;
@@ -1901,7 +1909,7 @@ mod lossless_scroll_hello_tests {
         let s = server(caps);
         assert_eq!(ClientHello::decode(&c.encode()).unwrap(), c);
         assert_eq!(ServerHello::decode(&s.encode()).unwrap(), s);
-        for version in [27_u16, 28, 29, 31] {
+        for version in [27_u16, 28, 29, 30, 32] {
             let mut cb = c.encode();
             cb[8..10].copy_from_slice(&version.to_be_bytes());
             assert!(ClientHello::decode(&cb).is_err());
@@ -2016,5 +2024,91 @@ mod lossless_scroll_hello_tests {
             sb[HELLO_PREFIX_LEN + 28] = bits;
             assert!(ServerHello::decode(&sb).is_err());
         }
+    }
+}
+
+#[cfg(test)]
+mod popup_capability_tests {
+    use super::*;
+    fn client(stream: StreamCapabilities) -> ClientHello {
+        ClientHello {
+            stream,
+            initial_viewport: None,
+            request_input: false,
+            request_clipboard: false,
+            request_clipboard_files: false,
+            keymap: KeymapTable::empty(),
+        }
+    }
+    fn server(stream: StreamCapabilities) -> ServerHello {
+        ServerHello {
+            stream,
+            pointer_enabled: false,
+            keyboard_enabled: false,
+            clipboard_enabled: false,
+            clipboard_files_enabled: false,
+        }
+    }
+    #[test]
+    fn popup_actual_hellos_are_default_off_exclusive_and_strict() {
+        assert!(!StreamCapabilities::default().wayland_popup_pointer);
+        let caps = StreamCapabilities {
+            wayland_popup_pointer: true,
+            ..Default::default()
+        };
+        assert_eq!(StreamCapabilities::decode(&caps.encode()).unwrap(), caps);
+        assert_eq!(
+            ClientHello::decode(&client(caps).encode()).unwrap(),
+            client(caps)
+        );
+        assert_eq!(
+            ServerHello::decode(&server(caps).encode()).unwrap(),
+            server(caps)
+        );
+        for index in 23..33 {
+            for value in [1, 2, 3, 255] {
+                let mut c = client(caps).encode();
+                c[HELLO_PREFIX_LEN + index] = value;
+                let mut s = server(caps).encode();
+                s[HELLO_PREFIX_LEN + index] = value;
+                assert!(ClientHello::decode(&c).is_err(), "client {index}/{value}");
+                assert!(ServerHello::decode(&s).is_err(), "server {index}/{value}");
+            }
+        }
+        for value in [2, 3, 128, 255] {
+            let mut c = client(caps).encode();
+            c[HELLO_PREFIX_LEN + 33] = value;
+            let mut s = server(caps).encode();
+            s[HELLO_PREFIX_LEN + 33] = value;
+            assert!(ClientHello::decode(&c).is_err());
+            assert!(ServerHello::decode(&s).is_err());
+        }
+        for flag in [
+            FLAG_POINTER,
+            FLAG_KEYBOARD,
+            FLAG_CLIPBOARD,
+            FLAG_CLIPBOARD_FILES,
+            128,
+        ] {
+            let mut c = client(caps).encode();
+            c[10] |= flag;
+            let mut s = server(caps).encode();
+            s[10] |= flag;
+            assert!(ClientHello::decode(&c).is_err());
+            assert!(ServerHello::decode(&s).is_err());
+        }
+        for version in [0_u16, 29, 30, 32, u16::MAX] {
+            let mut c = client(caps).encode();
+            c[8..10].copy_from_slice(&version.to_be_bytes());
+            let mut s = server(caps).encode();
+            s[8..10].copy_from_slice(&version.to_be_bytes());
+            assert!(ClientHello::decode(&c).is_err());
+            assert!(ServerHello::decode(&s).is_err());
+        }
+        let b = caps.encode();
+        assert!(StreamCapabilities::decode(&b[..33]).is_err());
+        let mut b = b.to_vec();
+        b.push(0);
+        assert!(StreamCapabilities::decode(&b).is_err());
     }
 }

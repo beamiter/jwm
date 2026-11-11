@@ -9,6 +9,7 @@ on:
       - dot/remote-popup-v2
       - dot/remote-popup-adapter
       - dot/remote-popup-action
+      - dot/remote-popup-network
   pull_request:
     branches:
       - master

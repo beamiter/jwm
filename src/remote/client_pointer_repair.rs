@@ -647,6 +647,9 @@ impl ClientPointer {
         if !self.repair.enabled {
             return Ok(());
         }
+        if purpose == FramePurpose::PopupFamilyProof {
+            return Err(repair_error());
+        }
         if self.repair.natural_expiry {
             if let Some(drain) = self.repair.expiry.as_mut() {
                 drain.frame(purpose, scope)?;
@@ -673,6 +676,7 @@ impl ClientPointer {
                     }
                     phase.visual = Some(scope);
                 }
+                FramePurpose::PopupFamilyProof => return Err(repair_error()),
                 FramePurpose::NativeProof => {
                     if phase.proof.is_some()
                         || phase

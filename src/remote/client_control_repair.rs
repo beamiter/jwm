@@ -357,6 +357,9 @@ impl ClientControl {
         if !self.repair.enabled {
             return Ok(());
         }
+        if purpose == FramePurpose::PopupFamilyProof {
+            return Err(failure());
+        }
         self.repair.decoded = Some(scope);
         if self.ended {
             return Ok(());
@@ -380,6 +383,7 @@ impl ClientControl {
                     }
                     phase.visual = Some(scope);
                 }
+                FramePurpose::PopupFamilyProof => return Err(failure()),
                 FramePurpose::NativeProof => {
                     if phase.proof.is_some()
                         || phase.visual.is_none_or(|v| scope.sequence <= v.sequence)

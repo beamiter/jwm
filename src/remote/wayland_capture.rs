@@ -347,7 +347,15 @@ impl WaylandCapture {
         popups: bool,
         select: impl FnOnce(&mut Self) -> RemoteResult<usize>,
     ) -> RemoteResult<Self> {
-        Self::connect_stream_mode(stream, max_width, resize_follow, popups, false, select)
+        Self::connect_stream_mode(
+            stream,
+            max_width,
+            resize_follow,
+            popups,
+            false,
+            false,
+            select,
+        )
     }
     fn connect_stream_mode(
         stream: UnixStream,
@@ -355,6 +363,7 @@ impl WaylandCapture {
         resize_follow: bool,
         popups: bool,
         interactive_popup: bool,
+        deferred_popup: bool,
         select: impl FnOnce(&mut Self) -> RemoteResult<usize>,
     ) -> RemoteResult<Self> {
         if interactive_popup && (resize_follow || popups || max_width != 0) {
@@ -449,6 +458,29 @@ impl WaylandCapture {
             .as_ref()
             .unwrap()
             .create_source(&selected, &qh, ());
+        if deferred_popup {
+            if !interactive_popup {
+                return Err(invalid("deferred popup mode is not explicit").into());
+            }
+            capture.retain_popup_original(source)?;
+            // Establish the original authority on the server before waiting
+            // for network permission. Otherwise create_source could remain
+            // buffered across an unmap/remap or lock/unlock and authorize the
+            // restored surface instead of retaining the selected instance.
+            let established = (|| -> RemoteResult<()> {
+                capture.sync_until(deadline)?;
+                capture.state.check()?;
+                if Instant::now() >= deadline {
+                    return Err(invalid("prepared popup source deadline expired").into());
+                }
+                Ok(())
+            })();
+            if let Err(error) = established {
+                capture.fail_interactive_popup();
+                return Err(error);
+            }
+            return Ok(capture);
+        }
         let source = if interactive_popup {
             capture.create_interactive_popup_source(source)?
         } else {
@@ -1184,6 +1216,12 @@ impl WaylandCapture {
         visual_only: bool,
     ) -> RemoteResult<CaptureOutcome> {
         self.state.check()?;
+        if self.state.interactive_popup.enabled && !self.state.interactive_popup.started() {
+            return Err(
+                invalid("interactive popup source has not been negotiated and started").into(),
+            );
+        }
+
         self.expire_text();
         self.expire_control();
         self.expire_keyboard();

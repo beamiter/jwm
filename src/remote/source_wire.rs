@@ -19,6 +19,7 @@ pub enum FramePurpose {
     Video = 0,
     NativeProof = 1,
     VisualRepair = 2,
+    PopupFamilyProof = 3,
 }
 
 pub fn encode_frame_payload(
@@ -47,6 +48,7 @@ pub fn decode_frame_payload(bytes: &[u8]) -> RemoteResult<(u64, FramePurpose, &[
         0 => FramePurpose::Video,
         1 => FramePurpose::NativeProof,
         2 => FramePurpose::VisualRepair,
+        3 => FramePurpose::PopupFamilyProof,
         _ => return Err(invalid("unknown frame purpose").into()),
     };
     Ok((epoch, purpose, &bytes[FRAME_PREFIX_LEN..]))
@@ -358,6 +360,7 @@ mod frame_purpose_tests {
             FramePurpose::Video,
             FramePurpose::NativeProof,
             FramePurpose::VisualRepair,
+            FramePurpose::PopupFamilyProof,
         ] {
             let bytes = encode_frame_payload(7, purpose, b"pixels").unwrap();
             assert_eq!(
@@ -367,7 +370,7 @@ mod frame_purpose_tests {
             for n in 0..=FRAME_PREFIX_LEN {
                 assert!(decode_frame_payload(&bytes[..n]).is_err());
             }
-            for bad in [3, 127, 255] {
+            for bad in [4, 127, 255] {
                 let mut b = bytes.clone();
                 b[8] = bad;
                 assert!(decode_frame_payload(&b).is_err());

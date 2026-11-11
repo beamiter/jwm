@@ -74,6 +74,7 @@ fn options(scroll: bool, horizontal_scroll: bool) -> host::HostOptions {
         allow_static_lossless: false,
         allow_wayland_scroll: scroll,
         allow_wayland_horizontal_scroll: horizontal_scroll,
+        allow_wayland_popup_pointer: false,
         scroll_copy: false,
         allow_clipboard: false,
         clipboard_mode: Default::default(),
@@ -426,6 +427,7 @@ impl Harness {
                 static_lossless: viewer_lossless,
                 wayland_scroll: viewer_scroll.0,
                 wayland_horizontal_scroll: viewer_scroll.1,
+                wayland_popup_pointer: false,
                 resize_source: None,
                 follow_source_size: false,
                 window_size: Some(WindowSize {
@@ -1192,3 +1194,6 @@ fn actual_wayland_horizontal_scroll_viewer_tcp_mixed_axes_revoke_without_input()
 
 #[path = "host_wayland_pointer_lossless_integration.rs"]
 mod pointer_lossless_integration;
+
+#[path = "host_wayland_popup_action_integration.rs"]
+mod popup_action_integration;

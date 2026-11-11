@@ -1976,6 +1976,7 @@ pub struct HostOptions {
     pub allow_wayland_pointer: bool,
     pub allow_wayland_control: bool,
     pub allow_wayland_text: bool,
+    pub allow_wayland_popup_pointer: bool,
     pub allow_wayland_scroll: bool,
     pub allow_wayland_horizontal_scroll: bool,
     /// Experimental video codec optimization, independent of input grants.
@@ -2432,6 +2433,31 @@ fn listener_security_notice(address: IpAddr) -> Option<&'static str> {
 }
 
 fn validate_window_policy(options: &HostOptions) -> RemoteResult<()> {
+    if options.allow_wayland_popup_pointer
+        && (!options.wayland_select
+            || !options.once
+            || options.wayland_popups
+            || options.wayland_resize_follow
+            || options.allow_input
+            || options.allow_clipboard
+            || options.allow_window_resize
+            || options.allow_wayland_keyboard
+            || options.allow_wayland_pointer
+            || options.allow_wayland_control
+            || options.allow_wayland_text
+            || options.allow_wayland_scroll
+            || options.allow_wayland_horizontal_scroll
+            || options.scroll_copy
+            || options.allow_static_lossless
+            || !options.shared_sources.is_empty()
+            || options.max_width != 0)
+    {
+        return Err(invalid_data(
+            "popup pointer requires exclusive unscaled one-session Wayland root selection",
+        )
+        .into());
+    }
+
     if options.allow_static_lossless
         && (options.allow_input
             || options.allow_clipboard
@@ -2604,14 +2630,19 @@ pub fn run_host(options: HostOptions) -> RemoteResult<()> {
     let window_capture = if options.wayland_select {
         #[cfg(feature = "remote-wayland")]
         {
-            Some(GrantedCapture::Wayland(Box::new(
+            let capture = if options.allow_wayland_popup_pointer {
+                super::wayland_capture::WaylandCapture::prepare_popup_pointer(
+                    options.wayland_display.as_deref(),
+                )?
+            } else {
                 super::wayland_capture::WaylandCapture::connect(
                     options.wayland_display.as_deref(),
                     options.max_width,
                     options.wayland_resize_follow,
                     options.wayland_popups,
-                )?,
-            )))
+                )?
+            };
+            Some(GrantedCapture::Wayland(Box::new(capture)))
         }
         #[cfg(not(feature = "remote-wayland"))]
         {
@@ -2998,6 +3029,30 @@ fn serve_authenticated(
         mut writer,
         hello,
     } = peer;
+    if options.allow_wayland_popup_pointer || hello.stream.wayland_popup_pointer {
+        if !options.allow_wayland_popup_pointer || !hello.stream.wayland_popup_pointer {
+            let reason = "popup pointer permission was not mutually negotiated exclusively";
+            decline_session(&mut writer, capture_refusal(reason));
+            return Err(permission_denied(reason).into());
+        }
+        validate_window_policy(options)?;
+        #[cfg(feature = "remote-wayland")]
+        {
+            let granted = window_capture.lock().unwrap().take();
+            let Some(GrantedCapture::Wayland(capture)) = granted else {
+                let reason = "popup pointer requires the original prepared Wayland source";
+                decline_session(&mut writer, capture_refusal(reason));
+                return Err(permission_denied(reason).into());
+            };
+            return popup::serve(reader, writer, hello, options, shutdown, capture);
+        }
+        #[cfg(not(feature = "remote-wayland"))]
+        {
+            let reason = "native popup pointer is not compiled in";
+            decline_session(&mut writer, capture_refusal(reason));
+            return Err(permission_denied(reason).into());
+        }
+    }
     // Both sides must have opted in: the host's flag is policy, the client's
     // request is consent. Sending clipboard records to a peer that asked for
     // none would be a protocol violation on arrival.
@@ -5969,6 +6024,9 @@ fn receive_input_scoped(
                 | MessageKind::Frame
                 | MessageKind::CursorShape
                 | MessageKind::CursorPosition
+                | MessageKind::WaylandPopupStatus
+                | MessageKind::WaylandPopupClick
+                | MessageKind::WaylandPopupRevoke
                 | MessageKind::WaylandControlActionCompleted
                 | MessageKind::WaylandControlRepairOffer
                 | MessageKind::WaylandControlRepairStatus
@@ -7854,6 +7912,7 @@ mod tests {
             allow_wayland_pointer: false,
             allow_wayland_control: false,
             allow_wayland_text: false,
+            allow_wayland_popup_pointer: false,
             allow_static_lossless: false,
             allow_wayland_scroll: false,
             allow_wayland_horizontal_scroll: false,
@@ -10543,6 +10602,7 @@ mod tests {
             allow_wayland_pointer: false,
             allow_wayland_control: false,
             allow_wayland_text: false,
+            allow_wayland_popup_pointer: false,
             allow_static_lossless: false,
             allow_wayland_scroll: false,
             allow_wayland_horizontal_scroll: false,
@@ -12678,3 +12738,7 @@ mod host_keyboard_viewer_integration;
 #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
 #[path = "wayland_viewer_integration.rs"]
 mod wayland_viewer_integration;
+
+#[cfg(feature = "remote-wayland")]
+#[path = "host_popup.rs"]
+mod popup;

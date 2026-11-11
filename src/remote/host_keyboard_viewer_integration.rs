@@ -66,6 +66,7 @@ fn options() -> HostOptions {
         allow_static_lossless: false,
         allow_wayland_scroll: false,
         allow_wayland_horizontal_scroll: false,
+        allow_wayland_popup_pointer: false,
         scroll_copy: false,
         allow_clipboard: false,
         clipboard_mode: Default::default(),
@@ -165,6 +166,7 @@ fn client_options(
         static_lossless: false,
         wayland_scroll: false,
         wayland_horizontal_scroll: false,
+        wayland_popup_pointer: false,
         resize_source: None,
         follow_source_size: false,
         window_size: Some(WindowSize {

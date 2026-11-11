@@ -2,7 +2,7 @@ name: Remote Wayland source safety
 
 on:
   push:
-    branches: [master, dot/remote-window-plan, dot/remote-readback-snapshot, dot/remote-popup-v2, dot/remote-popup-adapter, dot/remote-popup-action]
+    branches: [master, dot/remote-window-plan, dot/remote-readback-snapshot, dot/remote-popup-v2, dot/remote-popup-adapter, dot/remote-popup-action, dot/remote-popup-network]
   workflow_dispatch:
 
 permissions:
@@ -147,6 +147,33 @@ jobs:
             ignored="$(env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --ignored --list)"
             test "$(printf '%s\n' "$ignored" | grep -c ': test$' || true)" -eq 0
             env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --test-threads=1
+          done
+      - name: Authenticated popup pointer network and exclusive permission safety
+        env:
+          JWM_REQUIRE_HEADLESS_GL: '1'
+          EGL_PLATFORM: surfaceless
+          LIBGL_ALWAYS_SOFTWARE: '1'
+        run: |
+          set -euo pipefail
+          export XDG_RUNTIME_DIR="$(mktemp -d)"
+          trap 'rm -rf "$XDG_RUNTIME_DIR"' EXIT
+          real='remote::host::wayland_viewer_integration::host_pointer_integration::popup_action_integration::'
+          wire='remote::wayland_popup_wire::'
+          client='remote::client::popup::tests::'
+          cli='popup_pointer_cli_tests::'
+          for filter in "$real" "$wire" "$client" "$cli"; do
+            target=(--lib)
+            case "$filter" in
+              "$real") expected=6 ;;
+              "$wire") expected=13 ;;
+              "$client") expected=5 ;;
+              "$cli") expected=1; target=(--bin jwm-remote) ;;
+            esac
+            listed="$(env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev "${target[@]}" "$filter" -- --list)"
+            test "$(printf '%s\n' "$listed" | grep -c ': test$')" -eq "$expected"
+            ignored="$(env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev "${target[@]}" "$filter" -- --ignored --list)"
+            test "$(printf '%s\n' "$ignored" | grep -c ': test$' || true)" -eq 0
+            env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev "${target[@]}" "$filter" -- --test-threads=1
           done
       - name: Actual scoped keyboard lease recipient and revocation tests
         run: |

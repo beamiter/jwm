@@ -76,6 +76,7 @@ fn options(case: Case) -> HostOptions {
         allow_static_lossless: matches!(case, Case::RepairReRequest),
         allow_wayland_scroll: false,
         allow_wayland_horizontal_scroll: false,
+        allow_wayland_popup_pointer: false,
         scroll_copy: false,
         allow_clipboard: false,
         clipboard_mode: Default::default(),

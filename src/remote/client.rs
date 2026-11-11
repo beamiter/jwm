@@ -2,9 +2,12 @@
 
 #[path = "client_control.rs"]
 mod control;
+#[path = "client_popup.rs"]
+mod popup;
 use control::ClientControl;
 #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
 pub(crate) use control::{with_control_lifetime_observer, with_control_repair_observer};
+use popup::ClientPopup;
 #[path = "client_text.rs"]
 mod text;
 use super::wayland_keyboard_wire::DrawnScope;
@@ -180,6 +183,7 @@ pub struct ClientOptions {
     pub wayland_keyboard: bool,
     pub wayland_pointer: bool,
     pub wayland_control: bool,
+    pub wayland_popup_pointer: bool,
     pub static_lossless: bool,
     pub wayland_text: Option<super::wayland_text_wire::ExplicitText>,
     pub wayland_scroll: bool,
@@ -547,6 +551,26 @@ fn suppress_reconnect(result: RemoteResult<()>, suppress: bool) -> RemoteResult<
 }
 
 fn validate_viewer_backend(options: &ClientOptions) -> RemoteResult<()> {
+    if options.wayland_popup_pointer
+        && (options.viewer_backend != ViewerBackend::Wayland
+            || options.view_only
+            || options.wayland_keyboard
+            || options.wayland_pointer
+            || options.wayland_control
+            || options.wayland_text.is_some()
+            || options.wayland_scroll
+            || options.wayland_horizontal_scroll
+            || options.static_lossless
+            || options.clipboard
+            || options.grab_input
+            || options.resize_source.is_some()
+            || options.follow_source_size)
+    {
+        return Err(invalid_data(
+            "popup pointer requires exclusive native Wayland viewer permission",
+        )
+        .into());
+    }
     let lossless_keyboard = options.wayland_keyboard
         && options.viewer_backend == ViewerBackend::Wayland
         && !options.view_only;
@@ -640,6 +664,7 @@ fn validate_viewer_backend(options: &ClientOptions) -> RemoteResult<()> {
                 + usize::from(options.wayland_pointer)
                 + usize::from(options.wayland_control)
                 + usize::from(options.wayland_text.is_some())
+                + usize::from(options.wayland_popup_pointer)
                 != 1
             || options.clipboard
             || options.resize_source.is_some()
@@ -729,7 +754,8 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
         && !options.wayland_keyboard
         && !options.wayland_pointer
         && !options.wayland_control
-        && options.wayland_text.is_none();
+        && options.wayland_text.is_none()
+        && !options.wayland_popup_pointer;
     let keymap = if request_input {
         read_display(options.display.as_deref())?
     } else {
@@ -754,6 +780,7 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
     let stream = connect_with_timeout(&options.address, CONNECT_TIMEOUT)?;
     *stage = ClientStage::Negotiate;
     eprintln!("jwm-remote: connection opened; authenticating and negotiating permissions");
+    let popup_requested_at = Instant::now();
     let (mut reader, writer, hello) = negotiate_session(
         options.resize_source.is_some() || options.follow_source_size,
         options.wayland_keyboard,
@@ -763,6 +790,7 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
         options.wayland_control,
         options.wayland_text.is_some(),
         options.static_lossless,
+        options.wayland_popup_pointer,
         stream,
         &key,
         request_input,
@@ -851,6 +879,13 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
 
     *stage = ClientStage::FirstFrame;
     let mut initial_state = ReceiveState::new();
+    if options.wayland_popup_pointer {
+        initial_state
+            .wayland_popup
+            .get_mut()
+            .unwrap()
+            .enable(popup_requested_at);
+    }
     initial_state.wayland_text.get_mut().unwrap().payload = options.wayland_text.clone();
     initial_state.frame_limits = hello.stream.frame_limits;
     initial_state.scroll_copy = hello.stream.scroll_copy;
@@ -899,12 +934,12 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
     if initial_epoch != 1 || state.catalog.lock().unwrap().is_none() {
         return Err(invalid_data("initial frame missing source catalog or initial epoch").into());
     }
-    let mut first_frame = decode_queued_frame(
+    let mut first_frame = decode_popup_queued_frame(
+        &state,
         &mut tile_decoder,
         initial_payload,
         initial_purpose,
-        &state.telemetry,
-        &state.decode_pool,
+        initial_epoch,
     )?;
     #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
     if let Some(observer) = &state.lossless_observer {
@@ -962,6 +997,9 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
     if options.wayland_keyboard {
         let digest = viewer.enable_wayland_keyboard(options.display.as_deref())?;
         state.wayland_keyboard.lock().unwrap().enable(digest);
+    }
+    if options.wayland_popup_pointer {
+        viewer.enable_wayland_pointer(false, false)?;
     }
     if options.wayland_pointer {
         viewer.enable_wayland_pointer(options.wayland_scroll, options.wayland_horizontal_scroll)?;
@@ -1328,6 +1366,7 @@ fn negotiate_session(
     request_wayland_control: bool,
     request_wayland_text: bool,
     request_static_lossless: bool,
+    request_wayland_popup_pointer: bool,
     mut stream: TcpStream,
     key: &[u8],
     request_input: bool,
@@ -1378,6 +1417,7 @@ fn negotiate_session(
                 wayland_scroll: request_wayland_scroll,
                 wayland_horizontal_scroll: request_wayland_horizontal_scroll,
                 wayland_control: request_wayland_control,
+                wayland_popup_pointer: request_wayland_popup_pointer,
                 wayland_text: request_wayland_text,
                 static_lossless: request_static_lossless,
                 scroll_copy: true,
@@ -1506,6 +1546,22 @@ fn negotiate_session(
     }
     if hello.stream.window_resize && !request_window_resize {
         return Err(invalid_data("host granted unrequested native resize capability").into());
+    }
+    if hello.stream.wayland_popup_pointer != request_wayland_popup_pointer
+        || (request_wayland_popup_pointer
+            && (hello.pointer_enabled
+                || hello.keyboard_enabled
+                || hello.clipboard_enabled
+                || hello.stream.window_resize
+                || hello.stream.static_lossless
+                || hello.stream.wayland_keyboard
+                || hello.stream.wayland_pointer
+                || hello.stream.wayland_control
+                || hello.stream.wayland_text
+                || hello.stream.wayland_scroll
+                || hello.stream.wayland_horizontal_scroll))
+    {
+        return Err(invalid_data("popup pointer permission was not mutually negotiated").into());
     }
     validate_server_capabilities(
         &hello,
@@ -1760,6 +1816,21 @@ fn viewer_loop(
             }
         }
 
+        {
+            let popup = state.wayland_popup.lock().unwrap();
+            if popup.enabled {
+                popup.check(Instant::now())?;
+                viewer.set_wayland_pointer_status(
+                    if popup.ready_sequence(Instant::now()).is_some() {
+                        "Popup pointer: Ready (one click)"
+                    } else {
+                        "Popup pointer: Waiting for presented frame"
+                    },
+                );
+                #[cfg(test)]
+                viewer.observe_pointer_ready(popup.ready_sequence(Instant::now()))?;
+            }
+        }
         state.resize.lock().unwrap().check_timeout(Instant::now())?;
         {
             let mut keyboard = state.wayland_keyboard.lock().unwrap();
@@ -1883,6 +1954,9 @@ fn viewer_loop(
             }
         })?;
         if reported_viewport.is_some_and(|previous| previous != viewer.viewport()) {
+            if state.wayland_popup.lock().unwrap().enabled {
+                return Err(invalid_data("popup viewer viewport changed").into());
+            }
             let mut pointer = state.wayland_pointer.lock().unwrap();
             if pointer.enabled && !pointer.ended {
                 #[cfg(test)]
@@ -2008,6 +2082,42 @@ fn viewer_loop(
                     keyboard.ended,
                 )?;
                 // These events never enter legacy InputBatch or pointer paths.
+                events.retain(|event| matches!(event, ViewerEvent::Close));
+            }
+        }
+        {
+            let mut popup = state.wayland_popup.lock().unwrap();
+            if popup.enabled {
+                popup.check(Instant::now())?;
+                if events.iter().any(|event| {
+                    matches!(
+                        event,
+                        ViewerEvent::WaylandPointerRevoke
+                            | ViewerEvent::Close
+                            | ViewerEvent::ReleaseAll
+                            | ViewerEvent::CycleSource
+                    )
+                }) {
+                    if let Some(binding) = popup.revoke() {
+                        writer
+                            .write_message(MessageKind::WaylandPopupRevoke, &binding.encode()?)?;
+                        writer.flush()?;
+                    }
+                    if !events
+                        .iter()
+                        .any(|event| matches!(event, ViewerEvent::Close))
+                    {
+                        return Err(invalid_data("popup pointer local authority revoked").into());
+                    }
+                } else {
+                    for event in &events {
+                        if let Some(click) = popup.event(event, Instant::now())? {
+                            writer
+                                .write_message(MessageKind::WaylandPopupClick, &click.encode()?)?;
+                            writer.flush()?;
+                        }
+                    }
+                }
                 events.retain(|event| matches!(event, ViewerEvent::Close));
             }
         }
@@ -2159,7 +2269,14 @@ fn viewer_loop(
             follow.viewport(viewport);
         }
         if !outcome.close {
-            wrote |= viewport_policy.report(writer, &mut reported_viewport, viewport)?;
+            if state.wayland_popup.lock().unwrap().enabled {
+                // Popup proofs describe the fixed native canvas. Record the
+                // local viewport for the invalidation check, never request
+                // remote scaling through the ordinary viewport protocol.
+                reported_viewport = Some(viewport);
+            } else {
+                wrote |= viewport_policy.report(writer, &mut reported_viewport, viewport)?;
+            }
         }
         if let Some(clipboard) = clipboard {
             // Closing the viewer wins over a simultaneous local worker exit.
@@ -2275,6 +2392,14 @@ fn viewer_loop(
             } else {
                 None
             };
+            if state.wayland_popup.lock().unwrap().enabled {
+                state
+                    .wayland_popup
+                    .lock()
+                    .unwrap()
+                    .presented(sequence, Instant::now())?;
+                viewer.wayland_pointer_presented(sequence);
+            }
             acknowledge_presentation(writer, sequence, pending_presentations, &state.telemetry)?;
             // A repair is real display progress and returns video credit, but
             // cannot create, renew, or revive any native-input authority.
@@ -2473,6 +2598,9 @@ fn viewer_loop(
             if let Some(at) = text.deadline() {
                 deadline = deadline.min(at);
             }
+        }
+        if let Some(popup_deadline) = state.wayland_popup.lock().unwrap().deadline() {
+            deadline = deadline.min(popup_deadline);
         }
         if let Some(follow_deadline) = state
             .resize
@@ -3810,6 +3938,7 @@ struct ReceiveState {
     purpose_observer: Option<FramePurposeObserver>,
     wayland_text: Mutex<ClientText>,
     wayland_control: Mutex<ClientControl>,
+    wayland_popup: Mutex<ClientPopup>,
     resize: Mutex<ClientResize>,
     wayland_keyboard: Mutex<ClientKeyboard>,
     wayland_pointer: Mutex<ClientPointer>,
@@ -3849,6 +3978,7 @@ impl ReceiveState {
             purpose_observer: FRAME_PURPOSE_OBSERVER.with(|slot| slot.borrow().clone()),
             wayland_text: Mutex::new(ClientText::default()),
             wayland_control: Mutex::new(ClientControl::default()),
+            wayland_popup: Mutex::new(ClientPopup::default()),
             resize: Mutex::new(ClientResize::default()),
             wayland_keyboard: Mutex::new(ClientKeyboard::default()),
             wayland_pointer: Mutex::new(ClientPointer::default()),
@@ -3959,6 +4089,49 @@ fn take_latest(state: &ReceiveState, epoch: u64) -> Option<QueuedFrame> {
 fn replace_latest<T>(latest: &Mutex<Option<T>>, next: T) -> Option<T> {
     let mut latest = latest.lock().unwrap();
     latest.replace(next)
+}
+
+fn decode_popup_queued_frame(
+    state: &ReceiveState,
+    decoder: &mut TileDecoder,
+    payload: &[u8],
+    purpose: FramePurpose,
+    epoch: u64,
+) -> RemoteResult<QueuedFrame> {
+    let enabled = state.wayland_popup.lock().unwrap().enabled;
+    if enabled != (purpose == FramePurpose::PopupFamilyProof) {
+        return Err(invalid_data("popup frame purpose was not negotiated").into());
+    }
+    let (metadata, payload) = if enabled {
+        let prefix = super::wayland_popup_wire::METADATA_LEN;
+        if payload.len() < prefix {
+            return Err(invalid_data("short popup frame metadata").into());
+        }
+        (
+            Some(super::wayland_popup_wire::Metadata::decode(
+                &payload[..prefix],
+            )?),
+            &payload[prefix..],
+        )
+    } else {
+        (None, payload)
+    };
+    let queued = decode_queued_frame(
+        decoder,
+        payload,
+        purpose,
+        &state.telemetry,
+        &state.decode_pool,
+    )?;
+    if let Some(metadata) = metadata {
+        state.wayland_popup.lock().unwrap().decoded(
+            metadata,
+            epoch,
+            &queued.frame,
+            Instant::now(),
+        )?;
+    }
+    Ok(queued)
 }
 
 fn decode_queued_frame(
@@ -4090,6 +4263,13 @@ fn receive_frame_records(
             })?;
         let kind = read_record(&mut payload, remaining)?;
         match kind {
+            MessageKind::WaylandPopupStatus => {
+                state.wayland_popup.lock().unwrap().status(
+                    super::wayland_popup_wire::Status::decode(&payload)?,
+                    Instant::now(),
+                )?;
+                completion.signal()?;
+            }
             MessageKind::WaylandControlActionCompleted => {
                 state.wayland_control.lock().unwrap().repair_completed(
                     super::control_repair_wire::ActionReceipt::decode(&payload)?,
@@ -4206,6 +4386,11 @@ fn receive_frame_records(
                 tile_decoder = state.new_tile_decoder()?;
                 *state.latest.lock().unwrap() = None;
                 *state.cursor.lock().unwrap() = super::cursor::CursorInbox::default();
+                if state.wayland_popup.lock().unwrap().enabled {
+                    return Err(
+                        invalid_data("popup source cannot change during the session").into(),
+                    );
+                }
                 state.source_epoch.store(changed.epoch, Ordering::Release);
                 completion.signal()?;
             }
@@ -4218,13 +4403,8 @@ fn receive_frame_records(
                 // returning Frame, so pool checkout starts only on trusted
                 // header/JPEG bytes.
                 state.telemetry.record_received();
-                let mut queued = decode_queued_frame(
-                    &mut tile_decoder,
-                    inner,
-                    purpose,
-                    &state.telemetry,
-                    &state.decode_pool,
-                )?;
+                let mut queued =
+                    decode_popup_queued_frame(&state, &mut tile_decoder, inner, purpose, epoch)?;
                 #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
                 if let Some(observer) = &state.lossless_observer {
                     observer.lock().unwrap().push((
@@ -4322,6 +4502,8 @@ fn receive_frame_records(
             | MessageKind::WaylandKeyboardRequest
             | MessageKind::WaylandKeyboardKey
             | MessageKind::WaylandKeyboardRevoke
+            | MessageKind::WaylandPopupClick
+            | MessageKind::WaylandPopupRevoke
             | MessageKind::WaylandPointerRequest
             | MessageKind::WaylandPointerAction
             | MessageKind::WaylandPointerRevoke
@@ -5606,6 +5788,7 @@ pub(super) mod tests {
             wayland_keyboard: false,
             wayland_pointer: false,
             wayland_control: false,
+            wayland_popup_pointer: false,
             wayland_text: None,
             static_lossless: false,
             wayland_scroll: false,
@@ -7800,6 +7983,7 @@ pub(super) mod tests {
             false,
             false,
             false,
+            false,
             stream,
             &TEST_PSK,
             false,
@@ -7894,6 +8078,7 @@ pub(super) mod tests {
             false,
             false,
             false,
+            false,
             stream,
             &TEST_PSK,
             false,
@@ -7956,6 +8141,7 @@ pub(super) mod tests {
         });
         let stream = TcpStream::connect(address).unwrap();
         let result = negotiate_session(
+            false,
             false,
             false,
             false,
@@ -8027,6 +8213,7 @@ pub(super) mod tests {
             false,
             false,
             false,
+            false,
             stream,
             &TEST_PSK,
             false,
@@ -8090,6 +8277,7 @@ pub(super) mod tests {
             });
             let stream = TcpStream::connect(address).unwrap();
             let result = negotiate_session(
+                false,
                 false,
                 false,
                 false,
@@ -8195,6 +8383,7 @@ pub(super) mod tests {
         let started = Instant::now();
         let (mut reader, _writer, hello) = negotiate_session(
             true,
+            false,
             false,
             false,
             false,
@@ -8458,6 +8647,7 @@ mod native_viewer_permission_tests {
             wayland_keyboard: false,
             wayland_pointer: false,
             wayland_control: false,
+            wayland_popup_pointer: false,
             wayland_text: None,
             static_lossless: false,
             wayland_scroll: false,
@@ -8486,6 +8676,36 @@ mod native_viewer_permission_tests {
             validate_viewer_backend(&options).is_ok(),
             cfg!(feature = "remote-wayland")
         );
+        let mut popup = options.clone();
+        popup.view_only = false;
+        popup.wayland_popup_pointer = true;
+        assert_eq!(
+            validate_viewer_backend(&popup).is_ok(),
+            cfg!(feature = "remote-wayland")
+        );
+        for mutation in 0..12 {
+            let mut changed = popup.clone();
+            match mutation {
+                0 => changed.view_only = true,
+                1 => changed.wayland_keyboard = true,
+                2 => changed.wayland_pointer = true,
+                3 => changed.wayland_control = true,
+                4 => changed.wayland_scroll = true,
+                5 => changed.wayland_horizontal_scroll = true,
+                6 => changed.static_lossless = true,
+                7 => changed.clipboard = true,
+                8 => changed.grab_input = true,
+                9 => changed.follow_source_size = true,
+                10 => {
+                    changed.resize_source = Some(super::super::window_size::WindowSize {
+                        width: 32,
+                        height: 24,
+                    })
+                }
+                _ => changed.viewer_backend = ViewerBackend::X11,
+            }
+            assert!(validate_viewer_backend(&changed).is_err());
+        }
         for mutation in 0..8 {
             let mut changed = options.clone();
             match mutation {

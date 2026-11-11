@@ -79,6 +79,8 @@ pub mod x11_viewer;
 #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
 mod viewer_test_driver;
 
+mod wayland_popup_wire;
+
 pub mod viewer_backend;
 #[cfg(feature = "remote-wayland")]
 mod wayland_viewer;

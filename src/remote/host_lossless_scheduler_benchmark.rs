@@ -188,6 +188,7 @@ fn run_session(arm: &str, report: &mut Value) {
             wayland_control: false,
             wayland_scroll: false,
             wayland_horizontal_scroll: false,
+            wayland_popup_pointer: false,
             resize_source: None,
             follow_source_size: false,
             window_size: None,

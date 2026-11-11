@@ -16,7 +16,6 @@ pub(crate) struct PopupFrameProof {
     pub(crate) root_size: (u32, u32),
     pub(crate) popup_rect: Option<(u32, u32, u32, u32)>,
 }
-#[cfg(all(test, feature = "backend-wayland-udev"))]
 pub(crate) struct PopupCapturedFrame {
     pub(crate) frame: CapturedFrame,
     pub(crate) proof: PopupFrameProof,
@@ -76,9 +75,7 @@ pub(super) struct NativePopup {
     operation: Option<PopupOperation>,
     armed: bool,
     accepted_sequence: u32,
-    #[cfg(all(test, feature = "backend-wayland-udev"))]
     last_consumed_serial: u64,
-    #[cfg(all(test, feature = "backend-wayland-udev"))]
     last_completion: Option<Instant>,
     pending: Option<(ExtImageCopyCaptureFrameV1, u32, u64)>,
     proof: Option<PopupFrameProof>,
@@ -112,6 +109,9 @@ impl NativePopup {
         self.pending = None;
         self.proof = None;
         self.operation = None;
+    }
+    pub(super) fn started(&self) -> bool {
+        self.enabled && self.lease.is_some() && self.epoch.is_some() && self.deadline.is_some()
     }
     pub(super) fn check(&self) -> RemoteResult<()> {
         self.check_at(Instant::now())
@@ -147,7 +147,6 @@ fn valid_layout(root: (u32, u32), present: u32, rect: (u32, u32, u32, u32)) -> b
         _ => false,
     }
 }
-#[cfg(all(test, feature = "backend-wayland-udev"))]
 fn popup_click_inside(proof: &PopupFrameProof, x: u32, y: u32) -> bool {
     x < proof.root_size.0
         && y < proof.root_size.1
@@ -185,12 +184,99 @@ impl WaylandCapture {
         stream: UnixStream,
         index: usize,
     ) -> RemoteResult<Self> {
-        Self::connect_stream_mode(stream, 0, false, false, true, |_| {
+        Self::connect_stream_mode(stream, 0, false, false, true, false, |_| {
             index
                 .checked_sub(1)
                 .filter(|i| *i < MAX_TOPLEVELS)
                 .ok_or_else(|| invalid("invalid interactive popup selection").into())
         })
+    }
+    /// Select and retain only the original root. Lease creation is deferred
+    /// until both authenticated peers have explicitly negotiated this mode.
+    pub(in crate::remote) fn prepare_popup_pointer(display: Option<&str>) -> RemoteResult<Self> {
+        let path = socket_path(display)?;
+        let stream = jwm_ipc_transport::connect(&path, PROTOCOL_TIMEOUT)?;
+        Self::connect_stream_mode(stream, 0, false, false, true, true, |capture| {
+            eprint!("jwm-remote: select Wayland window index: ");
+            io::stderr().flush()?;
+            capture.read_selection(Instant::now() + SELECTION_TIMEOUT)
+        })
+    }
+    #[cfg(all(test, feature = "backend-wayland-udev"))]
+    pub(crate) fn connect_test_stream_popup_pointer(
+        stream: UnixStream,
+        index: usize,
+    ) -> RemoteResult<Self> {
+        Self::connect_stream_mode(stream, 0, false, false, true, true, |_| {
+            index
+                .checked_sub(1)
+                .filter(|i| *i < MAX_TOPLEVELS)
+                .ok_or_else(|| invalid("invalid interactive popup selection").into())
+        })
+    }
+    pub(super) fn retain_popup_original(
+        &mut self,
+        source: ExtImageCaptureSourceV1,
+    ) -> RemoteResult<()> {
+        let p = &mut self.state.interactive_popup;
+        if !p.enabled || p.original.is_some() || p.lease.is_some() {
+            return Err(invalid("invalid prepared popup source").into());
+        }
+        p.original = Some(source);
+        Ok(())
+    }
+    pub(in crate::remote) fn start_popup_pointer(&mut self) -> RemoteResult<()> {
+        let result = self.start_popup_pointer_inner();
+        if result.is_err() {
+            self.fail_interactive_popup();
+        }
+        result
+    }
+    fn start_popup_pointer_inner(&mut self) -> RemoteResult<()> {
+        self.state.check()?;
+        let p = &mut self.state.interactive_popup;
+        if !p.enabled || p.requested_at.is_some() || self.source.is_some() || self.session.is_some()
+        {
+            return Err(invalid("popup source already started or not prepared").into());
+        }
+        let original = p
+            .original
+            .take()
+            .ok_or_else(|| invalid("missing prepared popup source"))?;
+        let source = self.create_interactive_popup_source(original)?;
+        let deadline = self.popup_protocol_deadline()?;
+        self.session = Some(self.state.capture_manager.as_ref().unwrap().create_session(
+            &source,
+            manager::Options::empty(),
+            &self.queue.handle(),
+            (),
+        ));
+        self.source = Some(source);
+        self.drive_until(deadline, |s| s.constraints_done || s.session_stopped)?;
+        if self.state.session_stopped {
+            return Err(invalid("Wayland image capture session stopped").into());
+        }
+        self.create_buffer()?;
+        self.sync_until(deadline)?;
+        require_before_deadline(Instant::now(), deadline)?;
+        self.state.check()
+    }
+    pub(in crate::remote) fn popup_lease_info(&self) -> RemoteResult<(u32, Instant, Instant)> {
+        self.state.check()?;
+        let p = &self.state.interactive_popup;
+        Ok((
+            p.epoch.ok_or_else(|| invalid("missing popup epoch"))?,
+            p.requested_at
+                .ok_or_else(|| invalid("missing popup request clock"))?,
+            p.deadline
+                .ok_or_else(|| invalid("missing popup lease deadline"))?,
+        ))
+    }
+    pub(in crate::remote) fn popup_capture_started_at(&self) -> RemoteResult<Instant> {
+        self.state
+            .interactive_popup
+            .frame_started_at
+            .ok_or_else(|| invalid("missing popup capture clock").into())
     }
     pub(super) fn popup_protocol_deadline(&self) -> RemoteResult<Instant> {
         self.state.interactive_popup.check()?;
@@ -264,7 +350,6 @@ impl WaylandCapture {
         require_before_deadline(Instant::now(), deadline)?;
         self.state.check()
     }
-    #[cfg(all(test, feature = "backend-wayland-udev"))]
     pub(crate) fn capture_interactive_popup_frame(&mut self) -> RemoteResult<PopupCapturedFrame> {
         let result = self.capture_interactive_popup_frame_inner();
         if result.is_err() && self.state.interactive_popup.enabled {
@@ -272,7 +357,6 @@ impl WaylandCapture {
         }
         result
     }
-    #[cfg(all(test, feature = "backend-wayland-udev"))]
     fn capture_interactive_popup_frame_inner(&mut self) -> RemoteResult<PopupCapturedFrame> {
         if !self.state.interactive_popup.enabled || self.retained_frame.is_some() {
             return Err(invalid("interactive popup frame still retained or mode disabled").into());
@@ -288,7 +372,6 @@ impl WaylandCapture {
             .ok_or_else(|| invalid("missing popup metadata"))?;
         Ok(PopupCapturedFrame { frame, proof })
     }
-    #[cfg(all(test, feature = "backend-wayland-udev"))]
     pub(crate) fn discard_popup_frame(&mut self) {
         if self.state.interactive_popup.enabled {
             if let Some(frame) = self.retained_frame.take() {
@@ -438,6 +521,101 @@ impl WaylandCapture {
         self.discard_popup_frame();
         Ok(())
     }
+    /// Production input boundary: only the host's committed/exact-ACK ledger
+    /// can mint this opaque permit. Wire metadata alone is never sufficient.
+    pub(in crate::remote) fn dispatch_host_popup(
+        &mut self,
+        permit: crate::remote::wayland_popup_wire::NativePermit,
+    ) -> RemoteResult<()> {
+        let result = self.dispatch_host_popup_inner(permit);
+        if result.is_err() {
+            self.fail_interactive_popup();
+        }
+        result
+    }
+    fn dispatch_host_popup_inner(
+        &mut self,
+        permit: crate::remote::wayland_popup_wire::NativePermit,
+    ) -> RemoteResult<()> {
+        use crate::remote::wayland_popup_wire::NativeOperation;
+        let (metadata, captured_at, requested) = permit.into_parts();
+        self.state.check()?;
+        let now = Instant::now();
+        let p = &mut self.state.interactive_popup;
+        let proof = p
+            .proof
+            .as_ref()
+            .ok_or_else(|| invalid("missing popup retained metadata"))?;
+        let rect = metadata.popup.map(|r| (r.x, r.y, r.width, r.height));
+        if !p.enabled
+            || p.operation.is_some()
+            || p.pending.is_some()
+            || p.frame_started_at != Some(captured_at)
+            || metadata.key.binding.lease_epoch != proof.epoch
+            || metadata.key.geometry_epoch != self.epoch
+            || metadata.key.native_frame_id != proof.capture_sequence
+            || metadata.key.native_ready_serial != proof.native_ready_serial
+            || metadata.key.family_generation != proof.generation
+            || metadata.canvas != proof.root_size
+            || rect != proof.popup_rect
+            || proof.native_ready_serial <= p.last_consumed_serial
+            || p.last_completion.is_some_and(|t| captured_at <= t)
+        {
+            return Err(invalid("host popup permit does not match retained native frame").into());
+        }
+        let operation = match requested {
+            NativeOperation::Arm if !p.armed && proof.popup_rect.is_none() => PopupOperation::Arm,
+            NativeOperation::Click { sequence, x, y }
+                if p.armed
+                    && p.accepted_sequence.checked_add(1) == Some(sequence)
+                    && popup_click_inside(proof, x, y) =>
+            {
+                PopupOperation::Click(sequence)
+            }
+            _ => return Err(invalid("invalid host popup operation").into()),
+        };
+        let serial = proof.native_ready_serial;
+        let deadline = captured_at
+            .checked_add(Duration::from_secs(1))
+            .ok_or_else(|| invalid("popup clock overflow"))?
+            .min(
+                p.deadline
+                    .ok_or_else(|| invalid("missing popup deadline"))?,
+            )
+            .min(now + PROTOCOL_TIMEOUT);
+        require_before_deadline(now, deadline)?;
+        let frame = self
+            .retained_frame
+            .as_ref()
+            .ok_or_else(|| invalid("missing retained native popup frame"))?;
+        let lease = p
+            .lease
+            .as_ref()
+            .ok_or_else(|| invalid("missing native popup lease"))?;
+        let epoch = p
+            .epoch
+            .ok_or_else(|| invalid("missing native popup epoch"))?;
+        p.operation = Some(operation);
+        match requested {
+            NativeOperation::Arm => lease.arm(epoch, frame),
+            NativeOperation::Click { sequence, x, y } => {
+                lease.action(epoch, sequence, frame, 1, x, y)
+            }
+        }
+        if let Err(error) = self.conn.flush() {
+            self.abort_interactive_popup_transport();
+            return Err(error.into());
+        }
+        self.drive_until(deadline, |s| s.interactive_popup.operation.is_none())?;
+        self.sync_until(deadline)?;
+        require_before_deadline(Instant::now(), deadline)?;
+        self.state.check()?;
+        let p = &mut self.state.interactive_popup;
+        p.last_consumed_serial = serial;
+        p.last_completion = Some(Instant::now());
+        self.discard_popup_frame();
+        Ok(())
+    }
     fn abort_interactive_popup_transport(&mut self) {
         if self.state.interactive_popup.transport_aborted {
             return;
@@ -460,7 +638,7 @@ impl WaylandCapture {
         }
         self.finish_interactive_popup();
     }
-    pub(super) fn finish_interactive_popup(&mut self) {
+    pub(in crate::remote) fn finish_interactive_popup(&mut self) {
         if !self.state.interactive_popup.enabled {
             return;
         }
