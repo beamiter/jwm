@@ -565,6 +565,9 @@ impl WaylandCapture {
         }
         let operation = match requested {
             NativeOperation::Arm if !p.armed && proof.popup_rect.is_none() => PopupOperation::Arm,
+            // This sequence is minted by the host ledger's native-accepted
+            // counter, not the network processed-command counter. An explicit
+            // no-dispatch stale rejection must never create a native gap.
             NativeOperation::Click { sequence, x, y }
                 if p.armed
                     && p.accepted_sequence.checked_add(1) == Some(sequence)

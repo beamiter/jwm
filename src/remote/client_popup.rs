@@ -26,6 +26,7 @@ pub(crate) struct PopupLifetimeObservation {
     pub deadline: Option<Instant>,
     pub ttl_fixed: bool,
     pub first_failure: Option<PopupLifetimeFailure>,
+    pub last_rejected: Option<(super::super::wayland_popup_wire::FrameKey, u32)>,
 }
 #[cfg(test)]
 type LifetimeObserver = Arc<Mutex<PopupLifetimeObservation>>;
@@ -66,6 +67,8 @@ pub(super) struct ClientPopup {
     left_down: bool,
     sequence: u32,
     pending: Option<(Click, Instant)>,
+    pending_metadata: Option<Metadata>,
+    rejection_floor: Option<u64>,
     ended: bool,
 }
 impl ClientPopup {
@@ -210,11 +213,42 @@ impl ClientPopup {
                     return Err(invalid_data("popup completion proof mismatch").into());
                 }
                 self.pending = None;
+                self.pending_metadata = None;
+                self.ready = None;
+                self.candidate = None;
+            }
+            StatusKind::RejectedStale => {
+                let (pending, _) = self
+                    .pending
+                    .ok_or_else(|| invalid_data("unsolicited popup stale rejection"))?;
+                if value.action_sequence != pending.sequence
+                    || value.metadata.key != pending.key
+                    || self.pending_metadata != Some(value.metadata)
+                {
+                    return Err(invalid_data("popup stale rejection proof mismatch").into());
+                }
+                #[cfg(test)]
+                if let Some(observer) = &self.lifetime_observer {
+                    observer.lock().unwrap().last_rejected = Some((pending.key, pending.sequence));
+                }
+                self.rejection_floor = Some(
+                    self.decoded
+                        .ok_or_else(|| invalid_data("popup stale rejection without decoded proof"))?
+                        .0
+                        .key
+                        .wire_sequence,
+                );
+                self.pending = None;
+                self.pending_metadata = None;
                 self.ready = None;
                 self.candidate = None;
             }
             StatusKind::Waiting => {
-                if value.action_sequence != self.sequence
+                let previous_completed = self.pending.is_some_and(|(pending, _)| {
+                    pending.sequence == self.sequence
+                        && value.action_sequence.checked_add(1) == Some(pending.sequence)
+                });
+                if (value.action_sequence != self.sequence && !previous_completed)
                     || self.decoded.map(|p| p.0) != Some(value.metadata)
                 {
                     return Err(invalid_data("popup Waiting lacks an issued frame").into());
@@ -224,6 +258,9 @@ impl ClientPopup {
             }
             StatusKind::Ready => {
                 if !self.armed
+                    || self
+                        .rejection_floor
+                        .is_some_and(|floor| value.metadata.key.wire_sequence <= floor)
                     || self.pending.is_some()
                     || self.presented != Some(value.metadata)
                     || self.decoded.map(|p| p.0) != Some(value.metadata)
@@ -238,6 +275,7 @@ impl ClientPopup {
                         invalid_data("popup Ready lacks exact post-arm presentation").into(),
                     );
                 }
+                self.rejection_floor = None;
                 self.ready_seen = Some(value.metadata.key);
                 if self.fresh_frame(now) {
                     self.ready = Some(value.metadata);
@@ -388,6 +426,7 @@ impl ClientPopup {
                     y: u32::from(dy),
                 };
                 self.pending = Some((click, now));
+                self.pending_metadata = Some(meta);
                 self.ready = None;
                 return Ok(Some(click));
             }
@@ -522,7 +561,7 @@ mod tests {
         assert!(p.status(status(StatusKind::Ready, 1, 1), now).is_err());
     }
     #[test]
-    fn popup_refresh_waiting_crossing_click_fails_closed_without_completion() {
+    fn popup_refresh_waiting_crossing_click_preserves_completion_fence() {
         use crate::remote::x11_viewer::WaylandPointerEventKind as E;
         let now = Instant::now();
         let mut p = ready(now);
@@ -530,12 +569,68 @@ mod tests {
         let click = p.event(&edge(1, E::LeftUp), now).unwrap().unwrap();
         // This older Waiting may already be in flight when the local click
         // is sent. It is not evidence that the click completed or was denied.
-        assert!(p.status(status(StatusKind::Waiting, 1, 0), now).is_err());
+        p.status(status(StatusKind::Waiting, 1, 0), now).unwrap();
         assert_eq!(p.pending.as_ref().unwrap().0, click);
         assert!(p.ready_sequence(now).is_none());
         assert!(p.event(&edge(1, E::LeftDown), now).unwrap().is_none());
         assert!(p.event(&edge(1, E::LeftUp), now).unwrap().is_none());
         assert_eq!(p.sequence, 1);
+    }
+    #[test]
+    fn popup_stale_rejection_needs_post_receipt_frame_and_new_click() {
+        use crate::remote::x11_viewer::WaylandPointerEventKind as E;
+        let now = Instant::now();
+        let observer = Arc::new(Mutex::new(PopupLifetimeObservation::default()));
+        let mut p = with_popup_lifetime_observer(Arc::clone(&observer), || ready(now));
+        let original_deadline = p.deadline;
+        p.event(&edge(1, E::LeftDown), now).unwrap();
+        p.event(&edge(1, E::LeftUp), now).unwrap().unwrap();
+        decode(&mut p, 2, now);
+        p.presented(2, now).unwrap();
+        p.status(status(StatusKind::Waiting, 2, 0), now).unwrap();
+        p.event(&edge(2, E::LeftDown), now).unwrap();
+        p.status(status(StatusKind::RejectedStale, 1, 1), now)
+            .unwrap();
+        assert_eq!(
+            observer.lock().unwrap().last_rejected,
+            Some((status(StatusKind::RejectedStale, 1, 1).metadata.key, 1))
+        );
+        assert!(p.status(status(StatusKind::Ready, 2, 1), now).is_err());
+        decode(&mut p, 3, now);
+        assert!(p.status(status(StatusKind::Ready, 3, 1), now).is_err());
+        p.presented(3, now).unwrap();
+        p.status(status(StatusKind::Ready, 3, 1), now).unwrap();
+        assert!(p.event(&edge(3, E::LeftUp), now).unwrap().is_none());
+        p.event(&edge(3, E::LeftDown), now).unwrap();
+        assert_eq!(
+            p.event(&edge(3, E::LeftUp), now).unwrap().unwrap().sequence,
+            2
+        );
+        assert_eq!(p.deadline, original_deadline);
+    }
+    #[test]
+    fn popup_stale_rejection_rejects_unknown_duplicate_and_altered_receipts() {
+        use crate::remote::x11_viewer::WaylandPointerEventKind as E;
+        let now = Instant::now();
+        let mut p = ready(now);
+        let receipt = status(StatusKind::RejectedStale, 1, 1);
+        assert!(p.status(receipt, now).is_err());
+        p.event(&edge(1, E::LeftDown), now).unwrap();
+        p.event(&edge(1, E::LeftUp), now).unwrap().unwrap();
+        let mut wrong = receipt;
+        wrong.action_sequence = 2;
+        assert!(p.status(wrong, now).is_err());
+        wrong = receipt;
+        wrong.metadata.canvas.0 += 1;
+        assert!(p.status(wrong, now).is_err());
+        wrong = receipt;
+        wrong.metadata.key.binding.lease_epoch += 1;
+        assert!(p.status(wrong, now).is_err());
+        assert!(p.pending.is_some());
+        p.status(receipt, now).unwrap();
+        assert!(p.status(receipt, now).is_err());
+        assert!(p.status(status(StatusKind::Accepted, 1, 1), now).is_err());
+        assert!(p.ready_sequence(now).is_none());
     }
     #[test]
     fn popup_new_frame_cancels_held_candidate_without_replay() {

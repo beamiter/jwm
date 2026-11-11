@@ -10,6 +10,7 @@ on:
       - dot/remote-popup-adapter
       - dot/remote-popup-action
       - dot/remote-popup-network
+      - dot/remote-popup-cancel
   pull_request:
     branches:
       - master

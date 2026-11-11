@@ -4,8 +4,8 @@ use crate::remote::source_wire::{FramePurpose, MAX_FRAME_INNER_PAYLOAD_LEN, enco
 use crate::remote::tile::{TileEncodeRequest, TileEncoder};
 use crate::remote::wayland_capture::WaylandCapture;
 use crate::remote::wayland_popup_wire::{
-    Binding, Click, FrameKey, Ledger, METADATA_LEN, Metadata, Opportunity, Region, Status,
-    StatusKind,
+    AckDisposition, Binding, Click, ClickResolution, FrameKey, Ledger, METADATA_LEN, Metadata,
+    Opportunity, Region, Status, StatusKind,
 };
 use std::sync::mpsc::{self, TryRecvError};
 
@@ -67,6 +67,67 @@ fn observe_current(current: Option<(u64, Instant)>, acked: bool) {
     });
 }
 
+#[cfg(all(test, feature = "backend-wayland-udev"))]
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum PopupHostTestEvent {
+    ReadyPublished(FrameKey),
+    BeforeIdleRefresh(FrameKey),
+    DiscardedAck {
+        sequence: u64,
+        at: Instant,
+    },
+    ClickQueued {
+        key: FrameKey,
+        sequence: u32,
+    },
+    ClickDequeued {
+        key: FrameKey,
+        sequence: u32,
+        at: Instant,
+    },
+    FrameCaptured {
+        key: FrameKey,
+        at: Instant,
+    },
+    RejectedStale {
+        key: FrameKey,
+        sequence: u32,
+        at: Instant,
+    },
+    Accepted {
+        key: FrameKey,
+        sequence: u32,
+        at: Instant,
+    },
+}
+#[cfg(all(test, feature = "backend-wayland-udev"))]
+type ScheduleObserver = Arc<dyn Fn(PopupHostTestEvent) + Send + Sync>;
+#[cfg(all(test, feature = "backend-wayland-udev"))]
+thread_local! {
+    static SCHEDULE_OBSERVER: std::cell::RefCell<Option<ScheduleObserver>> = const { std::cell::RefCell::new(None) };
+}
+#[cfg(all(test, feature = "backend-wayland-udev"))]
+pub(crate) fn with_popup_schedule_observer<T>(
+    observer: ScheduleObserver,
+    run: impl FnOnce() -> T,
+) -> T {
+    struct Restore(Option<ScheduleObserver>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            SCHEDULE_OBSERVER.with(|slot| *slot.borrow_mut() = self.0.take());
+        }
+    }
+    let _restore = Restore(SCHEDULE_OBSERVER.with(|slot| slot.replace(Some(observer))));
+    run()
+}
+#[cfg(all(test, feature = "backend-wayland-udev"))]
+fn observe_schedule(event: PopupHostTestEvent) {
+    let observer = SCHEDULE_OBSERVER.with(|slot| slot.borrow().clone());
+    if let Some(observer) = observer {
+        observer(event);
+    }
+}
+
 pub(super) fn serve(
     mut reader: SessionReader<TcpStream>,
     mut writer: SessionWriter<DeadlineWriter<TcpStream>>,
@@ -84,7 +145,11 @@ pub(super) fn serve(
         .set_read_timeout(Some(Duration::from_secs(31)))?;
     let failed = broken.clone();
     let reader_socket = socket.try_clone()?;
+    #[cfg(all(test, feature = "backend-wayland-udev"))]
+    let schedule_observer = SCHEDULE_OBSERVER.with(|slot| slot.borrow().clone());
     let receiver = thread::spawn(move || {
+        #[cfg(all(test, feature = "backend-wayland-udev"))]
+        SCHEDULE_OBSERVER.with(|slot| *slot.borrow_mut() = schedule_observer);
         if !receive_popup_requests(&mut reader, &tx) {
             failed.store(true, Ordering::Release);
             let _ = reader_socket.shutdown(Shutdown::Both);
@@ -150,6 +215,7 @@ pub(super) fn serve(
         let mut wire_sequence = 0_u64;
         let mut proof_id = 0_u64;
         let mut action_sequence = 0_u32;
+        let mut capture_after = None;
         let mut announced = false;
         let interval = Duration::from_secs_f64(1.0 / f64::from(options.fps.max(1)));
         let mut next_capture = Instant::now();
@@ -177,6 +243,9 @@ pub(super) fn serve(
                 next_capture = Instant::now() + interval;
                 let exported = capture.capture_interactive_popup_frame()?;
                 let captured_at = capture.popup_capture_started_at()?;
+                if capture_after.is_some_and(|floor| captured_at <= floor) {
+                    return Err(invalid_data("popup capture predates rejected command").into());
+                }
                 let frame = exported.frame;
                 let proof = exported.proof;
                 stream
@@ -206,6 +275,11 @@ pub(super) fn serve(
                         height,
                     }),
                 };
+                #[cfg(all(test, feature = "backend-wayland-udev"))]
+                observe_schedule(PopupHostTestEvent::FrameCaptured {
+                    key: meta.key,
+                    at: captured_at,
+                });
                 if ledger.is_none() {
                     ledger = Some(Ledger::new(binding, meta.canvas, created)?);
                 }
@@ -252,6 +326,7 @@ pub(super) fn serve(
                         return Err(invalid_data("popup reader ended").into());
                     }
                 };
+                let dequeued_at = Instant::now();
                 check_popup_transport(&broken)?;
                 let authority = ledger.as_mut().unwrap();
                 let meta = current
@@ -263,7 +338,16 @@ pub(super) fn serve(
                         if source != binding.source_epoch {
                             return Err(invalid_data("popup ACK source mismatch").into());
                         }
-                        authority.acknowledge_exact(binding, sequence, Instant::now())?;
+                        if authority.acknowledge_frame(binding, sequence, Instant::now())?
+                            == AckDisposition::Discarded
+                        {
+                            #[cfg(all(test, feature = "backend-wayland-udev"))]
+                            observe_schedule(PopupHostTestEvent::DiscardedAck {
+                                sequence,
+                                at: Instant::now(),
+                            });
+                            continue;
+                        }
                         #[cfg(all(test, feature = "backend-wayland-udev"))]
                         observe_current(
                             current.map(|(meta, at)| (meta.key.wire_sequence, at)),
@@ -289,6 +373,8 @@ pub(super) fn serve(
                                     deadline,
                                 )?;
                                 announced = true;
+                                #[cfg(all(test, feature = "backend-wayland-udev"))]
+                                observe_schedule(PopupHostTestEvent::ReadyPublished(meta.key));
                             }
                             None => {
                                 return Err(invalid_data("popup ACK lacks committed proof").into());
@@ -296,22 +382,57 @@ pub(super) fn serve(
                         }
                     }
                     MessageKind::WaylandPopupClick => {
-                        if !announced {
-                            return Err(invalid_data("popup click before Ready").into());
-                        }
                         let request = Click::decode(&bytes)?;
-                        let permit = authority.authorize_click(request, Instant::now())?;
-                        check_popup_transport(&broken)?;
-                        capture.dispatch_host_popup(permit)?;
-                        authority.complete_click(binding, request.sequence, Instant::now())?;
+                        #[cfg(all(test, feature = "backend-wayland-udev"))]
+                        observe_schedule(PopupHostTestEvent::ClickDequeued {
+                            key: request.key,
+                            sequence: request.sequence,
+                            at: dequeued_at,
+                        });
+                        match authority.resolve_click(request, dequeued_at)? {
+                            ClickResolution::Dispatch(permit) => {
+                                check_popup_transport(&broken)?;
+                                capture.dispatch_host_popup(permit)?;
+                                authority.complete_click(
+                                    binding,
+                                    request.sequence,
+                                    Instant::now(),
+                                )?;
+                                status(
+                                    &mut writer,
+                                    StatusKind::Accepted,
+                                    meta,
+                                    request.sequence,
+                                    deadline,
+                                )?;
+                                #[cfg(all(test, feature = "backend-wayland-udev"))]
+                                observe_schedule(PopupHostTestEvent::Accepted {
+                                    key: request.key,
+                                    sequence: request.sequence,
+                                    at: Instant::now(),
+                                });
+                            }
+                            ClickResolution::RejectedStale { metadata, sequence } => {
+                                check_popup_transport(&broken)?;
+                                capture.discard_popup_frame();
+                                capture_after = Some(dequeued_at);
+                                // The rejection precedes every replacement frame on this writer.
+                                status(
+                                    &mut writer,
+                                    StatusKind::RejectedStale,
+                                    metadata,
+                                    sequence,
+                                    deadline,
+                                )?;
+                                #[cfg(all(test, feature = "backend-wayland-udev"))]
+                                observe_schedule(PopupHostTestEvent::RejectedStale {
+                                    key: metadata.key,
+                                    sequence,
+                                    at: Instant::now(),
+                                });
+                            }
+                        }
                         action_sequence = request.sequence;
-                        status(
-                            &mut writer,
-                            StatusKind::Accepted,
-                            meta,
-                            action_sequence,
-                            deadline,
-                        )?;
                         current = None;
                         #[cfg(all(test, feature = "backend-wayland-udev"))]
                         observe_current(None, false);
@@ -332,6 +453,8 @@ pub(super) fn serve(
             }
             if let Some((meta, captured_at)) = current {
                 if announced && captured_at.elapsed() >= Duration::from_millis(500) {
+                    #[cfg(all(test, feature = "backend-wayland-udev"))]
+                    observe_schedule(PopupHostTestEvent::BeforeIdleRefresh(meta.key));
                     status(
                         &mut writer,
                         StatusKind::Waiting,
@@ -407,8 +530,19 @@ fn receive_popup_requests<R: io::Read>(
             Err(_) => return false,
         };
         let terminal = message.0 == MessageKind::WaylandPopupRevoke;
+        #[cfg(all(test, feature = "backend-wayland-udev"))]
+        let queued_click = (message.0 == MessageKind::WaylandPopupClick)
+            .then(|| Click::decode(&message.1).ok())
+            .flatten();
         if tx.try_send(message).is_err() {
             return false;
+        }
+        #[cfg(all(test, feature = "backend-wayland-udev"))]
+        if let Some(click) = queued_click {
+            observe_schedule(PopupHostTestEvent::ClickQueued {
+                key: click.key,
+                sequence: click.sequence,
+            });
         }
         if terminal {
             return true;

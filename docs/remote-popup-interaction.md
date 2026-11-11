@@ -6,9 +6,9 @@ permission prompt or a claim of general GTK/Qt menu compatibility. Existing
 read-only `--wayland-popups` capture remains read-only. The existing keyboard,
 pointer and unified-control modes retain their single-surface restrictions.
 
-## Explicit network use (application protocol v31)
+## Explicit network use (application protocol v32)
 
-Upgrade both endpoints together: application protocol v31 requires an exact
+Upgrade both endpoints together: application protocol v32 requires an exact
 match and rejects older peers rather than falling back to ordinary input.
 Transport v3 is unchanged; the host compositor must provide the native popup
 protocol v2 capability. Both helpers need native Wayland support.
@@ -60,23 +60,35 @@ its proof again. Old, future, duplicate or mismatched ACKs cannot grant input.
 While idle with an acknowledged click opportunity, the host retires the current
 proof at approximately 500 ms of capture age: it flushes Waiting before
 releasing that proof and capturing its replacement. This is not a new lease or
-a guaranteed refresh latency. A click already in transit when its proof is
-retired may conservatively terminate the session; it is not replayed against a
-new frame. Revocation, local takeover, lock, source loss and original expiry
-terminate authority without reconnect or automatic regrant.
+a guaranteed refresh latency. In v32, only a click for the exact Ready proof
+retired by this active refresh may receive `RejectedStale`: an explicit
+zero-delivery result, never an acceptance or automatic retry. The next command
+sequence and legal coordinates must match, and that proof must not have been
+dispatched. Unknown proofs, repeats, other retirement causes and uncertain
+native outcomes still terminate the session.
+
+On this narrow rejection the host discards any current replacement proof,
+flushes the rejection first, and captures again strictly after dequeuing the
+rejected click. That new frame still needs successful flush and actual viewer
+presentation before input resumes. A single exact ACK for an already-sent,
+unacknowledged replacement that was discarded can be drained without granting
+input; it cannot renew a deadline or revive the discarded frame. Network
+processed-command numbering is separate from native accepted-action numbering.
+The viewer does not replay the old click and requires a new complete press and
+release after the replacement is Ready. Revocation, local takeover, lock, source
+loss and original expiry terminate authority without reconnect or regrant.
 
 ## Current network verification status
 
-The product path and CLI are implemented, but the first network CI run exposed
-a production Hello capability conflict before most interaction cases could
-execute. The follow-up candidate corrects that construction and adds continued
-real presentation through the original lease deadline. It also corrects the
-popup reader's authenticated-record budget to include padding for a real Click;
-four in-memory record-budget/keepalive regressions are being verified alongside the
-network cases. Keepalive is one-way and does not reset proof freshness or the
-original lease deadline. Its seven real network cases and these new regressions
-are **not yet claimed to have passed** here. Pure codec or CLI checks are
-not substitutes for those receiver, capture and presentation checks.
+The v32 cancellation candidate is being implemented and independently tested.
+It preserves the earlier one-way keepalive, authenticated-record padding budget,
+and original lease/proof deadlines. New deterministic real-network tests must
+exercise both orderings: refresh before a queued click produces zero native
+input and requires a new presented proof; a click processed first is accepted
+only once. These new results are **not yet claimed to have passed** here.
+Pure codec or CLI checks do not substitute for receiver, capture, presentation
+and unchanged-deadline evidence. Both peers must upgrade from v31; there is no
+automatic downgrade for the new rejection state.
 
 All presentation evidence is from owned software-GL test environments, not
 physical display hardware, two-machine latency or arbitrary toolkit acceptance.
@@ -119,7 +131,7 @@ receivers invalidates the old authority. Each action consumes a fresh frame;
 arming or acting never extends the lease.
 
 The native capture protocol proves captured pixels and native dispatch. Actual
-viewer presentation remains an obligation of the trusted host. The v31 network
+viewer presentation remains an obligation of the trusted host. The v32 network
 path adds the exact viewer-presentation ACK gate described above; native capture
 `ready` by itself must still not be described as actual viewer presentation.
 
@@ -160,4 +172,4 @@ Callback-owned data is cloned before reentrant code runs. An isolated harness
 executes three production FFI-free guard tests; a separate real owned-display
 regression checks callback reentrancy and registered handler retrieval in CI.
 The registry visibility assertions remain strict. At that stage, these fixes required successful real CI before validation; this
-historical failure is not evidence that the new v31 network candidate has passed.
+historical failure is not evidence that the new v32 network candidate has passed.

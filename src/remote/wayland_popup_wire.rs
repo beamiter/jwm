@@ -162,7 +162,11 @@ pub(crate) struct Ledger {
     last: Option<Metadata>,
     last_completion: Option<Instant>,
     pending: Option<(Pending, Instant)>,
-    sequence: u32,
+    sequence: u32,        // processed network commands, including explicit rejection
+    native_sequence: u32, // only successfully accepted native clicks
+    retired_refresh: Option<Metadata>,
+    discarded_ack: Option<FrameKey>,
+    capture_after: Option<Instant>,
 }
 #[cfg(any(test, feature = "remote-wayland"))]
 impl Ledger {
@@ -195,6 +199,10 @@ impl Ledger {
             last_completion: None,
             pending: None,
             sequence: 0,
+            native_sequence: 0,
+            retired_refresh: None,
+            discarded_ack: None,
+            capture_after: None,
         })
     }
     fn run<T>(&mut self, now: Instant, f: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
@@ -217,6 +225,8 @@ impl Ledger {
         self.ended = true;
         self.slot = None;
         self.pending = None;
+        self.retired_refresh = None;
+        self.discarded_ack = None;
     }
     pub(crate) fn reserve(
         &mut self,
@@ -238,6 +248,7 @@ impl Ledger {
                 || captured_at > now
                 || now >= captured_at.checked_add(FRESH).ok_or(Failure::Overflow)?
                 || s.last_completion.is_some_and(|t| captured_at <= t)
+                || s.capture_after.is_some_and(|t| captured_at <= t)
             {
                 return Err(Failure::Stale);
             }
@@ -410,6 +421,7 @@ impl Ledger {
                 .checked_add(1)
                 .filter(|v| *v <= MAX_ACTIONS)
                 .ok_or(Failure::Overflow)?;
+            s.retired_refresh = None; // any dispatched operation retires cancellation eligibility
             let click = Click {
                 key,
                 sequence,
@@ -450,6 +462,11 @@ impl Ledger {
             {
                 return Err(Failure::Identity);
             }
+            s.native_sequence = s
+                .native_sequence
+                .checked_add(1)
+                .filter(|v| *v <= MAX_ACTIONS)
+                .ok_or(Failure::Overflow)?;
             s.sequence = sequence;
             s.pending = None;
             s.last_completion = Some(now);
@@ -740,6 +757,194 @@ mod tests {
         assert_eq!(l.ready(t), Err(Failure::Ended));
     }
     #[test]
+    fn decoded_click_cannot_substitute_any_retained_scope_field() {
+        let start = Instant::now();
+        let now = start + Duration::from_millis(1);
+        for field in 0..9 {
+            let mut ledger = armed(start);
+            let key = displayed(&mut ledger, 2, now);
+            let mut request = Click {
+                key,
+                sequence: 1,
+                x: 1,
+                y: 1,
+            };
+            match field {
+                0 => request.key.binding.source_instance += 1,
+                1 => request.key.binding.source_epoch += 1,
+                2 => request.key.binding.lease_epoch += 1,
+                3 => request.key.geometry_epoch += 1,
+                4 => request.key.wire_sequence += 1,
+                5 => request.key.proof_id += 1,
+                6 => request.key.native_frame_id += 1,
+                7 => request.key.native_ready_serial += 1,
+                8 => request.key.family_generation += 1,
+                _ => unreachable!(),
+            }
+            // Every mutation is structurally valid on the real wire; only the
+            // host's retained full-key comparison can reject substitution.
+            let decoded = Click::decode(&request.encode().unwrap()).unwrap();
+            assert!(
+                matches!(ledger.authorize_click(decoded, now), Err(Failure::Identity)),
+                "field {field}"
+            );
+            assert_eq!(ledger.ready(now), Err(Failure::Ended));
+            assert!(matches!(
+                ledger.authorize_click(
+                    Click {
+                        key,
+                        sequence: 1,
+                        x: 1,
+                        y: 1
+                    },
+                    now
+                ),
+                Err(Failure::Ended)
+            ));
+        }
+    }
+
+    fn refresh_with_replacement(
+        start: Instant,
+        acked: bool,
+    ) -> (Ledger, FrameKey, FrameKey, Instant) {
+        let mut l = armed(start);
+        let t = start + Duration::from_millis(1);
+        let old = displayed(&mut l, 2, t);
+        l.refresh_presented(old, t).unwrap();
+        let b = reserve(&mut l, 3, t);
+        l.commit_write(b, t).unwrap();
+        if acked {
+            l.acknowledge_exact(binding(), b.wire_sequence, t).unwrap();
+        }
+        (l, old, b, t + Duration::from_millis(1))
+    }
+    fn stale_request(key: FrameKey) -> Click {
+        Click {
+            key,
+            sequence: 1,
+            x: 1,
+            y: 1,
+        }
+    }
+    fn reject(l: &mut Ledger, old: FrameKey, t: Instant) {
+        let request = Click::decode(&stale_request(old).encode().unwrap()).unwrap();
+        assert!(
+            matches!(l.resolve_click(request, t), Ok(ClickResolution::RejectedStale { metadata, sequence: 1 }) if metadata.key == old)
+        );
+        assert_eq!(l.native_sequence, 0);
+        assert!(l.pending.is_none());
+        assert_eq!(l.sequence, 1);
+    }
+    #[test]
+    fn stale_refresh_rejection_never_dispatches_and_native_sequence_has_no_gap() {
+        let start = Instant::now();
+        let (mut l, old, b, t) = refresh_with_replacement(start, false);
+        reject(&mut l, old, t);
+        assert_eq!(l.ready(t).unwrap(), None);
+        assert_eq!(
+            l.acknowledge_frame(binding(), b.wire_sequence, t).unwrap(),
+            AckDisposition::Discarded
+        );
+        assert_eq!(l.ready(t).unwrap(), None);
+        let later = t + Duration::from_nanos(1);
+        let c = displayed(&mut l, 4, later);
+        let request = Click {
+            key: c,
+            sequence: 2,
+            x: 1,
+            y: 1,
+        };
+        let ClickResolution::Dispatch(permit) = l.resolve_click(request, later).unwrap() else {
+            panic!("new click must dispatch");
+        };
+        assert_eq!(
+            permit.into_parts().2,
+            NativeOperation::Click {
+                sequence: 1,
+                x: 1,
+                y: 1
+            }
+        );
+        l.complete_click(binding(), 2, later).unwrap();
+        assert_eq!((l.sequence, l.native_sequence), (2, 1));
+    }
+    #[test]
+    fn discarded_ack_after_new_ready_only_clears_its_one_slot() {
+        let start = Instant::now();
+        let (mut l, old, b, t) = refresh_with_replacement(start, false);
+        reject(&mut l, old, t);
+        let later = t + Duration::from_nanos(1);
+        let c = displayed(&mut l, 4, later);
+        let deadline = l.deadline;
+        let completed = l.last_completion;
+        assert_eq!(
+            l.acknowledge_frame(binding(), b.wire_sequence, later)
+                .unwrap(),
+            AckDisposition::Discarded
+        );
+        assert_eq!(l.ready(later).unwrap(), Some(Opportunity::Click(c)));
+        assert_eq!((l.deadline, l.last_completion), (deadline, completed));
+        assert_eq!(
+            l.acknowledge_frame(binding(), b.wire_sequence, later),
+            Err(Failure::Identity)
+        );
+        assert_eq!(l.ready(later), Err(Failure::Ended));
+    }
+    #[test]
+    fn already_acked_replacement_has_no_second_ack_allowance_and_capture_floor_is_strict() {
+        let start = Instant::now();
+        let (mut l, old, b, t) = refresh_with_replacement(start, true);
+        reject(&mut l, old, t);
+        assert!(l.discarded_ack.is_none());
+        assert!(l.acknowledge_frame(binding(), b.wire_sequence, t).is_err());
+        let (mut l, old, _, t) = refresh_with_replacement(start, false);
+        reject(&mut l, old, t);
+        assert_eq!(l.reserve(metadata(4), t, t), Err(Failure::Stale));
+    }
+    #[test]
+    fn cancellation_unknown_duplicate_expired_and_unsent_proofs_fail_closed() {
+        let start = Instant::now();
+        let (mut l, old, _, t) = refresh_with_replacement(start, false);
+        let mut wrong = stale_request(old);
+        wrong.key.family_generation += 1;
+        assert!(l.resolve_click(wrong, t).is_err());
+        let (mut l, old, _, t) = refresh_with_replacement(start, false);
+        reject(&mut l, old, t);
+        assert!(l.resolve_click(stale_request(old), t).is_err());
+        let (mut l, old, b, t) = refresh_with_replacement(start, false);
+        reject(&mut l, old, t);
+        assert_eq!(
+            l.acknowledge_frame(binding(), b.wire_sequence, start + TTL),
+            Err(Failure::Deadline)
+        );
+        let (mut l, old, _, t) = refresh_with_replacement(start, false);
+        l.slot.as_mut().unwrap().committed = false;
+        assert!(l.resolve_click(stale_request(old), t).is_err());
+        assert!(l.discarded_ack.is_none());
+    }
+    #[test]
+    fn cancellation_never_overwrites_an_unconsumed_discarded_ack() {
+        let start = Instant::now();
+        let (mut l, old, _, t) = refresh_with_replacement(start, false);
+        reject(&mut l, old, t);
+        let later = t + Duration::from_nanos(1);
+        let c = displayed(&mut l, 4, later);
+        l.refresh_presented(c, later).unwrap();
+        let request = Click {
+            key: c,
+            sequence: 2,
+            x: 1,
+            y: 1,
+        };
+        assert!(matches!(
+            l.resolve_click(request, later),
+            Err(Failure::Ordering)
+        ));
+        assert_eq!(l.ready(later), Err(Failure::Ended));
+    }
+
+    #[test]
     fn operation_completion_keeps_original_capture_freshness_boundary() {
         let start = Instant::now();
         for delta in [Duration::from_nanos(1), Duration::ZERO] {
@@ -800,6 +1005,7 @@ pub(crate) enum StatusKind {
     Accepted = 3,
     Revoked = 4,
     Denied = 5,
+    RejectedStale = 6,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Status {
@@ -967,6 +1173,7 @@ impl Status {
             3 => StatusKind::Accepted,
             4 => StatusKind::Revoked,
             5 => StatusKind::Denied,
+            6 => StatusKind::RejectedStale,
             _ => return Err(Failure::InvalidMetadata),
         };
         let value = Self {
@@ -1024,12 +1231,18 @@ impl Ledger {
             }
             s.slot(request.key, now).copied()
         })?;
+        let native_sequence = self.run(now, |s| {
+            s.native_sequence
+                .checked_add(1)
+                .filter(|n| *n <= MAX_ACTIONS)
+                .ok_or(Failure::Overflow)
+        })?;
         let click = self.begin_click(request.key, request.x, request.y, now)?;
         Ok(NativePermit {
             metadata: slot.metadata,
             captured_at: slot.captured_at,
             operation: NativeOperation::Click {
-                sequence: click.sequence,
+                sequence: native_sequence,
                 x: click.x,
                 y: click.y,
             },
@@ -1045,9 +1258,101 @@ impl Ledger {
             if s.pending.is_some() || s.opportunity() != Some(Opportunity::Click(key)) {
                 return Err(Failure::Ordering);
             }
+            s.retired_refresh = s.slot.map(|slot| slot.metadata);
             s.slot = None;
             Ok(())
         })
+    }
+}
+
+/// An explicit no-dispatch result is distinct from a native permit. It never
+/// asserts that an already dispatched or uncertain action did not execute.
+#[cfg(any(test, feature = "remote-wayland"))]
+pub(crate) enum ClickResolution {
+    Dispatch(NativePermit),
+    RejectedStale { metadata: Metadata, sequence: u32 },
+}
+#[cfg(any(test, feature = "remote-wayland"))]
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum AckDisposition {
+    Current,
+    Discarded,
+}
+#[cfg(any(test, feature = "remote-wayland"))]
+impl Ledger {
+    pub(crate) fn resolve_click(
+        &mut self,
+        request: Click,
+        now: Instant,
+    ) -> Result<ClickResolution> {
+        let retired = self.run(now, |s| {
+            if s.pending.is_some()
+                || !s.armed
+                || request.sequence > MAX_ACTIONS
+                || s.sequence.checked_add(1) != Some(request.sequence)
+            {
+                return Err(Failure::Ordering);
+            }
+            let Some(metadata) = s.retired_refresh.filter(|m| m.key == request.key) else {
+                return Ok(None);
+            };
+            if s.discarded_ack.is_some() {
+                return Err(Failure::Ordering);
+            }
+            if request.x >= metadata.canvas.0
+                || request.y >= metadata.canvas.1
+                || metadata
+                    .popup
+                    .is_some_and(|r| !r.contains(request.x, request.y))
+            {
+                return Err(Failure::Bounds);
+            }
+            // Only a fully sent replacement can produce a legitimate delayed
+            // ACK. Never manufacture an ACK allowance for an unsent frame.
+            if let Some(slot) = s.slot {
+                if !slot.committed {
+                    return Err(Failure::Ordering);
+                }
+                if !slot.acked {
+                    s.discarded_ack = Some(slot.metadata.key);
+                }
+            }
+            s.slot = None;
+            s.retired_refresh = None;
+            s.sequence = request.sequence;
+            s.capture_after = Some(now); // actual dequeue; never a peer timestamp
+            Ok(Some(metadata))
+        })?;
+        match retired {
+            Some(metadata) => Ok(ClickResolution::RejectedStale {
+                metadata,
+                sequence: request.sequence,
+            }),
+            None => self
+                .authorize_click(request, now)
+                .map(ClickResolution::Dispatch),
+        }
+    }
+    pub(crate) fn acknowledge_frame(
+        &mut self,
+        binding: Binding,
+        sequence: u64,
+        now: Instant,
+    ) -> Result<AckDisposition> {
+        let discarded = self.run(now, |s| {
+            if let Some(key) = s.discarded_ack {
+                if key.binding == binding && key.wire_sequence == sequence {
+                    s.discarded_ack = None;
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        })?;
+        if discarded {
+            return Ok(AckDisposition::Discarded);
+        }
+        self.acknowledge_exact(binding, sequence, now)?;
+        Ok(AckDisposition::Current)
     }
 }
 
@@ -1101,6 +1406,7 @@ mod codec_tests {
             StatusKind::Accepted,
             StatusKind::Revoked,
             StatusKind::Denied,
+            StatusKind::RejectedStale,
         ] {
             let s = Status {
                 kind,
@@ -1111,6 +1417,41 @@ mod codec_tests {
             assert_eq!(Status::decode(&s.encode().unwrap()).unwrap(), s);
         }
     }
+    #[test]
+    fn popup_metadata_edge_rect_and_each_absent_rect_byte_are_canonical() {
+        let mut m = sample();
+        m.popup = Some(Region {
+            x: 319,
+            y: 239,
+            width: 1,
+            height: 1,
+        });
+        let edge = m.encode().unwrap();
+        assert_eq!(Metadata::decode(&edge).unwrap(), m);
+        for (offset, value) in [
+            (77, 320u32),
+            (81, 240),
+            (85, 2),
+            (89, 2),
+            (85, 0),
+            (89, 0),
+            (85, u32::MAX),
+            (89, u32::MAX),
+        ] {
+            let mut malformed = edge;
+            malformed[offset..offset + 4].copy_from_slice(&value.to_be_bytes());
+            assert_eq!(Metadata::decode(&malformed), Err(Failure::InvalidMetadata));
+        }
+        m.popup = None;
+        let absent = m.encode().unwrap();
+        assert_eq!(Metadata::decode(&absent).unwrap(), m);
+        for offset in 77..METADATA_LEN {
+            let mut malformed = absent;
+            malformed[offset] = 1;
+            assert_eq!(Metadata::decode(&malformed), Err(Failure::InvalidMetadata));
+        }
+    }
+
     #[test]
     fn popup_wire_rejects_noncanonical_rect_unknown_kind_and_lengths() {
         let m = sample();
@@ -1136,7 +1477,7 @@ mod codec_tests {
             ttl_ms: 1,
         };
         let mut b = s.encode().unwrap();
-        b[0] = 6;
+        b[0] = 7;
         assert!(Status::decode(&b).is_err());
         b = s.encode().unwrap();
         b[98..].fill(0);

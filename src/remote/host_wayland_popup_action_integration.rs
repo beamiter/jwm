@@ -183,6 +183,23 @@ impl PopupHarness {
         raw: Option<RawCase>,
         prepared_change: Option<PreparedChange>,
     ) -> Self {
+        Self::configured_with_schedule(
+            gl,
+            host_permission,
+            client_permission,
+            raw,
+            prepared_change,
+            None,
+        )
+    }
+    fn configured_with_schedule(
+        gl: &mut HeadlessSmithayGles,
+        host_permission: bool,
+        client_permission: bool,
+        raw: Option<RawCase>,
+        prepared_change: Option<PreparedChange>,
+        schedule: Option<Arc<dyn Fn(host::popup::PopupHostTestEvent) + Send + Sync>>,
+    ) -> Self {
         let mut native = Server::new();
         let mut local = Server::new();
         native.state.image_capture_pending =
@@ -226,14 +243,21 @@ impl PopupHarness {
                 let mut opts = options(false, false);
                 opts.allow_wayland_pointer = false;
                 opts.allow_wayland_popup_pointer = host_permission;
-                host::popup::with_popup_lifetime_observer(host_lifetime, || {
-                    host::serve_authenticated(
-                        peer,
-                        &opts,
-                        &stopping,
-                        &Mutex::new(Some(host::GrantedCapture::Wayland(Box::new(capture)))),
-                    )
-                })
+                let serve = || {
+                    host::popup::with_popup_lifetime_observer(host_lifetime, || {
+                        host::serve_authenticated(
+                            peer,
+                            &opts,
+                            &stopping,
+                            &Mutex::new(Some(host::GrantedCapture::Wayland(Box::new(capture)))),
+                        )
+                    })
+                };
+                if let Some(schedule) = schedule {
+                    host::popup::with_popup_schedule_observer(schedule, serve)
+                } else {
+                    serve()
+                }
             })();
             let _ = host_tx.send(result);
         });
@@ -577,7 +601,7 @@ impl PopupHarness {
             }
             assert!(Instant::now() < deadline, "client close deadline");
         }
-        // Let the host consume the client's flushed Revoke and retire native
+        // Let the host consume the client's queued Revoke and retire native
         // authority. Setting the emergency stop here would race that dequeue.
         let mut host_result = None;
         loop {
@@ -1507,4 +1531,354 @@ fn authenticated_popup_periodic_real_presentation_does_not_renew_original_lease(
     );
     h.client.take().unwrap().join().unwrap();
     h.host.take().unwrap().join().unwrap();
+}
+
+// These barriers only pause an already selected production scheduling point.
+// The input, queue, refresh, rejection, capture and presentation remain real.
+struct PopupSchedule {
+    events: Arc<Mutex<Vec<host::popup::PopupHostTestEvent>>>,
+    release: mpsc::SyncSender<()>,
+    hook: Arc<dyn Fn(host::popup::PopupHostTestEvent) + Send + Sync>,
+}
+impl PopupSchedule {
+    fn new(refresh_first: bool) -> Self {
+        use host::popup::PopupHostTestEvent as E;
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let recorded = events.clone();
+        let paused = AtomicBool::new(false);
+        let (release, resume) = mpsc::sync_channel(1);
+        let resume = Mutex::new(resume);
+        let hook = Arc::new(move |event| {
+            let stop = if refresh_first {
+                matches!(event, E::BeforeIdleRefresh(_))
+            } else {
+                matches!(event, E::ReadyPublished(_))
+            } && !paused.swap(true, Ordering::AcqRel);
+            {
+                let mut events = recorded.lock().unwrap();
+                assert!(events.len() < 512, "bounded scheduling observations");
+                events.push(event);
+            }
+            if stop || (refresh_first && matches!(event, E::RejectedStale { .. })) {
+                resume
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("test must release real host scheduling barrier");
+            }
+        });
+        Self {
+            events,
+            release,
+            hook,
+        }
+    }
+    fn snapshot(&self) -> Vec<host::popup::PopupHostTestEvent> {
+        self.events.lock().unwrap().clone()
+    }
+}
+
+fn popup_refresh_click_order(refresh_first: bool) {
+    use host::popup::PopupHostTestEvent as E;
+    let Some(mut gl) = HeadlessSmithayGles::new() else {
+        return;
+    };
+    let schedule = PopupSchedule::new(refresh_first);
+    let mut h = PopupHarness::configured_with_schedule(
+        &mut gl,
+        true,
+        true,
+        None,
+        None,
+        Some(schedule.hook.clone()),
+    );
+    h.wait(
+        &mut gl,
+        "real Ready and chosen host scheduling barrier",
+        Some((false, false)),
+        |s| {
+            s.ready.lock().unwrap().is_some_and(|sequence| {
+                s.last_presented == Some(sequence)
+                    && s.frames.lock().unwrap().1 == Some(sequence)
+                    && schedule.snapshot().iter().any(|event| match event {
+                        E::BeforeIdleRefresh(key) if refresh_first => key.wire_sequence == sequence,
+                        E::ReadyPublished(key) if !refresh_first => key.wire_sequence == sequence,
+                        _ => false,
+                    })
+            })
+        },
+    );
+    let old_sequence = h.ready.lock().unwrap().unwrap();
+    let native_lifetime = remote_popup::lease_timing_for_test(&h.native.state).unwrap();
+    let client_deadline = h.popup_client_lifetime.lock().unwrap().deadline.unwrap();
+    let host_lifetime = h.popup_host_lifetime.lock().unwrap().unwrap();
+    assert!(h.private_events.iter().all(|e| matches!(e.0, 0 | 2 | 5)));
+    let before = h.private_events.len();
+    h.click(8.0, 8.0);
+    h.wait(
+        &mut gl,
+        "actual old Ready click queued while host paused",
+        None,
+        |_| {
+            schedule.snapshot().iter().any(|e| {
+                matches!(e,
+            E::ClickQueued { key, sequence: 1 } if key.wire_sequence == old_sequence)
+            })
+        },
+    );
+    assert_eq!(*h.dispatched.lock().unwrap(), (1, 1));
+    assert_eq!(h.private_events.len(), before);
+    schedule.release.send(()).unwrap();
+
+    if refresh_first {
+        h.wait(
+            &mut gl,
+            "exact stale rejection and unpresented replacement",
+            None,
+            |s| {
+                s.popup_client_lifetime
+                    .lock()
+                    .unwrap()
+                    .last_rejected
+                    .is_some_and(|(key, sequence)| {
+                        key.wire_sequence == old_sequence && sequence == 1
+                    })
+                    && !s.feedback.is_empty()
+                    && s.frames.lock().unwrap().0.is_some_and(|n| n > old_sequence)
+            },
+        );
+        assert!(h.ready.lock().unwrap().is_none());
+        assert_eq!(
+            h.private_events.len(),
+            before,
+            "rejected click never reaches native"
+        );
+        let events = schedule.snapshot();
+        let (key, dequeued) = events
+            .iter()
+            .find_map(|event| match event {
+                E::ClickDequeued {
+                    key,
+                    sequence: 1,
+                    at,
+                } => Some((*key, *at)),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(
+            h.popup_client_lifetime.lock().unwrap().last_rejected,
+            Some((key, 1))
+        );
+        let rejected = events
+            .iter()
+            .find_map(|event| match event {
+                E::RejectedStale {
+                    key: rejected,
+                    sequence: 1,
+                    at,
+                } if *rejected == key => Some(*at),
+                _ => None,
+            })
+            .unwrap();
+        assert!(rejected >= dequeued);
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, E::Accepted { .. }))
+        );
+        // The host already sent the intermediate refresh frame before it
+        // dequeued this click. Present that real frame while the rejection
+        // hook holds the next capture back; its ACK may drain credit only.
+        let intermediate = h.frames.lock().unwrap().0.unwrap();
+        h.tick(&mut gl, Some((false, false)));
+        h.wait(
+            &mut gl,
+            "discarded intermediate frame actually presented",
+            None,
+            |s| s.frames.lock().unwrap().1 == Some(intermediate),
+        );
+        assert!(h.ready.lock().unwrap().is_none());
+        assert_eq!(h.private_events.len(), before);
+        schedule.release.send(()).unwrap();
+        h.wait(
+            &mut gl,
+            "post-rejection capture committed but not presented",
+            None,
+            |s| {
+                !s.feedback.is_empty()
+                    && s.frames.lock().unwrap().0.is_some_and(|n| n > intermediate)
+            },
+        );
+        assert!(h.ready.lock().unwrap().is_none());
+        assert_eq!(h.private_events.len(), before);
+        // A presentation observation alone does not prove transmission:
+        // Sender can coalesce unsent FrameAck records. Keep N+1 unpresented
+        // until the host actually consumes N through its discarded-ACK slot.
+        h.wait(
+            &mut gl,
+            "exact intermediate ACK consumed without authorization",
+            None,
+            |_| {
+                schedule.snapshot().iter().any(|event| {
+                    matches!(event,
+                E::DiscardedAck { sequence, .. } if *sequence == intermediate)
+                })
+            },
+        );
+        assert!(h.ready.lock().unwrap().is_none());
+        assert_eq!(h.private_events.len(), before);
+        assert_eq!(
+            remote_popup::lease_timing_for_test(&h.native.state),
+            Some(native_lifetime)
+        );
+        assert_eq!(
+            h.popup_client_lifetime.lock().unwrap().deadline,
+            Some(client_deadline)
+        );
+        let ack_snapshot = h.popup_host_lifetime.lock().unwrap().unwrap();
+        assert_eq!(
+            (
+                ack_snapshot.created,
+                ack_snapshot.deadline,
+                ack_snapshot.binding
+            ),
+            (
+                host_lifetime.created,
+                host_lifetime.deadline,
+                host_lifetime.binding
+            )
+        );
+        assert!(
+            !ack_snapshot.current_acked,
+            "discarded ACK cannot ACK replacement"
+        );
+        let events = schedule.snapshot();
+        let discarded: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                E::DiscardedAck { sequence, at } if *sequence == intermediate => Some(*at),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(discarded.len(), 1, "exactly one discarded ACK consumed");
+        assert!(discarded[0] >= rejected);
+        let committed = h.frames.lock().unwrap().0.unwrap();
+        assert_eq!(ack_snapshot.current_sequence, Some(committed));
+        let captured = events
+            .iter()
+            .find_map(|event| match event {
+                E::FrameCaptured { key, at } if key.wire_sequence == committed => Some(*at),
+                _ => None,
+            })
+            .unwrap();
+        assert!(
+            captured > dequeued,
+            "replacement capture must start after rejected dequeue"
+        );
+        h.wait(
+            &mut gl,
+            "new actual GL presentation and exact ACK restore Ready",
+            Some((false, false)),
+            |s| {
+                s.ready.lock().unwrap().is_some_and(|n| {
+                    n > old_sequence
+                        && s.last_presented == Some(n)
+                        && s.frames.lock().unwrap().1 == Some(n)
+                })
+            },
+        );
+        assert_eq!(
+            h.private_events.len(),
+            before,
+            "new Ready does not replay rejected input"
+        );
+        h.click(8.0, 8.0);
+    }
+    let accepted_sequence = if refresh_first { 2 } else { 1 };
+    h.wait(
+        &mut gl,
+        "one fresh atomic click reaches exact target",
+        Some((false, false)),
+        |s| {
+            s.private_events[before..]
+                .iter()
+                .filter(|e| e.0 == 3)
+                .count()
+                == 2
+                && schedule.snapshot().iter().any(|event| {
+                    matches!(event,
+                E::Accepted { sequence, .. } if *sequence == accepted_sequence)
+                })
+        },
+    );
+    let buttons: Vec<_> = h.private_events[before..]
+        .iter()
+        .filter(|e| e.0 == 3)
+        .collect();
+    assert_eq!(&buttons[0].1[2..], &[0x110, 1]);
+    assert_eq!(&buttons[1].1[2..], &[0x110, 0]);
+    assert!(
+        h.private_events[before..]
+            .iter()
+            .all(|e| matches!(e.0, 2 | 3 | 5))
+    );
+    let events = schedule.snapshot();
+    let accepted: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            E::Accepted { key, sequence, at } => Some((*key, *sequence, *at)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(accepted.len(), 1, "no duplicate native acceptance");
+    assert_eq!(accepted[0].1, accepted_sequence);
+    let dequeued = events
+        .iter()
+        .find_map(|event| match event {
+            E::ClickDequeued { key, sequence, at }
+                if *key == accepted[0].0 && *sequence == accepted_sequence =>
+            {
+                Some(*at)
+            }
+            _ => None,
+        })
+        .unwrap();
+    assert!(accepted[0].2 >= dequeued);
+    if !refresh_first {
+        assert_eq!(accepted[0].0.wire_sequence, old_sequence);
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, E::RejectedStale { .. }))
+        );
+    }
+    assert_eq!(
+        remote_popup::lease_timing_for_test(&h.native.state),
+        Some(native_lifetime)
+    );
+    assert_eq!(
+        h.popup_client_lifetime.lock().unwrap().deadline,
+        Some(client_deadline)
+    );
+    let after = h.popup_host_lifetime.lock().unwrap().unwrap();
+    assert_eq!(
+        (after.created, after.deadline, after.binding),
+        (
+            host_lifetime.created,
+            host_lifetime.deadline,
+            host_lifetime.binding
+        )
+    );
+    h.finish(&mut gl);
+}
+
+#[test]
+fn authenticated_popup_refresh_before_click_rejects_without_replay_then_new_presented_click_succeeds()
+ {
+    popup_refresh_click_order(true);
+}
+
+#[test]
+fn authenticated_popup_click_before_refresh_is_accepted_exactly_once() {
+    popup_refresh_click_order(false);
 }

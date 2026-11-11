@@ -2,7 +2,7 @@ name: Remote Wayland source safety
 
 on:
   push:
-    branches: [master, dot/remote-window-plan, dot/remote-readback-snapshot, dot/remote-popup-v2, dot/remote-popup-adapter, dot/remote-popup-action, dot/remote-popup-network]
+    branches: [master, dot/remote-window-plan, dot/remote-readback-snapshot, dot/remote-popup-v2, dot/remote-popup-adapter, dot/remote-popup-action, dot/remote-popup-network, dot/remote-popup-cancel]
   workflow_dispatch:
 
 permissions:
@@ -162,16 +162,18 @@ jobs:
           client='remote::client::popup::tests::'
           hello='remote::client::popup_hello_policy_tests::'
           budget='remote::host::popup::record_budget_tests::'
+          capabilities='remote::messages::popup_capability_tests::'
           sender='remote::sender::tests::popup_terminal_'
           cli='popup_pointer_cli_tests::'
-          for filter in "$real" "$wire" "$client" "$hello" "$budget" "$sender" "$cli"; do
+          for filter in "$real" "$wire" "$client" "$hello" "$budget" "$capabilities" "$sender" "$cli"; do
             target=(--lib)
             case "$filter" in
-              "$real") expected=7 ;;
-              "$wire") expected=13 ;;
-              "$client") expected=6 ;;
+              "$real") expected=9 ;;
+              "$wire") expected=20 ;;
+              "$client") expected=8 ;;
               "$hello") expected=2 ;;
               "$budget") expected=7 ;;
+              "$capabilities") expected=1 ;;
               "$sender") expected=3 ;;
               "$cli") expected=1; target=(--bin jwm-remote) ;;
             esac
