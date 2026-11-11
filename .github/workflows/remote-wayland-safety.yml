@@ -152,7 +152,7 @@ jobs:
           export XDG_RUNTIME_DIR="$(mktemp -d)"
           filter='remote::host::wayland_viewer_integration::host_lossless_integration::'
           listed="$(env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --skip scheduler_benchmark --list)"
-          test "$(printf '%s\n' "$listed" | grep -c ': test$')" -eq 9
+          test "$(printf '%s\n' "$listed" | grep -c ': test$')" -eq 10
           env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --skip scheduler_benchmark --test-threads=1 --nocapture
       - name: Lossless popup and passive resize family exact pixels and epoch fences
         run: |

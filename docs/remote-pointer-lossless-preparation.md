@@ -380,3 +380,22 @@ Independent static review found no remaining contract mismatch. The combined
 fixture list now contains 22 tests, including the unchanged independently required
 optimized 1080p test; seven new horizontal cases and two additional malicious raw
 records await actual CI. No local display, socket or renderer acceptance is claimed.
+
+The first horizontal candidate passed general CI (8,308 tests), X11, the new
+real horizontal scenarios and the mandatory optimized 1080p case. The final
+Wayland aggregate still failed an existing read-only blink test: one generation
+missed its unchanged 500 ms actual-presentation requirement, with 1,049 other
+tests passing. It was not merged. Source repaint was about 160 ms late while the
+same harness thread spent about 100 ms checking each full frame. The horizontal
+production diff did not change that read-only capture or scheduling path.
+
+A test-only follow-up computes the identical full static-region RGBA SSE in row
+spans, preserving every channel and the exact 16×16 exclusion. Equal spans prove
+zero error directly. A debug pure-CPU alternating A/B (two warmups, eight samples)
+measured reference/new median costs of 64.075/0.096 ms for equal frames,
+61.333/10.971 ms for half-frame differences and 61.379/21.693 ms for dense
+differences, with identical SSE in each case. Boundary, alpha, last-pixel and
+maximum-error reference comparisons cover the oracle. Fixed cadence, 500 ms,
+18-second total deadline, actual presentation timestamps and production code are
+unchanged. This demonstrates fixture CPU cost, not the sole cause of the missed
+deadline or a production latency improvement; real CI must still pass.

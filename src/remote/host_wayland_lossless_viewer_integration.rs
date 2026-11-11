@@ -98,13 +98,24 @@ fn blink_pattern(generation: usize) -> Vec<u8> {
 }
 fn static_sse(actual: &[u8], expected: &[u8]) -> u64 {
     assert_eq!(actual.len(), expected.len());
-    actual
-        .chunks_exact(4)
-        .zip(expected.chunks_exact(4))
+    assert_eq!(actual.len(), 800 * 600 * 4);
+    let mut error = 0;
+    for (y, (a, b)) in actual
+        .chunks_exact(800 * 4)
+        .zip(expected.chunks_exact(800 * 4))
         .enumerate()
-        .filter(|(index, _)| index % 800 >= BLINK_SIDE || index / 800 >= BLINK_SIDE)
-        .map(|(_, (a, b))| sse(a, b))
-        .sum()
+    {
+        let start = if y < BLINK_SIDE { BLINK_SIDE * 4 } else { 0 };
+        let (a, b) = (&a[start..], &b[start..]);
+        // Whole-row equality proves zero error, not a sampled approximation.
+        // Mismatching rows still check every included channel, including alpha.
+        // Avoid a nested iterator and assertion per pixel on the same thread
+        // that must service the fixed source schedule and both compositors.
+        if a != b {
+            error += sse(a, b);
+        }
+    }
+    error
 }
 fn blink_matches(bytes: &[u8], generation: usize) -> bool {
     // JPEG motion is deliberately not called lossless. Interior pixels must
@@ -716,6 +727,48 @@ fn blink_exclusion_is_exactly_one_tile_not_neighboring_edges() {
     assert_eq!(static_sse(&a, &b), 2);
     assert!(blink_matches(&a, 0));
     assert!(!blink_matches(&a, 1));
+}
+
+#[test]
+fn blink_row_oracle_matches_full_pixel_reference() {
+    fn reference(a: &[u8], b: &[u8]) -> u64 {
+        a.chunks_exact(4)
+            .zip(b.chunks_exact(4))
+            .enumerate()
+            .filter(|(i, _)| i % 800 >= BLINK_SIDE || i / 800 >= BLINK_SIDE)
+            .map(|(_, (a, b))| sse(a, b))
+            .sum()
+    }
+    let a = blink_pattern(0);
+    assert_eq!(static_sse(&a, &a), reference(&a, &a));
+    // Every channel at the exclusion boundary, row ends and final pixel.
+    for (x, y) in [
+        (0, 0),
+        (15, 15),
+        (16, 0),
+        (0, 16),
+        (16, 16),
+        (799, 15),
+        (799, 599),
+    ] {
+        for channel in 0..4 {
+            let mut b = a.clone();
+            b[(y * 800 + x) * 4 + channel] ^= 255;
+            assert_eq!(static_sse(&a, &b), reference(&a, &b), "{x},{y},{channel}");
+        }
+    }
+    let b: Vec<u8> = a
+        .iter()
+        .enumerate()
+        .map(|(i, v)| v.wrapping_add(((i * 73 + i / 17) % 256) as u8))
+        .collect();
+    assert_eq!(static_sse(&a, &b), reference(&a, &b));
+    let zeros = vec![0; a.len()];
+    let max = vec![255; a.len()];
+    assert_eq!(
+        static_sse(&zeros, &max),
+        ((800 * 600 - 16 * 16) * 4) as u64 * 255 * 255
+    );
 }
 
 #[test]
