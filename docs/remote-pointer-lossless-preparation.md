@@ -14,12 +14,25 @@ on that evidence. Follow-up work distinguishes a legitimate late action receipt
 after local revocation, uses the actual trusted-local input acquisition path,
 and narrows permission-denial teardown classification. Lock now requires exactly the one time-zero focus-restore motion produced by
 Smithay during locking; extra motion, buttons and axes fail. Unmap remains
-strictly zero-action. These distinctions still require the real CI rerun.
+strictly zero-action. These distinctions were checked by the successful follow-up candidate run described below.
 The updated module has six real fixtures, including 800×600 multi-batch repair,
 and one pure marker negative test. The follow-up passes strict Clippy, test
 compilation, 39 pure phase/client/host/wire regressions, the marker negative test
-and the arithmetic checks below. Its new real CI results remain pending. No
-hardware or physical-latency acceptance is claimed for this combination.
+and the arithmetic checks below. Candidate `9b3105` then passed
+[general CI](https://github.com/beamiter/jwm/actions/runs/42939234419)
+(8,267 passed, 37 ignored),
+[Wayland CI](https://github.com/beamiter/jwm/actions/runs/42939234552)
+(remote suite 1,009 passed, 30 ignored; CLI 53 passed), and X11 CI.
+All seven tests in the baseline module passed. All four baseline mainline
+workflows subsequently passed:
+[general](https://github.com/beamiter/jwm/actions/runs/42941742193)
+(8,267 passed, 37 ignored),
+[X11](https://github.com/beamiter/jwm/actions/runs/42941742100),
+[Wayland](https://github.com/beamiter/jwm/actions/runs/42941742204)
+(remote 1,009 passed, 30 ignored), and
+[Eva](https://github.com/beamiter/jwm/actions/runs/42941742186).
+These are owned software-GL results, not physical hardware or latency acceptance.
+The separate natural-expiry candidate below remains unvalidated.
 
 ## Explicit selection and permissions
 
@@ -36,8 +49,8 @@ group allows exactly one of view-only, keyboard or pointer, and the native-input
 lossless validation requires the Wayland viewer. Scroll and the other forbidden
 combinations remain explicitly rejected. The centralized static-lossless CLI
 group passed all three pure tests, including
-the positive pointer combination and mixed-mode/profile negative cases. Real
-integration CI remains pending at this checkpoint.
+the positive pointer combination and mixed-mode/profile negative cases.
+Baseline real integration CI also passed as recorded above.
 
 The host selects one live surface locally. This combination requires a native
 Wayland viewer and is not view-only: do not add `--view-only`. It does not enable
@@ -102,8 +115,15 @@ report failures rather than enlarging the acceptance window.
 This combination currently promises only **local progressive repair, not
 full-frame exactness at common desktop sizes within the input lease**. The
 existing 200×150 fixture fits in one batch and cannot demonstrate larger-frame
-convergence. An 800×600 multi-batch real fixture has been added; no passing
-result is claimed for that additional test yet.
+convergence. The 800×600 real fixture completed eight batches to whole-frame
+RGB SSE=0 in three executions: 18,371 / 18,360 / 18,449 ms, followed by an actual
+click through the renewed proof/presentation gate, without renewing the lease.
+The small fixture took 2,214 / 2,218 / 2,225 ms. The mainline repeat
+completed the 800×600 eight-batch exact repair in 18,388 / 18,289 / 18,413 ms,
+with two actual clicks in each fixture execution. These are observed synthetic
+software-GL convergence samples, not upper bounds or hardware timings. They
+validate multi-batch progress at 800×600 but do not remove the 1080p budget
+limitation below.
 
 With the default 16×16 tiles, selection is capped at
 `min(65536 / 256, 16384 / 16) = 256` tiles per PNG record. Partial edge tiles
@@ -143,7 +163,37 @@ python3 scripts/check-pointer-lossless-budget.py
 
 This independent pure model mirrors current constants; it is not production
 code, a simulated successful protocol exchange or a latency benchmark. Keep
-its constants aligned if the implementation changes. Representative real tests
-should check multi-batch exactness at 800×600 and partial progress/terminal
-expiry at 1080p, without demanding impossible 1080p full convergence or changing
+its constants aligned if the implementation changes. The 800×600 real test now covers multi-batch exactness. Further representative
+coverage should check partial progress/terminal expiry at 1080p, without demanding impossible 1080p full convergence or changing
 the 30-second deadline.
+
+
+## Next candidate: natural expiry followed by read-only repair
+
+A separate candidate is in progress to handle natural pointer-lease expiry as
+an irreversible transition to read-only viewing and repair, and to add a real
+1080p partial-progress/expiry regression. The input lease remains 30 seconds,
+with no renewal or restoration of input authority. Any exact convergence after
+expiry belongs to read-only operation, not to the active pointer-lease budget
+in the table above.
+
+Inspection confirmed a client-side misclassification at the natural deadline.
+An initial suspicion that host capture remained frozen was disproved by the
+complete stop path: it already clears `pointer_enabled`. The actual host issue
+under repair is a late-flush race. This distinction matters: the candidate must
+not be described as fixing a confirmed capture-freeze defect or as validated
+merely because ordinary stop already changes the flag.
+
+The expanded module contains seven real fixtures and two pure tests, nine in
+total, which have not yet been executed for this candidate. The successful
+`9b3105` results above describe the baseline only; they do not validate these
+new client/host changes or the 1080p expiry path. Real tests must establish
+partial progress before expiry, permanent loss of input authority, safe
+late-record handling, and continuing read-only repair without automatic
+regrant. Local strict Clippy, 50 pure sequencing/host/client/wire checks,
+the exact-expiry ACK negative test, formatting and arithmetic checks pass.
+Independent static review found no remaining blocker. These checks are not
+execution of the new real protocol/GL test or physical-hardware acceptance.
+Terminal handling drains only bounded, exactly identified in-flight evidence;
+unmatched messages still fail closed, so arbitrary stalls are not promised to
+preserve the video session.

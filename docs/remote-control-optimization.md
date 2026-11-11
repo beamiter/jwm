@@ -6,7 +6,11 @@ of the shared plan.
 It is not completion of the entire remote-control roadmap.
 This document retains historical implementation stages and their introduction
 versions. For current usage and compatibility, see [remote-control.md](remote-control.md);
-the current application protocol is v26, separate from transport v3.
+the current application protocol is v27, separate from transport v3.
+The v27 explicit native pointer-only plus PNG baseline (`9b3105`) passed its
+three candidate and four mainline workflows; see the
+[pointer/lossless evidence](remote-pointer-lossless-preparation.md). The separate
+natural-expiry-to-read-only candidate is not covered by those results.
 
 ## Implemented
 
@@ -193,7 +197,7 @@ this cloud workspace; live-X11 results remain pending until it runs.
 ## Compatibility note for Rust callers
 
 The historical v19 wire stage was intentionally incompatible with prior
-application protocol versions. Current application v26 likewise requires
+application protocol versions. Current application v27 likewise requires
 matching peers. The Rust API notes below describe those historical increments,
 not a complete current migration checklist.
 The public `DecodedFrame` and synchronous `Viewer::draw` behavior remain usable.

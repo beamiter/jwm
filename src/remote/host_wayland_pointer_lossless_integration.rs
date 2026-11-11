@@ -697,3 +697,6 @@ fn actual_pointer_lossless_800x600_multibatch_reaches_exact_and_remains_clickabl
     );
     h.close(&mut gl);
 }
+
+#[path = "host_wayland_pointer_lossless_expiry_integration.rs"]
+mod expiry_integration;

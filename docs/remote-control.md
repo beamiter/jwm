@@ -571,8 +571,9 @@ standard Noise transport.
 All handshake flights have fixed small bounds and share the existing absolute
 negotiation deadline. Wrong keys, versions, malformed flights or missing
 confirmation close the connection. There is no downgrade or v2 fallback.
-Upgrade both endpoints together. Application protocol v23 and the native
-Wayland protocol versions are separate and unchanged by this transport update.
+Upgrade both endpoints together. This transport update originally accompanied
+application v23; the current application protocol is v27. Transport v3 and the
+native Wayland extension versions are separate version domains.
 
 Each record is `kind || sequence || ciphertext_len || ciphertext || tag(16)`.
 The plaintext is sealed with ChaCha20-Poly1305 under a nonce of four zero bytes
@@ -1909,3 +1910,26 @@ horizontal scrolling, multi-notch batches or mixed button/axis input is enabled.
 Waiting scroll is discarded, not queued for a later Ready. Every motion/click still needs the matching
 fresh, genuinely presented frame and host Ready ticket; the 30-second lease is
 not renewed. Default read-only viewing does not bind input devices.
+
+
+### Explicit native pointer-only plus static lossless (application v27)
+
+Both peers must use matching application v27. A host may explicitly combine
+`--wayland-select --once --allow-wayland-pointer --allow-static-lossless`, and
+the viewer must separately request
+`connect HOST --viewer-backend wayland --wayland-pointer --static-lossless`.
+Do not add `--view-only`. This default-off combination permits only the existing
+motion/atomic-left-click lease, not keyboard, unified control, scroll, text,
+clipboard, grab, popup capture or resize-follow. It grants no new input actions.
+
+Repair cannot generate authorization: another actionable scope requires a new
+native proof and actual presentation acknowledgment. The original 30-second
+lease is not renewed. Candidate `9b3105` passed general, Wayland and X11 CI,
+including all seven new module tests; all four baseline mainline workflows
+subsequently passed. This does not validate the separate natural-expiry-to-read-only
+candidate, whose new tests have not yet run. The owned software-GL 800×600 test reached full-frame exactness
+in eight batches, then performed an actual click. This does not imply physical
+hardware acceptance or common-desktop full-frame convergence: 1080p needs at
+least 32 batches and 64 seconds in the ideal budget, longer than the lease.
+See [pointer plus lossless boundaries and evidence](remote-pointer-lossless-preparation.md)
+for observed times, permission restrictions and the unchanged cooldown limits.

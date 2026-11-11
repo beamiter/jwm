@@ -31,6 +31,7 @@ pub(super) struct Control {
     completed_action: u64,
     last_input: Instant,
     stable_debt: bool,
+    stopped_flush: Option<Stamp>,
 }
 impl Default for Control {
     fn default() -> Self {
@@ -41,6 +42,7 @@ impl Default for Control {
             completed_action: 0,
             last_input: Instant::now(),
             stable_debt: false,
+            stopped_flush: None,
         }
     }
 }
@@ -75,12 +77,41 @@ pub(super) fn granted(s: &SourceControl, epoch: u64, now: Instant) {
         r.last_input = now;
     }
 }
+pub(super) fn validate_expiry(s: &SourceControl, now: Instant) -> RemoteResult<()> {
+    if !enabled(s) {
+        return Ok(());
+    }
+    let mut r = s.pointer_repair.lock().unwrap();
+    if let Some(phase) = r.phase.as_mut() {
+        if !phase.natural_expiry(now) {
+            phase.check(now).map_err(|_| phase_error())?;
+        }
+    }
+    Ok(())
+}
 pub(super) fn stopped(s: &SourceControl) {
     let mut r = s.pointer_repair.lock().unwrap();
     if let Some(p) = r.phase.as_mut() {
         p.revoke();
     }
-    r.mode = Mode::Stopped;
+    if r.mode != Mode::Stopped {
+        r.stopped_flush = match r.mode {
+            Mode::Normal => Some(Stamp {
+                generation: r.generation,
+                intent: Intent::Normal,
+            }),
+            Mode::VisualQueued(t) => Some(Stamp {
+                generation: r.generation,
+                intent: Intent::Visual(t),
+            }),
+            Mode::ProofQueued(t) => Some(Stamp {
+                generation: r.generation,
+                intent: Intent::PostRepair(t),
+            }),
+            _ => None,
+        };
+        r.mode = Mode::Stopped;
+    }
 }
 pub(super) fn after_action(
     s: &SourceControl,
@@ -220,6 +251,21 @@ pub(super) fn poll_active(
         return Ok(false);
     }
     let now = Instant::now();
+    // process_pointer checked earlier, but its deadline can be crossed before
+    // this phase poll. Only the original lease expiry takes the readonly path;
+    // an earlier accepted-phase deadline remains an error below.
+    let natural_expiry = s
+        .pointer_repair
+        .lock()
+        .unwrap()
+        .phase
+        .as_ref()
+        .is_some_and(|p| p.natural_expiry(now));
+    if state.epoch().is_some() && !state.active(now) && natural_expiry {
+        stop_pointer(s, capture, writer, state)?;
+        return Ok(true);
+    }
+
     let tracked = *s.pointer_frame.lock().unwrap();
     let drawn = s.state.lock().unwrap().presented_native_proof;
     let (mode, cancelled) = {
@@ -372,6 +418,20 @@ pub(super) fn flushed(
     // An old normal frame may have flushed under the writer barrier just
     // before Request was accepted. It precedes Accepted on the same wire and
     // cannot advance this repair phase. The prewriter stamp blocks later ones.
+    if r.mode == Mode::Stopped {
+        let purpose_matches = match stamp.intent {
+            Intent::Visual(_) => purpose != FramePurpose::NativeProof,
+            Intent::PostRepair(_) => purpose == FramePurpose::NativeProof,
+            Intent::Normal => true,
+        };
+        if r.stopped_flush == Some(stamp) && purpose_matches {
+            // This exact record passed the writer fence before revocation.
+            // Drain its completion once, without restoring any phase or ticket.
+            r.stopped_flush = None;
+            return Ok(());
+        }
+        return Err(phase_error().into());
+    }
     if stamp.intent == Intent::Normal {
         return Ok(());
     }
@@ -383,6 +443,12 @@ pub(super) fn flushed(
         Intent::Visual(t) => {
             if r.mode != Mode::VisualQueued(t) || purpose == FramePurpose::NativeProof {
                 return Err(phase_error().into());
+            }
+            if r.phase.as_ref().is_some_and(|p| p.natural_expiry(flushed)) {
+                // The exact queued write completed across the original lease
+                // boundary. Capture-loop revocation follows; never advance
+                // repair, issue Ready or replace an earlier phase timeout.
+                return Ok(());
             }
             r.phase
                 .as_mut()
@@ -403,6 +469,12 @@ pub(super) fn flushed(
         Intent::PostRepair(t) => {
             if r.mode != Mode::ProofQueued(t) || purpose != FramePurpose::NativeProof {
                 return Err(phase_error().into());
+            }
+            if r.phase.as_ref().is_some_and(|p| p.natural_expiry(flushed)) {
+                // The exact queued write completed across the original lease
+                // boundary. Capture-loop revocation follows; never advance
+                // repair, issue Ready or replace an earlier phase timeout.
+                return Ok(());
             }
             r.phase
                 .as_mut()
@@ -564,5 +636,94 @@ mod tests {
             Mode::AwaitAck(t, fresh.into())
         );
         assert!(matches!(capture_stamp(&s), Some(Err(()))));
+    }
+    #[test]
+    fn terminal_readonly_drops_old_stamps_and_drains_only_one_known_flush() {
+        for postproof in [false, true] {
+            let (s, token, at) = quiesced();
+            let stamp = Stamp {
+                generation: token.phase,
+                intent: if postproof {
+                    Intent::PostRepair(token)
+                } else {
+                    Intent::Visual(token)
+                },
+            };
+            s.pointer_repair.lock().unwrap().mode = if postproof {
+                Mode::ProofQueued(token)
+            } else {
+                Mode::VisualQueued(token)
+            };
+            // The production stop_pointer disables input before marking terminal.
+            s.pointer_enabled.store(false, Ordering::Release);
+            stopped(&s);
+            assert_eq!(capture_stamp(&s), None);
+            assert!(!permits_write(&s, stamp));
+            let scope: DrawnScope = token.ready.into();
+            let purpose = if postproof {
+                FramePurpose::NativeProof
+            } else {
+                FramePurpose::VisualRepair
+            };
+            let bad = Stamp {
+                generation: stamp.generation + 1,
+                ..stamp
+            };
+            assert!(flushed(&s, bad, scope, purpose, at, at).is_err());
+            assert!(flushed(&s, stamp, scope, purpose, at, at).is_ok());
+            assert!(flushed(&s, stamp, scope, purpose, at, at).is_err());
+            assert_eq!(s.pointer_repair.lock().unwrap().mode, Mode::Stopped);
+            assert_eq!(capture_stamp(&s), None);
+        }
+    }
+    #[test]
+    fn early_phase_timeout_is_not_a_readonly_completion() {
+        let (s, token, at) = quiesced();
+        let stamp = capture_stamp(&s).unwrap().unwrap();
+        capture_queued(&s, stamp).unwrap();
+        assert!(
+            flushed(
+                &s,
+                stamp,
+                DrawnScope {
+                    frame_sequence: token.ready.sequence + 1,
+                    ..token.ready.into()
+                },
+                FramePurpose::VisualRepair,
+                at,
+                at + Duration::from_secs(8)
+            )
+            .is_err()
+        );
+        assert_ne!(s.pointer_repair.lock().unwrap().mode, Mode::Stopped);
+    }
+    #[test]
+    fn native_lease_expiry_validation_keeps_earlier_phase_failure() {
+        let (s, _, at) = quiesced();
+        assert!(validate_expiry(&s, at + Duration::from_secs(31)).is_err());
+        let s =
+            SourceControl::new(vec![(SourceId(1), CaptureArea::Root)], (32, 32).into(), 1).unwrap();
+        s.static_lossless.store(true, Ordering::Release);
+        s.pointer_enabled.store(true, Ordering::Release);
+        granted(&s, 1, at);
+        assert!(validate_expiry(&s, at + Duration::from_secs(31)).is_ok());
+    }
+    #[test]
+    fn all_stop_triggers_preserve_earlier_fault_but_clean_local_revoke_is_ok() {
+        for remote_trigger in [false, true] {
+            for before_timeout in [false, true] {
+                let (s, _, at) = quiesced();
+                s.pointer_revoke.store(remote_trigger, Ordering::Release);
+                // Either a local revoke or native timer may arrive while the
+                // host's original 30-second lease is still active.
+                let now = at + Duration::from_secs(if before_timeout { 3 } else { 29 });
+                let result = validate_expiry(&s, now);
+                s.pointer_enabled.store(false, Ordering::Release);
+                stopped(&s);
+                assert_eq!(result.is_ok(), before_timeout);
+                assert_eq!(capture_stamp(&s), None);
+                assert_eq!(s.pointer_repair.lock().unwrap().mode, Mode::Stopped);
+            }
+        }
     }
 }

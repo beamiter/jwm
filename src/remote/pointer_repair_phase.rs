@@ -1,4 +1,4 @@
-//! Unwired pointer-only repair protocol core. No CLI capability is enabled.
+//! Pointer-only repair sequencing core for the explicit v27 negotiated combination.
 //!
 //! This is sequencing, NOT a native authority validator. Integration must retain
 //! every native focus/instance/local-input/lock/held check and the original lease
@@ -187,6 +187,18 @@ impl RepairPhase {
     fn reject<T>(&mut self, error: Error) -> Result<T, Error> {
         self.stage = Stage::Ended;
         Err(error)
+    }
+    /// Natural expiry is not a substitute for a missed earlier repair deadline.
+    pub(crate) fn natural_expiry(&self, now: Instant) -> bool {
+        if now < self.lease_deadline || matches!(self.stage, Stage::Ended) {
+            return false;
+        }
+        match self.stage {
+            Stage::Quiesced { deadline, .. }
+            | Stage::VisualFlushed { deadline, .. }
+            | Stage::AwaitProofAck { deadline, .. } => deadline == self.lease_deadline,
+            _ => true,
+        }
     }
     pub(crate) fn check(&mut self, now: Instant) -> Result<(), Error> {
         if matches!(self.stage, Stage::Ended) {
@@ -1021,5 +1033,26 @@ mod tests {
         fence.revoke();
         assert_eq!(fence.pending_receipt(), None);
         assert_eq!(fence.repair_watermark(), None);
+    }
+    #[test]
+    fn natural_expiry_does_not_hide_an_earlier_phase_deadline() {
+        let (mut p, token, t) = setup();
+        p.request(
+            token,
+            token.ready,
+            token.completed_action,
+            true,
+            t + Duration::from_secs(2),
+            t + Duration::from_millis(2300),
+        )
+        .unwrap();
+        assert!(!p.natural_expiry(t + Duration::from_secs(31)));
+        assert_eq!(p.check(t + Duration::from_secs(31)), Err(Error::Deadline));
+        let (mut p, token, t) = setup();
+        p.stage = Stage::Quiesced {
+            token,
+            deadline: p.lease_deadline,
+        };
+        assert!(p.natural_expiry(t + Duration::from_secs(31)));
     }
 }

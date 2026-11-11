@@ -5,6 +5,39 @@ use crate::remote::pointer_repair_phase::{
     ActionCompletionFence, ActionReceipt, ClientIdle, Scope, Token,
 };
 use crate::remote::pointer_repair_wire::{RepairStatus, RepairStatusKind};
+#[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+type LifetimeObserver = std::sync::Arc<std::sync::Mutex<Option<(Instant, Instant)>>>;
+#[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+thread_local! {static LIFETIME_OBSERVER: std::cell::RefCell<Option<LifetimeObserver>> = const { std::cell::RefCell::new(None) };}
+#[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+pub(crate) fn with_pointer_lifetime_observer<T>(
+    observer: LifetimeObserver,
+    run: impl FnOnce() -> T,
+) -> T {
+    struct Restore(Option<LifetimeObserver>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            LIFETIME_OBSERVER.with(|slot| {
+                slot.replace(self.0.take());
+            });
+        }
+    }
+    let _restore = Restore(LIFETIME_OBSERVER.with(|slot| slot.replace(Some(observer))));
+    run()
+}
+#[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+pub(super) fn observe_pointer_lifetime(requested: Instant) {
+    LIFETIME_OBSERVER.with(|slot| {
+        if let Some(observer) = slot.borrow().as_ref() {
+            let mut value = observer.lock().unwrap();
+            assert!(value.is_none(), "one pointer request per original lease");
+            *value = Some((
+                requested,
+                requested + crate::remote::wayland_pointer_wire::LEASE_DURATION,
+            ));
+        }
+    });
+}
 const DEADLINE: Duration = Duration::from_secs(5);
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PhaseKind {
@@ -28,6 +61,9 @@ pub(super) struct PointerRepair {
     lease: Option<(u64, Instant)>,
     fence: Option<ActionCompletionFence>,
     terminal_receipt: Option<ActionReceipt>,
+    natural_expiry: bool,
+    expiry: Option<ExpiryDrain>,
+    pending_expiry_revoke: Option<crate::remote::wayland_pointer_wire::PointerRevoke>,
     action_deadline: Option<Instant>,
     last_input: Option<Instant>,
     held_keys: std::collections::BTreeSet<u8>,
@@ -36,7 +72,140 @@ pub(super) struct PointerRepair {
     declining: Option<(Token, Instant)>,
     phase: Option<Phase>,
     retired: Vec<Token>,
+    advisory_cancelled: Vec<Token>,
+    last_ready_status: Option<Scope>,
+    last_waiting_status: Option<Scope>,
     last_phase: u64,
+}
+// Frozen protocol evidence only. This cannot restore a completion fence,
+// candidate, native mapping, Ready ticket, or lease after natural expiry.
+struct ExpiryDrain {
+    late_proof_seen: bool,
+    late_proof_after: Option<Scope>,
+    late_offer: Option<Token>,
+    late_cancel: Option<Token>,
+    receipt: Option<ActionReceipt>,
+    offer: Option<Token>,
+    declining: Option<Token>,
+    phase: Option<Phase>,
+    cancelled: Vec<Token>,
+    scopes: Vec<Scope>,
+    statuses: Vec<(
+        Scope,
+        crate::remote::wayland_pointer_wire::PointerStatusKind,
+    )>,
+}
+impl ExpiryDrain {
+    fn status(&mut self, value: RepairStatus) -> RemoteResult<()> {
+        if value.kind == RepairStatusKind::Declined && self.declining == Some(value.token) {
+            self.declining = None;
+            return Ok(());
+        }
+        if value.kind == RepairStatusKind::Cancelled {
+            if self.late_cancel == Some(value.token) {
+                self.late_cancel = None;
+                self.cancelled.push(value.token);
+                return Ok(());
+            }
+            if self.cancelled.contains(&value.token) {
+                return Err(repair_error());
+            }
+            if self.offer == Some(value.token) {
+                self.offer = None;
+                self.cancelled.push(value.token);
+                return Ok(());
+            }
+            if self.declining == Some(value.token)
+                || self
+                    .phase
+                    .is_some_and(|p| p.token == value.token && p.kind == PhaseKind::Requested)
+            {
+                self.cancelled.push(value.token);
+                return Ok(());
+            }
+            return Err(repair_error());
+        }
+        let phase = self.phase.as_mut().ok_or_else(repair_error)?;
+        if phase.token != value.token {
+            return Err(repair_error());
+        }
+        match (phase.kind, value.kind) {
+            (PhaseKind::Requested, RepairStatusKind::Accepted) => phase.kind = PhaseKind::Accepted,
+            (PhaseKind::Requested, RepairStatusKind::RequestCancelled) => self.phase = None,
+            (PhaseKind::Accepted, RepairStatusKind::Ready)
+                if value.proof.is_some()
+                    && value.proof == phase.proof
+                    && phase.confirmed.is_none() =>
+            {
+                self.phase = None
+            }
+            _ => return Err(repair_error()),
+        }
+        Ok(())
+    }
+    fn frame(&mut self, purpose: FramePurpose, scope: Scope) -> RemoteResult<()> {
+        if let Some(phase) = self.phase.as_mut() {
+            if (scope.source, scope.geometry)
+                != (phase.token.ready.source, phase.token.ready.geometry)
+            {
+                return Err(repair_error());
+            }
+            if phase.kind == PhaseKind::Accepted {
+                match purpose {
+                    FramePurpose::VisualRepair | FramePurpose::Video if phase.visual.is_none() => {
+                        if scope.sequence <= phase.token.ready.sequence {
+                            return Err(repair_error());
+                        }
+                        phase.visual = Some(scope);
+                    }
+                    FramePurpose::NativeProof => {
+                        if self.late_proof_seen
+                            || phase.proof.is_some()
+                            || phase.visual.is_none_or(|v| scope.sequence <= v.sequence)
+                        {
+                            return Err(repair_error());
+                        }
+                        phase.proof = Some(scope);
+                        self.late_proof_seen = true;
+                        self.late_proof_after = None;
+                        if !self.scopes.contains(&scope) {
+                            self.scopes.push(scope);
+                        }
+                    }
+                    _ => {}
+                }
+                return Ok(());
+            }
+        }
+        if purpose == FramePurpose::NativeProof {
+            if self.late_proof_seen {
+                return Err(repair_error());
+            }
+            let previous = self.late_proof_after.ok_or_else(repair_error)?;
+            if (scope.source, scope.geometry) != (previous.source, previous.geometry)
+                || scope.sequence <= previous.sequence
+            {
+                return Err(repair_error());
+            }
+            self.late_proof_after = None;
+            self.late_proof_seen = true;
+            if !self.scopes.contains(&scope) {
+                self.scopes.push(scope);
+            }
+        }
+        Ok(())
+    }
+    fn pointer_status(
+        &mut self,
+        value: crate::remote::wayland_pointer_wire::PointerStatus,
+    ) -> RemoteResult<()> {
+        let scope = value.scope.into();
+        if !self.scopes.contains(&scope) || self.statuses.contains(&(scope, value.status)) {
+            return Err(repair_error());
+        }
+        self.statuses.push((scope, value.status));
+        Ok(())
+    }
 }
 fn repair_error() -> RemoteError {
     invalid_data("pointer repair ordering, scope or deadline invalid").into()
@@ -67,6 +236,8 @@ impl ClientPointer {
         self.repair.offer = None;
         self.repair.declining = None;
         self.repair.terminal_receipt = None;
+        self.repair.expiry = None;
+        self.repair.pending_expiry_revoke = None;
     }
 
     pub(super) fn revoke_local(
@@ -105,18 +276,157 @@ impl ClientPointer {
         }
         Ok(())
     }
-    pub(super) fn repair_check(&mut self, now: Instant) -> RemoteResult<()> {
-        if !self.repair.enabled || self.ended {
-            return Ok(());
+    pub(super) fn repair_check(&mut self, now: Instant) -> RemoteResult<bool> {
+        if !self.repair.enabled {
+            return Ok(!self.ended);
         }
-        if self.repair.action_deadline.is_some_and(|at| now >= at)
-            || self.repair.declining.is_some_and(|(_, at)| now >= at)
-            || self.repair.phase.is_some_and(|phase| now >= phase.deadline)
-        {
+        if self.ended {
+            return Ok(false);
+        }
+        let lease_deadline = self.repair.lease.map(|(_, at)| at);
+        let first = [
+            self.repair.action_deadline,
+            self.repair.declining.map(|(_, at)| at),
+            self.repair.phase.map(|p| p.deadline),
+        ]
+        .into_iter()
+        .flatten()
+        .min();
+        // A real earlier protocol timeout remains a failure even when this
+        // thread is scheduled only after the later lease deadline.
+        if first.is_some_and(|at| now >= at && lease_deadline.is_none_or(|lease| at < lease)) {
             self.revoke();
             return Err(repair_error());
         }
-        Ok(())
+        if lease_deadline.is_some_and(|at| now >= at) {
+            let mut scopes = Vec::new();
+            for scope in [self.presented.map(|(s, _)| s), self.ready, self.consumed]
+                .into_iter()
+                .flatten()
+            {
+                if !scopes.contains(&Scope::from(scope)) {
+                    scopes.push(scope.into());
+                }
+            }
+            if let Some(scope) = self.repair.phase.and_then(|p| p.proof) {
+                if !scopes.contains(&scope) {
+                    scopes.push(scope);
+                }
+            }
+            // Only a fully derivable next advisory offer can cross this local
+            // expiry boundary. Freeze freshness now, never at its later arrival.
+            let late_offer = (|| {
+                if self.repair.offer.is_some()
+                    || self.repair.declining.is_some()
+                    || self.repair.phase.is_some()
+                    || self.repair.action_deadline.is_some()
+                    || self.newer_frame
+                {
+                    return None;
+                }
+                let (scope, at) = self.presented?;
+                let initial = self.requested?.0;
+                if self.consumed == Some(scope)
+                    || (scope.source_epoch, scope.geometry_epoch)
+                        != (initial.source_epoch, initial.geometry_epoch)
+                    || now.saturating_duration_since(at)
+                        >= crate::remote::wayland_pointer_wire::FRAME_MAX_AGE
+                {
+                    return None;
+                }
+                Some(Token {
+                    lease: self.repair.lease?.0,
+                    phase: self.repair.last_phase.checked_add(1)?,
+                    ready: scope.into(),
+                    completed_action: self.repair.fence.as_ref()?.repair_watermark()?,
+                })
+            })();
+            let drain = ExpiryDrain {
+                late_proof_seen: self.repair.phase.is_some_and(|p| p.proof.is_some()),
+                late_proof_after: self.requested.and_then(|(initial, _)| {
+                    self.repair.latest_decoded_sequence.map(|sequence| Scope {
+                        source: initial.source_epoch,
+                        geometry: initial.geometry_epoch,
+                        sequence,
+                    })
+                }),
+                late_offer,
+                late_cancel: None,
+                receipt: self
+                    .repair
+                    .fence
+                    .as_ref()
+                    .and_then(ActionCompletionFence::pending_receipt),
+                offer: self.repair.offer,
+                declining: self.repair.declining.map(|(t, _)| t),
+                phase: self.repair.phase,
+                cancelled: self.repair.advisory_cancelled.clone(),
+                scopes,
+                statuses: [
+                    self.repair.last_ready_status.map(|s| {
+                        (
+                            s,
+                            crate::remote::wayland_pointer_wire::PointerStatusKind::Ready,
+                        )
+                    }),
+                    self.repair.last_waiting_status.map(|s| {
+                        (
+                            s,
+                            crate::remote::wayland_pointer_wire::PointerStatusKind::Waiting,
+                        )
+                    }),
+                ]
+                .into_iter()
+                .flatten()
+                .collect(),
+            };
+            let revoke = self.revoke();
+            self.repair.natural_expiry = true;
+            self.repair.expiry = Some(drain);
+            self.repair.pending_expiry_revoke = revoke;
+            return Ok(false);
+        }
+        Ok(true)
+    }
+    pub(super) fn take_expiry_revoke(
+        &mut self,
+    ) -> Option<crate::remote::wayland_pointer_wire::PointerRevoke> {
+        self.repair.pending_expiry_revoke.take()
+    }
+    pub(super) fn repair_note_pointer_status(
+        &mut self,
+        value: crate::remote::wayland_pointer_wire::PointerStatus,
+    ) {
+        if !self.repair.enabled || self.ended {
+            return;
+        }
+        match value.status {
+            crate::remote::wayland_pointer_wire::PointerStatusKind::Ready => {
+                self.repair.last_ready_status = Some(value.scope.into())
+            }
+            crate::remote::wayland_pointer_wire::PointerStatusKind::Waiting => {
+                self.repair.last_waiting_status = Some(value.scope.into())
+            }
+            _ => {}
+        }
+    }
+    fn repair_note_cancelled(&mut self, token: Token) {
+        if !self.repair.advisory_cancelled.contains(&token) {
+            // Tokens are bounded by the same retired-token fence (plus current).
+            self.repair.advisory_cancelled.push(token);
+        }
+    }
+    pub(super) fn repair_expired_status(
+        &mut self,
+        value: crate::remote::wayland_pointer_wire::PointerStatus,
+    ) -> Option<RemoteResult<()>> {
+        self.repair.natural_expiry.then(|| {
+            self.repair
+                .expiry
+                .as_mut()
+                .ok_or_else(repair_error)?
+                .pointer_status(value)
+        })
     }
     pub(super) fn repair_input(&mut self, event: &ViewerEvent, now: Instant) {
         if !self.repair.enabled {
@@ -147,11 +457,13 @@ impl ClientPointer {
         &mut self,
         action: &crate::remote::wayland_pointer_wire::PointerAction,
         now: Instant,
-    ) -> RemoteResult<()> {
+    ) -> RemoteResult<bool> {
         if !self.repair.enabled {
-            return Ok(());
+            return Ok(true);
         }
-        self.repair_check(now)?;
+        if !self.repair_check(now)? {
+            return Ok(false);
+        }
         let (_, lease_deadline) = self.repair.lease.ok_or_else(repair_error)?;
         self.repair
             .fence
@@ -164,7 +476,7 @@ impl ClientPointer {
             })
             .map_err(|_| repair_error())?;
         self.repair.action_deadline = Some((now + DEADLINE).min(lease_deadline));
-        Ok(())
+        Ok(true)
     }
     pub(super) fn repair_completed(
         &mut self,
@@ -174,6 +486,15 @@ impl ClientPointer {
         if !self.repair.enabled {
             return Err(repair_error());
         }
+        self.repair_check(now)?;
+        if self.repair.natural_expiry {
+            let drain = self.repair.expiry.as_mut().ok_or_else(repair_error)?;
+            if drain.receipt != Some(receipt) {
+                return Err(repair_error());
+            }
+            drain.receipt = None;
+            return Ok(());
+        }
         if self.ended {
             if !self.terminal_seen && self.repair.terminal_receipt == Some(receipt) {
                 self.repair.terminal_receipt = None;
@@ -181,7 +502,6 @@ impl ClientPointer {
             }
             return Err(repair_error());
         }
-        self.repair_check(now)?;
         self.repair
             .fence
             .as_mut()
@@ -193,6 +513,15 @@ impl ClientPointer {
     }
     pub(super) fn repair_offer(&mut self, token: Token, now: Instant) -> RemoteResult<()> {
         self.repair_check(now)?;
+        if self.repair.natural_expiry {
+            let drain = self.repair.expiry.as_mut().ok_or_else(repair_error)?;
+            if drain.late_offer != Some(token) {
+                return Err(repair_error());
+            }
+            drain.late_offer = None;
+            drain.late_cancel = Some(token);
+            return Ok(());
+        }
         if !self.repair.enabled
             || self.ended
             || self.epoch != Some(token.lease)
@@ -217,7 +546,9 @@ impl ClientPointer {
         &mut self,
         now: Instant,
     ) -> RemoteResult<Option<(MessageKind, Token)>> {
-        self.repair_check(now)?;
+        if !self.repair_check(now)? {
+            return Ok(None);
+        }
         // Request AND Decline share the native action's single ordered slot.
         // Preserve the offer until the exact completion receipt frees it;
         // enqueue success or generic Waiting never permits a second command.
@@ -268,6 +599,12 @@ impl ClientPointer {
         if !self.repair.enabled {
             return Ok(());
         }
+        if self.repair.natural_expiry {
+            if let Some(drain) = self.repair.expiry.as_mut() {
+                drain.frame(purpose, scope)?;
+            }
+            return Ok(());
+        }
         self.repair.latest_decoded_sequence = Some(scope.sequence);
         let Some(phase) = self.repair.phase.as_mut() else {
             return if purpose == FramePurpose::VisualRepair {
@@ -315,10 +652,21 @@ impl ClientPointer {
         Ok(())
     }
     pub(super) fn repair_status(&mut self, status: RepairStatus, now: Instant) -> RemoteResult<()> {
-        if !self.repair.enabled || self.ended {
+        if !self.repair.enabled {
             return Err(repair_error());
         }
         self.repair_check(now)?;
+        if self.repair.natural_expiry {
+            return self
+                .repair
+                .expiry
+                .as_mut()
+                .ok_or_else(repair_error)?
+                .status(status);
+        }
+        if self.ended {
+            return Err(repair_error());
+        }
         if status.kind == RepairStatusKind::Declined
             && self
                 .repair
@@ -336,10 +684,12 @@ impl ClientPointer {
         if status.kind == RepairStatusKind::Cancelled && self.repair.offer == Some(status.token) {
             self.repair.offer = None;
             self.repair_retire(status.token)?;
+            self.repair_note_cancelled(status.token);
             return Ok(());
         }
         if status.kind == RepairStatusKind::Cancelled && self.repair.retired.contains(&status.token)
         {
+            self.repair_note_cancelled(status.token);
             return Ok(());
         }
         let phase = self.repair.phase.as_mut().ok_or_else(repair_error)?;
@@ -353,6 +703,9 @@ impl ClientPointer {
             RepairStatusKind::Cancelled if phase.kind == PhaseKind::Requested => {
                 // Advisory expiry may have been sent before Request was read.
                 // It is not completion of our occupied host command slot.
+                if !self.repair.advisory_cancelled.contains(&status.token) {
+                    self.repair.advisory_cancelled.push(status.token);
+                }
             }
             RepairStatusKind::RequestCancelled if phase.kind == PhaseKind::Requested => {
                 phase.kind = PhaseKind::Cancelled;
@@ -911,6 +1264,357 @@ mod tests {
             )
             .is_err()
         );
+    }
+    #[test]
+    fn natural_ttl_one_decoded_late_proof_is_only_terminal_status_evidence() {
+        let now = Instant::now();
+        let (mut p, token) = fixture(now);
+        p.repair.latest_decoded_sequence = Some(token.ready.sequence);
+        p.repair.lease.as_mut().unwrap().1 = now;
+        assert!(!p.repair_check(now).unwrap());
+        let next = Scope {
+            sequence: token.ready.sequence + 1,
+            ..token.ready
+        };
+        let drain = p.repair.expiry.as_mut().unwrap();
+        assert!(drain.frame(FramePurpose::NativeProof, token.ready).is_err());
+        assert!(
+            drain
+                .frame(FramePurpose::NativeProof, Scope { source: 99, ..next })
+                .is_err()
+        );
+        drain.frame(FramePurpose::NativeProof, next).unwrap();
+        assert!(drain.frame(FramePurpose::NativeProof, next).is_err());
+        assert!(
+            drain
+                .frame(
+                    FramePurpose::NativeProof,
+                    Scope {
+                        sequence: next.sequence + 1,
+                        ..next
+                    }
+                )
+                .is_err()
+        );
+        for status in [PointerStatusKind::Ready, PointerStatusKind::Waiting] {
+            let value = PointerStatus {
+                lease_epoch: token.lease,
+                scope: next.into(),
+                status,
+            };
+            drain.pointer_status(value).unwrap();
+            assert!(drain.pointer_status(value).is_err());
+        }
+        drain.frame(FramePurpose::Video, next).unwrap();
+        drain.frame(FramePurpose::VisualRepair, next).unwrap();
+        assert!(p.ended && p.ready.is_none());
+        p.repair_end();
+        assert!(p.repair.expiry.is_none());
+    }
+
+    #[test]
+    fn natural_ttl_late_offer_is_one_frozen_exact_advisory_only() {
+        let now = Instant::now();
+        let make = || {
+            let (mut p, t) = fixture(now);
+            p.repair.lease.as_mut().unwrap().1 = now;
+            (p, t)
+        };
+        for field in 0..6 {
+            let (mut p, mut t) = make();
+            assert!(!p.repair_check(now).unwrap());
+            match field {
+                0 => t.lease += 1,
+                1 => t.phase += 1,
+                2 => t.ready.source += 1,
+                3 => t.ready.geometry += 1,
+                4 => t.ready.sequence += 1,
+                _ => t.completed_action += 1,
+            }
+            assert!(p.repair_offer(t, now).is_err());
+        }
+        let (mut p, t) = make();
+        assert!(!p.repair_check(now).unwrap());
+        let cancelled = RepairStatus {
+            kind: RepairStatusKind::Cancelled,
+            token: t,
+            proof: None,
+        };
+        assert!(p.repair_status(cancelled, now).is_err());
+        p.repair_offer(t, now + Duration::from_secs(2)).unwrap();
+        assert!(p.repair_offer(t, now).is_err());
+        p.repair_status(cancelled, now).unwrap();
+        assert!(p.repair_status(cancelled, now).is_err());
+        assert!(p.ended && p.ready.is_none() && p.repair.phase.is_none());
+        assert!(p.repair_outgoing(now).unwrap().is_none());
+        assert!(
+            p.repair
+                .fence
+                .as_ref()
+                .unwrap()
+                .repair_watermark()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn natural_ttl_does_not_guess_offer_without_fresh_complete_evidence() {
+        let now = Instant::now();
+        for missing in 0..9 {
+            let (mut p, t) = fixture(now);
+            p.repair.lease.as_mut().unwrap().1 = now;
+            match missing {
+                0 => {
+                    p.presented.as_mut().unwrap().1 =
+                        now - crate::remote::wayland_pointer_wire::FRAME_MAX_AGE
+                }
+                1 => p.newer_frame = true,
+                2 => p.consumed = p.presented.map(|(s, _)| s),
+                3 => p.repair.offer = Some(t),
+                4 => p.repair.declining = Some((t, now)),
+                5 => p.repair.action_deadline = Some(now),
+                6 => p.repair.last_phase = u64::MAX,
+                7 => p.presented = None,
+                _ => {
+                    p.repair.phase = Some(Phase {
+                        token: t,
+                        kind: PhaseKind::Requested,
+                        deadline: now,
+                        visual: None,
+                        proof: None,
+                        confirmed: None,
+                        recovery_after: 5,
+                    })
+                }
+            }
+            assert!(!p.repair_check(now).unwrap());
+            assert!(p.repair_offer(t, now).is_err());
+        }
+    }
+
+    #[test]
+    fn natural_ttl_closes_each_pending_authority_once_but_keeps_readonly_frames() {
+        let now = Instant::now();
+        for mode in 0..4 {
+            let (mut p, t) = fixture(now);
+            let lease = p.repair.lease.unwrap().1;
+            let near = lease - Duration::from_secs(2);
+            p.presented = Some((t.ready.into(), near));
+            match mode {
+                0 => {
+                    p.repair_sent(
+                        &PointerAction {
+                            lease_epoch: 9,
+                            sequence: 1,
+                            scope: t.ready.into(),
+                            kind: PointerActionKind::Motion,
+                            x: 0,
+                            y: 0,
+                        },
+                        near,
+                    )
+                    .unwrap();
+                }
+                1 => {
+                    p.repair.last_input = Some(near);
+                    p.repair_offer(t, near).unwrap();
+                    p.repair_outgoing(near).unwrap();
+                }
+                _ => {
+                    p.repair_offer(t, near).unwrap();
+                    p.repair_outgoing(near).unwrap();
+                    if mode == 3 {
+                        p.repair_status(
+                            RepairStatus {
+                                kind: RepairStatusKind::Accepted,
+                                token: t,
+                                proof: None,
+                            },
+                            near,
+                        )
+                        .unwrap();
+                    }
+                }
+            }
+            assert!(p.repair_check(lease - Duration::from_nanos(1)).unwrap());
+            assert!(!p.repair_check(lease).unwrap());
+            assert!(p.ended && p.repair.natural_expiry);
+            assert!(p.ready.is_none() && p.click.is_none());
+            assert!(!p.fresh(lease));
+            assert_eq!(p.take_expiry_revoke().unwrap().lease_epoch, 9);
+            assert!(p.take_expiry_revoke().is_none());
+            assert_eq!(p.repair.lease.unwrap().1, lease);
+            assert_eq!(p.repair.fence.as_ref().unwrap().repair_watermark(), None);
+            assert!(p.event(&motion(5), lease).unwrap().is_none());
+            p.repair_frame(FramePurpose::VisualRepair, scope(6))
+                .unwrap();
+            assert!(p.presented(scope(7).into(), lease).is_none());
+            assert!(p.ready.is_none());
+            p.receive(PointerStatus {
+                lease_epoch: 9,
+                scope: t.ready.into(),
+                status: PointerStatusKind::Revoked,
+            })
+            .unwrap();
+            assert!(p.repair.expiry.is_none());
+            assert!(p.take_expiry_revoke().is_none());
+            p.repair_frame(FramePurpose::Video, scope(8)).unwrap();
+            p.repair_frame(FramePurpose::VisualRepair, scope(9))
+                .unwrap();
+            assert!(
+                p.repair_status(
+                    RepairStatus {
+                        kind: RepairStatusKind::Cancelled,
+                        token: t,
+                        proof: None
+                    },
+                    lease
+                )
+                .is_err()
+            );
+        }
+    }
+    #[test]
+    fn ttl_drain_consumes_only_frozen_exact_phase_and_receipt_without_ready() {
+        let now = Instant::now();
+        let (mut p, t) = fixture(now);
+        let lease = p.repair.lease.unwrap().1;
+        let near = lease - Duration::from_secs(2);
+        let receipt = ActionReceipt {
+            lease: 9,
+            sequence: 1,
+            consumed: t.ready,
+        };
+        p.repair_sent(
+            &PointerAction {
+                lease_epoch: 9,
+                sequence: 1,
+                scope: t.ready.into(),
+                kind: PointerActionKind::Motion,
+                x: 0,
+                y: 0,
+            },
+            near,
+        )
+        .unwrap();
+        p.repair_completed(receipt, lease).unwrap(); // Receiver discovers natural TTL first.
+        assert!(p.ended && p.repair.natural_expiry);
+        assert!(p.take_expiry_revoke().is_some());
+        assert!(p.repair_completed(receipt, lease).is_err());
+        let (mut p, t) = fixture(now);
+        p.presented = Some((t.ready.into(), near));
+        p.repair_offer(t, near).unwrap();
+        p.repair_outgoing(near).unwrap();
+        p.repair_check(lease).unwrap();
+        let mut wrong = t;
+        wrong.phase += 1;
+        assert!(
+            p.repair_status(
+                RepairStatus {
+                    kind: RepairStatusKind::Accepted,
+                    token: wrong,
+                    proof: None
+                },
+                lease
+            )
+            .is_err()
+        );
+        p.repair_status(
+            RepairStatus {
+                kind: RepairStatusKind::Accepted,
+                token: t,
+                proof: None,
+            },
+            lease,
+        )
+        .unwrap();
+        assert!(
+            p.repair_status(
+                RepairStatus {
+                    kind: RepairStatusKind::Accepted,
+                    token: t,
+                    proof: None
+                },
+                lease
+            )
+            .is_err()
+        );
+        p.repair_frame(FramePurpose::VisualRepair, scope(6))
+            .unwrap();
+        p.repair_frame(FramePurpose::NativeProof, scope(7)).unwrap();
+        p.repair_status(
+            RepairStatus {
+                kind: RepairStatusKind::Ready,
+                token: t,
+                proof: Some(scope(7)),
+            },
+            lease,
+        )
+        .unwrap();
+        assert!(p.ready.is_none() && p.repair.phase.is_none());
+        assert!(!p.fresh(lease));
+        assert!(
+            p.repair_status(
+                RepairStatus {
+                    kind: RepairStatusKind::Ready,
+                    token: t,
+                    proof: Some(scope(7))
+                },
+                lease
+            )
+            .is_err()
+        );
+        p.receive(PointerStatus {
+            lease_epoch: 9,
+            scope: t.ready.into(),
+            status: PointerStatusKind::Revoked,
+        })
+        .unwrap();
+        assert!(
+            p.repair_status(
+                RepairStatus {
+                    kind: RepairStatusKind::Ready,
+                    token: t,
+                    proof: Some(scope(7))
+                },
+                lease
+            )
+            .is_err()
+        );
+    }
+    #[test]
+    fn earlier_five_second_timeout_is_never_relabelled_as_natural_ttl() {
+        let now = Instant::now();
+        for after_ttl in [false, true] {
+            let (mut p, t) = fixture(now);
+            let lease = p.repair.lease.unwrap().1;
+            let sent = lease - Duration::from_secs(7);
+            p.repair_sent(
+                &PointerAction {
+                    lease_epoch: 9,
+                    sequence: 1,
+                    scope: t.ready.into(),
+                    kind: PointerActionKind::Motion,
+                    x: 0,
+                    y: 0,
+                },
+                sent,
+            )
+            .unwrap();
+            let timeout = sent + DEADLINE;
+            assert!(p.repair_check(timeout - Duration::from_nanos(1)).unwrap());
+            assert!(
+                p.repair_check(if after_ttl {
+                    lease + Duration::from_nanos(1)
+                } else {
+                    timeout
+                })
+                .is_err()
+            );
+            assert!(p.ended);
+            assert!(!p.repair.natural_expiry);
+            assert!(p.take_expiry_revoke().is_none());
+        }
     }
     #[test]
     fn action_and_phase_deadlines_are_not_refreshed_by_status_or_lease_regrant() {

@@ -27,6 +27,32 @@ mod keyboard;
 #[path = "wayland_viewer_pointer.rs"]
 mod pointer;
 
+#[cfg(all(test, feature = "backend-wayland-udev"))]
+thread_local! {
+    static POINTER_BUTTON_DISPATCH_OBSERVER: std::cell::RefCell<Option<std::sync::Arc<std::sync::Mutex<(u64,u64)>>>> = const { std::cell::RefCell::new(None) };
+}
+/// Counts actual left-button Dispatch entries, including revoked early returns.
+#[cfg(all(test, feature = "backend-wayland-udev"))]
+pub(crate) fn with_pointer_button_dispatch_observer<T>(
+    observer: std::sync::Arc<std::sync::Mutex<(u64, u64)>>,
+    run: impl FnOnce() -> T,
+) -> T {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            POINTER_BUTTON_DISPATCH_OBSERVER.with(|s| {
+                s.borrow_mut().take();
+            });
+        }
+    }
+    POINTER_BUTTON_DISPATCH_OBSERVER.with(|s| {
+        assert!(s.borrow().is_none());
+        *s.borrow_mut() = Some(observer);
+    });
+    let _reset = Reset;
+    run()
+}
+
 // Only observes successful commits and actually drained presented sequences.
 #[cfg(all(test, feature = "backend-wayland-udev"))]
 type ControlFrameObservation = std::sync::Arc<std::sync::Mutex<(Option<u64>, Option<u64>)>>;

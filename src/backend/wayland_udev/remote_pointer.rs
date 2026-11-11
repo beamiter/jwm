@@ -162,6 +162,16 @@ pub(crate) fn init(dh: &DisplayHandle) {
 pub(crate) fn active(state: &JwmWaylandState) -> bool {
     state.remote_pointer.active.is_some()
 }
+/// Read-only observation of the native lease clock, not the host repair/proof
+/// deadlines. The test must retain this snapshot before the lease is removed.
+#[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+pub(crate) fn lease_timing_for_test(state: &JwmWaylandState) -> Option<(u32, Instant, Instant)> {
+    state
+        .remote_pointer
+        .active
+        .as_ref()
+        .map(|lease| (lease.epoch, lease.created, lease.created + TTL))
+}
 pub(crate) fn revoke(state: &mut JwmWaylandState, reason: u32) {
     super::remote_text::revoke(state, reason);
     super::remote_control::revoke(state, reason);

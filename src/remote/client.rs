@@ -10,6 +10,8 @@ use text::ClientText;
 #[path = "client_pointer_repair.rs"]
 mod pointer_repair;
 use pointer_repair::PointerRepair;
+#[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+pub(crate) use pointer_repair::with_pointer_lifetime_observer;
 
 use super::clipboard_policy::{self, ClipboardDirection, ClipboardMode};
 use super::clipboard_sync::{
@@ -1767,8 +1769,12 @@ fn viewer_loop(
         {
             let mut pointer = state.wayland_pointer.lock().unwrap();
             if pointer.enabled {
-                pointer.repair_check(Instant::now())?;
-                if pointer.expired(Instant::now()) {
+                let now = Instant::now();
+                pointer.repair_check(now)?;
+                if let Some(revoke) = pointer.take_expiry_revoke() {
+                    writer.write_message(MessageKind::WaylandPointerRevoke, &revoke.encode()?)?;
+                    writer.flush()?;
+                } else if pointer.expired(now) {
                     #[cfg(test)]
                     eprintln!("viewer pointer revoke: lease expiry");
                     if let Some(revoke) = pointer.revoke() {
@@ -1985,7 +1991,9 @@ fn viewer_loop(
                 } else {
                     for event in &events {
                         if let Some(action) = pointer.event(event, Instant::now())? {
-                            pointer.repair_sent(&action, Instant::now())?;
+                            if !pointer.repair_sent(&action, Instant::now())? {
+                                continue;
+                            }
                             if let Err(error) = (|| -> RemoteResult<()> {
                                 writer.write_message(
                                     MessageKind::WaylandPointerAction,
@@ -2297,7 +2305,7 @@ fn viewer_loop(
                         )?;
                         writer.flush()?;
                     }
-                    if pointer.enabled {
+                    if pointer.enabled && !pointer.ended {
                         viewer.wayland_pointer_presented(sequence);
                         viewer.set_wayland_pointer_status(pointer.label(Instant::now()));
                         #[cfg(test)]
@@ -3172,6 +3180,8 @@ impl ClientPointer {
         self.repair_resolve(now);
         if self.requested.is_none() {
             self.requested = Some((scope, now));
+            #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+            pointer_repair::observe_pointer_lifetime(now);
             Some(super::wayland_pointer_wire::PointerRequest { scope })
         } else {
             None
@@ -3194,6 +3204,7 @@ impl ClientPointer {
             return Err(invalid_data("pointer lease epoch changed").into());
         }
         if matches!(value.status, S::Denied | S::Revoked) {
+            self.repair_check(Instant::now())?;
             #[cfg(test)]
             eprintln!("viewer pointer terminal host status: {value:?}");
             self.ended = true;
@@ -3203,6 +3214,11 @@ impl ClientPointer {
             self.click = None;
             return Ok(());
         }
+        self.repair_check(Instant::now())?;
+        if let Some(result) = self.repair_expired_status(value) {
+            return result;
+        }
+        self.repair_note_pointer_status(value);
         if !self.ended {
             self.repair_granted(value.lease_epoch)?;
             if value.status == S::Ready

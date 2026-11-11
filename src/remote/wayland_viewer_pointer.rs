@@ -544,6 +544,24 @@ impl Dispatch<wl_pointer::WlPointer, ()> for State {
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
+        #[cfg(all(test, feature = "backend-wayland-udev"))]
+        if let wl_pointer::Event::Button {
+            button: 0x110,
+            state: WEnum::Value(edge),
+            ..
+        } = &event
+        {
+            POINTER_BUTTON_DISPATCH_OBSERVER.with(|slot| {
+                if let Some(observer) = slot.borrow().as_ref() {
+                    let mut counts = observer.lock().unwrap();
+                    match edge {
+                        wl_pointer::ButtonState::Pressed => counts.0 += 1,
+                        wl_pointer::ButtonState::Released => counts.1 += 1,
+                        _ => {}
+                    }
+                }
+            });
+        }
         if state.control_mode
             && state.keyboard.held_keys()
             && matches!(

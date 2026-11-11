@@ -3804,6 +3804,12 @@ fn stop_pointer(
     sources.pointer_revoke.store(true, Ordering::Release);
     sources.pointer_queue.lock().unwrap().clear();
     let frame = sources.pointer_frame.lock().unwrap().take();
+    {
+        let mut source = sources.state.lock().unwrap();
+        source.presented_native_proof = None;
+        source.presented_frame = None;
+        source.presented_geometry = None;
+    }
     state.revoke();
     capture.revoke_pointer();
     pointer_repair::stopped(sources);
@@ -3841,7 +3847,12 @@ fn process_pointer(
             capture.pointer_revoked(),
             state.epoch().is_some() && !state.active(now)
         );
-        return stop_pointer(sources, capture, writer, state);
+        // Any stop trigger may be observed after a strictly earlier repair
+        // timeout, including native expiry a few milliseconds before the host
+        // lease clock. Preserve that fault, but always revoke first.
+        let expiry = pointer_repair::validate_expiry(sources, now);
+        stop_pointer(sources, capture, writer, state)?;
+        return expiry;
     }
     let tracked = *sources.pointer_frame.lock().unwrap();
     let drawn = sources.state.lock().unwrap().presented_frame;

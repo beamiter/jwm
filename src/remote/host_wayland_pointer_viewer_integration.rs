@@ -229,6 +229,8 @@ struct Harness {
     wire_events: Vec<(u16, Vec<u32>)>,
     unexpected_wire: Vec<(u16, Vec<u32>)>,
     blue_presented: bool,
+    pointer_lifetime: Arc<Mutex<Option<(Instant, Instant)>>>,
+    button_dispatch: Arc<Mutex<(u64, u64)>>,
     frames: Arc<Mutex<(Option<u64>, Option<u64>)>>,
     purposes: Arc<Mutex<Vec<(u64, crate::remote::source_wire::FramePurpose)>>>,
     presentation_count: u64,
@@ -393,6 +395,10 @@ impl Harness {
             .unwrap();
         let ready = Arc::new(Mutex::new(None));
         let candidate = Arc::new(Mutex::new((None, false, 0)));
+        let pointer_lifetime = Arc::new(Mutex::new(None));
+        let observed_lifetime = pointer_lifetime.clone();
+        let button_dispatch = Arc::new(Mutex::new((0, 0)));
+        let observed_buttons = button_dispatch.clone();
         let frames = Arc::new(Mutex::new((None, None)));
         let purposes = Arc::new(Mutex::new(Vec::new()));
         let observed_frames = frames.clone();
@@ -437,7 +443,8 @@ impl Harness {
                     crate::remote::client::with_frame_purpose_observer(observed_purposes, || {
                         crate::remote::wayland_viewer::with_wayland_control_frame_observer(
                             observed_frames,
-                            || with_wayland_test_stream(stream, || run_client(opts)),
+                            || crate::remote::wayland_viewer::with_pointer_button_dispatch_observer(
+                                observed_buttons, || crate::remote::client::with_pointer_lifetime_observer(observed_lifetime, || with_wayland_test_stream(stream, || run_client(opts)))),
                         )
                     })
                 })
@@ -462,6 +469,8 @@ impl Harness {
             wire_events: Vec::new(),
             unexpected_wire: Vec::new(),
             blue_presented: false,
+            pointer_lifetime,
+            button_dispatch,
             frames,
             purposes,
             presentation_count: 0,
