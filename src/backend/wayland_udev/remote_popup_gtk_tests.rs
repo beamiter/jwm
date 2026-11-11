@@ -222,6 +222,7 @@ fn actual_gtk_menu_uses_private_seat_and_activation_changes_captured_pixels() {
     };
     let surface = server.state.surface_for_window(root).unwrap();
     assert_eq!(surface.client().unwrap().id(), gtk_id);
+    eprintln!("JWM_GTK_STAGE=root_mapped");
     let mut capture = Capture::new_with_size(&mut server, (W, H));
     let original = capture.source;
     let (_, pixels, _) = frame(&mut server, &mut capture, original, &mut gl);
@@ -229,6 +230,7 @@ fn actual_gtk_menu_uses_private_seat_and_activation_changes_captured_pixels() {
         canvas(&pixels, false),
         "actual GTK initial blue drawing area"
     );
+    eprintln!("JWM_GTK_STAGE=initial_capture");
     callbacks(&surface, start.elapsed().as_millis() as u32);
     let manager = capture.client.bind("jwm_remote_popup_manager_v1", 1);
     let lease = capture.client.new_id();
@@ -240,6 +242,7 @@ fn actual_gtk_menu_uses_private_seat_and_activation_changes_captured_pixels() {
         .expect("explicit popup lease grant");
     let epoch = grant.args[0];
     assert_eq!(grant.args[1], 30_000);
+    eprintln!("JWM_GTK_STAGE=lease_granted");
     let family = capture.client.new_id();
     capture.client.request(lease, 1, &[family]);
     fence(&mut server, &mut capture.client);
@@ -270,6 +273,7 @@ fn actual_gtk_menu_uses_private_seat_and_activation_changes_captured_pixels() {
         );
         thread::yield_now();
     }
+    eprintln!("JWM_GTK_STAGE=private_pointer_bound");
     let (proof, _, _) = frame(&mut server, &mut capture, family, &mut gl);
     capture.client.request(lease, 2, &[epoch, proof]);
     let events = fence(&mut server, &mut capture.client);
@@ -279,6 +283,7 @@ fn actual_gtk_menu_uses_private_seat_and_activation_changes_captured_pixels() {
             .any(|e| e.sender == lease && e.opcode == 1 && e.args == [epoch]),
         "actual arm"
     );
+    eprintln!("JWM_GTK_STAGE=armed");
     let (proof, _, _) = frame(&mut server, &mut capture, family, &mut gl);
     capture
         .client
@@ -289,6 +294,7 @@ fn actual_gtk_menu_uses_private_seat_and_activation_changes_captured_pixels() {
             .iter()
             .any(|e| e.sender == lease && e.opcode == 2 && e.args == [epoch, 1])
     );
+    eprintln!("JWM_GTK_STAGE=root_clicked");
     let popup = loop {
         server.roundtrip();
         let active = server
@@ -314,6 +320,7 @@ fn actual_gtk_menu_uses_private_seat_and_activation_changes_captured_pixels() {
         thread::yield_now();
     };
     assert_eq!(popup.surface.client().unwrap().id(), gtk_id);
+    eprintln!("JWM_GTK_STAGE=popup_mapped");
     let (x, y, w, h) = popup.rect;
     assert!(w > 0 && h > 0);
     let (x, y) = (x + w / 2, y + h / 2);
@@ -355,6 +362,7 @@ fn actual_gtk_menu_uses_private_seat_and_activation_changes_captured_pixels() {
         unchanged_outside > 0,
         "independent unchanged canvas evidence outside popup required"
     );
+    eprintln!("JWM_GTK_STAGE=popup_captured");
     callbacks(&surface, start.elapsed().as_millis() as u32);
     callbacks(&popup.surface, start.elapsed().as_millis() as u32);
     capture
@@ -367,6 +375,7 @@ fn actual_gtk_menu_uses_private_seat_and_activation_changes_captured_pixels() {
             .any(|e| e.sender == lease && e.opcode == 2 && e.args == [epoch, 2]),
         "actual popup selection dispatch"
     );
+    eprintln!("JWM_GTK_STAGE=selection_dispatched");
     let mut activation = 0;
     let mut changed = false;
     loop {
@@ -375,7 +384,7 @@ fn actual_gtk_menu_uses_private_seat_and_activation_changes_captured_pixels() {
         for line in rx.try_iter() {
             assert!(
                 !line.contains("duplicate_activation") && !line.contains("probe_deadline"),
-                "{line}"
+                "GTK probe reported duplicate activation or deadline"
             );
             if line == "{\"event\":\"menu_activated\",\"count\":1}" {
                 activation += 1;
@@ -411,6 +420,7 @@ fn actual_gtk_menu_uses_private_seat_and_activation_changes_captured_pixels() {
         changed,
         "actual production capture must show new green app canvas"
     );
+    eprintln!("JWM_GTK_STAGE=activation_verified");
     drop(process);
     reader.join().unwrap();
 }

@@ -55,8 +55,48 @@ jobs:
           # Keep raw process diagnostics on this ephemeral runner, not in artifacts
           # or public log output. A failure remains a hard job failure.
           log="${{ runner.temp }}/remote-popup-gtk-result.log"
-          if ! env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --ignored --exact --test-threads=1 > "$log" 2>&1; then
+          if ! env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --ignored --exact --test-threads=1 --nocapture > "$log" 2>&1; then
             echo 'GTK3 native popup compatibility check failed; no fallback or skipped acceptance.'
+            python3 - "$log" <<'PYDIAG'
+          import pathlib, sys
+          # Never emit matched text, paths, exception details or arbitrary panic strings.
+          with pathlib.Path(sys.argv[1]).open("rb") as stream:
+              raw = stream.read(2 * 1024 * 1024)
+          labels = {
+              b"GTK root never mapped": "root_mapping_timeout",
+              b"GTK exited before mapping": "process_exited_before_mapping",
+              b"GTK source must match bounded root geometry": "root_geometry_mismatch",
+              b"real production GL frame not ready": "capture_not_ready",
+              b"actual GTK initial blue drawing area": "initial_canvas_mismatch",
+              b"explicit popup lease grant": "lease_not_granted",
+              b"GTK lease revoked before seat binding": "lease_revoked_before_binding",
+              b"GTK did not bind the newly advertised private pointer; no main-seat fallback": "private_pointer_binding_timeout",
+              b"actual arm": "arm_not_confirmed",
+              b"GTK popup/serial unsupported: native lease revoked": "popup_serial_lease_revoked",
+              b"GTK did not create and restricted-grab its menu from the real click": "popup_grab_timeout",
+              b"popup rectangle below the button must contain actual changed pixels": "popup_pixels_missing",
+              b"independent unchanged canvas evidence outside popup required": "outside_canvas_evidence_missing",
+              b"actual popup selection dispatch": "selection_not_accepted",
+              b"activation/pixel deadline": "activation_pixel_timeout",
+              b"activation/readback deadline": "activation_readback_timeout",
+              b"GTK exited before activation/pixel evidence completed": "process_exited_before_evidence",
+              b"actual production capture must show new green app canvas": "final_canvas_mismatch",
+              b"display.sync timeout": "display_sync_timeout",
+              b"mandatory actual GL renderer required": "renderer_unavailable",
+          }
+          stages = (
+              "root_mapped", "initial_capture", "lease_granted", "private_pointer_bound",
+              "armed", "root_clicked", "popup_mapped", "popup_captured",
+              "selection_dispatched", "activation_verified",
+          )
+          lines = set(raw.splitlines())
+          for stage in stages:
+              if ("JWM_GTK_STAGE=" + stage).encode("ascii") in lines:
+                  print("GTK_PROBE_COMPLETED_STAGE=" + stage)
+          matches = [label for needle, label in labels.items() if needle in raw]
+          for label in matches or ["unclassified_failure"]:
+              print("GTK_PROBE_FAILURE_CATEGORY=" + label)
+          PYDIAG
             exit 1
           fi
           grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored;' "$log"
