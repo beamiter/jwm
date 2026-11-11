@@ -319,3 +319,13 @@ reuse a fence after a deliberately invalid receipt; it was corrected to prove
 that the invalid session remains terminal, without changing production logic.
 The six new real display/TCP cases and two malicious-record scenarios still
 require CI; local pure checks are not recipient or pixel acceptance.
+
+The first vertical-scroll CI candidate exposed a remaining wire capability
+validation rule: all six new combinations were rejected during Hello decoding,
+before native input execution. General CI had 8,289 passing and six failing
+tests; the dedicated module had eight passing, six failing and its one separately
+required optimized test. X11 and the mandatory optimized 1080p expiry case passed,
+but this does not accept the scroll combination. The follow-up permits only the
+vertical pointer-only combination in that shared decoder and adds actual client
+and server Hello round trips, a 64-combination permission matrix, and malformed
+flag/version negatives. Production native authorization is not relaxed.

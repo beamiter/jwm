@@ -205,7 +205,7 @@ impl StreamCapabilities {
             || payload[32] > 1
             || (payload[32] == 1
                 && (payload[23..26].iter().any(|b| *b != 0)
-                    || payload[28] != 0
+                    || (payload[28] != 0 && (payload[28] != 1 || payload[27] != 1))
                     || payload[30] != 0
                     || payload[31] != 0))
             || payload[31] > 1
@@ -1822,9 +1822,16 @@ mod static_lossless_capability_tests {
                 .unwrap()
                 .wayland_pointer
         );
-        // Only native pointer motion/atomic click is added. Every other
-        // input/clipboard/resize combination remains explicitly rejected.
-        for i in [23, 24, 25, 26, 28, 30, 31] {
+        // Vertical scroll is independently allowed with native pointer only.
+        // Every other input/clipboard/resize combination remains rejected.
+        let mut vertical = pointer;
+        vertical[28] = 1;
+        assert!(
+            StreamCapabilities::decode(&vertical)
+                .unwrap()
+                .wayland_scroll
+        );
+        for i in [23, 24, 25, 26, 30, 31] {
             let mut mixed = pointer;
             mixed[i] = 1;
             assert!(StreamCapabilities::decode(&mixed).is_err(), "mixed {i}");
@@ -1846,6 +1853,129 @@ mod static_lossless_capability_tests {
             FLAG_CLIPBOARD_FILES,
         ] {
             assert!(ServerHello::decode(&encode_hello(flags, c)).is_err());
+        }
+    }
+}
+
+#[cfg(test)]
+mod lossless_scroll_hello_tests {
+    use super::*;
+
+    fn client(stream: StreamCapabilities) -> ClientHello {
+        ClientHello {
+            stream,
+            initial_viewport: None,
+            request_input: false,
+            request_clipboard: false,
+            request_clipboard_files: false,
+            keymap: KeymapTable::empty(),
+        }
+    }
+    fn server(stream: StreamCapabilities) -> ServerHello {
+        ServerHello {
+            stream,
+            pointer_enabled: false,
+            keyboard_enabled: false,
+            clipboard_enabled: false,
+            clipboard_files_enabled: false,
+        }
+    }
+
+    #[test]
+    fn lossless_vertical_pointer_roundtrips_both_real_hellos() {
+        let caps = StreamCapabilities {
+            static_lossless: true,
+            wayland_pointer: true,
+            wayland_scroll: true,
+            ..Default::default()
+        };
+        let c = client(caps);
+        let s = server(caps);
+        assert_eq!(ClientHello::decode(&c.encode()).unwrap(), c);
+        assert_eq!(ServerHello::decode(&s.encode()).unwrap(), s);
+        for version in [27_u16, 29] {
+            let mut cb = c.encode();
+            cb[8..10].copy_from_slice(&version.to_be_bytes());
+            assert!(ClientHello::decode(&cb).is_err());
+            let mut sb = s.encode();
+            sb[8..10].copy_from_slice(&version.to_be_bytes());
+            assert!(ServerHello::decode(&sb).is_err());
+        }
+    }
+
+    #[test]
+    fn lossless_input_matrix_is_identical_in_both_hello_decoders() {
+        // Exhaustively vary native mode and axis bits with PNG enabled.
+        for mask in 0_u8..64 {
+            let caps = StreamCapabilities {
+                static_lossless: true,
+                wayland_keyboard: mask & 1 != 0,
+                wayland_pointer: mask & 2 != 0,
+                wayland_control: mask & 4 != 0,
+                wayland_text: mask & 8 != 0,
+                wayland_scroll: mask & 16 != 0,
+                wayland_horizontal_scroll: mask & 32 != 0,
+                ..Default::default()
+            };
+            let permitted = !caps.wayland_control
+                && !caps.wayland_text
+                && !caps.wayland_horizontal_scroll
+                && !(caps.wayland_keyboard && caps.wayland_pointer)
+                && (!caps.wayland_scroll || (caps.wayland_pointer && !caps.wayland_keyboard));
+            assert_eq!(
+                ClientHello::decode(&client(caps).encode()).is_ok(),
+                permitted,
+                "client mask {mask}"
+            );
+            assert_eq!(
+                ServerHello::decode(&server(caps).encode()).is_ok(),
+                permitted,
+                "server mask {mask}"
+            );
+        }
+    }
+
+    #[test]
+    fn lossless_vertical_pointer_rejects_legacy_clipboard_resize_and_unknown_bits() {
+        let caps = StreamCapabilities {
+            static_lossless: true,
+            wayland_pointer: true,
+            wayland_scroll: true,
+            ..Default::default()
+        };
+        for kind in 0..4 {
+            let mut c = client(caps);
+            let mut s = server(caps);
+            match kind {
+                0 => {
+                    c.request_input = true;
+                    s.pointer_enabled = true;
+                }
+                1 => {
+                    c.request_clipboard = true;
+                    s.clipboard_enabled = true;
+                }
+                2 => {
+                    c.request_clipboard = true;
+                    s.clipboard_enabled = true;
+                    c.request_clipboard_files = true;
+                    s.clipboard_files_enabled = true;
+                }
+                _ => {
+                    c.stream.window_resize = true;
+                    s.stream.window_resize = true;
+                }
+            }
+            assert!(ClientHello::decode(&c.encode()).is_err());
+            assert!(ServerHello::decode(&s.encode()).is_err());
+        }
+        for bits in [2, 3, 4, 128, 255] {
+            let mut cb = client(caps).encode();
+            cb[HELLO_PREFIX_LEN + 28] = bits;
+            assert!(ClientHello::decode(&cb).is_err());
+            let mut sb = server(caps).encode();
+            sb[HELLO_PREFIX_LEN + 28] = bits;
+            assert!(ServerHello::decode(&sb).is_err());
         }
     }
 }
