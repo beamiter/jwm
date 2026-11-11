@@ -18,7 +18,8 @@ pub(super) struct NativeText {
 }
 impl WaylandCapture {
     pub(in crate::remote) fn enable_text(&mut self) -> RemoteResult<()> {
-        if self.state.popups
+        if self.state.interactive_popup.enabled
+            || self.state.popups
             || self.state.resize_follow
             || self.state.frame_serial != 0
             || self.state.text.enabled

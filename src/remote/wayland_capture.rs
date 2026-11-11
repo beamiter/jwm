@@ -5,6 +5,8 @@
 //! permission boundary: this host must itself be a trusted local client.
 #[path = "wayland_capture_control.rs"]
 mod control;
+#[path = "wayland_capture_popup.rs"]
+mod interactive_popup;
 #[path = "wayland_capture_text.rs"]
 mod text;
 use super::RemoteResult;
@@ -125,6 +127,7 @@ struct NativePointer {
 }
 #[derive(Default)]
 struct State {
+    interactive_popup: interactive_popup::NativePopup,
     popups: bool,
     popup_manager: Option<JwmReadonlyPopupCaptureManagerV1>,
     popup_layout: Option<(u16, u16)>,
@@ -200,6 +203,7 @@ impl State {
         self.failed.get_or_insert(message);
     }
     fn check(&self) -> RemoteResult<()> {
+        self.interactive_popup.check()?;
         if let Some(message) = self.failed {
             return Err(invalid(message).into());
         }
@@ -343,6 +347,19 @@ impl WaylandCapture {
         popups: bool,
         select: impl FnOnce(&mut Self) -> RemoteResult<usize>,
     ) -> RemoteResult<Self> {
+        Self::connect_stream_mode(stream, max_width, resize_follow, popups, false, select)
+    }
+    fn connect_stream_mode(
+        stream: UnixStream,
+        max_width: u16,
+        resize_follow: bool,
+        popups: bool,
+        interactive_popup: bool,
+        select: impl FnOnce(&mut Self) -> RemoteResult<usize>,
+    ) -> RemoteResult<Self> {
+        if interactive_popup && (resize_follow || popups || max_width != 0) {
+            return Err(invalid("interactive family requires an unscaled exclusive root").into());
+        }
         stream.set_nonblocking(true)?;
         let conn = Connection::from_socket(stream)?;
         let queue = conn.new_event_queue();
@@ -352,6 +369,7 @@ impl WaylandCapture {
             conn,
             queue,
             state: State {
+                interactive_popup: interactive_popup::NativePopup::new(interactive_popup),
                 resize_follow,
                 popups,
                 ..Default::default()
@@ -431,6 +449,11 @@ impl WaylandCapture {
             .as_ref()
             .unwrap()
             .create_source(&selected, &qh, ());
+        let source = if interactive_popup {
+            capture.create_interactive_popup_source(source)?
+        } else {
+            source
+        };
         let source = if popups && !resize_follow {
             let manager = capture.state.popup_manager.as_ref().ok_or_else(|| {
                 invalid("Wayland compositor lacks explicit read-only popup capture capability")
@@ -497,7 +520,8 @@ impl WaylandCapture {
 
     /// Must be enabled before the first frame and only after wire negotiation.
     pub(super) fn enable_pointer(&mut self) -> RemoteResult<()> {
-        if self.state.text.enabled
+        if self.state.interactive_popup.enabled
+            || self.state.text.enabled
             || self.state.resize_follow
             || self.state.popups
             || self.state.frame_serial != 0
@@ -701,6 +725,9 @@ impl WaylandCapture {
         .then_some(self.state.frame_serial)
     }
     pub(super) fn enable_keyboard(&mut self) -> RemoteResult<()> {
+        if self.state.interactive_popup.enabled {
+            return Err(invalid("interactive family cannot upgrade input").into());
+        }
         if self.state.text.enabled
             || self.state.resize_follow
             || self.state.popups
@@ -1073,6 +1100,9 @@ impl WaylandCapture {
     fn frame_with_visual_inner(&mut self, visual_only: bool) -> RemoteResult<CaptureOutcome> {
         let result = self.read_frame_with_pointer_visual(visual_only);
         if result.is_err() {
+            if self.state.interactive_popup.enabled {
+                self.fail_interactive_popup();
+            }
             self.revoke_keyboard();
             self.state
                 .fail("Wayland capture failed; local authorization is required again");
@@ -1170,7 +1200,7 @@ impl WaylandCapture {
         if self.inflight.is_some() {
             return Err(invalid("duplicate Wayland capture frame").into());
         }
-        let deadline = Instant::now() + PROTOCOL_TIMEOUT;
+        let deadline = self.popup_protocol_deadline()?;
         self.sync_until(deadline)?;
         if self.state.resize_follow {
             if self.state.follow_suspended {
@@ -1225,7 +1255,9 @@ impl WaylandCapture {
             }
         }
         let ready_frame = self.inflight.take().unwrap();
-        if self.state.text.enabled && !self.state.text.ended && !self.state.text.revoked {
+        if self.state.interactive_popup.enabled {
+            self.retained_frame = Some(ready_frame);
+        } else if self.state.text.enabled && !self.state.text.ended && !self.state.text.revoked {
             self.retained_frame = Some(ready_frame);
             self.pointer_ready_at = Some(Instant::now());
         } else if self.state.control.enabled && !self.control_revoked() && !visual_only {
@@ -1281,6 +1313,12 @@ impl WaylandCapture {
         self.state.check()?;
         if self.state.resize_follow && self.state.session_stopped {
             return Ok(CaptureOutcome::NoChange);
+        }
+        if self.state.interactive_popup.enabled {
+            if (out_width, out_height) != (width, height) {
+                return Err(invalid("interactive family scaling is forbidden").into());
+            }
+            self.export_interactive_popup_frame(deadline)?;
         }
         #[cfg(all(test, feature = "backend-wayland-udev"))]
         CAPTURE_FRAME_OBSERVER.with(|slot| {
@@ -1377,6 +1415,7 @@ impl WaylandCapture {
 
 impl Drop for WaylandCapture {
     fn drop(&mut self) {
+        self.finish_interactive_popup();
         self.finish_text();
         self.revoke_control();
         self.revoke_pointer();
@@ -1417,6 +1456,14 @@ impl Dispatch<wl_registry::WlRegistry, ()> for State {
                         state.text.global = Some(name);
                         state.text.manager = Some(proxy.bind(name, 1, qh, ()));
                         false
+                    }
+                    "jwm_remote_popup_manager_v1"
+                        if state.interactive_popup.enabled
+                            && version >= 2
+                            && state.interactive_popup.manager.is_none() =>
+                    {
+                        state.interactive_popup.manager = Some(proxy.bind(name, 2, qh, ()));
+                        true
                     }
                     "jwm_readonly_popup_capture_manager_v1"
                         if state.popups

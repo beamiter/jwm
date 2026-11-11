@@ -1608,6 +1608,14 @@ pub(crate) mod wire_test_client {
     }
 
     impl Client {
+        /// Count only the actual initial registry advertisements in this test client.
+        pub(crate) fn global_count(&self, interface: &str) -> usize {
+            self.globals
+                .iter()
+                .filter(|(_, name, _)| name == interface)
+                .count()
+        }
+
         /// Allocate the next client-side object id.
         pub(crate) fn new_id(&mut self) -> u32 {
             self.next_id += 1;

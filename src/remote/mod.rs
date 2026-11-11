@@ -61,6 +61,8 @@ pub mod wayland_keyboard_wire;
 #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
 mod wayland_pointer_integration;
 pub mod wayland_pointer_wire;
+#[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+mod wayland_popup_capture_integration;
 pub mod wayland_text_wire;
 mod window_capture;
 #[cfg(test)]
