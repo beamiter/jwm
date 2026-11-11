@@ -1022,6 +1022,62 @@ mod tests {
         );
     }
 
+    fn terminal_receipt_cutoff_case(start: Instant, captured: Instant, cutoff: Instant) {
+        let accepted_at = cutoff - Duration::from_nanos(1);
+        for observed_at in [accepted_at, cutoff, cutoff + Duration::from_nanos(1)] {
+            let mut l = armed(start);
+            let original_deadline = l.deadline;
+            let key = displayed(&mut l, 2, captured);
+            let permit = l
+                .authorize_click(
+                    Click {
+                        key,
+                        sequence: 1,
+                        x: 1,
+                        y: 1,
+                    },
+                    captured,
+                )
+                .unwrap();
+            assert_eq!(l.pending.unwrap().1, cutoff);
+            let identity = permit.identity.clone();
+            let (metadata, _, _) = permit.into_parts();
+            // These are evidence arguments to the real ledger consumer, not a
+            // fabricated NativeDeliveryReceipt or a claim of native delivery.
+            let result = l.terminal_delivery(&identity, metadata, 1, accepted_at, observed_at);
+            if observed_at < cutoff {
+                assert_eq!(result, Ok((metadata, 1)));
+            } else {
+                assert_eq!(result, Err(Failure::Deadline));
+            }
+            // Both a terminal fact and a rejected late fact permanently retire
+            // authority; neither advances counters or extends the lease.
+            assert!(l.ended && l.pending.is_none() && l.slot.is_none());
+            assert_eq!(l.deadline, original_deadline);
+            assert_eq!((l.sequence, l.native_sequence), (0, 0));
+            assert_eq!(l.ready(observed_at), Err(Failure::Ended));
+            assert_eq!(
+                l.terminal_delivery(&identity, metadata, 1, accepted_at, observed_at),
+                Err(Failure::Ended)
+            );
+        }
+    }
+
+    #[test]
+    fn terminal_receipt_timely_accepted_cannot_cross_capture_deadline() {
+        let start = Instant::now();
+        let captured = start + Duration::from_millis(1);
+        terminal_receipt_cutoff_case(start, captured, captured + FRESH);
+    }
+
+    #[test]
+    fn terminal_receipt_timely_accepted_cannot_cross_original_lease_deadline() {
+        let start = Instant::now();
+        let lease_end = start + TTL;
+        let captured = lease_end - Duration::from_millis(500);
+        terminal_receipt_cutoff_case(start, captured, lease_end);
+    }
+
     #[test]
     fn operation_completion_keeps_original_capture_freshness_boundary() {
         let start = Instant::now();
