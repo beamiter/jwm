@@ -31,7 +31,7 @@ fn fence(server: &mut Server, client: &mut Client) -> Vec<Event> {
         thread::yield_now();
     }
 }
-fn direct_popup(
+fn direct_popup_resources(
     server: &mut Server,
     app: &mut App,
     seat: u32,
@@ -39,7 +39,7 @@ fn direct_popup(
     main_pointer: u32,
     main_keyboard: u32,
     private_pointer: u32,
-) -> u32 {
+) -> (u32, u32, u32) {
     let c = &mut app.client;
     let compositor = c.bind("wl_compositor", 6);
     let shell = c.bind("xdg_wm_base", 6);
@@ -100,7 +100,28 @@ fn direct_popup(
             );
         }
     }
-    surface
+    (surface, xdg, role)
+}
+
+fn direct_popup(
+    server: &mut Server,
+    app: &mut App,
+    seat: u32,
+    serial: u32,
+    main_pointer: u32,
+    main_keyboard: u32,
+    private_pointer: u32,
+) -> u32 {
+    direct_popup_resources(
+        server,
+        app,
+        seat,
+        serial,
+        main_pointer,
+        main_keyboard,
+        private_pointer,
+    )
+    .0
 }
 
 /// JPEG evidence is deliberately tested away from popup edges. A popup image
@@ -200,6 +221,27 @@ impl PopupHarness {
         prepared_change: Option<PreparedChange>,
         schedule: Option<Arc<dyn Fn(host::popup::PopupHostTestEvent) + Send + Sync>>,
     ) -> Self {
+        Self::configured_with_delivery_pause(
+            gl,
+            host_permission,
+            client_permission,
+            raw,
+            prepared_change,
+            schedule,
+            None,
+        )
+    }
+    fn configured_with_delivery_pause(
+        gl: &mut HeadlessSmithayGles,
+        host_permission: bool,
+        client_permission: bool,
+        raw: Option<RawCase>,
+        prepared_change: Option<PreparedChange>,
+        schedule: Option<Arc<dyn Fn(host::popup::PopupHostTestEvent) + Send + Sync>>,
+        delivery_pause: Option<
+            Arc<crate::remote::wayland_capture::interactive_popup::PopupDeliveryPause>,
+        >,
+    ) -> Self {
         let mut native = Server::new();
         let mut local = Server::new();
         native.state.image_capture_pending =
@@ -253,10 +295,19 @@ impl PopupHarness {
                         )
                     })
                 };
-                if let Some(schedule) = schedule {
-                    host::popup::with_popup_schedule_observer(schedule, serve)
+                let scheduled = || {
+                    if let Some(schedule) = schedule {
+                        host::popup::with_popup_schedule_observer(schedule, serve)
+                    } else {
+                        serve()
+                    }
+                };
+                if let Some(pause) = delivery_pause {
+                    crate::remote::wayland_capture::interactive_popup::with_popup_delivery_pause(
+                        pause, scheduled,
+                    )
                 } else {
-                    serve()
+                    scheduled()
                 }
             })();
             let _ = host_tx.send(result);
@@ -1997,4 +2048,338 @@ impl PopupCloseBarrier {
             hook,
         }
     }
+}
+
+// This independent, read-only compositor capture observes the application
+// callback. It is not the revoked popup family's video or an input grant.
+fn terminal_root_readback(h: &mut PopupHarness) -> Readback {
+    let mut c = h.native.connect();
+    let list = c.bind("ext_foreign_toplevel_list_v1", 1);
+    let sources = c.bind("ext_foreign_toplevel_image_capture_source_manager_v1", 1);
+    let manager = c.bind("ext_image_copy_capture_manager_v1", 1);
+    let events = fence(&mut h.native, &mut c);
+    let identifier =
+        crate::backend::wayland_udev::state::JwmWaylandState::foreign_toplevel_identifier(
+            h.target.window,
+        );
+    let handles: Vec<_> = events
+        .iter()
+        .filter(|e| e.sender == list && e.opcode == 0)
+        .map(|e| e.args[0])
+        .collect();
+    let selected: Vec<_> = events
+        .iter()
+        .filter(|e| {
+            if e.opcode != 4 || !handles.contains(&e.sender) || e.args.is_empty() {
+                return false;
+            }
+            let len = e.args[0] as usize;
+            let bytes: Vec<_> = e.args[1..]
+                .iter()
+                .flat_map(|word| word.to_ne_bytes())
+                .collect();
+            len > 0
+                && len <= bytes.len()
+                && bytes[len - 1] == 0
+                && &bytes[..len - 1] == identifier.as_bytes()
+        })
+        .map(|e| e.sender)
+        .collect();
+    assert_eq!(
+        selected.len(),
+        1,
+        "exact original application root identifier"
+    );
+    let source = c.new_id();
+    c.request(sources, 0, &[source, selected[0]]);
+    let session = c.new_id();
+    c.request(manager, 0, &[session, source, 0]);
+    let events = fence(&mut h.native, &mut c);
+    assert!(
+        events
+            .iter()
+            .any(|e| e.sender == session && e.opcode == 0 && e.args == [ROOT_WIDTH, ROOT_HEIGHT])
+    );
+    Readback {
+        size: (ROOT_WIDTH, ROOT_HEIGHT),
+        client: c,
+        session,
+    }
+}
+
+fn terminal_open_popup(h: &mut PopupHarness, gl: &mut HeadlessSmithayGles) -> (u32, u32, u32) {
+    h.wait(
+        gl,
+        "terminal scenario initial actual Ready",
+        Some((false, false)),
+        |s| {
+            s.ready
+                .lock()
+                .unwrap()
+                .is_some_and(|n| s.last_presented == Some(n))
+        },
+    );
+    h.click(8.0, 8.0);
+    h.wait(
+        gl,
+        "terminal scenario real root click",
+        Some((false, false)),
+        |s| s.private_events.iter().filter(|e| e.0 == 3).count() == 2,
+    );
+    let serial = h
+        .private_events
+        .iter()
+        .find(|e| e.0 == 3 && e.1[3] == 1)
+        .unwrap()
+        .1[0];
+    let popup = direct_popup_resources(
+        &mut h.native,
+        &mut h.target,
+        h.private_seat.unwrap(),
+        serial,
+        h.main_pointer,
+        h.main_keyboard,
+        h.private_pointer.unwrap(),
+    );
+    h.wait(
+        gl,
+        "terminal scenario real popup pixels and proof",
+        Some((true, false)),
+        |s| {
+            s.last_visual == Some((true, false))
+                && s.ready.lock().unwrap().is_some_and(|n| {
+                    s.last_presented == Some(n) && s.frames.lock().unwrap().1 == Some(n)
+                })
+        },
+    );
+    popup
+}
+
+fn terminal_application_callback(h: &mut PopupHarness, popup: (u32, u32, u32)) {
+    // The test app callback runs only after its own real popup receiver has
+    // observed the balanced click, never in response to a host status alone.
+    let buttons: Vec<_> = h.private_events.iter().filter(|e| e.0 == 3).collect();
+    assert_eq!(buttons.len(), 4, "one root click plus one popup click");
+    assert_eq!(&buttons[2].1[2..], &[0x110, 1]);
+    assert_eq!(&buttons[3].1[2..], &[0x110, 0]);
+    let (blue, _file) = shm(
+        &mut h.native,
+        &mut h.target.client,
+        [255, 0, 0, 255],
+        ROOT_WIDTH,
+        ROOT_HEIGHT,
+    );
+    h.target.client.request(popup.2, 0, &[]); // xdg_popup.destroy
+    h.target.client.request(popup.1, 0, &[]); // xdg_surface.destroy
+    h.target.client.request(popup.0, 0, &[]); // wl_surface.destroy
+    h.target.client.request(h.target.surface, 1, &[blue, 0, 0]);
+    h.target
+        .client
+        .request(h.target.surface, 2, &[0, 0, ROOT_WIDTH, ROOT_HEIGHT]);
+    h.target.client.request(h.target.surface, 6, &[]);
+    for event in fence(&mut h.native, &mut h.target.client) {
+        assert_ne!(
+            event.sender, h.main_pointer,
+            "callback touched main pointer"
+        );
+        assert_ne!(
+            event.sender, h.main_keyboard,
+            "callback touched main keyboard"
+        );
+        if Some(event.sender) == h.private_pointer {
+            assert!(
+                matches!(event.opcode, 1 | 5),
+                "callback may only clean private focus"
+            );
+            h.private_events.push((event.opcode, event.args));
+        }
+    }
+    assert!(
+        !remote_popup::active(&h.native.state),
+        "popup destroy permanently revokes family"
+    );
+}
+
+fn popup_destroy_after_delivery(before_tcp_accepted: bool) {
+    use crate::remote::wayland_capture::interactive_popup::PopupDeliveryPause;
+    use host::popup::PopupHostTestEvent as E;
+    let Some(mut gl) = HeadlessSmithayGles::new() else {
+        return;
+    };
+    let pause = Arc::new(PopupDeliveryPause::new(2));
+    struct ReleaseOnDrop(Arc<PopupDeliveryPause>);
+    impl Drop for ReleaseOnDrop {
+        fn drop(&mut self) {
+            self.0.release();
+        }
+    }
+    let _release = ReleaseOnDrop(pause.clone());
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let recorded = log.clone();
+    let (release, resume) = mpsc::sync_channel(1);
+    let resume = Mutex::new(resume);
+    let hook = Arc::new(move |event| {
+        {
+            let mut events = recorded.lock().unwrap();
+            assert!(events.len() < 512);
+            events.push(event);
+        }
+        if !before_tcp_accepted && matches!(event, E::Accepted { sequence: 2, .. }) {
+            resume
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(1))
+                .expect("application callback releases host completion barrier");
+        }
+    });
+    let mut h = PopupHarness::configured_with_delivery_pause(
+        &mut gl,
+        true,
+        true,
+        None,
+        None,
+        Some(hook),
+        before_tcp_accepted.then(|| pause.clone()),
+    );
+    let popup = terminal_open_popup(&mut h, &mut gl);
+    let original_deadline = remote_popup::lease_timing_for_test(&h.native.state).unwrap();
+    let mut root = terminal_root_readback(&mut h);
+    let pixels = root.pixels(&mut h.native, &mut gl);
+    assert!(pixels.chunks_exact(4).all(|p| p == [0, 0, 255, 255]));
+    let ready = h.ready.lock().unwrap().unwrap();
+    h.click(7.0, 8.0);
+    h.wait(
+        &mut gl,
+        "actual popup click before application destroy",
+        None,
+        |s| {
+            s.private_events.iter().filter(|e| e.0 == 3).count() == 4
+                && if before_tcp_accepted {
+                    pause.observed().is_some()
+                } else {
+                    log.lock()
+                        .unwrap()
+                        .iter()
+                        .any(|e| matches!(e, E::Accepted { sequence: 2, .. }))
+                }
+        },
+    );
+    assert!(
+        h.private_events
+            .iter()
+            .any(|e| e.0 == 2 && e.1[1..] == [3 * 256, 5 * 256])
+    );
+    if before_tcp_accepted {
+        let observed = pause.observed().unwrap();
+        assert_eq!(observed.native_sequence, 2);
+        assert_eq!(observed.metadata.key.wire_sequence, ready);
+        assert!(observed.accepted_at < observed.deadline);
+        assert!(Instant::now() < observed.deadline);
+        assert!(observed.deadline <= original_deadline.2);
+        assert!(
+            !log.lock()
+                .unwrap()
+                .iter()
+                .any(|e| matches!(e, E::Accepted { sequence: 2, .. }))
+        );
+    }
+    terminal_application_callback(&mut h, popup);
+    if before_tcp_accepted {
+        pause.release();
+    } else {
+        release.send(()).unwrap();
+    }
+    // Observe the application's own committed result independently of the
+    // now-revoked family. No post-revocation remote video success is assumed.
+    let pixels = root.pixels(&mut h.native, &mut gl);
+    assert!(pixels.chunks_exact(4).all(|p| p == [255, 0, 0, 255]));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut client = None;
+    let mut host = None;
+    loop {
+        h.tick(&mut gl, None);
+        if client.is_none() {
+            client = h.client_done.try_recv().ok();
+        }
+        if host.is_none() {
+            host = h.host_done.try_recv().ok();
+        }
+        assert!(!remote_popup::active(&h.native.state));
+        assert_eq!(
+            h.private_events.iter().filter(|e| e.0 == 3).count(),
+            4,
+            "terminal result cannot dispatch another click"
+        );
+        assert!(
+            Instant::now() < deadline,
+            "terminal result and native cleanup deadline"
+        );
+        if client.is_some() && host.is_some() {
+            break;
+        }
+    }
+    let client_error = client
+        .unwrap()
+        .expect_err("terminal lease never resumes input");
+    if before_tcp_accepted {
+        assert!(
+            crate::remote::client::popup_delivered_terminal(client_error.as_ref()),
+            "exact DeliveredTerminal, not EOF or generic close: {client_error:?}"
+        );
+        host.unwrap()
+            .expect("flushed terminal delivery exits host normally");
+        assert!(
+            !log.lock()
+                .unwrap()
+                .iter()
+                .any(|e| matches!(e, E::Accepted { sequence: 2, .. }))
+        );
+    } else {
+        assert_eq!(
+            crate::remote::client::classify_failure(client_error.as_ref()).peer_close_code,
+            Some(crate::remote::close_wire::SessionCloseCode::CaptureUnavailable)
+        );
+        let error = host
+            .unwrap()
+            .expect_err("destroy after Accepted permanently closes family");
+        assert_eq!(error.to_string(), "interactive popup lease revoked");
+        assert_eq!(
+            log.lock()
+                .unwrap()
+                .iter()
+                .filter(|e| matches!(e, E::Accepted { sequence: 2, .. }))
+                .count(),
+            1
+        );
+    }
+    let events = log.lock().unwrap();
+    let terminal_action = events
+        .iter()
+        .position(|e| matches!(e, E::ClickDequeued { sequence: 2, .. }))
+        .unwrap();
+    assert!(
+        !events[terminal_action + 1..]
+            .iter()
+            .any(|e| matches!(e, E::FrameCaptured { .. } | E::ReadyPublished(_))),
+        "destroyed popup must not acquire replacement proof or Ready"
+    );
+    drop(events);
+    assert!(
+        h.private_events
+            .iter()
+            .all(|e| matches!(e.0, 0 | 1 | 2 | 3 | 5))
+    );
+    assert!(remote_popup::lease_timing_for_test(&h.native.state).is_none());
+    h.client.take().unwrap().join().unwrap();
+    h.host.take().unwrap().join().unwrap();
+}
+
+#[test]
+fn authenticated_popup_destroy_after_native_delivery_reports_terminal_without_replay() {
+    popup_destroy_after_delivery(true);
+}
+
+#[test]
+fn authenticated_popup_destroy_after_tcp_acceptance_permanently_ends_authority() {
+    popup_destroy_after_delivery(false);
 }

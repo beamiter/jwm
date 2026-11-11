@@ -3,6 +3,7 @@ use super::*;
 use crate::remote::source_wire::{FramePurpose, MAX_FRAME_INNER_PAYLOAD_LEN, encode_frame_payload};
 use crate::remote::tile::{TileEncodeRequest, TileEncoder};
 use crate::remote::wayland_capture::WaylandCapture;
+use crate::remote::wayland_capture::interactive_popup::PopupDispatchOutcome;
 use crate::remote::wayland_popup_wire::{
     AckDisposition, Binding, Click, ClickResolution, FrameKey, Ledger, METADATA_LEN, Metadata,
     Opportunity, Region, Status, StatusKind,
@@ -366,7 +367,15 @@ pub(super) fn serve(
                             Some(Opportunity::Arm(key)) => {
                                 let permit = authority.authorize_arm(key, Instant::now())?;
                                 check_popup_transport(&broken)?;
-                                capture.dispatch_host_popup(permit)?;
+                                match capture.dispatch_host_popup(permit)? {
+                                    PopupDispatchOutcome::Active => {}
+                                    PopupDispatchOutcome::DeliveredThenRevoked(_) => {
+                                        return Err(invalid_data(
+                                            "terminal popup delivery cannot arm",
+                                        )
+                                        .into());
+                                    }
+                                }
                                 authority.complete_arm(binding, Instant::now())?;
                                 status(&mut writer, StatusKind::Armed, meta, 0, deadline)?;
                                 current = None;
@@ -401,7 +410,32 @@ pub(super) fn serve(
                         match authority.resolve_click(request, dequeued_at)? {
                             ClickResolution::Dispatch(permit) => {
                                 check_popup_transport(&broken)?;
-                                capture.dispatch_host_popup(permit)?;
+                                match capture.dispatch_host_popup(permit)? {
+                                    PopupDispatchOutcome::Active => {}
+                                    PopupDispatchOutcome::DeliveredThenRevoked(receipt) => {
+                                        // This consumes the exact pending network/native mapping
+                                        // and permanently retires ledger authority before output.
+                                        let (metadata, sequence) = authority
+                                            .complete_terminal_delivery(receipt, Instant::now())?;
+                                        check_popup_transport(&broken)?;
+                                        let terminal = Status {
+                                            kind: StatusKind::DeliveredTerminal,
+                                            metadata,
+                                            action_sequence: sequence,
+                                            ttl_ms: 0,
+                                        };
+                                        write_session_record(
+                                            &mut writer,
+                                            MessageKind::WaylandPopupStatus,
+                                            &terminal.encode()?,
+                                            remaining(deadline)?,
+                                        )?;
+                                        #[cfg(all(test, feature = "backend-wayland-udev"))]
+                                        observe_current(None, false);
+                                        // No Accepted, replacement capture, Ready or retry follows.
+                                        return Ok(());
+                                    }
+                                }
                                 authority.complete_click(
                                     binding,
                                     request.sequence,

@@ -276,6 +276,15 @@ impl std::error::Error for ClientFailure {
     }
 }
 
+/// Only the direct authenticated terminal cause qualifies. Cleanup wrappers,
+/// formatted messages and nested arbitrary sources are deliberately excluded.
+#[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+pub(crate) fn popup_delivered_terminal(error: &(dyn std::error::Error + 'static)) -> bool {
+    error
+        .downcast_ref::<ClientFailure>()
+        .is_some_and(|failure| popup::is_delivered_terminal(failure.cause.as_ref()))
+}
+
 /// Content-free terminal classification. Every string is a fixed vocabulary;
 /// neither error formatting nor peer-supplied text participates in this record.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]

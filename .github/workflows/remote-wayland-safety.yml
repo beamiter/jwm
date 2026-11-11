@@ -2,7 +2,7 @@ name: Remote Wayland source safety
 
 on:
   push:
-    branches: [master, dot/remote-window-plan, dot/remote-readback-snapshot, dot/remote-popup-v2, dot/remote-popup-adapter, dot/remote-popup-action, dot/remote-popup-network, dot/remote-popup-cancel]
+    branches: [master, dot/remote-window-plan, dot/remote-readback-snapshot, dot/remote-popup-v2, dot/remote-popup-adapter, dot/remote-popup-action, dot/remote-popup-network, dot/remote-popup-cancel, dot/remote-popup-terminal]
   workflow_dispatch:
 
 permissions:
@@ -122,7 +122,7 @@ jobs:
           real='remote::wayland_popup_capture_integration::'
           pure='remote::wayland_capture::interactive_popup::tests::'
           for filter in "$real" "$pure"; do
-            if test "$filter" = "$real"; then expected=4; else expected=8; fi
+            if test "$filter" = "$real"; then expected=4; else expected=11; fi
             listed="$(env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --list)"
             test "$(printf '%s\n' "$listed" | grep -c ': test$')" -eq "$expected"
             ignored="$(env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --ignored --list)"
@@ -168,9 +168,9 @@ jobs:
           for filter in "$real" "$wire" "$client" "$hello" "$budget" "$capabilities" "$sender" "$cli"; do
             target=(--lib)
             case "$filter" in
-              "$real") expected=9 ;;
-              "$wire") expected=20 ;;
-              "$client") expected=13 ;;
+              "$real") expected=11 ;;
+              "$wire") expected=23 ;;
+              "$client") expected=15 ;;
               "$hello") expected=2 ;;
               "$budget") expected=7 ;;
               "$capabilities") expected=1 ;;

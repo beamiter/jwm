@@ -4,7 +4,6 @@ use crate::remote_popup_protocol::client::{
     jwm_remote_popup_lease_v1::{self as lease, JwmRemotePopupLeaseV1},
     jwm_remote_popup_manager_v1::JwmRemotePopupManagerV1,
 };
-#[cfg(all(test, feature = "backend-wayland-udev"))]
 use std::sync::Arc;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct PopupFrameProof {
@@ -20,6 +19,151 @@ pub(crate) struct PopupCapturedFrame {
     pub(crate) frame: CapturedFrame,
     pub(crate) proof: PopupFrameProof,
 }
+/// A delivery fact minted only by the matching native Accepted event. It is
+/// not input authority and cannot be cloned or reconstructed from wire data.
+pub(crate) struct NativeDeliveryReceipt {
+    identity: Arc<()>,
+    metadata: crate::remote::wayland_popup_wire::Metadata,
+    native_sequence: u32,
+    accepted_at: Instant,
+}
+impl NativeDeliveryReceipt {
+    pub(crate) fn into_evidence(
+        self,
+    ) -> (
+        Arc<()>,
+        crate::remote::wayland_popup_wire::Metadata,
+        u32,
+        Instant,
+    ) {
+        (
+            self.identity,
+            self.metadata,
+            self.native_sequence,
+            self.accepted_at,
+        )
+    }
+}
+pub(crate) enum PopupDispatchOutcome {
+    Active,
+    DeliveredThenRevoked(NativeDeliveryReceipt),
+}
+struct HostDelivery {
+    identity: Arc<()>,
+    metadata: crate::remote::wayland_popup_wire::Metadata,
+    native_sequence: u32,
+    started_at: Instant,
+    deadline: Instant,
+    accepted_at: Option<Instant>,
+}
+#[derive(Debug)]
+struct NativePopupRevoked;
+impl std::fmt::Display for NativePopupRevoked {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("interactive popup lease revoked")
+    }
+}
+impl std::error::Error for NativePopupRevoked {}
+fn require_terminal_cleanup_complete(transport_aborted: bool) -> RemoteResult<()> {
+    if transport_aborted {
+        return Err(io::Error::other("popup terminal delivery cleanup transport failed").into());
+    }
+    Ok(())
+}
+fn is_native_revocation(error: &(dyn std::error::Error + 'static)) -> bool {
+    error
+        .downcast_ref::<io::Error>()
+        .and_then(|e| e.get_ref())
+        .is_some_and(|inner| inner.is::<NativePopupRevoked>())
+}
+#[cfg(all(test, feature = "backend-wayland-udev"))]
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PopupDeliveryObservation {
+    pub metadata: crate::remote::wayland_popup_wire::Metadata,
+    pub native_sequence: u32,
+    pub accepted_at: Instant,
+    pub deadline: Instant,
+}
+#[cfg(all(test, feature = "backend-wayland-udev"))]
+pub(crate) struct PopupDeliveryPause {
+    sequence: u32,
+    state: std::sync::Mutex<(Option<PopupDeliveryObservation>, bool)>,
+    released: std::sync::Condvar,
+}
+#[cfg(all(test, feature = "backend-wayland-udev"))]
+impl PopupDeliveryPause {
+    pub(crate) fn new(native_sequence: u32) -> Self {
+        Self {
+            sequence: native_sequence,
+            state: std::sync::Mutex::new((None, false)),
+            released: std::sync::Condvar::new(),
+        }
+    }
+    pub(crate) fn observed(&self) -> Option<PopupDeliveryObservation> {
+        self.state.lock().unwrap().0
+    }
+    pub(crate) fn release(&self) {
+        self.state.lock().unwrap().1 = true;
+        self.released.notify_all();
+    }
+    fn pause(&self, d: &HostDelivery) -> bool {
+        if d.native_sequence != self.sequence {
+            return true;
+        }
+        let Some(accepted_at) = d.accepted_at else {
+            return false;
+        };
+        let mut state = self.state.lock().unwrap();
+        if state.0.is_some() {
+            return false;
+        }
+        state.0 = Some(PopupDeliveryObservation {
+            metadata: d.metadata,
+            native_sequence: d.native_sequence,
+            accepted_at,
+            deadline: d.deadline,
+        });
+        while !state.1 {
+            let Some(left) = d
+                .deadline
+                .checked_duration_since(Instant::now())
+                .filter(|left| !left.is_zero())
+            else {
+                return false;
+            };
+            state = self.released.wait_timeout(state, left).unwrap().0;
+        }
+        Instant::now() < d.deadline
+    }
+}
+#[cfg(all(test, feature = "backend-wayland-udev"))]
+thread_local! {
+    static DELIVERY_PAUSE: std::cell::RefCell<Option<Arc<PopupDeliveryPause>>> = const { std::cell::RefCell::new(None) };
+}
+#[cfg(all(test, feature = "backend-wayland-udev"))]
+pub(crate) fn with_popup_delivery_pause<T>(
+    pause: Arc<PopupDeliveryPause>,
+    run: impl FnOnce() -> T,
+) -> T {
+    struct Restore(Option<Arc<PopupDeliveryPause>>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            DELIVERY_PAUSE.with(|slot| *slot.borrow_mut() = self.0.take());
+        }
+    }
+    let _restore = Restore(DELIVERY_PAUSE.with(|slot| slot.replace(Some(pause))));
+    run()
+}
+#[cfg(all(test, feature = "backend-wayland-udev"))]
+fn pause_delivery_for_test(p: &NativePopup) -> bool {
+    DELIVERY_PAUSE.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .zip(p.host_delivery.as_ref())
+            .is_none_or(|(pause, delivery)| pause.pause(delivery))
+    })
+}
+
 /// An owned captured image and an opaque binding, never constructed from a
 /// caller-supplied proof or a claimed presentation boolean.
 #[cfg(all(test, feature = "backend-wayland-udev"))]
@@ -65,6 +209,8 @@ pub(super) struct NativePopup {
     deadline: Option<Instant>,
     epoch: Option<u32>,
     revoked: bool,
+    native_revoked_at: Option<Instant>,
+    host_delivery: Option<HostDelivery>,
     pub(super) transport_aborted: bool,
     cookie: u32,
     #[cfg(all(test, feature = "backend-wayland-udev"))]
@@ -104,8 +250,55 @@ impl NativePopup {
         self.operation = None;
         true
     }
+    fn accept_click(&mut self, epoch: u32, sequence: u32, now: Instant) -> bool {
+        if self.host_delivery.as_ref().is_some_and(|d| {
+            d.native_sequence != sequence
+                || d.metadata.key.binding.lease_epoch != epoch
+                || now < d.started_at
+                || now >= d.deadline
+                || d.accepted_at.is_some()
+        }) {
+            return false;
+        }
+        if !self.complete_operation(epoch, PopupOperation::Click(sequence)) {
+            return false;
+        }
+        if let Some(d) = &mut self.host_delivery {
+            d.accepted_at = Some(now);
+        }
+        true
+    }
+    fn take_terminal_delivery(
+        &mut self,
+        now: Instant,
+        clean_protocol: bool,
+    ) -> Option<NativeDeliveryReceipt> {
+        if !clean_protocol || self.transport_aborted || !self.revoked {
+            return None;
+        }
+        let revoked_at = self.native_revoked_at?;
+        let d = self.host_delivery.as_ref()?;
+        let accepted_at = d.accepted_at?;
+        if accepted_at > revoked_at
+            || revoked_at > now
+            || now >= d.deadline
+            || self.deadline.is_none_or(|deadline| now >= deadline)
+            || self.operation.is_some()
+            || self.accepted_sequence != d.native_sequence
+        {
+            return None;
+        }
+        let d = self.host_delivery.take()?;
+        Some(NativeDeliveryReceipt {
+            identity: d.identity,
+            metadata: d.metadata,
+            native_sequence: d.native_sequence,
+            accepted_at,
+        })
+    }
     fn terminate(&mut self) {
         self.revoked = true;
+        self.host_delivery = None;
         self.pending = None;
         self.proof = None;
         self.operation = None;
@@ -118,6 +311,9 @@ impl NativePopup {
     }
     fn check_at(&self, now: Instant) -> RemoteResult<()> {
         if self.enabled && self.revoked {
+            if self.native_revoked_at.is_some() {
+                return Err(io::Error::new(io::ErrorKind::InvalidData, NativePopupRevoked).into());
+            }
             return Err(invalid("interactive popup lease revoked").into());
         }
         if self.enabled && self.deadline.is_some_and(|d| now >= d) {
@@ -526,7 +722,7 @@ impl WaylandCapture {
     pub(in crate::remote) fn dispatch_host_popup(
         &mut self,
         permit: crate::remote::wayland_popup_wire::NativePermit,
-    ) -> RemoteResult<()> {
+    ) -> RemoteResult<PopupDispatchOutcome> {
         let result = self.dispatch_host_popup_inner(permit);
         if result.is_err() {
             self.fail_interactive_popup();
@@ -536,8 +732,9 @@ impl WaylandCapture {
     fn dispatch_host_popup_inner(
         &mut self,
         permit: crate::remote::wayland_popup_wire::NativePermit,
-    ) -> RemoteResult<()> {
+    ) -> RemoteResult<PopupDispatchOutcome> {
         use crate::remote::wayland_popup_wire::NativeOperation;
+        let identity = permit.identity();
         let (metadata, captured_at, requested) = permit.into_parts();
         self.state.check()?;
         let now = Instant::now();
@@ -598,6 +795,19 @@ impl WaylandCapture {
         let epoch = p
             .epoch
             .ok_or_else(|| invalid("missing native popup epoch"))?;
+        if p.host_delivery.is_some() {
+            return Err(invalid("popup delivery already pending").into());
+        }
+        if let NativeOperation::Click { sequence, .. } = requested {
+            p.host_delivery = Some(HostDelivery {
+                identity,
+                metadata,
+                native_sequence: sequence,
+                started_at: now,
+                deadline,
+                accepted_at: None,
+            });
+        }
         p.operation = Some(operation);
         match requested {
             NativeOperation::Arm => lease.arm(epoch, frame),
@@ -609,15 +819,38 @@ impl WaylandCapture {
             self.abort_interactive_popup_transport();
             return Err(error.into());
         }
-        self.drive_until(deadline, |s| s.interactive_popup.operation.is_none())?;
-        self.sync_until(deadline)?;
-        require_before_deadline(Instant::now(), deadline)?;
-        self.state.check()?;
+        let completed = (|| -> RemoteResult<()> {
+            self.drive_until(deadline, |s| s.interactive_popup.operation.is_none())?;
+            self.sync_until(deadline)?;
+            require_before_deadline(Instant::now(), deadline)?;
+            self.state.check()
+        })();
+        if let Err(error) = completed {
+            // Preserve an exact, timely native delivery only for the explicit
+            // ordered revocation event. IO, timeout, duplicate/unknown events
+            // or any protocol failure retain their original error semantics.
+            if is_native_revocation(error.as_ref()) {
+                let clean = self.state.failed.is_none();
+                if let Some(receipt) = self
+                    .state
+                    .interactive_popup
+                    .take_terminal_delivery(Instant::now(), clean)
+                {
+                    self.fail_interactive_popup();
+                    require_terminal_cleanup_complete(
+                        self.state.interactive_popup.transport_aborted,
+                    )?;
+                    return Ok(PopupDispatchOutcome::DeliveredThenRevoked(receipt));
+                }
+            }
+            return Err(error);
+        }
         let p = &mut self.state.interactive_popup;
+        p.host_delivery = None;
         p.last_consumed_serial = serial;
         p.last_completion = Some(Instant::now());
         self.discard_popup_frame();
-        Ok(())
+        Ok(PopupDispatchOutcome::Active)
     }
     fn abort_interactive_popup_transport(&mut self) {
         if self.state.interactive_popup.transport_aborted {
@@ -711,6 +944,7 @@ impl Dispatch<JwmRemotePopupLeaseV1, ()> for State {
                 p.epoch = Some(epoch);
             }
             lease::Event::Revoked { .. } => {
+                p.native_revoked_at = Some(Instant::now());
                 p.revoked = true;
             }
             lease::Event::Armed { epoch } => {
@@ -719,8 +953,12 @@ impl Dispatch<JwmRemotePopupLeaseV1, ()> for State {
                 }
             }
             lease::Event::Accepted { epoch, sequence } => {
-                if !p.complete_operation(epoch, PopupOperation::Click(sequence)) {
+                if !p.accept_click(epoch, sequence, Instant::now()) {
                     state.fail("unexpected popup action completion");
+                }
+                #[cfg(all(test, feature = "backend-wayland-udev"))]
+                if state.failed.is_none() && !pause_delivery_for_test(&state.interactive_popup) {
+                    state.fail("popup delivery test pause deadline exceeded");
                 }
             }
             lease::Event::FrameProof {
@@ -874,6 +1112,109 @@ mod tests {
         state.terminate();
         assert!(state.check().is_err());
     }
+    fn pending_delivery(t: Instant) -> NativePopup {
+        use crate::remote::wayland_popup_wire::{Binding, FrameKey, Metadata};
+        let mut p = NativePopup::new(true);
+        p.epoch = Some(7);
+        p.deadline = Some(t + Duration::from_secs(30));
+        p.armed = true;
+        p.operation = Some(PopupOperation::Click(1));
+        p.host_delivery = Some(HostDelivery {
+            identity: Arc::new(()),
+            metadata: Metadata {
+                key: FrameKey {
+                    binding: Binding {
+                        source_instance: 1,
+                        source_epoch: 1,
+                        lease_epoch: 7,
+                    },
+                    geometry_epoch: 1,
+                    wire_sequence: 1,
+                    proof_id: 2,
+                    native_frame_id: 2,
+                    native_ready_serial: 2,
+                    family_generation: 1,
+                },
+                canvas: (320, 240),
+                popup: None,
+            },
+            native_sequence: 1,
+            started_at: t,
+            deadline: t + Duration::from_secs(1),
+            accepted_at: None,
+        });
+        p
+    }
+    #[test]
+    fn terminal_delivery_cleanup_failure_is_not_a_successful_receipt() {
+        require_terminal_cleanup_complete(false).unwrap();
+        let error = require_terminal_cleanup_complete(true).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "popup terminal delivery cleanup transport failed"
+        );
+        assert!(!is_native_revocation(error.as_ref()));
+    }
+
+    #[test]
+    fn native_terminal_delivery_requires_ordered_timely_exact_accepted_then_revoked() {
+        let t = Instant::now();
+        let mut p = pending_delivery(t);
+        assert!(p.take_terminal_delivery(t, true).is_none());
+        assert!(p.accept_click(7, 1, t));
+        assert!(p.take_terminal_delivery(t, true).is_none());
+        p.native_revoked_at = Some(t);
+        p.revoked = true;
+        let receipt = p.take_terminal_delivery(t, true).unwrap();
+        assert_eq!(receipt.native_sequence, 1);
+        assert_eq!(receipt.accepted_at, t);
+        assert!(p.check().is_err());
+        assert!(p.take_terminal_delivery(t, true).is_none());
+        assert!(!p.accept_click(7, 1, t));
+    }
+    #[test]
+    fn native_terminal_delivery_rejects_wrong_duplicate_deadline_and_unrelated_failure() {
+        let t = Instant::now();
+        for (epoch, sequence, now) in [(8, 1, t), (7, 2, t), (7, 1, t + Duration::from_secs(1))] {
+            let mut p = pending_delivery(t);
+            assert!(!p.accept_click(epoch, sequence, now));
+            p.native_revoked_at = Some(now);
+            p.revoked = true;
+            assert!(p.take_terminal_delivery(now, true).is_none());
+        }
+        let mut p = pending_delivery(t);
+        assert!(p.accept_click(7, 1, t));
+        assert!(!p.accept_click(7, 1, t)); // callback sets protocol failure
+        p.native_revoked_at = Some(t);
+        p.revoked = true;
+        assert!(p.take_terminal_delivery(t, false).is_none());
+        assert!(
+            p.take_terminal_delivery(t + Duration::from_secs(1), true)
+                .is_none()
+        );
+        p.transport_aborted = true;
+        assert!(p.take_terminal_delivery(t, true).is_none());
+        let revoked = io::Error::new(io::ErrorKind::InvalidData, NativePopupRevoked);
+        assert!(is_native_revocation(&revoked));
+        for kind in [
+            io::ErrorKind::BrokenPipe,
+            io::ErrorKind::TimedOut,
+            io::ErrorKind::InvalidData,
+        ] {
+            assert!(!is_native_revocation(&io::Error::new(
+                kind,
+                "interactive popup lease revoked"
+            )));
+        }
+        let mut p = pending_delivery(t);
+        p.operation = Some(PopupOperation::Arm);
+        p.armed = false;
+        assert!(p.complete_operation(7, PopupOperation::Arm));
+        p.native_revoked_at = Some(t);
+        p.revoked = true;
+        assert!(p.take_terminal_delivery(t, true).is_none());
+    }
+
     #[test]
     fn popup_operation_completion_is_exact_once_and_never_spontaneous() {
         let mut p = NativePopup::new(true);

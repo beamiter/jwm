@@ -1,6 +1,21 @@
 //! Explicit native popup pointer client. No queued or replayed input.
 use super::*;
 use crate::remote::wayland_popup_wire::{Binding, Click, Metadata, Status, StatusKind};
+/// A terminal delivery receipt is not an application completion receipt.
+#[derive(Debug)]
+struct PopupDeliveredThenRevoked;
+impl std::fmt::Display for PopupDeliveredThenRevoked {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("popup click delivered to native recipient; authority revoked; application completion unconfirmed")
+    }
+}
+impl std::error::Error for PopupDeliveredThenRevoked {}
+
+#[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+pub(super) fn is_delivered_terminal(error: &(dyn std::error::Error + 'static)) -> bool {
+    error.is::<PopupDeliveredThenRevoked>()
+}
+
 const FRESH: Duration = Duration::from_secs(1);
 const LEASE: Duration = Duration::from_secs(30);
 #[cfg(test)]
@@ -246,6 +261,26 @@ impl ClientPopup {
                 self.pending_metadata = None;
                 self.ready = None;
                 self.candidate = None;
+            }
+            StatusKind::DeliveredTerminal => {
+                let (pending, _) = self
+                    .pending
+                    .ok_or_else(|| invalid_data("unsolicited popup terminal delivery"))?;
+                if !self.armed
+                    || value.action_sequence != pending.sequence
+                    || value.metadata.key != pending.key
+                    || self.pending_metadata != Some(value.metadata)
+                    || value.ttl_ms != 0
+                {
+                    return Err(invalid_data("popup terminal delivery proof mismatch").into());
+                }
+                self.ended = true;
+                self.pending = None;
+                self.pending_metadata = None;
+                self.ready = None;
+                self.candidate = None;
+                self.rejection_floor = None;
+                return Err(Box::new(PopupDeliveredThenRevoked));
             }
             StatusKind::RejectedStale => {
                 let (pending, _) = self
@@ -852,6 +887,82 @@ mod tests {
             p.commit_decoded_or_drain(metadata(2), 2, FramePurpose::PopupFamilyProof, &frame, now)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn popup_terminal_delivery_is_exact_once_and_never_restores_authority() {
+        use crate::remote::x11_viewer::WaylandPointerEventKind as E;
+        let now = Instant::now();
+        let mut p = ready(now);
+        p.event(&edge(1, E::LeftDown), now).unwrap();
+        p.event(&edge(1, E::LeftUp), now).unwrap().unwrap();
+        let deadline = p.deadline;
+        let mut receipt = status(StatusKind::DeliveredTerminal, 1, 1);
+        receipt.ttl_ms = 0;
+        let error = p.status(receipt, now).unwrap_err();
+        assert!(error.is::<PopupDeliveredThenRevoked>());
+        assert!(p.ended);
+        assert!(p.pending.is_none() && p.pending_metadata.is_none());
+        assert!(p.candidate.is_none() && p.ready_sequence(now).is_none());
+        assert_eq!(p.deadline, deadline);
+        assert!(
+            !p.status(receipt, now)
+                .unwrap_err()
+                .is::<PopupDeliveredThenRevoked>()
+        );
+        assert!(p.status(status(StatusKind::Ready, 1, 1), now).is_err());
+        assert!(p.event(&edge(1, E::LeftDown), now).is_err());
+        assert!(p.revoke().is_none());
+    }
+
+    #[test]
+    fn popup_terminal_delivery_rejects_altered_late_and_completed_commands() {
+        use crate::remote::x11_viewer::WaylandPointerEventKind as E;
+        let now = Instant::now();
+        let mut receipt = status(StatusKind::DeliveredTerminal, 1, 1);
+        receipt.ttl_ms = 0;
+        for mutation in 0..9 {
+            let mut p = ready(now);
+            if mutation != 0 {
+                p.event(&edge(1, E::LeftDown), now).unwrap();
+                p.event(&edge(1, E::LeftUp), now).unwrap().unwrap();
+            }
+            let mut altered = receipt;
+            let at = match mutation {
+                1 => {
+                    altered.action_sequence += 1;
+                    now
+                }
+                2 => {
+                    altered.metadata.key.binding.lease_epoch += 1;
+                    now
+                }
+                3 => {
+                    altered.metadata.canvas.0 += 1;
+                    now
+                }
+                4 => {
+                    altered.metadata.key.proof_id += 1;
+                    now
+                }
+                5 => now + Duration::from_secs(5),
+                6 => p.deadline.unwrap(),
+                7 => {
+                    p.status(status(StatusKind::Accepted, 1, 1), now).unwrap();
+                    now
+                }
+                8 => {
+                    altered.ttl_ms = 1;
+                    now
+                }
+                _ => now,
+            };
+            assert!(
+                !p.status(altered, at)
+                    .unwrap_err()
+                    .is::<PopupDeliveredThenRevoked>()
+            );
+        }
     }
 
     #[test]

@@ -8,10 +8,10 @@ use super::x11_keymap::{KeymapTable, MAX_ENCODED_KEYMAP_LEN};
 use std::io;
 
 const APPLICATION_MAGIC: &[u8; 8] = b"JWMREM01";
-/// v32 adds explicit zero-delivery rejection of an actively retired popup proof.
+/// v34 distinguishes verified popup delivery followed by terminal native revocation.
 /// Native action receipts and proof-gated repair phases remain mandatory.
 /// Both peers must upgrade; no fallback to an older authorization contract.
-pub const APPLICATION_VERSION: u16 = 33;
+pub const APPLICATION_VERSION: u16 = 34;
 const HELLO_PREFIX_LEN: usize = 11;
 const STREAM_CAPABILITIES_LEN: usize = 34;
 const SERVER_HELLO_LEN: usize = HELLO_PREFIX_LEN + STREAM_CAPABILITIES_LEN;
@@ -1680,7 +1680,7 @@ mod scroll_capability_tests {
     use super::*;
     #[test]
     fn scroll_is_explicit_boolean_and_requires_pointer_or_control_in_version_23() {
-        assert_eq!(APPLICATION_VERSION, 33);
+        assert_eq!(APPLICATION_VERSION, 34);
         assert_eq!(STREAM_CAPABILITIES_LEN, 34);
         let mut caps = StreamCapabilities::default();
         assert!(
@@ -1909,7 +1909,7 @@ mod lossless_scroll_hello_tests {
         let s = server(caps);
         assert_eq!(ClientHello::decode(&c.encode()).unwrap(), c);
         assert_eq!(ServerHello::decode(&s.encode()).unwrap(), s);
-        for version in [27_u16, 28, 29, 30, 31, 32, 34] {
+        for version in [27_u16, 28, 29, 30, 31, 32, 33, 35] {
             let mut cb = c.encode();
             cb[8..10].copy_from_slice(&version.to_be_bytes());
             assert!(ClientHello::decode(&cb).is_err());
@@ -2097,7 +2097,7 @@ mod popup_capability_tests {
             assert!(ClientHello::decode(&c).is_err());
             assert!(ServerHello::decode(&s).is_err());
         }
-        for version in [0_u16, 29, 30, 31, 32, 34, u16::MAX] {
+        for version in [0_u16, 29, 30, 31, 32, 33, 35, u16::MAX] {
             let mut c = client(caps).encode();
             c[8..10].copy_from_slice(&version.to_be_bytes());
             let mut s = server(caps).encode();

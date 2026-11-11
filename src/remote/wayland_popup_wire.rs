@@ -9,6 +9,8 @@
 //! additionally enforces its 1024-export quota; this ledger does not replace it.
 //! Timeout after dispatch leaves execution uncertain: terminate, never retry.
 #[cfg(any(test, feature = "remote-wayland"))]
+use std::sync::Arc;
+#[cfg(any(test, feature = "remote-wayland"))]
 use std::time::{Duration, Instant};
 #[cfg(any(test, feature = "remote-wayland"))]
 const TTL: Duration = Duration::from_secs(30);
@@ -152,6 +154,7 @@ impl Pending {
 /// ledger does NOT authorize creating a replacement native lease.
 #[cfg(any(test, feature = "remote-wayland"))]
 pub(crate) struct Ledger {
+    identity: Arc<()>,
     binding: Binding,
     canvas: (u32, u32),
     created: Instant,
@@ -188,6 +191,7 @@ impl Ledger {
             return Err(Failure::InvalidMetadata);
         }
         Ok(Self {
+            identity: Arc::new(()),
             binding,
             canvas,
             created,
@@ -945,6 +949,80 @@ mod tests {
     }
 
     #[test]
+    fn terminal_delivery_is_exact_instance_pending_click_and_permanently_ended() {
+        let start = Instant::now();
+        let t = start + Duration::from_millis(1);
+        let mut l = armed(start);
+        let key = displayed(&mut l, 2, t);
+        let permit = l
+            .authorize_click(
+                Click {
+                    key,
+                    sequence: 1,
+                    x: 1,
+                    y: 1,
+                },
+                t,
+            )
+            .unwrap();
+        let identity = permit.identity.clone();
+        let (metadata, _, _) = permit.into_parts();
+        assert_eq!(
+            l.terminal_delivery(&identity, metadata, 1, t, t).unwrap(),
+            (metadata, 1)
+        );
+        assert_eq!(l.ready(t), Err(Failure::Ended));
+        assert_eq!(
+            l.terminal_delivery(&identity, metadata, 1, t, t),
+            Err(Failure::Ended)
+        );
+    }
+    #[test]
+    fn terminal_delivery_does_not_rescue_foreign_late_arm_or_wrong_receipts() {
+        let start = Instant::now();
+        let t = start + Duration::from_millis(1);
+        for case in 0..5 {
+            let mut l = armed(start);
+            let key = displayed(&mut l, 2, t);
+            l.authorize_click(
+                Click {
+                    key,
+                    sequence: 1,
+                    x: 1,
+                    y: 1,
+                },
+                t,
+            )
+            .unwrap();
+            let identity = if case == 0 {
+                Arc::new(())
+            } else {
+                l.identity.clone()
+            };
+            let mut metadata = metadata(2);
+            if case == 1 {
+                metadata.key.family_generation += 1;
+            }
+            let native = if case == 2 { 2 } else { 1 };
+            let accepted = if case == 3 { t + FRESH } else { t };
+            let observed = if case == 4 { t + FRESH } else { t };
+            assert!(
+                l.terminal_delivery(&identity, metadata, native, accepted, observed)
+                    .is_err()
+            );
+            assert_eq!(l.ready(t), Err(Failure::Ended));
+        }
+        let mut l = new(start);
+        let key = displayed(&mut l, 1, start);
+        l.begin_arm(key, start).unwrap();
+        let identity = l.identity.clone();
+        assert_eq!(
+            l.terminal_delivery(&identity, metadata(1), 1, start, start),
+            Err(Failure::Ordering)
+        );
+    }
+
+    #[test]
     fn operation_completion_keeps_original_capture_freshness_boundary() {
         let start = Instant::now();
         for delta in [Duration::from_nanos(1), Duration::ZERO] {
@@ -1006,6 +1084,7 @@ pub(crate) enum StatusKind {
     Revoked = 4,
     Denied = 5,
     RejectedStale = 6,
+    DeliveredTerminal = 7,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Status {
@@ -1152,7 +1231,13 @@ impl Click {
 }
 impl Status {
     pub(crate) fn encode(self) -> Result<[u8; 102]> {
-        if self.action_sequence > MAX_ACTIONS || self.ttl_ms == 0 || self.ttl_ms > 30000 {
+        if self.action_sequence > MAX_ACTIONS
+            || if self.kind == StatusKind::DeliveredTerminal {
+                self.ttl_ms != 0 || self.action_sequence == 0
+            } else {
+                self.ttl_ms == 0 || self.ttl_ms > 30000
+            }
+        {
             return Err(Failure::InvalidMetadata);
         }
         let mut b = [0; 102];
@@ -1174,6 +1259,7 @@ impl Status {
             4 => StatusKind::Revoked,
             5 => StatusKind::Denied,
             6 => StatusKind::RejectedStale,
+            7 => StatusKind::DeliveredTerminal,
             _ => return Err(Failure::InvalidMetadata),
         };
         let value = Self {
@@ -1197,6 +1283,7 @@ impl std::error::Error for Failure {}
 /// send/presentation gate. It is never encoded or reconstructed from the wire.
 #[cfg(any(test, feature = "remote-wayland"))]
 pub(crate) struct NativePermit {
+    identity: Arc<()>,
     metadata: Metadata,
     captured_at: Instant,
     operation: NativeOperation,
@@ -1209,7 +1296,12 @@ pub(crate) enum NativeOperation {
 }
 #[cfg(any(test, feature = "remote-wayland"))]
 impl NativePermit {
+    #[cfg(feature = "remote-wayland")]
+    pub(crate) fn identity(&self) -> Arc<()> {
+        self.identity.clone()
+    }
     pub(crate) fn into_parts(self) -> (Metadata, Instant, NativeOperation) {
+        let _identity = self.identity;
         (self.metadata, self.captured_at, self.operation)
     }
 }
@@ -1219,6 +1311,7 @@ impl Ledger {
         let slot = self.run(now, |s| s.slot(key, now).copied())?;
         self.begin_arm(key, now)?;
         Ok(NativePermit {
+            identity: self.identity.clone(),
             metadata: slot.metadata,
             captured_at: slot.captured_at,
             operation: NativeOperation::Arm,
@@ -1239,6 +1332,7 @@ impl Ledger {
         })?;
         let click = self.begin_click(request.key, request.x, request.y, now)?;
         Ok(NativePermit {
+            identity: self.identity.clone(),
             metadata: slot.metadata,
             captured_at: slot.captured_at,
             operation: NativeOperation::Click {
@@ -1280,6 +1374,44 @@ pub(crate) enum AckDisposition {
 }
 #[cfg(any(test, feature = "remote-wayland"))]
 impl Ledger {
+    /// Consume only an adapter-produced, exact native delivery receipt. This
+    /// ends the ledger even on success; no new capture/permit can follow.
+    #[cfg(feature = "remote-wayland")]
+    pub(crate) fn complete_terminal_delivery(
+        &mut self,
+        receipt: crate::remote::wayland_capture::interactive_popup::NativeDeliveryReceipt,
+        now: Instant,
+    ) -> Result<(Metadata, u32)> {
+        let (identity, metadata, native_sequence, accepted_at) = receipt.into_evidence();
+        self.terminal_delivery(&identity, metadata, native_sequence, accepted_at, now)
+    }
+    fn terminal_delivery(
+        &mut self,
+        identity: &Arc<()>,
+        metadata: Metadata,
+        native_sequence: u32,
+        accepted_at: Instant,
+        now: Instant,
+    ) -> Result<(Metadata, u32)> {
+        let result = self.run(now, |s| {
+            let Some((Pending::Click(click), deadline)) = s.pending else {
+                return Err(Failure::Ordering);
+            };
+            if !Arc::ptr_eq(identity, &s.identity)
+                || click.key != metadata.key
+                || s.last != Some(metadata)
+                || s.native_sequence.checked_add(1) != Some(native_sequence)
+                || accepted_at < s.created
+                || accepted_at > now
+                || accepted_at >= deadline
+            {
+                return Err(Failure::Identity);
+            }
+            Ok((metadata, click.sequence))
+        });
+        self.revoke();
+        result
+    }
     pub(crate) fn resolve_click(
         &mut self,
         request: Click,
@@ -1453,6 +1585,44 @@ mod codec_tests {
     }
 
     #[test]
+    fn terminal_delivery_status_has_no_live_ttl_and_requires_a_command() {
+        let terminal = Status {
+            kind: StatusKind::DeliveredTerminal,
+            metadata: sample(),
+            action_sequence: 1,
+            ttl_ms: 0,
+        };
+        assert_eq!(
+            Status::decode(&terminal.encode().unwrap()).unwrap(),
+            terminal
+        );
+        assert!(
+            Status {
+                ttl_ms: 1,
+                ..terminal
+            }
+            .encode()
+            .is_err()
+        );
+        assert!(
+            Status {
+                action_sequence: 0,
+                ..terminal
+            }
+            .encode()
+            .is_err()
+        );
+        assert!(
+            Status {
+                kind: StatusKind::Accepted,
+                ..terminal
+            }
+            .encode()
+            .is_err()
+        );
+    }
+
+    #[test]
     fn popup_wire_rejects_noncanonical_rect_unknown_kind_and_lengths() {
         let m = sample();
         let bytes = m.encode().unwrap();
@@ -1477,7 +1647,7 @@ mod codec_tests {
             ttl_ms: 1,
         };
         let mut b = s.encode().unwrap();
-        b[0] = 7;
+        b[0] = 8;
         assert!(Status::decode(&b).is_err());
         b = s.encode().unwrap();
         b[98..].fill(0);
