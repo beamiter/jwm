@@ -145,6 +145,23 @@ impl Harness {
         lossless: bool,
         probe: Option<Arc<host::PendingLosslessProbe>>,
     ) -> Self {
+        Self::with_lossless_schedule_probe(
+            gl,
+            popups,
+            follow,
+            lossless,
+            probe,
+            host::LosslessSchedule::New250,
+        )
+    }
+    fn with_lossless_schedule_probe(
+        gl: &mut HeadlessSmithayGles,
+        popups: bool,
+        follow: bool,
+        lossless: bool,
+        probe: Option<Arc<host::PendingLosslessProbe>>,
+        schedule: host::LosslessSchedule,
+    ) -> Self {
         let probe_guard = ReleasePendingProbe(probe.clone());
         let mut native = Server::new();
         let mut local = Server::new();
@@ -223,14 +240,22 @@ impl Harness {
                         }
                     };
                     let peer = host::authenticate_peer(stream, &KEY)?;
-                    host::with_pending_lossless_probe(probe, || {
-                        host::serve_authenticated(
-                            peer,
-                            &options(popups, follow, lossless),
-                            &stopping,
-                            &Mutex::new(Some(host::GrantedCapture::Wayland(Box::new(capture)))),
-                        )
-                    })
+                    host::with_lossless_schedule(
+                        schedule,
+                        Arc::new(host::LosslessScheduleProbe::default()),
+                        || {
+                            host::with_pending_lossless_probe(probe, || {
+                                host::serve_authenticated(
+                                    peer,
+                                    &options(popups, follow, lossless),
+                                    &stopping,
+                                    &Mutex::new(Some(host::GrantedCapture::Wayland(Box::new(
+                                        capture,
+                                    )))),
+                                )
+                            })
+                        },
+                    )
                 },
             )
             .map_err(|e| e.to_string());

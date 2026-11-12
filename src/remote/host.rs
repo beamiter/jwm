@@ -534,13 +534,18 @@ pub(crate) enum LosslessSchedule {
     Quiet250Pace100,
     #[cfg(test)]
     Quiet250Pace250,
+    /// Private read-only experiment: one bounded PNG after a flushed JPEG.
+    #[cfg(test)]
+    RegionDeadline,
 }
 impl LosslessSchedule {
     fn quiet_period(self) -> Duration {
         match self {
             Self::New250 => Duration::from_millis(250),
             #[cfg(test)]
-            Self::Legacy100 | Self::Quiet0Pace100 | Self::Quiet0Pace250 => Duration::ZERO,
+            Self::Legacy100 | Self::Quiet0Pace100 | Self::Quiet0Pace250 | Self::RegionDeadline => {
+                Duration::ZERO
+            }
             #[cfg(test)]
             Self::Quiet250Pace100 | Self::Quiet250Pace250 => Duration::from_millis(250),
         }
@@ -554,7 +559,9 @@ impl LosslessSchedule {
                 Duration::from_millis(100)
             }
             #[cfg(test)]
-            Self::Quiet0Pace250 | Self::Quiet250Pace250 => Duration::from_millis(250),
+            Self::Quiet0Pace250 | Self::Quiet250Pace250 | Self::RegionDeadline => {
+                Duration::from_millis(250)
+            }
         }
     }
 
@@ -737,6 +744,30 @@ impl FrameSender {
             // before the first repair must not postpone it indefinitely.
             self.last_content_change.get_or_insert(now);
         }
+        Ok(plan)
+    }
+
+    #[cfg(test)]
+    fn region_repair_due(&self, now: Instant) -> bool {
+        self.lossless_schedule == LosslessSchedule::RegionDeadline
+            && self.static_lossless
+            && self.lossless_retry_after.is_none_or(|at| now >= at)
+            && self.lossless_next_batch.is_none_or(|at| now >= at)
+            // Tile-local age survives unrelated damage. No global quiet clock,
+            // accumulated missed deadlines, or capture-history queue is needed.
+            && self.encoder.has_stable_exact_debt(now)
+    }
+
+    #[cfg(test)]
+    fn plan_region_repair_at(
+        &mut self,
+        frame: &CapturedFrame,
+        now: Instant,
+    ) -> RemoteResult<TilePlan> {
+        let plan = self
+            .encoder
+            .plan_at(frame, TileEncodeRequest::LosslessRepair, now)?;
+        self.pending_refinement_at = plan.emit.then_some(now);
         Ok(plan)
     }
 
@@ -2438,6 +2469,28 @@ fn listener_security_notice(address: IpAddr) -> Option<&'static str> {
 }
 
 fn validate_window_policy(options: &HostOptions) -> RemoteResult<()> {
+    #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+    if LOSSLESS_SCHEDULE_TEST.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .is_some_and(|(policy, _)| *policy == LosslessSchedule::RegionDeadline)
+    }) && (options.allow_input
+        || options.allow_clipboard
+        || options.allow_window_resize
+        || options.allow_wayland_keyboard
+        || options.allow_wayland_pointer
+        || options.allow_wayland_popup_pointer
+        || options.allow_wayland_control
+        || options.allow_wayland_text
+        || options.allow_wayland_scroll
+        || options.allow_wayland_horizontal_scroll)
+    {
+        return Err(invalid_data(
+            "RegionDeadline experiment requires explicit read-only permissions",
+        )
+        .into());
+    }
+
     if options.allow_wayland_popup_pointer
         && (!options.wayland_select
             || !options.once
@@ -4767,12 +4820,26 @@ fn send_frames_with_encoder_scoped<W: std::io::Write + SetWriteTimeout>(
     let mut sequence = 0_u64;
     let mut payload = Vec::new();
     let mut payload_retention = PayloadBufferRetention::default();
+    // Test-only: move, never clone, the just-flushed immutable capture. The
+    // ordinary latest mailbox remains live while this one opportunity waits
+    // for normal display credit. At most one PNG precedes the next dequeue.
+    #[cfg(test)]
+    let mut region_followup: Option<PendingFrame> = None;
 
     while running.load(Ordering::Acquire) {
         let Some(ack_wait) = credits.wait_for_credit(running, FRAME_ACK_TIMEOUT)? else {
             break;
         };
-        let Some(pending) = mailbox.receive()? else {
+        #[cfg(test)]
+        let is_region_followup = region_followup.is_some();
+        #[cfg(test)]
+        let next = match region_followup.take() {
+            Some(pending) => Some(pending),
+            None => mailbox.receive()?,
+        };
+        #[cfg(not(test))]
+        let next = mailbox.receive()?;
+        let Some(pending) = next else {
             break;
         };
         telemetry.record_dequeued(pending.capture_completed_at.elapsed(), ack_wait);
@@ -4813,14 +4880,30 @@ fn send_frames_with_encoder_scoped<W: std::io::Write + SetWriteTimeout>(
             }
         }
         let planned_at = Instant::now();
-        let mut plan = sender
-            .plan_record_at(
-                &pending.frame,
-                planned_at,
-                pending.pointer_serial.is_some(),
-                legacy_keyframe,
+        #[cfg(test)]
+        let region_plan = if is_region_followup {
+            Some(
+                sender
+                    .plan_region_repair_at(&pending.frame, planned_at)
+                    .map_err(LocalRuntimeFailure::encoding)?,
             )
-            .map_err(LocalRuntimeFailure::encoding)?;
+        } else {
+            None
+        };
+        #[cfg(not(test))]
+        let region_plan: Option<TilePlan> = None;
+        let mut plan = if let Some(plan) = region_plan {
+            plan
+        } else {
+            sender
+                .plan_record_at(
+                    &pending.frame,
+                    planned_at,
+                    pending.pointer_serial.is_some(),
+                    legacy_keyframe,
+                )
+                .map_err(LocalRuntimeFailure::encoding)?
+        };
         if let Some(sources) = sources {
             pointer_repair::observe_debt(sources, sender.encoder.has_stable_exact_debt(planned_at));
             control_repair::observe_debt(sources, sender.encoder.has_stable_exact_debt(planned_at));
@@ -5172,6 +5255,18 @@ fn send_frames_with_encoder_scoped<W: std::io::Write + SetWriteTimeout>(
             .checked_add(1)
             .ok_or_else(|| io::Error::other("remote frame sequence exhausted"))?;
         payload_retention.observe(&mut payload);
+        #[cfg(test)]
+        if !is_region_followup
+            && !is_png
+            && !plan.keyframe
+            && pending.pointer_serial.is_none()
+            && pending.native_proof_serial.is_none()
+            && pending.pointer_repair.is_none()
+            && pending.control_repair.is_none()
+            && sender.region_repair_due(flushed_at)
+        {
+            region_followup = Some(pending);
+        }
     }
     Ok(())
 }
@@ -6420,6 +6515,388 @@ mod tests {
         assert_eq!(result.image(), &frame.image);
         sender.commit_at(&frame, at + Duration::from_secs(4));
         assert!(!sender.encoder.has_exact_debt());
+    }
+
+    #[cfg(all(feature = "remote-wayland", feature = "backend-wayland-udev"))]
+    #[test]
+    fn region_deadline_experiment_rejects_every_control_permission() {
+        with_lossless_schedule(
+            LosslessSchedule::RegionDeadline,
+            Arc::new(LosslessScheduleProbe::default()),
+            || {
+                let options = test_host_source_options();
+                validate_window_policy(&options).unwrap();
+                for permission in 0..11 {
+                    let mut options = test_host_source_options();
+                    match permission {
+                        0 => options.allow_input = true,
+                        1 => options.allow_clipboard = true,
+                        2 => options.allow_window_resize = true,
+                        3 => options.allow_wayland_keyboard = true,
+                        4 => options.allow_wayland_pointer = true,
+                        5 => options.allow_wayland_popup_pointer = true,
+                        6 => options.allow_wayland_control = true,
+                        7 => options.allow_wayland_text = true,
+                        8 => options.allow_wayland_scroll = true,
+                        9 => options.allow_wayland_horizontal_scroll = true,
+                        10 => {
+                            options.allow_wayland_control = true;
+                            options.allow_static_lossless = true;
+                        }
+                        _ => unreachable!(),
+                    }
+                    let error = validate_window_policy(&options).unwrap_err();
+                    assert!(
+                        error
+                            .to_string()
+                            .contains("RegionDeadline experiment requires explicit read-only")
+                    );
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn region_deadline_followup_waits_for_credit_and_stale_discard_keeps_sequence() {
+        for mutation in 0..3 {
+            let selected_change = mutation == 1;
+            let geometry_aba = mutation == 2;
+            let make_frame = |red, selected_change| {
+                let mut pending = test_pending_frame(red);
+                pending.frame.source_width = 272;
+                pending.frame.source_height = 256;
+                pending.frame.image = RgbImage::from_pixel(272, 256, Rgb([90, 110, 130]));
+                pending.frame.image.put_pixel(0, 0, Rgb([red, 110, 130]));
+                if selected_change {
+                    pending.frame.image.put_pixel(271, 255, Rgb([91, 110, 130]));
+                }
+                pending
+            };
+            let mut frame_sender = FrameSender::with_codecs(false, true);
+            frame_sender.lossless_schedule = LosslessSchedule::RegionDeadline;
+            let base = Instant::now() - Duration::from_secs(3);
+            let seed = make_frame(90, false);
+            frame_sender.plan_at(&seed.frame, base).unwrap();
+            frame_sender
+                .encoder
+                .encode_into(&mut Vec::new(), 0, &seed.frame, 70)
+                .unwrap();
+            frame_sender.commit_at(&seed.frame, base);
+            let mailbox = Arc::new(LatestMailbox::new());
+            mailbox.publish(make_frame(200, false)).unwrap();
+            let gate = Arc::new((
+                Mutex::new(GateState {
+                    open: true,
+                    ..GateState::default()
+                }),
+                Condvar::new(),
+            ));
+            let running = Arc::new(AtomicBool::new(true));
+            let credits = Arc::new(FrameCredits::new());
+            let writer = Arc::new(Mutex::new(SessionWriter::new(
+                DeadlineWriter::new(GateWriter(Arc::clone(&gate)), WRITE_TIMEOUT),
+                [0x5a; 32],
+            )));
+            let sender_mailbox = Arc::clone(&mailbox);
+            let sender_running = Arc::clone(&running);
+            let sender_credits = Arc::clone(&credits);
+            let worker = thread::spawn(move || {
+                let quality = JpegQualityController::new_at(
+                    70,
+                    70,
+                    false,
+                    Duration::from_millis(100),
+                    Instant::now(),
+                )
+                .unwrap();
+                send_frames_with_encoder(
+                    sender_mailbox,
+                    writer,
+                    &sender_running,
+                    &sender_credits,
+                    &HostTelemetry::new(),
+                    &quality,
+                    &mut frame_sender,
+                )
+            });
+            let wait_flushes = |count| {
+                let (lock, ready) = &*gate;
+                let (state, timeout) = ready
+                    .wait_timeout_while(lock.lock().unwrap(), Duration::from_secs(3), |s| {
+                        s.flushes < count
+                    })
+                    .unwrap();
+                assert!(!timeout.timed_out(), "sender did not reach flush {count}");
+                assert_eq!(state.flushes, count);
+            };
+            wait_flushes(2);
+            assert_eq!(credits.outstanding(), 2);
+            // Pacing is anchored to the successful PNG flush, not planning.
+            thread::sleep(Duration::from_millis(300));
+            mailbox.publish(make_frame(120, false)).unwrap();
+            credits.acknowledge(0).unwrap().unwrap();
+            wait_flushes(3);
+            assert_eq!(credits.outstanding(), 2);
+            let mut latest = make_frame(220, selected_change);
+            if geometry_aba {
+                latest.frame.geometry_epoch += 2;
+            }
+            mailbox.publish(latest).unwrap();
+            let (lock, ready) = &*gate;
+            let (state, timeout) = ready
+                .wait_timeout_while(lock.lock().unwrap(), Duration::from_millis(60), |s| {
+                    s.flushes == 3
+                })
+                .unwrap();
+            assert!(timeout.timed_out(), "follow-on bypassed display credit");
+            assert_eq!(state.flushes, 3);
+            drop(state);
+            credits.acknowledge(2).unwrap().unwrap();
+            wait_flushes(if geometry_aba { 4 } else { 5 });
+            assert_eq!(credits.outstanding(), if geometry_aba { 1 } else { 2 });
+            {
+                let state = credits.state.lock().unwrap();
+                assert_eq!(
+                    state.last_sent,
+                    Some(if geometry_aba { 3 } else { 4 }),
+                    "discard must not consume a sequence"
+                );
+                assert_eq!(
+                    state.in_flight[0].purpose,
+                    if selected_change || geometry_aba {
+                        FramePurpose::Video
+                    } else {
+                        FramePurpose::VisualRepair
+                    }
+                );
+                if !geometry_aba {
+                    assert_eq!(
+                        state.in_flight[1].purpose,
+                        if selected_change {
+                            FramePurpose::VisualRepair
+                        } else {
+                            FramePurpose::Video
+                        }
+                    );
+                }
+            }
+            running.store(false, Ordering::Release);
+            mailbox.close();
+            credits.close();
+            worker.join().unwrap().unwrap();
+        }
+    }
+
+    #[test]
+    fn region_deadline_pending_repair_preserves_selected_pixel_and_scope_fences() {
+        let base = Instant::now();
+        let mut current = test_pending_frame(90);
+        current.frame.source_width = 32;
+        current.frame.source_height = 16;
+        current.frame.image = RgbImage::from_pixel(32, 16, Rgb([90, 110, 130]));
+        let mut sender = FrameSender::with_codecs(false, true);
+        sender.lossless_schedule = LosslessSchedule::RegionDeadline;
+        let mut payload = Vec::new();
+        sender.plan_at(&current.frame, base).unwrap();
+        sender
+            .encoder
+            .encode_into(&mut payload, 0, &current.frame, 70)
+            .unwrap();
+        sender.commit_at(&current.frame, base);
+        let now = base + Duration::from_secs(2);
+        current.frame.image.put_pixel(0, 0, Rgb([200, 110, 130]));
+        sender.plan_at(&current.frame, now).unwrap();
+        sender
+            .encoder
+            .encode_into(&mut payload, 1, &current.frame, 70)
+            .unwrap();
+        sender.commit_at(&current.frame, now);
+        assert!(sender.region_repair_due(now));
+        assert_eq!(
+            sender
+                .plan_region_repair_at(&current.frame, now)
+                .unwrap()
+                .dirty_tiles,
+            1
+        );
+        sender
+            .encoder
+            .encode_into(&mut payload, 2, &current.frame, 70)
+            .unwrap();
+        let mut newer = test_pending_frame(90);
+        newer.frame = CapturedFrame {
+            geometry_epoch: current.frame.geometry_epoch,
+            source_width: 32,
+            source_height: 16,
+            image: current.frame.image.clone(),
+        };
+        newer.frame.image.put_pixel(0, 0, Rgb([201, 110, 130]));
+        assert!(!newer_frame_supersedes_repair(
+            &sender.encoder,
+            &current,
+            &newer
+        ));
+        for value in [89, 91] {
+            newer.frame.image.put_pixel(16, 0, Rgb([value, 110, 130]));
+            assert!(newer_frame_supersedes_repair(
+                &sender.encoder,
+                &current,
+                &newer
+            ));
+        }
+        newer.frame = CapturedFrame {
+            geometry_epoch: current.frame.geometry_epoch,
+            source_width: 32,
+            source_height: 16,
+            image: current.frame.image.clone(),
+        };
+        newer.source_version.source = SourceId(2);
+        assert!(newer_frame_supersedes_repair(
+            &sender.encoder,
+            &current,
+            &newer
+        ));
+        // Source and geometry ABA must remain invalid even with original pixels.
+        newer.source_version.source = current.source_version.source;
+        newer.source_version.epoch += 2;
+        assert!(newer_frame_supersedes_repair(
+            &sender.encoder,
+            &current,
+            &newer
+        ));
+        newer.source_version = current.source_version;
+        newer.frame.geometry_epoch += 2;
+        assert!(newer_frame_supersedes_repair(
+            &sender.encoder,
+            &current,
+            &newer
+        ));
+        sender.discard();
+        assert!(sender.region_repair_due(now));
+        assert!(sender.lossless_next_batch.is_none());
+    }
+
+    #[test]
+    fn region_deadline_repairs_bounded_batches_beside_continuous_damage() {
+        for policy in [LosslessSchedule::New250, LosslessSchedule::RegionDeadline] {
+            let at = Instant::now();
+            let mut frame = CapturedFrame {
+                geometry_epoch: 1,
+                source_width: 272,
+                source_height: 256,
+                image: RgbImage::from_fn(272, 256, |x, y| {
+                    Rgb([((x * 13 + y * 7) % 256) as u8, 110, 130])
+                }),
+            };
+            let mut sender = FrameSender::with_codecs(false, true);
+            sender.lossless_schedule = policy;
+            let mut decoder = TileDecoder::new();
+            decoder.set_lossless_enabled(true);
+            let pool = super::super::frame::new_decode_buffer_pool();
+            let mut bytes = Vec::new();
+            let mut sequence = 0;
+            sender.plan_at(&frame, at).unwrap();
+            sender
+                .encoder
+                .encode_into(&mut bytes, sequence, &frame, 70)
+                .unwrap();
+            decoder.decode_into(&bytes, Arc::clone(&pool)).unwrap();
+            sender.commit_at(&frame, at);
+            let mut pngs = 0;
+            let mut exact_pixels = vec![false; 272 * 256];
+            for tick in 1..=40 {
+                let now = at + Duration::from_millis(tick * 100);
+                for y in 0..16 {
+                    for x in 0..16 {
+                        frame.image.put_pixel(
+                            x,
+                            y,
+                            Rgb([if tick % 2 == 0 { 20 } else { 230 }, 70, 90]),
+                        );
+                    }
+                }
+                let plan = sender.plan_at(&frame, now).unwrap();
+                assert_eq!(plan.dirty_tiles, 1, "ordinary JPEG must precede repair");
+                assert!(sender.pending_refinement_at.is_none());
+                sequence += 1;
+                sender
+                    .encoder
+                    .encode_into(&mut bytes, sequence, &frame, 70)
+                    .unwrap();
+                let mut decoded = decoder.decode_into(&bytes, Arc::clone(&pool)).unwrap();
+                assert!(!decoder.last_frame_was_lossless());
+                sender.commit_at(&frame, now);
+                assert_eq!(
+                    sender.region_repair_due(now),
+                    policy == LosslessSchedule::RegionDeadline
+                        && tick >= 20
+                        && pngs < 2
+                        && (pngs == 0 || tick >= 23)
+                );
+                if sender.region_repair_due(now) {
+                    let repair = sender.plan_region_repair_at(&frame, now).unwrap();
+                    assert_eq!(repair.dirty_tiles, if pngs == 0 { 256 } else { 15 });
+                    sequence += 1;
+                    sender
+                        .encoder
+                        .encode_into(&mut bytes, sequence, &frame, 70)
+                        .unwrap();
+                    // Abandoning an encoded batch neither discharges debt nor
+                    // advances the round-robin cursor. Replanning selects it again.
+                    let retry_bytes = bytes.clone();
+                    sender.discard();
+                    assert!(sender.region_repair_due(now));
+                    assert_eq!(
+                        sender
+                            .plan_region_repair_at(&frame, now)
+                            .unwrap()
+                            .dirty_tiles,
+                        repair.dirty_tiles
+                    );
+                    sender
+                        .encoder
+                        .encode_into(&mut bytes, sequence, &frame, 70)
+                        .unwrap();
+                    assert_eq!(bytes, retry_bytes);
+                    decoded = decoder.decode_into(&bytes, Arc::clone(&pool)).unwrap();
+                    assert!(decoder.last_frame_was_lossless());
+                    sender.commit_at(&frame, now);
+                    assert!(!sender.region_repair_due(now + Duration::from_millis(249)));
+                    pngs += 1;
+                }
+                let observed = decoded.image();
+                for y in 0..256 {
+                    for x in 0..272 {
+                        if x < 16 && y < 16 {
+                            continue;
+                        }
+                        let index = y as usize * 272 + x as usize;
+                        let exact = observed.get_pixel(x, y) == frame.image.get_pixel(x, y);
+                        assert!(
+                            !exact_pixels[index] || exact,
+                            "exact region regressed after JPEG"
+                        );
+                        exact_pixels[index] = exact;
+                    }
+                }
+            }
+            assert_eq!(
+                pngs,
+                if policy == LosslessSchedule::RegionDeadline {
+                    2
+                } else {
+                    0
+                }
+            );
+            assert_eq!(
+                exact_pixels.iter().filter(|&&v| v).count() == 272 * 256 - 256,
+                policy == LosslessSchedule::RegionDeadline
+            );
+            assert!(
+                sender.encoder.has_exact_debt(),
+                "animated tile retains debt"
+            );
+        }
     }
 
     #[test]

@@ -523,11 +523,27 @@ fn wait_first_pending_png(
 
 #[test]
 fn actual_pending_png_resize_aba_discards_old_scope_before_write() {
+    pending_png_resize_aba(host::LosslessSchedule::New250);
+}
+
+#[test]
+fn actual_region_deadline_pending_png_resize_aba_discards_old_scope_before_write() {
+    pending_png_resize_aba(host::LosslessSchedule::RegionDeadline);
+}
+
+fn pending_png_resize_aba(schedule: host::LosslessSchedule) {
     let Some(mut gl) = HeadlessSmithayGles::new() else {
         return;
     };
     let probe = Arc::new(host::PendingLosslessProbe::default());
-    let mut h = Harness::with_lossless_probe(&mut gl, true, true, true, Some(probe.clone()));
+    let mut h = Harness::with_lossless_schedule_probe(
+        &mut gl,
+        true,
+        true,
+        true,
+        Some(probe.clone()),
+        schedule,
+    );
     h.destroy_popup();
     paint(
         &mut h.native,

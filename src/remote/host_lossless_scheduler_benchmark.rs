@@ -4,13 +4,22 @@ use super::*;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
+const CONTINUOUS_GENERATIONS: usize = 80;
+const CONTINUOUS_PERIOD_MS: u64 = 100;
+const CONTINUOUS_WINDOW_NS: u64 = 8_000_000_000;
+const CONTINUOUS_MARKER_BITS: usize = 8;
+
 fn marker_pixels(generation: usize) -> Vec<u8> {
-    assert!(generation < 16);
+    marker_pixels_with_columns(generation, 2)
+}
+fn marker_pixels_with_columns(generation: usize, columns: usize) -> Vec<u8> {
+    assert!(matches!(columns, 2 | 4));
+    assert!(generation < (1 << (columns * 2)));
     let mut bytes = pattern(false);
     let gray = generation ^ (generation >> 1);
     for y in 0..16usize {
-        for x in 0..16usize {
-            let bit = (y / 8) * 2 + x / 8;
+        for x in 0..columns * 8 {
+            let bit = (y / 8) * columns + x / 8;
             let value = if gray >> bit & 1 == 0 { 32 } else { 224 };
             let i = (y * 800 + x) * 4;
             bytes[i..i + 4].copy_from_slice(&[value, value, value, 255]);
@@ -19,13 +28,17 @@ fn marker_pixels(generation: usize) -> Vec<u8> {
     bytes
 }
 fn marker_id(bytes: &[u8]) -> Option<usize> {
+    marker_id_with_columns(bytes, 2)
+}
+fn marker_id_with_columns(bytes: &[u8], columns: usize) -> Option<usize> {
+    assert!(matches!(columns, 2 | 4));
     if bytes.len() != 800 * 600 * 4 {
         return None;
     }
     let mut gray = 0usize;
-    for bit in 0..4 {
-        let x0 = (bit % 2) * 8 + 3;
-        let y0 = (bit / 2) * 8 + 3;
+    for bit in 0..columns * 2 {
+        let x0 = (bit % columns) * 8 + 3;
+        let y0 = (bit / columns) * 8 + 3;
         let mut dark = true;
         let mut light = true;
         for y in y0..y0 + 2 {
@@ -52,6 +65,22 @@ fn marker_id(bytes: &[u8]) -> Option<usize> {
         shift >>= 1;
     }
     Some(binary)
+}
+// The continuous animation occupies exactly two 16x16 codec tiles. Every
+// remaining pixel/channel participates in static equality, including edges.
+fn continuous_static_sse(actual: &[u8], expected: &[u8]) -> u64 {
+    assert_eq!(actual.len(), 800 * 600 * 4);
+    assert_eq!(actual.len(), expected.len());
+    actual
+        .chunks_exact(800 * 4)
+        .zip(expected.chunks_exact(800 * 4))
+        .enumerate()
+        .map(|(y, (a, b))| {
+            let start = if y < 16 { 32 * 4 } else { 0 };
+            let (a, b) = (&a[start..], &b[start..]);
+            if a == b { 0 } else { sse(a, b) }
+        })
+        .sum()
 }
 fn input_hash(bytes: &[u8]) -> String {
     Sha256::digest(bytes)
@@ -90,10 +119,14 @@ fn update_presented(report: &mut Value, base: Instant, ledger: &[(u64, Instant)]
     }
 }
 fn run_session(arm: &str, report: &mut Value) {
+    run_session_workload(arm, report, false);
+}
+fn run_session_workload(arm: &str, report: &mut Value, continuous: bool) {
     let enabled = arm != "off";
     let policy = match arm {
         "legacy" => host::LosslessSchedule::Legacy100,
-        "off" | "proposed" => host::LosslessSchedule::New250,
+        "off" | "proposed" | "new250" => host::LosslessSchedule::New250,
+        "region_deadline" => host::LosslessSchedule::RegionDeadline,
         "quiet0_pace100" => host::LosslessSchedule::Quiet0Pace100,
         "quiet0_pace250" => host::LosslessSchedule::Quiet0Pace250,
         "quiet250_pace100" => host::LosslessSchedule::Quiet250Pace100,
@@ -101,8 +134,26 @@ fn run_session(arm: &str, report: &mut Value) {
         _ => panic!("unknown explicit benchmark policy"),
     };
     let probe = Arc::new(host::LosslessScheduleProbe::default());
-    let inputs: Vec<_> = (0..16).map(marker_pixels).collect();
-    report["markers"]=json!((0..16).map(|generation|json!({"generation":generation,"scheduled_ns":generation as u64*500_000_000,"source_sha256":input_hash(&inputs[generation]),"paint_started_ns":null,"commit_issued_ns":null,"commit_completed_ns":null})).collect::<Vec<_>>());
+    let generations = if continuous {
+        CONTINUOUS_GENERATIONS
+    } else {
+        16
+    };
+    let period_ms = if continuous {
+        CONTINUOUS_PERIOD_MS
+    } else {
+        500
+    };
+    let inputs: Vec<_> = (0..generations)
+        .map(|generation| {
+            if continuous {
+                marker_pixels_with_columns(generation, 4)
+            } else {
+                marker_pixels(generation)
+            }
+        })
+        .collect();
+    report["markers"] = json!((0..generations).map(|generation|json!({"generation":generation,"scheduled_ns":generation as u64*period_ms*1_000_000,"source_sha256":input_hash(&inputs[generation]),"paint_started_ns":null,"commit_issued_ns":null,"commit_completed_ns":null})).collect::<Vec<_>>());
     let mut gl = HeadlessSmithayGles::new().expect("explicit benchmark requires owned software GL");
     let mut native = Server::new();
     let mut local = Server::new();
@@ -261,7 +312,9 @@ fn run_session(arm: &str, report: &mut Value) {
     let mut next = 0usize;
     let end = base + Duration::from_secs(9); // eight seconds scheduled work + one bounded drain
     while Instant::now() < end {
-        while next < 16 && Instant::now() >= base + Duration::from_millis(next as u64 * 500) {
+        while next < generations
+            && Instant::now() >= base + Duration::from_millis(next as u64 * period_ms)
+        {
             let (started, issued, completed) = paint_timed(&mut native, &mut target, &inputs[next]);
             let row = &mut report["markers"][next];
             row["paint_started_ns"] = json!(elapsed_ns(base, started));
@@ -286,8 +339,16 @@ fn run_session(arm: &str, report: &mut Value) {
             let bytes = read_pixels(&mut local, &mut gl, &mut reader);
             let gl_completed = Instant::now();
             assert_eq!(frames.lock().unwrap().0, Some(seq));
-            let generation = marker_id(&bytes);
-            let error = static_sse(&bytes, &expected);
+            let generation = if continuous {
+                marker_id_with_columns(&bytes, 4)
+            } else {
+                marker_id(&bytes)
+            };
+            let error = if continuous {
+                continuous_static_sse(&bytes, &expected)
+            } else {
+                static_sse(&bytes, &expected)
+            };
             let validated = Instant::now();
             let png = codecs
                 .lock()
@@ -309,6 +370,9 @@ fn run_session(arm: &str, report: &mut Value) {
         }
         update_presented(report, base, &presented_times.lock().unwrap());
         report["host_stats"] = host_stats(&probe);
+        if continuous && elapsed_ns(base, Instant::now()) <= CONTINUOUS_WINDOW_NS {
+            report["active_window_host_stats"] = host_stats(&probe);
+        }
         if let Ok(result) = host_done.try_recv() {
             panic!("benchmark host ended early: {result:?}");
         }
@@ -318,7 +382,7 @@ fn run_session(arm: &str, report: &mut Value) {
         thread::sleep(Duration::from_millis(1));
     }
     assert_eq!(
-        next, 16,
+        next, generations,
         "all scheduled source generations remain in denominator"
     );
     stop.store(true, Ordering::Release);
@@ -470,6 +534,130 @@ fn actual_static_lossless_scheduler_factorial_measurement() {
         "measurement infrastructure failed; raw private report retains every session"
     );
 }
+fn continuous_acceptance(session: &mut Value) -> bool {
+    let frames = session["frames"].as_array().unwrap();
+    let observed: Vec<_> = frames
+        .iter()
+        .filter_map(|frame| frame["presented_ns"].as_u64().map(|at| (at, frame)))
+        .collect();
+    let active: Vec<_> = observed
+        .iter()
+        .filter(|(at, _)| *at <= CONTINUOUS_WINDOW_NS)
+        .collect();
+    let exact = active
+        .iter()
+        .filter(|(_, frame)| frame["static_sse"] == 0)
+        .map(|(at, _)| *at)
+        .min();
+    let first_observed_exact = observed
+        .iter()
+        .filter(|(_, frame)| frame["static_sse"] == 0)
+        .map(|(at, _)| *at)
+        .min();
+    let regression_count = first_observed_exact.map_or(0, |first| {
+        observed
+            .iter()
+            .filter(|(at, frame)| *at > first && frame["static_sse"] != 0)
+            .count()
+    });
+    let later_animation_presented = exact.is_some_and(|first| {
+        active.iter().any(|(at, frame)| {
+            frame["marker_generation"]
+                .as_u64()
+                .is_some_and(|generation| {
+                    session["markers"][generation as usize]["commit_issued_ns"]
+                        .as_u64()
+                        .is_some_and(|commit| commit > first && *at >= commit)
+                })
+        })
+    });
+    let active_png = active
+        .iter()
+        .filter(|(_, frame)| frame["is_png"] == true)
+        .count();
+    let static_criterion = if session["arm"] == "new250" {
+        // The negative control must actually reproduce global-quiet starvation.
+        exact.is_none()
+            && active
+                .iter()
+                .any(|(at, frame)| *at >= 7_000_000_000 && frame["static_sse"] != 0)
+    } else {
+        exact.is_some() && later_animation_presented && active_png > 1
+    };
+    session["acceptance"] = json!({
+        "static_criterion":static_criterion,
+        "first_static_exact_active_ns":exact,
+        "later_animation_presented_after_exact":later_animation_presented,
+        "active_presented_png_frames":active_png,
+        "regressed_frames_after_exact_including_drain":regression_count,
+        "no_exact_to_inexact_regression":regression_count == 0
+    });
+    static_criterion && regression_count == 0
+}
+
+#[test]
+#[ignore = "explicit private continuous-animation starvation experiment using real TCP/GL"]
+fn actual_static_lossless_region_deadline_continuous_measurement() {
+    let order = ["new250", "region_deadline", "region_deadline", "new250"];
+    let mut report = json!({"schema_version":1,
+        "benchmark":"static_lossless_region_deadline_continuous_tcp_ab",
+        "scope":"same-process synthetic owned displays and controlled software GL presentation; not physical display latency",
+        "scheduled_interval_ns":CONTINUOUS_PERIOD_MS*1_000_000,
+        "generation_budget":CONTINUOUS_GENERATIONS,"active_window_ns":CONTINUOUS_WINDOW_NS,
+        "drain_ns":1_000_000_000u64,"width":800,"height":600,
+        "dynamic_region_width":32,"dynamic_region_height":16,
+        "static_pixels":800*600-32*16,"maximum_png_batch_pixels":65_536,
+        "success":false,"sessions":[]});
+    let mut failed = false;
+    for (index, arm) in order.iter().enumerate() {
+        let mut session = json!({"arm":arm,"order":index,"success":false,"failure":null,
+            "markers":[],"frames":[],"host_stats":null,"active_window_host_stats":null,
+            "host_records":[],"acceptance":null});
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            run_session_workload(arm, &mut session, true);
+            assert!(
+                continuous_acceptance(&mut session),
+                "continuous static starvation/convergence or regression criterion failed"
+            );
+        }));
+        if let Err(error) = result {
+            failed = true;
+            session["success"] = json!(false);
+            session["failure"] = json!(
+                error
+                    .downcast_ref::<String>()
+                    .cloned()
+                    .or_else(|| error.downcast_ref::<&str>().map(|s| s.to_string()))
+                    .unwrap_or_else(|| "non-string test panic".into())
+            );
+        }
+        report["sessions"].as_array_mut().unwrap().push(session);
+    }
+    let sessions = report["sessions"].as_array().unwrap();
+    for generation in 0..CONTINUOUS_GENERATIONS {
+        let hash = &sessions[0]["markers"][generation]["source_sha256"];
+        if hash.is_null()
+            || sessions
+                .iter()
+                .any(|session| &session["markers"][generation]["source_sha256"] != hash)
+        {
+            failed = true;
+            report["input_identity_failure"] = json!(true);
+            break;
+        }
+    }
+    report["success"] = json!(!failed);
+    let path = std::env::var("JWM_REMOTE_REGION_DEADLINE_REPORT")
+        .expect("explicit private continuous-animation report path required");
+    let bytes = serde_json::to_vec_pretty(&report).unwrap();
+    assert!(bytes.len() <= 4 * 1024 * 1024);
+    std::fs::write(path, bytes).unwrap();
+    assert!(
+        !failed,
+        "continuous-animation experiment failed; raw private report retains every session"
+    );
+}
+
 #[test]
 fn unique_gray_markers_survive_production_jpeg_and_reject_uncertain_cells() {
     use crate::remote::{
@@ -515,4 +703,70 @@ fn unique_gray_markers_survive_production_jpeg_and_reject_uncertain_cells() {
         }
     }
     assert_eq!(marker_id(&uncertain), None);
+}
+
+#[test]
+fn continuous_gray_markers_survive_production_jpeg_and_reject_uncertain_cells() {
+    use crate::remote::{
+        tile::{TileDecoder, TileEncodeRequest, TileEncoder},
+        x11_capture::CapturedFrame,
+    };
+    // Exhaust the finite 8-bit identity set, not just the 80 scheduled markers.
+    for generation in 0..1 << CONTINUOUS_MARKER_BITS {
+        let bytes = marker_pixels_with_columns(generation, 4);
+        assert_eq!(marker_id_with_columns(&bytes, 4), Some(generation));
+        let frame = CapturedFrame {
+            geometry_epoch: 1,
+            source_width: 800,
+            source_height: 600,
+            image: image::RgbImage::from_fn(800, 600, |x, y| {
+                let i = ((y * 800 + x) * 4) as usize;
+                image::Rgb([bytes[i + 2], bytes[i + 1], bytes[i]])
+            }),
+        };
+        let mut encoder = TileEncoder::new();
+        let mut decoder = TileDecoder::new();
+        encoder.plan(&frame, TileEncodeRequest::Keyframe).unwrap();
+        let mut payload = Vec::new();
+        encoder.encode_into(&mut payload, 0, &frame, 60).unwrap();
+        let decoded = decoder
+            .decode_into(&payload, crate::remote::frame::new_decode_buffer_pool())
+            .unwrap();
+        let actual: Vec<_> = decoded
+            .image()
+            .pixels()
+            .flat_map(|pixel| [pixel[2], pixel[1], pixel[0], 255])
+            .collect();
+        assert_eq!(
+            marker_id_with_columns(&actual, 4),
+            Some(generation),
+            "real JPEG classifier generation {generation}"
+        );
+    }
+    for bit in 0..CONTINUOUS_MARKER_BITS {
+        let mut uncertain = marker_pixels_with_columns(79, 4);
+        let x0 = (bit % 4) * 8 + 3;
+        let y0 = (bit / 4) * 8 + 3;
+        for y in y0..y0 + 2 {
+            for x in x0..x0 + 2 {
+                let i = (y * 800 + x) * 4;
+                uncertain[i..i + 3].fill(127);
+            }
+        }
+        assert_eq!(marker_id_with_columns(&uncertain, 4), None);
+    }
+    assert_eq!(marker_id_with_columns(&[0; 16], 4), None);
+}
+
+#[test]
+fn continuous_static_region_excludes_only_the_two_marker_tiles() {
+    let expected = pattern(false);
+    let mut bytes = marker_pixels_with_columns(79, 4);
+    assert_eq!(continuous_static_sse(&bytes, &expected), 0);
+    for (x, y) in [(32, 15), (31, 16), (799, 599)] {
+        let index = (y * 800 + x) * 4;
+        bytes[index] ^= 1;
+        assert_eq!(continuous_static_sse(&bytes, &expected), 1);
+        bytes[index] ^= 1;
+    }
 }
