@@ -228,6 +228,12 @@ jobs:
           set -euo pipefail
           python3 scripts/check-pointer-lossless-budget.py --self-test
           export XDG_RUNTIME_DIR="$(mktemp -d)"
+          expiry='remote::host::wayland_viewer_integration::host_pointer_integration::actual_wayland_pointer_unpresented_proof_expiry_requires_fresh_presentation'
+          listed="$(env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$expiry" -- --exact --list)"
+          test "$(printf '%s\n' "$listed" | grep -c ': test$')" -eq 1
+          ignored="$(env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$expiry" -- --ignored --exact --list)"
+          test "$(printf '%s\n' "$ignored" | grep -c ': test$' || true)" -eq 0
+          env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$expiry" -- --exact --test-threads=1
           cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib pointer_repair -- --test-threads=1
           filter='remote::host::wayland_viewer_integration::host_pointer_integration::pointer_lossless_integration::'
           listed="$(env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --list)"
@@ -367,7 +373,7 @@ jobs:
           export XDG_RUNTIME_DIR="$(mktemp -d)"
           filter='remote::host::wayland_viewer_integration::host_popup_integration::lossless_family_integration::'
           listed="$(env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --list)"
-          test "$(printf '%s\n' "$listed" | grep -c ': test$')" -eq 4
+          test "$(printf '%s\n' "$listed" | grep -c ': test$')" -eq 5
           env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --test-threads=1 --nocapture
       - name: One-shot text native protocol, exact context and revocation
         run: |

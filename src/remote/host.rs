@@ -2140,6 +2140,23 @@ struct PointerFrame {
     scope: Option<DrawnScope>,
     announced: bool,
 }
+fn pointer_expiry_waiting(
+    frame: PointerFrame,
+    lease_epoch: Option<u64>,
+    forced_refresh: bool,
+) -> Option<PointerStatus> {
+    // A published proof can expire before its actual presentation. Only an
+    // announced Ready has an authenticated presentation receipt at the client.
+    // An advisory Waiting must not invent that receipt for an unseen proof.
+    if !frame.announced || forced_refresh {
+        return None;
+    }
+    Some(PointerStatus {
+        lease_epoch: lease_epoch?,
+        scope: frame.scope?,
+        status: PointerStatusKind::Waiting,
+    })
+}
 // This only classifies a successfully acknowledged record. Credits validation
 // remains the sole replay/future-ACK gate; a wake never grants Ready itself.
 fn proof_ack_matches(frame: Option<PointerFrame>, scope: DrawnScope) -> bool {
@@ -4065,15 +4082,8 @@ fn process_pointer(
             // Only the controlled test refresh omits this advisory notification,
             // isolating cancellation by a real new frame rather than Waiting.
             // Host/native permission is still discarded before any new capture.
-            if !forced_refresh && let (Some(epoch), Some(scope)) = (state.epoch(), frame.scope) {
-                send_pointer_status(
-                    writer,
-                    PointerStatus {
-                        lease_epoch: epoch,
-                        scope,
-                        status: PointerStatusKind::Waiting,
-                    },
-                )?;
+            if let Some(status) = pointer_expiry_waiting(frame, state.epoch(), forced_refresh) {
+                send_pointer_status(writer, status)?;
             }
             state.clear_ready();
             sources.pointer_frame.lock().unwrap().take();
@@ -7320,6 +7330,38 @@ mod tests {
             );
         }
         assert!(captured_frame_from_outcome(CaptureOutcome::RetainedProofBlocked).is_none());
+    }
+    #[test]
+    fn pointer_expiry_waiting_requires_a_previously_announced_presentation() {
+        let scope = DrawnScope {
+            source_epoch: 1,
+            geometry_epoch: 7,
+            frame_sequence: 9,
+        };
+        for announced in [false, true] {
+            for published in [false, true] {
+                for granted in [false, true] {
+                    for forced in [false, true] {
+                        let frame = PointerFrame {
+                            serial: 12,
+                            at: Instant::now() - FRAME_MAX_AGE,
+                            scope: published.then_some(scope),
+                            announced,
+                        };
+                        let status = pointer_expiry_waiting(frame, granted.then_some(3), forced);
+                        assert_eq!(
+                            status.is_some(),
+                            announced && published && granted && !forced
+                        );
+                        if let Some(status) = status {
+                            assert_eq!(status.scope, scope);
+                            assert_eq!(status.lease_epoch, 3);
+                            assert_eq!(status.status, PointerStatusKind::Waiting);
+                        }
+                    }
+                }
+            }
+        }
     }
     #[test]
     fn proof_ack_wake_predicate_requires_exact_unannounced_scope() {

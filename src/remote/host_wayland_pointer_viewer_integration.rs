@@ -749,6 +749,107 @@ impl Harness {
     }
 }
 #[test]
+fn actual_wayland_pointer_unpresented_proof_expiry_requires_fresh_presentation() {
+    use crate::remote::{source_wire::FramePurpose, wayland_pointer_wire::FRAME_MAX_AGE};
+
+    let Some(mut gl) = HeadlessSmithayGles::new() else {
+        return;
+    };
+    for lossless in [false, true] {
+        let mut h = Harness::new_with_lossless(&mut gl, lossless, lossless);
+        let initial = h.ready_after(&mut gl, None);
+        h.button(true);
+        h.button(false);
+        // Consume the announced proof with real input, then commit its successor
+        // without ever supplying that successor's presentation feedback.
+        h.wait(
+            &mut gl,
+            "unannounced successor committed after real click",
+            false,
+            |s| {
+                s.events.len() == 3
+                    && s.frames.lock().unwrap().0.is_some_and(|n| n > initial)
+                    && !s.feedback.is_empty()
+                    && s.ready.lock().unwrap().is_none()
+            },
+        );
+        let held = h.frames.lock().unwrap().0.unwrap();
+        assert_eq!(h.frames.lock().unwrap().1, Some(initial));
+        assert!(
+            h.purposes
+                .lock()
+                .unwrap()
+                .contains(&(held, FramePurpose::NativeProof))
+        );
+        assert_eq!(h.events[1].1[2..], [0x110, 1]);
+        assert_eq!(h.events[2].1[2..], [0x110, 0]);
+
+        let withheld_since = Instant::now();
+        let deadline = withheld_since + FRAME_MAX_AGE + Duration::from_secs(2);
+        let replacement = loop {
+            h.tick(&mut gl, false);
+            if let Ok(result) = h.client_done.try_recv() {
+                panic!("unpresented proof expiry ended viewer: {result:?}");
+            }
+            assert!(Instant::now() < deadline, "expired proof was not replaced");
+            assert_eq!(*h.frames.lock().unwrap(), (Some(held), Some(initial)));
+            assert!(h.ready.lock().unwrap().is_none());
+            assert_eq!(h.events.len(), 3, "unpresented proof cannot inject input");
+            assert!(remote_pointer::active(&h.native.state));
+            // The viewer cannot submit another frame until held's feedback.
+            // A newer decoded NativeProof therefore witnesses real host expiry
+            // and recapture, not just elapsed wall time or a forced refresh.
+            let replacement = h
+                .purposes
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(sequence, purpose)| {
+                    *sequence > held && *purpose == FramePurpose::NativeProof
+                })
+                .map(|(sequence, _)| *sequence);
+            if withheld_since.elapsed() >= FRAME_MAX_AGE
+                && let Some(sequence) = replacement
+            {
+                break sequence;
+            }
+            thread::sleep(Duration::from_millis(1));
+        };
+
+        // Even real feedback for the expired proof cannot restore Ready.
+        // Hold its replacement separately before allowing fresh presentation.
+        h.tick(&mut gl, true);
+        h.wait(
+            &mut gl,
+            "expired proof acknowledged without replacement feedback",
+            false,
+            |s| {
+                let frames = *s.frames.lock().unwrap();
+                frames.1 == Some(held)
+                    && frames.0.is_some_and(|n| n >= replacement)
+                    && !s.feedback.is_empty()
+            },
+        );
+        assert!(h.ready.lock().unwrap().is_none());
+        assert_eq!(h.events.len(), 3);
+        let fresh = h.ready_after(&mut gl, Some(held));
+        assert!(fresh >= replacement);
+        assert_eq!(h.frames.lock().unwrap().1, Some(fresh));
+        h.button(true);
+        h.button(false);
+        h.wait(
+            &mut gl,
+            "fresh presented proof permits second click",
+            true,
+            |s| s.events.len() == 6,
+        );
+        assert_eq!(h.events[4].1[2..], [0x110, 1]);
+        assert_eq!(h.events[5].1[2..], [0x110, 0]);
+        h.close(&mut gl);
+    }
+}
+
+#[test]
 fn actual_wayland_pointer_viewer_tcp_presented_actions_and_revocation() {
     let Some(mut gl) = HeadlessSmithayGles::new() else {
         return;
