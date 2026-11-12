@@ -1264,10 +1264,11 @@ impl TileDecoder {
                 return Err(invalid_data("tile frame is missing its atlas body").into());
             }
             if header.lossless {
-                self.atlas = super::png_atlas::decode_rgb8(
+                super::png_atlas::decode_rgb8_into(
                     &payload[body_start..],
                     u32::from(width),
                     u32::from(height),
+                    &mut self.atlas,
                 )?;
             } else {
                 decode_atlas(

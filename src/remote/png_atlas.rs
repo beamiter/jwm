@@ -28,15 +28,29 @@ fn rgb_len(width: u32, height: u32) -> io::Result<usize> {
     Ok(bytes)
 }
 
-// CRC covers the chunk type and data, never the preceding length. No table or
-// attacker-sized temporary allocation is needed; the whole input is <=1 MiB.
+// CRC covers the chunk type and data, never the preceding length. The fixed
+// 1 KiB table removes eight polynomial rounds per byte on both encode validation
+// and decode. It adds no input-sized allocation and preserves the IEEE CRC.
+const CRC_TABLE: [u32; 256] = {
+    let mut table = [0; 256];
+    let mut index = 0;
+    while index < table.len() {
+        let mut crc = index as u32;
+        let mut bit = 0;
+        while bit < 8 {
+            crc = (crc >> 1) ^ (0xedb8_8320 & 0u32.wrapping_sub(crc & 1));
+            bit += 1;
+        }
+        table[index] = crc;
+        index += 1;
+    }
+    table
+};
+
 fn crc32(bytes: &[u8]) -> u32 {
     let mut crc = !0u32;
     for &byte in bytes {
-        crc ^= u32::from(byte);
-        for _ in 0..8 {
-            crc = (crc >> 1) ^ (0xedb8_8320 & 0u32.wrapping_sub(crc & 1));
-        }
+        crc = (crc >> 8) ^ CRC_TABLE[((crc ^ u32::from(byte)) & 255) as usize];
     }
     !crc
 }
@@ -136,33 +150,199 @@ pub(super) fn encode_rgb8(width: u32, height: u32, pixels: &[u8]) -> io::Result<
     Ok(output.0)
 }
 
+#[cfg(test)]
 pub(super) fn decode_rgb8(bytes: &[u8], width: u32, height: u32) -> io::Result<Vec<u8>> {
-    let size = validate(bytes, width, height)?;
-    let mut decoder = png::Decoder::new(Cursor::new(bytes));
-    decoder.set_limits(png::Limits {
-        bytes: DECODER_ALLOCATION_LIMIT,
-    });
-    let mut reader = decoder.read_info().map_err(io::Error::other)?;
-    if reader.output_buffer_size() != Some(size) {
-        return Err(invalid("PNG output size mismatch"));
-    }
-    let mut output = vec![0u8; size];
-    let info = reader.next_frame(&mut output).map_err(io::Error::other)?;
-    if info.width != width
-        || info.height != height
-        || info.color_type != png::ColorType::Rgb
-        || info.bit_depth != png::BitDepth::Eight
-        || info.buffer_size() != size
-    {
-        return Err(invalid("PNG decoded atlas layout mismatch"));
-    }
-    reader.finish().map_err(io::Error::other)?;
+    let mut output = Vec::new();
+    decode_rgb8_into(bytes, width, height, &mut output)?;
     Ok(output)
+}
+
+/// Reuse the tile decoder's private atlas allocation. No partially decoded
+/// bytes are exposed on failure, and the caller may scatter only after success.
+/// After success, logical output and retained scratch obey the PNG budget.
+/// Drop an oversized preceding JPEG allocation before decoding a valid PNG.
+pub(super) fn decode_rgb8_into(
+    bytes: &[u8],
+    width: u32,
+    height: u32,
+    output: &mut Vec<u8>,
+) -> io::Result<()> {
+    let result = (|| {
+        let size = validate(bytes, width, height)?;
+        let mut decoder = png::Decoder::new(Cursor::new(bytes));
+        decoder.set_limits(png::Limits {
+            bytes: DECODER_ALLOCATION_LIMIT,
+        });
+        let mut reader = decoder.read_info().map_err(io::Error::other)?;
+        if reader.output_buffer_size() != Some(size) {
+            return Err(invalid("PNG output size mismatch"));
+        }
+        if output.capacity() > MAX_RGB_BYTES {
+            *output = Vec::new();
+        }
+        if output.capacity() < size {
+            output
+                .try_reserve_exact(size.saturating_sub(output.len()))
+                .map_err(io::Error::other)?;
+        }
+        output.resize(size, 0);
+        let info = reader.next_frame(output).map_err(io::Error::other)?;
+        if info.width != width
+            || info.height != height
+            || info.color_type != png::ColorType::Rgb
+            || info.bit_depth != png::BitDepth::Eight
+            || info.buffer_size() != size
+        {
+            return Err(invalid("PNG decoded atlas layout mismatch"));
+        }
+        reader.finish().map_err(io::Error::other)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        output.clear();
+    }
+    result
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn reference_crc32(bytes: &[u8]) -> u32 {
+        let mut crc = !0u32;
+        for &byte in bytes {
+            crc ^= u32::from(byte);
+            for _ in 0..8 {
+                crc = (crc >> 1) ^ (0xedb8_8320 & 0u32.wrapping_sub(crc & 1));
+            }
+        }
+        !crc
+    }
+
+    #[test]
+    fn crc_table_matches_reference_and_known_vectors() {
+        assert_eq!(crc32(b""), 0);
+        assert_eq!(crc32(b"123456789"), 0xcbf4_3926);
+        for byte in 0..=255 {
+            assert_eq!(crc32(&[byte]), reference_crc32(&[byte]));
+        }
+        let data: Vec<_> = (0..MAX_COMPRESSED_BYTES)
+            .map(|i| (i.wrapping_mul(131) ^ (i >> 7)) as u8)
+            .collect();
+        for size in [
+            0,
+            1,
+            3,
+            7,
+            8,
+            15,
+            256,
+            1023,
+            MAX_RGB_BYTES,
+            MAX_COMPRESSED_BYTES,
+        ] {
+            for offset in 0..8 {
+                let end = (offset + size).min(data.len());
+                assert_eq!(
+                    crc32(&data[offset..end]),
+                    reference_crc32(&data[offset..end])
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn reusable_png_output_retains_allocation_and_overwrites_all_pixels() {
+        let mut output = Vec::new();
+        let mut saved = None;
+        for (w, h, byte) in [(256, 256, 213), (3, 5, 17), (1, 1, 0), (256, 256, 42)] {
+            let pixels = vec![byte; rgb_len(w, h).unwrap()];
+            let encoded = encode_rgb8(w, h, &pixels).unwrap();
+            decode_rgb8_into(&encoded, w, h, &mut output).unwrap();
+            assert_eq!(output, pixels);
+            let allocation = (output.as_ptr(), output.capacity());
+            if let Some(previous) = saved {
+                assert_eq!(allocation, previous);
+            }
+            saved = Some(allocation);
+        }
+    }
+
+    #[test]
+    fn png_decode_releases_oversized_jpeg_scratch() {
+        let encoded = encode_rgb8(3, 5, &[17; 45]).unwrap();
+        let mut output = vec![99; MAX_RGB_BYTES + 1];
+        decode_rgb8_into(&encoded, 3, 5, &mut output).unwrap();
+        assert_eq!(output, [17; 45]);
+        assert!(output.capacity() <= MAX_RGB_BYTES);
+    }
+
+    #[test]
+    fn failed_reusable_decode_clears_output_and_recovers() {
+        let good = encode_rgb8(17, 33, &[173; 17 * 33 * 3]).unwrap();
+        let mut output = vec![99; MAX_RGB_BYTES];
+        let allocation = (output.as_ptr(), output.capacity());
+        let mut malformed = good[..33].to_vec();
+        // Valid envelope/CRC, invalid zlib: exercise failure after validation.
+        malformed.extend(chunk(b"IDAT", &[0, 1, 2, 3]));
+        malformed.extend(chunk(b"IEND", &[]));
+        for bad in [&[][..], &good[..good.len() - 1], &malformed] {
+            output.resize(MAX_RGB_BYTES, 99);
+            assert!(decode_rgb8_into(bad, 17, 33, &mut output).is_err());
+            assert!(output.is_empty());
+            assert_eq!((output.as_ptr(), output.capacity()), allocation);
+            decode_rgb8_into(&good, 17, 33, &mut output).unwrap();
+            assert_eq!(output, [173; 17 * 33 * 3]);
+        }
+        assert!(decode_rgb8_into(&good, 0, 33, &mut output).is_err());
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn every_single_bit_png_corruption_is_rejected_before_returning_pixels() {
+        let good = encode_rgb8(3, 5, &[127; 45]).unwrap();
+        let mut output = Vec::new();
+        for index in 0..good.len() {
+            for bit in 0..8 {
+                let mut bad = good.clone();
+                bad[index] ^= 1 << bit;
+                assert!(
+                    decode_rgb8_into(&bad, 3, 5, &mut output).is_err(),
+                    "{index}:{bit}"
+                );
+                assert!(output.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "isolated CRC microbenchmark; not end-to-end latency"]
+    fn benchmark_png_crc_validation() {
+        use std::hint::black_box;
+        use std::time::Instant;
+        for size in [4096, MAX_RGB_BYTES, MAX_COMPRESSED_BYTES] {
+            let data: Vec<_> = (0..size)
+                .map(|i| (i.wrapping_mul(131) ^ (i >> 7)) as u8)
+                .collect();
+            let repetitions = 32;
+            let start = Instant::now();
+            for _ in 0..repetitions {
+                black_box(reference_crc32(black_box(&data)));
+            }
+            let reference = start.elapsed();
+            let start = Instant::now();
+            for _ in 0..repetitions {
+                black_box(crc32(black_box(&data)));
+            }
+            let table = start.elapsed();
+            assert_eq!(crc32(&data), reference_crc32(&data));
+            eprintln!(
+                "png_crc bytes={size} iterations={repetitions} reference_us={} table_us={}",
+                reference.as_micros(),
+                table.as_micros()
+            );
+        }
+    }
+
     fn chunk(kind: &[u8; 4], payload: &[u8]) -> Vec<u8> {
         let mut out = (payload.len() as u32).to_be_bytes().to_vec();
         out.extend_from_slice(kind);
