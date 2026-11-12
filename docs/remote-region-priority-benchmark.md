@@ -128,3 +128,34 @@ This mixed evidence does not justify enabling either experimental policy.
 A preceding run overlapped focused regression execution and is excluded from
 these timing comparisons. Its static gates passed, but it is not a clean
 performance comparison. Raw reports and logs remain private.
+
+## Optimized repeated evidence
+
+Debug results above are useful correctness checks, but they do not establish
+release-build latency. The existing optimized Wayland CI job now reuses its
+`profiling` executable for **two sequential complete six-session runs**, with
+identical fixed inputs, order, timing and safety gates. This changes neither the
+release profile nor the production scheduler. Both results are retained as
+separate allowlisted artifacts when their reports can be parsed, including
+reported session failures; missing/invalid reports fail the step and never
+produce a successful summary. Do not select the
+faster repetition or pool away a slow candidate. A test failure in either run
+fails the step. A dynamic `non_regression_not_established` result is still valid
+evidence, not a test failure and not permission to enable the policy.
+
+New raw reports and public summaries include the compile-time `debug_assertions`
+boolean. Historical reports with no field remain `null` in summaries. The
+optimized CI command uses the fixed `--profile profiling` flag and the summary's
+`--require-no-debug-assertions` guard rejects missing, malformed or true evidence.
+The boolean alone does not attest a compiler optimization level; the exact Cargo
+command and unchanged profile are part of the evidence. Debug CI remains in
+place as an independent correctness gate.
+
+For local repetition use the command above with `--profile profiling`, distinct
+private report paths for each run, and the summary flag
+`--require-no-debug-assertions`. Run sequentially without concurrent compilation
+or benchmarks. Inspect both repetitions' source preparation/commit delays,
+fixture stage times and host encode counters before attributing latency to
+scheduling. Software GL, controlled presentation and loopback are still not a
+physical GPU/display, WAN or real two-computer benchmark. Two repetitions do not
+establish statistical significance or authorize production promotion.

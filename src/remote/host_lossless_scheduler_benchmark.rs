@@ -626,6 +626,7 @@ fn actual_static_lossless_region_priority_continuous_measurement() {
 fn run_continuous_measurement(order: &[&str], benchmark: &str, report_variable: &str) {
     let mut report = json!({"schema_version":1,
         "benchmark":benchmark,
+        "debug_assertions":cfg!(debug_assertions),
         "scope":"same-process synthetic owned displays and controlled software GL presentation; not physical display latency",
         "scheduled_interval_ns":CONTINUOUS_PERIOD_MS*1_000_000,
         "generation_budget":CONTINUOUS_GENERATIONS,"active_window_ns":CONTINUOUS_WINDOW_NS,

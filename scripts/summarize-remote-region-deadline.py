@@ -65,6 +65,16 @@ def counters(value):
     return {key: integer(value[key], key) for key in COUNTERS if key in value}
 
 
+def build_mode(report, require_no_debug_assertions=False):
+    # Historical reports lack this field. Never relabel them as optimized.
+    value = report.get("debug_assertions")
+    if "debug_assertions" in report and type(value) is not bool:
+        raise ValueError("debug_assertions must be a boolean when present")
+    if require_no_debug_assertions and value is not False:
+        raise ValueError("explicit debug_assertions=false evidence required")
+    return value
+
+
 def summarize(report):
     if type(report.get("schema_version")) is not int or report["schema_version"] != 1:
         raise ValueError("unsupported schema version")
@@ -220,7 +230,7 @@ def summarize(report):
                         "aggregate_host_counters": counters(session.get("host_stats")),
                         "active_window_host_counters": counters(session.get("active_window_host_stats")),
                         "samples": samples})
-    return {"schema_version": 1, "benchmark": benchmark, "planned_sessions": len(arms),
+    return {"schema_version": 1, "benchmark": benchmark, "debug_assertions": build_mode(report), "planned_sessions": len(arms),
             "planned_generation_budget": len(arms) * GENERATIONS, "reported_sessions": len(results),
             "unreported_session_generation_budget": (len(arms) - len(results)) * GENERATIONS,
             "scope": "100ms deadlines; active window <=8s, later presentations are cleanup only; quantiles include observed samples only and missing counts retain all 80 planned generations; static equality excludes exactly 32x16 animation pixels; source commit means issued; host payload includes source envelope, excludes Noise/TCP; encode counts include discarded attempts; host counters include common startup and active counters are last sampled <=8s",
@@ -298,7 +308,7 @@ def public_summary(summary):
                "static_criterion", "no_exact_to_inexact_regression", "decoded_png_frames",
                "within_window_presented_png_frames", "decoded_frames", "unknown_marker_frames", "unscheduled_marker_frames",
                "aggregate_host_counters", "active_window_host_counters")
-    result = {key: summary[key] for key in ("schema_version", "benchmark", "planned_sessions",
+    result = {key: summary[key] for key in ("schema_version", "benchmark", "debug_assertions", "planned_sessions",
               "planned_generation_budget", "reported_sessions", "unreported_session_generation_budget", "scope")}
     result["dynamic_non_regression"] = public_dynamic_assessment(summary["dynamic_non_regression"])
     result["sessions"] = [{key: session[key] for key in allowed} for session in summary["sessions"]]
@@ -306,6 +316,24 @@ def public_summary(summary):
 
 
 def self_test():
+    for value in (True, False):
+        assert build_mode({"debug_assertions": value}) is value
+    assert build_mode({}) is None
+    for value in (None, 0, 1, "false", [], {}):
+        try:
+            build_mode({"debug_assertions": value})
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("invalid build evidence accepted")
+    for report_mode in ({}, {"debug_assertions": True}):
+        try:
+            build_mode(report_mode, require_no_debug_assertions=True)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("unknown/debug report accepted by optimized gate")
+    assert build_mode({"debug_assertions": False}, require_no_debug_assertions=True) is False
     marker = {"generation": 0, "source_sha256": "a" * 64, "scheduled_ns": 0,
               "paint_started_ns": 10, "commit_issued_ns": 19, "commit_completed_ns": 20}
     frame = {"sequence": 1, "is_png": False, "marker_generation": 0, "gl_started_ns": 30,
@@ -323,6 +351,9 @@ def self_test():
     assert row["within_window_missing_planned_generations"] == 79
     assert row["source_preparation"]["max_ms"] == 9 / 1e6
     assert "private failure" not in json.dumps(public_summary(summarize(report)))
+    assert public_summary(summarize(report))["debug_assertions"] is None
+    report["debug_assertions"] = False
+    assert public_summary(summarize(report))["debug_assertions"] is False
     assert "samples" not in public_summary(summarize(report))["sessions"][0]
     assert summarize(report)["unreported_session_generation_budget"] == 240
     frame["presented_ns"] = 58
@@ -485,6 +516,8 @@ def main():
     parser.add_argument("report", nargs="?", type=Path)
     parser.add_argument("--self-test", action="store_true")
     parser.add_argument("--public-summary", action="store_true")
+    parser.add_argument("--require-no-debug-assertions", action="store_true",
+                        help="reject unknown/debug builds; intended for the fixed profiling CI command")
     args = parser.parse_args()
     if args.self_test:
         self_test()
@@ -497,6 +530,7 @@ def main():
         parser.error("report exceeds 16MiB")
     try:
         report = json.loads(raw, object_pairs_hook=unique_object, parse_constant=reject_constant)
+        build_mode(report, args.require_no_debug_assertions)
         summary = summarize(report)
         print(json.dumps(public_summary(summary) if args.public_summary else summary, indent=2, allow_nan=False))
     except (ValueError, KeyError, TypeError, AttributeError) as error:
