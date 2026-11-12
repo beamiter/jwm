@@ -23,3 +23,10 @@ worker startup, prompt cancellation of a long wait, overflow rejection without
 socket closure, blocked-read interruption and socket usability after cancel.
 Client and authenticated TCP integration regressions cover the existing users
 of this guard. Tests run on Linux loopback, not a physical dual-machine network.
+
+The original-popup-lease integration assertion also recognizes a typed
+`ProtocolError::Io(BrokenPipe | ConnectionReset)` when the host writer observes
+the already-proven client expiry before its reader reports EOF. It still
+requires the original client deadline, fresh presentation, complete cleanup,
+and no input injection. Timeouts, stale proof and authentication errors remain
+failures; production termination behavior is unchanged.

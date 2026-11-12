@@ -1419,6 +1419,7 @@ fn authenticated_popup_lock_or_root_unmap_ends_current_lease_without_new_input()
 #[test]
 fn authenticated_popup_periodic_real_presentation_does_not_renew_original_lease() {
     use crate::remote::client::PopupLifetimeFailureReason;
+    use crate::remote::protocol::ProtocolError;
     let Some(mut gl) = HeadlessSmithayGles::new() else {
         return;
     };
@@ -1637,11 +1638,51 @@ fn authenticated_popup_periodic_real_presentation_does_not_renew_original_lease(
     let error = host_result
         .unwrap()
         .expect_err("client deadline closes its authenticated transport");
+    // Client expiry closes both halves of TCP. The reader may publish EOF
+    // first, or a concurrent frame/status write may observe the same close.
+    // All positive TTL/fresh-presentation/cleanup evidence above is required
+    // before classifying this host-side transport result.
+    let transport_closed = |error: &(dyn std::error::Error + 'static)| {
+        if let Some(ProtocolError::Io(io)) = error.downcast_ref::<ProtocolError>() {
+            return matches!(
+                io.kind(),
+                std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset
+            );
+        }
+        error.downcast_ref::<std::io::Error>().is_some_and(|io| {
+            io.kind() == std::io::ErrorKind::InvalidData
+                && matches!(
+                    io.to_string().as_str(),
+                    "popup transport closed" | "popup reader ended"
+                )
+        })
+    };
+    for kind in [
+        std::io::ErrorKind::BrokenPipe,
+        std::io::ErrorKind::ConnectionReset,
+    ] {
+        assert!(transport_closed(&ProtocolError::Io(std::io::Error::from(
+            kind
+        ))));
+    }
+    for kind in [
+        std::io::ErrorKind::TimedOut,
+        std::io::ErrorKind::InvalidData,
+    ] {
+        assert!(!transport_closed(&ProtocolError::Io(std::io::Error::from(
+            kind
+        ))));
+    }
+    assert!(!transport_closed(&ProtocolError::AuthenticationFailed));
+    assert!(!transport_closed(&std::io::Error::other(
+        "popup reader ended"
+    )));
+    assert!(!transport_closed(&std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        "Stale"
+    )));
     assert!(
-        matches!(
-            error.to_string().as_str(),
-            "popup transport closed" | "popup reader ended"
-        ),
+        transport_closed(error.as_ref()),
         "unexpected host termination (especially Stale is not TTL): {error}"
     );
     assert_eq!(
