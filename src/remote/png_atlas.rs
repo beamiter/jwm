@@ -185,6 +185,9 @@ pub(super) fn decode_rgb8_into(
                 .try_reserve_exact(size.saturating_sub(output.len()))
                 .map_err(io::Error::other)?;
         }
+        // Preserve the previous fresh-buffer initialization behavior while
+        // reusing capacity. Codec output must never inherit prior pixel bytes.
+        output.clear();
         output.resize(size, 0);
         let info = reader.next_frame(output).map_err(io::Error::other)?;
         if info.width != width

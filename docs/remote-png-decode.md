@@ -8,7 +8,8 @@ The tile decoder now reuses its private RGB atlas buffer for PNG repair records.
 After the first allocation, equal or smaller PNG repairs reuse the allocation;
 a larger PNG grows it fallibly. A valid PNG following a larger JPEG discards
 scratch exceeding the 196,608-byte PNG bound, rather than retaining a full-frame
-JPEG allocation indefinitely. PNG decoder internals may still allocate. This
+JPEG allocation indefinitely. The destination is initialized on every attempt even when capacity is reused.
+PNG decoder internals may still allocate. This
 is not an allocation-free decoder or a total-process memory bound.
 
 Envelope CRC validation uses a fixed, compile-time 1 KiB IEEE CRC table instead

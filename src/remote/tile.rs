@@ -1450,6 +1450,8 @@ fn decode_atlas(
                     invalid_data("tile atlas byte length does not match its dimensions").into(),
                 );
             }
+            // Do not remove this initialization: the tolerant JPEG backend
+            // can report success after a partial scan without filling its tail.
             atlas.clear();
             atlas.resize(expected_len, 0);
             if let Err(error) = decoder.read_image(atlas) {
