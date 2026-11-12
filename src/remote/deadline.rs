@@ -9,7 +9,7 @@ use std::io;
 use std::net::{Shutdown, TcpStream};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub(crate) struct TcpStreamDeadline {
     cancelled: Arc<(Mutex<bool>, Condvar)>,
@@ -18,24 +18,17 @@ pub(crate) struct TcpStreamDeadline {
 
 impl TcpStreamDeadline {
     pub(crate) fn arm(stream: &TcpStream, timeout: Duration) -> io::Result<Self> {
+        // Include clone/spawn/worker scheduling time in this phase's budget.
+        let deadline = Instant::now().checked_add(timeout).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "TCP phase deadline overflow")
+        })?;
         let deadline_stream = stream.try_clone()?;
         let cancelled = Arc::new((Mutex::new(false), Condvar::new()));
         let worker_cancelled = Arc::clone(&cancelled);
         let worker = thread::Builder::new()
             .name("jwm-remote-stream-deadline".into())
             .spawn(move || {
-                let (lock, wake) = &*worker_cancelled;
-                let Ok(guard) = lock.lock() else {
-                    let _ = deadline_stream.shutdown(Shutdown::Both);
-                    return;
-                };
-                let Ok((cancelled, wait)) =
-                    wake.wait_timeout_while(guard, timeout, |cancelled| !*cancelled)
-                else {
-                    let _ = deadline_stream.shutdown(Shutdown::Both);
-                    return;
-                };
-                if !*cancelled && wait.timed_out() {
+                if wait_until_expired(&worker_cancelled, deadline) {
                     let _ = deadline_stream.shutdown(Shutdown::Both);
                 }
             })?;
@@ -53,6 +46,28 @@ impl TcpStreamDeadline {
         }
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
+        }
+    }
+}
+
+/// Use the original absolute deadline after startup delay or a spurious wake.
+/// Poisoning remains fail-closed, matching the socket guard's original policy.
+fn wait_until_expired(cancelled: &(Mutex<bool>, Condvar), deadline: Instant) -> bool {
+    let (lock, wake) = cancelled;
+    let Ok(mut guard) = lock.lock() else {
+        return true;
+    };
+    loop {
+        if *guard {
+            return false;
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return true;
+        }
+        match wake.wait_timeout(guard, remaining) {
+            Ok((next, _)) => guard = next,
+            Err(_) => return true,
         }
     }
 }
@@ -103,6 +118,59 @@ mod tests {
         thread::sleep(Duration::from_millis(80));
         peer.write_all(b"x").unwrap();
         let mut byte = [0_u8; 1];
+        stream.read_exact(&mut byte).unwrap();
+        assert_eq!(byte, *b"x");
+    }
+
+    #[test]
+    fn delayed_worker_uses_already_expired_absolute_deadline() {
+        let state = (Mutex::new(false), Condvar::new());
+        // Model a worker that first runs after the phase deadline. No sleep or
+        // scheduler timing is needed to establish this ordering.
+        let deadline = Instant::now() - Duration::from_secs(1);
+        assert!(wait_until_expired(&state, deadline));
+    }
+
+    #[test]
+    fn cancelled_delayed_worker_does_not_close_a_completed_phase() {
+        let state = (Mutex::new(true), Condvar::new());
+        assert!(!wait_until_expired(
+            &state,
+            Instant::now() - Duration::from_secs(1)
+        ));
+    }
+
+    #[test]
+    fn cancellation_wakes_a_long_deadline_without_waiting_for_expiry() {
+        let state = Arc::new((Mutex::new(false), Condvar::new()));
+        let worker_state = Arc::clone(&state);
+        let (send, receive) = std::sync::mpsc::channel();
+        let worker = thread::spawn(move || {
+            send.send(wait_until_expired(
+                &worker_state,
+                Instant::now() + Duration::from_secs(60),
+            ))
+            .unwrap();
+        });
+        let (lock, wake) = &*state;
+        *lock.lock().unwrap() = true;
+        wake.notify_all();
+        assert!(!receive.recv_timeout(Duration::from_secs(2)).unwrap());
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn overflowing_deadline_is_rejected_without_closing_socket() {
+        let (mut stream, mut peer) = loopback_pair();
+        assert!(matches!(
+            TcpStreamDeadline::arm(&stream, Duration::MAX),
+            Err(error) if error.kind() == io::ErrorKind::InvalidInput
+        ));
+        stream
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        peer.write_all(b"x").unwrap();
+        let mut byte = [0];
         stream.read_exact(&mut byte).unwrap();
         assert_eq!(byte, *b"x");
     }
