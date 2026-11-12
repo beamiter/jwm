@@ -159,3 +159,52 @@ fixture stage times and host encode counters before attributing latency to
 scheduling. Software GL, controlled presentation and loopback are still not a
 physical GPU/display, WAN or real two-computer benchmark. Two repetitions do not
 establish statistical significance or authorize production promotion.
+
+## Controlled display-credit pressure
+
+A separate fixed workload, `static_lossless_region_priority_credit_pressure_tcp_ab`,
+keeps the same source, 80 scheduled generations, six mirrored arms and observation
+windows. It holds each post-startup presentation callback for at least **150 ms**
+from first observation before readback and feedback. Source commits and both
+compositor event pumps continue during that hold. The initial common JPEG remains
+undelayed. This deliberately limits display-credit throughput below the source
+rate without conflating queue pressure with slow debug pixel validation. It is
+not a bandwidth cap, WAN simulation, physical refresh rate, or permission to
+bypass display credit. Readback/validation add their own measured costs afterward.
+
+The private report records `feedback_observed_ns`; the summarizer rejects any
+pressure frame whose readback began before the required hold elapsed. The public
+summary retains only the fixed delay and allowlisted aggregates. Existing
+zero-delay benchmark identities cannot be used to label this workload. The
+optimized CI job executes two complete pressure repetitions separately from its
+two zero-delay repetitions; all four summaries remain separate.
+
+The host's test-only probe also records actual mailbox decisions:
+
+- `followup_opportunities`: successful follow-up selections after normal credit.
+- `priority_deferrals`: selections of a queued newer capture instead of retained
+  repair, not merely a request to prefer latest.
+- `retained_followups`: selections of the retained repair.
+
+Closed/failed mailbox reads count nothing. The probe updates the three counters
+under one snapshot lock; opportunities equal deferrals plus retained selections
+before saturation. These are decisions, not counts of subsequently encoded,
+transmitted or presented frames. They do not claim queue depth or total capture
+replacements. Both full-session and last-active-window samples are retained;
+historical absent counters are unknown, not zero.
+
+Pressure can expose repair starvation. Therefore the pressure test preserves
+failed static convergence as a valid negative observation instead of aborting the
+measurement; transport, endpoint cleanup, full source-generation submission,
+source identity and no-exact-to-inexact regression remain mandatory correctness
+gates. The summary's existing acceptance assessment still requires every static
+gate before it can make a dynamic non-regression claim. No threshold is relaxed,
+no missing frame is converted into zero latency, and all existing zero-delay
+correctness gates remain unchanged. A green pressure CI run alone never enables
+RegionPriority in production.
+
+Run explicitly with the same environment and profiling command above, using
+`actual_static_lossless_region_priority_credit_pressure_measurement` and a private
+`JWM_REMOTE_REGION_PRESSURE_REPORT` path. Keep the build/no-debug-assertions guard
+and public-summary allowlist. Inspect deferrals together with repair convergence,
+missing generations, late frames and both candidate sessions, not only p95.

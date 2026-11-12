@@ -11,13 +11,17 @@ ARMS = ("new250", "region_deadline", "region_deadline", "new250")
 PRIORITY_BENCHMARK = "static_lossless_region_priority_continuous_tcp_ab"
 PRIORITY_ARMS = ("new250", "region_deadline", "region_priority",
                  "region_priority", "region_deadline", "new250")
-BENCHMARK_ARMS = {BENCHMARK: ARMS, PRIORITY_BENCHMARK: PRIORITY_ARMS}
+PRESSURE_BENCHMARK = "static_lossless_region_priority_credit_pressure_tcp_ab"
+FEEDBACK_DELAY_NS = 150_000_000
+BENCHMARK_ARMS = {BENCHMARK: ARMS, PRIORITY_BENCHMARK: PRIORITY_ARMS,
+                  PRESSURE_BENCHMARK: PRIORITY_ARMS}
+QUEUE_COUNTERS = ("followup_opportunities", "priority_deferrals", "retained_followups")
 GENERATIONS = 80
 PERIOD_NS = 100_000_000
 WINDOW_NS = 8_000_000_000
 MAX_REPORT_BYTES = 16 * 1024 * 1024
 COUNTERS = ("encoded_jpeg", "encoded_png", "encode_ns", "jpeg_ns", "png_ns",
-            "sent_bytes", "comparisons", "comparison_ns", "stale_png_dropped")
+            "sent_bytes", "comparisons", "comparison_ns", "stale_png_dropped") + QUEUE_COUNTERS
 
 
 def integer(value, label):
@@ -62,7 +66,14 @@ def counters(value):
         return None
     if not isinstance(value, dict):
         raise ValueError("host counters must be an object")
-    return {key: integer(value[key], key) for key in COUNTERS if key in value}
+    result = {key: integer(value[key], key) for key in COUNTERS if key in value}
+    present = [key in result for key in QUEUE_COUNTERS]
+    if any(present):
+        if not all(present):
+            raise ValueError("partial queue counters")
+        if result["followup_opportunities"] != result["priority_deferrals"] + result["retained_followups"]:
+            raise ValueError("queue decision counters do not balance")
+    return result
 
 
 def build_mode(report, require_no_debug_assertions=False):
@@ -82,6 +93,10 @@ def summarize(report):
     if benchmark not in BENCHMARK_ARMS:
         raise ValueError("wrong benchmark")
     arms = BENCHMARK_ARMS[benchmark]
+    pressure = benchmark == PRESSURE_BENCHMARK
+    delay = integer(report.get("presentation_feedback_delay_ns", 0), "presentation_feedback_delay_ns")
+    if delay != (FEEDBACK_DELAY_NS if pressure else 0):
+        raise ValueError("unexpected fixed presentation feedback delay")
     for key, expected in (("scheduled_interval_ns", PERIOD_NS), ("active_window_ns", WINDOW_NS),
                           ("generation_budget", GENERATIONS), ("drain_ns", 1_000_000_000),
                           ("width", 800), ("height", 600), ("dynamic_region_width", 32),
@@ -100,6 +115,17 @@ def summarize(report):
         orders.add(order)
         if type(session.get("success")) is not bool:
             raise ValueError("success must be boolean")
+        total_counters = counters(session.get("host_stats"))
+        active_counters = counters(session.get("active_window_host_stats"))
+        for stats in (total_counters, active_counters):
+            if pressure and session["success"] and (stats is None or any(key not in stats for key in QUEUE_COUNTERS)):
+                raise ValueError("successful pressure session requires queue counters")
+            if stats is not None and session["arm"] != "region_priority" and stats.get("priority_deferrals", 0):
+                raise ValueError("non-priority arm reported priority deferrals")
+        if total_counters is not None and active_counters is not None:
+            for key in QUEUE_COUNTERS:
+                if key in total_counters and key in active_counters and active_counters[key] > total_counters[key]:
+                    raise ValueError("active queue counter exceeds session total")
         markers, frames = session.get("markers"), session.get("frames")
         if not isinstance(markers, list) or len(markers) > GENERATIONS:
             raise ValueError("marker budget exceeded")
@@ -143,6 +169,10 @@ def summarize(report):
             error = integer(frame.get("static_sse"), "static_sse")
             times = [integer(frame.get(key), key) for key in ("gl_started_ns", "gl_completed_ns",
                      "validation_completed_ns", "feedback_started_ns", "feedback_sent_ns")]
+            if pressure:
+                observed = integer(frame.get("feedback_observed_ns"), "feedback_observed_ns")
+                if times[0] < observed + delay:
+                    raise ValueError("pressure frame lacks the fixed feedback hold")
             if times != sorted(times):
                 raise ValueError("fixture stages moved backwards")
             at = frame.get("presented_ns")
@@ -227,15 +257,45 @@ def summarize(report):
                         "decoded_png_frames": png, "within_window_presented_png_frames": presented_png,
                         "decoded_frames": len(frames), "unknown_marker_frames": unknown,
                         "unscheduled_marker_frames": unscheduled,
-                        "aggregate_host_counters": counters(session.get("host_stats")),
-                        "active_window_host_counters": counters(session.get("active_window_host_stats")),
+                        "aggregate_host_counters": total_counters,
+                        "active_window_host_counters": active_counters,
                         "samples": samples})
-    return {"schema_version": 1, "benchmark": benchmark, "debug_assertions": build_mode(report), "planned_sessions": len(arms),
+    return {"schema_version": 1, "benchmark": benchmark, "debug_assertions": build_mode(report),
+            "presentation_feedback_delay_ns": delay, "planned_sessions": len(arms),
             "planned_generation_budget": len(arms) * GENERATIONS, "reported_sessions": len(results),
             "unreported_session_generation_budget": (len(arms) - len(results)) * GENERATIONS,
             "scope": "100ms deadlines; active window <=8s, later presentations are cleanup only; quantiles include observed samples only and missing counts retain all 80 planned generations; static equality excludes exactly 32x16 animation pixels; source commit means issued; host payload includes source envelope, excludes Noise/TCP; encode counts include discarded attempts; host counters include common startup and active counters are last sampled <=8s",
             "dynamic_non_regression": dynamic_assessment(results, arms),
+            "pressure_exercised": pressure_assessment(results) if pressure else None,
             "sessions": results}
+
+
+
+def pressure_assessment(sessions):
+    """Actual selected-latest decisions, not inferred from injected feedback delay."""
+    candidates = sorted((s for s in sessions if s["arm"] == "region_priority"), key=lambda s: s["order"])
+    result = {"status": "no_claim", "reason": "incomplete_or_failed_sessions",
+              "scope": "Both candidate sessions must select a queued latest capture instead of a retained followup within the active window; this does not prove encode/send/presentation or dynamic non-regression.",
+              "candidate_observations": [{"order": s["order"], "active_priority_deferrals":
+                  (s["active_window_host_counters"] or {}).get("priority_deferrals")} for s in candidates]}
+    if len(sessions) != len(PRIORITY_ARMS) or len(candidates) != 2 or any(not s["success"] for s in sessions):
+        return result
+    counts = [row["active_priority_deferrals"] for row in result["candidate_observations"]]
+    if any(count is None for count in counts):
+        result["reason"] = "missing_active_counters"
+    elif all(count > 0 for count in counts):
+        result.update(status="observed_priority_deferrals", reason="both_candidates_selected_queued_latest")
+    else:
+        result.update(status="not_established", reason="at_least_one_candidate_without_active_deferral")
+    return result
+
+
+def public_pressure_assessment(assessment):
+    if assessment is None:
+        return None
+    return {**{key: assessment[key] for key in ("status", "reason", "scope")},
+            "candidate_observations": [{key: row[key] for key in ("order", "active_priority_deferrals")}
+                                       for row in assessment["candidate_observations"]]}
 
 
 def dynamic_metrics(session):
@@ -308,10 +368,14 @@ def public_summary(summary):
                "static_criterion", "no_exact_to_inexact_regression", "decoded_png_frames",
                "within_window_presented_png_frames", "decoded_frames", "unknown_marker_frames", "unscheduled_marker_frames",
                "aggregate_host_counters", "active_window_host_counters")
-    result = {key: summary[key] for key in ("schema_version", "benchmark", "debug_assertions", "planned_sessions",
+    result = {key: summary[key] for key in ("schema_version", "benchmark", "debug_assertions", "presentation_feedback_delay_ns", "planned_sessions",
               "planned_generation_budget", "reported_sessions", "unreported_session_generation_budget", "scope")}
     result["dynamic_non_regression"] = public_dynamic_assessment(summary["dynamic_non_regression"])
+    result["pressure_exercised"] = public_pressure_assessment(summary["pressure_exercised"])
     result["sessions"] = [{key: session[key] for key in allowed} for session in summary["sessions"]]
+    for session in result["sessions"]:
+        for key in ("aggregate_host_counters", "active_window_host_counters"):
+            session[key] = counters(session[key])
     return result
 
 
@@ -429,8 +493,17 @@ def self_test():
     for benchmark, arms in BENCHMARK_ARMS.items():
         valid = copy.deepcopy(report)
         valid["benchmark"] = benchmark
+        if benchmark == PRESSURE_BENCHMARK:
+            valid["presentation_feedback_delay_ns"] = FEEDBACK_DELAY_NS
         valid["sessions"] = [dict(copy.deepcopy(session), arm=arm, order=order)
                              for order, arm in enumerate(arms)]
+        if benchmark == PRESSURE_BENCHMARK:
+            for pressure_session in valid["sessions"]:
+                for pressure_frame in pressure_session["frames"]:
+                    pressure_frame["feedback_observed_ns"] = 0
+                    for key in ("gl_started_ns", "gl_completed_ns", "validation_completed_ns",
+                                "feedback_started_ns", "feedback_sent_ns"):
+                        pressure_frame[key] += FEEDBACK_DELAY_NS
         assert summarize(valid)["planned_sessions"] == len(arms)
         bad_reports = []
         wrong_arm = copy.deepcopy(valid)
@@ -452,6 +525,97 @@ def self_test():
                 pass
             else:
                 raise AssertionError("wrong arm/order schema accepted")
+    pressure = copy.deepcopy(priority)
+    pressure["benchmark"] = PRESSURE_BENCHMARK
+    pressure["presentation_feedback_delay_ns"] = FEEDBACK_DELAY_NS
+    for row in pressure["sessions"]:
+        row["host_stats"] = {"followup_opportunities": 7, "priority_deferrals": 2 if row["arm"] == "region_priority" else 0,
+                             "retained_followups": 5 if row["arm"] == "region_priority" else 7,
+                             "private_trace": "do not publish"}
+        row["active_window_host_stats"] = {"followup_opportunities": 3, "priority_deferrals": 1 if row["arm"] == "region_priority" else 0,
+                                           "retained_followups": 2 if row["arm"] == "region_priority" else 3}
+        for observed_frame in row["frames"]:
+            observed_frame["feedback_observed_ns"] = 0
+            for key in ("gl_started_ns", "gl_completed_ns", "validation_completed_ns",
+                        "feedback_started_ns", "feedback_sent_ns"):
+                observed_frame[key] += FEEDBACK_DELAY_NS
+    pressure_summary = summarize(pressure)
+    public = public_summary(pressure_summary)
+    assert public["presentation_feedback_delay_ns"] == FEEDBACK_DELAY_NS
+    assert public["sessions"][2]["aggregate_host_counters"]["priority_deferrals"] == 2
+    assert public["dynamic_non_regression"]["status"] == "no_claim"
+    assert "feedback_observed_ns" not in json.dumps(public)
+    assert "do not publish" not in json.dumps(public)
+    assert "followup_opportunities" not in (summarize(report)["sessions"][0]["aggregate_host_counters"] or {})
+    assert public["pressure_exercised"]["status"] == "no_claim"
+    assert public_summary(summarize(report))["pressure_exercised"] is None
+    pressure_rows = copy.deepcopy(pressure_summary["sessions"])
+    for row in pressure_rows:
+        row["success"] = True
+    exercised = pressure_assessment(pressure_rows)
+    assert exercised["status"] == "observed_priority_deferrals"
+    assert pressure_assessment(pressure_rows[:-1])["status"] == "no_claim"
+    for order in (2, 3):
+        changed = copy.deepcopy(pressure_rows)
+        changed[order]["active_window_host_counters"]["priority_deferrals"] = 0
+        assert pressure_assessment(changed)["status"] == "not_established"
+        changed[order]["active_window_host_counters"] = None
+        assert pressure_assessment(changed)["reason"] == "missing_active_counters"
+        changed[order]["success"] = False
+        assert pressure_assessment(changed)["status"] == "no_claim"
+    exercised["private_trace"] = "do not publish"
+    exercised["candidate_observations"][0]["private_trace"] = "do not publish"
+    assert "do not publish" not in json.dumps(public_pressure_assessment(exercised))
+    bad_pressure_reports = []
+    for delay in (None, True, -1, 0, FEEDBACK_DELAY_NS - 1, FEEDBACK_DELAY_NS + 1):
+        bad = copy.deepcopy(pressure)
+        bad["presentation_feedback_delay_ns"] = delay
+        bad_pressure_reports.append(bad)
+    bad = copy.deepcopy(pressure)
+    del bad["presentation_feedback_delay_ns"]
+    bad_pressure_reports.append(bad)
+    for observed in (None, True, -1, 31):  # first GL readback is delay + 30 ns
+        bad = copy.deepcopy(pressure)
+        bad["sessions"][0]["frames"][0]["feedback_observed_ns"] = observed
+        bad_pressure_reports.append(bad)
+    bad = copy.deepcopy(pressure)
+    del bad["sessions"][0]["frames"][0]["feedback_observed_ns"]
+    bad_pressure_reports.append(bad)
+    bad = copy.deepcopy(priority)
+    bad["presentation_feedback_delay_ns"] = FEEDBACK_DELAY_NS
+    bad_pressure_reports.append(bad)
+    for key in QUEUE_COUNTERS:
+        for value in (None, True, -1, 2**63):
+            bad = copy.deepcopy(pressure)
+            bad["sessions"][2]["host_stats"][key] = value
+            bad_pressure_reports.append(bad)
+        bad = copy.deepcopy(pressure)
+        del bad["sessions"][2]["host_stats"][key]
+        bad_pressure_reports.append(bad)
+    bad = copy.deepcopy(pressure)
+    bad["sessions"][2]["host_stats"]["followup_opportunities"] += 1
+    bad_pressure_reports.append(bad)
+    bad = copy.deepcopy(pressure)
+    bad["sessions"][0]["host_stats"].update(priority_deferrals=1, retained_followups=6)
+    bad_pressure_reports.append(bad)
+    bad = copy.deepcopy(pressure)
+    bad["sessions"][2]["active_window_host_stats"].update(followup_opportunities=8, retained_followups=7)
+    bad_pressure_reports.append(bad)
+    for field in ("host_stats", "active_window_host_stats"):
+        bad = copy.deepcopy(pressure)
+        bad["sessions"][0]["success"] = True
+        bad["sessions"][0][field] = None
+        bad_pressure_reports.append(bad)
+    for bad in bad_pressure_reports:
+        try:
+            summarize(bad)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("invalid pressure evidence accepted")
+    pressure_summary["sessions"][0]["aggregate_host_counters"]["private_trace"] = "do not publish"
+    assert "do not publish" not in json.dumps(public_summary(pressure_summary))
+
     wrong_benchmark = copy.deepcopy(priority)
     wrong_benchmark["benchmark"] = BENCHMARK
     try:

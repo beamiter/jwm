@@ -7,6 +7,7 @@ use sha2::{Digest, Sha256};
 const CONTINUOUS_GENERATIONS: usize = 80;
 const CONTINUOUS_PERIOD_MS: u64 = 100;
 const CONTINUOUS_WINDOW_NS: u64 = 8_000_000_000;
+const PRESSURE_FEEDBACK_DELAY: Duration = Duration::from_millis(150);
 const CONTINUOUS_MARKER_BITS: usize = 8;
 
 fn marker_pixels(generation: usize) -> Vec<u8> {
@@ -108,7 +109,24 @@ fn host_stats(probe: &host::LosslessScheduleProbe) -> Value {
     let s = probe.snapshot();
     json!({"encoded_jpeg":s.encoded_jpeg,"encoded_png":s.encoded_png,"encode_ns":s.encode_ns,
         "jpeg_ns":s.jpeg_ns,"png_ns":s.png_ns,"sent_bytes":s.sent_bytes,"comparisons":s.comparisons,
-        "comparison_ns":s.comparison_ns,"stale_png_dropped":s.stale_png_dropped})
+        "comparison_ns":s.comparison_ns,"stale_png_dropped":s.stale_png_dropped,
+        "followup_opportunities":s.followup_opportunities,"priority_deferrals":s.priority_deferrals,
+        "retained_followups":s.retained_followups})
+}
+#[test]
+fn region_priority_report_includes_actual_decision_counters() {
+    let stats = host_stats(&host::LosslessScheduleProbe::default());
+    for field in [
+        "followup_opportunities",
+        "priority_deferrals",
+        "retained_followups",
+    ] {
+        assert_eq!(
+            stats[field].as_u64(),
+            Some(0),
+            "missing decision counter: {field}"
+        );
+    }
 }
 fn update_presented(report: &mut Value, base: Instant, ledger: &[(u64, Instant)]) {
     for frame in report["frames"].as_array_mut().unwrap() {
@@ -119,9 +137,9 @@ fn update_presented(report: &mut Value, base: Instant, ledger: &[(u64, Instant)]
     }
 }
 fn run_session(arm: &str, report: &mut Value) {
-    run_session_workload(arm, report, false);
+    run_session_workload(arm, report, false, Duration::ZERO);
 }
-fn run_session_workload(arm: &str, report: &mut Value, continuous: bool) {
+fn run_session_workload(arm: &str, report: &mut Value, continuous: bool, feedback_delay: Duration) {
     let enabled = arm != "off";
     let policy = match arm {
         "legacy" => host::LosslessSchedule::Legacy100,
@@ -311,6 +329,7 @@ fn run_session_workload(arm: &str, report: &mut Value, continuous: bool) {
     );
     let base = Instant::now();
     let mut next = 0usize;
+    let mut feedback_observed = None;
     let end = base + Duration::from_secs(9); // eight seconds scheduled work + one bounded drain
     while Instant::now() < end {
         while next < generations
@@ -327,7 +346,13 @@ fn run_session_workload(arm: &str, report: &mut Value, continuous: bool) {
         if let Some(top) = local.state.toplevels.values().next() {
             feedback.extend(take_feedback(top.wl_surface()));
         }
+        // Hold display credit without blocking source commits or compositor pumping.
+        // This models delayed presentation feedback, not bandwidth or WAN latency.
+        if !feedback.is_empty() && feedback_observed.is_none() {
+            feedback_observed = Some(Instant::now());
+        }
         if !feedback.is_empty()
+            && feedback_observed.is_some_and(|at| at.elapsed() >= feedback_delay)
             && frames
                 .lock()
                 .unwrap()
@@ -364,6 +389,7 @@ fn run_session_workload(arm: &str, report: &mut Value, continuous: bool) {
             let rows = report["frames"].as_array_mut().unwrap();
             assert!(rows.len() < 512);
             rows.push(json!({"sequence":seq,"is_png":png,"marker_generation":generation,
+                "feedback_observed_ns":elapsed_ns(base,feedback_observed.take().unwrap()),
                 "gl_started_ns":elapsed_ns(base,gl_started),"gl_completed_ns":elapsed_ns(base,gl_completed),
                 "validation_completed_ns":elapsed_ns(base,validated),"feedback_started_ns":elapsed_ns(base,feedback_started),"feedback_sent_ns":elapsed_ns(base,feedback_sent),
                 "presented_ns":null,"static_sse":error}));
@@ -603,6 +629,7 @@ fn actual_static_lossless_region_deadline_continuous_measurement() {
         &["new250", "region_deadline", "region_deadline", "new250"],
         "static_lossless_region_deadline_continuous_tcp_ab",
         "JWM_REMOTE_REGION_DEADLINE_REPORT",
+        Duration::ZERO,
     );
 }
 
@@ -620,13 +647,38 @@ fn actual_static_lossless_region_priority_continuous_measurement() {
         ],
         "static_lossless_region_priority_continuous_tcp_ab",
         "JWM_REMOTE_REGION_PRIORITY_REPORT",
+        Duration::ZERO,
     );
 }
 
-fn run_continuous_measurement(order: &[&str], benchmark: &str, report_variable: &str) {
+#[test]
+#[ignore = "explicit private delayed display-credit pressure experiment using real TCP/GL"]
+fn actual_static_lossless_region_priority_credit_pressure_measurement() {
+    run_continuous_measurement(
+        &[
+            "new250",
+            "region_deadline",
+            "region_priority",
+            "region_priority",
+            "region_deadline",
+            "new250",
+        ],
+        "static_lossless_region_priority_credit_pressure_tcp_ab",
+        "JWM_REMOTE_REGION_PRESSURE_REPORT",
+        PRESSURE_FEEDBACK_DELAY,
+    );
+}
+
+fn run_continuous_measurement(
+    order: &[&str],
+    benchmark: &str,
+    report_variable: &str,
+    feedback_delay: Duration,
+) {
     let mut report = json!({"schema_version":1,
         "benchmark":benchmark,
         "debug_assertions":cfg!(debug_assertions),
+        "presentation_feedback_delay_ns":u64::try_from(feedback_delay.as_nanos()).unwrap(),
         "scope":"same-process synthetic owned displays and controlled software GL presentation; not physical display latency",
         "scheduled_interval_ns":CONTINUOUS_PERIOD_MS*1_000_000,
         "generation_budget":CONTINUOUS_GENERATIONS,"active_window_ns":CONTINUOUS_WINDOW_NS,
@@ -640,11 +692,21 @@ fn run_continuous_measurement(order: &[&str], benchmark: &str, report_variable: 
             "markers":[],"frames":[],"host_stats":null,"active_window_host_stats":null,
             "host_records":[],"acceptance":null});
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            run_session_workload(arm, &mut session, true);
-            assert!(
-                continuous_acceptance(&mut session),
-                "continuous static starvation/convergence or regression criterion failed"
-            );
+            run_session_workload(arm, &mut session, true, feedback_delay);
+            let accepted = continuous_acceptance(&mut session);
+            if feedback_delay.is_zero() {
+                assert!(
+                    accepted,
+                    "continuous static starvation/convergence or regression criterion failed"
+                );
+            } else {
+                // Pressure can prevent convergence: retain that negative result rather
+                // than confusing policy acceptance with measurement infrastructure.
+                assert_eq!(
+                    session["acceptance"]["no_exact_to_inexact_regression"],
+                    true
+                );
+            }
         }));
         if let Err(error) = result {
             failed = true;

@@ -591,6 +591,9 @@ pub(crate) struct LosslessScheduleStats {
     pub comparisons: u64,
     pub comparison_ns: u128,
     pub stale_png_dropped: u64,
+    pub followup_opportunities: u64,
+    pub priority_deferrals: u64,
+    pub retained_followups: u64,
 }
 #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
 #[derive(Default)]
@@ -612,6 +615,18 @@ pub(crate) struct LosslessScheduleRecord {
 }
 #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
 impl LosslessScheduleProbe {
+    // A mailbox selection, not proof of later encoding, transport or presentation.
+    // Update all three bounded counters under the snapshot lock so readers cannot
+    // observe a half-recorded decision. Closure/failed mailbox reads count nothing.
+    fn record_followup(&self, retained: bool) {
+        let mut stats = self.stats.lock().unwrap();
+        stats.followup_opportunities = stats.followup_opportunities.saturating_add(1);
+        if retained {
+            stats.retained_followups = stats.retained_followups.saturating_add(1);
+        } else {
+            stats.priority_deferrals = stats.priority_deferrals.saturating_add(1);
+        }
+    }
     pub(crate) fn records(&self) -> Vec<LosslessScheduleRecord> {
         self.records.lock().unwrap().clone()
     }
@@ -1283,6 +1298,22 @@ impl<T> LatestMailbox<T> {
             return Ok((Some(latest), false));
         }
         Ok((Some(fallback), true))
+    }
+
+    #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+    fn receive_followup_observed(
+        &self,
+        fallback: T,
+        prefer_latest: bool,
+        probe: Option<&LosslessScheduleProbe>,
+    ) -> io::Result<(Option<T>, bool)> {
+        let result = self.receive_followup(fallback, prefer_latest)?;
+        if result.0.is_some()
+            && let Some(probe) = probe
+        {
+            probe.record_followup(result.1);
+        }
+        Ok(result)
     }
 
     fn inspect_latest(&self, inspect: impl FnOnce(Option<&T>) -> bool) -> io::Result<bool> {
@@ -4870,10 +4901,20 @@ fn send_frames_with_encoder_scoped<W: std::io::Write + SetWriteTimeout>(
         };
         #[cfg(test)]
         let (next, is_region_followup) = match region_followup.take() {
-            Some(pending) => mailbox.receive_followup(
-                pending,
-                sender.lossless_schedule == LosslessSchedule::RegionPriority,
-            )?,
+            Some(pending) => {
+                let prefer_latest = sender.lossless_schedule == LosslessSchedule::RegionPriority;
+                #[cfg(all(feature = "remote-wayland", feature = "backend-wayland-udev"))]
+                let result = mailbox.receive_followup_observed(
+                    pending,
+                    prefer_latest,
+                    sources
+                        .and_then(|s| s.lossless_schedule_test.as_ref())
+                        .map(|(_, probe)| probe.as_ref()),
+                )?;
+                #[cfg(not(all(feature = "remote-wayland", feature = "backend-wayland-udev")))]
+                let result = mailbox.receive_followup(pending, prefer_latest)?;
+                result
+            }
             None => (mailbox.receive()?, false),
         };
         #[cfg(not(test))]
@@ -6609,6 +6650,59 @@ mod tests {
         assert_eq!(mailbox.receive().unwrap(), Some(4));
         mailbox.close();
         assert_eq!(mailbox.receive_followup(1, true).unwrap(), (None, false));
+    }
+
+    #[test]
+    #[cfg(all(feature = "remote-wayland", feature = "backend-wayland-udev"))]
+    fn region_priority_probe_counts_only_actual_mailbox_selections() {
+        let mailbox = LatestMailbox::new();
+        let probe = LosslessScheduleProbe::default();
+        assert_eq!(
+            mailbox
+                .receive_followup_observed(1, true, Some(&probe))
+                .unwrap(),
+            (Some(1), true)
+        );
+        mailbox.publish(2).unwrap();
+        mailbox.publish(3).unwrap();
+        assert_eq!(
+            mailbox
+                .receive_followup_observed(1, true, Some(&probe))
+                .unwrap(),
+            (Some(3), false)
+        );
+        mailbox.publish(4).unwrap();
+        assert_eq!(
+            mailbox
+                .receive_followup_observed(1, false, Some(&probe))
+                .unwrap(),
+            (Some(1), true)
+        );
+        assert_eq!(mailbox.receive().unwrap(), Some(4));
+        mailbox.close();
+        assert_eq!(
+            mailbox
+                .receive_followup_observed(1, true, Some(&probe))
+                .unwrap(),
+            (None, false)
+        );
+        let stats = probe.snapshot();
+        assert_eq!(stats.followup_opportunities, 3);
+        assert_eq!(stats.priority_deferrals, 1);
+        assert_eq!(stats.retained_followups, 2);
+        // Overflow cannot wrap a long-running observer back to zero.
+        {
+            let mut stats = probe.stats.lock().unwrap();
+            stats.followup_opportunities = u64::MAX;
+            stats.priority_deferrals = u64::MAX;
+            stats.retained_followups = u64::MAX;
+        }
+        probe.record_followup(false);
+        probe.record_followup(true);
+        let stats = probe.snapshot();
+        assert_eq!(stats.followup_opportunities, u64::MAX);
+        assert_eq!(stats.priority_deferrals, u64::MAX);
+        assert_eq!(stats.retained_followups, u64::MAX);
     }
 
     #[test]
