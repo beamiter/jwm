@@ -27,6 +27,7 @@ struct Snapshot {
 }
 enum Command {
     Draw(u64),
+    DrawFrame(Box<RecyclableDecodedFrame>),
     Poll,
     InvalidateSource,
     Stop,
@@ -83,6 +84,9 @@ impl Peer {
                                     new_decode_buffer_pool(),
                                 );
                                 tx.send(Reply::Drawn(viewer.draw_recyclable(frame)?))?;
+                            }
+                            Command::DrawFrame(frame) => {
+                                tx.send(Reply::Drawn(viewer.draw_recyclable(*frame)?))?;
                             }
                             Command::Poll => {
                                 let events = viewer.poll_events()?;
@@ -1039,3 +1043,6 @@ mod host_lossless_integration;
 
 #[path = "wayland_popup_action_integration.rs"]
 mod popup_action_integration;
+
+#[path = "wayland_viewer_damage_integration.rs"]
+mod damage_integration;

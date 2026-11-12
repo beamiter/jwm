@@ -2,7 +2,7 @@ name: Remote Wayland source safety
 
 on:
   push:
-    branches: [master, dot/remote-window-plan, dot/remote-readback-snapshot, dot/remote-popup-v2, dot/remote-popup-adapter, dot/remote-popup-action, dot/remote-popup-network, dot/remote-popup-cancel, dot/remote-popup-terminal]
+    branches: [master, dot/remote-window-plan, dot/remote-readback-snapshot, dot/remote-popup-v2, dot/remote-popup-adapter, dot/remote-popup-action, dot/remote-popup-network, dot/remote-popup-cancel, dot/remote-popup-terminal, dot/remote-viewer-damage]
   workflow_dispatch:
 
 permissions:
@@ -41,6 +41,34 @@ jobs:
         run: |
           cargo fmt --all -- --check
           cargo clippy --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib --bin jwm-remote --tests --no-deps -- -D warnings
+      - name: Native viewer damage mapping and upload regressions
+        run: |
+          set -euo pipefail
+          for filter in 'remote::wayland_viewer::damage::tests::' 'remote::wayland_viewer::upload_tests::'; do
+            listed="$(cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --list)"
+            test "$(printf '%s\n' "$listed" | grep -c ': test$')" -eq 7
+            ignored="$(cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --ignored --list)"
+            test "$(printf '%s\n' "$ignored" | grep -c ': test$' || true)" -eq 0
+            cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --test-threads=1
+          done
+      - name: Cumulative native viewer damage and held SHM pixels
+        run: |
+          set -euo pipefail
+          export XDG_RUNTIME_DIR="$(mktemp -d)"
+          trap 'rm -rf "$XDG_RUNTIME_DIR"' EXIT
+          filter='remote::host::wayland_viewer_integration::damage_integration::'
+          listed="$(env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --list)"
+          test "$(printf '%s\n' "$listed" | grep -c ': test$')" -eq 1
+          ignored="$(env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --ignored --list)"
+          test "$(printf '%s\n' "$ignored" | grep -c ': test$' || true)" -eq 0
+          env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --test-threads=1 --nocapture
+      - name: Native viewer sparse memfd upload evidence
+        run: |
+          set -euo pipefail
+          filter='remote::wayland_viewer::damage_benchmark::native_memfd_sparse_damage_matches_full_canvas_and_counts_writes'
+          listed="$(cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --ignored --exact --list)"
+          test "$(printf '%s\n' "$listed" | grep -c ': test$')" -eq 1
+          cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --ignored --exact --test-threads=1 --nocapture
       - name: Compile nested Wayland input revocation paths
         run: cargo check --locked --no-default-features --features remote-wayland,backend-wayland-nested --lib
       - name: KMS contracts, presentation ownership and VT generation regressions
@@ -293,7 +321,7 @@ jobs:
           export XDG_RUNTIME_DIR="$(mktemp -d)"
           filter='remote::host::wayland_viewer_integration::host_popup_integration::lossless_family_integration::'
           listed="$(env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --list)"
-          test "$(printf '%s\n' "$listed" | grep -c ': test$')" -eq 3
+          test "$(printf '%s\n' "$listed" | grep -c ': test$')" -eq 4
           env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --test-threads=1 --nocapture
       - name: One-shot text native protocol, exact context and revocation
         run: |

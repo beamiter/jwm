@@ -43,14 +43,32 @@ also fail closed; uninterrupted resize is not promised in this first slice.
 
 SHM storage uses a bounded pool of at most two slots. Once the compositor
 releases a buffer, its storage can be reused for a later frame of the same size
-instead of creating a new memfd and protocol buffer for every frame. Each reuse
-still rewrites the entire image, including letterboxing: this is allocation
-reuse, not incremental upload or zero-copy presentation. Conversion writes
-multiple complete rows per chunk using one reusable 256 KiB scratch buffer,
-rather than allocating a row and writing each row separately. The scratch is
-additional bounded CPU memory, not part of the 128 MiB SHM-slot budget. The
-pixel sampling and letterboxing are unchanged, and the complete upload must
-succeed before the buffer is attached and committed.
+instead of creating a new memfd and protocol buffer for every frame. The viewer
+retains its last submitted RGB canvas and tile snapshot. New tile snapshots
+patch that canvas against the actual submitted predecessor, so frames skipped
+by the latest-only mailbox cannot lose changes. JPEG frames or damage with an
+unknown predecessor use a complete upload.
+
+Each slot independently accumulates destination damage until its next upload,
+including while busy. A released slot is patched with every change since its
+last upload, not just the latest frame's rectangle. At most eight rectangles
+are retained per slot; fragmented or large updates conservatively merge or
+become a full-frame update. Nearest-neighbor scaling maps both rectangle edges
+with ceiling division, including odd-size scaling and source pixels that are
+not sampled at all. Only changed destination spans are converted and written.
+New storage, changed source geometry or local configure generations rebuild
+the complete image and black letterboxing. Resize-and-restore also invalidates
+the baseline. Source switching still fails closed as described above. Wayland
+has no X11-style Expose redraw request: the compositor retains surface content.
+
+Conversion reuses one 256 KiB scratch buffer. Full-width updates batch complete
+rows; partial-width spans seek and write only their own bytes. The scratch and
+retained decoded canvas are additional CPU memory, outside the 128 MiB SHM-slot
+budget. This is incremental CPU upload, not zero-copy presentation. A validated
+unchanged frame needs no SHM writes, but still attaches its buffer, damages the
+surface and requests fresh presentation feedback. This preserves keepalive and
+native input-proof rendering; no ACK is inferred from unchanged pixels. Every
+required upload must succeed before the buffer is attached and committed.
 
 Idle and busy slots both count toward the 128 MiB aggregate ceiling, including
 buffers still held from an earlier size. Each buffer also has checked width,
@@ -93,9 +111,25 @@ not replace that audit or a real hardware acceptance run.
 
 ## Offline upload measurement
 
+The deterministic incremental-upload tests compare patched storage against an
+independent complete-image reference across odd upscales, downscales and black
+bars. They also check alternating/held-slot damage accumulation, bounded region
+counts, untouched neighboring bytes, zero-write keepalives and I/O failures:
+
+```sh
+cargo test --locked --no-default-features --features remote-wayland \
+  --lib remote::wayland_viewer::damage::tests::
+```
+
+A counted 3x2 patch in a 100x80 destination writes 24 bytes in two spans, versus
+32,000 bytes for a complete upload. This is a deterministic byte/write-count
+check, not a runtime speedup claim. Partial-width patches use one seek/write per
+affected row; broad damage can have different syscall costs from a full upload.
+
 An opt-in test calls the production chunked upload helper and the historical
 row-at-a-time reference against separate owned memfds. It opens no display or
-socket and adds no runtime viewer option:
+socket and adds no runtime viewer option. This measures the full-upload fallback,
+not incremental patch performance:
 
 ```sh
 cargo test --locked --no-default-features --features remote-wayland \
@@ -184,3 +218,35 @@ native pointer/control protocol version 3. See the [source-side permission and
 single-axis contract](remote-wayland-source.md#independently-authorized-horizontal-wheel-v23).
 This does not enable smooth scrolling, mixed-axis gestures, modifier-wheel,
 dragging or input replay while waiting for fresh pixels.
+
+
+## Incremental upload evidence
+
+The Wayland safety job explicitly runs all seven bounded damage-helper tests,
+all seven full-upload/baseline tests, and the owned compositor regression
+`actual_wayland_viewer_accumulates_skipped_tile_damage_across_held_slots`.
+The latter skips a decoded tile snapshot, alternates two held SHM slots,
+checks both complete SHM canvases and actual software-GL pixels, and verifies
+that release/frame callbacks still cannot acknowledge a new submission.
+
+A separate ignored test is explicitly enabled by that job:
+
+```sh
+cargo test --locked --no-default-features \
+  --features remote-wayland,backend-wayland-udev --lib \
+  remote::wayland_viewer::damage_benchmark::native_memfd_sparse_damage_matches_full_canvas_and_counts_writes \
+  -- --ignored --exact --test-threads=1 --nocapture
+```
+
+It compares full conversion with 64×64-source-region patches using real owned
+memfds at native 2560×1440, scaled 1280×720→1920×1080, and letterboxed
+800×600→1920×1080. Six samples per case alternate measurement order. Every
+patch must match the complete full-upload bytes, write exactly the mapped
+region's bytes, and write fewer than one sixteenth of the full canvas. The
+unchanged-image case must perform zero seeks and writes. The JSON line records
+conversion/write time and actual file-I/O counts without imposing a noisy
+wall-clock performance threshold.
+
+These are reproducible CPU/SHM checks, not RTX 5080, zero-copy, physical-display,
+or two-machine latency acceptance. Test definitions alone are not a successful
+run; use the CI result for the exact candidate/master commit.

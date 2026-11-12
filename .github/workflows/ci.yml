@@ -12,6 +12,7 @@ on:
       - dot/remote-popup-network
       - dot/remote-popup-cancel
       - dot/remote-popup-terminal
+      - dot/remote-viewer-damage
   pull_request:
     branches:
       - master

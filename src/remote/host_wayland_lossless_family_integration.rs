@@ -467,26 +467,16 @@ fn rgb_digest(bgra: &[u8]) -> [u8; 32] {
     digest.finalize().into()
 }
 
-#[test]
-fn actual_pending_png_resize_aba_discards_old_scope_before_write() {
-    let Some(mut gl) = HeadlessSmithayGles::new() else {
-        return;
-    };
-    let probe = Arc::new(host::PendingLosslessProbe::default());
-    let mut h = Harness::with_lossless_probe(&mut gl, true, true, true, Some(probe.clone()));
-    h.destroy_popup();
-    paint(
-        &mut h.native,
-        &mut h.target,
-        320,
-        240,
-        &root_pixels(320, 240, 0),
-    );
+fn wait_first_pending_png(
+    h: &mut Harness,
+    gl: &mut HeadlessSmithayGles,
+    probe: &host::PendingLosslessProbe,
+) -> ((u64, u64, u64), Option<u64>) {
     let until = Instant::now() + Duration::from_secs(10);
     let mut reader = None;
     let mut first_jpeg = None;
     let blocked = loop {
-        pump(&mut h, &mut gl, (320, 240));
+        pump(h, gl, (320, 240));
         if let Some(top) = h.local.state.toplevels.values().next() {
             let surface = top.wl_surface().clone();
             let feedback = take_feedback(&surface);
@@ -502,8 +492,7 @@ fn actual_pending_png_resize_aba_discards_old_scope_before_write() {
                     if reader.is_none() {
                         reader = Some(Capture::new_with_size(&mut h.local, (320, 240)));
                     }
-                    let actual =
-                        actual_pixels(&mut h, &mut gl, reader.as_mut().unwrap(), (320, 240));
+                    let actual = actual_pixels(h, gl, reader.as_mut().unwrap(), (320, 240));
                     assert_eq!(h.frames.lock().unwrap().0, Some(seq));
                     let codecs = h.codecs.lock().unwrap();
                     assert!(!codecs.iter().find(|(n, _)| *n == seq).unwrap().1);
@@ -529,6 +518,25 @@ fn actual_pending_png_resize_aba_discards_old_scope_before_write() {
         thread::sleep(Duration::from_millis(1));
     };
     drop(reader);
+    (blocked, first_jpeg)
+}
+
+#[test]
+fn actual_pending_png_resize_aba_discards_old_scope_before_write() {
+    let Some(mut gl) = HeadlessSmithayGles::new() else {
+        return;
+    };
+    let probe = Arc::new(host::PendingLosslessProbe::default());
+    let mut h = Harness::with_lossless_probe(&mut gl, true, true, true, Some(probe.clone()));
+    h.destroy_popup();
+    paint(
+        &mut h.native,
+        &mut h.target,
+        320,
+        240,
+        &root_pixels(320, 240, 0),
+    );
+    let (blocked, first_jpeg) = wait_first_pending_png(&mut h, &mut gl, &probe);
     let old_count = probe.written().len();
     eprintln!("pending PNG blocked seq/source/geometry={blocked:?}, already_written={old_count}");
     let transition_deadline = Instant::now() + Duration::from_secs(4);
@@ -613,4 +621,85 @@ fn actual_pending_png_resize_aba_discards_old_scope_before_write() {
         "pending PNG discarded={blocked:?}; first_new={first_new:?}; exact_new=({seq},{epoch})"
     );
     finish(h, &mut gl, (320, 240), false);
+}
+
+#[test]
+fn actual_pending_png_region_supersession_keeps_unselected_motion_and_drops_selected_change() {
+    let Some(mut gl) = HeadlessSmithayGles::new() else {
+        return;
+    };
+    for selected_change in [false, true] {
+        let probe = Arc::new(host::PendingLosslessProbe::default());
+        let mut h = Harness::with_lossless_probe(&mut gl, true, true, true, Some(probe.clone()));
+        h.destroy_popup();
+        let mut final_pixels = root_pixels(320, 240, 0);
+        paint(&mut h.native, &mut h.target, 320, 240, &final_pixels);
+        let (blocked, first_jpeg) = wait_first_pending_png(&mut h, &mut gl, &probe);
+        let before = probe.written().len();
+        // The first bounded PNG repairs the first 256 of 300 raster-order
+        // 16x16 tiles. The final pixel belongs to the unselected 300th tile.
+        // A selected +1 edit must cancel even though JPEG tolerance hides it.
+        let (x, y, change) = if selected_change {
+            (0, 0, 1)
+        } else {
+            (319, 239, 20)
+        };
+        final_pixels[(y * 320 + x) * 4 + 2] += change;
+        paint(&mut h.native, &mut h.target, 320, 240, &final_pixels);
+        let digest = rgb_digest(&final_pixels);
+        let deadline = Instant::now() + Duration::from_secs(4);
+        loop {
+            pump(&mut h, &mut gl, (320, 240));
+            if let Some(capture) = probe.successful_capture() {
+                if capture.rgb_sha256 == digest {
+                    assert_eq!(capture.source_epoch, blocked.1);
+                    assert_eq!(capture.geometry_epoch, blocked.2);
+                    assert_eq!(capture.source_size, (320, 240));
+                    assert_eq!(capture.encoded_size, (320, 240));
+                    break;
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "new RGB must reach mailbox before release"
+            );
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(probe.written().len(), before);
+        probe.release();
+        let (exact_sequence, _) = wait_exact(
+            &mut h,
+            &mut gl,
+            (320, 240),
+            &final_pixels,
+            first_jpeg,
+            blocked.2,
+            ("region-supersession", &probe),
+        );
+        assert_eq!(probe.superseded(), usize::from(selected_change));
+        let writes = probe.written();
+        let first_after = writes[before];
+        assert_eq!(
+            first_after.0, blocked.0,
+            "discard consumes no wire sequence"
+        );
+        assert_eq!((first_after.1, first_after.2), (blocked.1, blocked.2));
+        if !selected_change {
+            assert!(
+                first_after.3 && !first_after.4,
+                "unselected edit must preserve pending PNG"
+            );
+            assert!(
+                writes[before + 1..].iter().any(|record| !record.3),
+                "unselected dynamic damage must still receive its ordinary JPEG"
+            );
+        }
+        assert!(writes.windows(2).all(|pair| pair[1].0 == pair[0].0 + 1));
+        assert!(
+            writes
+                .iter()
+                .any(|record| record.0 == exact_sequence && record.3)
+        );
+        finish(h, &mut gl, (320, 240), false);
+    }
 }

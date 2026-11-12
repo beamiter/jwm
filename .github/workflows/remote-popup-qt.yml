@@ -2,7 +2,7 @@ name: Experimental Qt6 dynamic isolated-seat menu
 
 on:
   push:
-    branches: [dot/remote-popup-qt-probe]
+    branches: [dot/remote-popup-qt-probe, dot/remote-viewer-damage]
   workflow_dispatch:
 
 permissions:

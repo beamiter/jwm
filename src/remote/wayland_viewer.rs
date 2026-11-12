@@ -22,6 +22,8 @@ use wayland_client::{Connection, Dispatch, EventQueue, QueueHandle, WEnum};
 use wayland_protocols::wp::presentation_time::client::{wp_presentation, wp_presentation_feedback};
 use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
 
+#[path = "wayland_viewer_damage.rs"]
+mod damage;
 #[path = "wayland_viewer_keyboard.rs"]
 mod keyboard;
 #[path = "wayland_viewer_pointer.rs"]
@@ -257,6 +259,7 @@ struct Slot {
     buffer: wl_buffer::WlBuffer,
     pool: wl_shm_pool::WlShmPool,
     file: File,
+    damage: damage::SlotDamage,
 }
 impl Drop for Slot {
     fn drop(&mut self) {
@@ -417,6 +420,10 @@ impl State {
         #[cfg(all(test, feature = "backend-wayland-udev"))]
         self.popup_live.invalidate();
         self.pointer.revoke("Wayland pointer geometry changed");
+        // Even a resize-and-restore invalidates every cached destination.
+        for slot in &mut self.slots {
+            slot.damage = damage::SlotDamage::default();
+        }
         if self.keyboard.requested {
             self.keyboard.revoke("Wayland viewer geometry changed");
         }
@@ -451,6 +458,9 @@ pub(super) struct WaylandViewer {
     token: u64,
     slot_identity: u64,
     upload_scratch: Box<[u8]>,
+    // Retain the actual submitted predecessor, not the last received frame.
+    // Tile snapshots can patch this canvas across latest-only mailbox drops.
+    last_frame: Option<RecyclableDecodedFrame>,
     write_pending: std::cell::Cell<bool>,
 }
 impl WaylandViewer {
@@ -569,6 +579,7 @@ impl WaylandViewer {
             token: 0,
             slot_identity: 0,
             upload_scratch: vec![0; MAX_UPLOAD_SCRATCH_BYTES].into_boxed_slice(),
+            last_frame: None,
             write_pending: std::cell::Cell::new(false),
             #[cfg(all(test, feature = "backend-wayland-udev"))]
             popup_presentation: popup_presentation::Bridge::default(),
@@ -1034,7 +1045,10 @@ impl WaylandViewer {
             )
             && self.state.failure.is_none()
     }
-    pub(super) fn draw_recyclable(&mut self, frame: RecyclableDecodedFrame) -> RemoteResult<bool> {
+    pub(super) fn draw_recyclable(
+        &mut self,
+        mut frame: RecyclableDecodedFrame,
+    ) -> RemoteResult<bool> {
         #[cfg(all(test, feature = "backend-wayland-udev"))]
         self.state.popup_live.invalidate();
         #[cfg(all(test, feature = "backend-wayland-udev"))]
@@ -1055,6 +1069,13 @@ impl WaylandViewer {
         }
         self.state.check()?;
         self.state.scope = Some(scope);
+        if let Some(previous) = self.last_frame.as_mut() {
+            frame.reuse_canvas_from(previous);
+        }
+        let delta = incremental_damage(self.last_frame.as_ref(), &frame, self.viewport());
+        // Replace immediately after transferring its RGB allocation. On any
+        // upload error below the session ends without attaching partial pixels.
+        self.last_frame = None;
         let image = frame.image();
         if image.width() == 0 || image.height() == 0 {
             return Err("empty Wayland frame".into());
@@ -1065,6 +1086,11 @@ impl WaylandViewer {
         )?;
         let (width, height) = self.viewport();
         dimensions(width, height)?;
+        // Busy slots accumulate metadata only; release is still the sole
+        // permission to write their storage. Each slot may lag by many commits.
+        for slot in &mut self.state.slots {
+            slot.damage.accumulate(delta, (width, height));
+        }
         let bytes = usize::from(width) * usize::from(height) * 4;
         let metas: Vec<_> = self.state.slots.iter().map(|slot| slot.meta).collect();
         let plan = plan_slot(&metas, (width, height))?;
@@ -1082,14 +1108,27 @@ impl WaylandViewer {
         if slot.meta.busy {
             return Err("refusing to overwrite busy Wayland SHM storage".into());
         }
-        slot.file.seek(SeekFrom::Start(0))?;
-        upload_xrgb(
-            &mut slot.file,
-            image,
-            width,
-            height,
-            &mut self.upload_scratch,
-        )?;
+        let dirty = slot.damage.regions((width, height));
+        if slot.damage.is_full() {
+            slot.file.seek(SeekFrom::Start(0))?;
+            upload_xrgb(
+                &mut slot.file,
+                image,
+                width,
+                height,
+                &mut self.upload_scratch,
+            )?;
+        } else {
+            damage::upload_regions(
+                &mut slot.file,
+                image.as_raw(),
+                (image.width() as u16, image.height() as u16),
+                (width, height),
+                &dirty,
+                &mut self.upload_scratch,
+            )?;
+        }
+        slot.damage.uploaded();
         self.token = self
             .token
             .checked_add(1)
@@ -1129,14 +1168,24 @@ impl WaylandViewer {
         #[cfg(all(test, feature = "backend-wayland-udev"))]
         let mut commit_observation = commit_observer.as_ref().map(|o| o.lock().unwrap());
         self.surface.attach(Some(&buffer), 0, 0);
-        self.surface
-            .damage_buffer(0, 0, i32::from(width), i32::from(height));
+        // The slot's accumulated damage covers every change since the last
+        // attached image too. Keepalives/NativeProof still require a fresh
+        // compositor redraw and presentation proof, even with zero SHM writes.
+        if dirty.as_slice().is_empty() {
+            self.surface
+                .damage_buffer(0, 0, i32::from(width), i32::from(height));
+        }
+        for &(x, y, w, h) in dirty.as_slice() {
+            self.surface
+                .damage_buffer(i32::from(x), i32::from(y), i32::from(w), i32::from(h));
+        }
         self.surface.commit();
         self.prepare_wait()?;
         #[cfg(all(test, feature = "backend-wayland-udev"))]
         if let Some(observation) = commit_observation.as_mut() {
             observation.0 = Some(frame.sequence());
         }
+        self.last_frame = Some(frame);
         Ok(true)
     }
     fn retire_slot(&mut self, index: usize) -> RemoteResult<()> {
@@ -1208,6 +1257,7 @@ impl WaylandViewer {
             buffer,
             pool,
             file,
+            damage: damage::SlotDamage::default(),
         });
         Ok(index)
     }
@@ -1327,6 +1377,29 @@ impl WaylandViewer {
         }
     }
 }
+fn incremental_damage(
+    previous: Option<&RecyclableDecodedFrame>,
+    frame: &RecyclableDecodedFrame,
+    viewport: (u16, u16),
+) -> Option<super::frame::DamageRegions> {
+    let previous = previous?;
+    let delta = frame.damage()?;
+    if delta.base_sequence != previous.sequence()
+        || frame.source_epoch() != previous.source_epoch()
+        || frame.geometry_epoch() != previous.geometry_epoch()
+        || frame.dimensions() != previous.dimensions()
+        || (frame.source_width(), frame.source_height())
+            != (previous.source_width(), previous.source_height())
+    {
+        return None;
+    }
+    let encoded = (
+        u16::try_from(frame.dimensions().0).ok()?,
+        u16::try_from(frame.dimensions().1).ok()?,
+    );
+    damage::map_regions(encoded, viewport, &delta.regions)
+}
+
 fn pointer_title_status_changed(cached: &mut Option<&'static str>, status: &'static str) -> bool {
     if *cached == Some(status) {
         return false;
@@ -1801,6 +1874,7 @@ mod tests {
 #[cfg(test)]
 mod upload_tests {
     use super::*;
+    use crate::remote::frame::{DamageRegions, FrameDamage, new_decode_buffer_pool};
     use image::{Rgb, RgbImage};
 
     // Keep the pre-optimization row algorithm as an independent byte oracle.
@@ -1868,6 +1942,56 @@ mod upload_tests {
         RgbImage::from_fn(width, height, |x, y| {
             Rgb([(x * 13 + y) as u8, (y * 17 + x) as u8, (x ^ y) as u8])
         })
+    }
+    fn frame(sequence: u64) -> RecyclableDecodedFrame {
+        RecyclableDecodedFrame::new(sequence, 17, 13, image(17, 13), new_decode_buffer_pool())
+    }
+    #[test]
+    fn incremental_damage_requires_the_exact_frame_baseline_and_geometry() {
+        let previous = frame(7);
+        let delta = Some(FrameDamage {
+            base_sequence: 7,
+            regions: DamageRegions::from_rect(Some((3, 2, 1, 1))),
+        });
+        let current = frame(9).with_damage(delta);
+        assert_eq!(
+            incremental_damage(Some(&previous), &current, (17, 13))
+                .unwrap()
+                .as_slice(),
+            &[(3, 2, 1, 1)]
+        );
+        assert!(incremental_damage(None, &current, (17, 13)).is_none());
+        for current in [
+            frame(9),
+            frame(9).with_damage(Some(FrameDamage {
+                base_sequence: 8,
+                ..delta.unwrap()
+            })),
+            frame(9).with_damage(delta).with_source_epoch(2),
+            frame(9).with_damage(delta).with_geometry_epoch(2),
+            RecyclableDecodedFrame::new(9, 17, 13, image(13, 17), new_decode_buffer_pool())
+                .with_damage(delta),
+            RecyclableDecodedFrame::new(9, 18, 13, image(17, 13), new_decode_buffer_pool())
+                .with_damage(delta),
+        ] {
+            assert!(incremental_damage(Some(&previous), &current, (17, 13)).is_none());
+        }
+    }
+
+    #[test]
+    fn validated_unchanged_frame_preserves_empty_damage_without_losing_sequence() {
+        let previous = frame(7);
+        let current = frame(8).with_damage(Some(FrameDamage {
+            base_sequence: 7,
+            regions: DamageRegions::default(),
+        }));
+        assert!(
+            incremental_damage(Some(&previous), &current, (31, 19))
+                .unwrap()
+                .as_slice()
+                .is_empty()
+        );
+        assert_eq!(current.sequence(), 8);
     }
     #[test]
     fn chunk_upload_matches_old_rows_for_odd_scaling_black_bars_and_reused_scratch() {
@@ -2005,3 +2129,7 @@ fn run_pointer_fence_hook() {
         hook();
     }
 }
+
+#[cfg(test)]
+#[path = "wayland_viewer_damage_benchmark.rs"]
+mod damage_benchmark;

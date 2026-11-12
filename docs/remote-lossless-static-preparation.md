@@ -56,15 +56,23 @@ policy adds 250 ms of quiet after any exact raw change and separates successful
 batches by at least 250 ms from the preceding record's completed flush. Capture/FPS
 and transport credit still apply; a delayed writer never causes catch-up bursts.
 Before writing a PNG, the policy compares any newer queued capture's full
-source/geometry/dimensions/RGB and discards the repair if content was superseded.
-Identical newer captures do not cancel it. A discarded repair consumes no credit
+source/geometry/dimensions and the exact RGB of its selected repair tiles.
+A change in any selected pixel discards the repair, including a one-channel
+change below ordinary JPEG tolerance. Changes outside those tiles and identical
+newer captures do not cancel it. Commit still uses the original immutable
+capture and copies only the transmitted tiles; the newer capture stays queued
+for ordinary damage processing. A discarded repair consumes no credit
 and does not clear exactness debt. This is best effort before writing, not
 preemption of an already-sent record. The former policy used a 100 ms batch gap;
 [two real-pipeline comparisons](remote-lossless-scheduling-ab.md) document the interaction/convergence tradeoff. The global quiet guard
 intentionally gives changing content priority: updates more frequent than every
 250 ms can indefinitely postpone repair of otherwise stable neighboring tiles.
-It is not guaranteed per-tile convergence during continuous animation. A failed PNG
-encode instead backs off for two seconds without clearing exactness debt.
+It is not guaranteed per-tile convergence during continuous animation. The
+region-specific supersession check avoids wasting an already encoded repair;
+it does not remove the global quiet gate, zero-dirty eligibility or batch pacing.
+Earlier scheduling comparisons used full-capture supersession and do not measure
+this region-specific check. A failed PNG encode instead backs off for two seconds
+without clearing exactness debt.
 Any subsequent raw change, including a single channel
 changing by one, restarts that tile's stability and makes its pixels owe an exact
 repair again. Backpressure and batch limits can delay completion beyond two

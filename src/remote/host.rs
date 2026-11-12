@@ -623,12 +623,13 @@ pub(crate) fn with_lossless_schedule<T>(
     let _restore = Restore(LOSSLESS_SCHEDULE_TEST.with(|slot| slot.replace(Some((policy, probe)))));
     run()
 }
-fn newer_frame_supersedes_repair(current: &PendingFrame, newer: &PendingFrame) -> bool {
+fn newer_frame_supersedes_repair(
+    encoder: &TileEncoder,
+    current: &PendingFrame,
+    newer: &PendingFrame,
+) -> bool {
     current.source_version != newer.source_version
-        || current.frame.geometry_epoch != newer.frame.geometry_epoch
-        || (current.frame.source_width, current.frame.source_height)
-            != (newer.frame.source_width, newer.frame.source_height)
-        || current.frame.image != newer.frame.image
+        || !encoder.pending_lossless_matches(&newer.frame)
 }
 struct FrameSender {
     lossless_schedule: LosslessSchedule,
@@ -2175,6 +2176,7 @@ pub(crate) struct PendingLosslessProbe {
     released: Mutex<bool>,
     changed: Condvar,
     once: AtomicBool,
+    superseded: std::sync::atomic::AtomicUsize,
     successful_capture: Mutex<Option<SuccessfulLosslessCapture>>,
     written: Mutex<Vec<(u64, u64, u64, bool, bool)>>,
 }
@@ -2200,6 +2202,9 @@ impl PendingLosslessProbe {
     }
     pub(crate) fn written(&self) -> Vec<(u64, u64, u64, bool, bool)> {
         self.written.lock().unwrap().clone()
+    }
+    pub(crate) fn superseded(&self) -> usize {
+        self.superseded.load(Ordering::Acquire)
     }
     fn pause(&self, sequence: u64, source_epoch: u64, epoch: u64) -> RemoteResult<()> {
         if self.once.swap(true, Ordering::AcqRel) {
@@ -4956,7 +4961,9 @@ fn send_frames_with_encoder_scoped<W: std::io::Write + SetWriteTimeout>(
             #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
             let compare_started = Instant::now();
             let superseded = mailbox.inspect_latest(|latest| {
-                latest.is_some_and(|newer| newer_frame_supersedes_repair(&pending, newer))
+                latest.is_some_and(|newer| {
+                    newer_frame_supersedes_repair(&sender.encoder, &pending, newer)
+                })
             })?;
             #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
             if let Some((_, probe)) = sources.and_then(|s| s.lossless_schedule_test.as_ref()) {
@@ -4966,6 +4973,10 @@ fn send_frames_with_encoder_scoped<W: std::io::Write + SetWriteTimeout>(
                 stats.stale_png_dropped += u64::from(superseded);
             }
             if superseded {
+                #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+                if let Some(probe) = sources.and_then(|s| s.pending_lossless_probe.as_ref()) {
+                    probe.superseded.fetch_add(1, Ordering::AcqRel);
+                }
                 sender.discard();
                 continue;
             }
@@ -6504,35 +6515,57 @@ mod tests {
     #[test]
     fn pending_png_supersession_compares_scope_and_rgb_without_consuming_latest() {
         let current = test_pending_frame(90);
+        let mut encoder = TileEncoder::new();
+        encoder.set_lossless_enabled(true);
+        let now = Instant::now();
+        let mut payload = Vec::new();
+        encoder
+            .plan_at(&current.frame, TileEncodeRequest::Keyframe, now)
+            .unwrap();
+        encoder
+            .encode_into(&mut payload, 0, &current.frame, 70)
+            .unwrap();
+        encoder.commit(&current.frame);
+        encoder
+            .plan_at(
+                &current.frame,
+                TileEncodeRequest::LosslessRepair,
+                now + Duration::from_secs(2),
+            )
+            .unwrap();
+        encoder
+            .encode_into(&mut payload, 1, &current.frame, 70)
+            .unwrap();
         let mailbox = LatestMailbox::new();
         mailbox.publish(test_pending_frame(90)).unwrap();
         assert!(
             !mailbox
-                .inspect_latest(
-                    |next| next.is_some_and(|n| newer_frame_supersedes_repair(&current, n))
-                )
+                .inspect_latest(|next| next
+                    .is_some_and(|n| newer_frame_supersedes_repair(&encoder, &current, n)))
                 .unwrap()
         );
         let same = mailbox.receive().unwrap().unwrap();
-        assert!(!newer_frame_supersedes_repair(&current, &same));
+        assert!(!newer_frame_supersedes_repair(&encoder, &current, &same));
+        let mut newer = test_pending_frame(90);
+        newer.source_version.source = SourceId(2);
+        assert!(newer_frame_supersedes_repair(&encoder, &current, &newer));
         let mut newer = test_pending_frame(90);
         newer.source_version.epoch += 1;
-        assert!(newer_frame_supersedes_repair(&current, &newer));
+        assert!(newer_frame_supersedes_repair(&encoder, &current, &newer));
         let mut newer = test_pending_frame(90);
         newer.frame.geometry_epoch += 1;
-        assert!(newer_frame_supersedes_repair(&current, &newer));
+        assert!(newer_frame_supersedes_repair(&encoder, &current, &newer));
         let mut newer = test_pending_frame(90);
         newer.frame.source_width += 1;
-        assert!(newer_frame_supersedes_repair(&current, &newer));
+        assert!(newer_frame_supersedes_repair(&encoder, &current, &newer));
         let mut newer = test_pending_frame(90);
         newer.frame.image = RgbImage::from_pixel(3, 2, Rgb([90, 0, 0]));
-        assert!(newer_frame_supersedes_repair(&current, &newer));
+        assert!(newer_frame_supersedes_repair(&encoder, &current, &newer));
         mailbox.publish(test_pending_frame(91)).unwrap();
         assert!(
             mailbox
-                .inspect_latest(
-                    |next| next.is_some_and(|n| newer_frame_supersedes_repair(&current, n))
-                )
+                .inspect_latest(|next| next
+                    .is_some_and(|n| newer_frame_supersedes_repair(&encoder, &current, n)))
                 .unwrap()
         );
         assert_eq!(

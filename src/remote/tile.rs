@@ -309,6 +309,40 @@ impl TileEncoder {
         self.lossless_rejected
     }
 
+    /// Whether an encoded, uncommitted PNG still describes the selected pixels
+    /// of a newer capture. Unselected changes do not supersede a region repair.
+    /// This is read-only: commit must still use the original immutable capture,
+    /// and the caller must separately validate the capture's source identity.
+    pub(crate) fn pending_lossless_matches(&self, newer: &CapturedFrame) -> bool {
+        if !self.pending || !self.pending_lossless || self.dirty.is_empty() {
+            return false;
+        }
+        let (Some(identity), Some(encoded)) = (self.pending_exact_identity, &self.observed) else {
+            return false;
+        };
+        if identity.generation != self.observation_generation
+            || identity.geometry_epoch != newer.geometry_epoch
+            || identity.source != (newer.source_width, newer.source_height)
+            || encoded.dimensions() != newer.image.dimensions()
+        {
+            return false;
+        }
+        let width = encoded.width() as usize;
+        let height = encoded.height() as usize;
+        let stride = width * 3;
+        let original = encoded.as_raw();
+        let latest = newer.image.as_raw();
+        self.dirty.iter().all(|&index| {
+            let (x0, y0, x1, y1) =
+                tile_bounds(index as usize, self.grid.0, self.tile(), width, height);
+            (y0..y1).all(|y| {
+                let start = y * stride + x0 * 3;
+                let end = y * stride + x1 * 3;
+                original[start..end] == latest[start..end]
+            })
+        })
+    }
+
     fn tile(&self) -> usize {
         1_usize << self.tile_log2
     }
@@ -1963,6 +1997,160 @@ mod tests {
 
     fn flat(width: u32, height: u32, value: u8) -> CapturedFrame {
         frame(width, height, |_, _| Rgb([value, value, value]))
+    }
+
+    // Six tiles: a full tile plus right/bottom/corner-clipped candidates.
+    // All other tiles change below JPEG tolerance and are too young to repair.
+    fn pending_region_repair(selected: usize) -> (TileEncoder, CapturedFrame, Instant) {
+        let mut encoder = TileEncoder::new();
+        encoder.set_lossless_enabled(true);
+        let mut source = flat(33, 17, 90);
+        let base = Instant::now();
+        let mut payload = Vec::new();
+        encoder
+            .plan_at(&source, TileEncodeRequest::Keyframe, base)
+            .unwrap();
+        encoder.encode_into(&mut payload, 1, &source, 75).unwrap();
+        assert!(!encoder.pending_lossless_matches(&source));
+        encoder.commit(&source);
+        for index in 0..6 {
+            if index != selected {
+                source
+                    .image
+                    .get_pixel_mut((index % 3 * 16) as u32, (index / 3 * 16) as u32)
+                    .0[0] += 1;
+            }
+        }
+        assert!(
+            !encoder
+                .plan_at(
+                    &source,
+                    TileEncodeRequest::Delta,
+                    base + Duration::from_secs(1)
+                )
+                .unwrap()
+                .emit
+        );
+        let now = base + Duration::from_secs(2);
+        let plan = encoder
+            .plan_at(&source, TileEncodeRequest::LosslessRepair, now)
+            .unwrap();
+        assert_eq!(plan.dirty_tiles, 1);
+        assert_eq!(encoder.dirty, [selected as u32]);
+        assert!(!encoder.pending_lossless_matches(&source));
+        encoder.encode_into(&mut payload, 2, &source, 75).unwrap();
+        assert!(encoder.pending_lossless_matches(&source));
+        (encoder, source, now)
+    }
+
+    #[test]
+    fn pending_lossless_matches_only_selected_rgb_including_clipped_tiles() {
+        for selected in [0, 2, 3, 5] {
+            let (encoder, mut newer, _) = pending_region_repair(selected);
+            let reference = encoder.reference.clone();
+            let observed = encoder.observed.clone();
+            let exact = encoder.exact.clone();
+            let cursor = encoder.refinement_cursor;
+            for y in 0..17 {
+                for x in 0..33 {
+                    for channel in 0..3 {
+                        let original = newer.image.get_pixel(x, y).0[channel];
+                        let changed_tile = (y / 16 * 3 + x / 16) as usize;
+                        for delta in [-1_i16, 1] {
+                            newer.image.get_pixel_mut(x, y).0[channel] =
+                                (i16::from(original) + delta) as u8;
+                            assert_eq!(
+                                encoder.pending_lossless_matches(&newer),
+                                changed_tile != selected,
+                                "selected={selected}, changed=({x},{y},{channel}), delta={delta}"
+                            );
+                        }
+                        newer.image.get_pixel_mut(x, y).0[channel] = original;
+                    }
+                }
+            }
+            assert_eq!(encoder.reference, reference);
+            assert_eq!(encoder.observed, observed);
+            assert_eq!(encoder.exact, exact);
+            assert_eq!(encoder.refinement_cursor, cursor);
+            assert_eq!(encoder.last_sequence, Some(1));
+            assert_eq!(encoder.pending_sequence, Some(2));
+        }
+    }
+
+    #[test]
+    fn pending_lossless_matching_rejects_geometry_dimensions_and_retired_candidates() {
+        let (mut encoder, mut source, _) = pending_region_repair(5);
+        source.geometry_epoch += 1;
+        assert!(!encoder.pending_lossless_matches(&source));
+        source.geometry_epoch -= 1;
+        source.source_width += 1;
+        assert!(!encoder.pending_lossless_matches(&source));
+        source.source_width -= 1;
+        source.source_height += 1;
+        assert!(!encoder.pending_lossless_matches(&source));
+        source.source_height -= 1;
+        let original = source.image.clone();
+        source.image = RgbImage::from_pixel(34, 17, Rgb([90; 3]));
+        assert!(!encoder.pending_lossless_matches(&source));
+        source.image = RgbImage::from_pixel(33, 18, Rgb([90; 3]));
+        assert!(!encoder.pending_lossless_matches(&source));
+        source.image = original;
+        assert!(encoder.pending_lossless_matches(&source));
+        let reference = encoder.reference.clone();
+        let exact = encoder.exact.clone();
+        let cursor = encoder.refinement_cursor;
+        encoder.discard();
+        assert!(!encoder.pending_lossless_matches(&source));
+        assert_eq!(encoder.reference, reference);
+        assert_eq!(encoder.exact, exact);
+        assert_eq!(encoder.refinement_cursor, cursor);
+        assert_eq!(encoder.last_sequence, Some(1));
+        assert_eq!(encoder.pending_sequence, None);
+    }
+
+    #[test]
+    fn region_repair_commit_leaves_unsent_neighbor_damage_for_next_jpeg() {
+        let (mut encoder, source, now) = pending_region_repair(5);
+        let mut newer = flat(33, 17, 90);
+        newer.image.clone_from(&source.image);
+        newer.image.get_pixel_mut(0, 0).0[0] = 130;
+        assert!(encoder.pending_lossless_matches(&newer));
+        // Commit the original capture, never adopt the newer mailbox image.
+        encoder.commit(&source);
+        assert!(!encoder.pending_lossless_matches(&source));
+        assert_eq!(encoder.exact, [false, false, false, false, false, true]);
+        assert_eq!(encoder.reference().unwrap().get_pixel(0, 0).0[0], 90);
+        assert_eq!(encoder.observed.as_ref().unwrap(), &source.image);
+        let plan = encoder
+            .plan_at(&newer, TileEncodeRequest::Delta, now)
+            .unwrap();
+        assert_eq!(plan.dirty_tiles, 1);
+        assert_eq!(encoder.dirty, [0]);
+        assert!(!encoder.planned.unwrap().lossless);
+        let mut payload = Vec::new();
+        encoder.encode_into(&mut payload, 3, &newer, 75).unwrap();
+        encoder.commit(&newer);
+        assert_eq!(encoder.reference().unwrap().get_pixel(0, 0).0[0], 130);
+        assert!(encoder.exact[5]);
+    }
+
+    #[test]
+    fn region_match_does_not_authorize_committing_the_newer_capture() {
+        let (mut encoder, mut newer, now) = pending_region_repair(5);
+        newer.image.get_pixel_mut(0, 0).0[0] = 130;
+        assert!(encoder.pending_lossless_matches(&newer));
+        // Region matching is only a publication check. The immutable-capture
+        // contract must still reject a caller substituting newer input at commit.
+        encoder.commit(&newer);
+        assert!(encoder.reference().is_none());
+        assert!(encoder.has_exact_debt());
+        assert!(
+            encoder
+                .plan_at(&newer, TileEncodeRequest::Delta, now)
+                .unwrap()
+                .keyframe
+        );
     }
 
     #[test]
