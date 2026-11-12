@@ -113,7 +113,18 @@ fn host_stats(probe: &host::LosslessScheduleProbe) -> Value {
         "followup_opportunities":s.followup_opportunities,"priority_deferrals":s.priority_deferrals,
         "retained_followups":s.retained_followups,
         "budget_retained_selections":s.budget_retained_selections,"budget_png_flushed":s.budget_png_flushed,
-        "max_priority_deferral_streak":s.max_priority_deferral_streak})
+        "max_priority_deferral_streak":s.max_priority_deferral_streak,
+        "coalesced_attempts":s.coalesced_attempts,
+        "coalesced_selected":s.coalesced_selected,
+        "coalesced_plan_fallbacks":s.coalesced_plan_fallbacks,
+        "coalesced_encode_rejected":s.coalesced_encode_rejected,
+        "coalesced_flushed":s.coalesced_flushed,
+        "coalesced_selected_dynamic_tiles":s.coalesced_selected_dynamic_tiles,
+        "coalesced_selected_static_tiles":s.coalesced_selected_static_tiles,
+        "coalesced_flushed_dynamic_tiles":s.coalesced_flushed_dynamic_tiles,
+        "coalesced_flushed_static_tiles":s.coalesced_flushed_static_tiles,
+        "coalesced_encode_ns":s.coalesced_encode_ns,
+        "coalesced_sent_bytes":s.coalesced_sent_bytes})
 }
 #[test]
 fn region_priority_report_includes_actual_decision_counters() {
@@ -125,6 +136,17 @@ fn region_priority_report_includes_actual_decision_counters() {
         "budget_retained_selections",
         "budget_png_flushed",
         "max_priority_deferral_streak",
+        "coalesced_attempts",
+        "coalesced_selected",
+        "coalesced_plan_fallbacks",
+        "coalesced_encode_rejected",
+        "coalesced_flushed",
+        "coalesced_selected_dynamic_tiles",
+        "coalesced_selected_static_tiles",
+        "coalesced_flushed_dynamic_tiles",
+        "coalesced_flushed_static_tiles",
+        "coalesced_encode_ns",
+        "coalesced_sent_bytes",
     ] {
         assert_eq!(
             stats[field].as_u64(),
@@ -152,6 +174,7 @@ fn run_session_workload(arm: &str, report: &mut Value, continuous: bool, feedbac
         "region_deadline" => host::LosslessSchedule::RegionDeadline,
         "region_priority" => host::LosslessSchedule::RegionPriority,
         "region_priority_bounded1" => host::LosslessSchedule::RegionPriorityBounded1,
+        "region_coalesced" => host::LosslessSchedule::RegionCoalesced,
         "quiet0_pace100" => host::LosslessSchedule::Quiet0Pace100,
         "quiet0_pace250" => host::LosslessSchedule::Quiet0Pace250,
         "quiet250_pace100" => host::LosslessSchedule::Quiet250Pace100,
@@ -708,6 +731,41 @@ fn run_bounded_priority_measurement(feedback_delay: Duration) {
     );
 }
 
+#[test]
+#[ignore = "explicit private coalesced-PNG experiment using real TCP/GL"]
+fn actual_static_lossless_region_coalesced_continuous_measurement() {
+    run_coalesced_measurement(Duration::ZERO);
+}
+#[test]
+#[ignore = "explicit private coalesced-PNG display-credit pressure using real TCP/GL"]
+fn actual_static_lossless_region_coalesced_credit_pressure_measurement() {
+    run_coalesced_measurement(PRESSURE_FEEDBACK_DELAY);
+}
+fn run_coalesced_measurement(feedback_delay: Duration) {
+    let benchmark = if feedback_delay.is_zero() {
+        "static_lossless_region_coalesced_continuous_tcp_ab"
+    } else {
+        "static_lossless_region_coalesced_credit_pressure_tcp_ab"
+    };
+    run_continuous_measurement(
+        &[
+            "new250",
+            "region_deadline",
+            "region_priority",
+            "region_priority_bounded1",
+            "region_coalesced",
+            "region_coalesced",
+            "region_priority_bounded1",
+            "region_priority",
+            "region_deadline",
+            "new250",
+        ],
+        benchmark,
+        "JWM_REMOTE_REGION_COALESCED_REPORT",
+        feedback_delay,
+    );
+}
+
 fn run_continuous_measurement(
     order: &[&str],
     benchmark: &str,
@@ -733,9 +791,11 @@ fn run_continuous_measurement(
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             run_session_workload(arm, &mut session, true, feedback_delay);
             let accepted = continuous_acceptance(&mut session);
-            let measured_unbounded_control = benchmark
+            let measured_unbounded_control = (benchmark
                 == "static_lossless_region_bounded_priority_continuous_tcp_ab"
-                && *arm == "region_priority";
+                && *arm == "region_priority")
+                || (benchmark == "static_lossless_region_coalesced_continuous_tcp_ab"
+                    && matches!(*arm, "region_priority" | "region_priority_bounded1"));
             if feedback_delay.is_zero() && !measured_unbounded_control {
                 assert!(
                     accepted,

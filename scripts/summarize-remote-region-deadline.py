@@ -16,19 +16,29 @@ BOUNDED_BENCHMARK = "static_lossless_region_bounded_priority_continuous_tcp_ab"
 BOUNDED_PRESSURE_BENCHMARK = "static_lossless_region_bounded_priority_credit_pressure_tcp_ab"
 BOUNDED_ARMS = ("new250", "region_deadline", "region_priority", "region_priority_bounded1",
                 "region_priority_bounded1", "region_priority", "region_deadline", "new250")
-PRESSURE_BENCHMARKS = (PRESSURE_BENCHMARK, BOUNDED_PRESSURE_BENCHMARK)
+COALESCED_BENCHMARK = "static_lossless_region_coalesced_continuous_tcp_ab"
+COALESCED_PRESSURE_BENCHMARK = "static_lossless_region_coalesced_credit_pressure_tcp_ab"
+COALESCED_ARMS = ("new250", "region_deadline", "region_priority", "region_priority_bounded1", "region_coalesced",
+                  "region_coalesced", "region_priority_bounded1", "region_priority", "region_deadline", "new250")
+PRESSURE_BENCHMARKS = (PRESSURE_BENCHMARK, BOUNDED_PRESSURE_BENCHMARK, COALESCED_PRESSURE_BENCHMARK)
 FEEDBACK_DELAY_NS = 150_000_000
 BENCHMARK_ARMS = {BENCHMARK: ARMS, PRIORITY_BENCHMARK: PRIORITY_ARMS,
                   PRESSURE_BENCHMARK: PRIORITY_ARMS, BOUNDED_BENCHMARK: BOUNDED_ARMS,
-                  BOUNDED_PRESSURE_BENCHMARK: BOUNDED_ARMS}
+                  BOUNDED_PRESSURE_BENCHMARK: BOUNDED_ARMS, COALESCED_BENCHMARK: COALESCED_ARMS,
+                  COALESCED_PRESSURE_BENCHMARK: COALESCED_ARMS}
 QUEUE_COUNTERS = ("followup_opportunities", "priority_deferrals", "retained_followups")
 BOUNDED_COUNTERS = ("budget_retained_selections", "budget_png_flushed", "max_priority_deferral_streak")
+COALESCED_COUNTERS = ("coalesced_attempts", "coalesced_selected", "coalesced_plan_fallbacks",
+                      "coalesced_encode_rejected", "coalesced_flushed",
+                      "coalesced_selected_dynamic_tiles", "coalesced_selected_static_tiles",
+                      "coalesced_flushed_dynamic_tiles", "coalesced_flushed_static_tiles",
+                      "coalesced_encode_ns", "coalesced_sent_bytes")
 GENERATIONS = 80
 PERIOD_NS = 100_000_000
 WINDOW_NS = 8_000_000_000
 MAX_REPORT_BYTES = 16 * 1024 * 1024
 COUNTERS = ("encoded_jpeg", "encoded_png", "encode_ns", "jpeg_ns", "png_ns",
-            "sent_bytes", "comparisons", "comparison_ns", "stale_png_dropped") + QUEUE_COUNTERS + BOUNDED_COUNTERS
+            "sent_bytes", "comparisons", "comparison_ns", "stale_png_dropped") + QUEUE_COUNTERS + BOUNDED_COUNTERS + COALESCED_COUNTERS
 
 
 def integer(value, label):
@@ -85,6 +95,23 @@ def counters(value):
             raise ValueError("partial bounded-priority counters")
         if not result["budget_png_flushed"] <= result["budget_retained_selections"] <= result["retained_followups"]:
             raise ValueError("bounded-priority budget counters do not balance")
+    if any(key in result for key in COALESCED_COUNTERS):
+        if not all(key in result for key in COALESCED_COUNTERS):
+            raise ValueError("partial coalesced counters")
+        if result["coalesced_attempts"] != result["coalesced_selected"] + result["coalesced_plan_fallbacks"]:
+            raise ValueError("coalesced plan counters do not balance")
+        if result["coalesced_encode_rejected"] + result["coalesced_flushed"] > result["coalesced_selected"]:
+            raise ValueError("coalesced outcomes exceed selections")
+        if "sent_bytes" in result and result["coalesced_sent_bytes"] > result["sent_bytes"]:
+            raise ValueError("coalesced payload exceeds total sent payload")
+        for stage in ("selected", "flushed"):
+            count = result[f"coalesced_{stage}"]
+            dynamic, static = (result[f"coalesced_{stage}_{kind}_tiles"] for kind in ("dynamic", "static"))
+            if dynamic < count or static < count or dynamic + static > count * 256:
+                raise ValueError("coalesced tile counts violate combined batch bounds")
+        for kind in ("dynamic", "static"):
+            if result[f"coalesced_flushed_{kind}_tiles"] > result[f"coalesced_selected_{kind}_tiles"]:
+                raise ValueError("coalesced flushed tiles exceed selections")
     return result
 
 
@@ -130,6 +157,12 @@ def summarize(report):
         total_counters = counters(session.get("host_stats"))
         active_counters = counters(session.get("active_window_host_stats"))
         for stats in (total_counters, active_counters):
+            if arms == COALESCED_ARMS and session["success"] and (stats is None or any(key not in stats for key in COALESCED_COUNTERS + BOUNDED_COUNTERS + QUEUE_COUNTERS)):
+                raise ValueError("successful coalesced experiment requires all scheduling counters")
+            if stats is not None and session["arm"] == "region_coalesced" and any(stats.get(key, 0) for key in QUEUE_COUNTERS):
+                raise ValueError("coalesced arm unexpectedly used a retained followup")
+            if stats is not None and session["arm"] != "region_coalesced" and any(stats.get(key, 0) for key in COALESCED_COUNTERS):
+                raise ValueError("non-coalesced arm reported coalesced counters")
             if arms == BOUNDED_ARMS and session["success"] and (stats is None or any(key not in stats for key in BOUNDED_COUNTERS + QUEUE_COUNTERS)):
                 raise ValueError("successful bounded session requires all scheduling counters")
             if stats is not None:
@@ -143,7 +176,7 @@ def summarize(report):
             if stats is not None and session["arm"] not in ("region_priority", "region_priority_bounded1") and stats.get("priority_deferrals", 0):
                 raise ValueError("non-priority arm reported priority deferrals")
         if total_counters is not None and active_counters is not None:
-            for key in QUEUE_COUNTERS + BOUNDED_COUNTERS:
+            for key in QUEUE_COUNTERS + BOUNDED_COUNTERS + COALESCED_COUNTERS:
                 if key in total_counters and key in active_counters and active_counters[key] > total_counters[key]:
                     raise ValueError("active queue counter exceeds session total")
         markers, frames = session.get("markers"), session.get("frames")
@@ -279,6 +312,8 @@ def summarize(report):
                         "unscheduled_marker_frames": unscheduled,
                         "aggregate_host_counters": total_counters,
                         "active_window_host_counters": active_counters,
+                        "coalesced_outcomes": coalesced_outcomes(total_counters),
+                        "active_coalesced_outcomes": coalesced_outcomes(active_counters),
                         "samples": samples})
     return {"schema_version": 1, "benchmark": benchmark, "debug_assertions": build_mode(report),
             "presentation_feedback_delay_ns": delay, "planned_sessions": len(arms),
@@ -291,7 +326,24 @@ def summarize(report):
 
 
 
+def coalesced_outcomes(stats):
+    if stats is None or any(key not in stats for key in COALESCED_COUNTERS):
+        return None
+    result = {}
+    for name, numerator, denominator in (
+        ("selection", "coalesced_selected", "coalesced_attempts"),
+        ("plan_fallback", "coalesced_plan_fallbacks", "coalesced_attempts"),
+        ("encode_rejection", "coalesced_encode_rejected", "coalesced_selected"),
+        ("flush", "coalesced_flushed", "coalesced_selected"),
+    ):
+        n, d = stats[numerator], stats[denominator]
+        result[name] = {"numerator": n, "denominator": d, "ratio": n / d if d else None}
+    return result
+
+
 def candidate_for(arms):
+    if arms == COALESCED_ARMS:
+        return "region_coalesced"
     if arms == BOUNDED_ARMS:
         return "region_priority_bounded1"
     return "region_priority" if "region_priority" in arms else "region_deadline"
@@ -299,6 +351,8 @@ def candidate_for(arms):
 
 def pressure_assessment(sessions, arms=PRIORITY_ARMS):
     """Actual selected-latest decisions, not inferred from injected feedback delay."""
+    if arms == COALESCED_ARMS:
+        return coalesced_pressure_assessment(sessions)
     candidates = sorted((s for s in sessions if s["arm"] == candidate_for(arms)), key=lambda s: s["order"])
     result = {"status": "no_claim", "reason": "incomplete_or_failed_sessions",
               "scope": "Both candidate sessions must select a queued latest capture instead of a retained followup within the active window; this does not prove encode/send/presentation or dynamic non-regression.",
@@ -316,11 +370,31 @@ def pressure_assessment(sessions, arms=PRIORITY_ARMS):
     return result
 
 
+def coalesced_pressure_assessment(sessions):
+    candidates = sorted((s for s in sessions if s["arm"] == "region_coalesced"), key=lambda s: s["order"])
+    keys = ("coalesced_flushed", "coalesced_flushed_dynamic_tiles", "coalesced_flushed_static_tiles")
+    result = {"status": "no_claim", "reason": "incomplete_or_failed_sessions",
+              "scope": "Both coalesced candidate sessions must completely write and flush at least one bounded PNG containing dynamic and stable-static tiles in the active window; authenticated transport flush is not viewer presentation, static convergence, or dynamic non-regression.",
+              "candidate_observations": [{"order": s["order"], **{
+                  "active_" + key: (s["active_window_host_counters"] or {}).get(key) for key in keys}} for s in candidates]}
+    if len(sessions) != len(COALESCED_ARMS) or len(candidates) != 2 or any(not s["success"] for s in sessions):
+        return result
+    counts = [row["active_" + key] for row in result["candidate_observations"] for key in keys]
+    if any(count is None for count in counts):
+        result["reason"] = "missing_active_counters"
+    elif all(count > 0 for count in counts):
+        result.update(status="observed_coalesced_flushes", reason="both_candidates_flushed_dynamic_and_static_tiles")
+    else:
+        result.update(status="not_established", reason="at_least_one_candidate_without_active_combined_flush")
+    return result
+
+
 def public_pressure_assessment(assessment):
     if assessment is None:
         return None
     return {**{key: assessment[key] for key in ("status", "reason", "scope")},
-            "candidate_observations": [{key: row[key] for key in ("order", "active_priority_deferrals")}
+            "candidate_observations": [{key: row[key] for key in ("order", "active_priority_deferrals", "active_coalesced_flushed",
+                "active_coalesced_flushed_dynamic_tiles", "active_coalesced_flushed_static_tiles") if key in row}
                                        for row in assessment["candidate_observations"]]}
 
 
@@ -346,7 +420,11 @@ def dynamic_assessment(sessions, arms):
         return result
     # Only the new bounded schemas admit starvation of the unbounded priority
     # comparator. Its observed static_criterion stays false; no old gate changes.
-    required_static = [s for s in sessions if arms != BOUNDED_ARMS or s["arm"] != "region_priority"]
+    descriptive_static = (("region_priority", "region_priority_bounded1") if arms == COALESCED_ARMS else
+                          ("region_priority",) if arms == BOUNDED_ARMS else ())
+    required_static = [s for s in sessions if s["arm"] not in descriptive_static]
+    if arms == COALESCED_ARMS:
+        result["scope"] += " Coalesced-schema static gates require candidate and deadline convergence, New250 starvation, and no regressions in any arm; both priority controls' convergence is measured but not required."
     if arms == BOUNDED_ARMS:
         result["scope"] += " Bounded-schema static gates require candidate and deadline convergence, New250 starvation, and no regressions in any arm; unbounded priority convergence is measured but not required."
     if any(not s["static_criterion"] for s in required_static) or any(not s["no_exact_to_inexact_regression"] for s in sessions):
@@ -407,6 +485,10 @@ def public_summary(summary):
     for session in result["sessions"]:
         for key in ("aggregate_host_counters", "active_window_host_counters"):
             session[key] = counters(session[key])
+        # Derive public ratios from validated counter allowlists, never copy a
+        # future diagnostic field from an outcome or raw trace.
+        session["coalesced_outcomes"] = coalesced_outcomes(session["aggregate_host_counters"])
+        session["active_coalesced_outcomes"] = coalesced_outcomes(session["active_window_host_counters"])
     return result
 
 
@@ -781,6 +863,120 @@ def self_test():
             pass
         else:
             raise AssertionError("invalid bounded-priority evidence accepted")
+    coalesced_rows = [dict(copy.deepcopy(rows[0]), arm=arm, order=order)
+                      for order, arm in enumerate(COALESCED_ARMS)]
+    for row in coalesced_rows:
+        row["static_criterion"] = row["arm"] not in ("region_priority", "region_priority_bounded1")
+        row["active_window_host_counters"] = {"coalesced_flushed": 1,
+            "coalesced_flushed_dynamic_tiles": 2, "coalesced_flushed_static_tiles": 3}
+    assessed = dynamic_assessment(coalesced_rows, COALESCED_ARMS)
+    assert assessed["candidate_arm"] == "region_coalesced"
+    assert assessed["status"] == "observed_non_regression"
+    assert [r["order"] for r in assessed["candidate_comparisons"]] == [4, 5]
+    assert len(assessed["control_arms"]) == 4
+    exercised = pressure_assessment(coalesced_rows, COALESCED_ARMS)
+    assert exercised["status"] == "observed_coalesced_flushes"
+    assert [r["order"] for r in exercised["candidate_observations"]] == [4, 5]
+    assert pressure_assessment(coalesced_rows[:-1], COALESCED_ARMS)["status"] == "no_claim"
+    for order in range(10):
+        for key in ("success", "no_exact_to_inexact_regression"):
+            changed = copy.deepcopy(coalesced_rows)
+            changed[order][key] = False
+            assert dynamic_assessment(changed, COALESCED_ARMS)["status"] == "no_claim"
+        if order in (0, 1, 4, 5, 8, 9):
+            changed = copy.deepcopy(coalesced_rows)
+            changed[order]["static_criterion"] = False
+            assert dynamic_assessment(changed, COALESCED_ARMS)["reason"] == "static_gate_failed"
+        else:
+            changed = copy.deepcopy(coalesced_rows)
+            changed[order]["static_criterion"] = True
+            assert dynamic_assessment(changed, COALESCED_ARMS)["status"] == "observed_non_regression"
+        if order not in (4, 5):
+            changed = copy.deepcopy(coalesced_rows)
+            changed[order]["within_window_scheduled_to_present"]["p95_ms"] -= 1
+            assert dynamic_assessment(changed, COALESCED_ARMS)["status"] == "non_regression_not_established"
+    for order in (4, 5):
+        for key in ("coalesced_flushed", "coalesced_flushed_dynamic_tiles", "coalesced_flushed_static_tiles"):
+            changed = copy.deepcopy(coalesced_rows)
+            changed[order]["active_window_host_counters"][key] = 0
+            assert pressure_assessment(changed, COALESCED_ARMS)["status"] == "not_established"
+            del changed[order]["active_window_host_counters"][key]
+            assert pressure_assessment(changed, COALESCED_ARMS)["status"] == "no_claim"
+        for clock in ("scheduled", "commit"):
+            for quantile in ("p95_ms", "max_ms"):
+                changed = copy.deepcopy(coalesced_rows)
+                changed[order][f"within_window_{clock}_to_present"][quantile] += 1
+                assert dynamic_assessment(changed, COALESCED_ARMS)["status"] == "non_regression_not_established"
+        for key in ("within_window_missing_planned_generations", "late_presented_generations"):
+            changed = copy.deepcopy(coalesced_rows)
+            changed[order][key] += 1
+            assert dynamic_assessment(changed, COALESCED_ARMS)["status"] == "non_regression_not_established"
+    exercised["private_trace"] = "do not publish"
+    exercised["candidate_observations"][0]["private_trace"] = "do not publish"
+    assert "do not publish" not in json.dumps(public_pressure_assessment(exercised))
+    coalesced_report = copy.deepcopy(pressure)
+    coalesced_report["benchmark"] = COALESCED_PRESSURE_BENCHMARK
+    coalesced_report["sessions"] = [dict(copy.deepcopy(pressure["sessions"][0]), arm=arm, order=order)
+                                   for order, arm in enumerate(COALESCED_ARMS)]
+    for row in coalesced_report["sessions"]:
+        for scope in ("host_stats", "active_window_host_stats"):
+            row[scope].update({key: 0 for key in BOUNDED_COUNTERS + COALESCED_COUNTERS})
+            row[scope]["sent_bytes"] = 300
+            if row["arm"] == "region_coalesced":
+                row[scope].update({key: 0 for key in QUEUE_COUNTERS})
+                row[scope].update(coalesced_attempts=3, coalesced_selected=2, coalesced_plan_fallbacks=1,
+                    coalesced_encode_rejected=1, coalesced_flushed=1, coalesced_selected_dynamic_tiles=4,
+                    coalesced_selected_static_tiles=4, coalesced_flushed_dynamic_tiles=2,
+                    coalesced_flushed_static_tiles=2, coalesced_encode_ns=100, coalesced_sent_bytes=200)
+    coalesced_summary = summarize(coalesced_report)
+    assert coalesced_summary["planned_sessions"] == 10 and coalesced_summary["planned_generation_budget"] == 800
+    public = public_summary(coalesced_summary)
+    assert public["sessions"][4]["coalesced_outcomes"]["plan_fallback"] == {"numerator": 1, "denominator": 3, "ratio": 1 / 3}
+    assert public["sessions"][4]["coalesced_outcomes"]["encode_rejection"]["ratio"] == .5
+    assert public["sessions"][0]["coalesced_outcomes"]["flush"]["ratio"] is None
+    assert summarize(report)["sessions"][0]["coalesced_outcomes"] is None
+    coalesced_summary["sessions"][4]["coalesced_outcomes"]["flush"]["private_trace"] = "do not publish"
+    assert "do not publish" not in json.dumps(public_summary(coalesced_summary))
+    bad_coalesced = []
+    bad = copy.deepcopy(coalesced_report)
+    bad["sessions"][4]["host_stats"].update(followup_opportunities=1, retained_followups=1)
+    bad_coalesced.append(bad)
+    for key in COALESCED_COUNTERS:
+        for value in (None, True, -1, 2**63):
+            bad = copy.deepcopy(coalesced_report)
+            bad["sessions"][4]["host_stats"][key] = value
+            bad_coalesced.append(bad)
+        bad = copy.deepcopy(coalesced_report)
+        del bad["sessions"][4]["host_stats"][key]
+        bad_coalesced.append(bad)
+        bad = copy.deepcopy(coalesced_report)
+        bad["sessions"][0]["host_stats"][key] = 1
+        bad_coalesced.append(bad)
+    for key, value in (("coalesced_attempts", 4), ("coalesced_encode_rejected", 2),
+                       ("coalesced_flushed", 2), ("coalesced_selected_dynamic_tiles", 1),
+                       ("coalesced_selected_static_tiles", 512), ("coalesced_flushed_dynamic_tiles", 5),
+                       ("coalesced_flushed_static_tiles", 0), ("coalesced_sent_bytes", 301)):
+        bad = copy.deepcopy(coalesced_report)
+        bad["sessions"][4]["host_stats"][key] = value
+        bad_coalesced.append(bad)
+    bad = copy.deepcopy(coalesced_report)
+    bad["sessions"][4]["active_window_host_stats"]["coalesced_encode_ns"] = 101
+    bad_coalesced.append(bad)
+    bad = copy.deepcopy(coalesced_report)
+    bad["sessions"][4]["success"] = True
+    for key in COALESCED_COUNTERS:
+        del bad["sessions"][4]["active_window_host_stats"][key]
+    bad_coalesced.append(bad)
+    bad = copy.deepcopy(coalesced_report)
+    bad["benchmark"] = BOUNDED_PRESSURE_BENCHMARK
+    bad_coalesced.append(bad)
+    for bad in bad_coalesced:
+        try:
+            summarize(bad)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("invalid coalesced evidence accepted")
     assessment["private_trace"] = "do not publish"
     assessment["best_control"]["private_trace"] = "do not publish"
     assessment["candidate_comparisons"][0]["metrics"]["private_trace"] = "do not publish"

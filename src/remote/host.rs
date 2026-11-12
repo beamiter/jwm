@@ -543,6 +543,9 @@ pub(crate) enum LosslessSchedule {
     /// Private experiment: at most one latest-capture deferral per repair service.
     #[cfg(test)]
     RegionPriorityBounded1,
+    /// Test-only bounded combined dynamic/static PNG, never a retained follow-up.
+    #[cfg(test)]
+    RegionCoalesced,
 }
 impl LosslessSchedule {
     fn quiet_period(self) -> Duration {
@@ -554,7 +557,8 @@ impl LosslessSchedule {
             | Self::Quiet0Pace250
             | Self::RegionDeadline
             | Self::RegionPriority
-            | Self::RegionPriorityBounded1 => Duration::ZERO,
+            | Self::RegionPriorityBounded1
+            | Self::RegionCoalesced => Duration::ZERO,
             #[cfg(test)]
             Self::Quiet250Pace100 | Self::Quiet250Pace250 => Duration::from_millis(250),
         }
@@ -572,7 +576,8 @@ impl LosslessSchedule {
             | Self::Quiet250Pace250
             | Self::RegionDeadline
             | Self::RegionPriority
-            | Self::RegionPriorityBounded1 => Duration::from_millis(250),
+            | Self::RegionPriorityBounded1
+            | Self::RegionCoalesced => Duration::from_millis(250),
         }
     }
 
@@ -602,10 +607,23 @@ pub(crate) struct LosslessScheduleStats {
     pub budget_retained_selections: u64,
     pub budget_png_flushed: u64,
     pub max_priority_deferral_streak: u64,
+    pub coalesced_attempts: u64,
+    pub coalesced_selected: u64,
+    pub coalesced_plan_fallbacks: u64,
+    pub coalesced_encode_rejected: u64,
+    pub coalesced_flushed: u64,
+    pub coalesced_encode_ns: u128,
+    pub coalesced_sent_bytes: u64,
+    pub coalesced_selected_dynamic_tiles: u64,
+    pub coalesced_selected_static_tiles: u64,
+    pub coalesced_flushed_dynamic_tiles: u64,
+    pub coalesced_flushed_static_tiles: u64,
 }
 #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
 #[derive(Default)]
 pub(crate) struct LosslessScheduleProbe {
+    // Explicit deterministic fault injection, never selected by benchmarks.
+    reject_coalesced_once: AtomicBool,
     stats: Mutex<LosslessScheduleStats>,
     records: Mutex<Vec<LosslessScheduleRecord>>,
 }
@@ -813,6 +831,33 @@ impl FrameSender {
             self.last_content_change.get_or_insert(now);
         }
         Ok(plan)
+    }
+
+    #[cfg(test)]
+    fn try_coalesced_at(
+        &mut self,
+        frame: &CapturedFrame,
+        now: Instant,
+        plan: TilePlan,
+        ordinary_read_only: bool,
+    ) -> RemoteResult<(TilePlan, bool)> {
+        if self.lossless_schedule != LosslessSchedule::RegionCoalesced
+            || !self.static_lossless
+            || self.scroll_copy
+            || !ordinary_read_only
+            || plan.keyframe
+            || self.encoder.detected_dirty_tiles() == 0
+            || self.lossless_retry_after.is_some_and(|at| now < at)
+            || self.lossless_next_batch.is_some_and(|at| now < at)
+            || !self.encoder.has_stable_exact_debt(now)
+        {
+            return Ok((plan, false));
+        }
+        let plan = self
+            .encoder
+            .plan_at(frame, TileEncodeRequest::CoalescedLosslessRepair, now)?;
+        self.pending_refinement_at = self.encoder.planned_coalesced_counts().map(|_| now);
+        Ok((plan, true))
     }
 
     #[cfg(test)]
@@ -2597,6 +2642,7 @@ fn validate_window_policy(options: &HostOptions) -> RemoteResult<()> {
                 LosslessSchedule::RegionDeadline
                     | LosslessSchedule::RegionPriority
                     | LosslessSchedule::RegionPriorityBounded1
+                    | LosslessSchedule::RegionCoalesced
             )
         })
     }) && (options.allow_input
@@ -5059,6 +5105,47 @@ fn send_frames_with_encoder_scoped<W: std::io::Write + SetWriteTimeout>(
                 )
                 .map_err(LocalRuntimeFailure::encoding)?
         };
+        #[cfg(test)]
+        let (coalesced_plan, coalesced_attempted) = sender
+            .try_coalesced_at(
+                &pending.frame,
+                planned_at,
+                plan,
+                pending.pointer_serial.is_none()
+                    && pending.native_proof_serial.is_none()
+                    && pending.pointer_repair.is_none()
+                    && pending.control_repair.is_none(),
+            )
+            .map_err(LocalRuntimeFailure::encoding)?;
+        #[cfg(test)]
+        {
+            plan = coalesced_plan;
+        }
+        #[cfg(test)]
+        let mut coalesced_counts = sender.encoder.planned_coalesced_counts();
+        #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+        if coalesced_attempted
+            && let Some((_, probe)) = sources.and_then(|s| s.lossless_schedule_test.as_ref())
+        {
+            let mut stats = probe.stats.lock().unwrap();
+            stats.coalesced_attempts = stats.coalesced_attempts.saturating_add(1);
+            if let Some((dynamic, repair)) = coalesced_counts {
+                stats.coalesced_selected = stats.coalesced_selected.saturating_add(1);
+                stats.coalesced_selected_dynamic_tiles = stats
+                    .coalesced_selected_dynamic_tiles
+                    .saturating_add(dynamic as u64);
+                stats.coalesced_selected_static_tiles = stats
+                    .coalesced_selected_static_tiles
+                    .saturating_add(repair as u64);
+            } else {
+                stats.coalesced_plan_fallbacks = stats.coalesced_plan_fallbacks.saturating_add(1);
+            }
+        }
+        #[cfg(all(
+            test,
+            not(all(feature = "remote-wayland", feature = "backend-wayland-udev"))
+        ))]
+        let _ = coalesced_attempted;
         if let Some(sources) = sources {
             pointer_repair::observe_debt(sources, sender.encoder.has_stable_exact_debt(planned_at));
             control_repair::observe_debt(sources, sender.encoder.has_stable_exact_debt(planned_at));
@@ -5120,12 +5207,49 @@ fn send_frames_with_encoder_scoped<W: std::io::Write + SetWriteTimeout>(
             telemetry.record_unchanged_suppressed();
             continue;
         }
+        #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+        if coalesced_counts.is_some()
+            && sources
+                .and_then(|s| s.lossless_schedule_test.as_ref())
+                .is_some_and(|(_, probe)| probe.reject_coalesced_once.swap(false, Ordering::AcqRel))
+        {
+            sender.encoder.reject_next_lossless_encode_for_test();
+        }
         let encode_started = Instant::now();
-        if let Err(error) =
+        let encode_result =
+            sender
+                .encoder
+                .encode_into(&mut payload, sequence, &pending.frame, quality.quality);
+        #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+        let coalesced_encode_ns = if coalesced_counts.is_some() {
+            encode_started.elapsed().as_nanos()
+        } else {
+            0
+        };
+        #[cfg(test)]
+        let encode_result = if encode_result.is_err()
+            && coalesced_counts.is_some()
+            && sender.encoder.lossless_encode_rejected()
+        {
+            #[cfg(all(feature = "remote-wayland", feature = "backend-wayland-udev"))]
+            if let Some((_, probe)) = sources.and_then(|s| s.lossless_schedule_test.as_ref()) {
+                let mut stats = probe.stats.lock().unwrap();
+                stats.coalesced_encode_rejected = stats.coalesced_encode_rejected.saturating_add(1);
+            }
+            sender.discard();
+            sender.lossless_retry_after = Some(Instant::now() + STATIC_REFINEMENT_INTERVAL);
+            coalesced_counts = None;
+            plan = sender
+                .encoder
+                .plan_at(&pending.frame, TileEncodeRequest::Delta, planned_at)
+                .map_err(LocalRuntimeFailure::encoding)?;
             sender
                 .encoder
                 .encode_into(&mut payload, sequence, &pending.frame, quality.quality)
-        {
+        } else {
+            encode_result
+        };
+        if let Err(error) = encode_result {
             if sender.static_lossless && sender.encoder.lossless_encode_rejected() {
                 sender.discard();
                 sender.lossless_retry_after = Some(Instant::now() + STATIC_REFINEMENT_INTERVAL);
@@ -5137,6 +5261,9 @@ fn send_frames_with_encoder_scoped<W: std::io::Write + SetWriteTimeout>(
         if let Some((_, probe)) = sources.and_then(|s| s.lossless_schedule_test.as_ref()) {
             let mut stats = probe.stats.lock().unwrap();
             stats.encode_ns += encode_started.elapsed().as_nanos();
+            stats.coalesced_encode_ns = stats
+                .coalesced_encode_ns
+                .saturating_add(coalesced_encode_ns);
             if let Some(t) = sender.encoder.encode_timings() {
                 if let Some(png) = t.png {
                     stats.encoded_png += 1;
@@ -5353,7 +5480,22 @@ fn send_frames_with_encoder_scoped<W: std::io::Write + SetWriteTimeout>(
         }
         #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
         if let Some((_, probe)) = sources.and_then(|s| s.lossless_schedule_test.as_ref()) {
-            probe.stats.lock().unwrap().sent_bytes += wire_payload.len() as u64;
+            {
+                let mut stats = probe.stats.lock().unwrap();
+                stats.sent_bytes = stats.sent_bytes.saturating_add(wire_payload.len() as u64);
+                if is_png && let Some((dynamic, repair)) = coalesced_counts {
+                    stats.coalesced_flushed = stats.coalesced_flushed.saturating_add(1);
+                    stats.coalesced_sent_bytes = stats
+                        .coalesced_sent_bytes
+                        .saturating_add(wire_payload.len() as u64);
+                    stats.coalesced_flushed_dynamic_tiles = stats
+                        .coalesced_flushed_dynamic_tiles
+                        .saturating_add(dynamic as u64);
+                    stats.coalesced_flushed_static_tiles = stats
+                        .coalesced_flushed_static_tiles
+                        .saturating_add(repair as u64);
+                }
+            }
             let stages = sender.encoder.encode_timings();
             let mut records = probe.records.lock().unwrap();
             assert!(
@@ -6689,6 +6831,7 @@ mod tests {
             LosslessSchedule::RegionDeadline,
             LosslessSchedule::RegionPriority,
             LosslessSchedule::RegionPriorityBounded1,
+            LosslessSchedule::RegionCoalesced,
         ] {
             with_lossless_schedule(policy, Arc::new(LosslessScheduleProbe::default()), || {
                 let options = test_host_source_options();
@@ -6721,6 +6864,307 @@ mod tests {
                 }
             });
         }
+    }
+
+    #[test]
+    fn coalesced_host_requires_plain_dynamic_debt_and_never_queues_followup() {
+        let base = Instant::now();
+        for blocked in 0..8 {
+            let mut pending = test_pending_frame(90);
+            pending.frame.source_width = 32;
+            pending.frame.source_height = 16;
+            pending.frame.image = RgbImage::from_pixel(32, 16, Rgb([90, 110, 130]));
+            let mut sender = FrameSender::with_codecs(false, true);
+            sender.lossless_schedule = LosslessSchedule::RegionCoalesced;
+            sender.plan_at(&pending.frame, base).unwrap();
+            sender
+                .encoder
+                .encode_into(&mut Vec::new(), 0, &pending.frame, 70)
+                .unwrap();
+            sender.commit_at(&pending.frame, base);
+            let now = base + Duration::from_secs(2);
+            pending.frame.image.put_pixel(0, 0, Rgb([200, 110, 130]));
+            let plan = sender.plan_at(&pending.frame, now).unwrap();
+            match blocked {
+                1 => sender.static_lossless = false,
+                2 => sender.scroll_copy = true,
+                3 => sender.lossless_retry_after = Some(now + Duration::from_secs(1)),
+                4 => sender.lossless_next_batch = Some(now + Duration::from_secs(1)),
+                5 => sender.lossless_schedule = LosslessSchedule::New250,
+                _ => {}
+            }
+            let mut plan = plan;
+            if blocked == 6 {
+                plan.keyframe = true;
+            }
+            let (_, attempted) = sender
+                .try_coalesced_at(&pending.frame, now, plan, blocked != 7)
+                .unwrap();
+            assert_eq!(attempted, blocked == 0);
+            assert_eq!(
+                sender.encoder.planned_coalesced_counts().is_some(),
+                blocked == 0
+            );
+            assert!(
+                !sender.region_repair_due(now),
+                "coalesced cannot retain a second slot"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(all(feature = "remote-wayland", feature = "backend-wayland-udev"))]
+    fn coalesced_sender_stale_dynamic_pixels_keep_credit_and_sequence() {
+        let make_frame = |red| {
+            let mut frame = test_pending_frame(red);
+            frame.frame.source_width = 32;
+            frame.frame.source_height = 16;
+            frame.frame.image = RgbImage::from_pixel(32, 16, Rgb([90, 110, 130]));
+            for y in 0..16 {
+                for x in 0..16 {
+                    frame.frame.image.put_pixel(x, y, Rgb([red, 110, 130]));
+                }
+            }
+            frame
+        };
+        let probe = Arc::new(LosslessScheduleProbe::default());
+        let pending_probe = Arc::new(PendingLosslessProbe::default());
+        let mut sources =
+            SourceControl::new(vec![(SourceId(1), CaptureArea::Root)], (32, 16).into(), 0).unwrap();
+        sources.lossless_schedule_test = Some((LosslessSchedule::RegionCoalesced, probe.clone()));
+        sources.pending_lossless_probe = Some(pending_probe.clone());
+        let sources = Arc::new(sources);
+        let mailbox = Arc::new(LatestMailbox::new());
+        mailbox.publish(make_frame(90)).unwrap();
+        let gate = Arc::new((
+            Mutex::new(GateState {
+                open: true,
+                ..GateState::default()
+            }),
+            Condvar::new(),
+        ));
+        let writer = Arc::new(Mutex::new(SessionWriter::new(
+            DeadlineWriter::new(GateWriter(gate.clone()), WRITE_TIMEOUT),
+            [0x5a; 32],
+        )));
+        let running = Arc::new(AtomicBool::new(true));
+        let credits = Arc::new(FrameCredits::new());
+        let worker = {
+            let mailbox = mailbox.clone();
+            let running = running.clone();
+            let credits = credits.clone();
+            let sources = sources.clone();
+            thread::spawn(move || {
+                let quality = JpegQualityController::new_at(
+                    70,
+                    70,
+                    false,
+                    Duration::from_millis(100),
+                    Instant::now(),
+                )
+                .unwrap();
+                let mut sender = FrameSender::with_codecs(false, true);
+                send_frames_with_encoder_scoped(
+                    mailbox,
+                    writer,
+                    &running,
+                    &credits,
+                    &HostTelemetry::new(),
+                    &quality,
+                    &mut sender,
+                    Some(&sources),
+                )
+            })
+        };
+        let wait_flushes = |count| {
+            let (lock, ready) = &*gate;
+            let (state, timeout) = ready
+                .wait_timeout_while(lock.lock().unwrap(), Duration::from_secs(3), |s| {
+                    s.flushes < count
+                })
+                .unwrap();
+            assert!(!timeout.timed_out(), "missing flush {count}");
+            assert_eq!(state.flushes, count);
+        };
+        wait_flushes(1);
+        {
+            let mut state = sources.state.lock().unwrap();
+            let version = state.policy.current();
+            state.policy.acknowledge_presentation(version, 0).unwrap();
+        }
+        sources.changed.notify_all();
+        thread::sleep(Duration::from_millis(2100));
+        credits.acknowledge(0).unwrap().unwrap();
+        mailbox.publish(make_frame(130)).unwrap();
+        let until = Instant::now() + Duration::from_secs(3);
+        while pending_probe.blocked().is_none() {
+            assert!(
+                Instant::now() < until,
+                "combined PNG did not reach encode barrier"
+            );
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(pending_probe.blocked().unwrap().0, 1);
+        assert_eq!(credits.outstanding(), 0);
+        assert_eq!(credits.state.lock().unwrap().last_sent, Some(0));
+        // Dynamic tile participates in the selected-pixel stale fence too.
+        mailbox.publish(make_frame(170)).unwrap();
+        pending_probe.release();
+        wait_flushes(2);
+        running.store(false, Ordering::Release);
+        mailbox.close();
+        credits.close();
+        worker.join().unwrap().unwrap();
+        let stats = probe.snapshot();
+        assert_eq!(stats.coalesced_attempts, 2);
+        assert_eq!(stats.coalesced_selected, 2);
+        assert_eq!(stats.coalesced_flushed, 1);
+        assert_eq!(stats.stale_png_dropped, 1);
+        assert_eq!(stats.followup_opportunities, 0);
+        assert!(stats.coalesced_encode_ns > 0 && stats.coalesced_sent_bytes > 0);
+        assert_eq!(stats.coalesced_flushed_dynamic_tiles, 1);
+        assert_eq!(stats.coalesced_flushed_static_tiles, 1);
+        let written = pending_probe.written();
+        assert_eq!(written.len(), 2);
+        assert_eq!(written[1].0, 1);
+        assert!(written[1].3);
+    }
+
+    #[test]
+    #[cfg(all(feature = "remote-wayland", feature = "backend-wayland-udev"))]
+    fn coalesced_sender_rejected_encode_falls_back_same_capture_without_exact_commit() {
+        let make_frame = |red| {
+            let mut frame = test_pending_frame(red);
+            frame.frame.source_width = 32;
+            frame.frame.source_height = 16;
+            frame.frame.image = RgbImage::from_pixel(32, 16, Rgb([90, 110, 130]));
+            for y in 0..16 {
+                for x in 0..16 {
+                    frame.frame.image.put_pixel(x, y, Rgb([red, 110, 130]));
+                }
+            }
+            frame
+        };
+        let probe = Arc::new(LosslessScheduleProbe::default());
+        let pending_probe = Arc::new(PendingLosslessProbe::observing_only());
+        probe.reject_coalesced_once.store(true, Ordering::Release);
+        let mut sources =
+            SourceControl::new(vec![(SourceId(1), CaptureArea::Root)], (32, 16).into(), 0).unwrap();
+        sources.lossless_schedule_test = Some((LosslessSchedule::RegionCoalesced, probe.clone()));
+        sources.pending_lossless_probe = Some(pending_probe.clone());
+        let sources = Arc::new(sources);
+        let mailbox = Arc::new(LatestMailbox::new());
+        mailbox.publish(make_frame(90)).unwrap();
+        let gate = Arc::new((
+            Mutex::new(GateState {
+                open: true,
+                ..GateState::default()
+            }),
+            Condvar::new(),
+        ));
+        let writer = Arc::new(Mutex::new(SessionWriter::new(
+            DeadlineWriter::new(GateWriter(gate.clone()), WRITE_TIMEOUT),
+            [0x5a; 32],
+        )));
+        let running = Arc::new(AtomicBool::new(true));
+        let credits = Arc::new(FrameCredits::new());
+        let worker = {
+            let mailbox = mailbox.clone();
+            let running = running.clone();
+            let credits = credits.clone();
+            let sources = sources.clone();
+            thread::spawn(move || {
+                let quality = JpegQualityController::new_at(
+                    70,
+                    70,
+                    false,
+                    Duration::from_millis(100),
+                    Instant::now(),
+                )
+                .unwrap();
+                let mut sender = FrameSender::with_codecs(false, true);
+                send_frames_with_encoder_scoped(
+                    mailbox,
+                    writer,
+                    &running,
+                    &credits,
+                    &HostTelemetry::new(),
+                    &quality,
+                    &mut sender,
+                    Some(&sources),
+                )
+            })
+        };
+        let wait_flushes = |count| {
+            let (lock, ready) = &*gate;
+            let (state, timeout) = ready
+                .wait_timeout_while(lock.lock().unwrap(), Duration::from_secs(3), |s| {
+                    s.flushes < count
+                })
+                .unwrap();
+            assert!(!timeout.timed_out(), "missing flush {count}");
+            assert_eq!(state.flushes, count);
+        };
+        wait_flushes(1);
+        {
+            let mut state = sources.state.lock().unwrap();
+            let version = state.policy.current();
+            state.policy.acknowledge_presentation(version, 0).unwrap();
+        }
+        sources.changed.notify_all();
+        thread::sleep(Duration::from_millis(2100));
+        credits.acknowledge(0).unwrap().unwrap();
+        mailbox.publish(make_frame(130)).unwrap();
+        wait_flushes(2); // Failed PNG uses no sequence/credit; same capture becomes JPEG 1.
+        assert_eq!(credits.outstanding(), 1);
+        assert_eq!(credits.state.lock().unwrap().last_sent, Some(1));
+        // Static debt must still exist after rejection. An ordinary idle PNG
+        // can discharge it later, but must not inherit coalesced flush metadata.
+        thread::sleep(STATIC_REFINEMENT_INTERVAL + Duration::from_millis(100));
+        mailbox.publish(make_frame(130)).unwrap();
+        wait_flushes(3);
+        running.store(false, Ordering::Release);
+        mailbox.close();
+        credits.close();
+        worker.join().unwrap().unwrap();
+        let stats = probe.snapshot();
+        assert_eq!(stats.coalesced_attempts, 1);
+        assert_eq!(stats.coalesced_selected, 1);
+        assert_eq!(stats.coalesced_encode_rejected, 1);
+        assert_eq!(stats.coalesced_flushed, 0);
+        assert_eq!(stats.coalesced_flushed_dynamic_tiles, 0);
+        assert_eq!(stats.coalesced_flushed_static_tiles, 0);
+        assert_eq!(stats.coalesced_sent_bytes, 0);
+        assert!(stats.coalesced_encode_ns > 0);
+        assert_eq!(stats.followup_opportunities, 0);
+        let wire = gate.0.lock().unwrap().bytes.clone();
+        let mut reader = SessionReader::new(Cursor::new(wire), [0x5a; 32]);
+        let mut decoder = TileDecoder::new();
+        decoder.set_lossless_enabled(true);
+        for sequence in 0..3 {
+            let (_, payload) = reader.read_message().unwrap();
+            let (epoch, purpose, inner) =
+                super::super::source_wire::decode_frame_payload(&payload).unwrap();
+            assert_eq!(epoch, 1);
+            let (actual_sequence, image) = decode_wire(&mut decoder, inner);
+            assert_eq!(actual_sequence, sequence);
+            assert_eq!(
+                purpose,
+                if sequence == 2 {
+                    FramePurpose::VisualRepair
+                } else {
+                    FramePurpose::Video
+                }
+            );
+            assert_eq!(decoder.last_frame_was_lossless(), sequence == 2);
+            if sequence == 1 {
+                assert!(image.get_pixel(0, 0)[0].abs_diff(130) <= 10);
+            }
+            if sequence == 2 {
+                assert_eq!(*image.get_pixel(16, 0), Rgb([90, 110, 130]));
+            }
+        }
+        assert!(reader.read_message().is_err());
     }
 
     #[test]

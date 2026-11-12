@@ -260,3 +260,109 @@ Use `JWM_REMOTE_REGION_BOUNDED_PRIORITY_REPORT` with the explicit ignored tests
 `actual_static_lossless_region_bounded_priority_credit_pressure_measurement` and
 the same profiling/no-debug-assertions/public-summary guards. Software GL and
 loopback remain synthetic evidence, not a physical-display or WAN guarantee.
+
+## Single-PNG coalescing experiment
+
+`RegionCoalesced` is test-only and explicitly read-only. It does **not** mix JPEG
+and PNG in one record: the existing wire format has one codec per atlas. Instead,
+when the latest snapshot has a small dynamic dirty set and stable exact debt,
+the planner puts **all** dynamic dirty tiles plus a bounded round-robin selection
+of stable static tiles into one PNG atlas. Both come directly from that same
+immutable source snapshot. The padded atlas remains at most 65,536 pixels and
+respects the existing dimension and encoded-byte limits. No protocol, client,
+capability negotiation, default option or native-input proof rule changes.
+
+At least one dynamic tile and one stable debt tile must fit. Large dynamic sets,
+scroll, keyframes, mandatory/control/native proofs, retry/pacing restrictions and
+unavailable stable debt retain the ordinary path. An unsuitable coalesced plan
+falls back to ordinary JPEG without truncating dynamic damage. A rejected PNG
+encoding is discarded and replanned as JPEG from the same snapshot, with the
+existing retry cooldown. Neither selection nor a failed encode commits exact
+pixels or advances the repair cursor.
+
+The coalesced policy never creates a retained region follow-up. Its successful
+combined PNG uses one authenticated record, one sequence, one normal credit and
+one `VisualRepair` presentation. All source/geometry and selected-RGB supersession
+checks remain in place, including checks on the dynamic tiles. New damage can
+therefore invalidate the entire selected PNG; measuring that rejection cost is
+part of this experiment, not permission to send stale content. Partial writes
+still cannot commit the encoder's exact-pixel model.
+
+The new identities are `static_lossless_region_coalesced_continuous_tcp_ab` and
+`static_lossless_region_coalesced_credit_pressure_tcp_ab`, with the same zero or
+150 ms delay and fixed source as before. Each has ten mirrored sessions: New250,
+RegionDeadline, unbounded priority, bounded-one priority, coalesced, coalesced,
+bounded-one priority, unbounded priority, RegionDeadline, New250. Both coalesced
+candidates must meet static exactness, later-animation and non-regression gates.
+New250 remains the negative static control and RegionDeadline the positive one.
+Both older priority policies are measured comparators, not required to converge
+for these new identities; every arm must still complete without exactness
+regression. Dynamic acceptance remains each candidate against the per-metric
+best of **all eight** controls. Earlier schemas and gates are not weakened.
+
+New allowlisted counters distinguish attempted, selected, rejected and delivered
+work. `coalesced_attempts = coalesced_selected + coalesced_plan_fallbacks` counts
+eligible planning attempts, not all source frames. `coalesced_encode_rejected`
+is the subset of selections rejected during PNG encoding; `coalesced_flushed`
+counts only successful combined PNG flushes. Selected and flushed dynamic/static
+tile totals remain separate. `coalesced_encode_ns` includes the initial combined
+PNG encoding work even when it is rejected or later superseded, excluding its
+subsequent fallback JPEG. `coalesced_sent_bytes` counts only successfully flushed
+combined source-envelope payload, excluding Noise/TCP overhead. Existing total
+payload, JPEG/PNG encode totals and stale-PNG-drop counters remain alongside them.
+Fallback ratios must state their denominator; a zero denominator is unknown, not
+zero percent. Neither payload count nor software-loopback timing is a WAN result.
+
+CI retains two full optimized repetitions of each new identity independently.
+Use `JWM_REMOTE_REGION_COALESCED_REPORT` and explicit ignored tests
+`actual_static_lossless_region_coalesced_continuous_measurement` or
+`actual_static_lossless_region_coalesced_credit_pressure_measurement` with the
+same profiling, no-debug-assertions and public-summary guards. Inspect encoding
+cost, payload, fallback/rejection, actual combined delivery, static convergence,
+missing source generations and tail latency together before proposing any
+production change. Default scheduling remains unchanged.
+
+### Evidence motivating coalescing (2026-11-12)
+
+The optimized pressure repetitions for
+[`85dae205`](https://github.com/beamiter/jwm/commit/85dae205a3657c750c9178a46bf0671bd33b1972),
+master Wayland run `43267519099`, confirmed that this is not only debug overhead:
+all four unbounded-priority sessions selected latest captures 35, 34, 37 and 33
+times, retained no repair, and failed active-window static convergence. All four
+RegionDeadline controls converged in 5.815–5.821 seconds with eight retained
+repairs. Every session completed without exact-to-inexact regression. These runs
+establish exercised pressure, not dynamic non-regression.
+
+The next optimized experiment checked bounded service and preserved dynamic
+response. In candidate
+[`56c5cc5`](https://github.com/beamiter/jwm/commit/56c5cc5fba3aa0db99ef7a432880b89037fe49f8),
+Wayland run `43270225985`, the four bounded-one pressure sessions respectively
+converged in 7.1345, 7.1362, 7.1452 and 7.1394 seconds, each with eight actual
+budgeted PNG flushes, maximum deferral streak one, later animation presented and
+no regression. But scheduled-to-present p95 was respectively 643.91, 650.69,
+646.04 and 644.50 ms; each missed 38 of 80 planned generations in the active
+window. All four New250 controls missed 30; their p95 values were 543.07, 532.44,
+539.57 and 533.63 ms. Both complete mirrored runs therefore returned
+`non_regression_not_established`. No best repetition was selected. The two
+zero-delay repetitions delivered all planned generations, but also failed the
+strict best-control-per-metric assessment.
+
+Thus bounded service repaired starvation in this fixture but did not preserve
+dynamic responsiveness. Coalescing is a new experiment aimed at avoiding the
+extra presentation opportunities, not a declaration that the problem is solved.
+
+### Interpreting late-frame counts under injected pressure
+
+The fixed 150 ms callback hold exceeds the source's 100 ms deadline by itself.
+Consequently, `late_presented_generations` is not a standalone measure of worse
+responsiveness in this pressure workload: delivering more previously missing
+frames can increase that count. The historical conservative acceptance rule is
+retained unchanged, so a run can improve missing generations and all observed
+latency quantiles yet still return `non_regression_not_established` solely on this
+metric. Inspect its per-metric comparisons instead of relabeling that result as
+slower latency. The fixed-budget deadline-miss denominator is all 80 planned
+generations; `80 - within_window_on_time_presented_generations` counts both missing
+and late active-window generations without rewarding dropped frames. A workload
+where the injected delay alone makes every deadline miss cannot establish a
+real-world 100 ms response guarantee. Neither this clarification nor improved
+observed quantiles authorizes production enablement.
