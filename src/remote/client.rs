@@ -55,7 +55,7 @@ use nix::errno::Errno;
 use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 use std::io::Write as _;
 use std::io::{self, Read as _};
-use std::net::{Shutdown, TcpStream, ToSocketAddrs};
+use std::net::{Shutdown, TcpStream};
 use std::os::fd::{AsFd, BorrowedFd};
 use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -4640,38 +4640,9 @@ fn receive_frame_records(
     completion.finish(result);
 }
 
-/// Connect with an explicit bound on the TCP handshake.
-///
-/// Every later phase of a session is absolutely bounded, but a bare
-/// `TcpStream::connect` is not: a black-holed address burns the kernel's whole
-/// SYN retry budget (~130 s on Linux) against a documented 5 s negotiation
-/// budget. Each resolved address gets its own attempt so a stale AAAA record
-/// cannot consume the entire allowance.
-fn connect_with_timeout(address: &str, timeout: Duration) -> RemoteResult<TcpStream> {
-    let resolved = address
-        .to_socket_addrs()
-        .map_err(|error| invalid_data(format!("cannot resolve {address}: {error}")))?
-        .collect::<Vec<_>>();
-    let Some((last, rest)) = resolved.split_last() else {
-        return Err(invalid_data(format!("{address} resolved to no addresses")).into());
-    };
-    let per_address = timeout
-        .checked_div(resolved.len() as u32)
-        .unwrap_or(timeout)
-        .max(Duration::from_secs(1));
-    for candidate in rest {
-        if let Ok(stream) = TcpStream::connect_timeout(candidate, per_address) {
-            return Ok(stream);
-        }
-    }
-    TcpStream::connect_timeout(last, per_address).map_err(|error| {
-        io::Error::new(
-            error.kind(),
-            format!("cannot reach {address} within {timeout:?}: {error}"),
-        )
-        .into()
-    })
-}
+#[path = "client_connect.rs"]
+mod connect;
+use connect::connect_with_timeout;
 
 fn invalid_data(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.into())
