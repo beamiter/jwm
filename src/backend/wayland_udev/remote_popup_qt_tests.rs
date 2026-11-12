@@ -6,7 +6,7 @@ use crate::backend::wayland_udev::{
     image_copy_capture::{
         authority_tests::Capture,
         init_image_copy_capture,
-        wire_test_client::{Client, Event, Server},
+        wire_test_client::{Client, Event, Server, test_output},
     },
 };
 use smithay::{
@@ -143,6 +143,27 @@ fn actual_qt_dynamic_private_seat_menu_selection_and_terminal_retirement() {
     let mut gl = HeadlessSmithayGles::new().expect("mandatory software GL unavailable");
     let mut server = Server::new();
     server.state.image_capture_pending = Some(init_image_copy_capture(&server.display.handle()));
+    // Server::new intentionally has no outputs. Real toolkit menus require
+    // nonempty screen geometry; Qt's placeholder screen is an empty QRect.
+    // Publish a normal owned output before Qt's registry roundtrip. This does
+    // not render, present a frame, or grant input authority.
+    let output = test_output("qt-probe-output");
+    let mode = smithay::output::Mode {
+        size: (W as i32, H as i32).into(),
+        refresh: 60_000,
+    };
+    output.change_current_state(Some(mode), None, None, Some((0, 0).into()));
+    output.set_preferred(mode);
+    output
+        .create_global::<crate::backend::wayland::state::JwmWaylandState>(&server.display.handle());
+    server.state.outputs.push(output.clone());
+    server
+        .state
+        .output_rects
+        .push(smithay::utils::Rectangle::new(
+            (0, 0).into(),
+            (W as i32, H as i32).into(),
+        ));
     let (native, peer) = UnixStream::pair().unwrap();
     let qt_id = server
         .display
@@ -194,6 +215,8 @@ fn actual_qt_dynamic_private_seat_menu_selection_and_terminal_retirement() {
             }
             assert!(n < 128, "bounded Qt probe output");
             match line.as_slice() {
+                b"QT_PROBE_SCREEN_MISSING\n" => panic!("Qt advertised screen missing"),
+                b"QT_PROBE_SCREEN_READY\n" => eprintln!("JWM_QT_STAGE=toolkit_screen_ready"),
                 b"QT_PROBE_ACTIVATED_ONCE\n" => assert!(tx.try_send(()).is_ok()),
                 b"QT_PROBE_BUTTON_PRESSED\n" => eprintln!("JWM_QT_STAGE=toolkit_button_pressed"),
                 b"QT_PROBE_MENU_ABOUT_TO_SHOW\n" => {
@@ -236,6 +259,8 @@ fn actual_qt_dynamic_private_seat_menu_selection_and_terminal_retirement() {
     };
     let surface = server.state.surface_for_window(root).unwrap();
     assert_eq!(surface.client().unwrap().id(), qt_id);
+    output.enter(&surface);
+    server.roundtrip();
     eprintln!("JWM_QT_STAGE=root_mapped");
     let local = server.state.seat.get_pointer().unwrap();
     let local_before = (

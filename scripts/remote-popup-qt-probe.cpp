@@ -4,6 +4,7 @@
 #include <QMenu>
 #include <QPainter>
 #include <QTimer>
+#include <QScreen>
 #include <QToolButton>
 #include <QWidget>
 #include <cstdio>
@@ -26,6 +27,13 @@ int main(int argc, char **argv) {
     qputenv("QT_WAYLAND_DISABLE_WINDOWDECORATION", "1");
     QApplication app(argc, argv);
     if (QGuiApplication::platformName() != QStringLiteral("wayland")) return 5;
+    // No synthetic screen fallback: the owned compositor must advertise one.
+    QScreen *screen = QGuiApplication::primaryScreen();
+    if (!screen || screen->geometry().isEmpty() || screen->availableGeometry().isEmpty()) {
+        std::puts("QT_PROBE_SCREEN_MISSING");
+        return 6;
+    }
+    std::puts("QT_PROBE_SCREEN_READY");
     QApplication::setStyle(QStringLiteral("Fusion"));
     QWidget root;
     root.setWindowTitle(QStringLiteral("owned-qt-popup-probe"));

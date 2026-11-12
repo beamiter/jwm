@@ -63,7 +63,7 @@ jobs:
           python3 - "$RUNNER_TEMP/qt-native-result.log" <<'PY'
           import pathlib, sys
           text = pathlib.Path(sys.argv[1]).read_text(errors="replace")
-          allowed = ("root_mapped", "initial_capture", "private_pointer_bound", "root_clicked",
+          allowed = ("toolkit_screen_ready", "root_mapped", "initial_capture", "private_pointer_bound", "root_clicked",
                      "popup_captured", "selection_delivered", "activation_and_retirement_verified",
                      "toolkit_button_pressed", "toolkit_menu_about_to_show", "popup_role_created",
                      "popup_grab_accepted", "popup_buffer_mapped", "popup_initial_configure_sent", "popup_snapshot_ready",
@@ -73,6 +73,7 @@ jobs:
               if "JWM_QT_STAGE=" + stage in lines:
                   print("qt_stage=" + stage)
           failures = {
+              "Qt advertised screen missing": "advertised_screen_missing",
               "Qt seat or serial incompatible": "lease_inactive_before_popup_snapshot",
               "Qt menu mapping timeout": "menu_mapping_deadline",
               "Qt mapped family snapshot invalid": "mapped_family_snapshot_invalid",

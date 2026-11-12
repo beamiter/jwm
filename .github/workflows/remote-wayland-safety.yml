@@ -169,8 +169,8 @@ jobs:
             target=(--lib)
             case "$filter" in
               "$real") expected=11 ;;
-              "$wire") expected=23 ;;
-              "$client") expected=15 ;;
+              "$wire") expected=28 ;;
+              "$client") expected=18 ;;
               "$hello") expected=2 ;;
               "$budget") expected=7 ;;
               "$capabilities") expected=1 ;;
