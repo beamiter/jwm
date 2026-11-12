@@ -359,6 +359,42 @@ jobs:
           path: ${{ runner.temp }}/remote-region-deadline-summary.json
           if-no-files-found: warn
           retention-days: 3
+      - name: Mandatory latest-frame-priority scheduler evidence
+        # Six mirrored real TCP/GL sessions; production remains unchanged.
+        # Keep bounded headroom for shared-runner software rendering.
+        timeout-minutes: 10
+        env:
+          JWM_REQUIRE_HEADLESS_GL: '1'
+          JWM_REMOTE_REGION_PRIORITY_REPORT: ${{ runner.temp }}/remote-region-priority-private.json
+        run: |
+          set -euo pipefail
+          python3 scripts/summarize-remote-region-deadline.py --self-test
+          export XDG_RUNTIME_DIR="$(mktemp -d)"
+          trap 'rm -rf "$XDG_RUNTIME_DIR"' EXIT
+          base='remote::host::wayland_viewer_integration::host_lossless_integration::scheduler_benchmark'
+          filter="$base::actual_static_lossless_region_priority_continuous_measurement"
+          listed="$(env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --ignored --exact --list)"
+          test "$(printf '%s\n' "$listed" | grep -c ': test$')" -eq 1
+          status=0
+          env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --ignored --exact --test-threads=1 > "${{ runner.temp }}/remote-region-priority-private.log" 2>&1 || status=$?
+          if test -f "$JWM_REMOTE_REGION_PRIORITY_REPORT"; then
+            python3 scripts/summarize-remote-region-deadline.py --public-summary "$JWM_REMOTE_REGION_PRIORITY_REPORT" > "${{ runner.temp }}/remote-region-priority-summary.json" 2> "${{ runner.temp }}/remote-region-priority-summary-error-private.log"
+            cat "${{ runner.temp }}/remote-region-priority-summary.json"
+          else
+            exit 1
+          fi
+          if test "$status" -eq 0; then
+            grep -q 'test result: ok. 1 passed; 0 failed; 0 ignored;' "${{ runner.temp }}/remote-region-priority-private.log"
+          fi
+          exit "$status"
+      - name: Preserve allowlisted priority scheduler metrics
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: remote-region-priority-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/remote-region-priority-summary.json
+          if-no-files-found: warn
+          retention-days: 3
       - name: Static lossless refinement exact TCP and viewer pixels
         run: |
           set -euo pipefail

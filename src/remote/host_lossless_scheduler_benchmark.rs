@@ -127,6 +127,7 @@ fn run_session_workload(arm: &str, report: &mut Value, continuous: bool) {
         "legacy" => host::LosslessSchedule::Legacy100,
         "off" | "proposed" | "new250" => host::LosslessSchedule::New250,
         "region_deadline" => host::LosslessSchedule::RegionDeadline,
+        "region_priority" => host::LosslessSchedule::RegionPriority,
         "quiet0_pace100" => host::LosslessSchedule::Quiet0Pace100,
         "quiet0_pace250" => host::LosslessSchedule::Quiet0Pace250,
         "quiet250_pace100" => host::LosslessSchedule::Quiet250Pace100,
@@ -598,9 +599,33 @@ fn continuous_acceptance(session: &mut Value) -> bool {
 #[test]
 #[ignore = "explicit private continuous-animation starvation experiment using real TCP/GL"]
 fn actual_static_lossless_region_deadline_continuous_measurement() {
-    let order = ["new250", "region_deadline", "region_deadline", "new250"];
+    run_continuous_measurement(
+        &["new250", "region_deadline", "region_deadline", "new250"],
+        "static_lossless_region_deadline_continuous_tcp_ab",
+        "JWM_REMOTE_REGION_DEADLINE_REPORT",
+    );
+}
+
+#[test]
+#[ignore = "explicit private latest-frame-priority experiment using real TCP/GL"]
+fn actual_static_lossless_region_priority_continuous_measurement() {
+    run_continuous_measurement(
+        &[
+            "new250",
+            "region_deadline",
+            "region_priority",
+            "region_priority",
+            "region_deadline",
+            "new250",
+        ],
+        "static_lossless_region_priority_continuous_tcp_ab",
+        "JWM_REMOTE_REGION_PRIORITY_REPORT",
+    );
+}
+
+fn run_continuous_measurement(order: &[&str], benchmark: &str, report_variable: &str) {
     let mut report = json!({"schema_version":1,
-        "benchmark":"static_lossless_region_deadline_continuous_tcp_ab",
+        "benchmark":benchmark,
         "scope":"same-process synthetic owned displays and controlled software GL presentation; not physical display latency",
         "scheduled_interval_ns":CONTINUOUS_PERIOD_MS*1_000_000,
         "generation_budget":CONTINUOUS_GENERATIONS,"active_window_ns":CONTINUOUS_WINDOW_NS,
@@ -647,7 +672,7 @@ fn actual_static_lossless_region_deadline_continuous_measurement() {
         }
     }
     report["success"] = json!(!failed);
-    let path = std::env::var("JWM_REMOTE_REGION_DEADLINE_REPORT")
+    let path = std::env::var(report_variable)
         .expect("explicit private continuous-animation report path required");
     let bytes = serde_json::to_vec_pretty(&report).unwrap();
     assert!(bytes.len() <= 4 * 1024 * 1024);

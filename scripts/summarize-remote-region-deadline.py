@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
-"""Summarize bounded private 100ms region-deadline TCP/GL measurements."""
+"""Summarize bounded private 100ms region-deadline/priority TCP/GL measurements."""
 import argparse
+import copy
 import json
 import math
 from pathlib import Path
 
 BENCHMARK = "static_lossless_region_deadline_continuous_tcp_ab"
 ARMS = ("new250", "region_deadline", "region_deadline", "new250")
+PRIORITY_BENCHMARK = "static_lossless_region_priority_continuous_tcp_ab"
+PRIORITY_ARMS = ("new250", "region_deadline", "region_priority",
+                 "region_priority", "region_deadline", "new250")
+BENCHMARK_ARMS = {BENCHMARK: ARMS, PRIORITY_BENCHMARK: PRIORITY_ARMS}
 GENERATIONS = 80
 PERIOD_NS = 100_000_000
 WINDOW_NS = 8_000_000_000
@@ -63,8 +68,10 @@ def counters(value):
 def summarize(report):
     if type(report.get("schema_version")) is not int or report["schema_version"] != 1:
         raise ValueError("unsupported schema version")
-    if report.get("benchmark") != BENCHMARK:
+    benchmark = report.get("benchmark")
+    if benchmark not in BENCHMARK_ARMS:
         raise ValueError("wrong benchmark")
+    arms = BENCHMARK_ARMS[benchmark]
     for key, expected in (("scheduled_interval_ns", PERIOD_NS), ("active_window_ns", WINDOW_NS),
                           ("generation_budget", GENERATIONS), ("drain_ns", 1_000_000_000),
                           ("width", 800), ("height", 600), ("dynamic_region_width", 32),
@@ -73,12 +80,12 @@ def summarize(report):
         if integer(report.get(key), key) != expected:
             raise ValueError(f"unexpected fixed workload: {key}")
     sessions = report.get("sessions")
-    if not isinstance(sessions, list) or not 1 <= len(sessions) <= len(ARMS):
+    if not isinstance(sessions, list) or not 1 <= len(sessions) <= len(arms):
         raise ValueError("bounded sessions required, including failures")
     hashes, orders, results = {}, set(), []
     for session in sessions:
         order = integer(session.get("order"), "order")
-        if order >= len(ARMS) or order in orders or session.get("arm") != ARMS[order]:
+        if order >= len(arms) or order in orders or session.get("arm") != arms[order]:
             raise ValueError("invalid mirrored session order or arm")
         orders.add(order)
         if type(session.get("success")) is not bool:
@@ -213,11 +220,69 @@ def summarize(report):
                         "aggregate_host_counters": counters(session.get("host_stats")),
                         "active_window_host_counters": counters(session.get("active_window_host_stats")),
                         "samples": samples})
-    return {"schema_version": 1, "benchmark": BENCHMARK, "planned_sessions": len(ARMS),
-            "planned_generation_budget": len(ARMS) * GENERATIONS, "reported_sessions": len(results),
-            "unreported_session_generation_budget": (len(ARMS) - len(results)) * GENERATIONS,
+    return {"schema_version": 1, "benchmark": benchmark, "planned_sessions": len(arms),
+            "planned_generation_budget": len(arms) * GENERATIONS, "reported_sessions": len(results),
+            "unreported_session_generation_budget": (len(arms) - len(results)) * GENERATIONS,
             "scope": "100ms deadlines; active window <=8s, later presentations are cleanup only; quantiles include observed samples only and missing counts retain all 80 planned generations; static equality excludes exactly 32x16 animation pixels; source commit means issued; host payload includes source envelope, excludes Noise/TCP; encode counts include discarded attempts; host counters include common startup and active counters are last sampled <=8s",
+            "dynamic_non_regression": dynamic_assessment(results, arms),
             "sessions": results}
+
+
+def dynamic_metrics(session):
+    return {**{f"{clock}_{quantile}": session[f"within_window_{clock}_to_present"][quantile]
+               for clock in ("scheduled", "commit") for quantile in ("p95_ms", "max_ms")},
+            "missing_planned_generations": session["within_window_missing_planned_generations"],
+            "late_presented_generations": session["late_presented_generations"]}
+
+
+def dynamic_assessment(sessions, arms):
+    """No pooled quantiles: every candidate must beat the best control per metric."""
+    candidate_arm = "region_priority" if "region_priority" in arms else "region_deadline"
+    candidates = sorted((s for s in sessions if s["arm"] == candidate_arm), key=lambda s: s["order"])
+    controls = [s for s in sessions if s["arm"] != candidate_arm]
+    result = {"candidate_arm": candidate_arm,
+              "control_arms": sorted(set(arms) - {candidate_arm}),
+              "scope": "Both candidate sessions versus the per-metric best of all control sessions; active-window observed scheduled/commit p95 and max, active-window planned missing, and all late presentations including cleanup. Descriptive only, not statistical or hard real-time proof.",
+              "status": "no_claim", "reason": None,
+              "best_control": None, "candidate_comparisons": []}
+    if len(sessions) != len(arms) or any(not s["success"] for s in sessions):
+        result["reason"] = "incomplete_or_failed_sessions"
+        return result
+    if any(not s["static_criterion"] or not s["no_exact_to_inexact_regression"] for s in sessions):
+        result["reason"] = "static_gate_failed"
+        return result
+    metrics = [dynamic_metrics(s) for s in sessions]
+    if any(value is None for metric in metrics for value in metric.values()):
+        result["reason"] = "missing_dynamic_observations"
+        return result
+    best = {key: min(dynamic_metrics(s)[key] for s in controls) for key in metrics[0]}
+    result["best_control"] = best
+    for session in candidates:
+        values = dynamic_metrics(session)
+        checks = {key: value <= best[key] for key, value in values.items()}
+        result["candidate_comparisons"].append({"order": session["order"], "metrics": values,
+                                                  "no_worse_than_best_control": checks,
+                                                  "passed": all(checks.values())})
+    passed = len(candidates) == 2 and all(c["passed"] for c in result["candidate_comparisons"])
+    result["status"] = "observed_non_regression" if passed else "non_regression_not_established"
+    result["reason"] = "all_candidate_metrics_no_worse" if passed else "candidate_metric_worse_than_best_control"
+    return result
+
+
+def public_dynamic_assessment(assessment):
+    # Nested allowlists prevent later private diagnostic fields from leaking.
+    result = {key: assessment[key] for key in
+              ("candidate_arm", "control_arms", "scope", "status", "reason")}
+    metric_keys = ("scheduled_p95_ms", "scheduled_max_ms", "commit_p95_ms", "commit_max_ms",
+                   "missing_planned_generations", "late_presented_generations")
+    result["best_control"] = (None if assessment["best_control"] is None else
+                              {key: assessment["best_control"][key] for key in metric_keys})
+    result["candidate_comparisons"] = [
+        {"order": row["order"], "passed": row["passed"],
+         "metrics": {key: row["metrics"][key] for key in metric_keys},
+         "no_worse_than_best_control": {key: row["no_worse_than_best_control"][key] for key in metric_keys}}
+        for row in assessment["candidate_comparisons"]]
+    return result
 
 
 def public_summary(summary):
@@ -235,6 +300,7 @@ def public_summary(summary):
                "aggregate_host_counters", "active_window_host_counters")
     result = {key: summary[key] for key in ("schema_version", "benchmark", "planned_sessions",
               "planned_generation_budget", "reported_sessions", "unreported_session_generation_budget", "scope")}
+    result["dynamic_non_regression"] = public_dynamic_assessment(summary["dynamic_non_regression"])
     result["sessions"] = [{key: session[key] for key in allowed} for session in summary["sessions"]]
     return result
 
@@ -319,6 +385,91 @@ def self_test():
             pass
         else:
             raise AssertionError("ambiguous or non-finite JSON accepted")
+    priority = copy.deepcopy(report)
+    priority["benchmark"] = PRIORITY_BENCHMARK
+    priority["sessions"] = [dict(copy.deepcopy(session), arm=arm, order=order)
+                            for order, arm in enumerate(PRIORITY_ARMS)]
+    priority_summary = summarize(priority)
+    assert priority_summary["planned_sessions"] == 6
+    assert priority_summary["planned_generation_budget"] == 480
+    assert priority_summary["unreported_session_generation_budget"] == 0
+    assert priority_summary["dynamic_non_regression"]["status"] == "no_claim"
+    assert [row["arm"] for row in priority_summary["sessions"]] == list(PRIORITY_ARMS)
+    for benchmark, arms in BENCHMARK_ARMS.items():
+        valid = copy.deepcopy(report)
+        valid["benchmark"] = benchmark
+        valid["sessions"] = [dict(copy.deepcopy(session), arm=arm, order=order)
+                             for order, arm in enumerate(arms)]
+        assert summarize(valid)["planned_sessions"] == len(arms)
+        bad_reports = []
+        wrong_arm = copy.deepcopy(valid)
+        wrong_arm["sessions"][0]["arm"] = "region_priority"
+        bad_reports.append(wrong_arm)
+        wrong_order = copy.deepcopy(valid)
+        wrong_order["sessions"][0]["order"] = len(arms)
+        bad_reports.append(wrong_order)
+        duplicate = copy.deepcopy(valid)
+        duplicate["sessions"][1] = copy.deepcopy(duplicate["sessions"][0])
+        bad_reports.append(duplicate)
+        extra = copy.deepcopy(valid)
+        extra["sessions"].append(copy.deepcopy(extra["sessions"][0]))
+        bad_reports.append(extra)
+        for bad_report in bad_reports:
+            try:
+                summarize(bad_report)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("wrong arm/order schema accepted")
+    wrong_benchmark = copy.deepcopy(priority)
+    wrong_benchmark["benchmark"] = BENCHMARK
+    try:
+        summarize(wrong_benchmark)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("priority sessions accepted as deadline benchmark")
+
+    # Exercise the assessment independently with explicit aggregate fixtures.
+    rows = copy.deepcopy(priority_summary["sessions"])
+    for row in rows:
+        row.update(success=True, static_criterion=True, no_exact_to_inexact_regression=True,
+                   within_window_missing_planned_generations=5, late_presented_generations=20)
+        for clock in ("scheduled", "commit"):
+            row[f"within_window_{clock}_to_present"].update(p95_ms=90, max_ms=100)
+    assessment = dynamic_assessment(rows, PRIORITY_ARMS)
+    assert assessment["status"] == "observed_non_regression"
+    assert len(assessment["candidate_comparisons"]) == 2
+    # Every metric in either candidate must pass, even when its peer passes.
+    for order in (2, 3):
+        for clock in ("scheduled", "commit"):
+            for quantile in ("p95_ms", "max_ms"):
+                changed = copy.deepcopy(rows)
+                changed[order][f"within_window_{clock}_to_present"][quantile] += 1
+                assert dynamic_assessment(changed, PRIORITY_ARMS)["status"] == "non_regression_not_established"
+        for key in ("within_window_missing_planned_generations", "late_presented_generations"):
+            changed = copy.deepcopy(rows)
+            changed[order][key] += 1
+            assert dynamic_assessment(changed, PRIORITY_ARMS)["status"] == "non_regression_not_established"
+    # A faster second control defeats a comparison against only the first control.
+    for order in (1, 4, 5):
+        changed = copy.deepcopy(rows)
+        changed[order]["within_window_scheduled_to_present"]["p95_ms"] = 89
+        assert dynamic_assessment(changed, PRIORITY_ARMS)["status"] == "non_regression_not_established"
+    assert dynamic_assessment(rows[:-1], PRIORITY_ARMS)["status"] == "no_claim"
+    for key in ("success", "static_criterion", "no_exact_to_inexact_regression"):
+        changed = copy.deepcopy(rows)
+        changed[3][key] = False
+        assert dynamic_assessment(changed, PRIORITY_ARMS)["status"] == "no_claim"
+    changed = copy.deepcopy(rows)
+    changed[2]["within_window_scheduled_to_present"]["p95_ms"] = None
+    assert dynamic_assessment(changed, PRIORITY_ARMS)["reason"] == "missing_dynamic_observations"
+    assessment["private_trace"] = "do not publish"
+    assessment["best_control"]["private_trace"] = "do not publish"
+    assessment["candidate_comparisons"][0]["metrics"]["private_trace"] = "do not publish"
+    assessment["candidate_comparisons"][0]["private_trace"] = "do not publish"
+    priority_summary["dynamic_non_regression"] = assessment
+    assert "do not publish" not in json.dumps(public_summary(priority_summary))
     report["scheduled_interval_ns"] = 500_000_000
     try:
         summarize(report)
@@ -326,7 +477,7 @@ def self_test():
         pass
     else:
         raise AssertionError("500ms workload accepted by the continuous parser")
-    print("region-deadline summary self-test passed")
+    print("region-deadline/priority summary self-test passed")
 
 
 def main():

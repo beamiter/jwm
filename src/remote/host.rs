@@ -537,15 +537,20 @@ pub(crate) enum LosslessSchedule {
     /// Private read-only experiment: one bounded PNG after a flushed JPEG.
     #[cfg(test)]
     RegionDeadline,
+    /// Private experiment: queued video wins over a retained PNG opportunity.
+    #[cfg(test)]
+    RegionPriority,
 }
 impl LosslessSchedule {
     fn quiet_period(self) -> Duration {
         match self {
             Self::New250 => Duration::from_millis(250),
             #[cfg(test)]
-            Self::Legacy100 | Self::Quiet0Pace100 | Self::Quiet0Pace250 | Self::RegionDeadline => {
-                Duration::ZERO
-            }
+            Self::Legacy100
+            | Self::Quiet0Pace100
+            | Self::Quiet0Pace250
+            | Self::RegionDeadline
+            | Self::RegionPriority => Duration::ZERO,
             #[cfg(test)]
             Self::Quiet250Pace100 | Self::Quiet250Pace250 => Duration::from_millis(250),
         }
@@ -559,9 +564,10 @@ impl LosslessSchedule {
                 Duration::from_millis(100)
             }
             #[cfg(test)]
-            Self::Quiet0Pace250 | Self::Quiet250Pace250 | Self::RegionDeadline => {
-                Duration::from_millis(250)
-            }
+            Self::Quiet0Pace250
+            | Self::Quiet250Pace250
+            | Self::RegionDeadline
+            | Self::RegionPriority => Duration::from_millis(250),
         }
     }
 
@@ -749,7 +755,7 @@ impl FrameSender {
 
     #[cfg(test)]
     fn region_repair_due(&self, now: Instant) -> bool {
-        self.lossless_schedule == LosslessSchedule::RegionDeadline
+        matches!(self.lossless_schedule, LosslessSchedule::RegionDeadline | LosslessSchedule::RegionPriority)
             && self.static_lossless
             && self.lossless_retry_after.is_none_or(|at| now >= at)
             && self.lossless_next_batch.is_none_or(|at| now >= at)
@@ -1258,6 +1264,25 @@ impl<T> LatestMailbox<T> {
                 .wait(state)
                 .map_err(|_| io::Error::other("remote frame mailbox lock was poisoned"))?;
         }
+    }
+
+    /// Atomically choose after display credit arrives. Never consume credit or
+    /// a sequence for a postponed repair. Drop the unused capture after unlock.
+    #[cfg(test)]
+    fn receive_followup(&self, fallback: T, prefer_latest: bool) -> io::Result<(Option<T>, bool)> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| io::Error::other("remote frame mailbox lock was poisoned"))?;
+        if state.closed {
+            return Ok((None, false));
+        }
+        if prefer_latest && let Some(latest) = state.latest.take() {
+            state.queued_at = None;
+            drop(state);
+            return Ok((Some(latest), false));
+        }
+        Ok((Some(fallback), true))
     }
 
     fn inspect_latest(&self, inspect: impl FnOnce(Option<&T>) -> bool) -> io::Result<bool> {
@@ -2488,9 +2513,12 @@ fn listener_security_notice(address: IpAddr) -> Option<&'static str> {
 fn validate_window_policy(options: &HostOptions) -> RemoteResult<()> {
     #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
     if LOSSLESS_SCHEDULE_TEST.with(|slot| {
-        slot.borrow()
-            .as_ref()
-            .is_some_and(|(policy, _)| *policy == LosslessSchedule::RegionDeadline)
+        slot.borrow().as_ref().is_some_and(|(policy, _)| {
+            matches!(
+                policy,
+                LosslessSchedule::RegionDeadline | LosslessSchedule::RegionPriority
+            )
+        })
     }) && (options.allow_input
         || options.allow_clipboard
         || options.allow_window_resize
@@ -4841,11 +4869,12 @@ fn send_frames_with_encoder_scoped<W: std::io::Write + SetWriteTimeout>(
             break;
         };
         #[cfg(test)]
-        let is_region_followup = region_followup.is_some();
-        #[cfg(test)]
-        let next = match region_followup.take() {
-            Some(pending) => Some(pending),
-            None => mailbox.receive()?,
+        let (next, is_region_followup) = match region_followup.take() {
+            Some(pending) => mailbox.receive_followup(
+                pending,
+                sender.lossless_schedule == LosslessSchedule::RegionPriority,
+            )?,
+            None => (mailbox.receive()?, false),
         };
         #[cfg(not(test))]
         let next = mailbox.receive()?;
@@ -6530,10 +6559,11 @@ mod tests {
     #[cfg(all(feature = "remote-wayland", feature = "backend-wayland-udev"))]
     #[test]
     fn region_deadline_experiment_rejects_every_control_permission() {
-        with_lossless_schedule(
+        for policy in [
             LosslessSchedule::RegionDeadline,
-            Arc::new(LosslessScheduleProbe::default()),
-            || {
+            LosslessSchedule::RegionPriority,
+        ] {
+            with_lossless_schedule(policy, Arc::new(LosslessScheduleProbe::default()), || {
                 let options = test_host_source_options();
                 validate_window_policy(&options).unwrap();
                 for permission in 0..11 {
@@ -6562,138 +6592,161 @@ mod tests {
                             .contains("RegionDeadline experiment requires explicit read-only")
                     );
                 }
-            },
-        );
+            });
+        }
+    }
+
+    #[test]
+    fn region_priority_mailbox_prefers_latest_without_retaining_history() {
+        let mailbox = LatestMailbox::new();
+        assert_eq!(mailbox.receive_followup(1, true).unwrap(), (Some(1), true));
+        mailbox.publish(2).unwrap();
+        mailbox.publish(3).unwrap();
+        assert_eq!(mailbox.receive_followup(1, true).unwrap(), (Some(3), false));
+        assert!(mailbox.state.lock().unwrap().queued_at.is_none());
+        mailbox.publish(4).unwrap();
+        assert_eq!(mailbox.receive_followup(1, false).unwrap(), (Some(1), true));
+        assert_eq!(mailbox.receive().unwrap(), Some(4));
+        mailbox.close();
+        assert_eq!(mailbox.receive_followup(1, true).unwrap(), (None, false));
     }
 
     #[test]
     fn region_deadline_followup_waits_for_credit_and_stale_discard_keeps_sequence() {
-        for mutation in 0..3 {
-            let selected_change = mutation == 1;
-            let geometry_aba = mutation == 2;
-            let make_frame = |red, selected_change| {
-                let mut pending = test_pending_frame(red);
-                pending.frame.source_width = 272;
-                pending.frame.source_height = 256;
-                pending.frame.image = RgbImage::from_pixel(272, 256, Rgb([90, 110, 130]));
-                pending.frame.image.put_pixel(0, 0, Rgb([red, 110, 130]));
-                if selected_change {
-                    pending.frame.image.put_pixel(271, 255, Rgb([91, 110, 130]));
+        for policy in [
+            LosslessSchedule::RegionDeadline,
+            LosslessSchedule::RegionPriority,
+        ] {
+            for mutation in 0..3 {
+                let selected_change = mutation == 1;
+                let geometry_aba = mutation == 2;
+                let make_frame = |red, selected_change| {
+                    let mut pending = test_pending_frame(red);
+                    pending.frame.source_width = 272;
+                    pending.frame.source_height = 256;
+                    pending.frame.image = RgbImage::from_pixel(272, 256, Rgb([90, 110, 130]));
+                    pending.frame.image.put_pixel(0, 0, Rgb([red, 110, 130]));
+                    if selected_change {
+                        pending.frame.image.put_pixel(271, 255, Rgb([91, 110, 130]));
+                    }
+                    pending
+                };
+                let mut frame_sender = FrameSender::with_codecs(false, true);
+                frame_sender.lossless_schedule = policy;
+                let base = Instant::now() - Duration::from_secs(3);
+                let seed = make_frame(90, false);
+                frame_sender.plan_at(&seed.frame, base).unwrap();
+                frame_sender
+                    .encoder
+                    .encode_into(&mut Vec::new(), 0, &seed.frame, 70)
+                    .unwrap();
+                frame_sender.commit_at(&seed.frame, base);
+                let mailbox = Arc::new(LatestMailbox::new());
+                mailbox.publish(make_frame(200, false)).unwrap();
+                let gate = Arc::new((
+                    Mutex::new(GateState {
+                        open: true,
+                        ..GateState::default()
+                    }),
+                    Condvar::new(),
+                ));
+                let running = Arc::new(AtomicBool::new(true));
+                let credits = Arc::new(FrameCredits::new());
+                let writer = Arc::new(Mutex::new(SessionWriter::new(
+                    DeadlineWriter::new(GateWriter(Arc::clone(&gate)), WRITE_TIMEOUT),
+                    [0x5a; 32],
+                )));
+                let sender_mailbox = Arc::clone(&mailbox);
+                let sender_running = Arc::clone(&running);
+                let sender_credits = Arc::clone(&credits);
+                let worker = thread::spawn(move || {
+                    let quality = JpegQualityController::new_at(
+                        70,
+                        70,
+                        false,
+                        Duration::from_millis(100),
+                        Instant::now(),
+                    )
+                    .unwrap();
+                    send_frames_with_encoder(
+                        sender_mailbox,
+                        writer,
+                        &sender_running,
+                        &sender_credits,
+                        &HostTelemetry::new(),
+                        &quality,
+                        &mut frame_sender,
+                    )
+                });
+                let wait_flushes = |count| {
+                    let (lock, ready) = &*gate;
+                    let (state, timeout) = ready
+                        .wait_timeout_while(lock.lock().unwrap(), Duration::from_secs(3), |s| {
+                            s.flushes < count
+                        })
+                        .unwrap();
+                    assert!(!timeout.timed_out(), "sender did not reach flush {count}");
+                    assert_eq!(state.flushes, count);
+                };
+                wait_flushes(2);
+                assert_eq!(credits.outstanding(), 2);
+                // Pacing is anchored to the successful PNG flush, not planning.
+                thread::sleep(Duration::from_millis(300));
+                mailbox.publish(make_frame(120, false)).unwrap();
+                credits.acknowledge(0).unwrap().unwrap();
+                wait_flushes(3);
+                assert_eq!(credits.outstanding(), 2);
+                let mut latest = make_frame(220, selected_change);
+                if geometry_aba {
+                    latest.frame.geometry_epoch += 2;
                 }
-                pending
-            };
-            let mut frame_sender = FrameSender::with_codecs(false, true);
-            frame_sender.lossless_schedule = LosslessSchedule::RegionDeadline;
-            let base = Instant::now() - Duration::from_secs(3);
-            let seed = make_frame(90, false);
-            frame_sender.plan_at(&seed.frame, base).unwrap();
-            frame_sender
-                .encoder
-                .encode_into(&mut Vec::new(), 0, &seed.frame, 70)
-                .unwrap();
-            frame_sender.commit_at(&seed.frame, base);
-            let mailbox = Arc::new(LatestMailbox::new());
-            mailbox.publish(make_frame(200, false)).unwrap();
-            let gate = Arc::new((
-                Mutex::new(GateState {
-                    open: true,
-                    ..GateState::default()
-                }),
-                Condvar::new(),
-            ));
-            let running = Arc::new(AtomicBool::new(true));
-            let credits = Arc::new(FrameCredits::new());
-            let writer = Arc::new(Mutex::new(SessionWriter::new(
-                DeadlineWriter::new(GateWriter(Arc::clone(&gate)), WRITE_TIMEOUT),
-                [0x5a; 32],
-            )));
-            let sender_mailbox = Arc::clone(&mailbox);
-            let sender_running = Arc::clone(&running);
-            let sender_credits = Arc::clone(&credits);
-            let worker = thread::spawn(move || {
-                let quality = JpegQualityController::new_at(
-                    70,
-                    70,
-                    false,
-                    Duration::from_millis(100),
-                    Instant::now(),
-                )
-                .unwrap();
-                send_frames_with_encoder(
-                    sender_mailbox,
-                    writer,
-                    &sender_running,
-                    &sender_credits,
-                    &HostTelemetry::new(),
-                    &quality,
-                    &mut frame_sender,
-                )
-            });
-            let wait_flushes = |count| {
+                mailbox.publish(latest).unwrap();
                 let (lock, ready) = &*gate;
                 let (state, timeout) = ready
-                    .wait_timeout_while(lock.lock().unwrap(), Duration::from_secs(3), |s| {
-                        s.flushes < count
+                    .wait_timeout_while(lock.lock().unwrap(), Duration::from_millis(60), |s| {
+                        s.flushes == 3
                     })
                     .unwrap();
-                assert!(!timeout.timed_out(), "sender did not reach flush {count}");
-                assert_eq!(state.flushes, count);
-            };
-            wait_flushes(2);
-            assert_eq!(credits.outstanding(), 2);
-            // Pacing is anchored to the successful PNG flush, not planning.
-            thread::sleep(Duration::from_millis(300));
-            mailbox.publish(make_frame(120, false)).unwrap();
-            credits.acknowledge(0).unwrap().unwrap();
-            wait_flushes(3);
-            assert_eq!(credits.outstanding(), 2);
-            let mut latest = make_frame(220, selected_change);
-            if geometry_aba {
-                latest.frame.geometry_epoch += 2;
-            }
-            mailbox.publish(latest).unwrap();
-            let (lock, ready) = &*gate;
-            let (state, timeout) = ready
-                .wait_timeout_while(lock.lock().unwrap(), Duration::from_millis(60), |s| {
-                    s.flushes == 3
-                })
-                .unwrap();
-            assert!(timeout.timed_out(), "follow-on bypassed display credit");
-            assert_eq!(state.flushes, 3);
-            drop(state);
-            credits.acknowledge(2).unwrap().unwrap();
-            wait_flushes(if geometry_aba { 4 } else { 5 });
-            assert_eq!(credits.outstanding(), if geometry_aba { 1 } else { 2 });
-            {
-                let state = credits.state.lock().unwrap();
-                assert_eq!(
-                    state.last_sent,
-                    Some(if geometry_aba { 3 } else { 4 }),
-                    "discard must not consume a sequence"
-                );
-                assert_eq!(
-                    state.in_flight[0].purpose,
-                    if selected_change || geometry_aba {
-                        FramePurpose::Video
-                    } else {
-                        FramePurpose::VisualRepair
-                    }
-                );
-                if !geometry_aba {
+                assert!(timeout.timed_out(), "follow-on bypassed display credit");
+                assert_eq!(state.flushes, 3);
+                drop(state);
+                credits.acknowledge(2).unwrap().unwrap();
+                wait_flushes(if geometry_aba { 4 } else { 5 });
+                assert_eq!(credits.outstanding(), if geometry_aba { 1 } else { 2 });
+                {
+                    let state = credits.state.lock().unwrap();
                     assert_eq!(
-                        state.in_flight[1].purpose,
-                        if selected_change {
-                            FramePurpose::VisualRepair
-                        } else {
+                        state.last_sent,
+                        Some(if geometry_aba { 3 } else { 4 }),
+                        "discard must not consume a sequence"
+                    );
+                    assert_eq!(
+                        state.in_flight[0].purpose,
+                        if selected_change
+                            || geometry_aba
+                            || policy == LosslessSchedule::RegionPriority
+                        {
                             FramePurpose::Video
+                        } else {
+                            FramePurpose::VisualRepair
                         }
                     );
+                    if !geometry_aba {
+                        assert_eq!(
+                            state.in_flight[1].purpose,
+                            if selected_change || policy == LosslessSchedule::RegionPriority {
+                                FramePurpose::VisualRepair
+                            } else {
+                                FramePurpose::Video
+                            }
+                        );
+                    }
                 }
+                running.store(false, Ordering::Release);
+                mailbox.close();
+                credits.close();
+                worker.join().unwrap().unwrap();
             }
-            running.store(false, Ordering::Release);
-            mailbox.close();
-            credits.close();
-            worker.join().unwrap().unwrap();
         }
     }
 
