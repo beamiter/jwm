@@ -501,7 +501,22 @@ impl Harness {
     }
     fn presented(&mut self, popup: bool) {
         let surface = viewer_surface(&self.viewer);
-        let feedback = take_feedback(&surface);
+        // Drawn acknowledges the client's flush, not dispatch of its surface
+        // commit by this owned compositor. The reply can race the final viewer
+        // roundtrip in receive(), especially in the parallel regression suite.
+        // Wait for the real committed request; never fabricate presentation.
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let feedback = loop {
+            self.viewer.roundtrip();
+            let feedback = take_feedback(&surface);
+            if !feedback.is_empty() {
+                break feedback;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "draw did not commit its presentation feedback request"
+            );
+        };
         assert_eq!(feedback.len(), 1);
         viewer_pixels(&mut self.viewer, &mut self.gl.borrow_mut(), popup);
         present(&mut self.viewer, feedback);
@@ -658,6 +673,43 @@ fn actual_popup_presented_receipt_cannot_survive_lock_source_loss_or_freshness_e
 
 #[test]
 fn actual_popup_claimed_receipt_cannot_survive_viewer_resize_or_close() {
+    // Deterministically retain the draw's protocol requests in the viewer
+    // socket until after its worker reply. A flushed draw is not server-side
+    // dispatch and must not be mistaken for an already committed feedback.
+    {
+        let Some(gl) = HeadlessSmithayGles::new() else {
+            return;
+        };
+        let mut h = Harness::new(gl);
+        h.tx.as_ref().unwrap().send(Command::Draw).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(8);
+        loop {
+            h.native.dispatch_timers(Duration::from_millis(1));
+            let queue = h.native.state.image_capture_pending.as_ref().unwrap();
+            fulfill_test_toplevel_capture(
+                &mut h.gl.borrow_mut().renderer,
+                &mut None,
+                &h.native.state,
+                queue,
+            );
+            h.native.roundtrip();
+            // Deliberately no h.viewer.roundtrip() before the draw reply.
+            match h.rx.try_recv() {
+                Ok(Reply::Drawn(serial, generation, rect)) => {
+                    h.proof = Some((serial, generation, rect));
+                    h.released = false;
+                    break;
+                }
+                Ok(reply) => panic!("actual deferred draw failed: {reply:?}"),
+                Err(mpsc::TryRecvError::Disconnected) => panic!("draw worker disconnected"),
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
+            assert!(Instant::now() < deadline, "deferred viewer draw deadline");
+        }
+        assert!(take_feedback(&viewer_surface(&h.viewer)).is_empty());
+        h.presented(false);
+        h.done(Command::Arm);
+    }
     for (change, direct) in [
         (0, false),
         (1, false),
