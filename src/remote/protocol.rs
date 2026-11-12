@@ -442,13 +442,16 @@ impl<R: Read> SessionReader<R> {
                 });
             }
 
-            // The declared length is still plaintext, so allocation stays
-            // bounded before a single byte of ciphertext is read.
-            payload.resize(payload_len, 0);
+            // The checked ciphertext length plus the fixed-size tag stays
+            // bounded. Read both together: on an unbuffered TCP stream this
+            // avoids a separate read solely for the tag when all bytes are
+            // available. read_exact still handles fragmentation/Interrupted.
+            payload.resize(payload_len + TAG_LEN, 0);
             self.inner.read_exact(payload)?;
-
-            let mut tag = [0_u8; TAG_LEN];
-            self.inner.read_exact(&mut tag)?;
+            let tag: [u8; TAG_LEN] = payload[payload_len..]
+                .try_into()
+                .expect("record tag has a fixed length");
+            payload.truncate(payload_len);
             cipher(&self.key)
                 .decrypt_inout_detached(
                     &record_nonce(received_sequence),
@@ -1065,6 +1068,153 @@ mod tests {
         assert_eq!(payload.as_ptr(), allocation);
         assert_eq!(payload.capacity(), capacity);
         assert_eq!(reader.expected_sequence(), 3);
+    }
+
+    struct ObservedReader {
+        bytes: Cursor<Vec<u8>>,
+        requests: Vec<usize>,
+        chunk: usize,
+        interrupt_next: bool,
+        fragmented: bool,
+    }
+
+    impl Read for ObservedReader {
+        fn read(&mut self, destination: &mut [u8]) -> io::Result<usize> {
+            self.requests.push(destination.len());
+            if self.interrupt_next {
+                self.interrupt_next = false;
+                return Err(io::Error::from(ErrorKind::Interrupted));
+            }
+            let length = destination.len().min(self.chunk);
+            let read = self.bytes.read(&mut destination[..length]);
+            self.interrupt_next = self.fragmented;
+            read
+        }
+    }
+
+    fn observed_reader(bytes: Vec<u8>, chunk: usize, fragmented: bool) -> ObservedReader {
+        ObservedReader {
+            bytes: Cursor::new(bytes),
+            requests: Vec::new(),
+            chunk,
+            interrupt_next: fragmented,
+            fragmented,
+        }
+    }
+
+    #[test]
+    fn record_reader_combines_ciphertext_and_tag_without_reading_next_header() {
+        let key = [0x6a; MAC_LEN];
+        for length in [0, 1, 63, 64, 255, 704, 4096] {
+            let body = vec![0x5a; length];
+            let mut wire = encoded_record(key, 0, MessageKind::Frame, &body);
+            let boundary = wire.len();
+            wire.extend_from_slice(&encoded_record(key, 1, MessageKind::Heartbeat, &[]));
+            let mut reader = SessionReader::new(observed_reader(wire, usize::MAX, false), key);
+            let mut payload = Vec::new();
+            assert_eq!(
+                reader.read_message_into(&mut payload).unwrap(),
+                MessageKind::Frame
+            );
+            assert_eq!(payload, body);
+            assert_eq!(
+                reader.get_ref().requests,
+                [RECORD_HEADER_LEN, padded_len(length) + TAG_LEN]
+            );
+            assert_eq!(reader.get_ref().bytes.position() as usize, boundary);
+            assert_eq!(
+                reader.read_message_into(&mut payload).unwrap(),
+                MessageKind::Heartbeat
+            );
+            assert!(payload.is_empty());
+            assert_eq!(reader.expected_sequence(), 2);
+        }
+    }
+
+    #[test]
+    fn combined_record_read_tolerates_fragmentation_and_interrupted_reads() {
+        let key = [0x6b; MAC_LEN];
+        for chunk in [1, 7, 16, 65, 1024] {
+            let body = vec![0xa5; 513];
+            let mut wire = encoded_record(key, 0, MessageKind::Frame, &body);
+            wire.extend_from_slice(&encoded_record(key, 1, MessageKind::Close, b"done"));
+            let mut reader = SessionReader::new(observed_reader(wire, chunk, true), key);
+            let mut payload = Vec::with_capacity(2048);
+            let allocation = payload.as_ptr();
+            assert_eq!(
+                reader.read_message_into(&mut payload).unwrap(),
+                MessageKind::Frame
+            );
+            assert_eq!(payload, body);
+            assert_eq!(
+                reader.read_message_into(&mut payload).unwrap(),
+                MessageKind::Close
+            );
+            assert_eq!(payload, b"done");
+            assert_eq!(payload.as_ptr(), allocation);
+            assert_eq!(reader.expected_sequence(), 2);
+        }
+    }
+
+    #[test]
+    fn every_combined_body_truncation_clears_payload_without_advancing_sequence() {
+        let key = [0x6c; MAC_LEN];
+        let record = encoded_record(key, 0, MessageKind::Frame, b"body");
+        for end in 0..record.len() {
+            let mut reader = SessionReader::new(Cursor::new(record[..end].to_vec()), key);
+            let mut payload = b"previous authenticated bytes".to_vec();
+            assert!(
+                matches!(reader.read_message_into(&mut payload), Err(ProtocolError::Io(ref error)) if error.kind() == ErrorKind::UnexpectedEof)
+            );
+            assert!(payload.is_empty(), "truncated at {end}");
+            assert_eq!(reader.expected_sequence(), 0);
+        }
+    }
+
+    #[test]
+    fn combined_record_tag_is_authenticated_and_never_returned() {
+        let key = [0x6d; MAC_LEN];
+        let record = encoded_record(key, 0, MessageKind::Frame, b"body");
+        for offset in record.len() - TAG_LEN..record.len() {
+            let mut damaged = record.clone();
+            damaged[offset] ^= 1;
+            let mut reader = SessionReader::new(Cursor::new(damaged), key);
+            let mut payload = b"previous".to_vec();
+            assert!(matches!(
+                reader.read_message_into(&mut payload),
+                Err(ProtocolError::AuthenticationFailed)
+            ));
+            assert!(payload.is_empty());
+            assert_eq!(reader.expected_sequence(), 0);
+        }
+    }
+
+    #[test]
+    fn combined_body_read_keeps_payload_cap_separate_from_fixed_tag() {
+        let key = [0x6e; MAC_LEN];
+        let body = b"bounded";
+        let record = encoded_record(key, 0, MessageKind::Frame, body);
+        let cap = padded_len(body.len());
+        let mut reader =
+            SessionReader::new(observed_reader(record.clone(), usize::MAX, false), key);
+        reader.set_max_payload_len(cap);
+        assert_eq!(reader.read_message().unwrap().1, body);
+        assert_eq!(
+            reader.get_ref().requests,
+            [RECORD_HEADER_LEN, cap + TAG_LEN]
+        );
+
+        let mut reader = SessionReader::new(observed_reader(record, usize::MAX, false), key);
+        reader.set_max_payload_len(cap - 1);
+        let mut payload = Vec::with_capacity(32);
+        let capacity = payload.capacity();
+        assert!(matches!(
+            reader.read_message_into(&mut payload),
+            Err(ProtocolError::PayloadTooLarge { .. })
+        ));
+        assert!(payload.is_empty());
+        assert_eq!(payload.capacity(), capacity);
+        assert_eq!(reader.get_ref().requests, [RECORD_HEADER_LEN]);
     }
 
     #[test]
