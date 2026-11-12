@@ -12,16 +12,23 @@ PRIORITY_BENCHMARK = "static_lossless_region_priority_continuous_tcp_ab"
 PRIORITY_ARMS = ("new250", "region_deadline", "region_priority",
                  "region_priority", "region_deadline", "new250")
 PRESSURE_BENCHMARK = "static_lossless_region_priority_credit_pressure_tcp_ab"
+BOUNDED_BENCHMARK = "static_lossless_region_bounded_priority_continuous_tcp_ab"
+BOUNDED_PRESSURE_BENCHMARK = "static_lossless_region_bounded_priority_credit_pressure_tcp_ab"
+BOUNDED_ARMS = ("new250", "region_deadline", "region_priority", "region_priority_bounded1",
+                "region_priority_bounded1", "region_priority", "region_deadline", "new250")
+PRESSURE_BENCHMARKS = (PRESSURE_BENCHMARK, BOUNDED_PRESSURE_BENCHMARK)
 FEEDBACK_DELAY_NS = 150_000_000
 BENCHMARK_ARMS = {BENCHMARK: ARMS, PRIORITY_BENCHMARK: PRIORITY_ARMS,
-                  PRESSURE_BENCHMARK: PRIORITY_ARMS}
+                  PRESSURE_BENCHMARK: PRIORITY_ARMS, BOUNDED_BENCHMARK: BOUNDED_ARMS,
+                  BOUNDED_PRESSURE_BENCHMARK: BOUNDED_ARMS}
 QUEUE_COUNTERS = ("followup_opportunities", "priority_deferrals", "retained_followups")
+BOUNDED_COUNTERS = ("budget_retained_selections", "budget_png_flushed", "max_priority_deferral_streak")
 GENERATIONS = 80
 PERIOD_NS = 100_000_000
 WINDOW_NS = 8_000_000_000
 MAX_REPORT_BYTES = 16 * 1024 * 1024
 COUNTERS = ("encoded_jpeg", "encoded_png", "encode_ns", "jpeg_ns", "png_ns",
-            "sent_bytes", "comparisons", "comparison_ns", "stale_png_dropped") + QUEUE_COUNTERS
+            "sent_bytes", "comparisons", "comparison_ns", "stale_png_dropped") + QUEUE_COUNTERS + BOUNDED_COUNTERS
 
 
 def integer(value, label):
@@ -73,6 +80,11 @@ def counters(value):
             raise ValueError("partial queue counters")
         if result["followup_opportunities"] != result["priority_deferrals"] + result["retained_followups"]:
             raise ValueError("queue decision counters do not balance")
+    if any(key in result for key in BOUNDED_COUNTERS):
+        if not all(key in result for key in BOUNDED_COUNTERS + QUEUE_COUNTERS):
+            raise ValueError("partial bounded-priority counters")
+        if not result["budget_png_flushed"] <= result["budget_retained_selections"] <= result["retained_followups"]:
+            raise ValueError("bounded-priority budget counters do not balance")
     return result
 
 
@@ -93,7 +105,7 @@ def summarize(report):
     if benchmark not in BENCHMARK_ARMS:
         raise ValueError("wrong benchmark")
     arms = BENCHMARK_ARMS[benchmark]
-    pressure = benchmark == PRESSURE_BENCHMARK
+    pressure = benchmark in PRESSURE_BENCHMARKS
     delay = integer(report.get("presentation_feedback_delay_ns", 0), "presentation_feedback_delay_ns")
     if delay != (FEEDBACK_DELAY_NS if pressure else 0):
         raise ValueError("unexpected fixed presentation feedback delay")
@@ -118,12 +130,20 @@ def summarize(report):
         total_counters = counters(session.get("host_stats"))
         active_counters = counters(session.get("active_window_host_stats"))
         for stats in (total_counters, active_counters):
+            if arms == BOUNDED_ARMS and session["success"] and (stats is None or any(key not in stats for key in BOUNDED_COUNTERS + QUEUE_COUNTERS)):
+                raise ValueError("successful bounded session requires all scheduling counters")
+            if stats is not None:
+                if session["arm"] == "region_priority_bounded1":
+                    if stats.get("max_priority_deferral_streak", 0) > 1:
+                        raise ValueError("bounded priority deferral budget exceeded")
+                elif any(stats.get(key, 0) for key in BOUNDED_COUNTERS):
+                    raise ValueError("non-bounded arm reported bounded counters")
             if pressure and session["success"] and (stats is None or any(key not in stats for key in QUEUE_COUNTERS)):
                 raise ValueError("successful pressure session requires queue counters")
-            if stats is not None and session["arm"] != "region_priority" and stats.get("priority_deferrals", 0):
+            if stats is not None and session["arm"] not in ("region_priority", "region_priority_bounded1") and stats.get("priority_deferrals", 0):
                 raise ValueError("non-priority arm reported priority deferrals")
         if total_counters is not None and active_counters is not None:
-            for key in QUEUE_COUNTERS:
+            for key in QUEUE_COUNTERS + BOUNDED_COUNTERS:
                 if key in total_counters and key in active_counters and active_counters[key] > total_counters[key]:
                     raise ValueError("active queue counter exceeds session total")
         markers, frames = session.get("markers"), session.get("frames")
@@ -266,19 +286,25 @@ def summarize(report):
             "unreported_session_generation_budget": (len(arms) - len(results)) * GENERATIONS,
             "scope": "100ms deadlines; active window <=8s, later presentations are cleanup only; quantiles include observed samples only and missing counts retain all 80 planned generations; static equality excludes exactly 32x16 animation pixels; source commit means issued; host payload includes source envelope, excludes Noise/TCP; encode counts include discarded attempts; host counters include common startup and active counters are last sampled <=8s",
             "dynamic_non_regression": dynamic_assessment(results, arms),
-            "pressure_exercised": pressure_assessment(results) if pressure else None,
+            "pressure_exercised": pressure_assessment(results, arms) if pressure else None,
             "sessions": results}
 
 
 
-def pressure_assessment(sessions):
+def candidate_for(arms):
+    if arms == BOUNDED_ARMS:
+        return "region_priority_bounded1"
+    return "region_priority" if "region_priority" in arms else "region_deadline"
+
+
+def pressure_assessment(sessions, arms=PRIORITY_ARMS):
     """Actual selected-latest decisions, not inferred from injected feedback delay."""
-    candidates = sorted((s for s in sessions if s["arm"] == "region_priority"), key=lambda s: s["order"])
+    candidates = sorted((s for s in sessions if s["arm"] == candidate_for(arms)), key=lambda s: s["order"])
     result = {"status": "no_claim", "reason": "incomplete_or_failed_sessions",
               "scope": "Both candidate sessions must select a queued latest capture instead of a retained followup within the active window; this does not prove encode/send/presentation or dynamic non-regression.",
               "candidate_observations": [{"order": s["order"], "active_priority_deferrals":
                   (s["active_window_host_counters"] or {}).get("priority_deferrals")} for s in candidates]}
-    if len(sessions) != len(PRIORITY_ARMS) or len(candidates) != 2 or any(not s["success"] for s in sessions):
+    if len(sessions) != len(arms) or len(candidates) != 2 or any(not s["success"] for s in sessions):
         return result
     counts = [row["active_priority_deferrals"] for row in result["candidate_observations"]]
     if any(count is None for count in counts):
@@ -307,7 +333,7 @@ def dynamic_metrics(session):
 
 def dynamic_assessment(sessions, arms):
     """No pooled quantiles: every candidate must beat the best control per metric."""
-    candidate_arm = "region_priority" if "region_priority" in arms else "region_deadline"
+    candidate_arm = candidate_for(arms)
     candidates = sorted((s for s in sessions if s["arm"] == candidate_arm), key=lambda s: s["order"])
     controls = [s for s in sessions if s["arm"] != candidate_arm]
     result = {"candidate_arm": candidate_arm,
@@ -318,7 +344,12 @@ def dynamic_assessment(sessions, arms):
     if len(sessions) != len(arms) or any(not s["success"] for s in sessions):
         result["reason"] = "incomplete_or_failed_sessions"
         return result
-    if any(not s["static_criterion"] or not s["no_exact_to_inexact_regression"] for s in sessions):
+    # Only the new bounded schemas admit starvation of the unbounded priority
+    # comparator. Its observed static_criterion stays false; no old gate changes.
+    required_static = [s for s in sessions if arms != BOUNDED_ARMS or s["arm"] != "region_priority"]
+    if arms == BOUNDED_ARMS:
+        result["scope"] += " Bounded-schema static gates require candidate and deadline convergence, New250 starvation, and no regressions in any arm; unbounded priority convergence is measured but not required."
+    if any(not s["static_criterion"] for s in required_static) or any(not s["no_exact_to_inexact_regression"] for s in sessions):
         result["reason"] = "static_gate_failed"
         return result
     metrics = [dynamic_metrics(s) for s in sessions]
@@ -493,11 +524,11 @@ def self_test():
     for benchmark, arms in BENCHMARK_ARMS.items():
         valid = copy.deepcopy(report)
         valid["benchmark"] = benchmark
-        if benchmark == PRESSURE_BENCHMARK:
+        if benchmark in PRESSURE_BENCHMARKS:
             valid["presentation_feedback_delay_ns"] = FEEDBACK_DELAY_NS
         valid["sessions"] = [dict(copy.deepcopy(session), arm=arm, order=order)
                              for order, arm in enumerate(arms)]
-        if benchmark == PRESSURE_BENCHMARK:
+        if benchmark in PRESSURE_BENCHMARKS:
             for pressure_session in valid["sessions"]:
                 for pressure_frame in pressure_session["frames"]:
                     pressure_frame["feedback_observed_ns"] = 0
@@ -659,6 +690,97 @@ def self_test():
     changed = copy.deepcopy(rows)
     changed[2]["within_window_scheduled_to_present"]["p95_ms"] = None
     assert dynamic_assessment(changed, PRIORITY_ARMS)["reason"] == "missing_dynamic_observations"
+    # New bounded schemas alone tolerate the unbounded comparator's starvation.
+    bounded_rows = [dict(copy.deepcopy(rows[0]), arm=arm, order=order)
+                    for order, arm in enumerate(BOUNDED_ARMS)]
+    for row in bounded_rows:
+        if row["arm"] == "region_priority":
+            row["static_criterion"] = False
+        row["active_window_host_counters"] = {"priority_deferrals": 1 if row["arm"] == "region_priority_bounded1" else 0}
+    bounded_assessment = dynamic_assessment(bounded_rows, BOUNDED_ARMS)
+    assert bounded_assessment["candidate_arm"] == "region_priority_bounded1"
+    assert bounded_assessment["control_arms"] == ["new250", "region_deadline", "region_priority"]
+    assert bounded_assessment["status"] == "observed_non_regression"
+    assert [row["order"] for row in bounded_assessment["candidate_comparisons"]] == [3, 4]
+    assert pressure_assessment(bounded_rows, BOUNDED_ARMS)["status"] == "observed_priority_deferrals"
+    assert [row["order"] for row in pressure_assessment(bounded_rows, BOUNDED_ARMS)["candidate_observations"]] == [3, 4]
+    for order in range(8):
+        changed = copy.deepcopy(bounded_rows)
+        changed[order]["success"] = False
+        assert dynamic_assessment(changed, BOUNDED_ARMS)["status"] == "no_claim"
+        changed = copy.deepcopy(bounded_rows)
+        changed[order]["no_exact_to_inexact_regression"] = False
+        assert dynamic_assessment(changed, BOUNDED_ARMS)["reason"] == "static_gate_failed"
+        if order not in (2, 5):
+            changed = copy.deepcopy(bounded_rows)
+            changed[order]["static_criterion"] = False
+            assert dynamic_assessment(changed, BOUNDED_ARMS)["reason"] == "static_gate_failed"
+    # Every control, including both starving unbounded controls, participates.
+    for order in (0, 1, 2, 5, 6, 7):
+        changed = copy.deepcopy(bounded_rows)
+        changed[order]["within_window_scheduled_to_present"]["p95_ms"] = 89
+        assert dynamic_assessment(changed, BOUNDED_ARMS)["status"] == "non_regression_not_established"
+    for order in (3, 4):
+        for clock in ("scheduled", "commit"):
+            for quantile in ("p95_ms", "max_ms"):
+                changed = copy.deepcopy(bounded_rows)
+                changed[order][f"within_window_{clock}_to_present"][quantile] += 1
+                assert dynamic_assessment(changed, BOUNDED_ARMS)["status"] == "non_regression_not_established"
+        for key in ("within_window_missing_planned_generations", "late_presented_generations"):
+            changed = copy.deepcopy(bounded_rows)
+            changed[order][key] += 1
+            assert dynamic_assessment(changed, BOUNDED_ARMS)["status"] == "non_regression_not_established"
+        changed = copy.deepcopy(bounded_rows)
+        changed[order]["active_window_host_counters"]["priority_deferrals"] = 0
+        assert pressure_assessment(changed, BOUNDED_ARMS)["status"] == "not_established"
+    assert pressure_assessment(bounded_rows[:-1], BOUNDED_ARMS)["status"] == "no_claim"
+    bounded_report = copy.deepcopy(pressure)
+    bounded_report["benchmark"] = BOUNDED_PRESSURE_BENCHMARK
+    bounded_report["sessions"] = [dict(copy.deepcopy(pressure["sessions"][0]), arm=arm, order=order)
+                                 for order, arm in enumerate(BOUNDED_ARMS)]
+    for row in bounded_report["sessions"]:
+        for key in ("host_stats", "active_window_host_stats"):
+            row[key].update(budget_retained_selections=1 if row["arm"] == "region_priority_bounded1" else 0,
+                            budget_png_flushed=1 if row["arm"] == "region_priority_bounded1" else 0,
+                            max_priority_deferral_streak=1 if row["arm"] == "region_priority_bounded1" else 0)
+    summary = summarize(bounded_report)
+    assert summary["planned_sessions"] == 8 and summary["planned_generation_budget"] == 640
+    assert public_summary(summary)["sessions"][3]["aggregate_host_counters"]["budget_png_flushed"] == 1
+    invalid_bounded = []
+    for key in BOUNDED_COUNTERS:
+        for value in (None, True, -1, 2**63):
+            bad = copy.deepcopy(bounded_report)
+            bad["sessions"][3]["host_stats"][key] = value
+            invalid_bounded.append(bad)
+        bad = copy.deepcopy(bounded_report)
+        del bad["sessions"][3]["host_stats"][key]
+        invalid_bounded.append(bad)
+        bad = copy.deepcopy(bounded_report)
+        bad["sessions"][0]["host_stats"][key] = 1
+        invalid_bounded.append(bad)
+    for key, value in (("max_priority_deferral_streak", 2), ("budget_png_flushed", 2), ("budget_retained_selections", 8)):
+        bad = copy.deepcopy(bounded_report)
+        bad["sessions"][3]["host_stats"][key] = value
+        invalid_bounded.append(bad)
+    for key in ("host_stats", "active_window_host_stats"):
+        bad = copy.deepcopy(bounded_report)
+        bad["sessions"][3]["success"] = True
+        for counter in BOUNDED_COUNTERS:
+            del bad["sessions"][3][key][counter]
+        invalid_bounded.append(bad)
+    bad = copy.deepcopy(bounded_report)
+    bad["sessions"][3]["host_stats"]["budget_png_flushed"] = 0
+    invalid_bounded.append(bad)  # active flush count exceeds total
+    bad = copy.deepcopy(bounded_report)
+    bad["benchmark"] = PRESSURE_BENCHMARK
+    invalid_bounded.append(bad)  # no relabeling eight arms as old six-arm schema
+    for bad in invalid_bounded:
+        try:
+            summarize(bad)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("invalid bounded-priority evidence accepted")
     assessment["private_trace"] = "do not publish"
     assessment["best_control"]["private_trace"] = "do not publish"
     assessment["candidate_comparisons"][0]["metrics"]["private_trace"] = "do not publish"

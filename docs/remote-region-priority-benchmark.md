@@ -208,3 +208,55 @@ Run explicitly with the same environment and profiling command above, using
 `JWM_REMOTE_REGION_PRESSURE_REPORT` path. Keep the build/no-debug-assertions guard
 and public-summary allowlist. Inspect deferrals together with repair convergence,
 missing generations, late frames and both candidate sessions, not only p95.
+
+## Bounded-priority anti-starvation experiment
+
+`RegionPriorityBounded1` is another private `cfg(test)` policy, not a new default
+or production option. Once eligible static debt exists in the same complete
+source/geometry scope, it allows at most one actual selection of a queued latest
+capture before choosing retained repair at the next eligible opportunity. Merely
+creating a new JPEG follow-up does not reset that budget. Only a successfully
+flushed PNG, disappearance of stable exact debt after a successful commit, or a
+source/geometry scope change resets it. This is a service-opportunity budget,
+not a wall-clock latency or static-convergence guarantee.
+
+The budget stores no image: ownership remains one latest mailbox and at most one
+retained immutable capture. Selected repair still passes all normal credit,
+permission, source/geometry, selected-pixel supersession, encoding and publication
+checks. Exhausting the budget never permits stale PNG pixels. A discarded repair
+or unsuccessful write is not successful service and does not reset the same-scope
+budget. New source versions and geometry changes cannot inherit old debt.
+
+Two new identities separately exercise zero delay and fixed 150 ms feedback hold:
+`static_lossless_region_bounded_priority_continuous_tcp_ab` and
+`static_lossless_region_bounded_priority_credit_pressure_tcp_ab`. Both use eight
+sessions in this mirrored order: New250, RegionDeadline, unbounded RegionPriority,
+Bounded1, Bounded1, unbounded RegionPriority, RegionDeadline, New250. All prior
+workloads and gates remain unchanged. CI preserves two complete optimized runs
+of each new identity, separately from the previous experiments.
+
+Both bounded candidates must converge and preserve exact static pixels and later
+animation. New250 must reproduce starvation and RegionDeadline must converge.
+The unbounded-priority controls' convergence is reported but is not required for
+these new identities: its failure under pressure is precisely the control
+observation this experiment investigates. Every session still must complete and
+have no exact-to-inexact regression. Dynamic acceptance compares each bounded
+candidate independently against the best value of each metric across **all six
+controls**, including unbounded priority. Faster response than only the slowest
+control is insufficient; changed statistical thresholds are not introduced.
+
+Three additional test-only counters distinguish choice from actual service:
+`budget_retained_selections` counts retained choices after the one-deferral budget
+was spent (even if no latest capture is then queued); `budget_png_flushed` counts
+those choices that actually complete a PNG flush; `max_priority_deferral_streak`
+records whether a bounded candidate spent its single deferral. The parser checks
+that flushes do not exceed budget selections, selections do not exceed retained
+choices, and the bounded maximum is at most one. Non-bounded policies report zero;
+historical missing fields remain unknown. Counters and static exactness must be
+inspected together. A budget selection is not proof of fresh-frame delivery.
+
+Use `JWM_REMOTE_REGION_BOUNDED_PRIORITY_REPORT` with the explicit ignored tests
+`actual_static_lossless_region_bounded_priority_continuous_measurement` or
+`actual_static_lossless_region_bounded_priority_credit_pressure_measurement` and
+the same profiling/no-debug-assertions/public-summary guards. Software GL and
+loopback remain synthetic evidence, not a physical-display or WAN guarantee.

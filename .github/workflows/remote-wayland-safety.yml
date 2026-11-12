@@ -678,3 +678,89 @@ jobs:
           path: ${{ runner.temp }}/region-pressure-optimized-summary-*.json
           if-no-files-found: warn
           retention-days: 3
+      - name: Repeated optimized bounded-priority zero-delay evidence
+        # Reuse the already-built profiling executable, not debug timings.
+        # Two complete eight-arm mirrored runs; never pool candidates or select a best run.
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          python3 scripts/summarize-remote-region-deadline.py --self-test
+          export XDG_RUNTIME_DIR="$(mktemp -d)"
+          trap 'rm -rf "$XDG_RUNTIME_DIR"' EXIT
+          base='remote::host::wayland_viewer_integration::host_lossless_integration::scheduler_benchmark'
+          filter="$base::actual_static_lossless_region_bounded_priority_continuous_measurement"
+          listed="$(env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --profile profiling --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --ignored --exact --list)"
+          test "$(printf '%s\n' "$listed" | grep -c ': test$')" -eq 1
+          status=0
+          for repetition in 1 2; do
+            export JWM_REMOTE_REGION_BOUNDED_PRIORITY_REPORT="$RUNNER_TEMP/region-bounded-zero-delay-optimized-private-$repetition.json"
+            log="$RUNNER_TEMP/region-bounded-zero-delay-optimized-private-$repetition.log"
+            summary="$RUNNER_TEMP/region-bounded-zero-delay-optimized-summary-$repetition.json"
+            current=0
+            env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --profile profiling --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --ignored --exact --test-threads=1 > "$log" 2>&1 || current=$?
+            if test -f "$JWM_REMOTE_REGION_BOUNDED_PRIORITY_REPORT"; then
+              if python3 scripts/summarize-remote-region-deadline.py --require-no-debug-assertions --public-summary "$JWM_REMOTE_REGION_BOUNDED_PRIORITY_REPORT" > "$summary.tmp" 2> "$RUNNER_TEMP/region-bounded-zero-delay-optimized-error-private-$repetition.log"; then
+                mv "$summary.tmp" "$summary"
+              else
+                current=1
+              fi
+            else
+              current=1
+            fi
+            if test "$current" -eq 0; then
+              grep -q 'test result: ok. 1 passed; 0 failed; 0 ignored;' "$log" || current=1
+            fi
+            if test "$current" -ne 0; then status=1; fi
+          done
+          exit "$status"
+      - name: Preserve both allowlisted bounded-priority zero-delay repetitions
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: remote-region-bounded-zero-delay-optimized-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/region-bounded-zero-delay-optimized-summary-*.json
+          if-no-files-found: warn
+          retention-days: 3
+      - name: Repeated optimized bounded-priority pressure evidence
+        # Reuse the already-built profiling executable, not debug timings.
+        # Two complete eight-arm mirrored runs; never pool candidates or select a best run.
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          python3 scripts/summarize-remote-region-deadline.py --self-test
+          export XDG_RUNTIME_DIR="$(mktemp -d)"
+          trap 'rm -rf "$XDG_RUNTIME_DIR"' EXIT
+          base='remote::host::wayland_viewer_integration::host_lossless_integration::scheduler_benchmark'
+          filter="$base::actual_static_lossless_region_bounded_priority_credit_pressure_measurement"
+          listed="$(env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --profile profiling --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --ignored --exact --list)"
+          test "$(printf '%s\n' "$listed" | grep -c ': test$')" -eq 1
+          status=0
+          for repetition in 1 2; do
+            export JWM_REMOTE_REGION_BOUNDED_PRIORITY_REPORT="$RUNNER_TEMP/region-bounded-pressure-optimized-private-$repetition.json"
+            log="$RUNNER_TEMP/region-bounded-pressure-optimized-private-$repetition.log"
+            summary="$RUNNER_TEMP/region-bounded-pressure-optimized-summary-$repetition.json"
+            current=0
+            env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --profile profiling --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --ignored --exact --test-threads=1 > "$log" 2>&1 || current=$?
+            if test -f "$JWM_REMOTE_REGION_BOUNDED_PRIORITY_REPORT"; then
+              if python3 scripts/summarize-remote-region-deadline.py --require-no-debug-assertions --public-summary "$JWM_REMOTE_REGION_BOUNDED_PRIORITY_REPORT" > "$summary.tmp" 2> "$RUNNER_TEMP/region-bounded-pressure-optimized-error-private-$repetition.log"; then
+                mv "$summary.tmp" "$summary"
+              else
+                current=1
+              fi
+            else
+              current=1
+            fi
+            if test "$current" -eq 0; then
+              grep -q 'test result: ok. 1 passed; 0 failed; 0 ignored;' "$log" || current=1
+            fi
+            if test "$current" -ne 0; then status=1; fi
+          done
+          exit "$status"
+      - name: Preserve both allowlisted bounded-priority pressure repetitions
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: remote-region-bounded-pressure-optimized-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/region-bounded-pressure-optimized-summary-*.json
+          if-no-files-found: warn
+          retention-days: 3

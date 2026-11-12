@@ -111,7 +111,9 @@ fn host_stats(probe: &host::LosslessScheduleProbe) -> Value {
         "jpeg_ns":s.jpeg_ns,"png_ns":s.png_ns,"sent_bytes":s.sent_bytes,"comparisons":s.comparisons,
         "comparison_ns":s.comparison_ns,"stale_png_dropped":s.stale_png_dropped,
         "followup_opportunities":s.followup_opportunities,"priority_deferrals":s.priority_deferrals,
-        "retained_followups":s.retained_followups})
+        "retained_followups":s.retained_followups,
+        "budget_retained_selections":s.budget_retained_selections,"budget_png_flushed":s.budget_png_flushed,
+        "max_priority_deferral_streak":s.max_priority_deferral_streak})
 }
 #[test]
 fn region_priority_report_includes_actual_decision_counters() {
@@ -120,6 +122,9 @@ fn region_priority_report_includes_actual_decision_counters() {
         "followup_opportunities",
         "priority_deferrals",
         "retained_followups",
+        "budget_retained_selections",
+        "budget_png_flushed",
+        "max_priority_deferral_streak",
     ] {
         assert_eq!(
             stats[field].as_u64(),
@@ -146,6 +151,7 @@ fn run_session_workload(arm: &str, report: &mut Value, continuous: bool, feedbac
         "off" | "proposed" | "new250" => host::LosslessSchedule::New250,
         "region_deadline" => host::LosslessSchedule::RegionDeadline,
         "region_priority" => host::LosslessSchedule::RegionPriority,
+        "region_priority_bounded1" => host::LosslessSchedule::RegionPriorityBounded1,
         "quiet0_pace100" => host::LosslessSchedule::Quiet0Pace100,
         "quiet0_pace250" => host::LosslessSchedule::Quiet0Pace250,
         "quiet250_pace100" => host::LosslessSchedule::Quiet250Pace100,
@@ -669,6 +675,39 @@ fn actual_static_lossless_region_priority_credit_pressure_measurement() {
     );
 }
 
+#[test]
+#[ignore = "explicit private bounded-priority experiment using real TCP/GL"]
+fn actual_static_lossless_region_bounded_priority_continuous_measurement() {
+    run_bounded_priority_measurement(Duration::ZERO);
+}
+#[test]
+#[ignore = "explicit private bounded-priority display-credit pressure using real TCP/GL"]
+fn actual_static_lossless_region_bounded_priority_credit_pressure_measurement() {
+    run_bounded_priority_measurement(PRESSURE_FEEDBACK_DELAY);
+}
+fn run_bounded_priority_measurement(feedback_delay: Duration) {
+    let benchmark = if feedback_delay.is_zero() {
+        "static_lossless_region_bounded_priority_continuous_tcp_ab"
+    } else {
+        "static_lossless_region_bounded_priority_credit_pressure_tcp_ab"
+    };
+    run_continuous_measurement(
+        &[
+            "new250",
+            "region_deadline",
+            "region_priority",
+            "region_priority_bounded1",
+            "region_priority_bounded1",
+            "region_priority",
+            "region_deadline",
+            "new250",
+        ],
+        benchmark,
+        "JWM_REMOTE_REGION_BOUNDED_PRIORITY_REPORT",
+        feedback_delay,
+    );
+}
+
 fn run_continuous_measurement(
     order: &[&str],
     benchmark: &str,
@@ -694,7 +733,10 @@ fn run_continuous_measurement(
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             run_session_workload(arm, &mut session, true, feedback_delay);
             let accepted = continuous_acceptance(&mut session);
-            if feedback_delay.is_zero() {
+            let measured_unbounded_control = benchmark
+                == "static_lossless_region_bounded_priority_continuous_tcp_ab"
+                && *arm == "region_priority";
+            if feedback_delay.is_zero() && !measured_unbounded_control {
                 assert!(
                     accepted,
                     "continuous static starvation/convergence or regression criterion failed"
