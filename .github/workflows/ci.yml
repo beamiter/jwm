@@ -383,7 +383,7 @@ jobs:
           RUSTFLAGS: -D warnings
         run: |
           xvfb-run -a -s '-screen 0 1024x768x24 -nolisten tcp' \
-            sh -c 'JWM_TEST_X11_DISPLAY="$DISPLAY" cargo test --locked --no-default-features --features remote-x11 --lib remote::x11_viewer::tests:: -- --ignored --nocapture --test-threads=1'
+            sh -c 'JWM_REMOTE_TEST_VIEWER_OWNED=1 JWM_TEST_X11_DISPLAY="$DISPLAY" cargo test --locked --no-default-features --features remote-x11 --lib remote::x11_viewer::tests:: -- --ignored --nocapture --test-threads=1'
           xvfb-run -a -s '-screen 0 1024x768x24 -nolisten tcp' \
             sh -c 'JWM_TEST_X11_DISPLAY="$DISPLAY" cargo test --locked --no-default-features --features remote-x11 --lib remote::clipboard_sync::tests::remote_clipboard_shutdown_and_clones_on_x11 -- --ignored --nocapture --test-threads=1'
           for attempt in 1 2 3 4 5; do
