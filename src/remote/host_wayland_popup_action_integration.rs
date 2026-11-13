@@ -1573,9 +1573,14 @@ fn authenticated_popup_periodic_real_presentation_does_not_renew_original_lease(
                 "must have fresh actual Ready evidence near the original deadline"
             );
         }
+        // tick drains recipient events before dispatching native teardown.
+        // A just-revoked lease can therefore be inactive one iteration before
+        // its wl_pointer.leave is observed. Wait for actual recipient cleanup,
+        // within the existing overall deadline, not merely native inactivity.
         if client_result.is_some()
             && host_result.is_some()
             && !remote_popup::active(&h.native.state)
+            && h.private_events.iter().any(|event| event.0 == 1)
         {
             break;
         }
