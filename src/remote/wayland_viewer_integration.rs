@@ -1052,6 +1052,13 @@ mod host_keyboard_integration;
 mod host_keyboard_lossless_integration;
 
 #[path = "wayland_viewer_pointer_integration.rs"]
+modration.rs"]
+mod host_keyboard_integration;
+
+#[path = "host_wayland_keyboard_lossless_integration.rs"]
+mod host_keyboard_lossless_integration;
+
+#[path = "wayland_viewer_pointer_integration.rs"]
 mod pointer_integration;
 
 #[path = "host_wayland_pointer_viewer_integration.rs"]
