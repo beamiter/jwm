@@ -54,9 +54,12 @@ impl Viewer {
         keyboard: bool,
         keymap: Option<KeymapTable>,
     ) -> RemoteResult<Self> {
+        if options.seamless_input && !(pointer && keyboard) {
+            return Err(std::io::Error::other("seamless input requires negotiated pointer and keyboard control; check host input permission and keymap compatibility").into());
+        }
         match options.viewer_backend {
-            ViewerBackend::X11 => Ok(Self::X11(Box::new(
-                x11_viewer::Viewer::connect_with_window_geometry(
+            ViewerBackend::X11 => {
+                let mut viewer = x11_viewer::Viewer::connect_with_window_geometry(
                     options.display.as_deref(),
                     width,
                     height,
@@ -69,8 +72,10 @@ impl Viewer {
                     options.grab_input && (pointer || keyboard),
                     &options.escape_key,
                     &options.peer_label,
-                )?,
-            ))),
+                )?;
+                viewer.set_seamless_input(options.seamless_input);
+                Ok(Self::X11(Box::new(viewer)))
+            }
             ViewerBackend::Wayland => {
                 #[cfg(feature = "remote-wayland")]
                 {

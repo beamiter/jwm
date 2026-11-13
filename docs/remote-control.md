@@ -1937,3 +1937,8 @@ hardware acceptance or common-desktop full-frame convergence: 1080p needs at
 least 32 batches and 64 seconds in the ideal budget, longer than the lease.
 See [pointer plus lossless boundaries and evidence](remote-pointer-lossless-preparation.md)
 for observed times, permission restrictions and the unchanged cooldown limits.
+
+## Seamless input handoff
+
+For opt-in X11 mouse-enter/leave keyboard and pointer handoff, see
+[Seamless input](remote-seamless-input.md). Default click-to-grab behavior is unchanged.

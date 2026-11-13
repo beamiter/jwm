@@ -134,6 +134,7 @@ fn actual_scroll_copy_preserves_exact_interior_and_repairs_exposed_edges() {
             display: None,
             view_only: true,
             grab_input: false,
+            seamless_input: false,
             clipboard: false,
             clipboard_mode: Default::default(),
             clipboard_direction: Default::default(),

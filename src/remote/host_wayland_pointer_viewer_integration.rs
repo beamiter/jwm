@@ -442,6 +442,7 @@ impl Harness {
                 display: None,
                 view_only: false,
                 grab_input: false,
+                seamless_input: false,
                 clipboard: false,
                 clipboard_mode: Default::default(),
                 clipboard_direction: Default::default(),

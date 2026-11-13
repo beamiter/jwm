@@ -266,6 +266,16 @@ fn reset_input_geometry(
 // An external keyboard grab diverts releases even though the ordinary focus
 // has not changed. Our own grab's synthetic focus notifications must not tear
 // down the grab we just acquired.
+fn seamless_entry_is_clean(keys: &[u8; 32], mask: x11rb::protocol::xproto::KeyButMask) -> bool {
+    // Lock/NumLock are latched state, not a held local chord.
+    let buttons = x11rb::protocol::xproto::KeyButMask::BUTTON1
+        | x11rb::protocol::xproto::KeyButMask::BUTTON2
+        | x11rb::protocol::xproto::KeyButMask::BUTTON3
+        | x11rb::protocol::xproto::KeyButMask::BUTTON4
+        | x11rb::protocol::xproto::KeyButMask::BUTTON5;
+    keys.iter().all(|key| *key == 0) && u16::from(mask & buttons) == 0
+}
+
 fn focus_out_releases_input(mode: NotifyMode, owns_grab: bool) -> bool {
     mode == NotifyMode::NORMAL || (mode == NotifyMode::GRAB && !owns_grab)
 }
@@ -622,6 +632,8 @@ pub struct Viewer {
     /// upload overwrote.
     backing_letterbox: Option<Letterbox>,
     grab_input: bool,
+    seamless_input: bool,
+    seamless_suspended: bool,
     forward_input: bool,
     source_switching: bool,
     source_cycle_enabled: bool,
@@ -1063,6 +1075,8 @@ impl Viewer {
         let event_mask = EventMask::EXPOSURE
             | EventMask::STRUCTURE_NOTIFY
             | EventMask::FOCUS_CHANGE
+            | EventMask::ENTER_WINDOW
+            | EventMask::LEAVE_WINDOW
             | EventMask::POINTER_MOTION
             | EventMask::BUTTON_PRESS
             | EventMask::BUTTON_RELEASE
@@ -1211,6 +1225,8 @@ impl Viewer {
             #[cfg(feature = "remote-wayland")]
             wayland_keymap: None,
             grabbed: false,
+            seamless_input: false,
+            seamless_suspended: false,
             escape_keycodes,
             escape_keysym,
             escape_name: escape_key.to_string(),
@@ -1510,6 +1526,11 @@ impl Viewer {
                         &mut result,
                     );
                     if (new_width, new_height) != (self.width, self.height) {
+                        if self.seamless_input {
+                            self.release_local_grab()?;
+                            self.release_all_input(&mut result);
+                            self.seamless_suspended = true;
+                        }
                         self.width = new_width;
                         self.height = new_height;
                         redraw = true;
@@ -1536,6 +1557,7 @@ impl Viewer {
                     #[cfg(test)]
                     eprintln!("viewer input revoke: UnmapNotify {event:?}");
                     self.clipboard_shortcut = ViewerKeyboardState::default();
+                    self.seamless_suspended = true;
                     self.release_local_grab()?;
                     self.release_all_input(&mut result);
                 }
@@ -1557,8 +1579,34 @@ impl Viewer {
                         );
                     }
                     self.clipboard_shortcut = ViewerKeyboardState::default();
+                    self.seamless_suspended = true;
                     self.release_local_grab()?;
                     self.release_all_input(&mut result);
+                }
+                Event::EnterNotify(event)
+                    if event.event == self.window
+                        && self.seamless_input
+                        && event.mode == NotifyMode::NORMAL =>
+                {
+                    self.update_seamless_input(event.event_x, event.event_y, &mut result)?;
+                }
+                Event::LeaveNotify(event)
+                    if event.event == self.window
+                        && self.seamless_input
+                        && event.mode == NotifyMode::NORMAL
+                        && event.detail != x11rb::protocol::xproto::NotifyDetail::INFERIOR =>
+                {
+                    self.release_local_grab()?;
+                    self.release_all_input(&mut result);
+                    self.seamless_suspended = false;
+                }
+                Event::MotionNotify(event) if event.event == self.window && self.seamless_input => {
+                    self.update_seamless_input(event.event_x, event.event_y, &mut result)?;
+                    if self.forwarding_input() {
+                        if let Some((x, y)) = self.map_pointer(event.event_x, event.event_y) {
+                            push_pointer(&mut result, x, y);
+                        }
+                    }
                 }
                 Event::MotionNotify(event)
                     if event.event == self.window && self.wayland_pointer =>
@@ -1616,6 +1664,7 @@ impl Viewer {
                         continue;
                     }
                     if self.source_switching
+                        || (self.seamless_input && !self.grabbed)
                         || (self.grab_input && !self.grabbed && !self.acquire_local_grab()?)
                     {
                         continue;
@@ -1700,6 +1749,7 @@ impl Viewer {
                     {
                         KeyPressAction::ReleaseGrab => {
                             self.user_released_grab = true;
+                            self.seamless_suspended = true;
                             self.release_local_grab()?;
                             self.release_all_input(&mut result);
                         }
@@ -1928,6 +1978,7 @@ impl Viewer {
 
     pub(crate) fn invalidate_source(&mut self, label: String) -> RemoteResult<()> {
         self.release_local_grab()?;
+        self.seamless_suspended = true;
         self.keyboard = ViewerKeyboardState::default();
         self.held_buttons.clear();
         self.begin_source_switch(label);
@@ -2380,6 +2431,14 @@ impl Viewer {
             self.clipboard_activity.as_deref(),
             &self.escape_name,
         );
+        if self.seamless_input {
+            title = title.replace("; input released - click to control", "");
+            title.push_str(if self.grabbed {
+                "; seamless: leave image to release"
+            } else {
+                "; seamless: enter image to control (after release, leave first)"
+            });
+        }
         if let Some(status) = self.pointer_status {
             title.push_str("; ");
             title.push_str(status);
@@ -2421,6 +2480,88 @@ impl Viewer {
         self.escape_keycodes.contains(&keycode)
     }
 
+    /// Explicit per-session local policy; does not grant remote input permission.
+    pub(super) fn set_seamless_input(&mut self, enabled: bool) {
+        self.seamless_input =
+            enabled && self.grab_input && self.pointer_enabled && self.forward_keyboard;
+        self.update_title();
+    }
+
+    fn update_seamless_input(
+        &mut self,
+        x: i16,
+        y: i16,
+        events: &mut Vec<ViewerEvent>,
+    ) -> RemoteResult<()> {
+        if !self.pointer_is_inside_image(x, y) {
+            if self.grabbed {
+                self.release_local_grab()?;
+                self.release_all_input(events);
+            }
+            self.seamless_suspended = false;
+            return Ok(());
+        }
+        if self.grabbed
+            || self.seamless_suspended
+            || self.source_switching
+            || !self
+                .last_frame
+                .as_ref()
+                .is_some_and(|frame| self.presented_geometry == Some(frame.geometry_epoch))
+        {
+            return Ok(());
+        }
+        // Never steal the tail of a local drag or key chord. Do not synthesize
+        // presses for keys already down on entry. A later clean motion can enter.
+        let keys = self.conn.query_keymap()?.reply()?;
+        let pointer = self.conn.query_pointer(self.window)?.reply()?;
+        if !pointer.same_screen
+            || !self.pointer_is_inside_image(pointer.win_x, pointer.win_y)
+            || !seamless_entry_is_clean(&keys.keys, pointer.mask)
+        {
+            return Ok(());
+        }
+        // This grab is intentionally unconfined: outside motion must remain
+        // observable, and ungrab restores the pre-existing local focus.
+        if self.acquire_local_grab()? {
+            // Seamless grabs freeze logical device state. A press that reached
+            // a local app before GrabKeyboard remains visible here even if its
+            // physical release raced the request. Rejecting the grab unfreezes
+            // that release back to the local focus instead of swallowing it.
+            let clean: RemoteResult<bool> = (|| {
+                let keys = self.conn.query_keymap()?.reply()?;
+                let pointer = self.conn.query_pointer(self.window)?.reply()?;
+                Ok(pointer.same_screen
+                    && self.pointer_is_inside_image(pointer.win_x, pointer.win_y)
+                    && seamless_entry_is_clean(&keys.keys, pointer.mask))
+            })();
+            match clean {
+                Ok(true) => {
+                    let resumed: RemoteResult<()> = (|| {
+                        self.conn
+                            .allow_events(x11rb::protocol::xproto::Allow::ASYNC_BOTH, CURRENT_TIME)?
+                            .check()?;
+                        self.conn.flush()?;
+                        Ok(())
+                    })();
+                    if let Err(error) = resumed {
+                        self.release_local_grab()?;
+                        return Err(error);
+                    }
+                }
+                Ok(false) => {
+                    self.release_local_grab()?;
+                    self.release_all_input(events);
+                }
+                Err(error) => {
+                    self.release_local_grab()?;
+                    return Err(error);
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn forwarding_input(&self) -> bool {
         self.forward_input
             && !self.source_switching
@@ -2436,15 +2577,14 @@ impl Viewer {
             return Ok(true);
         }
 
+        let mode = if self.seamless_input {
+            GrabMode::SYNC
+        } else {
+            GrabMode::ASYNC
+        };
         let keyboard = self
             .conn
-            .grab_keyboard(
-                false,
-                self.window,
-                CURRENT_TIME,
-                GrabMode::ASYNC,
-                GrabMode::ASYNC,
-            )?
+            .grab_keyboard(false, self.window, CURRENT_TIME, GrabMode::ASYNC, mode)?
             .reply()?;
         if keyboard.status != GrabStatus::SUCCESS {
             eprintln!(
@@ -2460,9 +2600,16 @@ impl Viewer {
                 .grab_pointer(
                     false,
                     self.window,
-                    EventMask::POINTER_MOTION | EventMask::BUTTON_PRESS | EventMask::BUTTON_RELEASE,
-                    GrabMode::ASYNC,
-                    GrabMode::ASYNC,
+                    EventMask::POINTER_MOTION
+                        | EventMask::BUTTON_PRESS
+                        | EventMask::BUTTON_RELEASE
+                        | if self.seamless_input {
+                            EventMask::ENTER_WINDOW | EventMask::LEAVE_WINDOW
+                        } else {
+                            EventMask::NO_EVENT
+                        },
+                    mode,
+                    mode,
                     x11rb::NONE,
                     self.blank_cursor,
                     CURRENT_TIME,
@@ -5660,6 +5807,31 @@ mod tests {
     }
 
     #[test]
+    fn seamless_entry_rejects_pressed_keys_and_buttons_but_not_locks() {
+        use x11rb::protocol::xproto::KeyButMask;
+        let mut keys = [0; 32];
+        assert!(seamless_entry_is_clean(&keys, KeyButMask::default()));
+        assert!(seamless_entry_is_clean(
+            &keys,
+            KeyButMask::LOCK | KeyButMask::MOD2
+        ));
+        for button in [
+            KeyButMask::BUTTON1,
+            KeyButMask::BUTTON2,
+            KeyButMask::BUTTON3,
+            KeyButMask::BUTTON4,
+            KeyButMask::BUTTON5,
+        ] {
+            assert!(!seamless_entry_is_clean(&keys, button));
+        }
+        for index in 0..32 {
+            keys[index] = 1;
+            assert!(!seamless_entry_is_clean(&keys, KeyButMask::default()));
+            keys[index] = 0;
+        }
+    }
+
+    #[test]
     fn own_grab_notifications_do_not_release_new_grab() {
         assert!(focus_out_releases_input(NotifyMode::NORMAL, false));
         assert!(focus_out_releases_input(NotifyMode::NORMAL, true));
@@ -6450,6 +6622,247 @@ mod tests {
         )
         .unwrap();
         assert!(validate_native_upload(&oversized, format, ImageOrder::LsbFirst).is_err());
+    }
+
+    #[test]
+    #[ignore = "requires a dedicated owned JWM_TEST_X11_DISPLAY Xvfb server"]
+    fn seamless_input_crossing_releases_and_escape_requires_exit_on_x11() {
+        use x11rb::protocol::{xproto, xtest::ConnectionExt as _};
+        assert_eq!(
+            std::env::var("JWM_REMOTE_TEST_VIEWER_OWNED").as_deref(),
+            Ok("1")
+        );
+        let display = std::env::var("JWM_TEST_X11_DISPLAY").unwrap();
+        assert!(display.starts_with(':'));
+        let (driver, screen) = x11rb::connect(Some(&display)).unwrap();
+        let root = driver.setup().roots[screen].root;
+        driver
+            .warp_pointer(x11rb::NONE, root, 0, 0, 0, 0, 1, 1)
+            .unwrap()
+            .check()
+            .unwrap();
+        let keymap = super::super::x11_keymap::KeymapTable::read(&driver).unwrap();
+        let mut viewer = Viewer::connect(
+            Some(&display),
+            320,
+            240,
+            true,
+            true,
+            Some(keymap),
+            true,
+            "F12",
+            "seamless regression",
+        )
+        .unwrap();
+        viewer.set_seamless_input(true);
+        viewer
+            .draw(DecodedFrame {
+                sequence: 1,
+                source_width: 320,
+                source_height: 240,
+                image: RgbImage::from_pixel(320, 240, image::Rgb([20, 40, 60])),
+            })
+            .unwrap();
+        viewer.source_presented(viewer.last_frame.as_ref().unwrap().geometry_epoch);
+        viewer.poll_events().unwrap();
+        let pump = |viewer: &mut Viewer| {
+            driver.get_input_focus().unwrap().reply().unwrap();
+            let mut events = Vec::new();
+            for _ in 0..10 {
+                events.extend(viewer.poll_events().unwrap());
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            events
+        };
+        // Regression for the acquisition race: a local press exists at the
+        // freeze point, but its release arrives before validation. QueryKeymap
+        // must still expose the press until rejection unfreezes the devices.
+        driver
+            .xtest_fake_input(xproto::KEY_PRESS_EVENT, 38, CURRENT_TIME, root, 0, 0, 0)
+            .unwrap()
+            .check()
+            .unwrap();
+        assert!(viewer.acquire_local_grab().unwrap());
+        driver
+            .xtest_fake_input(xproto::KEY_RELEASE_EVENT, 38, CURRENT_TIME, root, 0, 0, 0)
+            .unwrap()
+            .check()
+            .unwrap();
+        let frozen = driver.query_keymap().unwrap().reply().unwrap();
+        assert_ne!(
+            frozen.keys[38 / 8] & (1 << (38 % 8)),
+            0,
+            "a release racing the grab must remain frozen until validation"
+        );
+        viewer.release_local_grab().unwrap();
+        pump(&mut viewer);
+        let released = driver.query_keymap().unwrap().reply().unwrap();
+        assert_eq!(released.keys[38 / 8] & (1 << (38 % 8)), 0);
+        let window = viewer.window;
+        let motion = |x, y| {
+            driver
+                .warp_pointer(x11rb::NONE, window, 0, 0, 0, 0, x, y)
+                .unwrap()
+                .check()
+                .unwrap();
+        };
+        // A local held key must not cross the boundary as half of a chord.
+        driver
+            .xtest_fake_input(xproto::KEY_PRESS_EVENT, 38, CURRENT_TIME, root, 0, 0, 0)
+            .unwrap()
+            .check()
+            .unwrap();
+        motion(20, 20);
+        pump(&mut viewer);
+        assert!(!viewer.grabbed);
+        driver
+            .xtest_fake_input(xproto::KEY_RELEASE_EVENT, 38, CURRENT_TIME, root, 0, 0, 0)
+            .unwrap()
+            .check()
+            .unwrap();
+        motion(21, 20);
+        pump(&mut viewer);
+        assert!(
+            viewer.grabbed,
+            "clean entry must acquire both devices without a click"
+        );
+        // The OS ungrab must not retain any forwarded remote key/button.
+        driver
+            .xtest_fake_input(xproto::KEY_PRESS_EVENT, 38, CURRENT_TIME, root, 0, 0, 0)
+            .unwrap()
+            .check()
+            .unwrap();
+        driver
+            .xtest_fake_input(xproto::BUTTON_PRESS_EVENT, 1, CURRENT_TIME, root, 0, 0, 0)
+            .unwrap()
+            .check()
+            .unwrap();
+        pump(&mut viewer);
+        assert!(viewer.keyboard.held.contains(&38));
+        motion(-10, 20);
+        let events = pump(&mut viewer);
+        assert!(!viewer.grabbed);
+        assert!(viewer.keyboard.held.is_empty());
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, ViewerEvent::ReleaseAll))
+        );
+        driver
+            .xtest_fake_input(xproto::KEY_RELEASE_EVENT, 38, CURRENT_TIME, root, 0, 0, 0)
+            .unwrap()
+            .check()
+            .unwrap();
+        driver
+            .xtest_fake_input(xproto::BUTTON_RELEASE_EVENT, 1, CURRENT_TIME, root, 0, 0, 0)
+            .unwrap()
+            .check()
+            .unwrap();
+        motion(20, 20);
+        pump(&mut viewer);
+        assert!(viewer.grabbed);
+        // Deliver the escape edge through the real event queue, not a helper call.
+        driver
+            .send_event(
+                false,
+                viewer.window,
+                EventMask::KEY_PRESS,
+                xproto::KeyPressEvent {
+                    response_type: xproto::KEY_PRESS_EVENT,
+                    detail: viewer.escape_keycodes[0],
+                    sequence: 0,
+                    time: 10,
+                    root,
+                    event: viewer.window,
+                    child: x11rb::NONE,
+                    root_x: 0,
+                    root_y: 0,
+                    event_x: 20,
+                    event_y: 20,
+                    state: KeyButMask::CONTROL | KeyButMask::MOD4,
+                    same_screen: true,
+                },
+            )
+            .unwrap()
+            .check()
+            .unwrap();
+        pump(&mut viewer);
+        assert!(!viewer.grabbed);
+        assert!(viewer.user_released_grab());
+        motion(22, 20);
+        pump(&mut viewer);
+        assert!(
+            !viewer.grabbed,
+            "escape must not immediately re-grab on motion"
+        );
+        motion(-10, 20);
+        pump(&mut viewer);
+        motion(20, 20);
+        pump(&mut viewer);
+        assert!(
+            viewer.grabbed,
+            "actual exit and re-entry re-arms seamless input"
+        );
+        // Moving the window away under a stationary pointer must also release:
+        // this requires crossing events in the active pointer-grab mask.
+        driver
+            .configure_window(window, &xproto::ConfigureWindowAux::new().x(600).y(400))
+            .unwrap()
+            .check()
+            .unwrap();
+        let events = pump(&mut viewer);
+        assert!(
+            !viewer.grabbed,
+            "window movement must not strand keyboard ownership"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, ViewerEvent::ReleaseAll))
+        );
+        motion(20, 20);
+        pump(&mut viewer);
+        assert!(viewer.grabbed);
+        driver
+            .send_event(
+                false,
+                window,
+                EventMask::FOCUS_CHANGE,
+                xproto::FocusOutEvent {
+                    response_type: xproto::FOCUS_OUT_EVENT,
+                    detail: xproto::NotifyDetail::NONLINEAR,
+                    sequence: 0,
+                    event: window,
+                    mode: NotifyMode::NORMAL,
+                },
+            )
+            .unwrap()
+            .check()
+            .unwrap();
+        assert!(
+            pump(&mut viewer)
+                .iter()
+                .any(|event| matches!(event, ViewerEvent::ReleaseAll))
+        );
+        assert!(!viewer.grabbed);
+        motion(22, 20);
+        pump(&mut viewer);
+        assert!(
+            !viewer.grabbed,
+            "focus loss suspends reacquisition until exit"
+        );
+        motion(-10, 20);
+        pump(&mut viewer);
+        motion(20, 20);
+        pump(&mut viewer);
+        assert!(viewer.grabbed);
+        driver.unmap_window(window).unwrap().check().unwrap();
+        assert!(
+            pump(&mut viewer)
+                .iter()
+                .any(|event| matches!(event, ViewerEvent::ReleaseAll))
+        );
+        assert!(!viewer.grabbed);
     }
 
     #[test]

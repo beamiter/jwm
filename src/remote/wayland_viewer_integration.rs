@@ -832,6 +832,7 @@ fn actual_wayland_viewer_tcp_ack_waits_for_presented_not_release() {
             display: None,
             view_only: true,
             grab_input: false,
+            seamless_input: false,
             clipboard: false,
             clipboard_mode: Default::default(),
             clipboard_direction: Default::default(),

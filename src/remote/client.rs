@@ -208,6 +208,7 @@ pub struct ClientOptions {
     pub display: Option<String>,
     pub view_only: bool,
     pub grab_input: bool,
+    pub seamless_input: bool,
     pub clipboard: bool,
     pub clipboard_mode: ClipboardMode,
     pub clipboard_direction: ClipboardDirection,
@@ -564,6 +565,16 @@ fn suppress_reconnect(result: RemoteResult<()>, suppress: bool) -> RemoteResult<
 }
 
 fn validate_viewer_backend(options: &ClientOptions) -> RemoteResult<()> {
+    if options.seamless_input
+        && (!options.grab_input
+            || options.view_only
+            || options.viewer_backend != ViewerBackend::X11)
+    {
+        return Err(std::io::Error::other(
+            "seamless input requires X11, --grab-input and input control",
+        )
+        .into());
+    }
     if options.wayland_popup_pointer
         && (options.viewer_backend != ViewerBackend::Wayland
             || options.view_only
@@ -1105,7 +1116,12 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
             hello.stream.clipboard_directions
         )
     );
-    if options.grab_input && (hello.pointer_enabled || hello.keyboard_enabled) {
+    if options.seamless_input {
+        eprintln!(
+            "jwm-remote: seamless input: enter remote image to control, leave to release; Ctrl+Super+{} releases until you leave and enter again",
+            options.escape_key
+        );
+    } else if options.grab_input && (hello.pointer_enabled || hello.keyboard_enabled) {
         eprintln!(
             "jwm-remote: click the viewer to control; Ctrl+Super+{} to release input",
             options.escape_key
@@ -5886,6 +5902,7 @@ pub(super) mod tests {
             display: Some("invalid display".into()),
             view_only: true,
             grab_input: false,
+            seamless_input: false,
             clipboard: false,
             clipboard_mode: Default::default(),
             clipboard_direction: Default::default(),
@@ -8742,6 +8759,7 @@ mod native_viewer_permission_tests {
             display: None,
             view_only: true,
             grab_input: false,
+            seamless_input: false,
             clipboard: false,
             clipboard_mode: Default::default(),
             clipboard_direction: Default::default(),

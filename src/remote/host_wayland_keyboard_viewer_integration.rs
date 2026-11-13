@@ -248,6 +248,7 @@ fn actual_wayland_keyboard_viewer_tcp_requires_presented_and_targets_only_origin
             display: None,
             view_only: false,
             grab_input: false,
+            seamless_input: false,
             clipboard: false,
             clipboard_mode: Default::default(),
             clipboard_direction: Default::default(),

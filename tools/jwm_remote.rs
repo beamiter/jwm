@@ -418,6 +418,11 @@ enum Command {
         #[arg(long, conflicts_with = "view_only")]
         grab_input: bool,
 
+        /// X11: enter the remote image to control; leave to restore local input.
+        /// Requires --grab-input and never changes host authorization.
+        #[arg(long, requires = "grab_input", conflicts_with = "view_only")]
+        seamless_input: bool,
+
         /// Base X keysym of the Ctrl+Super grab-release shortcut.
         #[arg(long, default_value = DEFAULT_ESCAPE_KEY, value_name = "KEYSYM")]
         escape_key: String,
@@ -562,6 +567,11 @@ enum Command {
         /// Click the viewer to grab local input; Ctrl+Super+F12 releases it.
         #[arg(long, conflicts_with = "view_only")]
         grab_input: bool,
+
+        /// X11: enter the remote image to control; leave to restore local input.
+        /// Requires --grab-input and never changes host authorization.
+        #[arg(long, requires = "grab_input", conflicts_with = "view_only")]
+        seamless_input: bool,
 
         /// Base X keysym of the Ctrl+Super grab-release shortcut.
         ///
@@ -754,6 +764,7 @@ fn profile_from_command(command: Command) -> RemoteResult<Profile> {
             window_position,
             view_only,
             grab_input,
+            seamless_input,
             escape_key,
             clipboard,
             clipboard_mode,
@@ -762,6 +773,9 @@ fn profile_from_command(command: Command) -> RemoteResult<Profile> {
             frame_limits,
             scaling,
         } => {
+            if seamless_input {
+                return Err(profile_error("seamless input consent cannot be saved in a profile; use connect or ssh directly").into());
+            }
             if scaling != ScalingPolicy::Auto {
                 return Err(profile_error(
                     "profiles do not store scaling overrides; use connect directly",
@@ -839,6 +853,7 @@ fn profile_from_command(command: Command) -> RemoteResult<Profile> {
             window_position,
             view_only,
             grab_input,
+            seamless_input,
             escape_key,
             clipboard,
             clipboard_mode,
@@ -850,6 +865,9 @@ fn profile_from_command(command: Command) -> RemoteResult<Profile> {
             scaling,
         } => {
             jwm::remote::ssh::validate_destination(&destination)?;
+            if seamless_input {
+                return Err(profile_error("seamless input consent cannot be saved in a profile; use connect or ssh directly").into());
+            }
             if scaling != ScalingPolicy::Auto {
                 return Err(profile_error(
                     "profiles do not store scaling overrides; use ssh directly",
@@ -1411,6 +1429,7 @@ fn run(command: Command) -> RemoteResult<()> {
             shares,
             view_only,
             grab_input,
+            seamless_input,
             escape_key,
             clipboard,
             clipboard_mode,
@@ -1442,6 +1461,7 @@ fn run(command: Command) -> RemoteResult<()> {
                 window_position,
                 view_only,
                 grab_input,
+                seamless_input,
                 clipboard,
                 clipboard_mode,
                 clipboard_direction,
@@ -1472,6 +1492,7 @@ fn run(command: Command) -> RemoteResult<()> {
             window_position,
             view_only,
             grab_input,
+            seamless_input,
             clipboard,
             clipboard_mode,
             clipboard_direction,
@@ -1523,6 +1544,7 @@ fn run(command: Command) -> RemoteResult<()> {
                     window_position,
                     view_only,
                     grab_input,
+                    seamless_input,
                     clipboard,
                     clipboard_mode,
                     clipboard_direction,
@@ -1705,6 +1727,41 @@ fn parse_window_id(value: &str) -> Result<u32, String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn seamless_input_is_explicit_and_never_profile_saved() {
+        for command in ["connect", "ssh"] {
+            assert!(
+                Cli::try_parse_from(["jwm-remote", command, "desk", "--seamless-input"]).is_err()
+            );
+            assert!(
+                Cli::try_parse_from([
+                    "jwm-remote",
+                    command,
+                    "desk",
+                    "--grab-input",
+                    "--seamless-input",
+                    "--view-only"
+                ])
+                .is_err()
+            );
+            let parsed = Cli::try_parse_from([
+                "jwm-remote",
+                command,
+                "desk",
+                "--grab-input",
+                "--seamless-input",
+            ])
+            .unwrap()
+            .command;
+            assert!(
+                profile_from_command(parsed)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("seamless input consent")
+            );
+        }
+    }
+
     #[test]
     fn follow_source_size_is_explicit_narrow_and_never_profile_saved() {
         let plain = Cli::try_parse_from(["jwm-remote", "connect", "desk", "--view-only"])
