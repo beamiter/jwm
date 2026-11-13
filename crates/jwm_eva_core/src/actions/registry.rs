@@ -1141,6 +1141,11 @@ pub fn ipc_catalog() -> Vec<CatalogEntry> {
         ("remote_resize_grant", "command"),
         ("remote_resize_apply", "command"),
         ("remote_resize_revoke", "command"),
+        // Native task-workspace preview/apply protocol has its own approval path.
+        // Its identity-bound mutation must not bypass that path via voice tools;
+        // the read-only companion query is not a model query_state adapter.
+        ("task_workspace_view", "command"),
+        ("get_task_workspace_state", "query"),
         ("get_execution_context", "query"),
         ("get_execution_status", "query"),
         ("get_command_schema", "query"),
@@ -1406,6 +1411,34 @@ mod tests {
             assert!(
                 !tool.contains(name),
                 "native capability exposed to model: {name}"
+            );
+        }
+    }
+    #[test]
+    fn task_workspace_protocol_is_internal_and_never_model_tools() {
+        let catalog = ipc_catalog();
+        let registry = full_registry();
+        let semantics = semantic_actions();
+        let tool = tool_schema().to_string();
+        for (name, kind) in [
+            ("task_workspace_view", "command"),
+            ("get_task_workspace_state", "query"),
+        ] {
+            let entries: Vec<_> = catalog.iter().filter(|e| e.name == name).collect();
+            assert_eq!(entries.len(), 1, "exactly one reviewed role for {name}");
+            assert_eq!(entries[0].kind, kind);
+            assert_eq!(entries[0].role, "bridge_internal");
+            let spec = registry.iter().find(|s| s.canonical_name == name).unwrap();
+            assert_eq!(spec.execution_adapter, "internal_only");
+            assert_eq!(spec.risk_class, "internal_only");
+            assert_eq!(spec.completion_contract, "internal_protocol");
+            assert_eq!(spec.retry_policy, "never_replay");
+            assert!(!semantics.iter().any(|s| {
+                s.canonical_name == name || s.ipc_names.iter().any(|alias| alias == name)
+            }));
+            assert!(
+                !tool.contains(name),
+                "native protocol exposed to model: {name}"
             );
         }
     }
