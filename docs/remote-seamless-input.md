@@ -144,7 +144,17 @@ pause/resume. These tests do **not** establish physical mouse/keyboard, live
 desktop, DRM/GPU or two-machine acceptance. Parser-to-options tests and actual
 production-viewer TCP tests provide **separate layers of evidence**. The latter
 construct options in the fixture; they do not launch the CLI as an independent
-process. An independent CLI-process end-to-end session has not been accepted.
+process.
+
+The separate `scripts/test-remote-wayland-cli.sh` CI gate builds and launches
+actual `jwm-remote host` and `connect` processes against two owned compositors.
+It requires all three cases to execute with strict GL and no skipped tests:
+real input/pause/resume under the same lease followed by successful process
+cleanup, missing host permission rejection, and old local protocol rejection.
+Readiness is observed only after the real ACK, local fence and fresh proof;
+recipient events and lease identity are checked separately. Unix socket or GL
+unavailability fails this gate rather than turning it into a passing skip.
+Passing this owned-software process gate is still not physical desktop acceptance.
 
 See the [native integration contract](remote-wayland-seamless-design.md) for
 protocol and state-machine details. This remains experimental, not a generic

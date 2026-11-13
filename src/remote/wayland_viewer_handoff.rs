@@ -204,13 +204,16 @@ impl WaylandViewer {
         may_enter: bool,
     ) -> RemoteResult<bool> {
         self.state.handoff.check()?;
+        if self.state.closed {
+            return Ok(false);
+        }
         let inside = self.state.pointer.inside_image();
         self.state.handoff.drive(may_enter, inside);
         self.state.handoff.check()?;
         Ok(self.state.handoff.forwarding())
     }
     pub(in crate::remote) fn wayland_handoff_active(&self) -> bool {
-        self.state.handoff.forwarding()
+        !self.state.closed && self.state.handoff.forwarding()
     }
 }
 impl Dispatch<JwmRemoteViewerHandoffManagerV1, ()> for State {

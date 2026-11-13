@@ -41,6 +41,9 @@ jobs:
         run: |
           cargo fmt --all -- --check
           cargo clippy --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib --bin jwm-remote --tests --no-deps -- -D warnings
+      - name: Independent CLI host and viewer native handoff acceptance
+        timeout-minutes: 8
+        run: bash scripts/test-remote-wayland-cli.sh
       - name: Native viewer damage mapping and upload regressions
         run: |
           set -euo pipefail
@@ -261,9 +264,6 @@ jobs:
             test "$(printf '%s\n' "$ignored" | grep -c ': test$' || true)" -eq 0
             env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --test-threads=1 --nocapture
           done
-      - name: Independent CLI host and viewer native handoff acceptance
-        timeout-minutes: 8
-        run: bash scripts/test-remote-wayland-cli.sh
       - name: Explicit unified control plus lossless proof and recipient safety
         run: |
           set -euo pipefail

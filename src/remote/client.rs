@@ -1866,7 +1866,8 @@ fn viewer_loop(
         .unwrap()
         .as_ref()
         .is_some_and(|catalog| catalog.entries.len() > 1);
-    loop {
+    #[allow(unused_labels)] // Native control cancellation rejoins the close path.
+    'viewer: loop {
         state.wayland_text.lock().unwrap().check()?;
         wake.drain()?;
         #[cfg(feature = "remote-wayland")]
@@ -1904,7 +1905,9 @@ fn viewer_loop(
                 } else if epoch.is_some() && !activated && viewer.wayland_handoff_active() {
                     // Do not hold the shared state while a real compositor fence waits.
                     #[cfg(feature = "remote-wayland")]
-                    viewer.check_wayland_control(true)?;
+                    if !viewer.check_wayland_control(true)? {
+                        continue 'viewer;
+                    }
                     let mut control = state.wayland_control.lock().unwrap();
                     control.check(presented_scope, Instant::now())?;
                     if !control.ended && control.epoch == epoch && !control.activated {
@@ -2093,11 +2096,14 @@ fn viewer_loop(
             }
             let check_local = {
                 let control = state.wayland_control.lock().unwrap();
-                control.configured() && !control.ended
+                control.configured() && !control.ended && !events.contains(&ViewerEvent::Close)
             };
             if check_local {
                 #[cfg(feature = "remote-wayland")]
-                viewer.check_wayland_control(false)?;
+                if !viewer.check_wayland_control(false)? {
+                    events.clear();
+                    events.push(ViewerEvent::Close);
+                }
             }
             let validate_resume = events.is_empty()
                 && viewer.wayland_handoff_active()
@@ -2110,7 +2116,9 @@ fn viewer_loop(
                 // The fresh same-connection fence must observe clean local
                 // focus and held state after ACK, not merely before Resume.
                 #[cfg(feature = "remote-wayland")]
-                viewer.check_wayland_control(true)?;
+                if !viewer.check_wayland_control(true)? {
+                    continue 'viewer;
+                }
                 #[cfg(not(feature = "remote-wayland"))]
                 return Err(invalid_data("native resume validation unavailable").into());
                 #[cfg(feature = "remote-wayland")]
@@ -2139,7 +2147,19 @@ fn viewer_loop(
                 reported_control_generation = Some(generation);
             }
             if control.configured() {
-                if control.seamless_enabled {
+                // Terminal local intent goes straight to revoke below. Never
+                // race a new Pause ACK against close cleanup or resume on exit.
+                if control.seamless_enabled
+                    && !events.iter().any(|event| {
+                        matches!(
+                            event,
+                            ViewerEvent::ReleaseAll
+                                | ViewerEvent::Close
+                                | ViewerEvent::CycleSource
+                                | ViewerEvent::WaylandPointerRevoke
+                        )
+                    })
+                {
                     let phase = control.resumable.as_ref().map(|session| session.phase());
                     let transition = if !control.local_handoff_active
                         && phase == Some(super::resumable_control::Phase::Active)
@@ -2156,7 +2176,9 @@ fn viewer_loop(
                     if let Some(resume) = transition {
                         #[cfg(feature = "remote-wayland")]
                         if resume {
-                            viewer.check_wayland_control(true)?;
+                            if !viewer.check_wayland_control(true)? {
+                                continue 'viewer;
+                            }
                         }
                         if resume && !viewer.wayland_handoff_active() {
                             return Err(
@@ -2657,7 +2679,9 @@ fn viewer_loop(
                         && viewer.wayland_handoff_active()
                     {
                         #[cfg(feature = "remote-wayland")]
-                        viewer.check_wayland_control(true)?;
+                        if !viewer.check_wayland_control(true)? {
+                            continue 'viewer;
+                        }
                     }
                     let mut control = state.wayland_control.lock().unwrap();
                     control.check(presented_scope, Instant::now())?;

@@ -250,3 +250,72 @@ fn actual_seamless_reserved_super_ends_remote_authority_and_cleans_held_modifier
         "Wayland keyboard edge lacks clean focus or exceeds bounds",
     );
 }
+
+#[test]
+fn actual_seamless_user_close_completes_cleanup_successfully_with_held_key() {
+    let Some(mut gl) = HeadlessSmithayGles::new() else {
+        return;
+    };
+    let mut h = Harness::new_seamless(&mut gl);
+    h.activate(&mut gl);
+    h.key(500, 42, true);
+    h.wait(
+        &mut gl,
+        "held Shift reaches recipient before user close",
+        true,
+        |s| s.received.keys == [(42, 1)],
+    );
+    h.local
+        .state
+        .toplevels
+        .values()
+        .next()
+        .unwrap()
+        .send_close();
+    h.local.roundtrip();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let (mut client_done, mut host_done) = (false, false);
+    loop {
+        h.tick(&mut gl, false);
+        if !client_done {
+            match h.client_done.try_recv() {
+                Ok(result) => {
+                    result.expect("normal viewer close must finish without cleanup failure");
+                    client_done = true;
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+                Err(error) => panic!("client completion lost: {error}"),
+            }
+        }
+        if !host_done {
+            match h.host_done.try_recv() {
+                Ok(result) => {
+                    result.expect("normal peer close must finish host cleanup");
+                    host_done = true;
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+                Err(error) => panic!("host completion lost: {error}"),
+            }
+        }
+        if client_done
+            && host_done
+            && !remote_control::active(&h.native.state)
+            && !viewer_handoff::registered_for_test(&h.local.state)
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "normal user close cleanup did not complete"
+        );
+        thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(h.received.keys, [(42, 1), (42, 0)]);
+    assert_eq!(remote_control::attempts_for_test(&h.native.state), 1);
+    assert!(
+        h.resumable_acks.lock().unwrap().is_empty(),
+        "terminal close must revoke directly, not enqueue a new pause/resume"
+    );
+    h.client.take().unwrap().join().unwrap();
+    h.host.take().unwrap().join().unwrap();
+}

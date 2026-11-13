@@ -709,13 +709,17 @@ impl WaylandViewer {
             std::thread::sleep(Duration::from_millis(1));
         }
     }
-    pub(super) fn check_wayland_control(&mut self, initial: bool) -> RemoteResult<()> {
+    /// False means an orderly close cancelled admission; never input authority.
+    pub(super) fn check_wayland_control(&mut self, initial: bool) -> RemoteResult<bool> {
         if !self.state.control_mode {
             return Err("Wayland control is disabled".into());
         }
-        self.keyboard_fence(Instant::now() + TIMEOUT)?;
+        self.fence_pointer_events_inner(true)?;
         self.state.control_collect();
         self.state.keyboard.check()?;
+        if self.state.closed {
+            return Ok(false);
+        }
         if initial
             && (!self.state.handoff.forwarding()
                 || !self.state.keyboard.clean_ready()
@@ -733,7 +737,7 @@ impl WaylandViewer {
             self.disable_wayland_control();
             return Err("Wayland control requires clean dual focus and actual presentation".into());
         }
-        Ok(())
+        Ok(true)
     }
     pub(super) fn disable_wayland_control(&mut self) {
         if self.state.handoff.enabled {
@@ -991,13 +995,16 @@ impl WaylandViewer {
         self.fence_pointer_events_inner(false)
     }
     fn fence_pointer_events_inner(&mut self, force: bool) -> RemoteResult<()> {
+        // A close discards the entire input batch; it does not need a new
+        // admission fence and must not manufacture an input-history failure.
+        if self.state.closed {
+            return Ok(());
+        }
         if !force && !self.state.pointer.needs_fence() {
             return Ok(());
         }
         #[cfg(all(test, feature = "backend-wayland-udev"))]
-        if !force {
-            run_pointer_fence_hook();
-        }
+        run_pointer_fence_hook();
         let Some(id) = self.state.pointer.begin_fence() else {
             return Ok(());
         };
@@ -1013,10 +1020,13 @@ impl WaylandViewer {
                 return Err(error);
             }
             self.state.pointer.check();
-            if self.state.closed || Instant::now() >= deadline {
+            if self.state.closed {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
                 self.state
                     .pointer
-                    .revoke("Wayland pointer history fence closed or expired");
+                    .revoke("Wayland pointer history fence expired");
                 return Ok(());
             }
             if self.state.pointer.revoked.is_some() {
@@ -1037,6 +1047,7 @@ impl WaylandViewer {
             self.state.control_collect();
             self.state.keyboard.check()?;
             if self.state.closed {
+                self.state.control_events.clear();
                 return Ok(vec![ViewerEvent::Close]);
             }
             return Ok(std::mem::take(&mut self.state.control_events));

@@ -61,8 +61,14 @@ This is a software-rendered, owned-protocol test target. It is not evidence of
 physical mouse/keyboard/GPU acceptance on a live desktop. CLI availability does
 not remove that separate acceptance requirement. Parser-to-options tests and
 production-viewer TCP integration are layered evidence, not a single CLI launch
-acceptance test. The TCP fixtures construct options directly; an independent
-CLI-process end-to-end session has not been accepted.
+acceptance test. The TCP fixtures construct options directly. A separate
+independent-process CI gate, `scripts/test-remote-wayland-cli.sh`, launches the
+actual host and viewer binaries with explicit flags and requires three executed
+cases with strict GL: same-lease input/pause/resume and clean successful closure,
+missing host permission denial, and old local protocol denial. The gate fails
+if private Unix sockets or rendering are unavailable; it never counts a skipped
+process test as acceptance. It remains owned-software, not physical hardware,
+validation.
 
 ## Implemented protocol slice
 

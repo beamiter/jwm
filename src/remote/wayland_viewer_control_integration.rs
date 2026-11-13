@@ -11,6 +11,7 @@ enum Answer {
     Connected,
     Enabled([u8; 32]),
     Done,
+    Checked(bool),
     Events(Vec<ViewerEvent>, Vec<u64>),
     Failed(String),
 }
@@ -21,6 +22,8 @@ enum Request {
     Ready(Option<u64>),
     Check,
     Poll,
+    FencePoll(mpsc::SyncSender<()>, mpsc::Receiver<()>),
+    FenceCheck(bool, mpsc::SyncSender<()>, mpsc::Receiver<()>),
     Stop,
 }
 struct ControlPeer {
@@ -83,7 +86,7 @@ impl ControlPeer {
                                 output.send(Answer::Done)?;
                             }
                             Request::Check => {
-                                viewer.check_wayland_control(true)?;
+                                assert!(viewer.check_wayland_control(true)?);
                                 output.send(Answer::Done)?;
                             }
                             Request::Poll => {
@@ -91,6 +94,28 @@ impl ControlPeer {
                                 let shown = viewer.take_presented_sequences()?;
                                 presented.extend(&shown);
                                 output.send(Answer::Events(events, shown))?;
+                            }
+                            Request::FencePoll(reached, release) => {
+                                let events =
+                                    crate::remote::wayland_viewer::with_pointer_fence_hook(
+                                        move || {
+                                            reached.send(()).unwrap();
+                                            release.recv_timeout(Duration::from_secs(5)).unwrap();
+                                        },
+                                        || viewer.poll_events(),
+                                    )?;
+                                output.send(Answer::Events(events, Vec::new()))?;
+                            }
+                            Request::FenceCheck(initial, reached, release) => {
+                                let admitted =
+                                    crate::remote::wayland_viewer::with_pointer_fence_hook(
+                                        move || {
+                                            reached.send(()).unwrap();
+                                            release.recv_timeout(Duration::from_secs(5)).unwrap();
+                                        },
+                                        || viewer.check_wayland_control(initial),
+                                    )?;
+                                output.send(Answer::Checked(admitted))?;
                             }
                             Request::Stop => {
                                 output.send(Answer::Done)?;
@@ -510,4 +535,79 @@ fn actual_wayland_control_scroll_consent_held_inputs_and_invalid_axis_fail_close
             },
         );
     }
+}
+
+#[test]
+fn actual_wayland_control_queued_close_discards_input_without_fence_failure() {
+    let (mut s, p, keyboard, _) = fixture();
+    key(&keyboard, true);
+    s.state.toplevels.values().next().unwrap().send_close();
+    s.roundtrip();
+    let (events, _) = p.poll(&mut s);
+    assert_eq!(events, vec![ViewerEvent::Close]);
+    p.stop(&mut s);
+}
+
+fn close_during_control_fence(
+    s: &mut Server,
+    reached: mpsc::Receiver<()>,
+    release: mpsc::SyncSender<()>,
+) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        s.roundtrip();
+        if reached.try_recv().is_ok() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "actual control fence was not reached"
+        );
+        thread::sleep(Duration::from_millis(1));
+    }
+    s.state.toplevels.values().next().unwrap().send_close();
+    s.roundtrip();
+    release.send(()).unwrap();
+}
+
+#[test]
+fn actual_wayland_control_close_during_poll_fence_is_clean_cancellation() {
+    let (mut s, p, _, _) = fixture();
+    let (reached_tx, reached) = mpsc::sync_channel(1);
+    let (release, release_rx) = mpsc::sync_channel(1);
+    p.tx.send(Request::FencePoll(reached_tx, release_rx))
+        .unwrap();
+    close_during_control_fence(&mut s, reached, release);
+    match p.receive(&mut s) {
+        Answer::Events(events, _) => assert_eq!(events, vec![ViewerEvent::Close]),
+        other => panic!("close must cancel, not manufacture a fence error: {other:?}"),
+    }
+    p.stop(&mut s);
+}
+
+#[test]
+fn actual_wayland_control_close_cannot_pass_initial_resume_or_health_admission() {
+    for initial in [false, true] {
+        let (mut s, p, _, _) = fixture();
+        let (reached_tx, reached) = mpsc::sync_channel(1);
+        let (release, release_rx) = mpsc::sync_channel(1);
+        p.tx.send(Request::FenceCheck(initial, reached_tx, release_rx))
+            .unwrap();
+        close_during_control_fence(&mut s, reached, release);
+        assert!(
+            matches!(p.receive(&mut s), Answer::Checked(false)),
+            "closed control cannot be certified for initial grant or resume"
+        );
+        assert_eq!(p.poll(&mut s).0, vec![ViewerEvent::Close]);
+        p.stop(&mut s);
+    }
+}
+
+#[test]
+fn actual_wayland_control_close_preserves_preexisting_focus_failure() {
+    let (mut s, p, keyboard, _) = fixture();
+    keyboard.leave(99, &viewer_surface(&s));
+    s.state.toplevels.values().next().unwrap().send_close();
+    s.roundtrip();
+    p.failed(&mut s, Request::Poll, "Wayland keyboard focus left");
 }

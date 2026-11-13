@@ -425,7 +425,7 @@ impl Viewer {
         }
     }
     #[cfg(feature = "remote-wayland")]
-    pub(super) fn check_wayland_control(&mut self, initial: bool) -> RemoteResult<()> {
+    pub(super) fn check_wayland_control(&mut self, initial: bool) -> RemoteResult<bool> {
         match self {
             Self::X11(_) => Err("combined control requires native Wayland viewer".into()),
             Self::Wayland(v) => v.check_wayland_control(initial),
