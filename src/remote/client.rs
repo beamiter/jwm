@@ -2133,7 +2133,9 @@ fn viewer_loop(
             if let Some(generation) = control.ready_input_generation()
                 && reported_control_generation != Some(generation)
             {
-                eprintln!("jwm-remote: control generation {generation} ready; original deadline unchanged");
+                eprintln!(
+                    "jwm-remote: control generation {generation} ready; original deadline unchanged"
+                );
                 reported_control_generation = Some(generation);
             }
             if control.configured() {
