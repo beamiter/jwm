@@ -16,6 +16,48 @@ use crate::ipc::{
 use crate::ipc_server::IncomingIpc;
 use crate::jwm::features::recording::RecordingFileIdentity;
 
+// A versioned, narrow command: only select a tag on the already selected output.
+// The identity is an opaque process/key-generation token, not an authentication secret.
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TaskWorkspaceView {
+    version: u32,
+    connector: String,
+    monitor: i32,
+    monitor_identity: String,
+    expected_tag_mask: u32,
+    tag_mask: u32,
+}
+
+fn task_workspace_identity(key: MonitorKey, connector: &str) -> String {
+    use slotmap::Key;
+    static PROCESS_NONCE: std::sync::LazyLock<u128> = std::sync::LazyLock::new(rand::random);
+    format!(
+        "{:032x}:{:016x}:{}",
+        *PROCESS_NONCE,
+        key.data().as_ffi(),
+        connector
+    )
+}
+
+impl TaskWorkspaceView {
+    fn validate(&self, configured_mask: u32) -> Result<(), String> {
+        if self.version != 1
+            || self.connector.is_empty()
+            || self.connector.len() > 4096
+            || self.connector.chars().any(char::is_control)
+            || self.monitor_identity.len() > 8192
+            || !self.tag_mask.is_power_of_two()
+            || self.tag_mask & configured_mask != self.tag_mask
+            || !self.expected_tag_mask.is_power_of_two()
+            || self.expected_tag_mask & configured_mask != self.expected_tag_mask
+        {
+            return Err("task_workspace_view: invalid version, identity or tag mask".into());
+        }
+        Ok(())
+    }
+}
+
 fn add_native_window_identities(
     context: &mut serde_json::Value,
     mut resolve: impl FnMut(
@@ -2155,6 +2197,9 @@ impl Jwm {
                 Err(error) => IpcResponse::err(error),
             };
         }
+        if name == "task_workspace_view" {
+            return self.handle_task_workspace_view(backend, args);
+        }
         if name == "assistant_control" {
             return self.eva_control(backend, args);
         }
@@ -2979,6 +3024,7 @@ impl Jwm {
         }
         let cfg = CONFIG.load();
         match name {
+            "get_task_workspace_state" => IpcResponse::ok(Some(self.task_workspace_state(backend))),
             "get_agent_sessions" => IpcResponse::ok(Some(self.agent_sessions_snapshot())),
             "get_agent_summary" => {
                 let mut summary = self.agent_summary();
@@ -4514,6 +4560,69 @@ impl Jwm {
             monitors,
             stack_positions,
             swallowed_by,
+        }
+    }
+
+    fn task_workspace_state(&self, backend: &dyn Backend) -> serde_json::Value {
+        let identity = self.state.sel_mon.and_then(|key| {
+            self.output_key_for_monitor(backend, key)
+                .map(|connector| task_workspace_identity(key, &connector))
+        });
+        serde_json::json!({
+            "version": 1,
+            "monitor_identity": identity,
+            "workspaces": self.query_workspaces(backend),
+        })
+    }
+
+    fn handle_task_workspace_view(
+        &mut self,
+        backend: &mut dyn Backend,
+        args: &serde_json::Value,
+    ) -> IpcResponse {
+        let request: TaskWorkspaceView = match serde_json::from_value(args.clone()) {
+            Ok(value) => value,
+            Err(error) => return IpcResponse::err(format!("task_workspace_view: {error}")),
+        };
+        if let Err(error) = request.validate(CONFIG.load().tagmask()) {
+            return IpcResponse::err(error);
+        }
+        let Some(key) = self.state.sel_mon else {
+            return IpcResponse::err("task_workspace_view: no selected monitor");
+        };
+        let Some(mon) = self.state.monitors.get(key) else {
+            return IpcResponse::err("task_workspace_view: selected monitor disappeared");
+        };
+        let matches = self
+            .state
+            .monitors
+            .keys()
+            .filter(|&candidate| {
+                self.output_key_for_monitor(backend, candidate).as_deref()
+                    == Some(request.connector.as_str())
+            })
+            .count();
+        if matches != 1
+            || self.output_key_for_monitor(backend, key).as_deref()
+                != Some(request.connector.as_str())
+            || mon.num != request.monitor
+            || task_workspace_identity(key, &request.connector) != request.monitor_identity
+            || mon.get_active_tags() != request.expected_tag_mask
+            || self.monitor_key_is_locked(key)
+            || self.features.system_ui.is_locked()
+            || backend.compositor_session_locked()
+        {
+            return IpcResponse::err(
+                "task_workspace_view: precondition changed or monitor locked; no mutation",
+            );
+        }
+        // No event-loop yield between checking selected output identity and mutation.
+        // Pass the resolved key, never re-resolve a globally selected monitor.
+        match self.view_on_monitor(backend, key, request.tag_mask) {
+            Ok(()) => IpcResponse::ok(Some(serde_json::json!({"status": "workspace_selected"}))),
+            Err(error) => IpcResponse::err(format!(
+                "task_workspace_view: transition failed; outcome may be uncertain: {error}"
+            )),
         }
     }
 
@@ -8326,6 +8435,163 @@ mod tests {
             parse_config_batch_changes(&serde_json::json!({ "values": values })).unwrap_err();
         assert!(error.contains("too many changes"));
         assert!(error.contains(&MAX_CONFIG_BATCH_CHANGES.to_string()));
+    }
+
+    fn task_workspace_test_request(jwm: &Jwm, backend: &dyn Backend) -> serde_json::Value {
+        let key = jwm.state.sel_mon.unwrap();
+        let mon = jwm.state.monitors.get(key).unwrap();
+        let state = jwm.task_workspace_state(backend);
+        serde_json::json!({
+            "version": 1,
+            "connector": jwm.output_key_for_monitor(backend, key).unwrap(),
+            "monitor": mon.num,
+            "monitor_identity": state["monitor_identity"],
+            "expected_tag_mask": mon.get_active_tags(),
+            "tag_mask": 2,
+        })
+    }
+
+    #[test]
+    fn task_workspace_view_selects_only_the_preconditioned_output() {
+        let mut backend = PairingIpcBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let key = jwm.state.sel_mon.unwrap();
+        let request = task_workspace_test_request(&jwm, &backend);
+        let state = jwm.handle_ipc_query(
+            "get_task_workspace_state",
+            &serde_json::json!({}),
+            &mut backend,
+        );
+        assert!(state.success);
+        let state = state.data.unwrap();
+        assert_eq!(state["version"], 1);
+        assert_eq!(state["monitor_identity"], request["monitor_identity"]);
+        assert!(
+            state["workspaces"]
+                .as_array()
+                .is_some_and(|rows| !rows.is_empty())
+        );
+        assert!(
+            jwm.handle_ipc_command(&mut backend, "task_workspace_view", &request)
+                .success
+        );
+        assert_eq!(jwm.state.sel_mon, Some(key));
+        assert_eq!(jwm.state.monitors[key].get_active_tags(), 2);
+        // Replaying a stale precondition must not switch back or mutate again.
+        assert!(
+            !jwm.handle_ipc_command(&mut backend, "task_workspace_view", &request)
+                .success
+        );
+        assert_eq!(jwm.state.monitors[key].get_active_tags(), 2);
+    }
+
+    #[test]
+    fn task_workspace_view_rejects_stale_or_malformed_requests_without_mutation() {
+        let mut backend = PairingIpcBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let key = jwm.state.sel_mon.unwrap();
+        let original = jwm.state.monitors[key].get_active_tags();
+        let request = task_workspace_test_request(&jwm, &backend);
+        for (field, value) in [
+            ("version", serde_json::json!(2)),
+            ("connector", serde_json::json!("missing-output")),
+            ("monitor", serde_json::json!(-999)),
+            (
+                "monitor_identity",
+                serde_json::json!("old-process-or-monitor"),
+            ),
+            ("expected_tag_mask", serde_json::json!(2)),
+            ("tag_mask", serde_json::json!(0)),
+            ("tag_mask", serde_json::json!(3)),
+            ("tag_mask", serde_json::json!(true)),
+            ("tag_mask", serde_json::json!(u32::MAX)),
+            ("unknown", serde_json::json!(1)),
+        ] {
+            let mut changed = request.clone();
+            changed[field] = value;
+            assert!(
+                !jwm.handle_ipc_command(&mut backend, "task_workspace_view", &changed)
+                    .success,
+                "{field}"
+            );
+            assert_eq!(jwm.state.monitors[key].get_active_tags(), original);
+        }
+        // A focus change to another monitor also fails closed when its output
+        // identity is unavailable. This is not a physical two-output test.
+        let other = jwm.state.monitors.insert(WMMonitor::new());
+        jwm.state.sel_mon = Some(other);
+        assert!(
+            !jwm.handle_ipc_command(&mut backend, "task_workspace_view", &request)
+                .success
+        );
+        assert_eq!(jwm.state.monitors[key].get_active_tags(), original);
+        jwm.state.sel_mon = None;
+        assert!(
+            !jwm.handle_ipc_command(&mut backend, "task_workspace_view", &request)
+                .success
+        );
+        assert_eq!(jwm.state.monitors[key].get_active_tags(), original);
+    }
+
+    #[test]
+    fn task_workspace_view_refuses_duplicate_connector_and_reused_monitor_slot() {
+        let mut backend = PairingIpcBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let key = jwm.state.sel_mon.unwrap();
+        let request = task_workspace_test_request(&jwm, &backend);
+        let original = jwm.state.monitors[key].get_active_tags();
+        let output = jwm.state.output_map[key];
+        let duplicate = jwm.state.monitors.insert(WMMonitor::new());
+        jwm.state.output_map.insert(duplicate, output);
+        assert!(
+            !jwm.handle_ipc_command(&mut backend, "task_workspace_view", &request)
+                .success
+        );
+        assert_eq!(jwm.state.monitors[key].get_active_tags(), original);
+        jwm.state.monitors.remove(duplicate);
+        let removed = jwm.state.monitors.remove(key).unwrap();
+        let replacement = jwm.state.monitors.insert(removed);
+        jwm.state.output_map.insert(replacement, output);
+        jwm.state.sel_mon = Some(replacement);
+        assert!(
+            !jwm.handle_ipc_command(&mut backend, "task_workspace_view", &request)
+                .success
+        );
+        assert_eq!(jwm.state.monitors[replacement].get_active_tags(), original);
+    }
+
+    #[test]
+    fn task_workspace_view_refuses_lock_and_shutdown() {
+        let mut backend = PairingIpcBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let key = jwm.state.sel_mon.unwrap();
+        let original = jwm.state.monitors[key].get_active_tags();
+        let request = task_workspace_test_request(&jwm, &backend);
+        jwm.features.system_ui = crate::jwm::features::system_ui::SystemUiState::lock();
+        assert!(
+            !jwm.handle_ipc_command(&mut backend, "task_workspace_view", &request)
+                .success
+        );
+        assert_eq!(jwm.state.monitors[key].get_active_tags(), original);
+        jwm.running
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        assert!(
+            !jwm.handle_ipc_command(&mut backend, "task_workspace_view", &request)
+                .success
+        );
+    }
+
+    #[test]
+    fn task_workspace_identity_changes_with_monitor_generation_and_connector() {
+        let mut monitors =
+            slotmap::SlotMap::<crate::core::models::MonitorKey, WMMonitor>::with_key();
+        let first = monitors.insert(WMMonitor::new());
+        let token = super::task_workspace_identity(first, "DP-1");
+        assert_eq!(token, super::task_workspace_identity(first, "DP-1"));
+        assert_ne!(token, super::task_workspace_identity(first, "DP-2"));
+        monitors.remove(first);
+        let replacement = monitors.insert(WMMonitor::new());
+        assert_ne!(token, super::task_workspace_identity(replacement, "DP-1"));
     }
 
     #[test]
