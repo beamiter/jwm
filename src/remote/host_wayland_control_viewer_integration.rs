@@ -872,7 +872,20 @@ impl Harness {
                     || crate::backend::wayland_udev::viewer_handoff::registered_for_test(
                         &self.local.state,
                     );
-                if pointers.len() == 1 && keyboards.len() == 1 && handoff_registered {
+                // A real compositor cannot enter a not-yet-mapped viewer.
+                // Wait for its actual buffer commit and scene hit-test instead
+                // of injecting focus while control resources are merely bound.
+                let spatial_ready = !self.seamless
+                    || self
+                        .local
+                        .state
+                        .surface_under((160.0, 120.0).into())
+                        .is_some_and(|(_, hit, _)| hit == surface);
+                if pointers.len() == 1
+                    && keyboards.len() == 1
+                    && handoff_registered
+                    && spatial_ready
+                {
                     assert!(self.pointer.is_none() && self.keyboard.is_none());
                     let p = pointers[0].clone();
                     let k = keyboards[0].clone();
@@ -1034,16 +1047,34 @@ impl Harness {
     /// Drive the real seat so the compositor contract sees its focus and serial.
     /// Never synthesize wl_pointer enter events as proof of native handoff.
     fn seamless_pointer_focus(&mut self, inside: bool) {
+        crate::backend::wayland_udev::backend::refresh_viewer_handoff_pointer_input(
+            &mut self.local.state,
+        );
         let surface = self
             .identified_viewer
             .clone()
             .expect("actual viewer identified");
+        let location = if inside {
+            (160.0, 120.0)
+        } else {
+            (5000.0, 5000.0)
+        }
+        .into();
+        self.local.state.pointer_location = location;
+        let focus = self
+            .local
+            .state
+            .surface_under(location)
+            .map(|(_, surface, origin)| (surface, origin));
+        if inside {
+            assert_eq!(focus.as_ref().map(|(hit, _)| hit), Some(&surface));
+        }
         let pointer = self.local.state.seat.get_pointer().unwrap();
         pointer.motion(
             &mut self.local.state,
-            inside.then_some((surface, (0.0, 0.0).into())),
+            focus,
             &MotionEvent {
-                location: (160.0, 120.0).into(),
+                location,
                 serial: SERIAL_COUNTER.next_serial(),
                 time: InputTime::now(),
             },

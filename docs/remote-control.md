@@ -1942,3 +1942,7 @@ for observed times, permission restrictions and the unchanged cooldown limits.
 
 For opt-in X11 mouse-enter/leave keyboard and pointer handoff, see
 [Seamless input](remote-seamless-input.md). Default click-to-grab behavior is unchanged.
+The same guide documents the separate experimental JWM udev Wayland mode,
+`--wayland-seamless-input`, with explicit host permission, a fixed lifetime and
+local protocol version 2. It is not support for arbitrary Wayland compositors;
+read its escape, Super-key, cross-monitor and validation limits before enabling it.

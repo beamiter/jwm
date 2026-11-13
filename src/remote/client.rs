@@ -1141,7 +1141,11 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
             hello.stream.clipboard_directions
         )
     );
-    if options.seamless_input {
+    if options.wayland_seamless_input {
+        eprintln!(
+            "jwm-remote: experimental JWM Wayland handoff: enter the remote image with all keys/buttons released to control; leave to release. After a black-bar exit, leave the whole surface before re-entering. Ctrl+Super+F12 ends control permanently; configured lock shortcuts stay local. The original lease is at most 30 seconds, never renewed. Focus/geometry changes end control; Super is not forwarded and ends control. No drag or modifier-click."
+        );
+    } else if options.seamless_input {
         eprintln!(
             "jwm-remote: seamless input: enter remote image to control, leave to release; Ctrl+Super+{} releases until you leave and enter again",
             options.escape_key

@@ -43,7 +43,7 @@ impl Fixture {
         viewer.client.events();
         let manager = viewer
             .client
-            .bind("jwm_remote_viewer_handoff_manager_v1", 1);
+            .bind("jwm_remote_viewer_handoff_manager_v1", 2);
         let session = viewer.client.new_id();
         viewer
             .client
@@ -68,19 +68,36 @@ impl Fixture {
         }
     }
     fn motion(&mut self, inside: bool) -> u32 {
+        super::super::backend::refresh_viewer_handoff_pointer_input(&mut self.server.state);
         let pointer = self.server.state.seat.get_pointer().unwrap();
-        let surface = inside.then(|| {
-            self.server
-                .state
-                .surface_for_window(self.viewer.window)
-                .unwrap()
-        });
+        let geometry = self.server.state.window_geometry[&self.viewer.window];
+        let location = if inside {
+            (f64::from(geometry.x) + 5.0, f64::from(geometry.y) + 5.0)
+        } else {
+            (5000.0, 5000.0)
+        }
+        .into();
+        self.server.state.pointer_location = location;
+        let focus = self
+            .server
+            .state
+            .surface_under(location)
+            .map(|(_, surface, origin)| (surface, origin));
+        if inside {
+            assert_eq!(
+                focus.as_ref().map(|(surface, _)| surface),
+                self.server
+                    .state
+                    .surface_for_window(self.viewer.window)
+                    .as_ref()
+            );
+        }
         let serial = SERIAL_COUNTER.next_serial();
         pointer.motion(
             &mut self.server.state,
-            surface.map(|s| (s, (0.0, 0.0).into())),
+            focus,
             &MotionEvent {
-                location: (5.0, 5.0).into(),
+                location,
                 serial,
                 time: InputTime::now(),
             },
@@ -311,7 +328,7 @@ fn handoff_foreign_focus_loss_expiry_and_surface_regrant_are_terminal() {
         let manager = f
             .viewer
             .client
-            .bind("jwm_remote_viewer_handoff_manager_v1", 1);
+            .bind("jwm_remote_viewer_handoff_manager_v1", 2);
         let seat = f.viewer.client.bind("wl_seat", 7);
         let next = f.viewer.client.new_id();
         f.viewer
@@ -421,4 +438,135 @@ fn handoff_expired_lease_revokes_before_physical_input_without_timer() {
             .iter()
             .all(|e| e.sender != f.prior_keyboard || e.opcode != 3)
     );
+}
+
+#[test]
+fn handoff_stationary_move_or_occlusion_cannot_reuse_stale_pointer_focus() {
+    for active_session in [false, true] {
+        for occluded in [false, true] {
+            let mut f = Fixture::new();
+            let serial = f.motion(true);
+            if active_session {
+                f.viewer.client.request(f.session, 1, &[1, serial]);
+                sync(&mut f.server);
+                assert!(active(&f.server.state));
+            }
+            f.viewer.client.events();
+            let pointer_location = f.server.state.pointer_location;
+            let surface = f.server.state.surface_for_window(f.viewer.window).unwrap();
+            let old_geometry = geometry(&f.server.state, &surface).unwrap();
+            let _occluder = if occluded {
+                let app = App::new(&mut f.server);
+                let geo = f.server.state.window_geometry.get_mut(&app.window).unwrap();
+                geo.x = old_geometry.0;
+                geo.y = old_geometry.1;
+                Some(app)
+            } else {
+                // Active sessions terminate even if a same-size move leaves
+                // the stationary cursor inside. Before entry, move clear away.
+                f.server
+                    .state
+                    .window_geometry
+                    .get_mut(&f.viewer.window)
+                    .unwrap()
+                    .x += if active_session { 1 } else { 2000 };
+                None
+            };
+            assert_eq!(f.server.state.pointer_location, pointer_location);
+            assert_eq!(
+                f.server.state.seat.get_pointer().unwrap().current_focus(),
+                Some(surface.clone())
+            );
+            assert_eq!(
+                geometry(&f.server.state, &surface).map(|g| (g.2, g.3)),
+                Some((old_geometry.2, old_geometry.3))
+            );
+            // No pointer motion is synthesized to repair the stale focus.
+            if active_session {
+                refresh_before_input(&mut f.server.state);
+            } else {
+                f.viewer.client.request(f.session, 1, &[1, serial]);
+            }
+            sync(&mut f.server);
+            assert!(!registered_for_test(&f.server.state));
+            assert!(!inhibits(&f.server.state));
+            assert!(
+                f.viewer
+                    .client
+                    .events()
+                    .iter()
+                    .any(|e| e.sender == f.session && e.opcode == 4)
+            );
+        }
+    }
+}
+
+#[test]
+fn handoff_advertises_spatial_guard_revision_two() {
+    let f = Fixture::new();
+    assert_eq!(
+        f.server
+            .state
+            .viewer_handoff
+            .session
+            .as_ref()
+            .unwrap()
+            .resource
+            .version(),
+        2,
+        "typed child session must inherit the advertised/bound manager version"
+    );
+}
+
+#[test]
+fn handoff_pointer_refresh_revokes_before_stale_focus_button_or_axis_delivery() {
+    use smithay::backend::input::{Axis, ButtonState};
+    use smithay::input::pointer::{AxisFrame, ButtonEvent};
+    for scroll in [false, true] {
+        let mut f = Fixture::new();
+        f.enter(1);
+        f.viewer.client.events();
+        let _occluder = App::new(&mut f.server);
+        assert!(!pointer_hits_surface(
+            &f.server.state,
+            &f.server.state.surface_for_window(f.viewer.window).unwrap()
+        ));
+        let pointer = f.server.state.seat.get_pointer().unwrap();
+        // This is the exact shared helper called before udev physical pointer
+        // event delivery. Do not dispatch timers or synthesize a pointer leave.
+        super::super::backend::refresh_viewer_handoff_pointer_input(&mut f.server.state);
+        if scroll {
+            pointer.axis(
+                &mut f.server.state,
+                AxisFrame::new(InputTime::now()).value(Axis::Vertical, 1.0),
+            );
+        } else {
+            pointer.button(
+                &mut f.server.state,
+                &ButtonEvent {
+                    serial: SERIAL_COUNTER.next_serial(),
+                    time: InputTime::now(),
+                    button: 0x110,
+                    state: ButtonState::Pressed,
+                },
+            );
+        }
+        pointer.frame(&mut f.server.state);
+        sync(&mut f.server);
+        let events = f.viewer.client.events();
+        let revoke = events
+            .iter()
+            .position(|e| e.sender == f.session && e.opcode == 4)
+            .unwrap();
+        let input = events
+            .iter()
+            .position(|e| e.sender == f.pointer && e.opcode == if scroll { 4 } else { 3 })
+            .unwrap();
+        assert!(
+            revoke < input,
+            "revocation must fence old-focus pointer events"
+        );
+        assert!(!registered_for_test(&f.server.state));
+        assert!(!inhibits(&f.server.state));
+    }
 }

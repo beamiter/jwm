@@ -223,3 +223,30 @@ fn actual_seamless_unrelated_focus_loss_is_terminal_not_pause() {
         "local handoff revoked: unexpected focus change",
     );
 }
+
+#[test]
+fn actual_seamless_reserved_super_ends_remote_authority_and_cleans_held_modifier() {
+    let Some(mut gl) = HeadlessSmithayGles::new() else {
+        return;
+    };
+    let mut h = Harness::new_seamless(&mut gl);
+    h.activate(&mut gl);
+    h.key(400, 29, true); // Left Control
+    h.wait(
+        &mut gl,
+        "Control reaches the authorized remote recipient",
+        true,
+        |s| s.received.keys == [(29, 1)],
+    );
+    // The existing native keyboard allowlist excludes Super. It must terminate
+    // rather than forwarding a compositor/system shortcut or broadening consent.
+    h.key(401, 125, true);
+    let expected_pointer = h.received.pointer_actions.clone();
+    h.rejected(
+        &mut gl,
+        &[(29, 1), (29, 0)],
+        &expected_pointer,
+        1,
+        "Wayland keyboard edge lacks clean focus or exceeds bounds",
+    );
+}

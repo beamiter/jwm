@@ -1,11 +1,24 @@
 # Native Wayland seamless input: integration contract
 
-Status: experimental JWM-udev-only programmatic vertical slice, not general
-Wayland seamless input. `--seamless-input` remains X11-only. CLI constructors
-keep native seamless/resumable options off; no new user-facing flag is enabled.
-The native path requires `ClientOptions.wayland_seamless_input`, explicit
-resumable combined control on both peers, and the JWM local handoff protocol.
+Status: experimental, explicit CLI opt-in for a **JWM udev viewer compositor
+and JWM native host**, not general Wayland seamless input. `--seamless-input`
+remains X11-only. Native use is `connect --viewer-backend wayland
+--wayland-control --wayland-seamless-input`; the dedicated flag requests the
+resumable capability, without a separate client resumable flag. The host must
+independently enable `--wayland-select --once --allow-wayland-control
+--allow-resumable-control`. Defaults remain off; an unavailable capability or
+local compositor protocol fails closed, without downgrade or XWayland fallback.
 Nested JWM backends and other compositors do not advertise this contract.
+The CLI viewer requires version 2 of the local handoff manager (the interface
+name retains `_v1`). Version 2 guarantees scene hit-testing and position-aware
+geometry invalidation; version-1 compositors are refused. Update and restart
+the local JWM compositor as well as updating the client binary.
+
+See [the user-facing example and limitations](remote-seamless-input.md#experimental-native-wayland-jwm-udev).
+The native option is not supported by `jwm-remote ssh` or saved connection
+profiles. A manually configured SSH port forward is a separate transport option.
+Entering the remote image can redirect typing away from the previous local
+window; use this mode only when that per-session behavior is intended.
 
 ## Local compositor handoff contract
 
@@ -28,22 +41,35 @@ bars) releases authority, but a subsequent resume needs a complete surface exit
 and new entry. It does not support black-bar-only back-and-forth re-entry. The
 pointer is never confined. Configured lock-screen/lock-monitor shortcuts and the
 fixed Ctrl+Super+F12 emergency chord remain local; emergency release is terminal,
-not a grant that can be restored by hovering. Unrelated focus loss, lock, surface
-or geometry changes, deadline expiry, malformed transitions and disconnection
+not a grant that can be restored by hovering. The native keyboard allowlist
+rejects Super and terminates control on its press; the emergency chord stays
+local, but termination may already have occurred at the Super edge. This is
+not general desktop/system-shortcut forwarding. Unrelated focus loss, lock,
+surface or geometry changes (including position), deadline expiry, malformed transitions and disconnection
 are terminal. Existing input restrictions, including no drag/modifier-click,
 remain unchanged. The local gate covers keyboard shortcuts, not a global mouse
 grab: compositor modifier+mouse bindings are not suppressed by this slice and
 may safely terminate the session through the resulting focus/geometry change.
+Actual pointer focus must also be refreshed when window movement or occlusion
+changes its recipient without physical mouse movement. Crossing monitors can
+cause a non-transactional WM focus change and is currently terminal; resumable
+cross-monitor handoff is not guaranteed. Already-inside startup relies on
+Smithay's normal pointer-enter delivery, but that ordering has not received a
+dedicated startup acceptance test.
 
 This is a software-rendered, owned-protocol test target. It is not evidence of
-physical mouse/keyboard/GPU acceptance on a live desktop. Such acceptance and a
-reviewed CLI opt-in remain separate release gates.
+physical mouse/keyboard/GPU acceptance on a live desktop. CLI availability does
+not remove that separate acceptance requirement. Parser-to-options tests and
+production-viewer TCP integration are layered evidence, not a single CLI launch
+acceptance test. The TCP fixtures construct options directly; an independent
+CLI-process end-to-end session has not been accepted.
 
 ## Implemented protocol slice
 
 - `ClientOptions.resumable_control` and `HostOptions.allow_resumable_control`
-  must both be true, alongside existing combined-control permission. Defaults
-  and every CLI constructor remain false. Static-lossless repair is excluded
+  must both be true, alongside existing combined-control permission. The
+  dedicated client seamless flag and host resumable flag set those permissions;
+  defaults remain false. Static-lossless repair is excluded
   until its phase cancellation has a separate proved acknowledgement.
 - Stream byte 30 is a bitfield: ordinary combined control is `1`, version-one
   resumable combined control is `3`; `2` is invalid. Old peers reject `3`, and a
@@ -79,7 +105,8 @@ alone is not proof that a compositor shortcut was withheld or delivered.
 ## Why this is a distinct protocol feature
 
 The X11 local grab can end without destroying the host's ordinary input
-permission. The native Wayland combined-control path has a different contract:
+permission. Without the dedicated native seamless opt-in, Wayland's ordinary
+one-shot combined-control path retains a different contract:
 
 - `wayland_viewer_pointer.rs`: surface leave permanently revokes the pointer.
 - `wayland_viewer_keyboard.rs`: keyboard leave revokes; a second enter is not a
@@ -103,10 +130,9 @@ Keyboard-shortcuts inhibition does not itself grant focus or remote permission.
 The experimental JWM-local transaction supplies a dedicated inhibition gate;
 it does not reinterpret generic shortcut-inhibit permission as a focus grant.
 
-A future opt-in must explain that entering the remote image can redirect typing.
-It must negotiate a new resumable-control capability with both endpoints. Old
-peers deny that capability; do not downgrade to an old one-shot grant or pretend
-XWayland is native support. Preserve existing one-shot behavior when absent.
+The native opt-in negotiates resumable-control capability with both endpoints.
+Old peers deny that capability; there is no downgrade to an old one-shot grant
+or XWayland fallback. Existing one-shot behavior is preserved when absent.
 
 ## State transitions and authority
 
@@ -123,7 +149,7 @@ pause. Pointer movement cannot create, extend or renew permission.
 | Active | leave image, including letterbox | Stop forwarding immediately; release local inhibition and queue host pause/release in order |
 | Pause pending | pointer enters again | Remember no input; wait for pause acknowledgement before any resume |
 | Pause pending | matching release acknowledgement | Armed outside; require a fresh checked entry, never replay held input |
-| Active or pending | escape chord | Pause/release; latch re-entry off until an observed exit and subsequent fresh entry |
+| Active or pending | Ctrl+Super+F12 emergency chord | Terminal release; hovering cannot reauthorize input |
 | Any live state | expiry, revoke, disconnect, topology/keymap/source/geometry change, focus loss not attributable to normal exit, malformed event or failed fence | Terminal; release locally and remotely; never resume from hover |
 | Terminal | any enter, late ACK or presentation | Remain terminal; a new explicit authorization is required |
 
@@ -134,7 +160,7 @@ terminate. The host must release held keys/buttons as part of pause before it
 acknowledges. If that acknowledgement fails or times out, terminate locally and
 close the session so existing host teardown releases authority.
 
-## Original implementation order and remaining release gates
+## Implementation stages and remaining acceptance gates
 
 1. Negotiate a separate versioned capability and explicit permission. Define
    pause/resume messages with session ID, monotonically increasing input
@@ -152,10 +178,10 @@ close the session so existing host teardown releases authority.
    wait for compositor acknowledgement before declaring keyboard control. Never
    confine the pointer. Destroy inhibition on exit, escape, failure and teardown.
    Preserve compositor emergency/lock shortcuts and sandbox restrictions.
-5. Wire the CLI option only when the complete negotiated path is available.
-   Report active, paused and terminal states truthfully. No profile persistence
-   or automatic reconnect/regrant. Implement a clear explicit reauthorization
-   action separately if desired.
+5. Expose the dedicated CLI opt-in only through the complete negotiated path.
+   Keep defaults off and reject profiles and unsupported `ssh` combinations.
+   No automatic reconnect/regrant. Report active, paused and terminal states
+   truthfully; explicit reauthorization is a separate session, not hover.
 
 ## Merge gates
 
@@ -166,7 +192,7 @@ not only a detached state-machine model:
 - exit with held key/button releases once before returning local shortcuts;
 - fast exit/enter waits for release ACK and cannot replay queued input;
 - letterbox crossing, drag, scroll and modifier-held entry fail safely;
-- escape while inside remains suspended until exit/entry; compositor escape and
+- emergency escape is terminal even after exit/entry; compositor escape and
   lock remain usable while inhibition is active;
 - pointer exit plus focus event reorder cannot make unrelated focus loss resume;
 - missing/denied inhibition or unsupported compositor never reports full control;

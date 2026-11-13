@@ -176,7 +176,7 @@ impl WaylandViewer {
             .handoff
             .manager
             .as_ref()
-            .ok_or("JWM local handoff protocol unavailable")?;
+            .ok_or("JWM local handoff protocol v2 required; update and restart JWM (udev backend), with no fallback")?;
         let seat = self
             .state
             .keyboard

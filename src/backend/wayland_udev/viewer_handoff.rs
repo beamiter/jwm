@@ -35,13 +35,13 @@ struct Session {
     last_enter: Option<Serial>,
     prior: Option<WlSurface>,
     outside_since: Option<Instant>,
-    geometry: Option<(u32, u32)>,
+    geometry: Option<(i32, i32, u32, u32)>,
     seen_mapped: bool,
 }
 // Called only by actual udev setup, not shared/nested state initialization.
 #[cfg(feature = "backend-wayland-udev")]
 pub(crate) fn init(dh: &DisplayHandle) {
-    dh.create_global::<JwmWaylandState, JwmRemoteViewerHandoffManagerV1, _>(1, ManagerData);
+    dh.create_global::<JwmWaylandState, JwmRemoteViewerHandoffManagerV1, _>(2, ManagerData);
 }
 #[cfg(feature = "backend-wayland-udev")]
 pub(crate) fn active(state: &JwmWaylandState) -> bool {
@@ -94,12 +94,20 @@ fn eligible(state: &JwmWaylandState, surface: &WlSurface) -> bool {
                     .is_some_and(|top| top.wl_surface() == surface)
             })
 }
-fn geometry(state: &JwmWaylandState, surface: &WlSurface) -> Option<(u32, u32)> {
+fn geometry(state: &JwmWaylandState, surface: &WlSurface) -> Option<(i32, i32, u32, u32)> {
     let window = state.surface_to_window.get(&surface.id())?;
     if !state.mapped_windows.contains(window) {
         return None;
     }
-    state.window_geometry.get(window).map(|g| (g.w, g.h))
+    state
+        .window_geometry
+        .get(window)
+        .map(|g| (g.x, g.y, g.w, g.h))
+}
+fn pointer_hits_surface(state: &JwmWaylandState, surface: &WlSurface) -> bool {
+    state
+        .surface_under(state.pointer_location)
+        .is_some_and(|(_, hit, _)| &hit == surface)
 }
 fn change_focus(state: &mut JwmWaylandState, focus: Option<WlSurface>) {
     state.viewer_handoff.changing_focus = true;
@@ -220,7 +228,13 @@ fn watchdog(state: &mut JwmWaylandState) -> bool {
                 .is_some_and(|keyboard| keyboard.current_focus().as_ref() == Some(&s.surface)))
         && now < s.deadline
         && (!s.seen_mapped || mapped.is_some())
-        && s.geometry.is_none_or(|g| mapped == Some(g));
+        && s.geometry.is_none_or(|g| mapped == Some(g))
+        // A real pointer leave gets its bounded exit transaction. A stationary
+        // pointer whose stale focus no longer matches scene hit-testing does not.
+        && (!s.active || state.seat.get_pointer().is_none_or(|pointer| {
+            pointer.current_focus().as_ref() != Some(&s.surface)
+                || pointer_hits_surface(state, &s.surface)
+        }));
     s.seen_mapped |= mapped.is_some();
     if s.active {
         if state
@@ -389,6 +403,7 @@ impl Dispatch<JwmRemoteViewerHandoffSessionV1, SessionData> for JwmWaylandState 
                         && !p.has_pressed_buttons()
                         && p.current_focus().as_ref() == Some(&s.surface)
                         && p.last_enter() == Some(serial)
+                        && pointer_hits_surface(state, &s.surface)
                 });
                 let keyboard_clean = state.seat.get_keyboard().is_some_and(|k| {
                     let m = k.modifier_state().serialized;

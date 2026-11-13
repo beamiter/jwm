@@ -1488,8 +1488,12 @@ impl Dispatch<wl_registry::WlRegistry, ()> for State {
                 version,
             } => {
                 match interface.as_str() {
-                    "jwm_remote_viewer_handoff_manager_v1" if state.handoff.manager.is_none() => {
-                        state.handoff.manager = Some(registry.bind(name, version.min(1), qh, ()));
+                    "jwm_remote_viewer_handoff_manager_v1"
+                        if state.handoff.manager.is_none() && version >= 2 =>
+                    {
+                        // Version 2 includes stationary-pointer spatial guards.
+                        // Old compositors cannot safely authorize this mode.
+                        state.handoff.manager = Some(registry.bind(name, 2, qh, ()));
                         state.handoff.global = Some(name);
                         return;
                     }

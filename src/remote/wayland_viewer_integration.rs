@@ -30,6 +30,7 @@ enum Command {
     DrawFrame(Box<RecyclableDecodedFrame>),
     Poll,
     InvalidateSource,
+    EnableSeamless,
     Stop,
 }
 #[derive(Debug)]
@@ -100,6 +101,11 @@ impl Peer {
                                     can_submit: viewer.can_submit_frame(),
                                     closed,
                                 }))?;
+                            }
+                            Command::EnableSeamless => {
+                                viewer.enable_wayland_control(false, false)?;
+                                viewer.enable_wayland_seamless_input()?;
+                                return Err("unsupported handoff unexpectedly enabled".into());
                             }
                             Command::InvalidateSource => {
                                 viewer.invalidate_source("replacement source".into())?;
@@ -311,6 +317,31 @@ fn verify_actual_gl_color(
     );
     capture.client.request(frame, 0, &[]);
     server.roundtrip();
+}
+
+#[test]
+fn actual_wayland_viewer_handoff_rejects_old_v1_and_missing_global() {
+    use crate::backend::wayland::state::JwmWaylandState;
+    use crate::backend::wayland_udev::viewer_handoff::{self, ManagerData};
+    use crate::viewer_handoff_protocol::server::jwm_remote_viewer_handoff_manager_v1::JwmRemoteViewerHandoffManagerV1;
+    for advertised_version in [None, Some(1)] {
+        let mut server = Server::new();
+        register_test_presentation(&mut server);
+        if let Some(version) = advertised_version {
+            server.display.handle().create_global::<JwmWaylandState, JwmRemoteViewerHandoffManagerV1, _>(version, ManagerData);
+        }
+        let (native, stream) = UnixStream::pair().unwrap();
+        server.display.handle().insert_client(native, Arc::new(JwmClientState::default())).unwrap();
+        let peer = Peer::start(stream);
+        assert!(matches!(peer.recv(&mut server), Reply::Connected));
+        peer.command.send(Command::EnableSeamless).unwrap();
+        let reply = peer.recv(&mut server);
+        assert!(matches!(&reply, Reply::Failed(error) if error.contains("protocol v2 required") && error.contains("update and restart JWM")), "version {advertised_version:?}: {reply:?}");
+        assert!(!viewer_handoff::registered_for_test(&server.state));
+        assert!(!viewer_handoff::active(&server.state));
+        assert!(!viewer_handoff::inhibits(&server.state));
+        peer.join_failed();
+    }
 }
 
 #[test]

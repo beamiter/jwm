@@ -97,6 +97,12 @@ pub(crate) struct HandoffKeyOutcome {
     pub(crate) mods: u16,
 }
 
+/// Revalidate local handoff before physical pointer delivery. A queued button
+/// or wheel must not use stale focus after the scene moved under a still cursor.
+pub(crate) fn refresh_viewer_handoff_pointer_input(state: &mut JwmWaylandState) {
+    super::viewer_handoff::refresh_before_input(state);
+}
+
 /// Route through the actual physical keyboard state before best-effort focus
 /// selection. In particular, quarantined releases cannot create a new local
 /// focus and replay the old remote chord through wl_keyboard.enter's held list.
@@ -3164,6 +3170,14 @@ impl UdevBackend {
                     // Notify idle tracker on any input activity
                     state.idle_notifier_state.notify_activity(&state.seat);
                     state.last_input = std::time::Instant::now();
+                    if matches!(&event, InputEvent::PointerMotion { .. }
+                        | InputEvent::PointerMotionAbsolute { .. }
+                        | InputEvent::PointerButton { .. }
+                        | InputEvent::PointerAxis { .. }) {
+                        // Validate the old position before motion: an ordinary
+                        // leave stays resumable; a scene change revokes first.
+                        refresh_viewer_handoff_pointer_input(state);
+                    }
 
                     match event {
                         InputEvent::DeviceAdded { device } => {
@@ -10868,7 +10882,7 @@ mod viewer_handoff_key_route_tests {
                 .set_keyboard_focus(Some(local_surface), SCOUNTER.next_serial());
             let manager = viewer
                 .client
-                .bind("jwm_remote_viewer_handoff_manager_v1", 1);
+                .bind("jwm_remote_viewer_handoff_manager_v1", 2);
             let session = viewer.client.new_id();
             viewer
                 .client
@@ -10881,14 +10895,24 @@ mod viewer_handoff_key_route_tests {
                     .iter()
                     .any(|e| e.sender == session && e.opcode == 0)
             );
-            let surface = server.state.surface_for_window(viewer.window).unwrap();
+            let geometry = server.state.window_geometry[&viewer.window];
+            let location = (f64::from(geometry.x) + 4.0, f64::from(geometry.y) + 4.0).into();
+            server.state.pointer_location = location;
+            let focus = server
+                .state
+                .surface_under(location)
+                .map(|(_, surface, origin)| (surface, origin));
+            assert_eq!(
+                focus.as_ref().map(|(surface, _)| surface),
+                server.state.surface_for_window(viewer.window).as_ref()
+            );
             let pointer = server.state.seat.get_pointer().unwrap();
             let serial = SCOUNTER.next_serial();
             pointer.motion(
                 &mut server.state,
-                Some((surface, (0.0, 0.0).into())),
+                focus,
                 &MotionEvent {
-                    location: (4.0, 4.0).into(),
+                    location,
                     serial,
                     time: InputTime::now(),
                 },
