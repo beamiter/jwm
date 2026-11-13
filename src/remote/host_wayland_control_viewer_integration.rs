@@ -1986,3 +1986,6 @@ mod resumable_integration;
 
 #[path = "host_wayland_seamless_control_integration.rs"]
 mod seamless_integration;
+
+#[path = "host_wayland_cli_process_integration.rs"]
+mod cli_process_integration;

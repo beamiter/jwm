@@ -754,3 +754,21 @@ pub(crate) fn attempts_for_test(state: &JwmWaylandState) -> u32 {
 #[cfg(test)]
 #[path = "remote_control_tests.rs"]
 mod tests;
+
+/// Read-only evidence for independent CLI-process tests; never mutates authority.
+#[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+pub(crate) fn cli_lease_snapshot_for_test(
+    state: &JwmWaylandState,
+) -> Option<(u32, Instant, Instant, bool, bool, u32, usize)> {
+    state.remote_control.active.as_ref().map(|lease| {
+        (
+            lease.epoch,
+            lease.created,
+            lease.created + TTL,
+            lease.resumable,
+            lease.paused_at.is_some(),
+            lease.generation,
+            lease.held.len(),
+        )
+    })
+}
