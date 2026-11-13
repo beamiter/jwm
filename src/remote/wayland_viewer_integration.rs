@@ -328,15 +328,28 @@ fn actual_wayland_viewer_handoff_rejects_old_v1_and_missing_global() {
         let mut server = Server::new();
         register_test_presentation(&mut server);
         if let Some(version) = advertised_version {
-            server.display.handle().create_global::<JwmWaylandState, JwmRemoteViewerHandoffManagerV1, _>(version, ManagerData);
+            server
+                .display
+                .handle()
+                .create_global::<JwmWaylandState, JwmRemoteViewerHandoffManagerV1, _>(
+                    version,
+                    ManagerData,
+                );
         }
         let (native, stream) = UnixStream::pair().unwrap();
-        server.display.handle().insert_client(native, Arc::new(JwmClientState::default())).unwrap();
+        server
+            .display
+            .handle()
+            .insert_client(native, Arc::new(JwmClientState::default()))
+            .unwrap();
         let peer = Peer::start(stream);
         assert!(matches!(peer.recv(&mut server), Reply::Connected));
         peer.command.send(Command::EnableSeamless).unwrap();
         let reply = peer.recv(&mut server);
-        assert!(matches!(&reply, Reply::Failed(error) if error.contains("protocol v2 required") && error.contains("update and restart JWM")), "version {advertised_version:?}: {reply:?}");
+        assert!(
+            matches!(&reply, Reply::Failed(error) if error.contains("protocol v2 required") && error.contains("update and restart JWM")),
+            "version {advertised_version:?}: {reply:?}"
+        );
         assert!(!viewer_handoff::registered_for_test(&server.state));
         assert!(!viewer_handoff::active(&server.state));
         assert!(!viewer_handoff::inhibits(&server.state));
@@ -1046,13 +1059,6 @@ fn actual_wayland_viewer_nested_registry_does_not_advertise_unfulfilled_presenta
 mod keyboard_integration;
 
 #[path = "host_wayland_keyboard_viewer_integration.rs"]
-mod host_keyboard_integration;
-
-#[path = "host_wayland_keyboard_lossless_integration.rs"]
-mod host_keyboard_lossless_integration;
-
-#[path = "wayland_viewer_pointer_integration.rs"]
-modration.rs"]
 mod host_keyboard_integration;
 
 #[path = "host_wayland_keyboard_lossless_integration.rs"]
