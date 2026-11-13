@@ -10,6 +10,67 @@ const CONTINUOUS_WINDOW_NS: u64 = 8_000_000_000;
 const PRESSURE_FEEDBACK_DELAY: Duration = Duration::from_millis(150);
 const CONTINUOUS_MARKER_BITS: usize = 8;
 
+#[derive(Clone, Copy)]
+struct Workload {
+    width: usize,
+    height: usize,
+    noise: bool,
+}
+const DEFAULT_WORKLOAD: Workload = Workload {
+    width: 32,
+    height: 16,
+    noise: false,
+};
+
+fn workload_pixels(generation: usize, workload: Workload) -> Vec<u8> {
+    assert!((32..=800).contains(&workload.width));
+    assert!((16..=600).contains(&workload.height));
+    let mut bytes = marker_pixels_with_columns(generation, 4);
+    let mut random = (generation as u32 + 1).wrapping_mul(0x9e3779b9);
+    for y in 0..workload.height {
+        for x in 0..workload.width {
+            if x < 32 && y < 16 {
+                continue;
+            }
+            let value = if workload.noise {
+                random ^= random << 13;
+                random ^= random >> 17;
+                random ^= random << 5;
+                random as u8
+            } else if (x / 16 + y / 16 + generation).is_multiple_of(2) {
+                32
+            } else {
+                224
+            };
+            let i = (y * 800 + x) * 4;
+            bytes[i..i + 4].copy_from_slice(&[value, value, value, 255]);
+        }
+    }
+    bytes
+}
+
+fn workload_static_sse(actual: &[u8], expected: &[u8], workload: Workload) -> u64 {
+    assert_eq!(actual.len(), 800 * 600 * 4);
+    assert_eq!(actual.len(), expected.len());
+    actual
+        .chunks_exact(800 * 4)
+        .zip(expected.chunks_exact(800 * 4))
+        .enumerate()
+        .map(|(y, (a, b))| {
+            let start = if y < workload.height {
+                workload.width * 4
+            } else {
+                0
+            };
+            if a[start..] == b[start..] {
+                0
+            } else {
+                sse(&a[start..], &b[start..])
+            }
+        })
+        .sum()
+}
+
 fn marker_pixels(generation: usize) -> Vec<u8> {
     marker_pixels_with_columns(generation, 2)
 }
@@ -70,19 +131,9 @@ fn marker_id_with_columns(bytes: &[u8], columns: usize) -> Option<usize> {
 // The continuous animation occupies exactly two 16x16 codec tiles. Every
 // remaining pixel/channel participates in static equality, including edges.
 fn continuous_static_sse(actual: &[u8], expected: &[u8]) -> u64 {
-    assert_eq!(actual.len(), 800 * 600 * 4);
-    assert_eq!(actual.len(), expected.len());
-    actual
-        .chunks_exact(800 * 4)
-        .zip(expected.chunks_exact(800 * 4))
-        .enumerate()
-        .map(|(y, (a, b))| {
-            let start = if y < 16 { 32 * 4 } else { 0 };
-            let (a, b) = (&a[start..], &b[start..]);
-            if a == b { 0 } else { sse(a, b) }
-        })
-        .sum()
+    workload_static_sse(actual, expected, DEFAULT_WORKLOAD)
 }
+
 fn input_hash(bytes: &[u8]) -> String {
     Sha256::digest(bytes)
         .iter()
@@ -167,6 +218,15 @@ fn run_session(arm: &str, report: &mut Value) {
     run_session_workload(arm, report, false, Duration::ZERO);
 }
 fn run_session_workload(arm: &str, report: &mut Value, continuous: bool, feedback_delay: Duration) {
+    run_session_config(arm, report, continuous, feedback_delay, DEFAULT_WORKLOAD);
+}
+fn run_session_config(
+    arm: &str,
+    report: &mut Value,
+    continuous: bool,
+    feedback_delay: Duration,
+    workload: Workload,
+) {
     let enabled = arm != "off";
     let policy = match arm {
         "legacy" => host::LosslessSchedule::Legacy100,
@@ -195,7 +255,7 @@ fn run_session_workload(arm: &str, report: &mut Value, continuous: bool, feedbac
     let inputs: Vec<_> = (0..generations)
         .map(|generation| {
             if continuous {
-                marker_pixels_with_columns(generation, 4)
+                workload_pixels(generation, workload)
             } else {
                 marker_pixels(generation)
             }
@@ -400,7 +460,11 @@ fn run_session_workload(arm: &str, report: &mut Value, continuous: bool, feedbac
                 marker_id(&bytes)
             };
             let error = if continuous {
-                continuous_static_sse(&bytes, &expected)
+                if workload.width == 32 && workload.height == 16 {
+                    continuous_static_sse(&bytes, &expected)
+                } else {
+                    workload_static_sse(&bytes, &expected, workload)
+                }
             } else {
                 static_sse(&bytes, &expected)
             };
@@ -959,4 +1023,117 @@ fn continuous_static_region_excludes_only_the_two_marker_tiles() {
         assert_eq!(continuous_static_sse(&bytes, &expected), 1);
         bytes[index] ^= 1;
     }
+}
+
+#[test]
+fn extended_workload_preserves_marker_and_static_boundary() {
+    for (width, height, noise) in [
+        (32, 16, false),
+        (128, 128, false),
+        (128, 128, true),
+        (256, 256, true),
+        (320, 256, true),
+    ] {
+        let workload = Workload {
+            width,
+            height,
+            noise,
+        };
+        let a = workload_pixels(13, workload);
+        assert_eq!(a, workload_pixels(13, workload));
+        assert_eq!(marker_id_with_columns(&a, 4), Some(13));
+        assert_eq!(workload_static_sse(&a, &pattern(false), workload), 0);
+        assert_ne!(a, workload_pixels(14, workload));
+        let mut b = a.clone();
+        b[(height * 800 + width) * 4] ^= 255;
+        assert!(workload_static_sse(&b, &pattern(false), workload) > 0);
+    }
+}
+
+#[test]
+#[ignore = "explicit extended workload matrix using real TCP/software GL"]
+fn actual_static_lossless_region_coalesced_workload_matrix() {
+    let case = std::env::var("JWM_REMOTE_WORKLOAD_CASE").expect("explicit case required");
+    let (width, height, noise, delay_ms) = match case.as_str() {
+        "marker0" => (32, 16, false, 0),
+        "blocks50" => (128, 128, false, 50),
+        "noise100" => (128, 128, true, 100),
+        "cap_noise150" => (256, 256, true, 150),
+        "overcap_noise250" => (320, 256, true, 250),
+        "noise0" => (128, 128, true, 0),
+        "noise250" => (128, 128, true, 250),
+        _ => panic!("unknown bounded workload case"),
+    };
+    let workload = Workload {
+        width,
+        height,
+        noise,
+    };
+    let mut report = json!({"schema_version":1, "benchmark":"static_lossless_coalesced_workload_matrix",
+        "case":case,"debug_assertions":cfg!(debug_assertions),"generation_budget":80,
+        "active_window_ns":CONTINUOUS_WINDOW_NS,"scheduled_interval_ns":100_000_000u64,
+        "presentation_feedback_delay_ns":delay_ms*1_000_000u64,"drain_ns":1_000_000_000u64,
+        "width":800,"height":600,"dynamic_region_width":width,"dynamic_region_height":height,
+        "noise":noise,"maximum_png_batch_pixels":65_536,"static_pixels":800*600-width*height,
+        "scope":"same-process synthetic TCP/software GL; not physical display or WAN latency",
+        "sessions":[],"success":false});
+    let mut failed = false;
+    for (order, arm) in ["new250", "region_coalesced", "region_coalesced", "new250"]
+        .iter()
+        .enumerate()
+    {
+        let mut session = json!({"arm":arm,"order":order,"success":false,"failure":null,
+            "markers":[],"frames":[],"host_stats":null,"active_window_host_stats":null,"host_records":[]});
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            run_session_config(
+                arm,
+                &mut session,
+                true,
+                Duration::from_millis(delay_ms),
+                workload,
+            );
+            continuous_acceptance(&mut session);
+            assert_eq!(
+                session["acceptance"]["no_exact_to_inexact_regression"],
+                true
+            );
+        }));
+        if let Err(error) = result {
+            failed = true;
+            session["success"] = json!(false);
+            session["failure"] = json!(
+                error
+                    .downcast_ref::<String>()
+                    .cloned()
+                    .or_else(|| error.downcast_ref::<&str>().map(|s| s.to_string()))
+                    .unwrap_or_else(|| "non-string test panic".into())
+            );
+        }
+        report["sessions"].as_array_mut().unwrap().push(session);
+    }
+    let sessions = report["sessions"].as_array().unwrap();
+    for generation in 0..80 {
+        let digest = &sessions[0]["markers"][generation]["source_sha256"];
+        if digest.is_null()
+            || sessions
+                .iter()
+                .any(|s| &s["markers"][generation]["source_sha256"] != digest)
+        {
+            failed = true;
+            report["input_identity_failure"] = json!(true);
+            break;
+        }
+    }
+    report["success"] = json!(!failed);
+    let bytes = serde_json::to_vec_pretty(&report).unwrap();
+    assert!(bytes.len() <= 4 * 1024 * 1024);
+    std::fs::write(
+        std::env::var("JWM_REMOTE_WORKLOAD_REPORT").expect("report path required"),
+        bytes,
+    )
+    .unwrap();
+    assert!(
+        !failed,
+        "extended workload failed; raw report retains failure evidence"
+    );
 }

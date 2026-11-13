@@ -850,3 +850,28 @@ jobs:
           path: ${{ runner.temp }}/region-coalesced-pressure-optimized-summary-*.json
           if-no-files-found: warn
           retention-days: 3
+      - name: Extended combined-frame workload correctness matrix
+        timeout-minutes: 12
+        run: |
+          set -euo pipefail
+          python3 scripts/remote-frame-freshness.py --self-test
+          export XDG_RUNTIME_DIR="$(mktemp -d)"
+          trap 'rm -rf "$XDG_RUNTIME_DIR"' EXIT
+          filter='remote::host::wayland_viewer_integration::host_lossless_integration::scheduler_benchmark::actual_static_lossless_region_coalesced_workload_matrix'
+          listed="$(cargo test --locked --profile profiling --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --ignored --exact --list)"
+          test "$(printf '%s\n' "$listed" | grep -c ': test$')" -eq 1
+          status=0
+          for case in marker0 blocks50 noise100 cap_noise150 overcap_noise250 noise0 noise250; do
+            export JWM_REMOTE_WORKLOAD_CASE="$case"
+            export JWM_REMOTE_WORKLOAD_REPORT="$RUNNER_TEMP/workload-private-$case.json"
+            log="$RUNNER_TEMP/workload-private-$case.log"
+            current=0
+            env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --profile profiling --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --ignored --exact --test-threads=1 > "$log" 2>&1 || current=$?
+            if test -f "$JWM_REMOTE_WORKLOAD_REPORT"; then
+              python3 scripts/remote-frame-freshness.py "$JWM_REMOTE_WORKLOAD_REPORT" --output "$RUNNER_TEMP/workload-diagnostics-$case.json" || current=1
+            else
+              current=1
+            fi
+            if test "$current" -ne 0; then status=1; fi
+          done
+          exit "$status"

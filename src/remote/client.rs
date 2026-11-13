@@ -1816,6 +1816,10 @@ fn viewer_loop(
         .as_ref()
         .is_some_and(|catalog| catalog.entries.len() > 1);
     loop {
+        // An authenticated close already published by the receiver is terminal.
+        // Do not let pending presentation ACKs or other outgoing records mask
+        // it with a secondary BrokenPipe while draining the final frame.
+        take_published_peer_close(state)?;
         state.wayland_text.lock().unwrap().check()?;
         wake.drain()?;
         {
@@ -4225,6 +4229,14 @@ fn decode_queued_frame(
         ready_at,
         purpose,
     })
+}
+
+fn take_published_peer_close(state: &ReceiveState) -> RemoteResult<()> {
+    let mut slot = state.error.lock().unwrap();
+    if slot.as_ref().is_some_and(|error| error.is::<PeerClosed>()) {
+        return Err(slot.take().expect("checked peer close"));
+    }
+    Ok(())
 }
 
 struct ReceiveCompletion {
@@ -7485,6 +7497,51 @@ pub(super) mod tests {
             .unwrap(),
             WaitOutcome::X11Hangup
         );
+    }
+
+    #[test]
+    fn published_peer_close_precedes_pending_writes_and_preserves_other_errors() {
+        let state = ReceiveState::new();
+        take_published_peer_close(&state).unwrap();
+        *state.error.lock().unwrap() = Some(io::Error::other("receiver failure").into());
+        take_published_peer_close(&state).unwrap();
+        assert_eq!(
+            state.error.lock().unwrap().as_ref().unwrap().to_string(),
+            "receiver failure"
+        );
+        *state.error.lock().unwrap() = Some(
+            PeerClosed::decode(
+                MessageKind::SessionClose,
+                &SessionClose::new(SessionCloseCode::HostStopping, "stopping").encode(),
+            )
+            .unwrap()
+            .into(),
+        );
+        // Publication is sufficient even before the receiver's alive flag is
+        // cleared. A final queued frame must not delay this terminal cause.
+        assert!(state.alive.load(Ordering::Acquire));
+        let cause = take_published_peer_close(&state).unwrap_err();
+        assert_eq!(
+            cause.downcast_ref::<PeerClosed>().unwrap().code,
+            Some(SessionCloseCode::HostStopping)
+        );
+        assert!(state.error.lock().unwrap().is_none());
+        let result = finish_session(
+            Err(cause),
+            Ok(()),
+            ReceiverExit::Completed,
+            Err(io::Error::new(io::ErrorKind::BrokenPipe, "sender cleanup").into()),
+            Ok(()),
+        )
+        .unwrap_err();
+        let summary = classify_failure(result.as_ref());
+        assert_eq!(
+            summary.peer_close_code,
+            Some(SessionCloseCode::HostStopping)
+        );
+        assert_eq!(summary.category, "cleanup_failed");
+        assert_eq!(summary.cleanup, "incomplete");
+        assert!(!summary.reconnect_certified);
     }
 
     #[test]
