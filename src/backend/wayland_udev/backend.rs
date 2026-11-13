@@ -97,14 +97,6 @@ pub(crate) struct HandoffKeyOutcome {
     pub(crate) mods: u16,
 }
 
-fn handoff_lock_binding(key: &crate::jwm::types::WMKey) -> bool {
-    use crate::jwm::types::WMFuncType;
-    key.func_opt.is_some_and(|function| {
-        std::ptr::fn_addr_eq(function, crate::Jwm::lock_screen as WMFuncType)
-            || std::ptr::fn_addr_eq(function, crate::Jwm::lock_monitor as WMFuncType)
-    })
-}
-
 /// Route through the actual physical keyboard state before best-effort focus
 /// selection. In particular, quarantined releases cannot create a new local
 /// focus and replay the old remote chord through wl_keyboard.enter's held list.
@@ -128,7 +120,7 @@ pub(crate) fn route_viewer_handoff_keyboard(
     let keyboard = state.seat.get_keyboard()?;
     let pressed = key_state == smithay::backend::input::KeyState::Pressed;
     let code = u8::try_from(u32::from(keycode)).ok();
-    let bindings = config.get_keys();
+    let lock_shortcuts = config.reserved_lock_shortcuts();
     let mut outcome = HandoffKeyOutcome::default();
     let mut release_handoff = false;
     keyboard.input::<(), _>(
@@ -153,10 +145,9 @@ pub(crate) fn route_viewer_handoff_keyboard(
                 && symbols
                     .iter()
                     .any(|sym| sym.raw() == crate::backend::common_define::keys::KEY_F12);
-            let lock = bindings.iter().any(|binding| {
-                handoff_lock_binding(binding)
-                    && binding.mask & allowed_shortcut_mods() == mods
-                    && symbols.iter().any(|sym| sym.raw() == binding.key_sym)
+            let lock = lock_shortcuts.iter().any(|(mask, key_sym)| {
+                *mask & allowed_shortcut_mods() == mods
+                    && symbols.iter().any(|sym| sym.raw() == *key_sym)
             });
             if emergency || lock {
                 release_handoff = true;
@@ -11205,17 +11196,5 @@ mod viewer_handoff_key_route_tests {
                 .any(|e| e.sender == f.local_keyboard && e.opcode == 3),
             "physical release must not reach a recipient that never received the press"
         );
-    }
-
-    #[test]
-    fn configured_lock_functions_not_similar_chords_are_reserved() {
-        let keys = Config::default().get_keys();
-        assert_eq!(
-            keys.iter().filter(|key| handoff_lock_binding(key)).count(),
-            2
-        );
-        let mut key = keys.into_iter().find(handoff_lock_binding).unwrap();
-        key.func_opt = None;
-        assert!(!handoff_lock_binding(&key));
     }
 }
