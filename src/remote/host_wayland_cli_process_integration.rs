@@ -320,7 +320,7 @@ impl CliFixture {
                         .all(|p| p[2] >= 250 && p[1] <= 3 && p[0] <= 3 && p[3] == 255),
                     "actual committed viewer pixels must match the owned red source"
                 );
-                self.presentations += feedback.len() as u64;
+                self.presentations += 1;
                 present(&mut self.local, feedback);
             }
         }
@@ -433,7 +433,7 @@ fn native_cli_flags_reach_real_viewer_and_preserve_lease() {
                 .as_ref()
                 .unwrap()
                 .text()
-                .contains("control ready for sequential typing")
+                .contains("jwm-remote: control generation 1 ready; original deadline unchanged")
                 && remote_control::cli_lease_snapshot_for_test(&s.native.state).is_some()
         },
     );
@@ -463,11 +463,18 @@ fn native_cli_flags_reach_real_viewer_and_preserve_lease() {
         (original.0, original.1, original.2)
     );
     assert_eq!(remote_control::attempts_for_test(&f.native.state), 1);
-    // Subsequent actual committed presentations, not a fabricated Ready or
-    // sleep, give the CLI receiver time to consume its real resume response.
-    let before = f.presentations;
-    f.wait(&mut gl, "post-resume actual presentations", |s| {
-        s.presentations >= before + 2
+    // Observe the real production main-loop readiness report, emitted only
+    // after matching resume ACK, local clean fence and a fresh input proof.
+    // The log grants nothing: native lease identity and actual recipient
+    // delivery remain independent assertions below.
+    f.wait(&mut gl, "generation-two production input gate ready", |s| {
+        s.viewer
+            .as_ref()
+            .unwrap()
+            .text()
+            .contains("jwm-remote: control generation 2 ready; original deadline unchanged")
+            && remote_control::cli_lease_snapshot_for_test(&s.native.state)
+                .is_some_and(|v| !v.4 && v.5 == 2)
     });
     f.key(30, true);
     f.key(30, false);
@@ -493,6 +500,16 @@ fn native_cli_flags_reach_real_viewer_and_preserve_lease() {
         },
     );
     assert_eq!(remote_control::attempts_for_test(&f.native.state), 1);
+    assert!(
+        f.viewer.as_ref().unwrap().status.unwrap().success(),
+        "viewer close must exit successfully: {}",
+        f.viewer.as_ref().unwrap().text()
+    );
+    assert!(
+        f.host.status.unwrap().success(),
+        "host --once must exit successfully: {}",
+        f.host.text()
+    );
 }
 
 #[test]

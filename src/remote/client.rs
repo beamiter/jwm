@@ -1845,6 +1845,7 @@ fn viewer_loop(
     pending_presentations: &mut std::collections::VecDeque<PendingFrameTiming>,
 ) -> RemoteResult<ViewerLoopExit> {
     let mut clipboard_status_seen = 0;
+    let mut reported_control_generation = None;
     let mut next_heartbeat = Instant::now() + HEARTBEAT_INTERVAL;
     let mut input_batch = Vec::with_capacity(MAX_INPUT_BATCH_EVENTS);
     let mut input_payload = Vec::new();
@@ -2126,6 +2127,15 @@ fn viewer_loop(
                 control.local_handoff_active = viewer.wayland_handoff_active();
             }
             control.check(presented_scope, Instant::now())?;
+            // Observable status only: this does not grant input or change a
+            // deadline. Report after the receiver ACK, clean local fence and
+            // fresh presented proof all agree, once per active generation.
+            if let Some(generation) = control.ready_input_generation()
+                && reported_control_generation != Some(generation)
+            {
+                eprintln!("jwm-remote: control generation {generation} ready; original deadline unchanged");
+                reported_control_generation = Some(generation);
+            }
             if control.configured() {
                 if control.seamless_enabled {
                     let phase = control.resumable.as_ref().map(|session| session.phase());

@@ -48,6 +48,12 @@ impl ClientControl {
             (self.resumable_input_active() && !self.ended).then(|| session.generation())
         })
     }
+    /// Read-only status: a matching ACK, post-ACK local fence and fresh proof
+    /// must all exist. Observing this status never authorizes an input event.
+    pub(super) fn ready_input_generation(&self) -> Option<u64> {
+        self.active_input_generation()
+            .filter(|_| self.ready_sequence().is_some())
+    }
     pub(super) fn resumable_local_validation_pending(&self) -> bool {
         self.resume_local_validation_pending && !self.ended
     }
@@ -824,6 +830,26 @@ mod tests {
         assert_eq!(c.active_input_generation(), Some(2));
         assert!(!c.resumable_local_validation_pending());
         assert!(c.event(&key, Instant::now()).unwrap().is_some());
+    }
+    #[test]
+    fn reported_generation_requires_ack_local_fence_and_fresh_presented_proof() {
+        let mut c = resumable_granted();
+        assert_eq!(c.ready_input_generation(), None);
+        ready(&mut c, 2);
+        assert_eq!(c.ready_input_generation(), Some(1));
+        pause_ack(&mut c);
+        assert_eq!(c.ready_input_generation(), None);
+        resume_ack(&mut c);
+        ready(&mut c, 4);
+        assert_eq!(c.ready_input_generation(), None, "ACK is not local validation");
+        c.complete_resumable_local_validation(Instant::now()).unwrap();
+        assert_eq!(c.ready_input_generation(), Some(2));
+        c.seamless_enabled = true;
+        c.local_handoff_active = false;
+        assert_eq!(c.ready_input_generation(), None);
+        c.local_handoff_active = true;
+        c.presented.as_mut().unwrap().1 = Instant::now() - Duration::from_secs(10);
+        assert_eq!(c.ready_input_generation(), None, "stale proof cannot report ready");
     }
     #[test]
     fn paused_mouse_up_discard_does_not_keep_old_logical_drag_on_resume() {
