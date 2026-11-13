@@ -565,16 +565,11 @@ fn suppress_reconnect(result: RemoteResult<()>, suppress: bool) -> RemoteResult<
 }
 
 fn validate_viewer_backend(options: &ClientOptions) -> RemoteResult<()> {
-    if options.seamless_input
-        && (!options.grab_input
-            || options.view_only
-            || options.viewer_backend != ViewerBackend::X11)
-    {
-        return Err(std::io::Error::other(
-            "seamless input requires X11, --grab-input and input control",
-        )
-        .into());
-    }
+    options.viewer_backend.validate_seamless_input(
+        options.seamless_input,
+        options.grab_input,
+        options.view_only,
+    )?;
     if options.wayland_popup_pointer
         && (options.viewer_backend != ViewerBackend::Wayland
             || options.view_only
@@ -8771,6 +8766,30 @@ mod native_viewer_permission_tests {
             validate_viewer_backend(&options).is_ok(),
             cfg!(feature = "remote-wayland")
         );
+        // No display, socket or key file may be opened for an unsupported
+        // seamless policy, including callers of the concrete viewer factory.
+        for (backend, grab, view_only) in [
+            (ViewerBackend::Wayland, true, false),
+            (ViewerBackend::X11, false, false),
+            (ViewerBackend::X11, true, true),
+        ] {
+            let mut seamless = options.clone();
+            seamless.viewer_backend = backend;
+            seamless.grab_input = grab;
+            seamless.view_only = view_only;
+            seamless.seamless_input = true;
+            let expected = "seamless input requires X11, --grab-input and input control";
+            assert_eq!(
+                validate_viewer_backend(&seamless).unwrap_err().to_string(),
+                expected
+            );
+            let error = super::super::viewer_backend::Viewer::connect(
+                &seamless, 800, 600, true, true, None,
+            )
+            .err()
+            .expect("unsupported seamless input must fail before display I/O");
+            assert_eq!(error.to_string(), expected);
+        }
         let mut popup = options.clone();
         popup.view_only = false;
         popup.wayland_popup_pointer = true;

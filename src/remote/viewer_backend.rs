@@ -22,6 +22,25 @@ pub enum ViewerBackend {
     X11,
     Wayland,
 }
+impl ViewerBackend {
+    /// Keep the native one-shot lease fail-closed at both public-client and
+    /// concrete-viewer boundaries. A native viewer must never silently ignore
+    /// an X11-only input policy, even when a caller skips client preflight.
+    pub(super) fn validate_seamless_input(
+        self,
+        seamless: bool,
+        grab: bool,
+        view_only: bool,
+    ) -> RemoteResult<()> {
+        if seamless && (!grab || view_only || self != Self::X11) {
+            return Err(std::io::Error::other(
+                "seamless input requires X11, --grab-input and input control",
+            )
+            .into());
+        }
+        Ok(())
+    }
+}
 impl std::str::FromStr for ViewerBackend {
     type Err = String;
     fn from_str(value: &str) -> Result<Self, String> {
@@ -54,6 +73,11 @@ impl Viewer {
         keyboard: bool,
         keymap: Option<KeymapTable>,
     ) -> RemoteResult<Self> {
+        options.viewer_backend.validate_seamless_input(
+            options.seamless_input,
+            options.grab_input,
+            options.view_only,
+        )?;
         if options.seamless_input && !(pointer && keyboard) {
             return Err(std::io::Error::other("seamless input requires negotiated pointer and keyboard control; check host input permission and keymap compatibility").into());
         }
@@ -609,6 +633,25 @@ pub(crate) fn with_wayland_pointer_candidate_observer<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn seamless_input_requires_explicit_x11_control_at_every_entry_point() {
+        for backend in [ViewerBackend::X11, ViewerBackend::Wayland] {
+            for seamless in [false, true] {
+                for grab in [false, true] {
+                    for view_only in [false, true] {
+                        assert_eq!(
+                            backend
+                                .validate_seamless_input(seamless, grab, view_only)
+                                .is_ok(),
+                            !seamless || (backend == ViewerBackend::X11 && grab && !view_only),
+                            "{backend:?}, seamless={seamless}, grab={grab}, view_only={view_only}",
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn wayland_initial_size_is_shared_by_hello_and_window() {
         assert_eq!(wayland_initial_size(None).dimensions(), (800, 600));

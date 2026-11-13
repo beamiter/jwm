@@ -44,3 +44,10 @@ xvfb-run -a -s '-screen 0 800x600x24 -nolisten tcp' sh -ec '
     -- --ignored --test-threads=1 --nocapture
 '
 ```
+
+## Native Wayland follow-up
+
+The [native integration contract](remote-wayland-seamless-design.md) specifies the
+new resumable permission, ordered release acknowledgements and compositor focus
+support required before enabling this mode on Wayland. It is not implemented by
+silently renewing the existing one-shot lease.
