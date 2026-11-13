@@ -1561,6 +1561,20 @@ impl<D: SeatHandler + 'static> KeyboardHandle<D> {
         });
     }
 
+    /// Retire compositor delivery bookkeeping for selected keys without sending
+    /// events to any focus or grab. Physical pressed keys and XKB state are
+    /// unchanged and must still receive their real input releases.
+    ///
+    /// This is delivery cleanup when a compositor ends an input handoff, not
+    /// input authorization. Call before changing focus so a later enter cannot
+    /// replay the retired presses, including when a grab redirects that change.
+    pub fn retire_forwarded_keys(&self, keys: &[Keycode]) {
+        let mut guard = self.arc.internal.lock().unwrap();
+        for key in keys {
+            guard.forwarded_pressed_keys.remove(key);
+        }
+    }
+
     /// Return the key codes of the currently pressed keys.
     pub fn pressed_keys(&self) -> HashSet<Keycode> {
         let guard = self.arc.internal.lock().unwrap();
@@ -2009,6 +2023,7 @@ impl<D: SeatHandler + 'static> KeyboardInnerHandle<'_, D> {
         } else if let Some((old_focus, _)) = self.inner.focus.take() {
             trace!("Focus unset");
             old_focus.leave(self.seat, data, serial);
+            data.focus_changed(self.seat, None);
         }
     }
 }

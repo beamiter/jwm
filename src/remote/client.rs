@@ -189,6 +189,8 @@ pub struct ClientOptions {
     pub wayland_control: bool,
     /// Explicit version-1 resumable protocol opt-in; never implied by control.
     pub resumable_control: bool,
+    /// Explicit JWM compositor seamless handoff; never implied by resumable control.
+    pub wayland_seamless_input: bool,
     pub wayland_popup_pointer: bool,
     pub static_lossless: bool,
     pub wayland_text: Option<super::wayland_text_wire::ExplicitText>,
@@ -567,6 +569,19 @@ fn suppress_reconnect(result: RemoteResult<()>, suppress: bool) -> RemoteResult<
 }
 
 fn validate_viewer_backend(options: &ClientOptions) -> RemoteResult<()> {
+    if options.wayland_seamless_input
+        && (!options.resumable_control
+            || !options.wayland_control
+            || options.viewer_backend != ViewerBackend::Wayland
+            || options.view_only
+            || options.clipboard
+            || options.grab_input
+            || options.static_lossless)
+    {
+        return Err(invalid_data(
+            "native seamless input requires explicit resumable combined Wayland control without clipboard, grabs or repair",
+        ).into());
+    }
     if options.resumable_control && (!options.wayland_control || options.static_lossless) {
         return Err(invalid_data(
             "resumable control requires explicit combined control without repair",
@@ -1016,11 +1031,16 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
         let mut control = state.wayland_control.lock().unwrap();
         control.digest = Some(digest);
         control.resumable_enabled = hello.stream.resumable_control;
+        control.seamless_enabled = options.wayland_seamless_input;
         control.repair.enabled = hello.stream.static_lossless;
         #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
         control.capture_repair_observer();
         control.scroll_enabled = options.wayland_scroll;
         control.horizontal_enabled = options.wayland_horizontal_scroll;
+    }
+    #[cfg(feature = "remote-wayland")]
+    if options.wayland_seamless_input {
+        viewer.enable_wayland_seamless_input()?;
     }
     #[cfg(feature = "remote-wayland")]
     if options.wayland_keyboard {
@@ -1844,6 +1864,23 @@ fn viewer_loop(
     loop {
         state.wayland_text.lock().unwrap().check()?;
         wake.drain()?;
+        #[cfg(feature = "remote-wayland")]
+        {
+            let (seamless, may_enter) = {
+                let control = state.wayland_control.lock().unwrap();
+                (
+                    control.seamless_enabled,
+                    control.epoch.is_none()
+                        || control.resumable.as_ref().is_some_and(|session| {
+                            session.phase() == super::resumable_control::Phase::Paused
+                        }),
+                )
+            };
+            if seamless {
+                let active = viewer.drive_wayland_handoff(may_enter)?;
+                state.wayland_control.lock().unwrap().local_handoff_active = active;
+            }
+        }
         {
             let (configured, ended, epoch, activated) = {
                 let mut control = state.wayland_control.lock().unwrap();
@@ -1859,7 +1896,7 @@ fn viewer_loop(
                 if ended {
                     #[cfg(feature = "remote-wayland")]
                     viewer.disable_wayland_control();
-                } else if epoch.is_some() && !activated {
+                } else if epoch.is_some() && !activated && viewer.wayland_handoff_active() {
                     // Do not hold the shared state while a real compositor fence waits.
                     #[cfg(feature = "remote-wayland")]
                     viewer.check_wayland_control(true)?;
@@ -2043,6 +2080,12 @@ fn viewer_loop(
             }
         }
         {
+            {
+                let mut control = state.wayland_control.lock().unwrap();
+                if control.seamless_enabled {
+                    control.local_handoff_active = viewer.wayland_handoff_active();
+                }
+            }
             let check_local = {
                 let control = state.wayland_control.lock().unwrap();
                 control.configured() && !control.ended
@@ -2052,6 +2095,7 @@ fn viewer_loop(
                 viewer.check_wayland_control(false)?;
             }
             let validate_resume = events.is_empty()
+                && viewer.wayland_handoff_active()
                 && state
                     .wayland_control
                     .lock()
@@ -2072,8 +2116,45 @@ fn viewer_loop(
                     .complete_resumable_local_validation(Instant::now())?;
             }
             let mut control = state.wayland_control.lock().unwrap();
+            // Both local protocol fences above may dispatch a late leave. Never
+            // authorize the polled batch using the pre-fence local snapshot.
+            if control.seamless_enabled {
+                control.local_handoff_active = viewer.wayland_handoff_active();
+            }
             control.check(presented_scope, Instant::now())?;
             if control.configured() {
+                if control.seamless_enabled {
+                    let phase = control.resumable.as_ref().map(|session| session.phase());
+                    let transition = if !control.local_handoff_active
+                        && phase == Some(super::resumable_control::Phase::Active)
+                    {
+                        Some(false)
+                    } else if control.local_handoff_active
+                        && events.is_empty()
+                        && control.resumable_resume_proof_ready()
+                    {
+                        Some(true)
+                    } else {
+                        None
+                    };
+                    if let Some(resume) = transition {
+                        #[cfg(feature = "remote-wayland")]
+                        if resume {
+                            viewer.check_wayland_control(true)?;
+                        }
+                        if resume && !viewer.wayland_handoff_active() {
+                            return Err(
+                                invalid_data("local handoff changed during resume fence").into()
+                            );
+                        }
+                        let record = control.resumable_transition(resume, Instant::now())?;
+                        writer.write_message(
+                            MessageKind::WaylandResumableControl,
+                            &record.encode()?,
+                        )?;
+                        writer.flush()?;
+                    }
+                }
                 // Test driver selects only a real production protocol transition.
                 // It cannot forge focus, presentation, native cleanup or ACKs.
                 #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
@@ -2086,8 +2167,7 @@ fn viewer_loop(
                                 && control.resumable_resume_proof_ready())
                         {
                             commands.pop_front();
-                            let record =
-                                control.resumable_test_transition(resume, Instant::now())?;
+                            let record = control.resumable_transition(resume, Instant::now())?;
                             writer.write_message(
                                 MessageKind::WaylandResumableControl,
                                 &record.encode()?,
@@ -2507,6 +2587,9 @@ fn viewer_loop(
             let control_request = if purpose == FramePurpose::NativeProof {
                 let mut control = state.wayland_control.lock().unwrap();
                 control.check(presented_scope, Instant::now())?;
+                if control.seamless_enabled {
+                    control.local_handoff_active = viewer.wayland_handoff_active();
+                }
                 control.presented(
                     super::wayland_control_wire::DrawnScope {
                         source_epoch: presented_scope.0,
@@ -2554,7 +2637,9 @@ fn viewer_loop(
                 };
                 if enabled && purpose == FramePurpose::NativeProof {
                     viewer.wayland_pointer_presented(sequence);
-                    if needs_request || control_request.is_some() {
+                    if (needs_request || control_request.is_some())
+                        && viewer.wayland_handoff_active()
+                    {
                         #[cfg(feature = "remote-wayland")]
                         viewer.check_wayland_control(true)?;
                     }
@@ -2564,6 +2649,12 @@ fn viewer_loop(
                         continue;
                     }
                     if let Some(request) = control_request {
+                        if control.seamless_enabled && !viewer.wayland_handoff_active() {
+                            return Err(invalid_data(
+                                "local handoff changed before one-shot control request",
+                            )
+                            .into());
+                        }
                         writer.write_message(
                             MessageKind::WaylandControlRequest,
                             &request.encode()?,
@@ -6055,6 +6146,7 @@ pub(super) mod tests {
             wayland_pointer: false,
             wayland_control: false,
             resumable_control: false,
+            wayland_seamless_input: false,
             wayland_popup_pointer: false,
             wayland_text: None,
             static_lossless: false,
@@ -8922,6 +9014,7 @@ mod native_viewer_permission_tests {
             wayland_pointer: false,
             wayland_control: false,
             resumable_control: false,
+            wayland_seamless_input: false,
             wayland_popup_pointer: false,
             wayland_text: None,
             static_lossless: false,
@@ -8976,6 +9069,39 @@ mod native_viewer_permission_tests {
             .expect("unsupported seamless input must fail before display I/O");
             assert_eq!(error.to_string(), expected);
         }
+        let mut native_seamless = options.clone();
+        native_seamless.view_only = false;
+        native_seamless.wayland_control = true;
+        native_seamless.resumable_control = true;
+        native_seamless.wayland_seamless_input = true;
+        assert_eq!(
+            validate_viewer_backend(&native_seamless).is_ok(),
+            cfg!(feature = "remote-wayland")
+        );
+        for mutation in 0..7 {
+            let mut invalid = native_seamless.clone();
+            match mutation {
+                0 => invalid.resumable_control = false,
+                1 => invalid.wayland_control = false,
+                2 => invalid.viewer_backend = ViewerBackend::X11,
+                3 => invalid.view_only = true,
+                4 => invalid.clipboard = true,
+                5 => invalid.grab_input = true,
+                _ => invalid.static_lossless = true,
+            }
+            assert!(
+                validate_viewer_backend(&invalid)
+                    .unwrap_err()
+                    .to_string()
+                    .starts_with("native seamless input requires")
+            );
+        }
+        assert_eq!(
+            run_client_reconnecting(native_seamless, 1)
+                .unwrap_err()
+                .to_string(),
+            "automatic reconnect is unavailable for source resize, scoped input leases or the Wayland viewer"
+        );
         let mut popup = options.clone();
         popup.view_only = false;
         popup.wayland_popup_pointer = true;

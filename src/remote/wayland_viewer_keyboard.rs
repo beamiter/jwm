@@ -262,7 +262,7 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for State {
                 }
             }
             wl_keyboard::Event::Enter { surface, keys, .. } => {
-                if keyboard.entered
+                if (keyboard.entered && !state.handoff.expects_focus_enter())
                     || keyboard.surface.as_ref() != Some(&surface)
                     || !keys.is_empty()
                     || keyboard.digest.is_none()
@@ -276,7 +276,16 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for State {
             }
             wl_keyboard::Event::Leave { .. } => {
                 keyboard.focused = false;
-                keyboard.revoke("Wayland keyboard focus left");
+                if state.handoff.expects_focus_exit() {
+                    keyboard.held.clear();
+                    keyboard.events.clear();
+                    keyboard.modifiers_seen = false;
+                    if let Some(map) = keyboard.map_state.as_ref().map(|state| state.get_keymap()) {
+                        keyboard.map_state = Some(xkb::State::new(&map));
+                    }
+                } else {
+                    keyboard.revoke("Wayland keyboard focus left");
+                }
             }
             wl_keyboard::Event::Modifiers {
                 mods_depressed,

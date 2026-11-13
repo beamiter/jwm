@@ -425,6 +425,7 @@ impl Harness {
                 wayland_pointer: true,
                 wayland_control: false,
                 resumable_control: false,
+                wayland_seamless_input: false,
                 wayland_text: None,
                 static_lossless: viewer_lossless,
                 wayland_scroll: viewer_scroll.0,

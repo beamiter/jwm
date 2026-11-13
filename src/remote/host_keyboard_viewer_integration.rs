@@ -164,6 +164,7 @@ fn client_options(
         wayland_pointer: false,
         wayland_control: false,
         resumable_control: false,
+        wayland_seamless_input: false,
         wayland_text: None,
         static_lossless: false,
         wayland_scroll: false,

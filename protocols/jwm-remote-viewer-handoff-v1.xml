@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<protocol name="jwm_remote_viewer_handoff_v1">
+  <copyright>Copyright 2026 JWM contributors. MIT license.</copyright>
+  <interface name="jwm_remote_viewer_handoff_manager_v1" version="1">
+    <description summary="explicit trusted local viewer focus transaction">JWM udev only. No remote authorization is granted. The authenticated viewer must independently obtain both peer permissions and use no more than its original remaining remote lifetime. Sandboxed clients, foreign surfaces and non-toplevel surfaces are denied. One attempt per surface, one live session per seat.</description>
+    <request name="destroy" type="destructor"/>
+    <request name="create"><arg name="id" type="new_id" interface="jwm_remote_viewer_handoff_session_v1"/><arg name="surface" type="object" interface="wl_surface"/><arg name="seat" type="object" interface="wl_seat"/><arg name="ttl_ms" type="uint"/></request>
+  </interface>
+  <interface name="jwm_remote_viewer_handoff_session_v1" version="1">
+    <description summary="nonrenewable surface hover authority">TTL is fixed at creation, 1 through 30000 ms. Sequence starts at one, contiguous and at most 60000. Enter consumes an actual fresh wl_pointer enter serial while physically clean. Transition is emitted before compositor focus changes; active follows actual focus and shortcut inhibition. Exit always releases, including inside the surface, but another entry needs a new pointer enter serial. Exiting while keys are held defers local focus restoration until all physical keys release; no held-key replay. Arbitrary focus loss, lock, unmap, expiry and emergency escape revoke permanently.</description>
+    <request name="destroy" type="destructor"/>
+    <request name="enter"><arg name="sequence" type="uint"/><arg name="serial" type="uint"/></request>
+    <request name="exit"><arg name="sequence" type="uint"/></request>
+    <event name="granted"><arg name="ttl_ms" type="uint"/></event>
+    <event name="transition"><arg name="sequence" type="uint"/><arg name="entering" type="uint"/></event>
+    <event name="active"><arg name="sequence" type="uint"/></event>
+    <event name="inactive"><arg name="sequence" type="uint"/></event>
+    <event name="revoked"><arg name="reason" type="uint" summary="1 denied, 2 lifetime or surface invalid, 3 unexpected focus change, 4 escape, 5 sequence or unclean input"/></event>
+  </interface>
+</protocol>

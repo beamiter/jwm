@@ -95,6 +95,9 @@ pub(super) struct Pointer {
     left_down: bool,
     observed_down: Option<Mapping>,
     mapping: Option<Mapping>,
+    // Last actually displayed image geometry survives a pending frame upload.
+    // It is only hit-test evidence, never a usable remote input proof.
+    displayed_mapping: Option<Mapping>,
     confirmed: Option<u64>,
     frame_events: Vec<ViewerEvent>,
     completed: Vec<ViewerEvent>,
@@ -103,6 +106,29 @@ pub(super) struct Pointer {
 impl Pointer {
     /// Local evidence only: an unfinished Wayland frame is not idle even when
     /// it has not produced a client-visible event. Never synthesize a release.
+    pub(super) fn inside_image(&self) -> bool {
+        self.focused
+            && self
+                .displayed_mapping
+                .zip(self.position)
+                .is_some_and(|(map, (x, y))| map_point(map, x, y).is_some())
+    }
+    pub(super) fn confirm_clean_handoff_enter(&mut self) {
+        self.left_down = false;
+        self.suspend_local_frame();
+    }
+    pub(super) fn suspend_local_frame(&mut self) {
+        self.ready = None;
+        self.observed_down = None;
+        self.frame_events.clear();
+        self.completed.clear();
+        self.frame_started = None;
+        self.scroll = ScrollFrame::default();
+        self.frame_count = 0;
+        self.frame_axis = false;
+        self.frame_button = false;
+        self.discard_frame = false;
+    }
     pub(super) fn repair_busy(&self) -> bool {
         self.requested
             && (self.revoked.is_some()
@@ -226,6 +252,7 @@ impl Pointer {
                 self.scroll = ScrollFrame::default();
             }
             self.mapping = Some(mapping);
+            self.displayed_mapping = Some(mapping);
             self.confirmed = None;
             self.ready = None;
         }
@@ -240,7 +267,11 @@ impl Pointer {
             self.revoke("Wayland pointer stale client presentation confirmation");
         }
     }
+    #[cfg(test)]
     pub(super) fn activation(&mut self, states: &[u8]) {
+        self.activation_for_handoff(states, false);
+    }
+    pub(super) fn activation_for_handoff(&mut self, states: &[u8], expected_exit: bool) {
         if states.len() % 4 != 0 || states.len() > 128 {
             self.revoke("invalid Wayland activation states");
             return;
@@ -249,7 +280,7 @@ impl Pointer {
             u32::from_ne_bytes(bytes.try_into().unwrap())
                 == u32::from(xdg_toplevel::State::Activated)
         });
-        if self.activation_seen && !active {
+        if self.activation_seen && !active && !expected_exit {
             self.revoke("Wayland pointer window deactivated");
         }
         self.activated = active;
@@ -576,6 +607,7 @@ impl Dispatch<wl_pointer::WlPointer, ()> for State {
         }
         if state.control_mode
             && state.keyboard.held_keys()
+            && !(state.handoff.enabled && matches!(&event, wl_pointer::Event::Motion { .. }))
             && matches!(
                 &event,
                 wl_pointer::Event::Motion { .. }
@@ -600,7 +632,7 @@ impl Dispatch<wl_pointer::WlPointer, ()> for State {
                 surface,
                 surface_x,
                 surface_y,
-                ..
+                serial,
             } => {
                 if pointer.entered
                     || pointer.surface.as_ref() != Some(&surface)
@@ -613,12 +645,20 @@ impl Dispatch<wl_pointer::WlPointer, ()> for State {
                 pointer.entered = true;
                 pointer.focused = true;
                 pointer.position = Some((surface_x, surface_y));
+                state.handoff.pointer_enter(serial, pointer.inside_image());
                 // Enter supplies no button snapshot and is not a synthetic motion.
                 pointer.frame_started.get_or_insert_with(Instant::now);
             }
             wl_pointer::Event::Leave { .. } => {
                 pointer.focused = false;
-                pointer.revoke("Wayland pointer left own surface");
+                if state.handoff.enabled {
+                    pointer.entered = false;
+                    pointer.position = None;
+                    pointer.suspend_local_frame();
+                    state.handoff.leave();
+                } else {
+                    pointer.revoke("Wayland pointer left own surface");
+                }
             }
             wl_pointer::Event::Motion {
                 surface_x,
@@ -630,7 +670,10 @@ impl Dispatch<wl_pointer::WlPointer, ()> for State {
                     return;
                 }
                 pointer.position = Some((surface_x, surface_y));
-                pointer.queue(pointer.scoped(Kind::Motion));
+                state.handoff.position(pointer.inside_image());
+                if state.handoff.forwarding() && !state.keyboard.held_keys() {
+                    pointer.queue(pointer.scoped(Kind::Motion));
+                }
             }
             wl_pointer::Event::Button {
                 button: 0x110,
@@ -680,6 +723,21 @@ mod tests {
         pointer.confirm(1);
         pointer
     }
+    #[test]
+    fn pending_upload_invalidates_input_proof_not_displayed_hit_test() {
+        let mut p = pointer();
+        assert!(p.inside_image());
+        p.invalidate_mapping();
+        assert!(p.inside_image());
+        assert!(p.mapping().is_none());
+        assert!(!p.locally_ready());
+        p.position = Some((50.0, 0.0));
+        assert!(!p.inside_image()); // Actual movement into a black bar still exits.
+        p.position = Some((50.0, 40.0));
+        p.focused = false;
+        assert!(!p.inside_image());
+    }
+
     fn scroll_pointer() -> Pointer {
         let mut p = pointer();
         p.scroll_enabled = true;

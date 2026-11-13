@@ -295,9 +295,3 @@ mod tests {
         }
     }
 }
-
-impl Drop for WaylandViewer {
-    fn drop(&mut self) {
-        self.state.popup_live.end();
-    }
-}

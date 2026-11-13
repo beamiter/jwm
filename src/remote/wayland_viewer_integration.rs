@@ -817,6 +817,7 @@ fn actual_wayland_viewer_tcp_ack_waits_for_presented_not_release() {
             wayland_pointer: false,
             wayland_control: false,
             resumable_control: false,
+            wayland_seamless_input: false,
             wayland_text: None,
             static_lossless: false,
             wayland_scroll: false,

@@ -41,6 +41,8 @@ pub mod remote_text_protocol;
 pub mod renderer;
 pub mod sync_ext;
 pub mod terminal_prober;
+#[cfg(any(feature = "remote-wayland", feature = "wayland-backends"))]
+pub mod viewer_handoff_protocol;
 
 pub use jwm::Jwm;
 

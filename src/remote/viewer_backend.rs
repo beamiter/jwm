@@ -404,6 +404,27 @@ impl Viewer {
         }
     }
     #[cfg(feature = "remote-wayland")]
+    pub(super) fn enable_wayland_seamless_input(&mut self) -> RemoteResult<()> {
+        match self {
+            Self::Wayland(v) => v.enable_wayland_seamless_input(),
+            _ => Err("native seamless input requires Wayland".into()),
+        }
+    }
+    #[cfg(feature = "remote-wayland")]
+    pub(super) fn drive_wayland_handoff(&mut self, may_enter: bool) -> RemoteResult<bool> {
+        match self {
+            Self::Wayland(v) => v.drive_wayland_handoff(may_enter),
+            _ => Err("native handoff requires Wayland".into()),
+        }
+    }
+    pub(super) fn wayland_handoff_active(&self) -> bool {
+        match self {
+            #[cfg(feature = "remote-wayland")]
+            Self::Wayland(v) => v.wayland_handoff_active(),
+            _ => true,
+        }
+    }
+    #[cfg(feature = "remote-wayland")]
     pub(super) fn check_wayland_control(&mut self, initial: bool) -> RemoteResult<()> {
         match self {
             Self::X11(_) => Err("combined control requires native Wayland viewer".into()),

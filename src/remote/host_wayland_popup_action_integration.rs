@@ -400,6 +400,7 @@ impl PopupHarness {
                 wayland_popup_pointer: client_permission,
                 wayland_control: false,
                 resumable_control: false,
+                wayland_seamless_input: false,
                 wayland_text: None,
                 static_lossless: false,
                 wayland_scroll: false,

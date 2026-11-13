@@ -10,6 +10,8 @@ pub(crate) use repair::{with_control_lifetime_observer, with_control_repair_obse
 pub(super) struct ClientControl {
     pub(super) repair: ControlRepair,
     pub(super) resumable_enabled: bool,
+    pub(super) seamless_enabled: bool,
+    pub(super) local_handoff_active: bool,
     resume_local_validation_pending: bool,
     pub(super) resumable: Option<crate::remote::resumable_control::ClientSession>,
     latest_decoded: Option<DrawnScope>,
@@ -33,10 +35,11 @@ pub(super) struct ClientControl {
 }
 impl ClientControl {
     pub(super) fn resumable_input_active(&self) -> bool {
-        self.resumable.as_ref().is_none_or(|session| {
-            session.phase() == crate::remote::resumable_control::Phase::Active
-                && !self.resume_local_validation_pending
-        })
+        (!self.seamless_enabled || self.local_handoff_active)
+            && self.resumable.as_ref().is_none_or(|session| {
+                session.phase() == crate::remote::resumable_control::Phase::Active
+                    && !self.resume_local_validation_pending
+            })
     }
     /// Only the main viewer thread may complete the local fence after an ACK.
     /// The receiver thread cannot authorize a previously polled input batch.
@@ -51,6 +54,7 @@ impl ClientControl {
     #[cfg(any(feature = "remote-wayland", test))]
     pub(super) fn complete_resumable_local_validation(&mut self, now: Instant) -> RemoteResult<()> {
         if !self.resume_local_validation_pending
+            || (self.seamless_enabled && !self.local_handoff_active)
             || self.ended
             || !self.held.is_empty()
             || self.left_down
@@ -95,7 +99,6 @@ impl ClientControl {
         self.click = None;
         Ok(())
     }
-    #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
     pub(super) fn resumable_resume_proof_ready(&self) -> bool {
         self.resumable.as_ref().is_some_and(|session| {
             session.phase() == crate::remote::resumable_control::Phase::Paused
@@ -105,8 +108,7 @@ impl ClientControl {
                 && at.elapsed() < super::super::wayland_pointer_wire::FRAME_MAX_AGE
         })
     }
-    #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
-    pub(super) fn resumable_test_transition(
+    pub(super) fn resumable_transition(
         &mut self,
         resume: bool,
         now: Instant,
@@ -190,7 +192,7 @@ impl ClientControl {
         if self.repair_resolve(now).is_err() {
             self.revoke();
         }
-        if self.request.is_none() {
+        if self.request.is_none() && (!self.seamless_enabled || self.local_handoff_active) {
             let request = ControlRequest {
                 scope,
                 keymap_digest: self.digest.unwrap(),

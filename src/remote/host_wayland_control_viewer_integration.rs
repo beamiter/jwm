@@ -277,6 +277,7 @@ type FixtureConfig = (
     FixtureLayout,
     (bool, bool),
     Option<ResumableAckBarrier>,
+    bool, // explicit local JWM seamless input contract
 );
 
 #[derive(Clone, Copy)]
@@ -306,6 +307,9 @@ type RepairObservation = Arc<
 >;
 
 struct Harness {
+    seamless: bool,
+    handoff_suppressed: std::collections::HashSet<u8>,
+    identified_viewer: Option<WlSurface>,
     hold_visual_repair: bool,
     layout: FixtureLayout,
     repair_observation: RepairObservation,
@@ -446,7 +450,13 @@ impl Harness {
             viewer_scroll,
             recipient_version,
             wake_config,
-            (proof_config, FixtureLayout::default(), (false, false), None),
+            (
+                proof_config,
+                FixtureLayout::default(),
+                (false, false),
+                None,
+                false,
+            ),
         )
     }
     fn new_lossless(gl: &mut HeadlessSmithayGles, layout: FixtureLayout) -> Self {
@@ -457,7 +467,7 @@ impl Harness {
             (false, false),
             7,
             None,
-            (None, layout, (false, false), None),
+            (None, layout, (false, false), None, false),
         )
     }
     fn new_resumable(gl: &mut HeadlessSmithayGles, host: bool, viewer: bool) -> Self {
@@ -468,7 +478,39 @@ impl Harness {
             (false, false),
             7,
             None,
-            (None, FixtureLayout::default(), (host, viewer), None),
+            (None, FixtureLayout::default(), (host, viewer), None, false),
+        )
+    }
+    fn new_seamless(gl: &mut HeadlessSmithayGles) -> Self {
+        Self::new_configured(
+            gl,
+            false,
+            (false, false),
+            (false, false),
+            7,
+            None,
+            (None, FixtureLayout::default(), (true, true), None, true),
+        )
+    }
+    fn new_seamless_with_ack_barrier(
+        gl: &mut HeadlessSmithayGles,
+        reached: mpsc::SyncSender<()>,
+        release: mpsc::Receiver<()>,
+    ) -> Self {
+        Self::new_configured(
+            gl,
+            false,
+            (false, false),
+            (false, false),
+            7,
+            None,
+            (
+                None,
+                FixtureLayout::default(),
+                (true, true),
+                Some((reached, release)),
+                true,
+            ),
         )
     }
     fn new_resumable_with_ack_barrier(
@@ -488,6 +530,7 @@ impl Harness {
                 FixtureLayout::default(),
                 (true, true),
                 Some((reached, release)),
+                false,
             ),
         )
     }
@@ -500,9 +543,12 @@ impl Harness {
         wake_config: Option<(bool, Arc<host::InputWakeProbe>)>,
         config: FixtureConfig,
     ) -> Self {
-        let (proof_config, layout, resumable, ack_barrier) = config;
+        let (proof_config, layout, resumable, ack_barrier, seamless) = config;
         let mut native = Server::new();
         let mut local = Server::new();
+        if seamless {
+            crate::backend::wayland_udev::viewer_handoff::init(&local.display.handle());
+        }
         native.state.image_capture_pending =
             Some(init_image_copy_capture(&native.display.handle()));
         local.state.image_capture_pending = Some(init_image_copy_capture(&local.display.handle()));
@@ -642,6 +688,7 @@ impl Harness {
                 wayland_popup_pointer: false,
                 wayland_control: true,
                 resumable_control: resumable.1,
+                wayland_seamless_input: seamless,
                 wayland_text: None,
                 static_lossless: layout.lossless.1,
                 resize_source: None,
@@ -702,6 +749,9 @@ impl Harness {
             let _ = client_tx.send(result);
         });
         Self {
+            seamless,
+            handoff_suppressed: std::collections::HashSet::new(),
+            identified_viewer: None,
             hold_visual_repair: false,
             layout,
             repair_observation,
@@ -764,6 +814,10 @@ impl Harness {
         drawn: bool,
         mut inspect: impl FnMut(&[u8], u64) -> bool,
     ) {
+        if self.seamless {
+            // Exercise the real compositor watchdog, not only socket dispatch.
+            self.local.dispatch_timers(Duration::ZERO);
+        }
         self.native.roundtrip();
         fulfill_test_toplevel_capture(
             &mut gl.renderer,
@@ -787,8 +841,13 @@ impl Harness {
             }
         }
         self.local.roundtrip();
-        if let Some(top) = self.local.state.toplevels.values().next() {
+        if let Some(top) = self.local.state.toplevels.values().find(|top| {
+            self.identified_viewer
+                .as_ref()
+                .is_none_or(|surface| top.wl_surface() == surface)
+        }) {
             let surface = top.wl_surface().clone();
+            self.identified_viewer = Some(surface.clone());
             if self.pointer.is_none() || self.keyboard.is_none() {
                 let owner = surface.client().unwrap();
                 let pointers: Vec<_> = self
@@ -809,7 +868,11 @@ impl Harness {
                     .collect();
                 // Deliver the two initial focuses together, never using an
                 // arbitrary resource belonging to another native client.
-                if pointers.len() == 1 && keyboards.len() == 1 {
+                let handoff_registered = !self.seamless
+                    || crate::backend::wayland_udev::viewer_handoff::registered_for_test(
+                        &self.local.state,
+                    );
+                if pointers.len() == 1 && keyboards.len() == 1 && handoff_registered {
                     assert!(self.pointer.is_none() && self.keyboard.is_none());
                     let p = pointers[0].clone();
                     let k = keyboards[0].clone();
@@ -818,23 +881,29 @@ impl Harness {
                     } else {
                         Vec::new()
                     };
-                    k.enter(1, &surface, held);
-                    k.modifiers(
-                        2,
-                        if self.held_on_enter {
-                            self.shift_mask
-                        } else {
-                            0
-                        },
-                        0,
-                        0,
-                        0,
-                    );
-                    p.enter(3, &surface, 160.0, 120.0);
-                    p.frame();
-                    self.pointer = Some(p);
-                    self.keyboard = Some(k);
-                    self.local.roundtrip();
+                    if self.seamless {
+                        self.pointer = Some(p);
+                        self.keyboard = Some(k);
+                        self.seamless_pointer_focus(true);
+                    } else {
+                        k.enter(1, &surface, held);
+                        k.modifiers(
+                            2,
+                            if self.held_on_enter {
+                                self.shift_mask
+                            } else {
+                                0
+                            },
+                            0,
+                            0,
+                            0,
+                        );
+                        p.enter(3, &surface, 160.0, 120.0);
+                        p.frame();
+                        self.pointer = Some(p);
+                        self.keyboard = Some(k);
+                        self.local.roundtrip();
+                    }
                 } else {
                     assert!(
                         pointers.len() <= 1 && keyboards.len() <= 1,
@@ -911,9 +980,21 @@ impl Harness {
             }
             assert!(
                 Instant::now() < deadline,
-                "{phase}: timed out; recipient={:?}, ready={:?}",
+                "{phase}: timed out; recipient={:?}, ready={:?}, handoff_registered={}, handoff_active={}, local_pointer_focus={:?}, local_keyboard_focus={:?}, native_attempts={}",
                 self.received,
-                self.ready.lock().unwrap()
+                self.ready.lock().unwrap(),
+                crate::backend::wayland_udev::viewer_handoff::registered_for_test(
+                    &self.local.state
+                ),
+                crate::backend::wayland_udev::viewer_handoff::active(&self.local.state),
+                self.local.state.seat.get_pointer().unwrap().current_focus(),
+                self.local
+                    .state
+                    .seat
+                    .get_keyboard()
+                    .unwrap()
+                    .current_focus(),
+                remote_control::attempts_for_test(&self.native.state),
             );
             thread::sleep(Duration::from_millis(1));
         }
@@ -950,7 +1031,62 @@ impl Harness {
         pointer.frame();
         self.local.roundtrip();
     }
+    /// Drive the real seat so the compositor contract sees its focus and serial.
+    /// Never synthesize wl_pointer enter events as proof of native handoff.
+    fn seamless_pointer_focus(&mut self, inside: bool) {
+        let surface = self
+            .identified_viewer
+            .clone()
+            .expect("actual viewer identified");
+        let pointer = self.local.state.seat.get_pointer().unwrap();
+        pointer.motion(
+            &mut self.local.state,
+            inside.then_some((surface, (0.0, 0.0).into())),
+            &MotionEvent {
+                location: (160.0, 120.0).into(),
+                serial: SERIAL_COUNTER.next_serial(),
+                time: InputTime::now(),
+            },
+        );
+        pointer.frame(&mut self.local.state);
+        self.local.roundtrip();
+    }
     fn key(&mut self, serial: u32, code: u32, down: bool) {
+        if self.seamless {
+            use smithay::backend::input::KeyState as NativeKeyState;
+            use smithay::input::keyboard::FilterResult;
+            let native_state = if down {
+                NativeKeyState::Pressed
+            } else {
+                NativeKeyState::Released
+            };
+            let native_serial = SERIAL_COUNTER.next_serial();
+            let time = InputTime::now();
+            // Use the same router as actual udev input, including active
+            // shortcut policy and held-release quarantine. Suppression must
+            // survive across physical press/release calls, just as in udev.
+            if crate::backend::wayland_udev::backend::route_viewer_handoff_keyboard(
+                &mut self.local.state,
+                (code + 8).into(),
+                native_state,
+                native_serial,
+                time,
+                &crate::config::CONFIG.load(),
+                &mut self.handoff_suppressed,
+            )
+            .is_none()
+            {
+                self.local.state.keyboard_input_for_popup(
+                    (code + 8).into(),
+                    native_state,
+                    native_serial,
+                    time,
+                    |_, _, _| FilterResult::Forward,
+                );
+            }
+            self.local.roundtrip();
+            return;
+        }
         let k = self.keyboard.as_ref().unwrap();
         k.key(
             serial,
@@ -1273,6 +1409,11 @@ impl Harness {
             );
             if host_finished
                 && !remote_control::active(&self.native.state)
+                && (!self.seamless
+                    || (!crate::backend::wayland_udev::viewer_handoff::active(&self.local.state)
+                        && !crate::backend::wayland_udev::viewer_handoff::inhibits(
+                            &self.local.state,
+                        )))
                 && self.received.keys == expected_keys
             {
                 break;
@@ -1811,3 +1952,6 @@ mod lossless_integration;
 
 #[path = "host_wayland_resumable_control_integration.rs"]
 mod resumable_integration;
+
+#[path = "host_wayland_seamless_control_integration.rs"]
+mod seamless_integration;

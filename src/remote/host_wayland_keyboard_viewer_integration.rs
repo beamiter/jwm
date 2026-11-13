@@ -234,6 +234,7 @@ fn actual_wayland_keyboard_viewer_tcp_requires_presented_and_targets_only_origin
             wayland_pointer: false,
             wayland_control: false,
             resumable_control: false,
+            wayland_seamless_input: false,
             wayland_text: None,
             static_lossless: false,
             wayland_scroll: false,

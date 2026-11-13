@@ -1,10 +1,43 @@
 # Native Wayland seamless input: integration contract
 
-Status: experimental protocol/native foundation, not a complete seamless viewer.
-`--seamless-input` still requires an X11 viewer, and its native Wayland requests
-fail before display or network I/O. Existing CLI control remains one-shot. The
-resumable mode is an explicit programmatic opt-in on both endpoints; no new CLI
-flag, hover-to-focus policy or shortcut inhibition is enabled.
+Status: experimental JWM-udev-only programmatic vertical slice, not general
+Wayland seamless input. `--seamless-input` remains X11-only. CLI constructors
+keep native seamless/resumable options off; no new user-facing flag is enabled.
+The native path requires `ClientOptions.wayland_seamless_input`, explicit
+resumable combined control on both peers, and the JWM local handoff protocol.
+Nested JWM backends and other compositors do not advertise this contract.
+
+## Local compositor handoff contract
+
+`jwm_remote_viewer_handoff_v1` creates one explicitly requested session for the
+viewer's own normal toplevel and seat. Sandboxed/foreign surfaces are denied.
+It grants no remote authority. Its at-most-30-second fixed lifetime starts
+before the first remote control request and can only end earlier, never extend the remote lease.
+
+Entry consumes a fresh real `wl_pointer.enter` serial, requires clean physical
+keys/buttons, and brackets the focus change with an ordered transition and
+active acknowledgement. Only then may the client request/restore remote input,
+and remote resume still needs its separate release ACK and fresh presented proof.
+A leave, black-bar crossing or pending-exit latch stops local forwarding at once.
+The local exit transaction removes shortcut inhibition and restores the previous
+focus only when physical keys are clean. Held-key exit quarantines key edges until
+release, rather than replaying the held chord into a local application.
+
+The v1 entry token is surface-based. An exit inside the surface (including black
+bars) releases authority, but a subsequent resume needs a complete surface exit
+and new entry. It does not support black-bar-only back-and-forth re-entry. The
+pointer is never confined. Configured lock-screen/lock-monitor shortcuts and the
+fixed Ctrl+Super+F12 emergency chord remain local; emergency release is terminal,
+not a grant that can be restored by hovering. Unrelated focus loss, lock, surface
+or geometry changes, deadline expiry, malformed transitions and disconnection
+are terminal. Existing input restrictions, including no drag/modifier-click,
+remain unchanged. The local gate covers keyboard shortcuts, not a global mouse
+grab: compositor modifier+mouse bindings are not suppressed by this slice and
+may safely terminate the session through the resulting focus/geometry change.
+
+This is a software-rendered, owned-protocol test target. It is not evidence of
+physical mouse/keyboard/GPU acceptance on a live desktop. Such acceptance and a
+reviewed CLI opt-in remain separate release gates.
 
 ## Implemented protocol slice
 
@@ -32,18 +65,16 @@ flag, hover-to-focus policy or shortcut inhibition is enabled.
   confirmation. Resume requires the exact current proof and a native frame
   completed after pause; stale input/proofs cannot cross the transition.
 
-The owned integration test drives pause/resume through a test-only command
-queue, but uses the real production client writer, authenticated TCP, host,
-Wayland v4 adapter and native recipient. Actual received ACKs are observed, not
-fabricated. The normal viewer still permanently revokes on surface/focus loss;
-this slice does not make crossing a window edge resumable. Local input is still
-polled while paused so local releases can clear physical held state without
-sending duplicate releases to the already-cleaned remote recipient.
+The original resumable integration fixture drives lifecycle transitions through
+a test-only queue but uses production authenticated TCP and native release ACKs.
+The seamless fixture instead drives actual compositor seat pointer/key events
+through the production local handoff route. It does not fabricate grants or use
+the lifecycle command queue. The ordinary one-shot path still revokes on leave.
 
-Run the pure wire/state tests with the `remote-x11` profile and the actual native
-and TCP integration tests with `remote-wayland,backend-wayland-udev` plus strict
-headless GL. Headless protocol/recipient checks do not certify physical pointer
-crossing or compositor shortcut routing.
+Run pure wire/state tests with `remote-x11`, and native/TCP integration tests
+with `remote-wayland,backend-wayland-udev` and strict headless GL. Keep the native
+key-routing assertions separate from TCP tests: observing an inhibitor boolean
+alone is not proof that a compositor shortcut was withheld or delivered.
 
 ## Why this is a distinct protocol feature
 
@@ -69,7 +100,8 @@ Target an explicitly opted-in JWM viewer compositor and JWM host first. Do not
 promise hover-to-keyboard-focus on arbitrary Wayland compositors: a normal client
 cannot force keyboard focus merely because its pointer entered a surface.
 Keyboard-shortcuts inhibition does not itself grant focus or remote permission.
-The viewer currently has no shortcuts-inhibit client integration.
+The experimental JWM-local transaction supplies a dedicated inhibition gate;
+it does not reinterpret generic shortcut-inhibit permission as a focus grant.
 
 A future opt-in must explain that entering the remote image can redirect typing.
 It must negotiate a new resumable-control capability with both endpoints. Old
@@ -102,7 +134,7 @@ terminate. The host must release held keys/buttons as part of pause before it
 acknowledges. If that acknowledgement fails or times out, terminate locally and
 close the session so existing host teardown releases authority.
 
-## Remaining integration and original implementation order
+## Original implementation order and remaining release gates
 
 1. Negotiate a separate versioned capability and explicit permission. Define
    pause/resume messages with session ID, monotonically increasing input

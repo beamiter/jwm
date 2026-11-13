@@ -610,6 +610,7 @@ pub struct JwmWaylandState {
     /// when the window is retired (see `retire_window_geometry`).
     pub(crate) remote_pointer: crate::backend::wayland_udev::remote_pointer::RemotePointerState,
     pub(crate) remote_text: crate::backend::wayland_udev::remote_text::RemoteTextState,
+    pub(crate) viewer_handoff: crate::backend::wayland_udev::viewer_handoff::HandoffState,
     pub(crate) remote_control: crate::backend::wayland_udev::remote_control::RemoteControlState,
     pub(crate) remote_popup: crate::backend::wayland_udev::remote_popup::RemotePopupState,
     pub(crate) remote_keyboard: crate::backend::wayland_udev::remote_keyboard::RemoteKeyboardState,
@@ -3730,6 +3731,7 @@ impl JwmWaylandState {
                 toplevel_capture_sessions: HashMap::new(),
                 toplevel_capture_authorities: Default::default(),
                 remote_control: Default::default(),
+                viewer_handoff: Default::default(),
                 remote_popup: Default::default(),
                 remote_text: Default::default(),
                 remote_keyboard: Default::default(),
@@ -5132,6 +5134,7 @@ impl SeatHandler for JwmWaylandState {
     }
 
     fn focus_changed(&mut self, seat: &Seat<Self>, focused: Option<&Self::KeyboardFocus>) {
+        crate::backend::wayland_udev::viewer_handoff::focus_changed(self, focused);
         crate::backend::wayland_udev::remote_keyboard::focus_changed(self);
         for delivery in self.virtual_keyboards.values_mut() {
             delivery.clear_held();

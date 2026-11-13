@@ -1534,6 +1534,7 @@ fn run(command: Command) -> RemoteResult<()> {
                     wayland_pointer,
                     wayland_control,
                     resumable_control: false,
+                    wayland_seamless_input: false,
                     wayland_popup_pointer,
                     static_lossless,
                     wayland_text: if wayland_text_stdin {

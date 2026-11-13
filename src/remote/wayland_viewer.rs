@@ -24,6 +24,8 @@ use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_ba
 
 #[path = "wayland_viewer_damage.rs"]
 mod damage;
+#[path = "wayland_viewer_handoff.rs"]
+mod handoff;
 #[path = "wayland_viewer_keyboard.rs"]
 mod keyboard;
 #[path = "wayland_viewer_pointer.rs"]
@@ -333,6 +335,12 @@ impl State {
             self.control_events.clear();
             return;
         }
+        if !self.handoff.forwarding() {
+            self.keyboard.take_events();
+            self.pointer.take_events();
+            self.control_events.clear();
+            return;
+        }
         self.control_events.extend(self.keyboard.take_events());
         let pointer_events = self.pointer.take_events();
         if pointer_events.iter().any(|event| {
@@ -363,6 +371,7 @@ struct State {
     #[cfg(all(test, feature = "backend-wayland-udev"))]
     popup_live: std::sync::Arc<popup_presentation::Live>,
     control_mode: bool,
+    handoff: handoff::Handoff,
     control_events: Vec<ViewerEvent>,
     pointer: pointer::Pointer,
     keyboard: keyboard::Keyboard,
@@ -387,7 +396,8 @@ struct State {
     failure: Option<String>,
 }
 impl State {
-    fn check(&self) -> RemoteResult<()> {
+    fn check(&mut self) -> RemoteResult<()> {
+        self.handoff.check()?;
         if let Some(error) = &self.failure {
             return Err(error.clone().into());
         }
@@ -506,6 +516,7 @@ impl WaylandViewer {
             popup_live: std::sync::Arc::new(popup_presentation::Live::default()),
             control_mode: false,
             control_events: Vec::new(),
+            handoff: handoff::Handoff::default(),
             pointer: pointer::Pointer::default(),
             keyboard: keyboard::Keyboard::default(),
             compositor: None,
@@ -706,7 +717,8 @@ impl WaylandViewer {
         self.state.control_collect();
         self.state.keyboard.check()?;
         if initial
-            && (!self.state.keyboard.clean_ready()
+            && (!self.state.handoff.forwarding()
+                || !self.state.keyboard.clean_ready()
                 || !self.state.pointer.locally_ready()
                 || self.state.control_events.iter().any(|event| {
                     matches!(
@@ -724,6 +736,9 @@ impl WaylandViewer {
         Ok(())
     }
     pub(super) fn disable_wayland_control(&mut self) {
+        if self.state.handoff.enabled {
+            self.state.handoff.fail("local control disabled");
+        }
         self.state
             .keyboard
             .revoke("Wayland control permanently disabled");
@@ -1473,6 +1488,11 @@ impl Dispatch<wl_registry::WlRegistry, ()> for State {
                 version,
             } => {
                 match interface.as_str() {
+                    "jwm_remote_viewer_handoff_manager_v1" if state.handoff.manager.is_none() => {
+                        state.handoff.manager = Some(registry.bind(name, version.min(1), qh, ()));
+                        state.handoff.global = Some(name);
+                        return;
+                    }
                     "wl_seat" => {
                         state
                             .pointer
@@ -1501,6 +1521,9 @@ impl Dispatch<wl_registry::WlRegistry, ()> for State {
                 }
             }
             wl_registry::Event::GlobalRemove { name } => {
+                if state.handoff.global == Some(name) && state.handoff.enabled {
+                    state.handoff.fail("local handoff global removed");
+                }
                 if state.keyboard.seats.iter().any(|(id, _)| *id == name) {
                     state.pointer.revoke("Wayland pointer seat removed");
                 }
@@ -1561,7 +1584,9 @@ impl Dispatch<xdg_toplevel::XdgToplevel, ()> for State {
             } => {
                 #[cfg(all(test, feature = "backend-wayland-udev"))]
                 state.popup_live.invalidate();
-                state.pointer.activation(&states);
+                state
+                    .pointer
+                    .activation_for_handoff(&states, state.handoff.expects_focus_exit());
                 if state.pointer.requested
                     && state.configured
                     && ((width != 0 && width != i32::from(state.width))

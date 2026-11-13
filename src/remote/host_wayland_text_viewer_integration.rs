@@ -272,6 +272,7 @@ fn exercise(
             wayland_pointer: false,
             wayland_control: false,
             resumable_control: false,
+            wayland_seamless_input: false,
             static_lossless: false,
             wayland_scroll: false,
             wayland_horizontal_scroll: false,

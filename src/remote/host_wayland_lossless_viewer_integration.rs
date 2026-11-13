@@ -382,6 +382,7 @@ fn exercise_workload(host_permission: bool, client_permission: bool, blinking: b
             wayland_pointer: false,
             wayland_control: false,
             resumable_control: false,
+            wayland_seamless_input: false,
             wayland_scroll: false,
             wayland_horizontal_scroll: false,
             wayland_popup_pointer: false,

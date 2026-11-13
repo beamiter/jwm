@@ -30,6 +30,7 @@ pub(crate) mod remote_control;
 pub(crate) mod remote_keyboard;
 pub(crate) mod remote_pointer;
 pub(crate) mod remote_text;
+pub(crate) mod viewer_handoff;
 
 pub mod gamma_control;
 

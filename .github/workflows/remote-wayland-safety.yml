@@ -250,6 +250,17 @@ jobs:
         run: |
           export XDG_RUNTIME_DIR="$(mktemp -d)"
           cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib remote_control -- --test-threads=1 --nocapture
+      - name: Explicit JWM local handoff and real seamless TCP safety
+        run: |
+          set -euo pipefail
+          export XDG_RUNTIME_DIR="$(mktemp -d)"
+          for filter in 'handoff' 'seamless_integration'; do
+            listed="$(env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --list)"
+            test "$(printf '%s\n' "$listed" | grep -c ': test$' || true)" -ge 3
+            ignored="$(env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --ignored --list)"
+            test "$(printf '%s\n' "$ignored" | grep -c ': test$' || true)" -eq 0
+            env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --test-threads=1 --nocapture
+          done
       - name: Explicit unified control plus lossless proof and recipient safety
         run: |
           set -euo pipefail
