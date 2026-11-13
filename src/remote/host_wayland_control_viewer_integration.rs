@@ -70,6 +70,7 @@ fn options(scroll: bool, horizontal_scroll: bool) -> host::HostOptions {
         allow_wayland_horizontal_scroll: horizontal_scroll,
         allow_wayland_popup_pointer: false,
         allow_wayland_control: true,
+        allow_resumable_control: false,
         allow_wayland_text: false,
         allow_static_lossless: false,
         scroll_copy: false,
@@ -270,6 +271,13 @@ impl Readback {
     }
 }
 type ProofFixtureConfig = Option<(bool, bool, bool, Arc<host::ProofDeltaProbe>)>;
+type ResumableAckBarrier = (mpsc::SyncSender<()>, mpsc::Receiver<()>);
+type FixtureConfig = (
+    ProofFixtureConfig,
+    FixtureLayout,
+    (bool, bool),
+    Option<ResumableAckBarrier>,
+);
 
 #[derive(Clone, Copy)]
 struct FixtureLayout {
@@ -302,6 +310,8 @@ struct Harness {
     layout: FixtureLayout,
     repair_observation: RepairObservation,
     control_lifetime: Arc<Mutex<Option<(Instant, Instant)>>>,
+    resumable_commands: Arc<Mutex<std::collections::VecDeque<bool>>>,
+    resumable_acks: Arc<Mutex<Vec<crate::remote::resumable_control::Record>>>,
     purposes: Arc<Mutex<Vec<(u64, crate::remote::source_wire::FramePurpose)>>>,
     native: Server,
     local: Server,
@@ -436,7 +446,7 @@ impl Harness {
             viewer_scroll,
             recipient_version,
             wake_config,
-            (proof_config, FixtureLayout::default()),
+            (proof_config, FixtureLayout::default(), (false, false), None),
         )
     }
     fn new_lossless(gl: &mut HeadlessSmithayGles, layout: FixtureLayout) -> Self {
@@ -447,7 +457,38 @@ impl Harness {
             (false, false),
             7,
             None,
-            (None, layout),
+            (None, layout, (false, false), None),
+        )
+    }
+    fn new_resumable(gl: &mut HeadlessSmithayGles, host: bool, viewer: bool) -> Self {
+        Self::new_configured(
+            gl,
+            false,
+            (false, false),
+            (false, false),
+            7,
+            None,
+            (None, FixtureLayout::default(), (host, viewer), None),
+        )
+    }
+    fn new_resumable_with_ack_barrier(
+        gl: &mut HeadlessSmithayGles,
+        reached: mpsc::SyncSender<()>,
+        release: mpsc::Receiver<()>,
+    ) -> Self {
+        Self::new_configured(
+            gl,
+            false,
+            (false, false),
+            (false, false),
+            7,
+            None,
+            (
+                None,
+                FixtureLayout::default(),
+                (true, true),
+                Some((reached, release)),
+            ),
         )
     }
     fn new_configured(
@@ -457,9 +498,9 @@ impl Harness {
         viewer_scroll: (bool, bool),
         recipient_version: u32,
         wake_config: Option<(bool, Arc<host::InputWakeProbe>)>,
-        config: (ProofFixtureConfig, FixtureLayout),
+        config: FixtureConfig,
     ) -> Self {
-        let (proof_config, layout) = config;
+        let (proof_config, layout, resumable, ack_barrier) = config;
         let mut native = Server::new();
         let mut local = Server::new();
         native.state.image_capture_pending =
@@ -512,6 +553,7 @@ impl Harness {
                 let peer = host::authenticate_peer(stream, &KEY)?;
                 let mut opts = options(host_scroll.0, host_scroll.1);
                 opts.allow_static_lossless = layout.lossless.0;
+                opts.allow_resumable_control = resumable.0;
                 host::serve_authenticated(
                     peer,
                     &opts,
@@ -584,6 +626,10 @@ impl Harness {
         let frame_observer = frames.clone();
         let scroll_frames = Arc::new(AtomicU64::new(0));
         let scroll_observer = scroll_frames.clone();
+        let resumable_commands = Arc::new(Mutex::new(std::collections::VecDeque::new()));
+        let client_commands = resumable_commands.clone();
+        let resumable_acks = Arc::new(Mutex::new(Vec::new()));
+        let client_acks = resumable_acks.clone();
         let (client_tx, client_done) = mpsc::channel();
         let client = thread::spawn(move || {
             let opts = ClientOptions {
@@ -595,6 +641,7 @@ impl Harness {
                 wayland_horizontal_scroll: viewer_scroll.1,
                 wayland_popup_pointer: false,
                 wayland_control: true,
+                resumable_control: resumable.1,
                 wayland_text: None,
                 static_lossless: layout.lossless.1,
                 resize_source: None,
@@ -632,7 +679,15 @@ impl Harness {
                                             observed_lifetime,
                                             || {
                                                 with_wayland_test_stream(stream, || {
-                                                    run_client(opts)
+                                                    crate::remote::client::with_resumable_control_test_driver(
+                                                        client_commands, client_acks, || {
+                                                            let run = || run_client(opts);
+                                                            match ack_barrier {
+                                                                Some((reached, release)) => crate::remote::client::with_resumable_control_ack_barrier(reached, release, run),
+                                                                None => run(),
+                                                            }
+                                                        },
+                                                    )
                                                 })
                                             },
                                         )
@@ -651,6 +706,8 @@ impl Harness {
             layout,
             repair_observation,
             control_lifetime,
+            resumable_commands,
+            resumable_acks,
             purposes,
             native,
             local,
@@ -845,7 +902,10 @@ impl Harness {
         while !done(self) {
             self.tick(gl, drawn);
             match self.client_done.try_recv() {
-                Ok(r) => panic!("{phase}: viewer ended prematurely: {r:?}"),
+                Ok(r) => {
+                    let host = self.host_done.try_recv();
+                    panic!("{phase}: viewer ended prematurely: {r:?}; host result: {host:?}");
+                }
                 Err(mpsc::TryRecvError::Disconnected) => panic!("{phase}: viewer worker panicked"),
                 Err(mpsc::TryRecvError::Empty) => {}
             }
@@ -1748,3 +1808,6 @@ mod latency_benchmark;
 
 #[path = "host_wayland_control_lossless_integration.rs"]
 mod lossless_integration;
+
+#[path = "host_wayland_resumable_control_integration.rs"]
+mod resumable_integration;

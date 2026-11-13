@@ -125,6 +125,8 @@ pub struct StreamCapabilities {
     pub static_lossless: bool,
     /// Explicit single combined authority, never inferred from old flags.
     pub wayland_control: bool,
+    /// Explicit version-1 resumable protocol opt-in; never implied by control.
+    pub resumable_control: bool,
     pub wayland_text: bool,
     pub wayland_popup_pointer: bool,
 }
@@ -181,7 +183,7 @@ impl StreamCapabilities {
         payload[28] =
             u8::from(self.wayland_scroll) | (u8::from(self.wayland_horizontal_scroll) << 1);
         payload[29] = u8::from(self.scroll_copy);
-        payload[30] = u8::from(self.wayland_control);
+        payload[30] = u8::from(self.wayland_control) | (u8::from(self.resumable_control) << 1);
         payload[31] = u8::from(self.wayland_text);
         payload[32] = u8::from(self.static_lossless);
         payload[33] = u8::from(self.wayland_popup_pointer);
@@ -214,14 +216,16 @@ impl StreamCapabilities {
             || payload[31] > 1
             || (payload[31] == 1 && payload[23..29].iter().any(|b| *b != 0))
             || (payload[31] == 1 && payload[30] != 0)
-            || payload[30] > 1
-            || (payload[30] == 1
+            || !matches!(payload[30], 0 | 1 | 3)
+            || (payload[30] == 3 && payload[32] != 0)
+            || (payload[30] & 1 == 1
                 && (payload[25] != 0
                     || payload[26] != 0
                     || payload[27] != 0
                     || payload[23] != 0
                     || payload[24] != 0))
-            || (payload[28] != 0 && (payload[26] == 1 || (payload[27] != 1 && payload[30] != 1)))
+            || (payload[28] != 0
+                && (payload[26] == 1 || (payload[27] != 1 && payload[30] & 1 != 1)))
             || (payload[26] == 1 && payload[27] == 1)
             || (payload[23] == 0) != (payload[24] == 0)
         {
@@ -246,11 +250,25 @@ impl StreamCapabilities {
             wayland_horizontal_scroll: payload[28] & 2 != 0,
             scroll_copy: payload[29] == 1,
             static_lossless: payload[32] == 1,
-            wayland_control: payload[30] == 1,
+            wayland_control: payload[30] & 1 != 0,
+            resumable_control: payload[30] & 2 != 0,
             wayland_text: payload[31] == 1,
             wayland_popup_pointer: payload[33] == 1,
             ..Self::default()
         })
+    }
+
+    /// Version-one resumption is never inferred from an ordinary control grant.
+    /// Refuse a requested-but-unavailable mode rather than silently downgrade.
+    pub fn negotiate_resumable_control(self, host_enabled: bool) -> RemoteResult<bool> {
+        if self.resumable_control
+            && (!self.wayland_control || self.static_lossless || !host_enabled)
+        {
+            return Err(
+                invalid_data("resumable control requires both explicit permissions").into(),
+            );
+        }
+        Ok(self.resumable_control)
     }
 
     /// Video codec extension requires host opt-in and peer decoder support.
@@ -1731,9 +1749,54 @@ mod scroll_copy_capability_tests {
 mod control_capability_tests {
     use super::*;
     #[test]
+    fn resumable_control_is_explicit_version_one_and_cannot_downgrade() {
+        for host in [false, true] {
+            for peer in [false, true] {
+                let caps = StreamCapabilities {
+                    wayland_control: true,
+                    resumable_control: peer,
+                    ..Default::default()
+                };
+                assert_eq!(StreamCapabilities::decode(&caps.encode()).unwrap(), caps);
+                match caps.negotiate_resumable_control(host) {
+                    Ok(enabled) => assert_eq!(enabled, host && peer),
+                    Err(_) => assert!(peer && !host),
+                }
+            }
+        }
+        let caps = StreamCapabilities {
+            wayland_control: true,
+            resumable_control: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            caps.encode()[30],
+            3,
+            "old peers reject the new version bit rather than interpreting a one-shot grant"
+        );
+        for bad in [
+            StreamCapabilities {
+                wayland_control: false,
+                ..caps
+            },
+            StreamCapabilities {
+                static_lossless: true,
+                ..caps
+            },
+        ] {
+            assert!(StreamCapabilities::decode(&bad.encode()).is_err());
+            assert!(bad.negotiate_resumable_control(true).is_err());
+        }
+        for flags in [FLAG_POINTER, FLAG_KEYBOARD, FLAG_CLIPBOARD] {
+            assert!(ServerHello::decode(&encode_hello(flags, caps)).is_err());
+        }
+    }
+
+    #[test]
     fn control_is_explicit_bounded_boolean_and_excludes_old_permissions() {
         let caps = StreamCapabilities {
             wayland_control: true,
+            resumable_control: false,
             ..Default::default()
         };
         let bytes = caps.encode();

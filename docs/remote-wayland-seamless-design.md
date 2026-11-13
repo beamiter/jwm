@@ -1,9 +1,49 @@
 # Native Wayland seamless input: integration contract
 
-Status: design, not an enabled feature. `--seamless-input` still requires an
-X11 viewer. Native Wayland requests fail before display or network I/O. The
-concrete viewer factory also rejects them rather than silently dropping the
-option. Existing one-shot native permissions are unchanged.
+Status: experimental protocol/native foundation, not a complete seamless viewer.
+`--seamless-input` still requires an X11 viewer, and its native Wayland requests
+fail before display or network I/O. Existing CLI control remains one-shot. The
+resumable mode is an explicit programmatic opt-in on both endpoints; no new CLI
+flag, hover-to-focus policy or shortcut inhibition is enabled.
+
+## Implemented protocol slice
+
+- `ClientOptions.resumable_control` and `HostOptions.allow_resumable_control`
+  must both be true, alongside existing combined-control permission. Defaults
+  and every CLI constructor remain false. Static-lossless repair is excluded
+  until its phase cancellation has a separate proved acknowledgement.
+- Stream byte 30 is a bitfield: ordinary combined control is `1`, version-one
+  resumable combined control is `3`; `2` is invalid. Old peers reject `3`, and a
+  new peer refuses an unavailable requested mode instead of downgrading.
+- Authenticated message kind 53 carries an exact version-one record: 56-byte
+  lifecycle or 104-byte action envelope. Every action binds the native session,
+  source/geometry epochs, generation and global sequence; the inner legacy
+  action fields must agree. Untagged actions are rejected in this mode.
+- Native manager/lease v4 adds explicit `create_resumable_lease`, `pause` and
+  `resume`. Using an old creation request on a v4 object still creates a one-shot
+  lease. Pause applies native keyboard cleanup and balances held XKB keys before
+  emitting `paused`; the adapter waits for that event before the TCP ACK.
+- Pause/resume consume the same monotonically increasing sequence as input;
+  resume increments generation. No new lease is created, no absolute deadline
+  is moved, and failure/revocation cannot return to a live state.
+- While paused, captured/presented proof announcements may continue. A
+  `PointerReady` record is only proof availability, **not input authority**:
+  both client and host session gates reject forwarding until matching resume
+  confirmation. Resume requires the exact current proof and a native frame
+  completed after pause; stale input/proofs cannot cross the transition.
+
+The owned integration test drives pause/resume through a test-only command
+queue, but uses the real production client writer, authenticated TCP, host,
+Wayland v4 adapter and native recipient. Actual received ACKs are observed, not
+fabricated. The normal viewer still permanently revokes on surface/focus loss;
+this slice does not make crossing a window edge resumable. Local input is still
+polled while paused so local releases can clear physical held state without
+sending duplicate releases to the already-cleaned remote recipient.
+
+Run the pure wire/state tests with the `remote-x11` profile and the actual native
+and TCP integration tests with `remote-wayland,backend-wayland-udev` plus strict
+headless GL. Headless protocol/recipient checks do not certify physical pointer
+crossing or compositor shortcut routing.
 
 ## Why this is a distinct protocol feature
 
@@ -62,7 +102,7 @@ terminate. The host must release held keys/buttons as part of pause before it
 acknowledges. If that acknowledgement fails or times out, terminate locally and
 close the session so existing host teardown releases authority.
 
-## Required wiring, in order
+## Remaining integration and original implementation order
 
 1. Negotiate a separate versioned capability and explicit permission. Define
    pause/resume messages with session ID, monotonically increasing input

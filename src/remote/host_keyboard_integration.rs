@@ -72,6 +72,7 @@ fn options(case: Case) -> HostOptions {
         allow_wayland_keyboard: true,
         allow_wayland_pointer: false,
         allow_wayland_control: false,
+        allow_resumable_control: false,
         allow_wayland_text: false,
         allow_static_lossless: matches!(case, Case::RepairReRequest),
         allow_wayland_scroll: false,

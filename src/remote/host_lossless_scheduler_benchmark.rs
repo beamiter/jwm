@@ -256,6 +256,7 @@ fn run_session_workload(arm: &str, report: &mut Value, continuous: bool, feedbac
             static_lossless: enabled,
             wayland_pointer: false,
             wayland_control: false,
+            resumable_control: false,
             wayland_scroll: false,
             wayland_horizontal_scroll: false,
             wayland_popup_pointer: false,

@@ -922,6 +922,10 @@ impl WaylandViewer {
     }
     /// Read-only local state after polling. Pending releases remain queued and
     /// unfinished device frames retain their original timeout.
+    #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+    pub(super) fn wayland_control_clean_for_resume(&self) -> bool {
+        self.state.keyboard.clean_ready() && !self.wayland_control_repair_busy()
+    }
     pub(super) fn wayland_control_repair_busy(&self) -> bool {
         self.state.control_mode
             && (self.state.closed

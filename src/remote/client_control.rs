@@ -9,6 +9,9 @@ pub(crate) use repair::{with_control_lifetime_observer, with_control_repair_obse
 #[derive(Default)]
 pub(super) struct ClientControl {
     pub(super) repair: ControlRepair,
+    pub(super) resumable_enabled: bool,
+    resume_local_validation_pending: bool,
+    pub(super) resumable: Option<crate::remote::resumable_control::ClientSession>,
     latest_decoded: Option<DrawnScope>,
     receipts: std::collections::VecDeque<(DrawnScope, bool)>,
     pub(super) scroll_enabled: bool,
@@ -29,18 +32,126 @@ pub(super) struct ClientControl {
     click: Option<(DrawnScope, i16, i16, Instant)>,
 }
 impl ClientControl {
+    pub(super) fn resumable_input_active(&self) -> bool {
+        self.resumable.as_ref().is_none_or(|session| {
+            session.phase() == crate::remote::resumable_control::Phase::Active
+                && !self.resume_local_validation_pending
+        })
+    }
+    /// Only the main viewer thread may complete the local fence after an ACK.
+    /// The receiver thread cannot authorize a previously polled input batch.
+    pub(super) fn active_input_generation(&self) -> Option<u64> {
+        self.resumable.as_ref().and_then(|session| {
+            (self.resumable_input_active() && !self.ended).then(|| session.generation())
+        })
+    }
+    pub(super) fn resumable_local_validation_pending(&self) -> bool {
+        self.resume_local_validation_pending && !self.ended
+    }
+    #[cfg(any(feature = "remote-wayland", test))]
+    pub(super) fn complete_resumable_local_validation(&mut self, now: Instant) -> RemoteResult<()> {
+        if !self.resume_local_validation_pending
+            || self.ended
+            || !self.held.is_empty()
+            || self.left_down
+            || self.click.is_some()
+            || self.resumable.as_ref().is_none_or(|session| {
+                session.phase() != crate::remote::resumable_control::Phase::Active
+            })
+        {
+            self.revoke();
+            return Err(
+                invalid_data("resumable local validation lacks clean pending state").into(),
+            );
+        }
+        if let Err(error) = self.resumable.as_mut().unwrap().check(now) {
+            self.revoke();
+            return Err(error.into());
+        }
+        self.resume_local_validation_pending = false;
+        Ok(())
+    }
+    pub(super) fn receive_resumable_ack(
+        &mut self,
+        record: crate::remote::resumable_control::Record,
+        now: Instant,
+    ) -> RemoteResult<()> {
+        let session = self
+            .resumable
+            .as_mut()
+            .ok_or_else(|| invalid_data("unnegotiated resumable control response"))?;
+        session.receive_ack(record, now)?;
+        self.resume_local_validation_pending =
+            record.kind == crate::remote::resumable_control::Kind::Resumed;
+        self.sequence = record.sequence;
+        self.held.clear();
+        // Native pause released every delivered input. A local mouse-up may
+        // have been intentionally discarded while paused; do not retain its
+        // old logical click/drag candidate after acknowledging that cleanup.
+        // The viewer's physical held state remains untouched and independently
+        // gates local resume validation.
+        self.left_down = false;
+        self.ready = None;
+        self.click = None;
+        Ok(())
+    }
+    #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+    pub(super) fn resumable_resume_proof_ready(&self) -> bool {
+        self.resumable.as_ref().is_some_and(|session| {
+            session.phase() == crate::remote::resumable_control::Phase::Paused
+        }) && self.presented.is_some_and(|(scope, at)| {
+            self.ready == Some(scope)
+                && self.latest_decoded.is_none_or(|decoded| decoded == scope)
+                && at.elapsed() < super::super::wayland_pointer_wire::FRAME_MAX_AGE
+        })
+    }
+    #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+    pub(super) fn resumable_test_transition(
+        &mut self,
+        resume: bool,
+        now: Instant,
+    ) -> RemoteResult<crate::remote::resumable_control::Record> {
+        let record = if resume {
+            let (scope, at) = self
+                .presented
+                .ok_or_else(|| invalid_data("resume without presentation"))?;
+            if self.ready != Some(scope)
+                || at.elapsed() >= super::super::wayland_pointer_wire::FRAME_MAX_AGE
+                || self.latest_decoded.is_some_and(|decoded| decoded != scope)
+            {
+                return Err(invalid_data("resume without fresh current presentation").into());
+            }
+            self.resumable
+                .as_mut()
+                .ok_or_else(|| invalid_data("resume before grant"))?
+                .begin_resume(scope.frame_sequence, now, |_| Ok(()))?
+        } else {
+            self.resumable
+                .as_mut()
+                .ok_or_else(|| invalid_data("pause before grant"))?
+                .begin_pause(now)?
+        };
+        self.sequence = record.sequence;
+        self.resume_local_validation_pending = false;
+        self.ready = None;
+        self.click = None;
+        Ok(record)
+    }
     pub(super) fn configured(&self) -> bool {
         self.digest.is_some()
     }
     pub(super) fn needs_request(&self) -> bool {
         self.configured() && !self.ended && self.request.is_none()
     }
-    pub(super) fn check(&self, scope: (u64, u64), now: Instant) -> RemoteResult<()> {
+    pub(super) fn check(&mut self, scope: (u64, u64), now: Instant) -> RemoteResult<()> {
         if let Some(reason) = self.terminal_failure {
             return Err(invalid_data(reason).into());
         }
         if self.ended {
             return Ok(());
+        }
+        if let Some(session) = self.resumable.as_mut() {
+            session.check(now)?;
         }
         self.repair_check(now)?;
         if let Some((request, at)) = self.request {
@@ -123,6 +234,23 @@ impl ClientControl {
                     Instant::now(),
                 )?;
                 self.epoch = Some(status.lease_epoch);
+                if self.resumable_enabled {
+                    use crate::remote::resumable_control::{
+                        Binding, ClientSession, LocalOptIn, Negotiated, VERSION,
+                    };
+                    let (_, requested_at) = self.request.unwrap();
+                    self.resumable = Some(ClientSession::after_native_arm(
+                        Negotiated::new(LocalOptIn::Explicit, Some(VERSION))?,
+                        Binding {
+                            session: status.lease_epoch,
+                            source_epoch: request.scope.source_epoch,
+                            geometry_epoch: request.scope.geometry_epoch,
+                        },
+                        Instant::now(),
+                        requested_at + LEASE_DURATION,
+                        request.scope.frame_sequence,
+                    )?);
+                }
                 eprintln!(
                     "jwm-remote: control host approved; waiting for local checks, do not type or click yet"
                 );
@@ -185,6 +313,10 @@ impl ClientControl {
             }
         }
         if self.ended {
+            self.resume_local_validation_pending = false;
+            if let Some(session) = self.resumable.as_mut() {
+                session.revoke();
+            }
             self.terminal_seen = true;
             self.repair_end();
             self.ready = None;
@@ -194,7 +326,12 @@ impl ClientControl {
         Ok(())
     }
     pub(super) fn ready_sequence(&self) -> Option<u64> {
-        if !self.activated || self.ended || !self.held.is_empty() || self.repair_blocked() {
+        if !self.activated
+            || self.ended
+            || !self.held.is_empty()
+            || self.repair_blocked()
+            || !self.resumable_input_active()
+        {
             return None;
         }
         self.presented
@@ -206,6 +343,10 @@ impl ClientControl {
             .map(|(s, _)| s.frame_sequence)
     }
     pub(super) fn revoke(&mut self) -> Option<ControlRevoke> {
+        self.resume_local_validation_pending = false;
+        if let Some(session) = self.resumable.as_mut() {
+            session.revoke();
+        }
         if self.ended {
             return None;
         }
@@ -225,6 +366,9 @@ impl ClientControl {
         self.repair_event(event, now)?;
         if self.ended {
             return Ok(None);
+        }
+        if !self.resumable_input_active() {
+            return Err(invalid_data("control input precedes resumable local validation").into());
         }
         let kind;
         let scope;
@@ -601,5 +745,143 @@ mod tests {
         c.held.clear();
         c.left_down = true;
         assert!(c.event(&wheel(3, P::ScrollUp), Instant::now()).is_err());
+    }
+    fn resumable_granted() -> ClientControl {
+        let mut c = ClientControl {
+            digest: Some([3; 32]),
+            resumable_enabled: true,
+            ..Default::default()
+        };
+        let scope = DrawnScope {
+            source_epoch: 1,
+            geometry_epoch: 2,
+            frame_sequence: 1,
+        };
+        c.presented(scope, Instant::now()).unwrap();
+        c.receive(ControlStatus {
+            scope,
+            lease_epoch: 7,
+            status: ControlStatusKind::Granted,
+        })
+        .unwrap();
+        c.activated = true;
+        c
+    }
+    fn pause_ack(c: &mut ClientControl) {
+        use crate::remote::resumable_control::Kind;
+        let pause = c
+            .resumable
+            .as_mut()
+            .unwrap()
+            .begin_pause(Instant::now())
+            .unwrap();
+        c.receive_resumable_ack(
+            crate::remote::resumable_control::Record {
+                kind: Kind::Paused,
+                ..pause
+            },
+            Instant::now(),
+        )
+        .unwrap();
+    }
+    fn resume_ack(c: &mut ClientControl) {
+        use crate::remote::resumable_control::Kind;
+        let resume = c
+            .resumable
+            .as_mut()
+            .unwrap()
+            .begin_resume(3, Instant::now(), |_| Ok(()))
+            .unwrap();
+        c.receive_resumable_ack(
+            crate::remote::resumable_control::Record {
+                kind: Kind::Resumed,
+                ..resume
+            },
+            Instant::now(),
+        )
+        .unwrap();
+    }
+    #[test]
+    fn resumed_ack_keeps_local_gate_closed_until_fresh_validation() {
+        let mut c = resumable_granted();
+        assert_eq!(c.active_input_generation(), Some(1));
+        pause_ack(&mut c);
+        assert_eq!(c.active_input_generation(), None);
+        resume_ack(&mut c);
+        assert!(c.resumable_local_validation_pending());
+        assert!(!c.resumable_input_active());
+        assert_eq!(c.active_input_generation(), None);
+        let key = ViewerEvent::Key {
+            keycode: 38,
+            pressed: true,
+        };
+        assert!(c.event(&key, Instant::now()).is_err());
+        assert!(c.held.is_empty(), "closed gate must not consume old batch");
+        c.complete_resumable_local_validation(Instant::now())
+            .unwrap();
+        assert_eq!(c.active_input_generation(), Some(2));
+        assert!(!c.resumable_local_validation_pending());
+        assert!(c.event(&key, Instant::now()).unwrap().is_some());
+    }
+    #[test]
+    fn paused_mouse_up_discard_does_not_keep_old_logical_drag_on_resume() {
+        use super::super::super::x11_viewer::WaylandPointerEventKind as P;
+        let mut c = resumable_granted();
+        ready(&mut c, 2);
+        let mut down = motion(2);
+        if let ViewerEvent::WaylandPointer { kind, .. } = &mut down {
+            *kind = P::LeftDown;
+        }
+        assert!(c.event(&down, Instant::now()).unwrap().is_none());
+        assert!(c.left_down);
+        assert!(c.click.is_some());
+        pause_ack(&mut c);
+        assert!(!c.left_down);
+        assert!(c.click.is_none());
+        // Main intentionally drops the physical mouse-up while paused. Its
+        // actual viewer-state update remains required before local validation.
+        resume_ack(&mut c);
+        c.complete_resumable_local_validation(Instant::now())
+            .unwrap();
+        let action = c
+            .event(
+                &ViewerEvent::Key {
+                    keycode: 38,
+                    pressed: true,
+                },
+                Instant::now(),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            action.kind,
+            ControlActionKind::Key {
+                code: 30,
+                pressed: true
+            }
+        );
+    }
+    #[test]
+    fn pending_local_validation_cannot_revive_expired_or_revoked_session() {
+        for expired in [false, true] {
+            let mut c = resumable_granted();
+            pause_ack(&mut c);
+            resume_ack(&mut c);
+            let deadline = c.resumable.as_ref().unwrap().deadline();
+            if !expired {
+                c.revoke();
+            }
+            assert!(
+                c.complete_resumable_local_validation(if expired {
+                    deadline
+                } else {
+                    Instant::now()
+                })
+                .is_err()
+            );
+            assert!(!c.resumable_local_validation_pending());
+            assert_eq!(c.active_input_generation(), None);
+            assert!(c.ended);
+        }
     }
 }

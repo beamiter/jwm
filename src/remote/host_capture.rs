@@ -27,6 +27,27 @@ impl HostCapture {
         let _ = (scroll_enabled, horizontal_enabled);
         Err(std::io::Error::other("native control unavailable").into())
     }
+    pub(super) fn enable_resumable_control(&mut self) -> RemoteResult<()> {
+        #[cfg(feature = "remote-wayland")]
+        if let Self::Wayland(c) = self {
+            return c.enable_resumable_control();
+        }
+        Err(std::io::Error::other("native resumable control unavailable").into())
+    }
+    pub(super) fn control_transition(
+        &mut self,
+        epoch: u64,
+        sequence: u64,
+        generation: u64,
+        resume_serial: Option<u64>,
+    ) -> RemoteResult<()> {
+        #[cfg(feature = "remote-wayland")]
+        if let Self::Wayland(c) = self {
+            return c.control_transition(epoch, sequence, generation, resume_serial);
+        }
+        let _ = (epoch, sequence, generation, resume_serial);
+        Err(std::io::Error::other("native resumable control unavailable").into())
+    }
     pub(super) fn arm_control(&mut self, digest: [u8; 32]) -> RemoteResult<u64> {
         #[cfg(feature = "remote-wayland")]
         if let Self::Wayland(c) = self {

@@ -56,6 +56,9 @@ struct Lease {
     xkb: xkb::State,
     held: BTreeSet<u32>,
     armed: bool,
+    resumable: bool,
+    generation: u32,
+    paused_at: Option<Instant>,
     sequence: u32,
     created: Instant,
     rate_start: Instant,
@@ -68,7 +71,7 @@ pub struct LeaseData {
     epoch: u32,
 }
 pub(crate) fn init(dh: &DisplayHandle) {
-    dh.create_global::<JwmWaylandState, JwmRemoteControlManagerV1, _>(3, ManagerData);
+    dh.create_global::<JwmWaylandState, JwmRemoteControlManagerV1, _>(4, ManagerData);
 }
 fn current(state: &JwmWaylandState, lease: &Lease) -> bool {
     lease.resource.is_alive()
@@ -86,6 +89,19 @@ fn current(state: &JwmWaylandState, lease: &Lease) -> bool {
         && state.seat.get_keyboard().is_some_and(|keyboard| {
             keyboard.authorized_keyboard_snapshot_is_current(&lease.snapshot)
         })
+}
+// Pause/resume consume the same bounded rate budget as keys. They never refill
+// authority, lifetime or quotas merely by changing the local phase.
+fn transition_budget(lease: &mut Lease) -> bool {
+    let now = Instant::now();
+    lease.tokens =
+        (lease.tokens + now.duration_since(lease.refill).as_secs_f64() * 120.0).min(32.0);
+    lease.refill = now;
+    if lease.tokens < 1.0 {
+        return false;
+    }
+    lease.tokens -= 1.0;
+    true
 }
 fn needs_keyboard_cleanup(cleanup: bool, held_count: usize) -> bool {
     cleanup && held_count != 0
@@ -188,18 +204,21 @@ impl Dispatch<JwmRemoteControlManagerV1, ManagerData> for JwmWaylandState {
         init: &mut DataInit<'_, Self>,
     ) {
         // Interface version is not consent: only the additional request grants wheel.
-        let (id, source, scroll_axes, axes_valid) = match request {
+        let (id, source, scroll_axes, axes_valid, resumable) = match request {
             jwm_remote_control_manager_v1::Request::CreateLease { id, source } => {
-                (id, source, 0, true)
+                (id, source, 0, true, false)
             }
             jwm_remote_control_manager_v1::Request::CreateLeaseWithScroll { id, source } => {
-                (id, source, 1, true)
+                (id, source, 1, true, false)
             }
             jwm_remote_control_manager_v1::Request::CreateLeaseWithScrollAxes {
                 id,
                 source,
                 axes,
-            } => (id, source, axes, matches!(axes, 1..=3)),
+            } => (id, source, axes, matches!(axes, 1..=3), false),
+            jwm_remote_control_manager_v1::Request::CreateResumableLease { id, source, axes } => {
+                (id, source, axes, axes <= 3, true)
+            }
             _ => return,
         };
         {
@@ -300,6 +319,9 @@ impl Dispatch<JwmRemoteControlManagerV1, ManagerData> for JwmWaylandState {
                 xkb: xkb::State::new(&map),
                 held: BTreeSet::new(),
                 armed: false,
+                resumable,
+                generation: 1,
+                paused_at: None,
                 sequence: 0,
                 created: now,
                 rate_start: now,
@@ -354,13 +376,109 @@ impl Dispatch<JwmRemoteControlLeaseV1, LeaseData> for JwmWaylandState {
         }
         match request {
             jwm_remote_control_lease_v1::Request::Arm { epoch, frame } => {
-                let valid=epoch==lease.epoch && !lease.armed && frame.is_alive() && frame.client().map(|client|client.id())==resource.client().map(|client|client.id()) && frame.data::<CaptureFrameData>().is_some_and(|data|data.ready.load(Ordering::Acquire) && matches!(data.source.as_ref(),Some(CaptureSource::Toplevel(authority)) if Arc::ptr_eq(authority,&lease.authority)) && data.session.upgrade().is_ok_and(|session|session.is_alive() && session.data::<super::image_copy_capture::CaptureSessionData>().is_some_and(|data|!data.stopped.load(Ordering::Acquire))));
+                let valid=epoch==lease.epoch && !lease.armed && lease.paused_at.is_none() && lease.sequence == 0 && frame.is_alive() && frame.client().map(|client|client.id())==resource.client().map(|client|client.id()) && frame.data::<CaptureFrameData>().is_some_and(|data|data.ready.load(Ordering::Acquire) && matches!(data.source.as_ref(),Some(CaptureSource::Toplevel(authority)) if Arc::ptr_eq(authority,&lease.authority)) && data.session.upgrade().is_ok_and(|session|session.is_alive() && session.data::<super::image_copy_capture::CaptureSessionData>().is_some_and(|data|!data.stopped.load(Ordering::Acquire))));
                 if !valid {
                     finish(state, lease, SOURCE, true);
                     return;
                 }
                 lease.armed = true;
                 resource.armed(epoch);
+            }
+            jwm_remote_control_lease_v1::Request::Pause {
+                epoch,
+                sequence,
+                generation,
+            } => {
+                if !lease.resumable
+                    || !lease.armed
+                    || lease.paused_at.is_some()
+                    || epoch != lease.epoch
+                    || generation != lease.generation
+                    || !valid_sequence(lease.sequence, sequence)
+                {
+                    finish(state, lease, SEQUENCE, true);
+                    return;
+                }
+                if !transition_budget(&mut lease) {
+                    finish(state, lease, QUOTA, true);
+                    return;
+                }
+                if !lease.held.is_empty() {
+                    let keys: Vec<_> = lease.held.iter().map(|key| (*key + 8).into()).collect();
+                    if !state.seat.get_keyboard().is_some_and(|keyboard| {
+                        keyboard.cleanup_authorized_keyboard(
+                            &lease.snapshot,
+                            &keys,
+                            SERIAL_COUNTER.next_serial(),
+                            InputTime::now(),
+                        )
+                    }) {
+                        finish(state, lease, SEAT, true);
+                        return;
+                    }
+                    for key in &lease.held {
+                        lease
+                            .xkb
+                            .update_key((*key + 8).into(), xkb::KeyDirection::Up);
+                    }
+                    lease.held.clear();
+                }
+                lease.armed = false;
+                lease.paused_at = Some(Instant::now());
+                lease.last_action = lease.paused_at;
+                lease.sequence = sequence;
+                resource.paused(epoch, sequence, generation);
+            }
+            jwm_remote_control_lease_v1::Request::Resume {
+                epoch,
+                sequence,
+                generation,
+                frame,
+            } => {
+                if !lease.resumable
+                    || lease.armed
+                    || lease.paused_at.is_none()
+                    || !lease.held.is_empty()
+                    || epoch != lease.epoch
+                    || lease.generation.checked_add(1) != Some(generation)
+                    || !valid_sequence(lease.sequence, sequence)
+                {
+                    finish(state, lease, SEQUENCE, true);
+                    return;
+                }
+                if !transition_budget(&mut lease) {
+                    finish(state, lease, QUOTA, true);
+                    return;
+                }
+                let stamp = frame.data::<CaptureFrameData>().and_then(|data| {
+                    let valid = frame.is_alive()
+                        && frame.client().map(|c| c.id()) == resource.client().map(|c| c.id())
+                        && data.ready.load(Ordering::Acquire)
+                        && matches!(data.source.as_ref(), Some(CaptureSource::Toplevel(a)) if Arc::ptr_eq(a, &lease.authority))
+                        && data.session.upgrade().is_ok_and(|s| s.is_alive() && s.data::<super::image_copy_capture::CaptureSessionData>().is_some_and(|d| !d.stopped.load(Ordering::Acquire)));
+                    valid.then(|| *data.ready_stamp.lock().unwrap()).flatten()
+                });
+                let Some((serial, ready_at)) = stamp else {
+                    finish(state, lease, SOURCE, true);
+                    return;
+                };
+                let now = Instant::now();
+                if serial <= lease.last_ready
+                    || ready_at <= lease.paused_at.unwrap()
+                    || now
+                        .checked_duration_since(ready_at)
+                        .is_none_or(|age| age > Duration::from_secs(1))
+                {
+                    finish(state, lease, SOURCE, true);
+                    return;
+                }
+                lease.armed = true;
+                lease.paused_at = None;
+                lease.generation = generation;
+                lease.sequence = sequence;
+                lease.last_ready = serial;
+                lease.last_action = Some(now);
+                resource.resumed(epoch, sequence, generation);
             }
             jwm_remote_control_lease_v1::Request::Key {
                 epoch,

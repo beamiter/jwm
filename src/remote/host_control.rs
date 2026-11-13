@@ -1,5 +1,9 @@
 //! One host authority and action order for sequential keyboard/pointer control.
 use super::*;
+use crate::remote::resumable_control::{
+    Binding, HostSession, Kind as ResumableKind, LocalOptIn, Message as ResumableMessage,
+    Negotiated, Record as ResumableRecord, VERSION,
+};
 use crate::remote::wayland_control_wire::{
     ControlAction, ControlActionKind, ControlRequest, ControlStatus, ControlStatusKind,
     LEASE_DURATION, MAX_SEQUENCE,
@@ -7,6 +11,7 @@ use crate::remote::wayland_control_wire::{
 pub(super) enum ControlCommand {
     Request(ControlRequest),
     Action(ControlAction),
+    Resumable(ResumableMessage),
     RepairRequest(super::super::pointer_repair_phase::Token),
     RepairDecline(super::super::pointer_repair_phase::Token),
 }
@@ -16,6 +21,7 @@ pub(super) struct HostControl {
     epoch: Option<u64>,
     ended: bool,
     started: Option<Instant>,
+    resumable: Option<HostSession>,
     sequence: u64,
     held: std::collections::BTreeSet<u16>,
     tokens: f64,
@@ -54,6 +60,12 @@ fn status(
     writer.flush()?;
     Ok(())
 }
+fn resumable_status(writer: &SharedWriter, record: ResumableRecord) -> RemoteResult<()> {
+    let mut writer = lock_writer(writer);
+    writer.write_message(MessageKind::WaylandResumableControl, &record.encode()?)?;
+    writer.flush()?;
+    Ok(())
+}
 pub(super) fn stop(
     sources: &SourceControl,
     capture: &mut HostCapture,
@@ -64,9 +76,15 @@ pub(super) fn stop(
         return Ok(());
     }
     state.ended = true;
+    if let Some(session) = &mut state.resumable {
+        session.revoke();
+    }
     state.held.clear();
     sources.control_revoke.store(true, Ordering::Release);
     sources.control_enabled.store(false, Ordering::Release);
+    sources
+        .resumable_control_enabled
+        .store(false, Ordering::Release);
     sources.control_queue.lock().unwrap().clear();
     sources.pointer_frame.lock().unwrap().take();
     capture.revoke_control();
@@ -112,6 +130,12 @@ pub(super) fn process(
         stop(sources, capture, writer, state)?;
         return validation;
     }
+    if let Some(session) = &mut state.resumable
+        && let Err(error) = session.check(now)
+    {
+        stop(sources, capture, writer, state)?;
+        return Err(error.into());
+    }
     let tracked = *sources.pointer_frame.lock().unwrap();
     let drawn = sources.state.lock().unwrap().presented_native_proof;
     let command = sources.control_queue.lock().unwrap().pop_front();
@@ -125,6 +149,28 @@ pub(super) fn process(
             }
         };
         let result = (|| -> RemoteResult<()> {
+            // Decode and generation-check every new-mode action before it may
+            // enter the existing bounded native action path. Legacy actions
+            // are never accepted as an untagged fallback in resumable mode.
+            let command = match command {
+                ControlCommand::Resumable(ResumableMessage::Action(envelope)) => {
+                    if !sources.resumable_control_enabled.load(Ordering::Acquire) {
+                        return Err(invalid_data("resumable control not negotiated").into());
+                    }
+                    state
+                        .resumable
+                        .as_mut()
+                        .ok_or_else(|| invalid_data("resumable action before grant"))?
+                        .accept_action(&envelope, now)?;
+                    ControlCommand::Action(ControlAction::decode(envelope.control_action_bytes())?)
+                }
+                ControlCommand::Action(_)
+                    if sources.resumable_control_enabled.load(Ordering::Acquire) =>
+                {
+                    return Err(invalid_data("untagged action in resumable control session").into());
+                }
+                other => other,
+            };
             match command {
                 ControlCommand::Request(request) => {
                     if state.request.is_some() || state.ended {
@@ -145,6 +191,22 @@ pub(super) fn process(
                     let epoch = capture.arm_control(request.keymap_digest)?;
                     state.epoch = Some(epoch);
                     state.started = Some(now);
+                    if sources.resumable_control_enabled.load(Ordering::Acquire) {
+                        // This bit is set only after independent local and peer
+                        // opt-ins have both passed the hello negotiation.
+                        let permission = Negotiated::new(LocalOptIn::Explicit, Some(VERSION))?;
+                        state.resumable = Some(HostSession::after_native_arm(
+                            permission,
+                            Binding {
+                                session: epoch,
+                                source_epoch: request.scope.source_epoch,
+                                geometry_epoch: request.scope.geometry_epoch,
+                            },
+                            now,
+                            now + LEASE_DURATION,
+                            request.scope.frame_sequence,
+                        )?);
+                    }
                     control_repair::granted(sources, epoch, now);
                     state.tokens = 32.0;
                     state.rate_at = Some(now);
@@ -251,6 +313,86 @@ pub(super) fn process(
                         ControlStatusKind::Waiting,
                     )?;
                 }
+                ControlCommand::Resumable(ResumableMessage::Lifecycle(record)) => {
+                    if !sources.resumable_control_enabled.load(Ordering::Acquire) {
+                        return Err(invalid_data("resumable control not negotiated").into());
+                    }
+                    let session = state
+                        .resumable
+                        .as_mut()
+                        .ok_or_else(|| invalid_data("resumable transition before grant"))?;
+                    let ack = match record.kind {
+                        ResumableKind::Pause => {
+                            let ticket = session.begin_pause(record, now)?;
+                            sources.pointer_frame.lock().unwrap().take();
+                            capture.discard_control_frame();
+                            {
+                                let mut proof = sources.state.lock().unwrap();
+                                proof.presented_native_proof = None;
+                                proof.presented_frame = None;
+                                proof.presented_geometry = None;
+                            }
+                            let released = capture
+                                .control_transition(
+                                    record.binding.session,
+                                    record.sequence,
+                                    record.generation,
+                                    None,
+                                )
+                                .map_err(|error| io::Error::other(error.to_string()));
+                            let ack = session.finish_pause(ticket, Instant::now(), released)?;
+                            // The native paused event confirms actual releases;
+                            // neither local queue disposal nor sending pause does.
+                            state.held.clear();
+                            ack
+                        }
+                        ResumableKind::Resume => {
+                            let frame = tracked
+                                .ok_or_else(|| invalid_data("resume lacks fresh captured proof"))?;
+                            let scope = frame
+                                .scope
+                                .ok_or_else(|| invalid_data("resume lacks frame scope"))?;
+                            if scope.source_epoch != record.binding.source_epoch
+                                || scope.geometry_epoch != record.binding.geometry_epoch
+                                || scope.frame_sequence != record.proof
+                                || drawn != Some(scope)
+                                || capture.control_frame().map(|proof| proof.0)
+                                    != Some(frame.serial)
+                                || now.saturating_duration_since(frame.at) >= FRAME_MAX_AGE
+                            {
+                                return Err(invalid_data(
+                                    "resume requires exact fresh drawn proof",
+                                )
+                                .into());
+                            }
+                            session.resume(record, now, |_| {
+                                capture
+                                    .control_transition(
+                                        record.binding.session,
+                                        record.sequence,
+                                        record.generation,
+                                        Some(frame.serial),
+                                    )
+                                    .map_err(|error| io::Error::other(error.to_string()))
+                            })?
+                        }
+                        _ => {
+                            return Err(
+                                invalid_data("unexpected resumable lifecycle record").into()
+                            );
+                        }
+                    };
+                    // Waiting for the native event must not let the original
+                    // host deadline lapse before an acknowledgement is sent.
+                    session.check(Instant::now())?;
+                    state.sequence = record.sequence;
+                    sources.pointer_frame.lock().unwrap().take();
+                    capture.discard_control_frame();
+                    resumable_status(writer, ack)?;
+                }
+                ControlCommand::Resumable(ResumableMessage::Action(_)) => {
+                    unreachable!("resumable actions normalized above")
+                }
                 ControlCommand::RepairRequest(_) | ControlCommand::RepairDecline(_) => {
                     unreachable!("repair commands intercepted")
                 }
@@ -263,6 +405,9 @@ pub(super) fn process(
         }
         return Ok(());
     }
+    // PointerReady remains a proof-availability announcement while paused,
+    // not input authority. The resumable session gate rejects every action
+    // until an explicit Resume consumes the exact fresh drawn proof.
     match control_repair::poll_active(sources, capture, writer, state) {
         Ok(true) => return Ok(()),
         Ok(false) => {}

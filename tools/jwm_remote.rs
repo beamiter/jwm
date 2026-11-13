@@ -1404,6 +1404,7 @@ fn run(command: Command) -> RemoteResult<()> {
                 allow_wayland_keyboard,
                 allow_wayland_pointer,
                 allow_wayland_control,
+                allow_resumable_control: false,
                 allow_wayland_text,
                 allow_wayland_popup_pointer,
                 allow_static_lossless,
@@ -1532,6 +1533,7 @@ fn run(command: Command) -> RemoteResult<()> {
                     wayland_keyboard,
                     wayland_pointer,
                     wayland_control,
+                    resumable_control: false,
                     wayland_popup_pointer,
                     static_lossless,
                     wayland_text: if wayland_text_stdin {

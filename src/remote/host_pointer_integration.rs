@@ -85,6 +85,7 @@ fn options() -> HostOptions {
         allow_wayland_keyboard: false,
         allow_wayland_pointer: true,
         allow_wayland_control: false,
+        allow_resumable_control: false,
         allow_wayland_text: false,
         allow_static_lossless: false,
         allow_wayland_scroll: false,
@@ -217,6 +218,7 @@ fn peer(address: std::net::SocketAddr, case: Case, trace: &Trace) -> RemoteResul
                 static_lossless: case.lossless(),
                 wayland_scroll: case.vertical_allowed(),
                 wayland_control: false,
+                resumable_control: false,
                 wayland_text: false,
                 ..Default::default()
             },

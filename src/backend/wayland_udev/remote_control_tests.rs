@@ -87,6 +87,18 @@ impl Fixture {
         scroll: bool,
         axes: Option<u32>,
     ) -> Self {
+        Self::with_mode(version, manager_version, scroll, axes, false)
+    }
+    fn resumable() -> Self {
+        Self::with_mode(7, 4, false, Some(0), true)
+    }
+    fn with_mode(
+        version: u32,
+        manager_version: u32,
+        scroll: bool,
+        axes: Option<u32>,
+        resumable: bool,
+    ) -> Self {
         let mut server = Server::new();
         server.state.image_capture_pending =
             Some(init_image_copy_capture(&server.display.handle()));
@@ -102,7 +114,11 @@ impl Fixture {
             .client
             .bind("jwm_remote_control_manager_v1", manager_version);
         let lease = capture.client.new_id();
-        if let Some(axes) = axes {
+        if resumable {
+            capture
+                .client
+                .request(manager, 4, &[lease, capture.source, axes.unwrap_or(0)]);
+        } else if let Some(axes) = axes {
             capture
                 .client
                 .request(manager, 3, &[lease, capture.source, axes]);
@@ -116,7 +132,13 @@ impl Fixture {
 
         sync(&mut server);
         let admission = events(&mut capture.client);
-        let epoch = if axes.is_some_and(|axes| !matches!(axes, 1..=3)) {
+        let epoch = if axes.is_some_and(|axes| {
+            if resumable {
+                axes > 3
+            } else {
+                !matches!(axes, 1..=3)
+            }
+        }) {
             assert!(
                 admission.iter().any(|e| e.sender == lease && e.opcode == 4),
                 "malformed axes must explicitly revoke"
@@ -786,3 +808,6 @@ fn wire_control_scroll_wrong_source_and_expired_frame_cannot_deliver() {
 
 #[path = "remote_control_scroll_tests.rs"]
 mod scroll_axes_tests;
+
+#[path = "remote_control_resumable_tests.rs"]
+mod resumable_tests;

@@ -1523,7 +1523,7 @@ impl Dispatch<wl_registry::WlRegistry, ()> for State {
                         true
                     }
                     "jwm_remote_control_manager_v1" if state.control.manager.is_none() => {
-                        state.control.manager = Some(proxy.bind(name, version.min(3), qh, ()));
+                        state.control.manager = Some(proxy.bind(name, version.min(4), qh, ()));
                         state.control.global = Some(name);
                         false
                     }

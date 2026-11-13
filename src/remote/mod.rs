@@ -88,3 +88,5 @@ mod wayland_viewer;
 mod follow_source_size;
 
 mod png_atlas;
+
+pub mod resumable_control;

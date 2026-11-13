@@ -11,6 +11,10 @@ pub(super) struct NativeControl {
     pub(super) enabled: bool,
     pub(super) revoked: bool,
     requested: bool,
+    resumable: bool,
+    paused: bool,
+    generation: u32,
+    transition: Option<(bool, u32, u32)>,
     digest: Option<[u8; 32]>,
     epoch: Option<u32>,
     armed: bool,
@@ -20,6 +24,31 @@ pub(super) struct NativeControl {
     deadline: Option<Instant>,
     scroll_enabled: bool,
     horizontal_enabled: bool,
+}
+impl NativeControl {
+    fn accept_transition(&mut self, resume: bool, epoch: u32, sequence: u32, generation: u32) {
+        if self.revoked
+            || !self.resumable
+            || !self.armed
+            || self.paused != resume
+            || self.epoch != Some(epoch)
+            || self.transition != Some((resume, sequence, generation))
+            || self.expected.is_some()
+            || self.accepted.checked_add(1) != Some(sequence)
+            || if resume {
+                self.generation.checked_add(1) != Some(generation)
+            } else {
+                self.generation != generation
+            }
+        {
+            self.revoked = true;
+        } else {
+            self.paused = !resume;
+            self.generation = generation;
+            self.accepted = sequence;
+            self.transition = None;
+        }
+    }
 }
 impl WaylandCapture {
     pub(in crate::remote) fn enable_control(
@@ -51,6 +80,27 @@ impl WaylandCapture {
         self.state.control.horizontal_enabled = horizontal_enabled;
         self.state.control.scroll_enabled = scroll_enabled;
         self.state.control.enabled = true;
+        Ok(())
+    }
+
+    /// Must be called after combined control is explicitly enabled and before
+    /// any capture or native lease request. An old manager cannot downgrade it.
+    pub(in crate::remote) fn enable_resumable_control(&mut self) -> RemoteResult<()> {
+        if !self.state.control.enabled
+            || self.state.control.resumable
+            || self.state.control.requested
+            || self.state.control.revoked
+            || self.state.frame_serial != 0
+            || self
+                .state
+                .control
+                .manager
+                .as_ref()
+                .is_none_or(|m| m.version() < 4)
+        {
+            return Err(invalid("resumable control requires fresh native v4 opt-in").into());
+        }
+        self.state.control.resumable = true;
         Ok(())
     }
 
@@ -126,7 +176,15 @@ impl WaylandCapture {
         self.state.control.requested = true;
         let deadline = (Instant::now() + PROTOCOL_TIMEOUT).min(self.arm_deadline.unwrap());
         let manager = self.state.control.manager.as_ref().unwrap();
-        let lease = if self.state.control.horizontal_enabled {
+        let lease = if self.state.control.resumable {
+            manager.create_resumable_lease(
+                self.source.as_ref().unwrap(),
+                u32::from(self.state.control.scroll_enabled)
+                    | (u32::from(self.state.control.horizontal_enabled) << 1),
+                &self.queue.handle(),
+                (),
+            )
+        } else if self.state.control.horizontal_enabled {
             manager.create_lease_with_scroll_axes(
                 self.source.as_ref().unwrap(),
                 2 | u32::from(self.state.control.scroll_enabled),
@@ -159,6 +217,89 @@ impl WaylandCapture {
         self.discard_control_frame();
         self.arm_deadline = None;
         Ok(u64::from(epoch))
+    }
+
+    pub(in crate::remote) fn control_transition(
+        &mut self,
+        epoch: u64,
+        sequence: u64,
+        generation: u64,
+        resume_serial: Option<u64>,
+    ) -> RemoteResult<()> {
+        let result = self.control_transition_inner(epoch, sequence, generation, resume_serial);
+        if result.is_err() {
+            self.revoke_control();
+        }
+        result
+    }
+
+    fn control_transition_inner(
+        &mut self,
+        epoch: u64,
+        sequence: u64,
+        generation: u64,
+        resume_serial: Option<u64>,
+    ) -> RemoteResult<()> {
+        self.expire_control();
+        self.sync_until(Instant::now() + PROTOCOL_TIMEOUT)?;
+        let (epoch, sequence, generation) = (
+            u32::try_from(epoch)?,
+            u32::try_from(sequence)?,
+            u32::try_from(generation)?,
+        );
+        let resume = resume_serial.is_some();
+        let state = &self.state.control;
+        if self.control_revoked()
+            || !state.resumable
+            || !state.armed
+            || state.transition.is_some()
+            || state.expected.is_some()
+            || state.epoch != Some(epoch)
+            || state.accepted.checked_add(1) != Some(sequence)
+            || sequence == 0
+            || sequence > 60000
+            || state.paused != resume
+            || if resume {
+                state.generation.checked_add(1) != Some(generation)
+            } else {
+                state.generation != generation
+            }
+        {
+            return Err(invalid("invalid native resumable transition").into());
+        }
+        if let Some(serial) = resume_serial {
+            let (actual, at) = self
+                .control_frame()
+                .ok_or_else(|| invalid("resume requires fresh native proof"))?;
+            if serial != actual || at.elapsed() >= super::super::wayland_pointer_wire::FRAME_MAX_AGE
+            {
+                return Err(invalid("stale resume proof").into());
+            }
+        }
+        self.state.control.transition = Some((resume, sequence, generation));
+        let lease = self
+            .control_lease
+            .as_ref()
+            .ok_or_else(|| invalid("missing control lease"))?;
+        if resume {
+            lease.resume(
+                epoch,
+                sequence,
+                generation,
+                self.retained_frame.as_ref().unwrap(),
+            );
+        } else {
+            lease.pause(epoch, sequence, generation);
+        }
+        let deadline =
+            (Instant::now() + PROTOCOL_TIMEOUT).min(self.state.control.deadline.unwrap());
+        // The event is sent by the native backend only after actual cleanup or
+        // proof validation. Sending the request is not a release acknowledgement.
+        self.await_control(deadline, |s| {
+            s.transition.is_none() && s.accepted == sequence
+        })?;
+        self.discard_control_frame();
+        Ok(())
     }
 
     pub(in crate::remote) fn control_frame(&self) -> Option<(u64, Instant)> {
@@ -199,6 +340,8 @@ impl WaylandCapture {
         let sequence = u32::try_from(action.sequence)?;
         if self.control_revoked()
             || !self.state.control.armed
+            || self.state.control.paused
+            || self.state.control.transition.is_some()
             || self.state.control.epoch != Some(epoch)
             || self.state.control.accepted.checked_add(1) != Some(sequence)
             || sequence == 0
@@ -332,10 +475,13 @@ impl Dispatch<JwmRemoteControlLeaseV1, ()> for State {
                     keyboard.revoked = true;
                 } else {
                     keyboard.armed = true;
+                    keyboard.generation = 1;
                 }
             }
             control_lease::Event::Accepted { epoch, sequence } => {
                 if !keyboard.armed
+                    || keyboard.paused
+                    || keyboard.transition.is_some()
                     || keyboard.epoch != Some(epoch)
                     || keyboard.expected != Some(sequence)
                     || keyboard.accepted.checked_add(1) != Some(sequence)
@@ -345,7 +491,80 @@ impl Dispatch<JwmRemoteControlLeaseV1, ()> for State {
                     keyboard.accepted = sequence;
                 }
             }
+            control_lease::Event::Paused {
+                epoch,
+                sequence,
+                generation,
+            } => {
+                keyboard.accept_transition(false, epoch, sequence, generation);
+            }
+            control_lease::Event::Resumed {
+                epoch,
+                sequence,
+                generation,
+            } => {
+                keyboard.accept_transition(true, epoch, sequence, generation);
+            }
             control_lease::Event::Revoked { .. } => keyboard.revoked = true,
+        }
+    }
+}
+
+#[cfg(test)]
+mod resumable_tests {
+    use super::*;
+
+    fn armed() -> NativeControl {
+        NativeControl {
+            enabled: true,
+            resumable: true,
+            armed: true,
+            epoch: Some(7),
+            generation: 1,
+            deadline: Some(Instant::now() + Duration::from_secs(10)),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn native_pause_resume_ack_is_ordered_and_never_renews_deadline() {
+        let mut state = armed();
+        let deadline = state.deadline;
+        state.transition = Some((false, 1, 1));
+        assert!(
+            !state.paused,
+            "queued pause is not applied release evidence"
+        );
+        state.accept_transition(false, 7, 1, 1);
+        assert!(state.paused && !state.revoked);
+        assert_eq!(state.accepted, 1);
+        assert_eq!(state.deadline, deadline);
+        state.transition = Some((true, 2, 2));
+        assert!(state.paused, "queued resume does not enable input");
+        state.accept_transition(true, 7, 2, 2);
+        assert!(!state.paused && !state.revoked);
+        assert_eq!((state.accepted, state.generation), (2, 2));
+        assert_eq!(state.deadline, deadline);
+        state.accept_transition(true, 7, 2, 2);
+        assert!(state.revoked, "duplicate ack is terminal");
+    }
+
+    #[test]
+    fn unsolicited_stale_or_unnegotiated_native_transition_is_terminal() {
+        for case in 0..6 {
+            let mut state = armed();
+            state.transition = Some((false, 1, 1));
+            match case {
+                0 => state.resumable = false,
+                1 => state.transition = None,
+                2 => state.epoch = Some(8),
+                3 => state.generation = 2,
+                4 => state.accepted = 1,
+                _ => state.revoked = true,
+            }
+            state.accept_transition(false, 7, 1, 1);
+            assert!(state.revoked, "case {case}");
+            assert!(!state.paused, "invalid ack must not commit transition");
         }
     }
 }

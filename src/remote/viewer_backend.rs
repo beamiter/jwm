@@ -352,6 +352,13 @@ impl Viewer {
             Self::Wayland(v) => v.set_wayland_pointer_status(status),
         }
     }
+    #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+    pub(super) fn wayland_control_clean_for_resume(&self) -> bool {
+        match self {
+            Self::X11(_) => false,
+            Self::Wayland(viewer) => viewer.wayland_control_clean_for_resume(),
+        }
+    }
     pub(super) fn wayland_control_repair_busy(&self) -> bool {
         match self {
             Self::X11(_) => false,

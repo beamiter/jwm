@@ -2063,6 +2063,7 @@ pub struct HostOptions {
     pub allow_wayland_keyboard: bool,
     pub allow_wayland_pointer: bool,
     pub allow_wayland_control: bool,
+    pub allow_resumable_control: bool,
     pub allow_wayland_text: bool,
     pub allow_wayland_popup_pointer: bool,
     pub allow_wayland_scroll: bool,
@@ -2361,6 +2362,7 @@ struct SourceControl {
     text_attempted: AtomicBool,
     text_request: Mutex<Option<super::wayland_text_wire::TextCommit>>,
     control_enabled: AtomicBool,
+    resumable_control_enabled: AtomicBool,
     control_revoke: AtomicBool,
     control_queue: Mutex<VecDeque<ControlCommand>>,
     scroll_copy: AtomicBool,
@@ -2445,6 +2447,7 @@ impl SourceControl {
             text_attempted: AtomicBool::new(false),
             text_request: Mutex::new(None),
             control_enabled: AtomicBool::new(false),
+            resumable_control_enabled: AtomicBool::new(false),
             control_revoke: AtomicBool::new(false),
             control_queue: Mutex::new(VecDeque::new()),
             scroll_copy: AtomicBool::new(false),
@@ -2542,6 +2545,14 @@ fn listener_security_notice(address: IpAddr) -> Option<&'static str> {
 }
 
 fn validate_window_policy(options: &HostOptions) -> RemoteResult<()> {
+    if options.allow_resumable_control
+        && (!options.allow_wayland_control || options.allow_static_lossless)
+    {
+        return Err(invalid_data(
+            "resumable control requires explicit combined control without repair",
+        )
+        .into());
+    }
     #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
     if LOSSLESS_SCHEDULE_TEST.with(|slot| {
         slot.borrow().as_ref().is_some_and(|(policy, _)| {
@@ -3281,6 +3292,9 @@ fn serve_authenticated(
     }
     negotiated_stream.wayland_control =
         hello.stream.wayland_control && options.allow_wayland_control;
+    negotiated_stream.resumable_control = hello.stream.negotiate_resumable_control(
+        options.allow_resumable_control && negotiated_stream.wayland_control,
+    )?;
     negotiated_stream.wayland_scroll = hello.stream.wayland_scroll
         && options.allow_wayland_scroll
         && (negotiated_stream.wayland_pointer || negotiated_stream.wayland_control);
@@ -3300,6 +3314,9 @@ fn serve_authenticated(
             negotiated_stream.wayland_scroll,
             negotiated_stream.wayland_horizontal_scroll,
         )?;
+        if negotiated_stream.resumable_control {
+            capture.enable_resumable_control()?;
+        }
     }
     if negotiated_stream.wayland_pointer {
         if hello.request_input
@@ -3468,6 +3485,9 @@ fn serve_authenticated(
         sources
             .control_enabled
             .store(negotiated_stream.wayland_control, Ordering::Release);
+        sources
+            .resumable_control_enabled
+            .store(negotiated_stream.resumable_control, Ordering::Release);
         sources
             .resize_enabled
             .store(negotiated_stream.window_resize, Ordering::Release);
@@ -5908,12 +5928,40 @@ fn receive_input_scoped(
                         }
                     }
                 }
+                MessageKind::WaylandResumableControl => {
+                    let sources = sources.ok_or_else(|| invalid_data("control unavailable"))?;
+                    if !sources.control_enabled.load(Ordering::Acquire)
+                        || !sources.resumable_control_enabled.load(Ordering::Acquire)
+                        || sources.control_revoke.load(Ordering::Acquire)
+                    {
+                        return Err(
+                            invalid_data("resumable control not negotiated or revoked").into()
+                        );
+                    }
+                    let message = super::resumable_control::Message::decode(&payload)?;
+                    let mut queue = sources.control_queue.lock().unwrap();
+                    if queue.len() >= 32 {
+                        sources.control_revoke.store(true, Ordering::Release);
+                        return Err(invalid_data("control queue exceeded").into());
+                    }
+                    queue.push_back(ControlCommand::Resumable(message));
+                    drop(queue);
+                    sources.notify_input()?;
+                }
                 MessageKind::WaylandControlRequest | MessageKind::WaylandControlAction => {
                     let sources = sources.ok_or_else(|| invalid_data("control unavailable"))?;
                     if !sources.control_enabled.load(Ordering::Acquire)
                         || sources.control_revoke.load(Ordering::Acquire)
                     {
                         return Err(invalid_data("control not negotiated or revoked").into());
+                    }
+                    if kind == MessageKind::WaylandControlAction
+                        && sources.resumable_control_enabled.load(Ordering::Acquire)
+                    {
+                        return Err(invalid_data(
+                            "resumable control requires generation-tagged input",
+                        )
+                        .into());
                     }
                     let command = if kind == MessageKind::WaylandControlRequest {
                         ControlCommand::Request(
@@ -8611,6 +8659,7 @@ mod tests {
             allow_wayland_keyboard: false,
             allow_wayland_pointer: false,
             allow_wayland_control: false,
+            allow_resumable_control: false,
             allow_wayland_text: false,
             allow_wayland_popup_pointer: false,
             allow_static_lossless: false,
@@ -11301,6 +11350,7 @@ mod tests {
             allow_wayland_keyboard: false,
             allow_wayland_pointer: false,
             allow_wayland_control: false,
+            allow_resumable_control: false,
             allow_wayland_text: false,
             allow_wayland_popup_pointer: false,
             allow_static_lossless: false,

@@ -187,6 +187,8 @@ pub struct ClientOptions {
     pub wayland_keyboard: bool,
     pub wayland_pointer: bool,
     pub wayland_control: bool,
+    /// Explicit version-1 resumable protocol opt-in; never implied by control.
+    pub resumable_control: bool,
     pub wayland_popup_pointer: bool,
     pub static_lossless: bool,
     pub wayland_text: Option<super::wayland_text_wire::ExplicitText>,
@@ -565,6 +567,12 @@ fn suppress_reconnect(result: RemoteResult<()>, suppress: bool) -> RemoteResult<
 }
 
 fn validate_viewer_backend(options: &ClientOptions) -> RemoteResult<()> {
+    if options.resumable_control && (!options.wayland_control || options.static_lossless) {
+        return Err(invalid_data(
+            "resumable control requires explicit combined control without repair",
+        )
+        .into());
+    }
     options.viewer_backend.validate_seamless_input(
         options.seamless_input,
         options.grab_input,
@@ -807,6 +815,7 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
         options.wayland_scroll,
         options.wayland_horizontal_scroll,
         options.wayland_control,
+        options.resumable_control,
         options.wayland_text.is_some(),
         options.static_lossless,
         options.wayland_popup_pointer,
@@ -1006,6 +1015,7 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
             .enable_wayland_control(options.wayland_scroll, options.wayland_horizontal_scroll)?;
         let mut control = state.wayland_control.lock().unwrap();
         control.digest = Some(digest);
+        control.resumable_enabled = hello.stream.resumable_control;
         control.repair.enabled = hello.stream.static_lossless;
         #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
         control.capture_repair_observer();
@@ -1410,6 +1420,7 @@ fn negotiate_session(
     request_wayland_scroll: bool,
     request_wayland_horizontal_scroll: bool,
     request_wayland_control: bool,
+    request_resumable_control: bool,
     request_wayland_text: bool,
     request_static_lossless: bool,
     request_wayland_popup_pointer: bool,
@@ -1463,6 +1474,7 @@ fn negotiate_session(
                 wayland_scroll: request_wayland_scroll,
                 wayland_horizontal_scroll: request_wayland_horizontal_scroll,
                 wayland_control: request_wayland_control,
+                resumable_control: request_resumable_control,
                 wayland_popup_pointer: request_wayland_popup_pointer,
                 wayland_text: request_wayland_text,
                 static_lossless: request_static_lossless,
@@ -1515,6 +1527,9 @@ fn negotiate_session(
         .into());
     }
 
+    if hello.stream.resumable_control != request_resumable_control {
+        return Err(invalid_data("resumable control was not mutually negotiated").into());
+    }
     if hello.stream.wayland_control != request_wayland_control
         || (request_wayland_control
             && (hello.stream.wayland_keyboard
@@ -1831,7 +1846,7 @@ fn viewer_loop(
         wake.drain()?;
         {
             let (configured, ended, epoch, activated) = {
-                let control = state.wayland_control.lock().unwrap();
+                let mut control = state.wayland_control.lock().unwrap();
                 control.check(presented_scope, Instant::now())?;
                 (
                     control.configured(),
@@ -1990,6 +2005,13 @@ fn viewer_loop(
         if let Some(ready) = scroll_ready {
             viewer.wayland_pointer_ready(ready)?;
         }
+        // A receive-thread ACK cannot retroactively authorize a batch that
+        // was collected before its resumed generation/local validation.
+        let polled_control_generation = state
+            .wayland_control
+            .lock()
+            .unwrap()
+            .active_input_generation();
         let mut events = viewer.poll_events().map_err(|error| {
             if viewer.user_close_requested() {
                 user_close_cleanup_failure(error)
@@ -2029,9 +2051,51 @@ fn viewer_loop(
                 #[cfg(feature = "remote-wayland")]
                 viewer.check_wayland_control(false)?;
             }
+            let validate_resume = events.is_empty()
+                && state
+                    .wayland_control
+                    .lock()
+                    .unwrap()
+                    .resumable_local_validation_pending();
+            if validate_resume {
+                // The fresh same-connection fence must observe clean local
+                // focus and held state after ACK, not merely before Resume.
+                #[cfg(feature = "remote-wayland")]
+                viewer.check_wayland_control(true)?;
+                #[cfg(not(feature = "remote-wayland"))]
+                return Err(invalid_data("native resume validation unavailable").into());
+                #[cfg(feature = "remote-wayland")]
+                state
+                    .wayland_control
+                    .lock()
+                    .unwrap()
+                    .complete_resumable_local_validation(Instant::now())?;
+            }
             let mut control = state.wayland_control.lock().unwrap();
             control.check(presented_scope, Instant::now())?;
             if control.configured() {
+                // Test driver selects only a real production protocol transition.
+                // It cannot forge focus, presentation, native cleanup or ACKs.
+                #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+                if let Some(driver) = &state.resumable_test_driver {
+                    let mut commands = driver.commands.lock().unwrap();
+                    if let Some(&resume) = commands.front() {
+                        if !resume
+                            || (events.is_empty()
+                                && viewer.wayland_control_clean_for_resume()
+                                && control.resumable_resume_proof_ready())
+                        {
+                            commands.pop_front();
+                            let record =
+                                control.resumable_test_transition(resume, Instant::now())?;
+                            writer.write_message(
+                                MessageKind::WaylandResumableControl,
+                                &record.encode()?,
+                            )?;
+                            writer.flush()?;
+                        }
+                    }
+                }
                 for event in &events {
                     if matches!(
                         event,
@@ -2050,6 +2114,15 @@ fn viewer_loop(
                         #[cfg(feature = "remote-wayland")]
                         viewer.disable_wayland_control();
                     } else {
+                        // Polling still updates the local seat's held state while
+                        // paused, but local releases must not be forwarded after
+                        // the native pause already released their remote pair.
+                        if !control.resumable_input_active()
+                            || (control.resumable_enabled
+                                && polled_control_generation != control.active_input_generation())
+                        {
+                            continue;
+                        }
                         let action = match control.event(event, Instant::now()) {
                             Ok(action) => action,
                             Err(error) => {
@@ -2067,10 +2140,19 @@ fn viewer_loop(
                         };
                         if let Some(action) = action {
                             control.repair_sent(&action, Instant::now())?;
-                            writer.write_message(
-                                MessageKind::WaylandControlAction,
-                                &action.encode()?,
-                            )?;
+                            if let Some(session) = control.resumable.as_mut() {
+                                let envelope =
+                                    session.wrap_action(&action.encode()?, Instant::now())?;
+                                writer.write_message(
+                                    MessageKind::WaylandResumableControl,
+                                    &envelope.encode(),
+                                )?;
+                            } else {
+                                writer.write_message(
+                                    MessageKind::WaylandControlAction,
+                                    &action.encode()?,
+                                )?;
+                            }
                             writer.flush()?;
                         }
                     }
@@ -2462,7 +2544,7 @@ fn viewer_loop(
             }
             {
                 let (enabled, needs_request, epoch) = {
-                    let control = state.wayland_control.lock().unwrap();
+                    let mut control = state.wayland_control.lock().unwrap();
                     control.check(presented_scope, Instant::now())?;
                     (
                         control.configured() && !control.ended,
@@ -2476,7 +2558,7 @@ fn viewer_loop(
                         #[cfg(feature = "remote-wayland")]
                         viewer.check_wayland_control(true)?;
                     }
-                    let control = state.wayland_control.lock().unwrap();
+                    let mut control = state.wayland_control.lock().unwrap();
                     control.check(presented_scope, Instant::now())?;
                     if control.ended || control.epoch != epoch {
                         continue;
@@ -4006,7 +4088,73 @@ impl ClientResize {
     }
 }
 
+#[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+#[derive(Clone)]
+struct ResumableTestDriver {
+    commands: Arc<Mutex<std::collections::VecDeque<bool>>>,
+    observations: Arc<Mutex<Vec<super::resumable_control::Record>>>,
+}
+#[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+thread_local! { static RESUMABLE_TEST_DRIVER: std::cell::RefCell<Option<ResumableTestDriver>> = const { std::cell::RefCell::new(None) }; }
+#[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+pub(crate) fn with_resumable_control_test_driver<T>(
+    commands: Arc<Mutex<std::collections::VecDeque<bool>>>,
+    observations: Arc<Mutex<Vec<super::resumable_control::Record>>>,
+    run: impl FnOnce() -> T,
+) -> T {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            RESUMABLE_TEST_DRIVER.with(|slot| slot.borrow_mut().take());
+        }
+    }
+    RESUMABLE_TEST_DRIVER.with(|slot| {
+        assert!(slot.borrow().is_none());
+        *slot.borrow_mut() = Some(ResumableTestDriver {
+            commands,
+            observations,
+        });
+    });
+    let _reset = Reset;
+    run()
+}
+
+#[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+#[derive(Clone)]
+struct ResumableAckBarrier {
+    reached: std::sync::mpsc::SyncSender<()>,
+    release: Arc<Mutex<Option<std::sync::mpsc::Receiver<()>>>>,
+}
+#[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+thread_local! { static RESUMABLE_ACK_BARRIER: std::cell::RefCell<Option<ResumableAckBarrier>> = const { std::cell::RefCell::new(None) }; }
+#[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+pub(crate) fn with_resumable_control_ack_barrier<T>(
+    reached: std::sync::mpsc::SyncSender<()>,
+    release: std::sync::mpsc::Receiver<()>,
+    run: impl FnOnce() -> T,
+) -> T {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            RESUMABLE_ACK_BARRIER.with(|slot| slot.borrow_mut().take());
+        }
+    }
+    RESUMABLE_ACK_BARRIER.with(|slot| {
+        assert!(slot.borrow().is_none());
+        *slot.borrow_mut() = Some(ResumableAckBarrier {
+            reached,
+            release: Arc::new(Mutex::new(Some(release))),
+        });
+    });
+    let _reset = Reset;
+    run()
+}
+
 struct ReceiveState {
+    #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+    resumable_ack_barrier: Option<ResumableAckBarrier>,
+    #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+    resumable_test_driver: Option<ResumableTestDriver>,
     #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
     scroll_decode_observer: Option<ScrollDecodeObserver>,
     #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
@@ -4048,6 +4196,10 @@ impl ReceiveState {
 
     fn new() -> Self {
         Self {
+            #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+            resumable_test_driver: RESUMABLE_TEST_DRIVER.with(|slot| slot.borrow().clone()),
+            #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+            resumable_ack_barrier: RESUMABLE_ACK_BARRIER.with(|slot| slot.borrow().clone()),
             #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
             lossless_observer: LOSSLESS_FRAME_OBSERVER.with(|slot| slot.borrow().clone()),
             #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
@@ -4392,6 +4544,32 @@ fn receive_frame_records(
                     super::control_repair_wire::RepairStatus::decode(&payload)?,
                     Instant::now(),
                 )?;
+                completion.signal()?;
+            }
+            MessageKind::WaylandResumableControl => {
+                let record = super::resumable_control::Record::decode(&payload)?;
+                // Test-only scheduling barrier: the real ACK has arrived, but
+                // no lease lock or state transition is held while local input
+                // is queued. This neither forges an ACK nor changes a deadline.
+                #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+                if record.kind == super::resumable_control::Kind::Resumed
+                    && let Some(barrier) = &state.resumable_ack_barrier
+                    && let Some(release) = barrier.release.lock().unwrap().take()
+                {
+                    barrier
+                        .reached
+                        .try_send(())
+                        .map_err(|_| invalid_data("resume ACK test barrier notification failed"))?;
+                    release
+                        .recv_timeout(Duration::from_secs(2))
+                        .map_err(|_| invalid_data("resume ACK test barrier release timed out"))?;
+                }
+                let mut control = state.wayland_control.lock().unwrap();
+                control.receive_resumable_ack(record, Instant::now())?;
+                #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+                if let Some(driver) = &state.resumable_test_driver {
+                    driver.observations.lock().unwrap().push(record);
+                }
                 completion.signal()?;
             }
             MessageKind::WaylandControlStatus => {
@@ -5876,6 +6054,7 @@ pub(super) mod tests {
             wayland_keyboard: false,
             wayland_pointer: false,
             wayland_control: false,
+            resumable_control: false,
             wayland_popup_pointer: false,
             wayland_text: None,
             static_lossless: false,
@@ -8073,6 +8252,7 @@ pub(super) mod tests {
             false,
             false,
             false,
+            false,
             stream,
             &TEST_PSK,
             false,
@@ -8168,6 +8348,7 @@ pub(super) mod tests {
             false,
             false,
             false,
+            false,
             stream,
             &TEST_PSK,
             false,
@@ -8230,6 +8411,7 @@ pub(super) mod tests {
         });
         let stream = TcpStream::connect(address).unwrap();
         let result = negotiate_session(
+            false,
             false,
             false,
             false,
@@ -8303,6 +8485,7 @@ pub(super) mod tests {
             false,
             false,
             false,
+            false,
             stream,
             &TEST_PSK,
             false,
@@ -8366,6 +8549,7 @@ pub(super) mod tests {
             });
             let stream = TcpStream::connect(address).unwrap();
             let result = negotiate_session(
+                false,
                 false,
                 false,
                 false,
@@ -8472,6 +8656,7 @@ pub(super) mod tests {
         let started = Instant::now();
         let (mut reader, _writer, hello) = negotiate_session(
             true,
+            false,
             false,
             false,
             false,
@@ -8736,6 +8921,7 @@ mod native_viewer_permission_tests {
             wayland_keyboard: false,
             wayland_pointer: false,
             wayland_control: false,
+            resumable_control: false,
             wayland_popup_pointer: false,
             wayland_text: None,
             static_lossless: false,
