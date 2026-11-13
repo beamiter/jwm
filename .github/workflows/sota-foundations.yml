@@ -1,0 +1,53 @@
+name: SOTA evidence tools
+
+on:
+  push:
+    branches: [master, dot/sota-foundations]
+    paths:
+      - 'scripts/sota-scorecard.py'
+      - 'scripts/test-sota-scorecard.py'
+      - 'scripts/remote-gpu-readiness.py'
+      - 'scripts/test-remote-gpu-readiness.py'
+      - 'docs/sota-scorecard.md'
+      - 'docs/remote-gpu-pipeline.md'
+      - '.github/workflows/sota-foundations.yml'
+  pull_request:
+    paths:
+      - 'scripts/*scorecard.py'
+      - 'scripts/*gpu-readiness.py'
+      - 'docs/sota-scorecard.md'
+      - 'docs/remote-gpu-pipeline.md'
+      - '.github/workflows/sota-foundations.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sota-foundations-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  offline-evidence-contracts:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Validate scorecard and synthetic probe contracts
+        run: |
+          python3 scripts/test-sota-scorecard.py
+          python3 scripts/test-remote-gpu-readiness.py
+          python3 -m py_compile scripts/sota-scorecard.py scripts/remote-gpu-readiness.py
+      - name: Exercise read-only readiness report
+        run: |
+          python3 scripts/remote-gpu-readiness.py > /tmp/gpu-readiness.json
+          python3 - <<'PY'
+          import json
+          with open('/tmp/gpu-readiness.json') as f:
+              report = json.load(f)
+          assert report['screen_capture_attempted'] is False
+          assert report['end_to_end_zero_copy_verified'] is False
+          assert all(e['probe_status'] == 'not_requested' for e in report['encoders'])
+          PY
