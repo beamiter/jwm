@@ -99,6 +99,16 @@ impl Fixture {
         axes: Option<u32>,
         resumable: bool,
     ) -> Self {
+        Self::with_duration(version, manager_version, scroll, axes, resumable, None)
+    }
+    fn with_duration(
+        version: u32,
+        manager_version: u32,
+        scroll: bool,
+        axes: Option<u32>,
+        resumable: bool,
+        ttl_ms: Option<u32>,
+    ) -> Self {
         let mut server = Server::new();
         server.state.image_capture_pending =
             Some(init_image_copy_capture(&server.display.handle()));
@@ -114,7 +124,13 @@ impl Fixture {
             .client
             .bind("jwm_remote_control_manager_v1", manager_version);
         let lease = capture.client.new_id();
-        if resumable {
+        if let Some(ttl_ms) = ttl_ms {
+            capture.client.request(
+                manager,
+                5,
+                &[lease, capture.source, axes.unwrap_or(0), ttl_ms],
+            );
+        } else if resumable {
             capture
                 .client
                 .request(manager, 4, &[lease, capture.source, axes.unwrap_or(0)]);
@@ -132,13 +148,14 @@ impl Fixture {
 
         sync(&mut server);
         let admission = events(&mut capture.client);
-        let epoch = if axes.is_some_and(|axes| {
-            if resumable {
-                axes > 3
-            } else {
-                !matches!(axes, 1..=3)
-            }
-        }) {
+        let epoch = if ttl_ms.is_some_and(|ttl| !(1..=300_000).contains(&ttl))
+            || axes.is_some_and(|axes| {
+                if resumable {
+                    axes > 3
+                } else {
+                    !matches!(axes, 1..=3)
+                }
+            }) {
             assert!(
                 admission.iter().any(|e| e.sender == lease && e.opcode == 4),
                 "malformed axes must explicitly revoke"
@@ -153,7 +170,7 @@ impl Fixture {
                 .into_iter()
                 .find(|e| e.sender == lease && e.opcode == 1)
                 .expect("native control grant");
-            assert_eq!(grant.args[2], 30_000);
+            assert_eq!(grant.args[2], ttl_ms.unwrap_or(30_000));
             grant.args[1]
         };
         Self {
@@ -481,7 +498,7 @@ fn wire_control_timer_and_local_takeover_cleanup_without_new_request() {
                 .active
                 .as_mut()
                 .unwrap()
-                .created = Instant::now() - super::TTL;
+                .deadline = Instant::now();
             let end = Instant::now() + Duration::from_secs(1);
             while super::active(&f.server.state) && Instant::now() < end {
                 f.server.dispatch_timers(Duration::from_millis(100));
@@ -811,3 +828,32 @@ mod scroll_axes_tests;
 
 #[path = "remote_control_resumable_tests.rs"]
 mod resumable_tests;
+
+#[test]
+fn wire_control_timed_creation_bounds_and_legacy_fixed_deadline() {
+    for ttl in [1, 30_000, 30_001, 300_000] {
+        let f = Fixture::with_duration(7, 5, false, Some(0), true, Some(ttl));
+        let lease = f.server.state.remote_control.active.as_ref().unwrap();
+        assert_eq!(
+            lease.deadline.duration_since(lease.created),
+            std::time::Duration::from_millis(u64::from(ttl))
+        );
+        assert!(lease.resumable);
+        assert_eq!(lease.scroll_axes, 0);
+    }
+    for ttl in [0, 300_001, u32::MAX] {
+        let f = Fixture::with_duration(7, 5, false, Some(0), true, Some(ttl));
+        assert!(f.server.state.remote_control.active.is_none());
+    }
+    for (scroll, axes, resumable) in [
+        (false, None, false),
+        (true, None, false),
+        (false, Some(3), false),
+        (false, Some(0), true),
+    ] {
+        let f = Fixture::with_duration(7, 5, scroll, axes, resumable, None);
+        let lease = f.server.state.remote_control.active.as_ref().unwrap();
+        assert_eq!(lease.deadline.duration_since(lease.created), super::TTL);
+        assert_eq!(lease.resumable, resumable);
+    }
+}

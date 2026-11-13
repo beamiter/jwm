@@ -55,9 +55,13 @@ backend**. It does not enable focus-following on arbitrary Wayland compositors
 or nested JWM, and it never falls back to X11. Missing permissions or protocol
 support cause an error rather than silently selecting another input mode.
 Update **and restart the local JWM compositor**, not only `jwm-remote`. The
-viewer requires local handoff protocol version 2, which guarantees scene
-hit-testing of the pointer and position-aware geometry guards. An older
-version-1 compositor is refused; no fallback is attempted.
+default 30-second mode requires source control protocol v4 and local handoff
+protocol v2, which guarantees scene hit-testing and position-aware geometry
+guards. Longer explicitly requested budgets require source control v5 and local
+handoff v3. Both `jwm-remote` helpers must use application protocol v35, including
+for the default duration; old network peers are rejected. Updating the binaries
+does not upgrade an already-running compositor. Unsupported versions are
+refused, never silently shortened or downgraded.
 
 **Entering the displayed remote image can redirect your typing and ordinary
 keyboard shortcuts away from the previous local window.** Both peers must
@@ -92,6 +96,42 @@ X11 `--seamless-input`. The `jwm-remote ssh` subcommand and saved profiles do
 **not** support the native seamless option. The manual `ssh -N -L` command above
 only supplies a tunnel; it does not launch or authorize the remote host.
 
+### Explicit duration, without renewal
+
+The commands above keep the **30-second default**. For a longer session, add
+`--max-wayland-control-duration SECONDS` on the host and
+`--wayland-control-duration SECONDS` on the viewer. Each accepts an integer
+from **30 through 300**. The host flag requires `--allow-resumable-control`;
+the client flag requires `--wayland-seamless-input`. For example, using the
+same key and tunnel setup:
+
+```sh
+# Source: explicitly approve a ceiling of 300 seconds for this connection.
+jwm-remote host --wayland-select --once \
+  --allow-wayland-control --allow-resumable-control \
+  --max-wayland-control-duration 300 \
+  --listen 127.0.0.1:48221 --key-file /private/session.key
+
+# Viewer: request exactly 120 seconds, not the host's larger ceiling.
+jwm-remote connect 127.0.0.1:48221 \
+  --viewer-backend wayland --wayland-control --wayland-seamless-input \
+  --wayland-control-duration 120 --key-file /private/session.key
+```
+
+A request above the host's independently approved ceiling is **rejected**, not
+silently reduced to the minimum. A host ceiling of 300 with no client duration
+flag still requests only 30 seconds. Omitting the host duration flag leaves its
+ceiling at 30, so it cannot approve a client's 120-second request. Neither flag
+is saved in profiles or supported by the `ssh` subcommand.
+
+This is an initial **absolute budget**, not a promise of that much active typing
+time. Authentication/setup from the initial negotiation, admission and all
+pauses consume it; grant or resume ACKs do not restart it. Local/native deadlines may shorten the budget. Existing
+sequence/rate limits, source or focus changes, failed checks and other terminal
+conditions can end the session earlier. Reaching the limit requires a new
+explicitly authorized session, not automatic reconnection or renewal. The
+longer duration grants no additional input types, shortcuts or quotas.
+
 ### What entry and exit mean
 
 - Entry waits for clean physical input, actual local compositor focus and a
@@ -103,8 +143,9 @@ only supplies a tunnel; it does not launch or authorize the remote host.
   release, not replayed into the previous local application. The pointer is
   never confined.
 - Re-entry resumes only the same original authorization, with fresh checks and
-  presentation proof. **The absolute lifetime is at most 30 seconds and never
-  renews on pause, hover or resume.** Expiry is terminal; there is no automatic
+  presentation proof. **The absolute budget defaults to 30 seconds (up to 300
+  only with both explicit duration approvals) and never renews on pause, hover
+  or resume.** Expiry is terminal; there is no automatic
   reconnect or new lease. Start a new explicitly authorized session if needed.
 - Crossing into black bars releases control, but v1 uses a surface-entry token:
   you must leave the entire viewer surface and enter it again before resuming.

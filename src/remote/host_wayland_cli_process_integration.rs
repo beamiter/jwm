@@ -128,11 +128,21 @@ struct CliFixture {
     presentations: u64,
     entered: bool,
     suppressed: std::collections::HashSet<u8>,
+    viewer_started: Option<Instant>,
+    duration: Option<u16>,
     binary: PathBuf,
     directory: PrivateDir,
 }
 impl CliFixture {
     fn new(host_opt_in: bool, local_version: u32) -> Self {
+        Self::with_duration(host_opt_in, local_version, None, None)
+    }
+    fn with_duration(
+        host_opt_in: bool,
+        local_version: u32,
+        duration: Option<u16>,
+        host_max: Option<u16>,
+    ) -> Self {
         assert_eq!(
             std::env::var("JWM_REQUIRE_HEADLESS_GL").as_deref(),
             Ok("1"),
@@ -158,13 +168,14 @@ impl CliFixture {
             Some(init_image_copy_capture(&native.display.handle()));
         local.state.image_capture_pending = Some(init_image_copy_capture(&local.display.handle()));
         register_test_presentation(&mut local);
-        if local_version == 2 {
+        assert!((1..=3).contains(&local_version));
+        if local_version == 3 {
             viewer_handoff::init(&local.display.handle());
         } else {
             use crate::viewer_handoff_protocol::server::jwm_remote_viewer_handoff_manager_v1::JwmRemoteViewerHandoffManagerV1;
             local.display.handle().create_global::<
                 crate::backend::wayland::state::JwmWaylandState,
-                JwmRemoteViewerHandoffManagerV1, _>(1, viewer_handoff::ManagerData);
+                JwmRemoteViewerHandoffManagerV1, _>(local_version, viewer_handoff::ManagerData);
         }
         install_keymaps(&mut native, &mut local);
         let mut target = App::with_size_color(&mut native, [0, 0, 255, 255], SW, SH);
@@ -201,6 +212,9 @@ impl CliFixture {
         if host_opt_in {
             command.arg("--allow-resumable-control");
         }
+        if let Some(max) = host_max {
+            command.args(["--max-wayland-control-duration", &max.to_string()]);
+        }
         let mut host = Process::spawn(&mut command);
         // Exactly one owned source exists. No title matching or user desktop.
         host.child
@@ -225,6 +239,8 @@ impl CliFixture {
             presentations: 0,
             entered: false,
             suppressed: Default::default(),
+            viewer_started: None,
+            duration,
             binary,
             directory,
         }
@@ -259,6 +275,10 @@ impl CliFixture {
             .arg(self.directory.0.join("viewer.sock"))
             .arg("--key-file")
             .arg(self.directory.0.join("session.key"));
+        if let Some(duration) = self.duration {
+            command.args(["--wayland-control-duration", &duration.to_string()]);
+        }
+        self.viewer_started = Some(Instant::now());
         self.viewer = Some(Process::spawn(&mut command));
     }
     fn tick(&mut self, gl: &mut HeadlessSmithayGles) {
@@ -555,4 +575,92 @@ fn native_cli_rejects_old_local_v1_without_fallback() {
     assert_eq!(remote_control::attempts_for_test(&f.native.state), 0);
     assert!(!viewer_handoff::registered_for_test(&f.local.state));
     f.received.assert_no_input();
+}
+
+#[test]
+#[ignore = "requires independent CLI artifact, private Unix listeners and strict GL; run dedicated script"]
+fn native_cli_explicit_long_budget_expires_without_regrant() {
+    let mut gl = HeadlessSmithayGles::new().expect("strict headless GL required");
+    let mut f = CliFixture::with_duration(true, 3, Some(40), Some(45));
+    f.connect(&mut gl);
+    f.wait(&mut gl, "extended production input gate ready", |s| {
+        s.viewer
+            .as_ref()
+            .unwrap()
+            .text()
+            .contains("control generation 1 ready")
+            && remote_control::cli_lease_snapshot_for_test(&s.native.state).is_some()
+    });
+    let original = remote_control::cli_lease_snapshot_for_test(&f.native.state).unwrap();
+    assert!(original.2.duration_since(original.1) > Duration::from_secs(31));
+    assert!(original.2.duration_since(original.1) <= Duration::from_secs(40));
+    // Real wall time, real processes and real input. No test clock or deadline edits.
+    while Instant::now() < original.1 + Duration::from_secs(31) {
+        f.tick(&mut gl);
+        assert!(
+            !f.exited(),
+            "explicit extended session ended before 31 seconds"
+        );
+        thread::sleep(Duration::from_millis(1));
+    }
+    assert!(viewer_handoff::active(&f.local.state));
+    f.key(42, true);
+    f.wait(&mut gl, "actual key beyond default lifetime", |s| {
+        s.received.keys == [(42, 1)]
+    });
+    f.pointer(false);
+    f.wait(&mut gl, "extended pause releases held key", |s| {
+        remote_control::cli_lease_snapshot_for_test(&s.native.state)
+            .is_some_and(|v| v.4 && v.6 == 0)
+            && s.received.keys == [(42, 1), (42, 0)]
+            && !viewer_handoff::inhibits(&s.local.state)
+    });
+    f.key(42, false);
+    f.pointer(true);
+    f.wait(&mut gl, "extended resume ready", |s| {
+        s.viewer
+            .as_ref()
+            .unwrap()
+            .text()
+            .contains("jwm-remote: control generation 2 ready; original deadline unchanged")
+            && remote_control::cli_lease_snapshot_for_test(&s.native.state)
+                .is_some_and(|v| !v.4 && v.5 == 2)
+    });
+    let resumed = remote_control::cli_lease_snapshot_for_test(&f.native.state).unwrap();
+    assert_eq!(
+        (resumed.0, resumed.1, resumed.2),
+        (original.0, original.1, original.2)
+    );
+    f.key(42, true);
+    f.wait(&mut gl, "held key before original expiry", |s| {
+        s.received.keys.len() == 3
+    });
+    f.wait(
+        &mut gl,
+        "original deadline releases both authorities and processes",
+        |s| {
+            s.exited()
+                && !remote_control::active(&s.native.state)
+                && !viewer_handoff::active(&s.local.state)
+                && !viewer_handoff::inhibits(&s.local.state)
+                && s.received.keys == [(42, 1), (42, 0), (42, 1), (42, 0)]
+        },
+    );
+    assert!(
+        f.viewer_started.unwrap().elapsed() >= Duration::from_millis(39_500),
+        "an unrelated early failure must not masquerade as natural expiry"
+    );
+    let diagnostics = format!("{} {}", f.host.text(), f.viewer.as_ref().unwrap().text());
+    assert!(
+        diagnostics.contains("expired"),
+        "natural expiry must be diagnosed: {diagnostics}"
+    );
+    // The disconnected surface need not remain mapped. Further scene motion
+    // cannot mint native authority, and the original attempt count stays one.
+    f.pointer(false);
+    for _ in 0..10 {
+        f.tick(&mut gl);
+    }
+    assert_eq!(remote_control::attempts_for_test(&f.native.state), 1);
+    assert!(!remote_control::active(&f.native.state));
 }

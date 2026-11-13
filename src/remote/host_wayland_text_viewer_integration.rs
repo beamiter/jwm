@@ -29,6 +29,7 @@ impl Drop for Stop {
 }
 fn host_options(allow: bool) -> host::HostOptions {
     host::HostOptions {
+        max_control_duration: Default::default(),
         frame_limits: Default::default(),
         listen: "127.0.0.1:0".into(),
         key: crate::remote::key::KeySource::Bytes(KEY.to_vec()),
@@ -265,6 +266,7 @@ fn exercise(
     let (client_tx, client_done) = mpsc::channel();
     let client_thread = thread::spawn(move || {
         let opts = ClientOptions {
+            control_duration: Default::default(),
             viewer_backend: ViewerBackend::Wayland,
             viewer_wayland_display: None,
             wayland_keyboard: false,

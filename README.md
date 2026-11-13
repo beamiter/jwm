@@ -480,6 +480,15 @@ reveal recorded v3 sessions, but a compromised key still permits impersonation:
 rotate it, or use the independently authenticated SSH channel. See the complete setup, security boundary, tuning, and
 current limits in [JWM remote control](docs/remote-control.md).
 
+Experimental [native Wayland seamless input](docs/remote-seamless-input.md#experimental-native-wayland-jwm-udev)
+is a separate, default-off JWM udev mode, not general Wayland support. Its
+nonrenewable budget defaults to 30 seconds. Longer sessions require both the
+client's explicit `--wayland-control-duration SECONDS` and the host's independent
+`--max-wayland-control-duration SECONDS` approval (30 through 300 seconds); the guide gives complete
+commands and protocol requirements. A larger host limit never increases a
+client's request, and requests over that limit are refused. Both helpers must
+use application protocol v35. Software tests are not physical-desktop acceptance.
+
 The default modifier is Alt (`Mod1`). Useful built-in bindings include:
 
 | Binding | Action |

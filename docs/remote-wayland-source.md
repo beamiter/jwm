@@ -366,7 +366,7 @@ This is a separate, default-off authorization, not a combination of the old
 keyboard and pointer flags. The host explicitly selects one surface with
 `host --wayland-select --once --allow-wayland-control`. The viewer explicitly
 uses `connect HOST --viewer-backend wayland --wayland-control`. Both peers must
-use application protocol **v23** (31-byte capabilities). Older peers are rejected;
+use application protocol **v35** (36-byte capabilities). Older peers are rejected;
 there is no protocol downgrade. Transport encryption independently requires v3.
 
 The bundle has one native resource, source owner/instance, epoch, cross-type
@@ -374,6 +374,13 @@ sequence and creation-time **30-second nonrenewable deadline**. It atomically
 consumes both input attempts on that capture authority. It never partially
 falls back to a separate lease or legacy XTEST. Existing keyboard-only and
 pointer-only modes remain separate and mutually exclusive with this mode.
+
+That 30-second limit remains unchanged for this ordinary one-shot mode. The
+separate [native seamless mode](remote-seamless-input.md#explicit-duration-without-renewal)
+adds explicit resumable permission and exact duration negotiation: default 30,
+up to 300 seconds only when independently approved by both peers. It requires
+source control v5/local handoff v3 for longer budgets (v4/v2 suffice for 30).
+It does not extend this mode, repair leases, popup leases or old creation opcodes.
 
 Keyboard and pointer must both already focus the selected source. Granting
 control never changes focus. The viewer binds both devices on one actual seat,

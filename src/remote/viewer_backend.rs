@@ -404,9 +404,14 @@ impl Viewer {
         }
     }
     #[cfg(feature = "remote-wayland")]
-    pub(super) fn enable_wayland_seamless_input(&mut self) -> RemoteResult<()> {
+    pub(super) fn enable_wayland_seamless_input(
+        &mut self,
+        deadline: std::time::Instant,
+        remaining_ms: u32,
+        extended: bool,
+    ) -> RemoteResult<()> {
         match self {
-            Self::Wayland(v) => v.enable_wayland_seamless_input(),
+            Self::Wayland(v) => v.enable_wayland_seamless_input(deadline, remaining_ms, extended),
             _ => Err("native seamless input requires Wayland".into()),
         }
     }

@@ -182,6 +182,8 @@ const RECEIVER_JOIN_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Debug)]
 pub struct ClientOptions {
+    /// Explicit immutable requested duration; never inferred from host permission.
+    pub control_duration: super::resumable_control::ControlDuration,
     pub viewer_backend: ViewerBackend,
     pub viewer_wayland_display: Option<String>,
     pub wayland_keyboard: bool,
@@ -569,6 +571,12 @@ fn suppress_reconnect(result: RemoteResult<()>, suppress: bool) -> RemoteResult<
 }
 
 fn validate_viewer_backend(options: &ClientOptions) -> RemoteResult<()> {
+    if options.control_duration.is_extended() && !options.wayland_seamless_input {
+        return Err(invalid_data(
+            "extended control duration requires explicit Wayland seamless input",
+        )
+        .into());
+    }
     if options.wayland_seamless_input
         && (!options.resumable_control
             || !options.wayland_control
@@ -823,6 +831,8 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
     *stage = ClientStage::Negotiate;
     eprintln!("jwm-remote: connection opened; authenticating and negotiating permissions");
     let popup_requested_at = Instant::now();
+    #[cfg(feature = "remote-wayland")]
+    let control_budget_started = Instant::now();
     let (mut reader, writer, hello) = negotiate_session(
         options.resize_source.is_some() || options.follow_source_size,
         options.wayland_keyboard,
@@ -831,6 +841,7 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
         options.wayland_horizontal_scroll,
         options.wayland_control,
         options.resumable_control,
+        options.control_duration,
         options.wayland_text.is_some(),
         options.static_lossless,
         options.wayland_popup_pointer,
@@ -1030,7 +1041,16 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
             .enable_wayland_control(options.wayland_scroll, options.wayland_horizontal_scroll)?;
         let mut control = state.wayland_control.lock().unwrap();
         control.digest = Some(digest);
-        control.resumable_enabled = hello.stream.resumable_control;
+        if hello.stream.resumable_control {
+            use super::resumable_control::{LocalOptIn, Negotiated, VERSION};
+            let permission = Negotiated::with_duration(
+                LocalOptIn::Explicit,
+                Some(VERSION),
+                hello.stream.control_duration,
+                options.control_duration,
+            )?;
+            control.configure_resumable(permission, control_budget_started)?;
+        }
         control.seamless_enabled = options.wayland_seamless_input;
         control.repair.enabled = hello.stream.static_lossless;
         #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
@@ -1040,7 +1060,16 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
     }
     #[cfg(feature = "remote-wayland")]
     if options.wayland_seamless_input {
-        viewer.enable_wayland_seamless_input()?;
+        let (deadline, remaining_ms) = state
+            .wayland_control
+            .lock()
+            .unwrap()
+            .local_budget(Instant::now())?;
+        viewer.enable_wayland_seamless_input(
+            deadline,
+            remaining_ms,
+            options.control_duration.is_extended(),
+        )?;
     }
     #[cfg(feature = "remote-wayland")]
     if options.wayland_keyboard {
@@ -1143,7 +1172,8 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
     );
     if options.wayland_seamless_input {
         eprintln!(
-            "jwm-remote: experimental JWM Wayland handoff: enter the remote image with all keys/buttons released to control; leave to release. After a black-bar exit, leave the whole surface before re-entering. Ctrl+Super+F12 ends control permanently; configured lock shortcuts stay local. The original lease is at most 30 seconds, never renewed. Focus/geometry changes end control; Super is not forwarded and ends control. No drag or modifier-click."
+            "jwm-remote: experimental JWM Wayland handoff: enter the remote image with all keys/buttons released to control; leave to release. After a black-bar exit, leave the whole surface before re-entering. Ctrl+Super+F12 ends control permanently; configured lock shortcuts stay local. The original approved budget is at most {} seconds, never renewed. Focus/geometry changes end control; Super is not forwarded and ends control. No drag or modifier-click.",
+            options.control_duration.as_secs()
         );
     } else if options.seamless_input {
         eprintln!(
@@ -1445,6 +1475,7 @@ fn negotiate_session(
     request_wayland_horizontal_scroll: bool,
     request_wayland_control: bool,
     request_resumable_control: bool,
+    requested_control_duration: super::resumable_control::ControlDuration,
     request_wayland_text: bool,
     request_static_lossless: bool,
     request_wayland_popup_pointer: bool,
@@ -1499,6 +1530,7 @@ fn negotiate_session(
                 wayland_horizontal_scroll: request_wayland_horizontal_scroll,
                 wayland_control: request_wayland_control,
                 resumable_control: request_resumable_control,
+                control_duration: requested_control_duration,
                 wayland_popup_pointer: request_wayland_popup_pointer,
                 wayland_text: request_wayland_text,
                 static_lossless: request_static_lossless,
@@ -1551,6 +1583,9 @@ fn negotiate_session(
         .into());
     }
 
+    hello
+        .stream
+        .confirm_control_duration(requested_control_duration, request_resumable_control)?;
     if hello.stream.resumable_control != request_resumable_control {
         return Err(invalid_data("resumable control was not mutually negotiated").into());
     }
@@ -6180,6 +6215,7 @@ pub(super) mod tests {
     #[test]
     fn invalid_startup_size_fails_before_reading_key_or_display() {
         let options = ClientOptions {
+            control_duration: Default::default(),
             viewer_backend: crate::remote::viewer_backend::ViewerBackend::X11,
             viewer_wayland_display: None,
             wayland_keyboard: false,
@@ -8382,6 +8418,7 @@ pub(super) mod tests {
             false,
             false,
             false,
+            Default::default(),
             false,
             false,
             false,
@@ -8478,6 +8515,7 @@ pub(super) mod tests {
             false,
             false,
             false,
+            Default::default(),
             false,
             false,
             false,
@@ -8550,6 +8588,7 @@ pub(super) mod tests {
             false,
             false,
             false,
+            Default::default(),
             false,
             false,
             false,
@@ -8615,6 +8654,7 @@ pub(super) mod tests {
             false,
             false,
             false,
+            Default::default(),
             false,
             false,
             false,
@@ -8688,6 +8728,7 @@ pub(super) mod tests {
                 false,
                 false,
                 false,
+                Default::default(),
                 false,
                 false,
                 false,
@@ -8794,6 +8835,7 @@ pub(super) mod tests {
             false,
             false,
             false,
+            Default::default(),
             false,
             false,
             false,
@@ -9048,6 +9090,7 @@ mod native_viewer_permission_tests {
     #[test]
     fn native_wayland_viewer_permissions_are_checked_before_any_io() {
         let mut options = ClientOptions {
+            control_duration: Default::default(),
             viewer_backend: crate::remote::viewer_backend::ViewerBackend::Wayland,
             viewer_wayland_display: None,
             wayland_keyboard: false,

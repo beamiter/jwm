@@ -4,6 +4,7 @@ use crate::viewer_handoff_protocol::client::{
     jwm_remote_viewer_handoff_manager_v1::{self as manager, JwmRemoteViewerHandoffManagerV1},
     jwm_remote_viewer_handoff_session_v1::{self as session, JwmRemoteViewerHandoffSessionV1},
 };
+use wayland_client::Proxy;
 const TRANSITION_TIMEOUT: Duration = Duration::from_secs(2);
 #[derive(Default)]
 pub(super) struct Handoff {
@@ -12,6 +13,8 @@ pub(super) struct Handoff {
     pub(super) session: Option<JwmRemoteViewerHandoffSessionV1>,
     pub(super) enabled: bool,
     granted: bool,
+    requested_at: Option<Instant>,
+    requested_ttl_ms: u32,
     deadline: Option<Instant>,
     pending: Option<(u32, bool, bool, Instant)>,
     sequence: u32,
@@ -167,7 +170,12 @@ impl Drop for WaylandViewer {
     }
 }
 impl WaylandViewer {
-    pub(in crate::remote) fn enable_wayland_seamless_input(&mut self) -> RemoteResult<()> {
+    pub(in crate::remote) fn enable_wayland_seamless_input(
+        &mut self,
+        deadline: Instant,
+        remaining_ms: u32,
+        extended: bool,
+    ) -> RemoteResult<()> {
         if !self.state.control_mode || self.state.handoff.enabled {
             return Err("native seamless input requires fresh combined control".into());
         }
@@ -177,18 +185,42 @@ impl WaylandViewer {
             .manager
             .as_ref()
             .ok_or("JWM local handoff protocol v2 required; update and restart JWM (udev backend), with no fallback")?;
+        if remaining_ms == 0 || remaining_ms > if extended { 300_000 } else { 30_000 } {
+            return Err("local handoff remaining budget is invalid".into());
+        }
+        if extended && manager.version() < 3 {
+            return Err(
+                "extended handoff requires local protocol v3; update and restart JWM".into(),
+            );
+        }
         let seat = self
             .state
             .keyboard
             .seat
             .as_ref()
             .ok_or("local handoff seat unavailable")?;
-        // This starts before the first remote ControlRequest. Its immutable
-        // deadline is therefore no later than the remote request's 30s expiry.
-        self.state.handoff.deadline = Some(Instant::now() + Duration::from_secs(30));
+        // The caller's budget began before ClientHello, not at this grant.
+        // ACKs can only shorten it; delayed native creation cannot renew it.
+        let started = Instant::now();
+        let remaining_ms = remaining_ms.min(
+            deadline
+                .saturating_duration_since(started)
+                .as_millis()
+                .min(u128::from(u32::MAX)) as u32,
+        );
+        if remaining_ms == 0 {
+            return Err("local handoff original budget expired".into());
+        }
+        let native_deadline = started + Duration::from_millis(u64::from(remaining_ms));
+        self.state.handoff.deadline = Some(deadline.min(native_deadline));
+        self.state.handoff.requested_at = Some(started);
+        self.state.handoff.requested_ttl_ms = remaining_ms;
         self.state.handoff.enabled = true;
-        self.state.handoff.session =
-            Some(manager.create(&self.surface, seat, 30_000, &self.queue.handle(), ()));
+        self.state.handoff.session = Some(if manager.version() >= 3 {
+            manager.create_timed(&self.surface, seat, remaining_ms, &self.queue.handle(), ())
+        } else {
+            manager.create(&self.surface, seat, remaining_ms, &self.queue.handle(), ())
+        });
         while !self.state.handoff.granted {
             self.pump()?;
             self.state.handoff.check()?;
@@ -242,13 +274,18 @@ impl Dispatch<JwmRemoteViewerHandoffSessionV1, ()> for State {
         }
         match event {
             session::Event::Granted { ttl_ms } => {
-                if !h.enabled || h.granted || ttl_ms == 0 || ttl_ms > 30_000 {
+                if !h.enabled
+                    || h.granted
+                    || ttl_ms == 0
+                    || ttl_ms > h.requested_ttl_ms
+                    || h.requested_at.is_none()
+                {
                     h.fail("invalid local handoff grant");
                     return;
                 }
                 h.granted = true;
                 h.deadline = h.deadline.map(|deadline| {
-                    deadline.min(Instant::now() + Duration::from_millis(u64::from(ttl_ms)))
+                    deadline.min(h.requested_at.unwrap() + Duration::from_millis(u64::from(ttl_ms)))
                 });
             }
             session::Event::Transition { sequence, entering } => {

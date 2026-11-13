@@ -41,7 +41,7 @@ struct Session {
 // Called only by actual udev setup, not shared/nested state initialization.
 #[cfg(feature = "backend-wayland-udev")]
 pub(crate) fn init(dh: &DisplayHandle) {
-    dh.create_global::<JwmWaylandState, JwmRemoteViewerHandoffManagerV1, _>(2, ManagerData);
+    dh.create_global::<JwmWaylandState, JwmRemoteViewerHandoffManagerV1, _>(3, ManagerData);
 }
 #[cfg(feature = "backend-wayland-udev")]
 pub(crate) fn active(state: &JwmWaylandState) -> bool {
@@ -283,14 +283,20 @@ impl Dispatch<JwmRemoteViewerHandoffManagerV1, ManagerData> for JwmWaylandState 
         _: &DisplayHandle,
         init: &mut DataInit<'_, Self>,
     ) {
-        let manager::Request::Create {
-            id,
-            surface,
-            seat,
-            ttl_ms,
-        } = request
-        else {
-            return;
+        let (id, surface, seat, ttl_ms, max_ttl_ms) = match request {
+            manager::Request::Create {
+                id,
+                surface,
+                seat,
+                ttl_ms,
+            } => (id, surface, seat, ttl_ms, 30_000),
+            manager::Request::CreateTimed {
+                id,
+                surface,
+                seat,
+                ttl_ms,
+            } => (id, surface, seat, ttl_ms, 300_000),
+            _ => return,
         };
         let resource = init.init(id, SessionData);
         state
@@ -301,7 +307,7 @@ impl Dispatch<JwmRemoteViewerHandoffManagerV1, ManagerData> for JwmWaylandState 
             && seat.client().as_ref().map(Client::id) == Some(client.id());
         if !owns
             || !eligible(state, &surface)
-            || !(1..=30_000).contains(&ttl_ms)
+            || !(1..=max_ttl_ms).contains(&ttl_ms)
             || Seat::<Self>::from_resource(&seat).as_ref() != Some(&state.seat)
             || state.viewer_handoff.session.is_some()
             || quarantined(state)

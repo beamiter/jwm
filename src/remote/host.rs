@@ -2037,6 +2037,8 @@ impl FirstStop {
 
 #[derive(Clone, Debug)]
 pub struct HostOptions {
+    /// Explicit ceiling, not the duration granted to every client.
+    pub max_control_duration: super::resumable_control::ControlDuration,
     pub frame_limits: super::messages::FrameLimits,
     pub listen: String,
     pub key: KeySource,
@@ -2545,6 +2547,11 @@ fn listener_security_notice(address: IpAddr) -> Option<&'static str> {
 }
 
 fn validate_window_policy(options: &HostOptions) -> RemoteResult<()> {
+    if options.max_control_duration.is_extended() && !options.allow_resumable_control {
+        return Err(
+            invalid_data("extended control limit requires explicit resumable permission").into(),
+        );
+    }
     if options.allow_resumable_control
         && (!options.allow_wayland_control || options.allow_static_lossless)
     {
@@ -3116,6 +3123,7 @@ fn accept_error_needs_backoff(error: &io::Error) -> bool {
 
 /// A peer that proved it holds the key and sent a well-formed `Hello`.
 struct AuthenticatedPeer {
+    accepted_at: Instant,
     reader: SessionReader<TcpStream>,
     writer: SessionWriter<DeadlineWriter<TcpStream>>,
     hello: ClientHello,
@@ -3157,6 +3165,7 @@ fn authenticate_peer(mut stream: TcpStream, key: &[u8]) -> RemoteResult<Authenti
     };
     handshake_deadline.cancel();
     Ok(AuthenticatedPeer {
+        accepted_at: Instant::now(),
         reader,
         writer,
         hello,
@@ -3170,6 +3179,7 @@ fn serve_authenticated(
     window_capture: &Mutex<Option<GrantedCapture>>,
 ) -> RemoteResult<()> {
     let AuthenticatedPeer {
+        accepted_at,
         mut reader,
         mut writer,
         hello,
@@ -3295,6 +3305,10 @@ fn serve_authenticated(
     negotiated_stream.resumable_control = hello.stream.negotiate_resumable_control(
         options.allow_resumable_control && negotiated_stream.wayland_control,
     )?;
+    negotiated_stream.control_duration = hello.stream.negotiate_control_duration(
+        options.allow_resumable_control && negotiated_stream.wayland_control,
+        options.max_control_duration,
+    )?;
     negotiated_stream.wayland_scroll = hello.stream.wayland_scroll
         && options.allow_wayland_scroll
         && (negotiated_stream.wayland_pointer || negotiated_stream.wayland_control);
@@ -3315,7 +3329,15 @@ fn serve_authenticated(
             negotiated_stream.wayland_horizontal_scroll,
         )?;
         if negotiated_stream.resumable_control {
-            capture.enable_resumable_control()?;
+            use super::resumable_control::{LocalOptIn, Negotiated, VERSION};
+            let permission = Negotiated::with_duration(
+                LocalOptIn::Explicit,
+                Some(VERSION),
+                negotiated_stream.control_duration,
+                options.max_control_duration,
+            )?;
+            let budget = permission.budget_from(accepted_at)?;
+            capture.enable_resumable_control(permission, budget)?;
         }
     }
     if negotiated_stream.wayland_pointer {
@@ -8636,6 +8658,7 @@ mod tests {
 
     fn test_host_source_options() -> HostOptions {
         HostOptions {
+            max_control_duration: Default::default(),
             frame_limits: super::super::messages::FrameLimits::default(),
             listen: "127.0.0.1:0".into(),
             key: KeySource::File("/unused".into()),
@@ -11327,6 +11350,7 @@ mod tests {
     #[test]
     fn defaults_must_explicitly_opt_into_lan_and_input() {
         let options = HostOptions {
+            max_control_duration: Default::default(),
             frame_limits: Default::default(),
             listen: "127.0.0.1:48221".into(),
             key: KeySource::File(std::path::PathBuf::from("key")),

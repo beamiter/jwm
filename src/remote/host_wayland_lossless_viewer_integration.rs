@@ -24,6 +24,7 @@ impl Drop for Stop {
 }
 fn host_options(allow: bool) -> host::HostOptions {
     host::HostOptions {
+        max_control_duration: Default::default(),
         allow_static_lossless: allow,
         frame_limits: Default::default(),
         listen: "127.0.0.1:0".into(),
@@ -374,6 +375,7 @@ fn exercise_workload(host_permission: bool, client_permission: bool, blinking: b
     let (client_tx, client_done) = mpsc::channel();
     let client_thread = thread::spawn(move || {
         let opts = ClientOptions {
+            control_duration: Default::default(),
             viewer_backend: ViewerBackend::Wayland,
             viewer_wayland_display: None,
             wayland_keyboard: false,

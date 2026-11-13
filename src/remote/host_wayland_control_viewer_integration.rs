@@ -44,6 +44,7 @@ impl Drop for Stop {
 }
 fn options(scroll: bool, horizontal_scroll: bool) -> host::HostOptions {
     host::HostOptions {
+        max_control_duration: Default::default(),
         frame_limits: Default::default(),
         listen: "127.0.0.1:0".into(),
         key: crate::remote::key::KeySource::Bytes(KEY.to_vec()),
@@ -277,7 +278,8 @@ type FixtureConfig = (
     FixtureLayout,
     (bool, bool),
     Option<ResumableAckBarrier>,
-    bool, // explicit local JWM seamless input contract
+    bool,               // explicit local JWM seamless input contract
+    Option<(u32, u16)>, // actual native advertised version and exact duration
 );
 
 #[derive(Clone, Copy)]
@@ -456,6 +458,7 @@ impl Harness {
                 (false, false),
                 None,
                 false,
+                None,
             ),
         )
     }
@@ -467,7 +470,7 @@ impl Harness {
             (false, false),
             7,
             None,
-            (None, layout, (false, false), None, false),
+            (None, layout, (false, false), None, false, None),
         )
     }
     fn new_resumable(gl: &mut HeadlessSmithayGles, host: bool, viewer: bool) -> Self {
@@ -478,7 +481,14 @@ impl Harness {
             (false, false),
             7,
             None,
-            (None, FixtureLayout::default(), (host, viewer), None, false),
+            (
+                None,
+                FixtureLayout::default(),
+                (host, viewer),
+                None,
+                false,
+                None,
+            ),
         )
     }
     fn new_seamless(gl: &mut HeadlessSmithayGles) -> Self {
@@ -489,7 +499,14 @@ impl Harness {
             (false, false),
             7,
             None,
-            (None, FixtureLayout::default(), (true, true), None, true),
+            (
+                None,
+                FixtureLayout::default(),
+                (true, true),
+                None,
+                true,
+                None,
+            ),
         )
     }
     fn new_seamless_with_ack_barrier(
@@ -510,6 +527,7 @@ impl Harness {
                 (true, true),
                 Some((reached, release)),
                 true,
+                None,
             ),
         )
     }
@@ -531,6 +549,25 @@ impl Harness {
                 (true, true),
                 Some((reached, release)),
                 false,
+                None,
+            ),
+        )
+    }
+    fn new_duration(gl: &mut HeadlessSmithayGles, native_version: u32, seconds: u16) -> Self {
+        Self::new_configured(
+            gl,
+            false,
+            (false, false),
+            (false, false),
+            7,
+            None,
+            (
+                None,
+                FixtureLayout::default(),
+                (true, true),
+                None,
+                seconds > 30,
+                Some((native_version, seconds)),
             ),
         )
     }
@@ -543,8 +580,11 @@ impl Harness {
         wake_config: Option<(bool, Arc<host::InputWakeProbe>)>,
         config: FixtureConfig,
     ) -> Self {
-        let (proof_config, layout, resumable, ack_barrier, seamless) = config;
-        let mut native = Server::new();
+        let (proof_config, layout, resumable, ack_barrier, seamless, duration_config) = config;
+        let (native_version, seconds) = duration_config.unwrap_or((5, 30));
+        let control_duration =
+            crate::remote::resumable_control::ControlDuration::from_secs(seconds).unwrap();
+        let mut native = remote_control::with_manager_version_for_test(native_version, Server::new);
         let mut local = Server::new();
         if seamless {
             crate::backend::wayland_udev::viewer_handoff::init(&local.display.handle());
@@ -600,6 +640,7 @@ impl Harness {
                 let mut opts = options(host_scroll.0, host_scroll.1);
                 opts.allow_static_lossless = layout.lossless.0;
                 opts.allow_resumable_control = resumable.0;
+                opts.max_control_duration = control_duration;
                 host::serve_authenticated(
                     peer,
                     &opts,
@@ -679,6 +720,7 @@ impl Harness {
         let (client_tx, client_done) = mpsc::channel();
         let client = thread::spawn(move || {
             let opts = ClientOptions {
+                control_duration,
                 viewer_backend: ViewerBackend::Wayland,
                 viewer_wayland_display: None,
                 wayland_keyboard: false,
@@ -1989,3 +2031,6 @@ mod seamless_integration;
 
 #[path = "host_wayland_cli_process_integration.rs"]
 mod cli_process_integration;
+
+#[path = "host_wayland_duration_integration.rs"]
+mod duration_integration;

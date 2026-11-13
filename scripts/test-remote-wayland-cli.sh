@@ -46,7 +46,7 @@ export JWM_REMOTE_CLI_TEST_BIN
 # hung protocol. Each test has its own bounded waits and child Drop cleanup.
 cargo test --locked --no-default-features --features "$features" --lib --no-run
 set +e
-timeout --signal=TERM --kill-after=10s 90s \
+timeout --signal=TERM --kill-after=10s 120s \
   cargo test --locked --no-default-features --features "$features" --lib \
     cli_process_integration -- --ignored --test-threads=1 --nocapture \
     > "$run_root/tests.log" 2>&1 &
@@ -60,14 +60,15 @@ cat "$run_root/tests.log"
 python3 - "$run_root/tests.log" <<'PY'
 import re, sys
 text = open(sys.argv[1]).read()
-assert re.search(r'test result: ok\. 3 passed; 0 failed; 0 ignored;', text), \
-    'all three independent CLI acceptance cases must really execute'
+assert re.search(r'test result: ok\. 4 passed; 0 failed; 0 ignored;', text), \
+    'all four independent CLI acceptance cases must really execute'
 names = {
+    'native_cli_explicit_long_budget_expires_without_regrant',
     'native_cli_flags_reach_real_viewer_and_preserve_lease',
     'native_cli_requires_host_opt_in',
     'native_cli_rejects_old_local_v1_without_fallback',
 }
 for name in names:
     assert re.search(r'test [^\n]*::' + name + r' \.\.\. ok', text), name
-print('Independent CLI-process acceptance: 3 executed, 0 skipped; strict GL required.')
+print('Independent CLI-process acceptance: 4 executed, 0 skipped; strict GL required.')
 PY

@@ -28,6 +28,7 @@ impl Drop for Stop {
 }
 fn host_options() -> host::HostOptions {
     host::HostOptions {
+        max_control_duration: Default::default(),
         frame_limits: Default::default(),
         listen: "127.0.0.1:0".into(),
         key: crate::remote::key::KeySource::Bytes(KEY.to_vec()),
@@ -387,6 +388,7 @@ fn run(termination: Termination) {
     let client_ttl_error = exact_ttl_error.clone();
     let client_thread = thread::spawn(move || {
         let opts = ClientOptions {
+            control_duration: Default::default(),
             viewer_backend: ViewerBackend::Wayland,
             viewer_wayland_display: None,
             wayland_keyboard: true,

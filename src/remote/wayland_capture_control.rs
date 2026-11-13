@@ -1,5 +1,6 @@
 //! One native combined authority; neither old independent lease is enabled.
 use super::*;
+use crate::remote::resumable_control::{LeaseBudget, Negotiated};
 use crate::remote_control_protocol::client::{
     jwm_remote_control_lease_v1::{self as control_lease, JwmRemoteControlLeaseV1},
     jwm_remote_control_manager_v1::JwmRemoteControlManagerV1,
@@ -12,6 +13,9 @@ pub(super) struct NativeControl {
     pub(super) revoked: bool,
     requested: bool,
     resumable: bool,
+    permission: Option<Negotiated>,
+    budget: Option<LeaseBudget>,
+    native_request: Option<(Instant, u32)>,
     paused: bool,
     generation: u32,
     transition: Option<(bool, u32, u32)>,
@@ -26,6 +30,78 @@ pub(super) struct NativeControl {
     horizontal_enabled: bool,
 }
 impl NativeControl {
+    /// Consume remaining time from the one authenticated negotiation budget.
+    /// This does not create a new budget at native request or acknowledgement.
+    fn prepare_resumable_request(
+        &mut self,
+        version: u32,
+        now: Instant,
+    ) -> RemoteResult<(bool, u32)> {
+        let permission = self
+            .permission
+            .as_ref()
+            .ok_or_else(|| invalid("missing duration permission"))?;
+        if self.native_request.is_some()
+            || version < 4
+            || (permission.duration().is_extended() && version < 5)
+        {
+            return Err(invalid("timed resumable control requires native v5; no downgrade").into());
+        }
+        let budget = self
+            .budget
+            .as_mut()
+            .ok_or_else(|| invalid("missing original control budget"))?;
+        let remaining = budget.remaining_millis(now)?;
+        let timed = version >= 5;
+        // v4 has no ttl argument. Only the legacy 30-second selection may use
+        // it; effective host/adapter authority still ends at the earlier cap.
+        let ttl = if timed { remaining } else { 30_000 };
+        self.native_request = Some((now, ttl));
+        if timed {
+            budget.tighten(now + Duration::from_millis(u64::from(ttl)))?;
+        }
+        self.deadline = Some(
+            self.deadline
+                .map_or(budget.deadline(), |old| old.min(budget.deadline())),
+        );
+        Ok((timed, ttl))
+    }
+    fn accept_grant(&mut self, id: u32, epoch: u32, ttl_ms: u32, now: Instant) {
+        let result = (|| -> RemoteResult<Instant> {
+            if id == 0 || epoch == 0 || ttl_ms == 0 || self.epoch.is_some() || self.revoked {
+                return Err(invalid("invalid or repeated native control grant").into());
+            }
+            if !self.resumable {
+                if ttl_ms > 30_000 {
+                    return Err(invalid("legacy native ttl exceeds limit").into());
+                }
+                return Ok(now + Duration::from_millis(u64::from(ttl_ms)));
+            }
+            let (sent_at, requested_ms) = self
+                .native_request
+                .ok_or_else(|| invalid("native grant before duration request"))?;
+            if now < sent_at || ttl_ms > requested_ms {
+                return Err(invalid("native grant exceeds requested remaining budget").into());
+            }
+            let budget = self
+                .budget
+                .as_mut()
+                .ok_or_else(|| invalid("missing original control budget"))?;
+            budget.remaining_millis(now)?;
+            // Native TTL is measured against our send time, never ACK arrival.
+            budget.tighten(sent_at + Duration::from_millis(u64::from(ttl_ms)))?;
+            Ok(self
+                .deadline
+                .map_or(budget.deadline(), |old| old.min(budget.deadline())))
+        })();
+        match result {
+            Ok(deadline) => {
+                self.epoch = Some(epoch);
+                self.deadline = Some(deadline);
+            }
+            Err(_) => self.revoked = true,
+        }
+    }
     fn accept_transition(&mut self, resume: bool, epoch: u32, sequence: u32, generation: u32) {
         if self.revoked
             || !self.resumable
@@ -85,7 +161,11 @@ impl WaylandCapture {
 
     /// Must be called after combined control is explicitly enabled and before
     /// any capture or native lease request. An old manager cannot downgrade it.
-    pub(in crate::remote) fn enable_resumable_control(&mut self) -> RemoteResult<()> {
+    pub(in crate::remote) fn enable_resumable_control(
+        &mut self,
+        permission: Negotiated,
+        mut budget: LeaseBudget,
+    ) -> RemoteResult<()> {
         if !self.state.control.enabled
             || self.state.control.resumable
             || self.state.control.requested
@@ -100,8 +180,39 @@ impl WaylandCapture {
         {
             return Err(invalid("resumable control requires fresh native v4 opt-in").into());
         }
+        if permission.duration().is_extended()
+            && self.state.control.manager.as_ref().unwrap().version() < 5
+        {
+            return Err(invalid("extended control duration requires native manager v5").into());
+        }
+        if budget
+            .deadline()
+            .checked_duration_since(budget.started())
+            .is_none_or(|duration| duration > permission.duration().as_duration())
+        {
+            return Err(invalid("control budget exceeds negotiated permission").into());
+        }
+        budget.remaining_millis(Instant::now())?;
+        self.state.control.deadline = Some(budget.deadline());
+        self.state.control.permission = Some(permission);
+        self.state.control.budget = Some(budget);
         self.state.control.resumable = true;
         Ok(())
+    }
+
+    /// Immutable approved duration only; cloning it must never restart a lease.
+    pub(in crate::remote) fn control_permission(&self) -> Option<&Negotiated> {
+        self.state.control.permission.as_ref()
+    }
+
+    /// Original negotiation start and monotonically tightened absolute cap.
+    /// Callers may intersect deadlines, never reconstruct start from current time.
+    pub(in crate::remote) fn control_budget_bounds(&self) -> Option<(Instant, Instant)> {
+        self.state
+            .control
+            .budget
+            .as_ref()
+            .map(|budget| (budget.started(), budget.deadline()))
     }
 
     pub(in crate::remote) fn control_revoked(&self) -> bool {
@@ -130,6 +241,15 @@ impl WaylandCapture {
     }
 
     pub(in crate::remote) fn expire_control(&mut self) {
+        if self
+            .state
+            .control
+            .budget
+            .as_mut()
+            .is_some_and(|budget| budget.remaining_millis(Instant::now()).is_err())
+        {
+            self.state.control.revoked = true;
+        }
         if self.control_revoked() {
             self.revoke_control();
         }
@@ -175,15 +295,36 @@ impl WaylandCapture {
         }
         self.state.control.requested = true;
         let deadline = (Instant::now() + PROTOCOL_TIMEOUT).min(self.arm_deadline.unwrap());
-        let manager = self.state.control.manager.as_ref().unwrap();
-        let lease = if self.state.control.resumable {
-            manager.create_resumable_lease(
-                self.source.as_ref().unwrap(),
-                u32::from(self.state.control.scroll_enabled)
-                    | (u32::from(self.state.control.horizontal_enabled) << 1),
-                &self.queue.handle(),
-                (),
+        let version = self.state.control.manager.as_ref().unwrap().version();
+        let timed = if self.state.control.resumable {
+            Some(
+                self.state
+                    .control
+                    .prepare_resumable_request(version, Instant::now())?,
             )
+        } else {
+            None
+        };
+        let manager = self.state.control.manager.as_ref().unwrap();
+        let axes = u32::from(self.state.control.scroll_enabled)
+            | (u32::from(self.state.control.horizontal_enabled) << 1);
+        let lease = if let Some((use_timed, ttl_ms)) = timed {
+            if use_timed {
+                manager.create_timed_resumable_lease(
+                    self.source.as_ref().unwrap(),
+                    axes,
+                    ttl_ms,
+                    &self.queue.handle(),
+                    (),
+                )
+            } else {
+                manager.create_resumable_lease(
+                    self.source.as_ref().unwrap(),
+                    axes,
+                    &self.queue.handle(),
+                    (),
+                )
+            }
         } else if self.state.control.horizontal_enabled {
             manager.create_lease_with_scroll_axes(
                 self.source.as_ref().unwrap(),
@@ -454,17 +595,7 @@ impl Dispatch<JwmRemoteControlLeaseV1, ()> for State {
                 }
             }
             control_lease::Event::Granted { id, epoch, ttl_ms } => {
-                if id == 0
-                    || epoch == 0
-                    || ttl_ms == 0
-                    || ttl_ms > 30_000
-                    || keyboard.epoch.is_some()
-                {
-                    keyboard.revoked = true;
-                    return;
-                }
-                keyboard.epoch = Some(epoch);
-                keyboard.deadline = Some(Instant::now() + Duration::from_millis(u64::from(ttl_ms)));
+                keyboard.accept_grant(id, epoch, ttl_ms, Instant::now());
             }
             control_lease::Event::Armed { epoch } => {
                 if keyboard.epoch != Some(epoch)
@@ -513,6 +644,101 @@ impl Dispatch<JwmRemoteControlLeaseV1, ()> for State {
 #[cfg(test)]
 mod resumable_tests {
     use super::*;
+
+    fn budgeted(start: Instant, seconds: u16) -> NativeControl {
+        use crate::remote::resumable_control::{ControlDuration, LocalOptIn, VERSION};
+        let duration = ControlDuration::from_secs(seconds).unwrap();
+        let permission =
+            Negotiated::with_duration(LocalOptIn::Explicit, Some(VERSION), duration, duration)
+                .unwrap();
+        let budget = permission.budget_from(start).unwrap();
+        NativeControl {
+            enabled: true,
+            resumable: true,
+            deadline: Some(budget.deadline()),
+            permission: Some(permission),
+            budget: Some(budget),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn timed_native_request_and_delayed_grant_never_restart_original_budget() {
+        let start = Instant::now();
+        let mut state = budgeted(start, 300);
+        assert_eq!(
+            state
+                .prepare_resumable_request(5, start + Duration::from_secs(4))
+                .unwrap(),
+            (true, 296_000)
+        );
+        state.accept_grant(7, 7, 296_000, start + Duration::from_secs(10));
+        assert!(!state.revoked);
+        assert_eq!(state.deadline, Some(start + Duration::from_secs(300)));
+        assert_eq!(state.budget.as_ref().unwrap().started(), start);
+        assert_eq!(state.epoch, Some(7));
+        assert!(
+            state
+                .prepare_resumable_request(5, start + Duration::from_secs(11))
+                .is_err(),
+            "no second native creation"
+        );
+    }
+
+    #[test]
+    fn shortened_native_grant_uses_request_time_not_ack_arrival() {
+        let start = Instant::now();
+        let mut state = budgeted(start, 300);
+        state
+            .prepare_resumable_request(5, start + Duration::from_secs(4))
+            .unwrap();
+        state.accept_grant(7, 7, 120_000, start + Duration::from_secs(10));
+        assert!(!state.revoked);
+        assert_eq!(state.deadline, Some(start + Duration::from_secs(124)));
+        assert_eq!(
+            state.budget.as_ref().unwrap().deadline(),
+            state.deadline.unwrap()
+        );
+    }
+
+    #[test]
+    fn native_v4_allows_only_default_duration_under_earlier_effective_cap() {
+        let start = Instant::now();
+        let mut legacy = budgeted(start, 30);
+        assert_eq!(
+            legacy
+                .prepare_resumable_request(4, start + Duration::from_secs(5))
+                .unwrap(),
+            (false, 30_000)
+        );
+        legacy.accept_grant(7, 7, 30_000, start + Duration::from_secs(10));
+        assert!(!legacy.revoked);
+        assert_eq!(legacy.deadline, Some(start + Duration::from_secs(30)));
+        let mut extended = budgeted(start, 31);
+        assert!(extended.prepare_resumable_request(4, start).is_err());
+        assert!(extended.native_request.is_none());
+    }
+
+    #[test]
+    fn timed_native_grant_rejects_extension_expiry_and_clock_reversal() {
+        let start = Instant::now();
+        for case in 0..3 {
+            let mut state = budgeted(start, 30);
+            let (timed, remaining) = state
+                .prepare_resumable_request(5, start + Duration::from_millis(1))
+                .unwrap();
+            assert!(timed);
+            assert_eq!(remaining, 29_999);
+            let (ttl, received) = match case {
+                0 => (30_000, start + Duration::from_millis(2)),
+                1 => (remaining, start + Duration::from_secs(30)),
+                _ => (remaining, start),
+            };
+            state.accept_grant(7, 7, ttl, received);
+            assert!(state.revoked, "case {case}");
+            assert!(state.epoch.is_none());
+        }
+    }
 
     fn armed() -> NativeControl {
         NativeControl {

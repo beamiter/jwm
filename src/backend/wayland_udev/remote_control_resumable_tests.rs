@@ -1,6 +1,6 @@
 //! Native v4 protocol and actual keyboard recipients, not compositor hover.
 use super::*;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 impl Fixture {
     fn pause(&mut self, sequence: u32, generation: u32) -> Vec<Event> {
@@ -30,60 +30,72 @@ fn wire_control_resumable_pause_releases_real_keys_and_keeps_original_lifetime()
     let Some(mut gl) = HeadlessSmithayGles::new() else {
         return;
     };
-    let mut f = Fixture::resumable();
-    let frame = f.frame(&mut gl);
-    f.arm(frame);
-    let created = f
-        .server
-        .state
-        .remote_control
-        .active
-        .as_ref()
-        .unwrap()
-        .created;
-    let result = f.key(1, 42, true);
-    f.accepted(&result, 1);
-    assert_eq!(f.target_keys(), vec![(42, 1)]);
-    let result = f.pause(2, 1);
-    f.transition(&result, 5, 2, 1);
-    assert_eq!(
-        f.target_keys(),
-        vec![(42, 0)],
-        "pause must balance actual delivered Shift"
-    );
-    let lease = f.server.state.remote_control.active.as_ref().unwrap();
-    assert!(!lease.armed && lease.held.is_empty());
-    assert_eq!(lease.created, created);
-    assert_eq!(lease.sequence, 2);
-    let frame = f.frame(&mut gl);
-    let result = f.resume(3, 2, frame);
-    f.transition(&result, 6, 3, 2);
-    assert!(
-        f.target_keys().is_empty(),
-        "resume is not a synthetic input event"
-    );
-    let lease = f.server.state.remote_control.active.as_ref().unwrap();
-    assert!(lease.armed && lease.paused_at.is_none());
-    assert_eq!(lease.created, created);
-    let result = f.key(4, 30, true);
-    f.accepted(&result, 4);
-    let delivered = events(&mut f.app.client);
-    assert!(
-        delivered
-            .iter()
-            .any(|e| e.sender == f.keyboard && e.opcode == 3 && e.args[2..] == [30, 1])
-    );
-    assert!(
-        delivered
-            .iter()
-            .filter(|e| e.sender == f.keyboard && e.opcode == 4)
-            .all(|e| e.args[1..] == [0, 0, 0, 0]),
-        "Shift must not survive in lease XKB state"
-    );
-    let result = f.pause(5, 2);
-    f.transition(&result, 5, 5, 2);
-    assert_eq!(f.target_keys(), vec![(30, 0)]);
-    f.other_empty();
+    for ttl in [None, Some(300_000)] {
+        let mut f = Fixture::with_duration(7, 5, false, Some(0), true, ttl);
+        let frame = f.frame(&mut gl);
+        f.arm(frame);
+        let created = f
+            .server
+            .state
+            .remote_control
+            .active
+            .as_ref()
+            .unwrap()
+            .created;
+        let deadline = f
+            .server
+            .state
+            .remote_control
+            .active
+            .as_ref()
+            .unwrap()
+            .deadline;
+        let result = f.key(1, 42, true);
+        f.accepted(&result, 1);
+        assert_eq!(f.target_keys(), vec![(42, 1)]);
+        let result = f.pause(2, 1);
+        f.transition(&result, 5, 2, 1);
+        assert_eq!(
+            f.target_keys(),
+            vec![(42, 0)],
+            "pause must balance actual delivered Shift"
+        );
+        let lease = f.server.state.remote_control.active.as_ref().unwrap();
+        assert!(!lease.armed && lease.held.is_empty());
+        assert_eq!(lease.created, created);
+        assert_eq!(lease.deadline, deadline);
+        assert_eq!(lease.sequence, 2);
+        let frame = f.frame(&mut gl);
+        let result = f.resume(3, 2, frame);
+        f.transition(&result, 6, 3, 2);
+        assert!(
+            f.target_keys().is_empty(),
+            "resume is not a synthetic input event"
+        );
+        let lease = f.server.state.remote_control.active.as_ref().unwrap();
+        assert!(lease.armed && lease.paused_at.is_none());
+        assert_eq!(lease.created, created);
+        assert_eq!(lease.deadline, deadline);
+        let result = f.key(4, 30, true);
+        f.accepted(&result, 4);
+        let delivered = events(&mut f.app.client);
+        assert!(
+            delivered
+                .iter()
+                .any(|e| e.sender == f.keyboard && e.opcode == 3 && e.args[2..] == [30, 1])
+        );
+        assert!(
+            delivered
+                .iter()
+                .filter(|e| e.sender == f.keyboard && e.opcode == 4)
+                .all(|e| e.args[1..] == [0, 0, 0, 0]),
+            "Shift must not survive in lease XKB state"
+        );
+        let result = f.pause(5, 2);
+        f.transition(&result, 5, 5, 2);
+        assert_eq!(f.target_keys(), vec![(30, 0)]);
+        f.other_empty();
+    }
 }
 
 #[test]
@@ -155,7 +167,7 @@ fn wire_control_resumable_focus_source_expiry_and_revoke_remain_terminal() {
                     .active
                     .as_mut()
                     .unwrap()
-                    .created = Instant::now() - Duration::from_secs(30);
+                    .deadline = Instant::now();
             }
             _ => super::super::revoke(&mut f.server.state, super::super::SEAT),
         }
@@ -205,4 +217,38 @@ fn wire_control_resumable_invalid_axes_and_exhausted_budget_never_acknowledge() 
     assert_eq!(f.target_keys(), vec![(42, 0)]);
     assert!(f.server.state.remote_control.active.is_none());
     f.other_empty();
+}
+
+#[test]
+fn wire_control_timed_expiry_releases_held_keys_and_cannot_resume() {
+    let Some(mut gl) = HeadlessSmithayGles::new() else {
+        return;
+    };
+    let mut f = Fixture::with_duration(7, 5, false, Some(0), true, Some(300_000));
+    let frame = f.frame(&mut gl);
+    f.arm(frame);
+    let result = f.key(1, 42, true);
+    f.accepted(&result, 1);
+    assert_eq!(f.target_keys(), vec![(42, 1)]);
+    // Deterministic deadline boundary, not evidence of real elapsed 300 seconds.
+    f.server
+        .state
+        .remote_control
+        .active
+        .as_mut()
+        .unwrap()
+        .deadline = Instant::now();
+    let result = f.pause(2, 1);
+    // Expiry must balance exactly the delivered press before we assert that
+    // revocation produced no additional input on either recipient.
+    assert_eq!(f.target_keys(), vec![(42, 0)]);
+    f.denied(&result);
+    assert!(f.server.state.remote_control.active.is_none());
+    let result = f.resume(3, 2, frame);
+    assert!(
+        !result
+            .iter()
+            .any(|e| e.sender == f.lease && matches!(e.opcode, 3 | 5 | 6))
+    );
+    assert!(f.target_keys().is_empty());
 }

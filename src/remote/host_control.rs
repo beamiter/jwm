@@ -1,8 +1,8 @@
 //! One host authority and action order for sequential keyboard/pointer control.
 use super::*;
 use crate::remote::resumable_control::{
-    Binding, HostSession, Kind as ResumableKind, LocalOptIn, Message as ResumableMessage,
-    Negotiated, Record as ResumableRecord, VERSION,
+    Binding, HostSession, Kind as ResumableKind, Message as ResumableMessage,
+    Record as ResumableRecord,
 };
 use crate::remote::wayland_control_wire::{
     ControlAction, ControlActionKind, ControlRequest, ControlStatus, ControlStatusKind,
@@ -21,6 +21,7 @@ pub(super) struct HostControl {
     epoch: Option<u64>,
     ended: bool,
     started: Option<Instant>,
+    deadline: Option<Instant>,
     resumable: Option<HostSession>,
     sequence: u64,
     held: std::collections::BTreeSet<u16>,
@@ -28,6 +29,9 @@ pub(super) struct HostControl {
     rate_at: Option<Instant>,
 }
 impl HostControl {
+    fn tighten_deadline(&mut self, deadline: Instant) {
+        self.deadline = Some(self.deadline.map_or(deadline, |old| old.min(deadline)));
+    }
     pub(super) fn held_empty(&self) -> bool {
         self.held.is_empty()
     }
@@ -36,9 +40,8 @@ impl HostControl {
     }
     pub(super) fn active(&self, now: Instant) -> bool {
         !self.ended
-            && self
-                .started
-                .is_some_and(|at| now.saturating_duration_since(at) < LEASE_DURATION)
+            && self.started.is_some_and(|at| now >= at)
+            && self.deadline.is_some_and(|deadline| now < deadline)
     }
 }
 fn status(
@@ -120,11 +123,13 @@ pub(super) fn process(
         return Ok(());
     }
     let now = Instant::now();
+    if let Some((_, deadline)) = capture.control_budget_bounds() {
+        state.tighten_deadline(deadline);
+    }
     if sources.control_revoke.load(Ordering::Acquire)
         || capture.control_revoked()
-        || state
-            .started
-            .is_some_and(|at| now.saturating_duration_since(at) >= LEASE_DURATION)
+        || state.started.is_some_and(|at| now < at)
+        || state.deadline.is_some_and(|deadline| now >= deadline)
     {
         let validation = control_repair::validate_expiry(sources, now);
         stop(sources, capture, writer, state)?;
@@ -190,11 +195,29 @@ pub(super) fn process(
                     }
                     let epoch = capture.arm_control(request.keymap_digest)?;
                     state.epoch = Some(epoch);
-                    state.started = Some(now);
+                    let armed_at = Instant::now();
+                    let (started, deadline) =
+                        if sources.resumable_control_enabled.load(Ordering::Acquire) {
+                            capture.control_budget_bounds().ok_or_else(|| {
+                                invalid_data("resumable arm lacks original negotiated budget")
+                            })?
+                        } else {
+                            (now, now + LEASE_DURATION)
+                        };
+                    state.started = Some(started);
+                    state.tighten_deadline(deadline);
+                    if !state.active(armed_at) {
+                        return Err(invalid_data("control budget expired during native arm").into());
+                    }
                     if sources.resumable_control_enabled.load(Ordering::Acquire) {
-                        // This bit is set only after independent local and peer
-                        // opt-ins have both passed the hello negotiation.
-                        let permission = Negotiated::new(LocalOptIn::Explicit, Some(VERSION))?;
+                        // The adapter owns the sole live budget. Approval may be
+                        // cloned, but its original start/deadline never restart.
+                        let permission = capture
+                            .control_permission()
+                            .ok_or_else(|| {
+                                invalid_data("resumable arm lacks exact approved duration")
+                            })?
+                            .clone();
                         state.resumable = Some(HostSession::after_native_arm(
                             permission,
                             Binding {
@@ -202,8 +225,8 @@ pub(super) fn process(
                                 source_epoch: request.scope.source_epoch,
                                 geometry_epoch: request.scope.geometry_epoch,
                             },
-                            now,
-                            now + LEASE_DURATION,
+                            armed_at,
+                            state.deadline.unwrap(),
                             request.scope.frame_sequence,
                         )?);
                     }
@@ -455,4 +478,27 @@ pub(super) fn process(
     }
     control_repair::maybe_offer(sources, writer, state)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod duration_tests {
+    use super::*;
+
+    #[test]
+    fn host_activity_uses_approved_absolute_cap_not_fixed_thirty_seconds() {
+        let start = Instant::now();
+        let mut state = HostControl {
+            started: Some(start),
+            ..Default::default()
+        };
+        state.tighten_deadline(start + Duration::from_secs(300));
+        assert!(state.active(start + Duration::from_secs(31)));
+        assert!(!state.active(start + Duration::from_secs(300)));
+        state.tighten_deadline(start + Duration::from_secs(90));
+        state.tighten_deadline(start + Duration::from_secs(300));
+        assert_eq!(state.deadline, Some(start + Duration::from_secs(90)));
+        assert!(!state.active(start + Duration::from_secs(90)));
+        state.ended = true;
+        assert!(!state.active(start + Duration::from_secs(1)));
+    }
 }

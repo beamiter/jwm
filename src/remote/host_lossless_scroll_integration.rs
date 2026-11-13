@@ -113,6 +113,7 @@ fn actual_scroll_copy_preserves_exact_interior_and_repairs_exposed_edges() {
     let (client_tx, client_done) = mpsc::channel();
     let client_thread = thread::spawn(move || {
         let opts = ClientOptions {
+            control_duration: Default::default(),
             viewer_backend: ViewerBackend::Wayland,
             viewer_wayland_display: None,
             wayland_keyboard: false,

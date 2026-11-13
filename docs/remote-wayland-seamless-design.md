@@ -9,10 +9,12 @@ independently enable `--wayland-select --once --allow-wayland-control
 --allow-resumable-control`. Defaults remain off; an unavailable capability or
 local compositor protocol fails closed, without downgrade or XWayland fallback.
 Nested JWM backends and other compositors do not advertise this contract.
-The CLI viewer requires version 2 of the local handoff manager (the interface
-name retains `_v1`). Version 2 guarantees scene hit-testing and position-aware
-geometry invalidation; version-1 compositors are refused. Update and restart
-the local JWM compositor as well as updating the client binary.
+The default 30-second path requires source control v4 and local handoff v2
+(the interface names retain `_v1`). Local v2 guarantees scene hit-testing and
+position-aware geometry invalidation; v1 compositors are refused. An explicitly
+longer budget requires source control v5 and local handoff v3, with no fallback.
+All network sessions require application hello v35 on both helpers. Update and
+restart the relevant JWM compositors as well as updating both helper binaries.
 
 See [the user-facing example and limitations](remote-seamless-input.md#experimental-native-wayland-jwm-udev).
 The native option is not supported by `jwm-remote ssh` or saved connection
@@ -24,8 +26,11 @@ window; use this mode only when that per-session behavior is intended.
 
 `jwm_remote_viewer_handoff_v1` creates one explicitly requested session for the
 viewer's own normal toplevel and seat. Sandboxed/foreign surfaces are denied.
-It grants no remote authority. Its at-most-30-second fixed lifetime starts
-before the first remote control request and can only end earlier, never extend the remote lease.
+It grants no remote authority. Its fixed lifetime uses only the remaining
+initial client budget: default 30 seconds, or an explicitly negotiated duration
+of at most 300 seconds. It can only end earlier, never renew the remote lease.
+The legacy `create` request remains limited to 30000 ms at every binding version;
+only v3 `create_timed` accepts up to 300000 ms of remaining budget.
 
 Entry consumes a fresh real `wl_pointer.enter` serial, requires clean physical
 keys/buttons, and brackets the focus change with an ordered transition and
@@ -70,6 +75,38 @@ if private Unix sockets or rendering are unavailable; it never counts a skipped
 process test as acceptance. It remains owned-software, not physical hardware,
 validation.
 
+## Exact duration negotiation and absolute budgets
+
+`connect --wayland-control-duration SECONDS` is valid only with native seamless
+input; `host --max-wayland-control-duration SECONDS` only with explicit resumable
+control. Each typed configuration value is 30..=300 seconds and defaults to 30.
+The host ceiling is not a grant: the client requests its exact duration, and a
+request above the ceiling is refused rather than clamped. The authenticated
+server must echo the exact request. These flags never become saved authority.
+
+Application v35 extends stream capabilities from 34 to 36 bytes. Bytes 34..36
+contain the big-endian u16 duration in seconds. The default value 30 alone grants
+no input; a value above 30 requires the combined/resumable bitfield and independent
+local permission. Old application versions and old record lengths are rejected.
+The lifecycle record version and generation/sequence rules remain unchanged.
+
+`Negotiated::new` still authorizes at most 30 seconds. The duration-aware token
+validates both opt-ins and the exact request against the local ceiling. One
+process-local `LeaseBudget` retains its original start and deadline; native
+confirmation can only tighten it. Remaining milliseconds are rounded down,
+including values below 30000 after setup. Clock reversal, exhaustion and expired
+budgets are terminal. No cross-machine `Instant` is serialized. Hello, native
+creation and local handoff each consume the existing budget; receiving Grant,
+Arm, Pause or Resume ACKs cannot restart it. Paused time counts toward expiry.
+
+Native control v5 adds `create_timed_resumable_lease`; local handoff v3 adds
+`create_timed`. These explicitly accept only bounded remaining lifetime, not
+new input permissions. Old creation opcodes retain their original 30-second
+limits even on newer bindings. Default 30-second requests can still use source
+v4/local v2; a request above 30 requires v5/v3 even if transit has already reduced
+its remainder below 30 seconds. Existing sequence/rate, proof freshness and
+transition-timeout limits remain unchanged and may end a longer session early.
+
 ## Implemented protocol slice
 
 - `ClientOptions.resumable_control` and `HostOptions.allow_resumable_control`
@@ -78,8 +115,9 @@ validation.
   defaults remain false. Static-lossless repair is excluded
   until its phase cancellation has a separate proved acknowledgement.
 - Stream byte 30 is a bitfield: ordinary combined control is `1`, version-one
-  resumable combined control is `3`; `2` is invalid. Old peers reject `3`, and a
-  new peer refuses an unavailable requested mode instead of downgrading.
+  resumable combined control is `3`; `2` is invalid. Application v35 additionally
+  carries the exact duration. A peer refuses an unavailable requested mode
+  instead of downgrading.
 - Authenticated message kind 53 carries an exact version-one record: 56-byte
   lifecycle or 104-byte action envelope. Every action binds the native session,
   source/geometry epochs, generation and global sequence; the inner legacy

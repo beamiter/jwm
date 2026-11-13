@@ -61,6 +61,7 @@ struct Lease {
     paused_at: Option<Instant>,
     sequence: u32,
     created: Instant,
+    deadline: Instant,
     rate_start: Instant,
     rate: u32,
     tokens: f64,
@@ -70,8 +71,29 @@ pub struct ManagerData;
 pub struct LeaseData {
     epoch: u32,
 }
+#[cfg(test)]
+thread_local! {
+    static TEST_MANAGER_VERSION: std::cell::Cell<u32> = const { std::cell::Cell::new(5) };
+}
+/// Construct a genuine old-version registry for compatibility tests. No authority override.
+#[cfg(all(test, feature = "remote-wayland"))]
+pub(crate) fn with_manager_version_for_test<R>(version: u32, run: impl FnOnce() -> R) -> R {
+    assert!(matches!(version, 4 | 5));
+    struct Restore(u32);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            TEST_MANAGER_VERSION.set(self.0);
+        }
+    }
+    let _restore = Restore(TEST_MANAGER_VERSION.replace(version));
+    run()
+}
 pub(crate) fn init(dh: &DisplayHandle) {
-    dh.create_global::<JwmWaylandState, JwmRemoteControlManagerV1, _>(4, ManagerData);
+    #[cfg(not(test))]
+    let version = 5;
+    #[cfg(test)]
+    let version = TEST_MANAGER_VERSION.get();
+    dh.create_global::<JwmWaylandState, JwmRemoteControlManagerV1, _>(version, ManagerData);
 }
 fn current(state: &JwmWaylandState, lease: &Lease) -> bool {
     lease.resource.is_alive()
@@ -82,7 +104,7 @@ fn current(state: &JwmWaylandState, lease: &Lease) -> bool {
             .seat
             .get_pointer()
             .is_some_and(|p| p.authorized_pointer_snapshot_is_current(&lease.pointer))
-        && lease.created.elapsed() < TTL
+        && Instant::now() < lease.deadline
         && authority_is_current(state, &lease.authority)
         && state.remote_keyboard_seat_eligible()
         && state.remote_keyboard_target_eligible(&lease.authority)
@@ -135,7 +157,7 @@ pub(crate) fn lease_timing_for_test(state: &JwmWaylandState) -> Option<(u32, Ins
         .remote_control
         .active
         .as_ref()
-        .map(|lease| (lease.epoch, lease.created, lease.created + TTL))
+        .map(|lease| (lease.epoch, lease.created, lease.deadline))
 }
 pub(crate) fn active(state: &JwmWaylandState) -> bool {
     state.remote_control.active.is_some()
@@ -204,21 +226,34 @@ impl Dispatch<JwmRemoteControlManagerV1, ManagerData> for JwmWaylandState {
         init: &mut DataInit<'_, Self>,
     ) {
         // Interface version is not consent: only the additional request grants wheel.
-        let (id, source, scroll_axes, axes_valid, resumable) = match request {
+        let (id, source, scroll_axes, axes_valid, resumable, ttl_ms) = match request {
             jwm_remote_control_manager_v1::Request::CreateLease { id, source } => {
-                (id, source, 0, true, false)
+                (id, source, 0, true, false, TTL.as_millis() as u32)
             }
             jwm_remote_control_manager_v1::Request::CreateLeaseWithScroll { id, source } => {
-                (id, source, 1, true, false)
+                (id, source, 1, true, false, TTL.as_millis() as u32)
             }
             jwm_remote_control_manager_v1::Request::CreateLeaseWithScrollAxes {
                 id,
                 source,
                 axes,
-            } => (id, source, axes, matches!(axes, 1..=3), false),
+            } => (
+                id,
+                source,
+                axes,
+                matches!(axes, 1..=3),
+                false,
+                TTL.as_millis() as u32,
+            ),
             jwm_remote_control_manager_v1::Request::CreateResumableLease { id, source, axes } => {
-                (id, source, axes, axes <= 3, true)
+                (id, source, axes, axes <= 3, true, TTL.as_millis() as u32)
             }
+            jwm_remote_control_manager_v1::Request::CreateTimedResumableLease {
+                id,
+                source,
+                axes,
+                ttl_ms,
+            } => (id, source, axes, axes <= 3, true, ttl_ms),
             _ => return,
         };
         {
@@ -242,6 +277,7 @@ impl Dispatch<JwmRemoteControlManagerV1, ManagerData> for JwmWaylandState {
             if source.client().as_ref().map(Client::id) != Some(client.id())
                 || !authority.consume_control_attempt()
                 || !axes_valid
+                || !(1..=300_000).contains(&ttl_ms)
                 || state.remote_control.active.is_some()
                 || super::remote_pointer::active(state)
                 || super::remote_keyboard::active(state)
@@ -324,6 +360,7 @@ impl Dispatch<JwmRemoteControlManagerV1, ManagerData> for JwmWaylandState {
                 paused_at: None,
                 sequence: 0,
                 created: now,
+                deadline: now + Duration::from_millis(u64::from(ttl_ms)),
                 rate_start: now,
                 rate: 0,
                 tokens: 32.0,
@@ -344,7 +381,13 @@ impl Dispatch<JwmRemoteControlManagerV1, ManagerData> for JwmWaylandState {
                 revoke(state, DENIED);
                 return;
             }
-            resource.granted(epoch, epoch, TTL.as_millis() as u32);
+            if let Some(lease) = state.remote_control.active.as_ref() {
+                resource.granted(
+                    epoch,
+                    epoch,
+                    lease.deadline.duration_since(lease.created).as_millis() as u32,
+                );
+            }
             state.request_client_flush();
         }
     }
@@ -764,7 +807,7 @@ pub(crate) fn cli_lease_snapshot_for_test(
         (
             lease.epoch,
             lease.created,
-            lease.created + TTL,
+            lease.deadline,
             lease.resumable,
             lease.paused_at.is_some(),
             lease.generation,

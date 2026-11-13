@@ -23,6 +23,9 @@ struct Fixture {
 }
 impl Fixture {
     fn new() -> Self {
+        Self::with_duration(2, false, 30_000)
+    }
+    fn with_duration(version: u32, timed: bool, ttl_ms: u32) -> Self {
         let mut server = Server::new();
         init(&server.display.handle());
         let mut prior = App::new(&mut server);
@@ -43,19 +46,33 @@ impl Fixture {
         viewer.client.events();
         let manager = viewer
             .client
-            .bind("jwm_remote_viewer_handoff_manager_v1", 2);
+            .bind("jwm_remote_viewer_handoff_manager_v1", version);
         let session = viewer.client.new_id();
-        viewer
-            .client
-            .request(manager, 1, &[session, viewer.surface, seat, 30_000]);
-        sync(&mut server);
-        assert!(
-            viewer
-                .client
-                .events()
-                .iter()
-                .any(|e| e.sender == session && e.opcode == 0)
+        viewer.client.request(
+            manager,
+            if timed { 2 } else { 1 },
+            &[session, viewer.surface, seat, ttl_ms],
         );
+        sync(&mut server);
+        let admission = viewer.client.events();
+        if (1..=if timed { 300_000 } else { 30_000 }).contains(&ttl_ms) {
+            assert!(
+                admission
+                    .iter()
+                    .any(|e| e.sender == session && e.opcode == 0 && e.args == [ttl_ms])
+            );
+        } else {
+            assert!(
+                admission
+                    .iter()
+                    .any(|e| e.sender == session && e.opcode == 4)
+            );
+            assert!(
+                !admission
+                    .iter()
+                    .any(|e| e.sender == session && e.opcode == 0)
+            );
+        }
         Self {
             server,
             viewer,
@@ -376,68 +393,70 @@ fn handoff_cannot_steal_non_toplevel_keyboard_focus() {
 
 #[test]
 fn handoff_expired_lease_revokes_before_physical_input_without_timer() {
-    let mut f = Fixture::new();
-    f.enter(1);
-    f.key(30, true);
-    assert!(
-        f.viewer
-            .client
-            .events()
-            .iter()
-            .any(|e| e.sender == f.keyboard && e.opcode == 3 && e.args[2..] == [30, 1])
-    );
-    f.prior.client.events();
-    f.server
-        .state
-        .viewer_handoff
-        .session
-        .as_mut()
-        .unwrap()
-        .deadline = Instant::now();
-    // Deliberately never dispatch the timer: routing alone must enforce expiry.
-    f.key(31, true);
-    assert!(!registered_for_test(&f.server.state));
-    assert!(quarantined(&f.server.state));
-    assert!(
-        f.viewer
-            .client
-            .events()
-            .iter()
-            .all(|e| e.sender != f.keyboard || e.opcode != 3)
-    );
-    assert!(
-        f.prior
-            .client
-            .events()
-            .iter()
-            .all(|e| e.sender != f.prior_keyboard || e.opcode != 3)
-    );
-    f.key(31, false);
-    f.key(30, false);
-    assert!(!quarantined(&f.server.state));
-    assert!(
+    for timed in [false, true] {
+        let mut f = Fixture::with_duration(3, timed, if timed { 300_000 } else { 30_000 });
+        f.enter(1);
+        f.key(30, true);
+        assert!(
+            f.viewer
+                .client
+                .events()
+                .iter()
+                .any(|e| e.sender == f.keyboard && e.opcode == 3 && e.args[2..] == [30, 1])
+        );
+        f.prior.client.events();
         f.server
             .state
-            .seat
-            .get_keyboard()
+            .viewer_handoff
+            .session
+            .as_mut()
             .unwrap()
-            .pressed_keys()
-            .is_empty()
-    );
-    assert!(
-        f.viewer
-            .client
-            .events()
-            .iter()
-            .all(|e| e.sender != f.keyboard || e.opcode != 3)
-    );
-    assert!(
-        f.prior
-            .client
-            .events()
-            .iter()
-            .all(|e| e.sender != f.prior_keyboard || e.opcode != 3)
-    );
+            .deadline = Instant::now();
+        // Deliberately never dispatch the timer: routing alone must enforce expiry.
+        f.key(31, true);
+        assert!(!registered_for_test(&f.server.state));
+        assert!(quarantined(&f.server.state));
+        assert!(
+            f.viewer
+                .client
+                .events()
+                .iter()
+                .all(|e| e.sender != f.keyboard || e.opcode != 3)
+        );
+        assert!(
+            f.prior
+                .client
+                .events()
+                .iter()
+                .all(|e| e.sender != f.prior_keyboard || e.opcode != 3)
+        );
+        f.key(31, false);
+        f.key(30, false);
+        assert!(!quarantined(&f.server.state));
+        assert!(
+            f.server
+                .state
+                .seat
+                .get_keyboard()
+                .unwrap()
+                .pressed_keys()
+                .is_empty()
+        );
+        assert!(
+            f.viewer
+                .client
+                .events()
+                .iter()
+                .all(|e| e.sender != f.keyboard || e.opcode != 3)
+        );
+        assert!(
+            f.prior
+                .client
+                .events()
+                .iter()
+                .all(|e| e.sender != f.prior_keyboard || e.opcode != 3)
+        );
+    }
 }
 
 #[test]
@@ -569,4 +588,22 @@ fn handoff_pointer_refresh_revokes_before_stale_focus_button_or_axis_delivery() 
         assert!(!registered_for_test(&f.server.state));
         assert!(!inhibits(&f.server.state));
     }
+}
+
+#[test]
+fn handoff_timed_creation_bounds_and_old_opcode_remains_short() {
+    for ttl in [1, 30_000, 30_001, 300_000] {
+        let f = Fixture::with_duration(3, true, ttl);
+        assert!(f.server.state.viewer_handoff.session.is_some());
+    }
+    for ttl in [0, 300_001, u32::MAX] {
+        let f = Fixture::with_duration(3, true, ttl);
+        assert!(f.server.state.viewer_handoff.session.is_none());
+    }
+    for ttl in [0, 30_001, 300_000] {
+        let f = Fixture::with_duration(3, false, ttl);
+        assert!(f.server.state.viewer_handoff.session.is_none());
+    }
+    let f = Fixture::with_duration(3, false, 30_000);
+    assert!(f.server.state.viewer_handoff.session.is_some());
 }

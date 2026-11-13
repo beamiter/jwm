@@ -257,9 +257,11 @@ jobs:
         run: |
           set -euo pipefail
           export XDG_RUNTIME_DIR="$(mktemp -d)"
-          for filter in 'handoff' 'seamless_integration'; do
+          for filter in 'handoff' 'seamless_integration' 'duration_integration' 'resumable_control' 'remote::wayland_capture::control::resumable_tests' 'remote::host::control::duration_tests'; do
+            minimum=3
+            if [[ "$filter" == 'remote::host::control::duration_tests' ]]; then minimum=1; fi
             listed="$(env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --list)"
-            test "$(printf '%s\n' "$listed" | grep -c ': test$' || true)" -ge 3
+            test "$(printf '%s\n' "$listed" | grep -c ': test$' || true)" -ge "$minimum"
             ignored="$(env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --ignored --list)"
             test "$(printf '%s\n' "$ignored" | grep -c ': test$' || true)" -eq 0
             env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --test-threads=1 --nocapture

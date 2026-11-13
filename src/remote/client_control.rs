@@ -10,6 +10,8 @@ pub(crate) use repair::{with_control_lifetime_observer, with_control_repair_obse
 pub(super) struct ClientControl {
     pub(super) repair: ControlRepair,
     pub(super) resumable_enabled: bool,
+    resumable_permission: Option<crate::remote::resumable_control::Negotiated>,
+    resumable_budget: Option<crate::remote::resumable_control::LeaseBudget>,
     pub(super) seamless_enabled: bool,
     pub(super) local_handoff_active: bool,
     resume_local_validation_pending: bool,
@@ -34,6 +36,33 @@ pub(super) struct ClientControl {
     click: Option<(DrawnScope, i16, i16, Instant)>,
 }
 impl ClientControl {
+    #[cfg(any(feature = "remote-wayland", test))]
+    pub(super) fn configure_resumable(
+        &mut self,
+        permission: crate::remote::resumable_control::Negotiated,
+        started: Instant,
+    ) -> RemoteResult<()> {
+        if self.request.is_some() || self.resumable_permission.is_some() || self.ended {
+            return Err(invalid_data("resumable budget cannot be replaced").into());
+        }
+        let mut budget = permission.budget_from(started)?;
+        budget.remaining_millis(Instant::now())?;
+        self.resumable_enabled = true;
+        self.resumable_permission = Some(permission);
+        self.resumable_budget = Some(budget);
+        Ok(())
+    }
+    pub(super) fn local_budget(&mut self, now: Instant) -> RemoteResult<(Instant, u32)> {
+        if self.ended {
+            return Err(invalid_data("control budget already ended").into());
+        }
+        let budget = self
+            .resumable_budget
+            .as_mut()
+            .ok_or_else(|| invalid_data("resumable control lacks negotiated budget"))?;
+        let remaining = budget.remaining_millis(now)?;
+        Ok((budget.deadline(), remaining))
+    }
     pub(super) fn resumable_input_active(&self) -> bool {
         (!self.seamless_enabled || self.local_handoff_active)
             && self.resumable.as_ref().is_none_or(|session| {
@@ -158,18 +187,18 @@ impl ClientControl {
         if self.ended {
             return Ok(());
         }
+        if self.resumable_enabled {
+            self.local_budget(now)?;
+        }
         if let Some(session) = self.resumable.as_mut() {
             session.check(now)?;
         }
         self.repair_check(now)?;
         if let Some((request, at)) = self.request {
             if (request.scope.source_epoch, request.scope.geometry_epoch) != scope
-                || now.saturating_duration_since(at)
-                    >= if self.epoch.is_some() {
-                        LEASE_DURATION
-                    } else {
-                        Duration::from_secs(5)
-                    }
+                || (self.epoch.is_none()
+                    && now.saturating_duration_since(at) >= Duration::from_secs(5))
+                || (!self.resumable_enabled && now.saturating_duration_since(at) >= LEASE_DURATION)
             {
                 return Err(invalid_data("control scope or deadline invalid").into());
             }
@@ -243,19 +272,24 @@ impl ClientControl {
                 )?;
                 self.epoch = Some(status.lease_epoch);
                 if self.resumable_enabled {
-                    use crate::remote::resumable_control::{
-                        Binding, ClientSession, LocalOptIn, Negotiated, VERSION,
-                    };
-                    let (_, requested_at) = self.request.unwrap();
+                    use crate::remote::resumable_control::{Binding, ClientSession};
+                    let permission = self.resumable_permission.take().ok_or_else(|| {
+                        invalid_data("control grant lacks exact negotiated permission")
+                    })?;
+                    let deadline = self
+                        .resumable_budget
+                        .as_ref()
+                        .ok_or_else(|| invalid_data("control grant lacks original budget"))?
+                        .deadline();
                     self.resumable = Some(ClientSession::after_native_arm(
-                        Negotiated::new(LocalOptIn::Explicit, Some(VERSION))?,
+                        permission,
                         Binding {
                             session: status.lease_epoch,
                             source_epoch: request.scope.source_epoch,
                             geometry_epoch: request.scope.geometry_epoch,
                         },
                         Instant::now(),
-                        requested_at + LEASE_DURATION,
+                        deadline,
                         request.scope.frame_sequence,
                     )?);
                 }
@@ -760,6 +794,15 @@ mod tests {
             resumable_enabled: true,
             ..Default::default()
         };
+        c.configure_resumable(
+            crate::remote::resumable_control::Negotiated::new(
+                crate::remote::resumable_control::LocalOptIn::Explicit,
+                Some(crate::remote::resumable_control::VERSION),
+            )
+            .unwrap(),
+            Instant::now(),
+        )
+        .unwrap();
         let scope = DrawnScope {
             source_epoch: 1,
             geometry_epoch: 2,

@@ -1943,6 +1943,13 @@ for observed times, permission restrictions and the unchanged cooldown limits.
 For opt-in X11 mouse-enter/leave keyboard and pointer handoff, see
 [Seamless input](remote-seamless-input.md). Default click-to-grab behavior is unchanged.
 The same guide documents the separate experimental JWM udev Wayland mode,
-`--wayland-seamless-input`, with explicit host permission, a fixed lifetime and
-local protocol version 2. It is not support for arbitrary Wayland compositors;
-read its escape, Super-key, cross-monitor and validation limits before enabling it.
+`--wayland-seamless-input`, with explicit host permission and a nonrenewable
+30-second default budget. The client may explicitly request 30..=300 seconds
+with `--wayland-control-duration`; the host independently sets its ceiling with
+`--max-wayland-control-duration`. Requests above the ceiling are refused, not
+silently shortened; pauses consume the original budget. Both helpers require
+application protocol v35. Default duration retains source control v4/local
+handoff v2 compatibility, while longer budgets require v5/v3 respectively.
+It is not support for arbitrary Wayland compositors or evidence of physical
+hardware acceptance. Read its escape, Super-key, cross-monitor, earlier-failure
+and validation limits before enabling it.

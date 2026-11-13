@@ -1504,7 +1504,7 @@ impl Dispatch<wl_registry::WlRegistry, ()> for State {
                     {
                         // Version 2 includes stationary-pointer spatial guards.
                         // Old compositors cannot safely authorize this mode.
-                        state.handoff.manager = Some(registry.bind(name, 2, qh, ()));
+                        state.handoff.manager = Some(registry.bind(name, version.min(3), qh, ()));
                         state.handoff.global = Some(name);
                         return;
                     }

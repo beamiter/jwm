@@ -27,18 +27,124 @@ pub enum LocalOptIn {
     Explicit,
 }
 
-/// A peer must explicitly advertise this version on its authenticated channel.
-/// Capability absence, an old version or local refusal cannot produce this token.
-#[derive(Debug)]
-pub struct Negotiated(());
+/// Bounded configuration/wire value, not an authority token by itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ControlDuration(u16);
+impl Default for ControlDuration {
+    fn default() -> Self {
+        Self(30)
+    }
+}
+impl ControlDuration {
+    pub fn from_secs(seconds: u16) -> io::Result<Self> {
+        if !(30..=300).contains(&seconds) {
+            return Err(invalid("control duration must be 30 through 300 seconds"));
+        }
+        Ok(Self(seconds))
+    }
+    pub fn as_secs(self) -> u16 {
+        self.0
+    }
+    pub fn as_duration(self) -> Duration {
+        Duration::from_secs(u64::from(self.0))
+    }
+    pub fn as_millis(self) -> u32 {
+        u32::from(self.0) * 1000
+    }
+    pub fn is_extended(self) -> bool {
+        self.0 > 30
+    }
+}
+
+/// Both peers explicitly approved this exact bounded duration, never a minimum.
+/// The legacy constructor deliberately remains limited to thirty seconds.
+#[derive(Clone, Debug)]
+pub struct Negotiated {
+    duration: ControlDuration,
+}
 impl Negotiated {
     pub fn new(local: LocalOptIn, peer_opted_in_version: Option<u16>) -> io::Result<Self> {
+        Self::with_duration(
+            local,
+            peer_opted_in_version,
+            ControlDuration::default(),
+            ControlDuration::default(),
+        )
+    }
+    pub fn with_duration(
+        local: LocalOptIn,
+        peer_opted_in_version: Option<u16>,
+        requested: ControlDuration,
+        local_max: ControlDuration,
+    ) -> io::Result<Self> {
         if local != LocalOptIn::Explicit || peer_opted_in_version != Some(VERSION) {
             return Err(invalid(
                 "resumable control requires both explicit version-one opt-ins",
             ));
         }
-        Ok(Self(()))
+        if requested > local_max {
+            return Err(invalid(
+                "requested control duration exceeds explicit local limit",
+            ));
+        }
+        Ok(Self {
+            duration: requested,
+        })
+    }
+    pub fn duration(&self) -> ControlDuration {
+        self.duration
+    }
+    pub fn budget_from(&self, started: Instant) -> io::Result<LeaseBudget> {
+        let deadline = started
+            .checked_add(self.duration.as_duration())
+            .ok_or_else(|| invalid("control deadline overflow"))?;
+        Ok(LeaseBudget {
+            started,
+            deadline,
+            last_now: started,
+            terminal: false,
+        })
+    }
+}
+
+/// Nonrenewable process-local budget. Construct once before an authorization
+/// request is sent, not when its ACK arrives. Never transmit an Instant.
+#[derive(Debug)]
+pub struct LeaseBudget {
+    started: Instant,
+    deadline: Instant,
+    last_now: Instant,
+    terminal: bool,
+}
+impl LeaseBudget {
+    pub fn started(&self) -> Instant {
+        self.started
+    }
+    pub fn deadline(&self) -> Instant {
+        self.deadline
+    }
+    /// A native confirmation may only shorten the original budget.
+    pub fn tighten(&mut self, deadline: Instant) -> io::Result<()> {
+        self.deadline = self.deadline.min(deadline);
+        if self.terminal || self.deadline <= self.last_now {
+            self.terminal = true;
+            return Err(invalid("control budget already terminal or expired"));
+        }
+        Ok(())
+    }
+    pub fn remaining_millis(&mut self, now: Instant) -> io::Result<u32> {
+        if self.terminal || now < self.last_now || now >= self.deadline {
+            self.terminal = true;
+            return Err(invalid("control budget expired or clock moved backwards"));
+        }
+        self.last_now = now;
+        // Floor, never round up: creating a native lease cannot extend this budget.
+        let remaining = self.deadline.duration_since(now).as_millis();
+        if remaining == 0 {
+            self.terminal = true;
+            return Err(invalid("control budget has no complete millisecond left"));
+        }
+        u32::try_from(remaining).map_err(|_| invalid("control budget overflow"))
     }
 }
 
@@ -300,13 +406,13 @@ impl HostSession {
     /// The deadline comes from the original authorization, not from the peer or
     /// a resume request. This constructor is called once per connection grant.
     pub fn new(
-        _permission: Negotiated,
+        permission: Negotiated,
         binding: Binding,
         now: Instant,
         deadline: Instant,
     ) -> io::Result<Self> {
         binding.validate()?;
-        if deadline <= now || deadline.duration_since(now) > MAX_LEASE {
+        if deadline <= now || deadline.duration_since(now) > permission.duration.as_duration() {
             return Err(invalid("invalid absolute resumable control deadline"));
         }
         Ok(Self {
@@ -1136,5 +1242,146 @@ mod tests {
                 .is_err()
         );
         assert_eq!(fresh_client.phase(), Phase::Terminal);
+    }
+}
+
+#[cfg(test)]
+mod duration_tests {
+    use super::*;
+    fn permit(seconds: u16, maximum: u16) -> io::Result<Negotiated> {
+        Negotiated::with_duration(
+            LocalOptIn::Explicit,
+            Some(VERSION),
+            ControlDuration::from_secs(seconds)?,
+            ControlDuration::from_secs(maximum)?,
+        )
+    }
+    #[test]
+    fn duration_is_bounded_and_never_inherits_host_ceiling() {
+        for invalid in [0, 1, 29, 301, u16::MAX] {
+            assert!(ControlDuration::from_secs(invalid).is_err());
+        }
+        assert_eq!(ControlDuration::default().as_secs(), 30);
+        assert_eq!(permit(30, 300).unwrap().duration().as_secs(), 30);
+        assert!(permit(120, 30).is_err());
+        assert_eq!(permit(120, 300).unwrap().duration().as_millis(), 120_000);
+        for (local, peer) in [
+            (LocalOptIn::Disabled, Some(VERSION)),
+            (LocalOptIn::Explicit, None),
+            (LocalOptIn::Explicit, Some(VERSION + 1)),
+        ] {
+            assert!(
+                Negotiated::with_duration(
+                    local,
+                    peer,
+                    ControlDuration::from_secs(120).unwrap(),
+                    ControlDuration::from_secs(300).unwrap()
+                )
+                .is_err()
+            );
+        }
+    }
+    #[test]
+    fn legacy_token_cannot_construct_extended_deadline() {
+        let now = Instant::now();
+        let binding = Binding {
+            session: 1,
+            source_epoch: 1,
+            geometry_epoch: 1,
+        };
+        assert!(
+            HostSession::new(
+                Negotiated::new(LocalOptIn::Explicit, Some(VERSION)).unwrap(),
+                binding,
+                now,
+                now + Duration::from_secs(31)
+            )
+            .is_err()
+        );
+        let session = HostSession::new(
+            permit(120, 300).unwrap(),
+            binding,
+            now,
+            now + Duration::from_secs(120),
+        )
+        .unwrap();
+        assert_eq!(session.deadline(), now + Duration::from_secs(120));
+        assert!(
+            HostSession::new(
+                permit(120, 300).unwrap(),
+                binding,
+                now,
+                now + Duration::from_secs(121)
+            )
+            .is_err()
+        );
+    }
+    #[test]
+    fn budget_only_tightens_and_clock_reversal_is_irreversible() {
+        let start = Instant::now();
+        let mut budget = permit(120, 300).unwrap().budget_from(start).unwrap();
+        budget.tighten(start + Duration::from_secs(300)).unwrap();
+        assert_eq!(budget.deadline(), start + Duration::from_secs(120));
+        budget.tighten(start + Duration::from_secs(100)).unwrap();
+        assert_eq!(budget.started(), start);
+        assert_eq!(
+            budget
+                .remaining_millis(start + Duration::from_secs(20))
+                .unwrap(),
+            80_000
+        );
+        assert!(
+            budget
+                .remaining_millis(start + Duration::from_secs(19))
+                .is_err()
+        );
+        assert!(
+            budget
+                .remaining_millis(start + Duration::from_secs(21))
+                .is_err()
+        );
+        assert!(budget.tighten(start + Duration::from_secs(300)).is_err());
+    }
+
+    #[test]
+    fn immutable_budget_consumes_transit_and_pause_time_and_floors_remainder() {
+        let start = Instant::now();
+        let mut budget = permit(120, 300).unwrap().budget_from(start).unwrap();
+        let deadline = budget.deadline();
+        assert_eq!(budget.remaining_millis(start).unwrap(), 120_000);
+        assert_eq!(
+            budget
+                .remaining_millis(start + Duration::from_micros(1001))
+                .unwrap(),
+            119_998
+        );
+        assert_eq!(
+            budget
+                .remaining_millis(start + Duration::from_secs(90))
+                .unwrap(),
+            30_000
+        );
+        assert!(
+            budget
+                .remaining_millis(deadline - Duration::from_micros(999))
+                .is_err()
+        );
+        assert!(budget.remaining_millis(deadline).is_err());
+        assert!(
+            budget
+                .remaining_millis(start - Duration::from_nanos(1))
+                .is_err()
+        );
+        assert_eq!(budget.deadline(), deadline);
+        let binding = Binding {
+            session: 1,
+            source_epoch: 1,
+            geometry_epoch: 1,
+        };
+        let mut host =
+            HostSession::new(permit(120, 300).unwrap(), binding, start, deadline).unwrap();
+        assert!(host.check(start + Duration::from_secs(31)).is_ok());
+        assert!(host.check(deadline).is_err());
+        assert_eq!(host.phase(), Phase::Terminal);
     }
 }

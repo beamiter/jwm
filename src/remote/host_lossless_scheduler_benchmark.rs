@@ -249,6 +249,7 @@ fn run_session_workload(arm: &str, report: &mut Value, continuous: bool, feedbac
     let (client_tx, client_done) = mpsc::channel();
     let client_thread = thread::spawn(move || {
         let opts = ClientOptions {
+            control_duration: Default::default(),
             viewer_backend: ViewerBackend::Wayland,
             viewer_wayland_display: None,
             wayland_keyboard: false,

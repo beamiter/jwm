@@ -6,12 +6,19 @@ permission prompt or a claim of general GTK/Qt menu compatibility. Existing
 read-only `--wayland-popups` capture remains read-only. The existing keyboard,
 pointer and unified-control modes retain their single-surface restrictions.
 
-## Explicit network use (application protocol v34)
+## Explicit network use (application protocol v35)
 
-Upgrade both endpoints together: application protocol v34 requires an exact
+Upgrade both endpoints together: application protocol v35 requires an exact
 match and rejects older peers rather than falling back to ordinary input.
 Transport v3 is unchanged; the host compositor must provide the native popup
 protocol v2 capability. Both helpers need native Wayland support.
+
+Application v35 retains the v34 popup terminal-delivery and orderly-close
+contracts described below; it adds duration negotiation only for separately
+opted-in resumable combined control. **Popup leases remain nonrenewable and
+limited to 30 seconds.** Neither duration CLI flag applies to popup mode.
+Versioned candidate/verification sections below describe their historical
+protocol stages, not permission to connect an older helper to a v35 peer.
 
 Using an existing private pre-shared key securely installed on both endpoints,
 run on the host's JWM Wayland session:
@@ -90,8 +97,8 @@ The viewer's close wait is bounded by two seconds intersected with the original
 lease deadline. It accepts only the matching acknowledgement within that bound;
 late, unsolicited or mismatched replies do not certify closure. No ACK renews
 the lease, restores input, or permits automatic reconnect. The v34 session
-retains this v33 close contract; both endpoints must now use v34 rather than
-falling back to older close behavior. This close receipt is not an
+retains this v33 close contract, also preserved by current v35. Both endpoints
+must now use v35 rather than falling back to older close behavior. This close receipt is not an
 application-action completion receipt.
 
 ## Terminal delivery receipt (v34 candidate)
@@ -109,8 +116,8 @@ the host never captures a replacement, publishes Ready or regrants input after
 this receipt. Revocation without verified acceptance, uncertain dispatch,
 identity mismatch and expired deadlines still fail closed. The original
 30-second lease and operation deadlines are unchanged. Both peers must upgrade
-to v34, which includes the exact orderly-close acknowledgement described above.
-Neither v32 nor v33 is silently accepted for this new terminal state.
+to current v35, which preserves the v34 terminal state and exact orderly-close
+acknowledgement described above. Older network peers are not silently accepted.
 
 ## Current network verification status
 

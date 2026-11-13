@@ -8,12 +8,12 @@ use super::x11_keymap::{KeymapTable, MAX_ENCODED_KEYMAP_LEN};
 use std::io;
 
 const APPLICATION_MAGIC: &[u8; 8] = b"JWMREM01";
-/// v34 distinguishes verified popup delivery followed by terminal native revocation.
+/// v35 adds exact, mutually authorized resumable-control duration negotiation.
 /// Native action receipts and proof-gated repair phases remain mandatory.
 /// Both peers must upgrade; no fallback to an older authorization contract.
-pub const APPLICATION_VERSION: u16 = 34;
+pub const APPLICATION_VERSION: u16 = 35;
 const HELLO_PREFIX_LEN: usize = 11;
-const STREAM_CAPABILITIES_LEN: usize = 34;
+const STREAM_CAPABILITIES_LEN: usize = 36;
 const SERVER_HELLO_LEN: usize = HELLO_PREFIX_LEN + STREAM_CAPABILITIES_LEN;
 const CLIENT_HELLO_HEADER_LEN: usize = SERVER_HELLO_LEN + 4;
 /// Largest client hello: the shared prefix plus a full keymap table.
@@ -127,6 +127,9 @@ pub struct StreamCapabilities {
     pub wayland_control: bool,
     /// Explicit version-1 resumable protocol opt-in; never implied by control.
     pub resumable_control: bool,
+    /// Exact requested/accepted duration, not the host ceiling. Default 30 does
+    /// not authorize input; values above 30 require explicit resumable control.
+    pub control_duration: super::resumable_control::ControlDuration,
     pub wayland_text: bool,
     pub wayland_popup_pointer: bool,
 }
@@ -187,12 +190,21 @@ impl StreamCapabilities {
         payload[31] = u8::from(self.wayland_text);
         payload[32] = u8::from(self.static_lossless);
         payload[33] = u8::from(self.wayland_popup_pointer);
+        payload[34..36].copy_from_slice(&self.control_duration.as_secs().to_be_bytes());
         payload
     }
 
     fn decode(payload: &[u8]) -> RemoteResult<Self> {
         if payload.len() != STREAM_CAPABILITIES_LEN {
             return Err(invalid_data("invalid bounded stream profile length").into());
+        }
+        let control_duration = super::resumable_control::ControlDuration::from_secs(
+            u16::from_be_bytes(payload[34..36].try_into().unwrap()),
+        )?;
+        if control_duration.is_extended() && payload[30] != 3 {
+            return Err(
+                invalid_data("extended duration requires explicit resumable control").into(),
+            );
         }
         let cursor = match &payload[..3] {
             [1, 1, 1] => CursorMode::Composited,
@@ -252,10 +264,49 @@ impl StreamCapabilities {
             static_lossless: payload[32] == 1,
             wayland_control: payload[30] & 1 != 0,
             resumable_control: payload[30] & 2 != 0,
+            control_duration,
             wayland_text: payload[31] == 1,
             wayland_popup_pointer: payload[33] == 1,
             ..Self::default()
         })
+    }
+
+    /// Negotiate the exact client duration against independent local permission.
+    /// Never silently shorten a request or inherit a larger host ceiling.
+    pub fn negotiate_control_duration(
+        self,
+        host_enabled: bool,
+        host_max: super::resumable_control::ControlDuration,
+    ) -> RemoteResult<super::resumable_control::ControlDuration> {
+        use super::resumable_control::{LocalOptIn, Negotiated, VERSION};
+        if !self.negotiate_resumable_control(host_enabled)? {
+            if self.control_duration.is_extended() {
+                return Err(invalid_data("extended duration without resumable control").into());
+            }
+            return Ok(self.control_duration);
+        }
+        Ok(Negotiated::with_duration(
+            LocalOptIn::Explicit,
+            Some(VERSION),
+            self.control_duration,
+            host_max,
+        )?
+        .duration())
+    }
+
+    /// The authenticated server must echo the original client request exactly.
+    pub fn confirm_control_duration(
+        self,
+        requested: super::resumable_control::ControlDuration,
+        requested_resumable: bool,
+    ) -> RemoteResult<()> {
+        if self.control_duration != requested || self.resumable_control != requested_resumable {
+            return Err(invalid_data(
+                "server changed requested control duration or resumable permission",
+            )
+            .into());
+        }
+        Ok(())
     }
 
     /// Version-one resumption is never inferred from an ordinary control grant.
@@ -1698,8 +1749,8 @@ mod scroll_capability_tests {
     use super::*;
     #[test]
     fn scroll_is_explicit_boolean_and_requires_pointer_or_control_in_version_23() {
-        assert_eq!(APPLICATION_VERSION, 34);
-        assert_eq!(STREAM_CAPABILITIES_LEN, 34);
+        assert_eq!(APPLICATION_VERSION, 35);
+        assert_eq!(STREAM_CAPABILITIES_LEN, 36);
         let mut caps = StreamCapabilities::default();
         assert!(
             !StreamCapabilities::decode(&caps.encode())
@@ -1800,7 +1851,7 @@ mod control_capability_tests {
             ..Default::default()
         };
         let bytes = caps.encode();
-        assert_eq!(bytes.len(), 34);
+        assert_eq!(bytes.len(), STREAM_CAPABILITIES_LEN);
         assert_eq!(StreamCapabilities::decode(&bytes).unwrap(), caps);
         for v in [2, 255] {
             let mut bad = bytes;
@@ -1846,7 +1897,7 @@ mod text_capability_tests {
             ..Default::default()
         };
         let bytes = c.encode();
-        assert_eq!(bytes.len(), 34);
+        assert_eq!(bytes.len(), STREAM_CAPABILITIES_LEN);
         assert_eq!(StreamCapabilities::decode(&bytes).unwrap(), c);
         for i in [23, 24, 25, 26, 27, 28, 30] {
             let mut b = bytes;
@@ -1972,7 +2023,7 @@ mod lossless_scroll_hello_tests {
         let s = server(caps);
         assert_eq!(ClientHello::decode(&c.encode()).unwrap(), c);
         assert_eq!(ServerHello::decode(&s.encode()).unwrap(), s);
-        for version in [27_u16, 28, 29, 30, 31, 32, 33, 35] {
+        for version in [27_u16, 28, 29, 30, 31, 32, 33, 34, APPLICATION_VERSION + 1] {
             let mut cb = c.encode();
             cb[8..10].copy_from_slice(&version.to_be_bytes());
             assert!(ClientHello::decode(&cb).is_err());
@@ -2160,7 +2211,17 @@ mod popup_capability_tests {
             assert!(ClientHello::decode(&c).is_err());
             assert!(ServerHello::decode(&s).is_err());
         }
-        for version in [0_u16, 29, 30, 31, 32, 33, 35, u16::MAX] {
+        for version in [
+            0_u16,
+            29,
+            30,
+            31,
+            32,
+            33,
+            34,
+            APPLICATION_VERSION + 1,
+            u16::MAX,
+        ] {
             let mut c = client(caps).encode();
             c[8..10].copy_from_slice(&version.to_be_bytes());
             let mut s = server(caps).encode();
@@ -2173,5 +2234,117 @@ mod popup_capability_tests {
         let mut b = b.to_vec();
         b.push(0);
         assert!(StreamCapabilities::decode(&b).is_err());
+    }
+}
+
+#[cfg(test)]
+mod control_duration_tests {
+    use super::*;
+    use crate::remote::resumable_control::ControlDuration;
+    fn seconds(n: u16) -> ControlDuration {
+        ControlDuration::from_secs(n).unwrap()
+    }
+    fn profile(n: u16) -> StreamCapabilities {
+        StreamCapabilities {
+            wayland_control: true,
+            resumable_control: true,
+            control_duration: seconds(n),
+            ..Default::default()
+        }
+    }
+    #[test]
+    fn control_duration_wire_is_exact_bounded_and_permission_scoped() {
+        for n in [30, 31, 120, 300] {
+            let caps = profile(n);
+            let bytes = caps.encode();
+            assert_eq!(&bytes[34..], &n.to_be_bytes());
+            assert_eq!(StreamCapabilities::decode(&bytes).unwrap(), caps);
+            assert!(StreamCapabilities::decode(&bytes[..34]).is_err());
+        }
+        for n in [0_u16, 29, 301, u16::MAX] {
+            let mut bytes = profile(30).encode();
+            bytes[34..].copy_from_slice(&n.to_be_bytes());
+            assert!(StreamCapabilities::decode(&bytes).is_err());
+        }
+        for bits in [0, 1, 2] {
+            let mut bytes = profile(120).encode();
+            bytes[30] = bits;
+            assert!(StreamCapabilities::decode(&bytes).is_err());
+        }
+    }
+    #[test]
+    fn control_duration_requires_both_opt_ins_exact_echo_and_host_ceiling() {
+        assert!(
+            profile(120)
+                .negotiate_control_duration(false, seconds(300))
+                .is_err()
+        );
+        assert!(
+            profile(120)
+                .negotiate_control_duration(true, seconds(30))
+                .is_err()
+        );
+        assert_eq!(
+            profile(120)
+                .negotiate_control_duration(true, seconds(300))
+                .unwrap(),
+            seconds(120)
+        );
+        assert_eq!(
+            profile(30)
+                .negotiate_control_duration(true, seconds(300))
+                .unwrap(),
+            seconds(30)
+        );
+        assert!(
+            profile(120)
+                .confirm_control_duration(seconds(120), true)
+                .is_ok()
+        );
+        assert!(
+            profile(30)
+                .confirm_control_duration(seconds(120), true)
+                .is_err()
+        );
+        assert!(
+            profile(300)
+                .confirm_control_duration(seconds(120), true)
+                .is_err()
+        );
+        assert!(
+            profile(120)
+                .confirm_control_duration(seconds(120), false)
+                .is_err()
+        );
+        assert!(
+            StreamCapabilities::default()
+                .confirm_control_duration(seconds(30), true)
+                .is_err()
+        );
+        assert_eq!(
+            StreamCapabilities::default()
+                .negotiate_control_duration(false, seconds(300))
+                .unwrap(),
+            seconds(30)
+        );
+    }
+    #[test]
+    fn duration_hello_rejects_old_application_version_without_fallback() {
+        assert_eq!(APPLICATION_VERSION, 35);
+        let mut bytes = ServerHello {
+            pointer_enabled: false,
+            keyboard_enabled: false,
+            clipboard_enabled: false,
+            clipboard_files_enabled: false,
+            stream: profile(120),
+        }
+        .encode();
+        bytes[8..10].copy_from_slice(&34_u16.to_be_bytes());
+        assert!(
+            ServerHello::decode(&bytes)
+                .unwrap_err()
+                .to_string()
+                .contains("version 34; expected 35")
+        );
     }
 }

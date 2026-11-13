@@ -1,11 +1,12 @@
 //! Separate window grants from desktop capture, including all fallback paths.
+use super::resumable_control::{LeaseBudget, Negotiated};
 use super::x11_capture::{
     CaptureArea, CaptureImageRecycler, CaptureMode, CaptureOutcome, CursorSample, X11Capture,
 };
 use super::{
     RemoteResult, messages::FrameLimits, window_capture::WindowCapture, x11_input::InputArea,
 };
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub(super) enum HostCapture {
     Desktop(Box<X11Capture>),
@@ -27,12 +28,33 @@ impl HostCapture {
         let _ = (scroll_enabled, horizontal_enabled);
         Err(std::io::Error::other("native control unavailable").into())
     }
-    pub(super) fn enable_resumable_control(&mut self) -> RemoteResult<()> {
+    pub(super) fn enable_resumable_control(
+        &mut self,
+        permission: Negotiated,
+        budget: LeaseBudget,
+    ) -> RemoteResult<()> {
         #[cfg(feature = "remote-wayland")]
         if let Self::Wayland(c) = self {
-            return c.enable_resumable_control();
+            return c.enable_resumable_control(permission, budget);
         }
+        let _ = (permission, budget);
         Err(std::io::Error::other("native resumable control unavailable").into())
+    }
+    /// Approval description only. Never use this getter to restart its budget.
+    pub(super) fn control_permission(&self) -> Option<&Negotiated> {
+        #[cfg(feature = "remote-wayland")]
+        if let Self::Wayland(c) = self {
+            return c.control_permission();
+        }
+        None
+    }
+    /// Saved negotiation start and current tightened cap, not an ACK timestamp.
+    pub(super) fn control_budget_bounds(&self) -> Option<(Instant, Instant)> {
+        #[cfg(feature = "remote-wayland")]
+        if let Self::Wayland(c) = self {
+            return c.control_budget_bounds();
+        }
+        None
     }
     pub(super) fn control_transition(
         &mut self,

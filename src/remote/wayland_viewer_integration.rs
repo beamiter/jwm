@@ -104,7 +104,11 @@ impl Peer {
                             }
                             Command::EnableSeamless => {
                                 viewer.enable_wayland_control(false, false)?;
-                                viewer.enable_wayland_seamless_input()?;
+                                viewer.enable_wayland_seamless_input(
+                                    Instant::now() + Duration::from_secs(30),
+                                    30_000,
+                                    false,
+                                )?;
                                 return Err("unsupported handoff unexpectedly enabled".into());
                             }
                             Command::InvalidateSource => {
@@ -855,6 +859,7 @@ fn actual_wayland_viewer_tcp_ack_waits_for_presented_not_release() {
     let (done_tx, done) = mpsc::channel();
     let viewer = thread::spawn(move || {
         let options = ClientOptions {
+            control_duration: Default::default(),
             viewer_backend: ViewerBackend::Wayland,
             viewer_wayland_display: None,
             wayland_keyboard: false,

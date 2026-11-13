@@ -150,6 +150,7 @@ pub fn run_ssh(options: SshOptions) -> RemoteResult<()> {
         )
         .and_then(|()| {
             run_client(ClientOptions {
+                control_duration: Default::default(),
                 viewer_backend: crate::remote::viewer_backend::ViewerBackend::X11,
                 viewer_wayland_display: None,
                 wayland_keyboard: false,

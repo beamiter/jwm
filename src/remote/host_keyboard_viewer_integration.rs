@@ -39,6 +39,7 @@ impl Drop for ShutdownGuard {
 
 fn options() -> HostOptions {
     HostOptions {
+        max_control_duration: Default::default(),
         frame_limits: Default::default(),
         listen: "127.0.0.1:0".into(),
         key: KeySource::File("/unused-private-test-key".into()),
@@ -158,6 +159,7 @@ fn client_options(
     _case: Case,
 ) -> ClientOptions {
     ClientOptions {
+        control_duration: Default::default(),
         viewer_backend: crate::remote::viewer_backend::ViewerBackend::X11,
         viewer_wayland_display: None,
         wayland_keyboard: true,

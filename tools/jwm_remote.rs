@@ -9,6 +9,7 @@ use jwm::remote::host::{HostOptions, run_host};
 use jwm::remote::key::{KeySource, generate_key_file};
 use jwm::remote::messages::FrameLimits;
 use jwm::remote::profiles::{Connection, Profile, Store, Viewer};
+use jwm::remote::resumable_control::ControlDuration;
 use jwm::remote::session_env;
 use jwm::remote::ssh::{SshOptions, run_ssh};
 use jwm::remote::usability::{
@@ -321,10 +322,15 @@ enum Command {
         #[arg(long, requires_all = ["wayland_select", "once"], conflicts_with_all = ["allow_wayland_keyboard", "allow_wayland_pointer", "allow_input", "allow_clipboard", "allow_window_resize"])]
         allow_wayland_control: bool,
 
-        /// Explicitly permit versioned pause/resume inside the original 30s control lease.
+        /// Explicitly permit versioned pause/resume inside one fixed control lease.
         /// Requires a mutually opted-in client; never renews or regrants control.
         #[arg(long, requires_all = ["allow_wayland_control", "wayland_select", "once"], conflicts_with = "allow_static_lossless")]
         allow_resumable_control: bool,
+
+        /// Explicit maximum control duration in seconds (30..=300; default 30).
+        /// A client must request its own exact duration; excess requests are denied.
+        #[arg(long, value_name = "SECONDS", value_parser = parse_control_duration, requires = "allow_resumable_control")]
+        max_wayland_control_duration: Option<ControlDuration>,
 
         /// Permit one UTF-8 commit to the selected surface's existing clean IME context.
         #[arg(long, requires_all=["wayland_select","once"], conflicts_with_all=["allow_input","allow_clipboard","allow_window_resize","allow_wayland_keyboard","allow_wayland_pointer","allow_wayland_control","allow_wayland_scroll","allow_wayland_horizontal_scroll","wayland_popups","wayland_resize_follow"])]
@@ -537,13 +543,18 @@ enum Command {
 
         /// Experimental JWM udev-only pointer-entry focus and shortcut handoff.
         /// Also opts into resumable-control; host must use --allow-resumable-control.
-        /// Fixed original 30s lease; no drag/modifier-click or pointer confinement.
+        /// Default 30s lease; no drag/modifier-click or pointer confinement.
         /// Leaving restores local control. After black-bar exit, fully leave/reenter.
         /// Entry requires released keys/buttons and a clean modifier/lock state.
         /// Unexpected focus changes (including compositor policy) end the session.
         /// Ctrl+Super+F12 ends the session permanently; no automatic regrant.
         #[arg(long, requires_all = ["wayland_control", "viewer_backend"], conflicts_with_all = ["static_lossless", "seamless_input", "view_only", "clipboard", "grab_input", "resize_source", "follow_source_size", "reconnect_attempts"])]
         wayland_seamless_input: bool,
+
+        /// Explicit exact control duration in seconds (30..=300; default 30).
+        /// Requires independent host approval; never renews during pause/resume.
+        #[arg(long, value_name = "SECONDS", value_parser = parse_control_duration, requires = "wayland_seamless_input")]
+        wayland_control_duration: Option<ControlDuration>,
 
         /// Read one exact UTF-8 text payload from stdin (1..=4000 bytes, no NUL).
         /// Requires a native Wayland viewer; no keyboard or clipboard fallback.
@@ -772,6 +783,7 @@ fn profile_from_command(command: Command) -> RemoteResult<Profile> {
             wayland_pointer,
             wayland_control,
             wayland_seamless_input,
+            wayland_control_duration,
             wayland_text_stdin,
             wayland_popup_pointer,
             static_lossless,
@@ -789,7 +801,7 @@ fn profile_from_command(command: Command) -> RemoteResult<Profile> {
             frame_limits,
             scaling,
         } => {
-            if wayland_seamless_input {
+            if wayland_seamless_input || wayland_control_duration.is_some() {
                 return Err(profile_error("Wayland seamless input consent cannot be saved in a profile; use connect directly").into());
             }
             if seamless_input {
@@ -1363,6 +1375,7 @@ fn run(command: Command) -> RemoteResult<()> {
             allow_wayland_pointer,
             allow_wayland_control,
             allow_resumable_control,
+            max_wayland_control_duration,
             allow_wayland_text,
             allow_wayland_popup_pointer,
             allow_static_lossless,
@@ -1403,6 +1416,7 @@ fn run(command: Command) -> RemoteResult<()> {
             };
             let shared_sources = shares.areas(&capture_area)?;
             run_host(HostOptions {
+                max_control_duration: max_wayland_control_duration.unwrap_or_default(),
                 listen,
                 key,
                 display,
@@ -4742,6 +4756,7 @@ fn connect_options(command: Command) -> RemoteResult<(ClientOptions, u8)> {
         wayland_pointer,
         wayland_control,
         wayland_seamless_input,
+        wayland_control_duration,
         wayland_text_stdin,
         wayland_popup_pointer,
         static_lossless,
@@ -4782,6 +4797,7 @@ fn connect_options(command: Command) -> RemoteResult<(ClientOptions, u8)> {
     )?;
     Ok((
         ClientOptions {
+            control_duration: wayland_control_duration.unwrap_or_default(),
             viewer_backend,
             viewer_wayland_display,
             peer_label: address.clone(),
@@ -4985,6 +5001,144 @@ mod wayland_seamless_cli_tests {
             "no automatic regrant",
         ] {
             assert!(help.contains(text), "missing {text}: {help}");
+        }
+    }
+}
+
+fn parse_control_duration(value: &str) -> Result<ControlDuration, String> {
+    let seconds = value.parse::<u16>().map_err(|_| {
+        "control duration must be an integer from 30 through 300 seconds".to_owned()
+    })?;
+    ControlDuration::from_secs(seconds).map_err(|error| error.to_string())
+}
+
+#[cfg(test)]
+mod control_duration_cli_tests {
+    use super::*;
+    const CLIENT: [&str; 9] = [
+        "jwm-remote",
+        "connect",
+        "host",
+        "--key-file",
+        "/unused-key",
+        "--viewer-backend",
+        "wayland",
+        "--wayland-control",
+        "--wayland-seamless-input",
+    ];
+    const HOST: [&str; 6] = [
+        "jwm-remote",
+        "host",
+        "--wayland-select",
+        "--once",
+        "--allow-wayland-control",
+        "--allow-resumable-control",
+    ];
+    #[test]
+    fn duration_cli_defaults_thirty_and_explicit_options_are_exact() {
+        for value in [None, Some("30"), Some("120"), Some("300")] {
+            let suffix: Vec<&str> = value
+                .map(|value| vec!["--wayland-control-duration", value])
+                .unwrap_or_default();
+            let command = Cli::try_parse_from(CLIENT.into_iter().chain(suffix))
+                .unwrap()
+                .command;
+            if cfg!(feature = "remote-wayland") {
+                let (options, attempts) = connect_options(command).unwrap();
+                assert_eq!(
+                    options.control_duration.as_secs(),
+                    value.unwrap_or("30").parse::<u16>().unwrap()
+                );
+                assert!(options.resumable_control && options.wayland_seamless_input);
+                assert_eq!(attempts, 0);
+            }
+            let suffix: Vec<&str> = value
+                .map(|value| vec!["--max-wayland-control-duration", value])
+                .unwrap_or_default();
+            let Command::Host {
+                max_wayland_control_duration,
+                ..
+            } = Cli::try_parse_from(HOST.into_iter().chain(suffix))
+                .unwrap()
+                .command
+            else {
+                panic!("host expected");
+            };
+            assert_eq!(
+                max_wayland_control_duration.unwrap_or_default().as_secs(),
+                value.unwrap_or("30").parse::<u16>().unwrap()
+            );
+        }
+        let (options, _) = connect_options(
+            Cli::try_parse_from(["jwm-remote", "connect", "host", "--key-file", "/unused-key"])
+                .unwrap()
+                .command,
+        )
+        .unwrap();
+        assert_eq!(options.control_duration.as_secs(), 30);
+        assert!(!options.resumable_control);
+    }
+    #[test]
+    fn duration_cli_rejects_unbounded_values_or_missing_explicit_mode() {
+        for value in ["0", "29", "301", "65536", "-1", "30.5", "forever"] {
+            assert!(
+                Cli::try_parse_from(
+                    CLIENT
+                        .into_iter()
+                        .chain(["--wayland-control-duration", value])
+                )
+                .is_err()
+            );
+            assert!(
+                Cli::try_parse_from(
+                    HOST.into_iter()
+                        .chain(["--max-wayland-control-duration", value])
+                )
+                .is_err()
+            );
+        }
+        for removed in ["--wayland-seamless-input", "--wayland-control"] {
+            assert!(
+                Cli::try_parse_from(
+                    CLIENT
+                        .into_iter()
+                        .filter(|arg| *arg != removed)
+                        .chain(["--wayland-control-duration", "120"])
+                )
+                .is_err()
+            );
+        }
+        assert!(
+            Cli::try_parse_from(
+                HOST.into_iter()
+                    .filter(|arg| *arg != "--allow-resumable-control")
+                    .chain(["--max-wayland-control-duration", "120"])
+            )
+            .is_err()
+        );
+        for flag in [
+            "--wayland-control-duration",
+            "--max-wayland-control-duration",
+        ] {
+            assert!(Cli::try_parse_from(["jwm-remote", "ssh", "host", flag, "120"]).is_err());
+        }
+    }
+    #[test]
+    fn explicit_duration_even_thirty_is_never_profile_saved() {
+        for value in ["30", "120", "300"] {
+            let command = Cli::try_parse_from(
+                CLIENT
+                    .into_iter()
+                    .chain(["--wayland-control-duration", value]),
+            )
+            .unwrap()
+            .command;
+            assert!(
+                profile_from_command(command)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("consent cannot be saved")
+            );
         }
     }
 }

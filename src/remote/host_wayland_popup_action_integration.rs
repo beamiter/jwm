@@ -393,6 +393,7 @@ impl PopupHarness {
                 return;
             }
             let opts = ClientOptions {
+                control_duration: Default::default(),
                 viewer_backend: ViewerBackend::Wayland,
                 viewer_wayland_display: None,
                 wayland_keyboard: false,

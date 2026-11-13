@@ -24,6 +24,7 @@ impl Drop for Stop {
 }
 fn host_options() -> host::HostOptions {
     host::HostOptions {
+        max_control_duration: Default::default(),
         frame_limits: Default::default(),
         listen: "127.0.0.1:0".into(),
         key: crate::remote::key::KeySource::Bytes(KEY.to_vec()),
@@ -228,6 +229,7 @@ fn actual_wayland_keyboard_viewer_tcp_requires_presented_and_targets_only_origin
     let (client_tx, client_done) = mpsc::channel();
     let client_thread = thread::spawn(move || {
         let opts = ClientOptions {
+            control_duration: Default::default(),
             viewer_backend: ViewerBackend::Wayland,
             viewer_wayland_display: None,
             wayland_keyboard: true,
