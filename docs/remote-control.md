@@ -148,6 +148,16 @@ another monitor's key **switches**: the open viewer is closed the way its close
 button does it, its host stops, and the new monitor opens — about 1.2 seconds
 on a LAN. A press while a session is still connecting does nothing.
 
+The session lock keeps its existing filename across upgrades. The runtime
+directory must be an absolute, non-symlink path owned by the current user,
+without group/other write access. If `XDG_RUNTIME_DIR` is unset, the same checks
+apply to the per-user `jwm-remote-UID` directory under the system temporary
+directory. New directories/files use private permissions; existing normal
+0755 directories and 0644 regular lock files remain compatible. Unsafe or
+inaccessible paths fail rather than silently selecting a different session
+slot. This protects against other local users, not root or another process
+running under the same UID.
+
 While the viewer has the keyboard grabbed, every key goes to the remote
 machine, these shortcuts included. Press Ctrl+Super+F12 to release it first, then
 press the other monitor's key. `--notify` reports a failure

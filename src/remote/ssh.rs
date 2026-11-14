@@ -26,7 +26,7 @@ use super::scaling::ScalingPolicy;
 use super::ssh_diagnostics::DiagnosticPump;
 use super::x11_capture::CaptureArea;
 use super::x11_viewer::{close_existing_viewer, focus_existing_viewer};
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::os::fd::{AsFd, AsRawFd};
@@ -549,12 +549,7 @@ struct SessionLock {
 impl SessionLock {
     /// The lock, or the label of the session that holds it.
     fn acquire(destination: &str) -> io::Result<Result<Self, String>> {
-        let mut file = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(session_lock_path(destination))?;
+        let mut file = super::ssh_session_file::open(&session_lock_path(destination))?;
         // SAFETY: flock only reads the descriptor, which `file` keeps open.
         if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
             return Ok(Ok(Self { file }));
@@ -597,12 +592,10 @@ impl SessionLock {
 fn session_lock_path(destination: &str) -> PathBuf {
     let directory = std::env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
-        .filter(|path| path.is_absolute())
         .unwrap_or_else(|| {
             // SAFETY: getuid has no preconditions and cannot fail.
             std::env::temp_dir().join(format!("jwm-remote-{}", unsafe { libc::getuid() }))
         });
-    let _ = std::fs::create_dir_all(&directory);
     let name: String = destination
         .chars()
         .map(|c| {
@@ -1402,6 +1395,49 @@ mod tests {
         assert!(read_host_line(&mut reader, &mut line).unwrap());
         assert_eq!(line, b"last line");
         assert!(!read_host_line(&mut reader, &mut line).unwrap());
+    }
+
+    #[test]
+    fn unsafe_runtime_directory_does_not_fall_back() {
+        const CHILD: &str = "JWM_TEST_UNSAFE_LOCK_RUNTIME";
+        if let Ok(destination) = std::env::var(CHILD) {
+            assert!(SessionLock::acquire(&destination).is_err());
+            return;
+        }
+        use std::os::unix::fs::PermissionsExt;
+        let directory = std::env::temp_dir().join(format!(
+            "jwm-lock-runtime-test-{:016x}",
+            rand::random::<u64>()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o777)).unwrap();
+        for runtime in [directory.clone(), PathBuf::from("relative-runtime")] {
+            let destination = format!("test@unsafe-runtime-{:016x}", rand::random::<u64>());
+            let fallback = std::env::temp_dir()
+                .join(format!("jwm-remote-{}", unsafe { libc::getuid() }))
+                .join(format!("jwm-remote-ssh-{destination}.lock"));
+            assert!(!fallback.exists());
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "remote::ssh::tests::unsafe_runtime_directory_does_not_fall_back",
+                    "--nocapture",
+                ])
+                .env(CHILD, &destination)
+                .env("XDG_RUNTIME_DIR", runtime)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+            assert!(!fallback.exists());
+        }
+        assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 0);
+        std::fs::remove_dir(directory).unwrap();
     }
 
     #[test]

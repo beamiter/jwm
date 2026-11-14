@@ -55,6 +55,7 @@ pub mod source_session;
 pub mod source_wire;
 pub mod ssh;
 mod ssh_diagnostics;
+mod ssh_session_file;
 mod tile;
 mod triangle_patch;
 pub mod usability;
