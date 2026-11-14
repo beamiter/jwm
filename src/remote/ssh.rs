@@ -99,6 +99,13 @@ pub fn run_ssh(options: SshOptions) -> RemoteResult<()> {
     }
     options.frame_limits.validate()?;
     validate_destination(&options.destination)?;
+    // Reject local input errors before creating a session slot or starting SSH.
+    super::viewer_backend::ViewerBackend::X11.validate_seamless_input(
+        options.seamless_input,
+        options.grab_input,
+        options.view_only,
+    )?;
+    super::x11_viewer::validate_escape_key(&options.escape_key)?;
     let _diagnostics = DiagnosticPump::install()?;
     let label = peer_label(&options);
     let Some(_session_lock) = claim_session(&options, &label)? else {
@@ -836,6 +843,97 @@ mod tests {
             escape_key: "F12".into(),
             scaling: ScalingPolicy::Auto,
         }
+    }
+
+    #[test]
+    fn ssh_input_preflight_precedes_lock_and_process_creation() {
+        const CHILD: &str = "JWM_TEST_SSH_INPUT_PREFLIGHT";
+        if let Ok(case) = std::env::var(CHILD) {
+            let mut opts = options();
+            let expected = match case.as_str() {
+                "invalid_escape" => {
+                    opts.escape_key = "not_a_keysym".into();
+                    "unknown escape key"
+                }
+                "seamless_without_grab" => {
+                    opts.seamless_input = true;
+                    opts.grab_input = false;
+                    "seamless input requires"
+                }
+                "seamless_view_only" => {
+                    opts.seamless_input = true;
+                    opts.view_only = true;
+                    "seamless input requires"
+                }
+                "valid" => {
+                    opts.seamless_input = true;
+                    "ssh"
+                }
+                _ => panic!("unexpected preflight case"),
+            };
+            let error = run_ssh(opts).unwrap_err();
+            assert!(error.to_string().contains(expected), "{error}");
+            if case == "valid" {
+                // The fake SSH exits 255 without readiness. Depending on EOF/exit
+                // observation order, either existing early-exit diagnostic applies.
+                let io = error.downcast_ref::<io::Error>().unwrap();
+                assert_eq!(io.kind(), io::ErrorKind::ConnectionAborted);
+            }
+            return;
+        }
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!(
+            "jwm-ssh-input-preflight-{:016x}",
+            rand::random::<u64>()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let bin = root.join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let ssh = bin.join("ssh");
+        std::fs::write(
+            &ssh,
+            "#!/bin/sh\nprintf invoked > \"$JWM_TEST_SSH_MARKER\"\nexit 255\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o700)).unwrap();
+        for case in [
+            "invalid_escape",
+            "seamless_without_grab",
+            "seamless_view_only",
+            "valid",
+        ] {
+            let runtime = root.join(case);
+            std::fs::create_dir(&runtime).unwrap();
+            std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let marker = root.join(format!("{case}.invoked"));
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "remote::ssh::tests::ssh_input_preflight_precedes_lock_and_process_creation",
+                    "--nocapture",
+                ])
+                .env(CHILD, case)
+                .env("PATH", &bin)
+                .env("XDG_RUNTIME_DIR", &runtime)
+                .env("JWM_TEST_SSH_MARKER", &marker)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{case}: {}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+            assert_eq!(marker.exists(), case == "valid", "{case}");
+            assert_eq!(
+                std::fs::read_dir(runtime).unwrap().count(),
+                usize::from(case == "valid"),
+                "{case}"
+            );
+        }
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
