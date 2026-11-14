@@ -6901,18 +6901,20 @@ mod tests {
     #[ignore = "requires a dedicated owned JWM_TEST_X11_DISPLAY Xvfb server"]
     fn seamless_stale_entry_must_not_grab_an_occluding_local_window() {
         use x11rb::protocol::xproto;
+        assert_eq!(
+            std::env::var("JWM_REMOTE_TEST_VIEWER_OWNED").as_deref(),
+            Ok("1")
+        );
+        let display = std::env::var("JWM_TEST_X11_DISPLAY").unwrap();
+        assert!(display.starts_with(':'));
+        // Keep one client alive across cases: Xvfb may reset when its last
+        // client exits, racing the next case's initial connection handshake.
+        let (driver, screen) = x11rb::connect(Some(&display)).unwrap();
+        let root = driver.setup().roots[screen].root;
         for class in [
             xproto::WindowClass::INPUT_OUTPUT,
             xproto::WindowClass::INPUT_ONLY,
         ] {
-            assert_eq!(
-                std::env::var("JWM_REMOTE_TEST_VIEWER_OWNED").as_deref(),
-                Ok("1")
-            );
-            let display = std::env::var("JWM_TEST_X11_DISPLAY").unwrap();
-            assert!(display.starts_with(':'));
-            let (driver, screen) = x11rb::connect(Some(&display)).unwrap();
-            let root = driver.setup().roots[screen].root;
             driver
                 .warp_pointer(x11rb::NONE, root, 0, 0, 0, 0, 700, 500)
                 .unwrap()
