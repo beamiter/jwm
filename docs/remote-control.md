@@ -353,7 +353,16 @@ local X11/clipboard errors, and any incomplete local cleanup never retry. Sender
 even when the underlying cause might be network loss. Closing the viewer never
 retries. Using Ctrl+Super+F12 (or the configured escape shortcut) still only
 releases the grab; it also disables reconnect for that session so a later drop
-cannot unexpectedly reopen a grabbed viewer. Explicitly reported layout/selection
+cannot unexpectedly reopen a grabbed viewer. X11 cleanup releases local keyboard
+and pointer grabs before waiting for network/clipboard workers, and the ending
+viewer cannot acquire input again. If a grab was still active when cleanup
+began, automatic retry is also disabled: subsequent Escape input goes back to
+local applications and can no longer be reliably observed by the viewer. This
+applies to both ordinary click-to-grab and seamless input. Sessions without an
+active grab retain the existing retry checks; any local release failure still
+prevents retry and does not skip other worker cleanup. Native Wayland handoff
+teardown is unchanged by this X11-specific release boundary.
+Explicitly reported layout/selection
 rejections and identity/authentication failures do not silently retry or
 downgrade. Every replacement connection repeats normal permission negotiation.
 A bare EOF/reset is ambiguous: it can also result from a host failure whose

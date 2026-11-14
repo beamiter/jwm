@@ -31,6 +31,16 @@ image. Focus loss, unmapping and resizing release input; leave and enter again
 to resume. Source switching also suspends automatic acquisition. Closing or
 losing the connection retains the existing release-all teardown path.
 
+On X11, session cleanup now returns any local keyboard/pointer grab before
+waiting for network and clipboard workers. The ending viewer cannot grab again;
+it only checks already delivered close, escape and clipboard-restriction intent.
+If it still held a grab when cleanup began, an unexpected disconnect requires
+an explicit reconnect, even with retry options: after local input is returned,
+Escape typed in the original local application no longer reaches the viewer.
+Sessions without an active grab retain the existing retry checks. A local
+release failure prevents automatic retry but does not skip other cleanup.
+This early-release change does not alter native Wayland handoff teardown.
+
 This first implementation targets an X11 viewer and X11 host. Native Wayland's
 scoped, one-shot authorizations still revoke on surface leave and are never
 silently renewed. Desktop/compositor-reserved shortcuts are not guaranteed to be

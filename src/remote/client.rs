@@ -1,5 +1,9 @@
 //! Remote desktop viewer/client orchestration.
 
+#[cfg(test)]
+#[path = "client_cleanup_probe.rs"]
+mod cleanup_probe;
+
 #[path = "client_control.rs"]
 mod control;
 #[path = "client_popup.rs"]
@@ -1189,6 +1193,8 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
 
     let mut cancel = SessionCancel::new(control, Arc::clone(&state));
     let receive_state = Arc::clone(&state);
+    #[cfg(test)]
+    let cleanup_probe = cleanup_probe::current();
     let receiver = ReceiverThread::spawn(move || {
         // Move the authenticated first-frame allocation into the receiver
         // thread. It remains thread-local while avoiding a second large
@@ -1202,6 +1208,10 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
             tile_decoder,
             clipboard_inbox,
         );
+        #[cfg(test)]
+        if let Some(probe) = cleanup_probe {
+            probe.receiver_finished();
+        }
     })?;
 
     let pointer_enabled = hello.pointer_enabled && !options.view_only;
@@ -1225,12 +1235,24 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
             close_release_flushed: true
         })
     );
-    let cancel_result = cancel.cancel(&mut writer, graceful_close);
-    let receiver_exit = receiver.join_timeout(RECEIVER_JOIN_TIMEOUT);
-    let sender_result = writer.shutdown_timeout(RECEIVER_JOIN_TIMEOUT);
-    let clipboard_result = clipboard_sync
-        .as_mut()
-        .map_or(Ok(()), |sync| sync.shutdown_timeout(RECEIVER_JOIN_TIMEOUT));
+    // Return local X11 input before any transport/clipboard join. Capture the
+    // failure instead of skipping the remaining mandatory cleanup steps.
+    let local_cleanup = viewer.begin_local_cleanup();
+    let (local_cleanup, (cancel_result, receiver_exit, sender_result, clipboard_result)) =
+        run_remaining_cleanup(local_cleanup, || {
+            let cancel_result = cancel.cancel(&mut writer, graceful_close);
+            let receiver_exit = receiver.join_timeout(RECEIVER_JOIN_TIMEOUT);
+            let sender_result = writer.shutdown_timeout(RECEIVER_JOIN_TIMEOUT);
+            let clipboard_result = clipboard_sync
+                .as_mut()
+                .map_or(Ok(()), |sync| sync.shutdown_timeout(RECEIVER_JOIN_TIMEOUT));
+            (
+                cancel_result,
+                receiver_exit,
+                sender_result,
+                clipboard_result,
+            )
+        });
     telemetry_reporter.force_report();
     let result = finish_session(
         suppress_reconnect(
@@ -1244,6 +1266,7 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
         sender_result,
         clipboard_result,
     );
+    let result = include_local_cleanup(result, local_cleanup);
     finalize_retry_intent(result, || viewer.reconnect_allowed_after_cleanup())
 }
 
@@ -1369,6 +1392,42 @@ impl std::error::Error for SessionCleanupError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         self.primary.as_deref().map(|error| error as _)
     }
+}
+
+/// A local release error is data, not an early-return path around worker cleanup.
+fn run_remaining_cleanup<T>(
+    local: RemoteResult<()>,
+    remaining: impl FnOnce() -> T,
+) -> (RemoteResult<()>, T) {
+    (local, remaining())
+}
+
+/// Preserve every completed cleanup result and never certify retry after a
+/// local release failure. Existing worker failures remain visible together.
+fn include_local_cleanup(result: RemoteResult<()>, local: RemoteResult<()>) -> RemoteResult<()> {
+    let Err(local) = local else {
+        return result;
+    };
+    let primary = match result {
+        Err(error) => match error.downcast::<SessionCleanupError>() {
+            Ok(mut cleanup) => {
+                cleanup.failures.push(local);
+                #[cfg(test)]
+                {
+                    cleanup.sender_transport_only = false;
+                }
+                return Err(cleanup);
+            }
+            Err(error) => Some(error),
+        },
+        Ok(()) => None,
+    };
+    Err(Box::new(SessionCleanupError {
+        #[cfg(test)]
+        sender_transport_only: false,
+        primary,
+        failures: vec![local],
+    }))
 }
 
 fn finish_session(
@@ -3630,6 +3689,10 @@ impl ReceiverThread {
     }
 
     fn join_timeout(mut self, timeout: Duration) -> ReceiverExit {
+        #[cfg(test)]
+        if let Some(probe) = cleanup_probe::current() {
+            probe.join_started();
+        }
         let handle = self.handle.take().expect("receiver handle");
         let joined = match reap_worker(handle) {
             Ok(joined) => joined,
@@ -8082,6 +8145,84 @@ pub(super) mod tests {
             assert!(error.is::<SessionCleanupError>());
             assert!(!error.is::<CleanTransportDisconnect>());
         }
+    }
+
+    #[test]
+    fn local_release_error_still_runs_all_remaining_cleanup_in_order() {
+        let mut steps = Vec::new();
+        let (local, remaining) =
+            run_remaining_cleanup(Err(io::Error::other("local release failed").into()), || {
+                steps.push("cancel");
+                let cancel: RemoteResult<()> = Err(io::Error::other("cancel failed").into());
+                steps.push("receiver");
+                let receiver = ReceiverExit::Completed;
+                steps.push("sender");
+                let sender: RemoteResult<()> = Ok(());
+                steps.push("clipboard");
+                let clipboard: RemoteResult<()> = Ok(());
+                (cancel, receiver, sender, clipboard)
+            });
+        assert_eq!(steps, ["cancel", "receiver", "sender", "clipboard"]);
+        let result = finish_session(Ok(()), remaining.0, remaining.1, remaining.2, remaining.3);
+        let error = include_local_cleanup(result, local).unwrap_err();
+        assert_eq!(
+            error
+                .downcast_ref::<SessionCleanupError>()
+                .unwrap()
+                .failures
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn local_release_failure_preserves_worker_errors_and_forbids_retry() {
+        let failure =
+            || -> RemoteResult<()> { Err(io::Error::other("local release failed").into()) };
+        let loss = || -> RemoteResult<()> {
+            Err(receiver_read_error(ProtocolError::Io(
+                io::ErrorKind::UnexpectedEof.into(),
+            )))
+        };
+        let clean = finish_session(loss(), Ok(()), ReceiverExit::Completed, Ok(()), Ok(()));
+        let result = include_local_cleanup(clean, failure());
+        let error = finalize_retry_intent(result, || {
+            panic!("failed local release must not get retry certificate")
+        })
+        .unwrap_err();
+        assert_eq!(
+            error
+                .downcast_ref::<SessionCleanupError>()
+                .unwrap()
+                .failures
+                .len(),
+            1
+        );
+        let workers = finish_session(
+            loss(),
+            Err(io::Error::other("cancel").into()),
+            ReceiverExit::TimedOut,
+            Err(io::Error::other("sender").into()),
+            Err(io::Error::other("clipboard").into()),
+        );
+        let error = include_local_cleanup(workers, failure()).unwrap_err();
+        assert_eq!(
+            error
+                .downcast_ref::<SessionCleanupError>()
+                .unwrap()
+                .failures
+                .len(),
+            5
+        );
+        let error = include_local_cleanup(Ok(()), failure()).unwrap_err();
+        assert!(
+            error
+                .downcast_ref::<SessionCleanupError>()
+                .unwrap()
+                .primary
+                .is_none()
+        );
+        assert!(include_local_cleanup(Ok(()), Ok(())).is_ok());
     }
 
     #[test]
