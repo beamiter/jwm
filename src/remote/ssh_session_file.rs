@@ -208,6 +208,25 @@ mod tests {
 
     #[test]
     fn existing_normal_permissions_preserve_inode_content_and_flock() {
+        // Other parallel tests spawn processes. A fork inherits even CLOEXEC
+        // descriptors until exec, temporarily extending a flock's lifetime.
+        // Isolate this exact last-holder-drop assertion; do not weaken it.
+        const CHILD: &str = "JWM_TEST_ISOLATED_SESSION_FLOCK";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "remote::ssh_session_file::tests::existing_normal_permissions_preserve_inode_content_and_flock", "--nocapture"])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+            return;
+        }
         let sandbox = Sandbox::new();
         sandbox.directory();
         fs::write(sandbox.lock(), b"existing label").unwrap();

@@ -1049,6 +1049,25 @@ mod tests {
 
     #[test]
     fn colliding_destination_slots_never_switch_to_a_different_machine() {
+        // Other parallel tests spawn processes. A fork inherits even CLOEXEC
+        // descriptors until exec, temporarily extending a flock's lifetime.
+        // Isolate this exact last-holder-drop assertion; do not weaken it.
+        const CHILD: &str = "JWM_TEST_ISOLATED_DESTINATION_LOCK";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "remote::ssh::tests::colliding_destination_slots_never_switch_to_a_different_machine", "--nocapture"])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+            return;
+        }
         for (left, right) in [("2001:db8::1", "2001_db8__1"), ("[::1]", "___1_")] {
             let mut first = options();
             let user = format!("test-{:016x}@", rand::random::<u64>());
