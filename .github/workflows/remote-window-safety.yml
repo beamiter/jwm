@@ -2,7 +2,7 @@ name: Remote window safety
 
 on:
   push:
-    branches: [master, dot/remote-window-plan, dot/remote-readback-snapshot, dot/remote-popup-v2, dot/remote-popup-adapter, dot/remote-popup-action, dot/remote-popup-network, dot/remote-popup-cancel, dot/remote-popup-terminal, dot/remote-viewer-damage, dot/seamless-input]
+    branches: [master, dot/remote-window-plan, dot/remote-readback-snapshot, dot/remote-popup-v2, dot/remote-popup-adapter, dot/remote-popup-action, dot/remote-popup-network, dot/remote-popup-cancel, dot/remote-popup-terminal, dot/remote-viewer-damage, dot/seamless-input, dot/seamless-occlusion-check-20261114]
   workflow_dispatch:
 
 permissions:
@@ -60,6 +60,7 @@ jobs:
             export JWM_TEST_X11_DISPLAY="$DISPLAY"
             export JWM_REMOTE_TEST_VIEWER_OWNED=1
             cargo test --locked --no-default-features --features remote-x11 --lib seamless_input_crossing_releases_and_escape_requires_exit_on_x11 -- --ignored --test-threads=1 --nocapture
+            cargo test --locked --no-default-features --features remote-x11 --lib seamless_stale_entry_must_not_grab_an_occluding_local_window -- --ignored --test-threads=1 --nocapture
             cargo test --locked --no-default-features --features remote-x11 --lib window_capture_integration -- --ignored --test-threads=1 --nocapture
             cargo test --locked --no-default-features --features remote-x11,backend-xcb --lib resize_history_fence_xcb_native -- --ignored --test-threads=1 --nocapture
           '

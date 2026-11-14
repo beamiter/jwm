@@ -6626,6 +6626,126 @@ mod tests {
 
     #[test]
     #[ignore = "requires a dedicated owned JWM_TEST_X11_DISPLAY Xvfb server"]
+    fn seamless_stale_entry_must_not_grab_an_occluding_local_window() {
+        use x11rb::protocol::xproto;
+        assert_eq!(
+            std::env::var("JWM_REMOTE_TEST_VIEWER_OWNED").as_deref(),
+            Ok("1")
+        );
+        let display = std::env::var("JWM_TEST_X11_DISPLAY").unwrap();
+        assert!(display.starts_with(':'));
+        let (driver, screen) = x11rb::connect(Some(&display)).unwrap();
+        let root = driver.setup().roots[screen].root;
+        driver
+            .warp_pointer(x11rb::NONE, root, 0, 0, 0, 0, 700, 500)
+            .unwrap()
+            .check()
+            .unwrap();
+        let local = driver.generate_id().unwrap();
+        driver
+            .create_window(
+                x11rb::COPY_DEPTH_FROM_PARENT,
+                local,
+                root,
+                500,
+                350,
+                320,
+                240,
+                0,
+                xproto::WindowClass::INPUT_OUTPUT,
+                x11rb::COPY_FROM_PARENT,
+                &xproto::CreateWindowAux::new().event_mask(EventMask::FOCUS_CHANGE),
+            )
+            .unwrap()
+            .check()
+            .unwrap();
+        driver.map_window(local).unwrap().check().unwrap();
+        driver
+            .set_input_focus(xproto::InputFocus::PARENT, local, CURRENT_TIME)
+            .unwrap()
+            .check()
+            .unwrap();
+        let keymap = super::super::x11_keymap::KeymapTable::read(&driver).unwrap();
+        let mut viewer = Viewer::connect(
+            Some(&display),
+            320,
+            240,
+            true,
+            true,
+            Some(keymap),
+            true,
+            "F12",
+            "stale seamless entry regression",
+        )
+        .unwrap();
+        viewer.set_seamless_input(true);
+        viewer
+            .draw(DecodedFrame {
+                sequence: 1,
+                source_width: 320,
+                source_height: 240,
+                image: RgbImage::from_pixel(320, 240, image::Rgb([20, 40, 60])),
+            })
+            .unwrap();
+        viewer.source_presented(viewer.last_frame.as_ref().unwrap().geometry_epoch);
+        viewer.poll_events().unwrap();
+        assert!(!viewer.grabbed);
+        assert!(!viewer.seamless_suspended);
+        // Queue real Enter/Motion events but do not let the viewer process them.
+        driver
+            .warp_pointer(x11rb::NONE, viewer.window, 0, 0, 0, 0, 20, 20)
+            .unwrap()
+            .check()
+            .unwrap();
+        let origin = driver
+            .translate_coordinates(viewer.window, root, 0, 0)
+            .unwrap()
+            .reply()
+            .unwrap();
+        driver
+            .configure_window(
+                local,
+                &xproto::ConfigureWindowAux::new()
+                    .x(i32::from(origin.dst_x))
+                    .y(i32::from(origin.dst_y))
+                    .stack_mode(xproto::StackMode::ABOVE),
+            )
+            .unwrap()
+            .check()
+            .unwrap();
+        let hit = driver.query_pointer(root).unwrap().reply().unwrap();
+        assert_eq!(
+            hit.child, local,
+            "the local window actually covers the pointer"
+        );
+        while driver.poll_for_event().unwrap().is_some() {}
+        for _ in 0..10 {
+            viewer.poll_events().unwrap();
+        }
+        driver.get_input_focus().unwrap().reply().unwrap();
+        let mut transient_grabs = Vec::new();
+        while let Some(event) = driver.poll_for_event().unwrap() {
+            if let Event::FocusOut(event) = event
+                && event.event == local
+                && event.mode == NotifyMode::GRAB
+            {
+                transient_grabs.push(event);
+            }
+        }
+        eprintln!(
+            "occluded entry: final_grabbed={}, transient_local_focus_grabs={transient_grabs:?}",
+            viewer.grabbed
+        );
+        assert!(
+            transient_grabs.is_empty(),
+            "stale entry stole the covering local window's keyboard"
+        );
+        assert!(!viewer.grabbed);
+        driver.destroy_window(local).unwrap().check().unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires a dedicated owned JWM_TEST_X11_DISPLAY Xvfb server"]
     fn seamless_input_crossing_releases_and_escape_requires_exit_on_x11() {
         use x11rb::protocol::{xproto, xtest::ConnectionExt as _};
         assert_eq!(
