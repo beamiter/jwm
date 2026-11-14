@@ -26,12 +26,13 @@ use super::scaling::ScalingPolicy;
 use super::x11_capture::CaptureArea;
 use super::x11_viewer::{close_existing_viewer, focus_existing_viewer};
 use std::fs::{File, OpenOptions};
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsFd, AsRawFd};
 use std::path::PathBuf;
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -137,9 +138,11 @@ pub fn run_ssh(options: SshOptions) -> RemoteResult<()> {
         .take()
         .ok_or_else(|| io::Error::other("ssh standard error was not captured"))?;
     let (ready_tx, ready_rx) = mpsc::channel();
+    let relay_stop = Arc::new(AtomicBool::new(false));
+    let reader = RelayReader::new(stderr, Arc::clone(&relay_stop));
     let relay = thread::Builder::new()
         .name("jwm-remote-ssh-relay".into())
-        .spawn(move || relay_host_messages(BufReader::new(stderr), &ready_tx));
+        .spawn(move || relay_host_messages(BufReader::new(reader), &ready_tx));
     let result = match relay {
         Ok(_) => wait_until_ready(
             &options.destination,
@@ -189,8 +192,10 @@ pub fn run_ssh(options: SshOptions) -> RemoteResult<()> {
     // after a grace period, so no session outlives this command.
     drop(stdin);
     stop_child(&mut child);
+    // A surviving ProxyCommand/wrapper child can inherit the diagnostic pipe;
+    // do not require every such process to close it before the reader can stop.
+    relay_stop.store(true, Ordering::Release);
     if let Ok(relay) = relay {
-        // The relay ends once SSH has exited and its error stream closed.
         let _ = relay.join();
     }
     result
@@ -271,6 +276,82 @@ fn stop_child(child: &mut Child) {
     }
     let _ = child.kill();
     let _ = child.wait();
+}
+
+/// A relay owns its read descriptor exclusively. Polling before each read lets
+/// shutdown interrupt an idle pipe even when a descendant inherited its writer.
+/// This bounds read-side cancellation only; diagnostic output may still block.
+struct RelayReader<R> {
+    input: R,
+    stop: Arc<AtomicBool>,
+    drain_remaining: usize,
+}
+
+impl<R> RelayReader<R> {
+    fn new(input: R, stop: Arc<AtomicBool>) -> Self {
+        Self {
+            input,
+            stop,
+            drain_remaining: 4 * MAX_HOST_LINE_BYTES,
+        }
+    }
+
+    fn stopped() -> io::Error {
+        // Not EOF: do not emit an incomplete diagnostic on cancellation.
+        io::Error::new(
+            io::ErrorKind::ConnectionAborted,
+            "SSH diagnostic relay stopped",
+        )
+    }
+}
+
+impl<R: Read + AsFd> Read for RelayReader<R> {
+    fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
+        if output.is_empty() {
+            return Ok(0);
+        }
+        loop {
+            let stopping = self.stop.load(Ordering::Acquire);
+            if stopping && self.drain_remaining == 0 {
+                return Err(Self::stopped());
+            }
+            let mut descriptors = [nix::poll::PollFd::new(
+                self.input.as_fd(),
+                nix::poll::PollFlags::POLLIN,
+            )];
+            // Preserve already queued final errors without waiting for new data.
+            // A bounded drain also handles descendants that keep writing forever.
+            let timeout: u16 = if stopping { 0 } else { 100 };
+            match nix::poll::poll(&mut descriptors, timeout) {
+                Ok(0) if stopping => return Err(Self::stopped()),
+                Ok(0) | Err(nix::errno::Errno::EINTR) => continue,
+                Err(error) => return Err(io::Error::from_raw_os_error(error as i32)),
+                Ok(_) => {}
+            }
+            if descriptors[0]
+                .revents()
+                .is_some_and(|events| events.contains(nix::poll::PollFlags::POLLNVAL))
+            {
+                return Err(io::Error::from_raw_os_error(libc::EBADF));
+            }
+            let stopping = self.stop.load(Ordering::Acquire);
+            let length = if stopping {
+                output.len().min(self.drain_remaining)
+            } else {
+                output.len()
+            };
+            if length == 0 {
+                return Err(Self::stopped());
+            }
+            // This is the sole reader, so another consumer cannot steal the
+            // readiness between poll and read. HUP/ERR are resolved by read.
+            let count = self.input.read(&mut output[..length])?;
+            if stopping {
+                self.drain_remaining -= count;
+            }
+            return Ok(count);
+        }
+    }
 }
 
 /// Keep SSH/host diagnostics bounded even when a peer never writes a newline.
@@ -1122,6 +1203,83 @@ mod tests {
         let input = "jwm-remote: sharing it\njwm-remote: listening on 127.0.0.1:1\n";
         relay_host_messages(io::Cursor::new(input), &ready_tx);
         assert!(ready_rx.try_recv().is_ok());
+    }
+
+    #[test]
+    fn relay_read_cancellation_does_not_wait_for_a_live_pipe_writer() {
+        let mut child = Command::new("sh")
+            .args([
+                "-c",
+                "printf 'jwm-remote: listening on test\\npartial-diagnostic' >&2; exec sleep 2",
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let reader = RelayReader::new(child.stderr.take().unwrap(), Arc::clone(&stop));
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let relay = thread::spawn(move || {
+            relay_host_messages(BufReader::new(reader), &ready_tx);
+        });
+        let ready = ready_rx.recv_timeout(Duration::from_secs(1));
+        let start = Instant::now();
+        stop.store(true, Ordering::Release);
+        let joined = relay.join();
+        let elapsed = start.elapsed();
+        let _ = child.kill();
+        child.wait().unwrap();
+        joined.unwrap();
+        ready.unwrap();
+        assert!(elapsed < Duration::from_secs(1), "relay waited {elapsed:?}");
+        assert!(ready_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn relay_reader_preserves_readiness_and_normal_eof() {
+        let (input, mut output) = std::os::unix::net::UnixStream::pair().unwrap();
+        output
+            .write_all(b"jwm-remote: listening on test\n")
+            .unwrap();
+        drop(output);
+        let reader = RelayReader::new(input, Arc::new(AtomicBool::new(false)));
+        let (ready_tx, ready_rx) = mpsc::channel();
+        relay_host_messages(BufReader::new(reader), &ready_tx);
+        assert_eq!(ready_rx.try_iter().count(), 1);
+    }
+
+    #[test]
+    fn cancelled_relay_drains_queued_complete_lines_without_waiting_for_eof() {
+        let (input, mut output) = std::os::unix::net::UnixStream::pair().unwrap();
+        output.write_all(b"Permission denied\npartial").unwrap();
+        let reader = RelayReader::new(input, Arc::new(AtomicBool::new(true)));
+        let mut reader = BufReader::new(reader);
+        let mut line = Vec::new();
+        assert!(read_host_line(&mut reader, &mut line).unwrap());
+        assert_eq!(line, b"Permission denied");
+        assert_eq!(
+            read_host_line(&mut reader, &mut line).unwrap_err().kind(),
+            io::ErrorKind::ConnectionAborted
+        );
+        drop(output);
+    }
+
+    #[test]
+    fn cancelled_relay_drain_is_bounded_even_when_data_remains_ready() {
+        let (input, mut output) = std::os::unix::net::UnixStream::pair().unwrap();
+        output.write_all(&[b'x'; 1024]).unwrap();
+        let mut reader = RelayReader::new(input, Arc::new(AtomicBool::new(true)));
+        // Small budget lets this exercise the exact production counter without
+        // depending on the platform socket buffer size.
+        reader.drain_remaining = 100;
+        let mut buffer = [0; 1024];
+        assert_eq!(reader.read(&mut buffer).unwrap(), 100);
+        assert_eq!(reader.drain_remaining, 0);
+        assert_eq!(
+            reader.read(&mut buffer).unwrap_err().kind(),
+            io::ErrorKind::ConnectionAborted
+        );
     }
 
     #[test]
