@@ -316,7 +316,11 @@ fn transport_cleanup_returns_local_input_before_waiting_for_receiver() {
         drop(gate);
         let result = client.join().unwrap();
         host.join().unwrap();
-        assert!(result.is_err(), "the mock host deliberately disconnected");
+        let error = result.expect_err("the mock host deliberately disconnected");
+        assert!(
+            !classify_failure(error.as_ref()).reconnect_certified,
+            "a session holding input at cleanup entry must require explicit reconnect"
+        );
         assert!(
             observed_during_wait,
             "observer missed the bounded cleanup/gate interval"

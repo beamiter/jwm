@@ -655,6 +655,9 @@ pub struct Viewer {
     grab_input: bool,
     seamless_input: bool,
     seamless_suspended: bool,
+    cleanup_started: bool,
+    cleanup_had_grab: bool,
+    cleanup_failed: bool,
     forward_input: bool,
     source_switching: bool,
     source_cycle_enabled: bool,
@@ -1248,6 +1251,9 @@ impl Viewer {
             grabbed: false,
             seamless_input: false,
             seamless_suspended: false,
+            cleanup_started: false,
+            cleanup_had_grab: false,
+            cleanup_failed: false,
             escape_keycodes,
             escape_keysym,
             escape_name: escape_key.to_string(),
@@ -1274,23 +1280,104 @@ impl Viewer {
         self.user_released_grab
     }
 
-    /// Final local-only event pass after transport workers stop. Never forward
-    /// these events to a replacement session. A backlog is ambiguous, so it
-    /// disables retry instead of draining unboundedly through a close/escape.
-    pub(crate) fn reconnect_allowed_after_cleanup(&mut self) -> RemoteResult<bool> {
-        let events = self.poll_events();
-        // Always try to release even when polling failed. Drop remains the
-        // fallback on connection errors; such errors never authorize retry.
+    /// Terminal local input boundary, before waiting on transport workers.
+    pub(crate) fn begin_local_cleanup(&mut self) -> RemoteResult<()> {
+        self.cleanup_had_grab |= self.grabbed;
+        self.cleanup_started = true;
+        self.seamless_suspended = true;
         let released = self.release_local_grab();
-        let events = events?;
-        released?;
+        self.cleanup_failed |= released.is_err();
+        self.keyboard = ViewerKeyboardState::default();
+        self.held_buttons.clear();
+        self.clipboard_shortcut = ViewerKeyboardState::default();
+        released
+    }
+
+    /// Final bounded intent-only pass. Once input is returned to local apps,
+    /// their physical escape chords no longer reach this viewer; a session
+    /// that still held a grab at cleanup entry must not automatically retry.
+    pub(crate) fn reconnect_allowed_after_cleanup(&mut self) -> RemoteResult<bool> {
+        self.begin_local_cleanup()?;
+        let events = self.poll_cleanup_intent()?;
+        if self.cleanup_had_grab || self.cleanup_failed {
+            return Ok(false);
+        }
+        let pending = self.has_pending_events();
+        self.cleanup_failed |= pending.is_err();
         Ok(local_retry_intent_allows(
             &events,
             self.user_close_requested,
             self.user_released_grab,
             self.user_restricted_clipboard,
-            self.has_pending_events()?,
+            pending?,
         ))
+    }
+
+    fn poll_cleanup_intent(&mut self) -> RemoteResult<Vec<ViewerEvent>> {
+        let result = self.poll_cleanup_intent_inner();
+        self.cleanup_failed |= result.is_err();
+        result
+    }
+
+    fn poll_cleanup_intent_inner(&mut self) -> RemoteResult<Vec<ViewerEvent>> {
+        let mut result = Vec::new();
+        let mut budget = EventPollBudget::new();
+        while budget.take() {
+            let event = if let Some(event) = self.deferred_events.pop_front() {
+                event
+            } else if let Some(event) = self.conn.poll_for_event()? {
+                event
+            } else {
+                break;
+            };
+            match event {
+                Event::ClientMessage(event)
+                    if event.window == self.window
+                        && event.format == 32
+                        && event.type_ == self.wm_protocols
+                        && event.data.as_data32()[0] == self.wm_delete_window =>
+                {
+                    self.user_close_requested = true;
+                    self.closed = true;
+                    result.push(ViewerEvent::Close);
+                }
+                Event::DestroyNotify(event) if event.window == self.window => {
+                    self.user_close_requested = true;
+                    self.closed = true;
+                    result.push(ViewerEvent::Close);
+                }
+                Event::KeyPress(event)
+                    if event.event == self.window && self.is_escape(event.detail) =>
+                {
+                    if self.clipboard_narrowing_enabled
+                        && clipboard_narrow_modifiers_match(event.state)
+                    {
+                        self.user_restricted_clipboard = true;
+                        result.push(ViewerEvent::NarrowClipboard);
+                    } else if self.grab_input && escape_modifiers_match(event.state) {
+                        self.user_released_grab = true;
+                    }
+                }
+                Event::Error(error) if is_closed_window_error(&error, self.window) => {
+                    self.closed = true;
+                    result.push(ViewerEvent::Close);
+                    break;
+                }
+                Event::Error(error) => {
+                    return Err(io::Error::other(format!(
+                        "X11 viewer received a protocol error during cleanup: {error:?}"
+                    ))
+                    .into());
+                }
+                Event::MappingNotify(event) if event.request != Mapping::POINTER => {
+                    return Err(invalid_data(
+                        "local X11 keyboard mapping changed during cleanup; explicit reconnect required"
+                    ).into());
+                }
+                _ => {} // No ordinary input, source switch, rendering or acquisition.
+            }
+        }
+        Ok(result)
     }
 
     /// Drain a bounded batch of X11 events without blocking.
@@ -1488,6 +1575,9 @@ impl Viewer {
     }
 
     pub fn poll_events(&mut self) -> RemoteResult<Vec<ViewerEvent>> {
+        if self.cleanup_started {
+            return self.poll_cleanup_intent();
+        }
         let mut result = Vec::new();
         #[cfg(feature = "remote-wayland")]
         if let Some(guard) = self.wayland_keymap.as_mut() {
@@ -2514,6 +2604,9 @@ impl Viewer {
         y: i16,
         events: &mut Vec<ViewerEvent>,
     ) -> RemoteResult<()> {
+        if self.cleanup_started {
+            return Ok(());
+        }
         if !self.pointer_is_inside_image(x, y) {
             if self.grabbed {
                 self.release_local_grab()?;
@@ -2597,7 +2690,8 @@ impl Viewer {
     }
 
     fn forwarding_input(&self) -> bool {
-        self.forward_input
+        !self.cleanup_started
+            && self.forward_input
             && !self.source_switching
             && self
                 .last_frame
@@ -2607,6 +2701,9 @@ impl Viewer {
     }
 
     fn acquire_local_grab(&mut self) -> RemoteResult<bool> {
+        if self.cleanup_started {
+            return Ok(false);
+        }
         if self.grabbed {
             return Ok(true);
         }
@@ -6692,6 +6789,272 @@ mod tests {
         )
         .unwrap();
         assert!(validate_native_upload(&oversized, format, ImageOrder::LsbFirst).is_err());
+    }
+
+    #[test]
+    #[ignore = "requires a dedicated owned JWM_TEST_X11_DISPLAY Xvfb server"]
+    fn terminal_cleanup_releases_input_preserves_intent_and_never_regrabs() {
+        use x11rb::protocol::xproto;
+        assert_eq!(
+            std::env::var("JWM_REMOTE_TEST_VIEWER_OWNED").as_deref(),
+            Ok("1")
+        );
+        let display = std::env::var("JWM_TEST_X11_DISPLAY").unwrap();
+        assert!(display.starts_with(':'));
+        let (driver, screen) = x11rb::connect(Some(&display)).unwrap();
+        let root = driver.setup().roots[screen].root;
+        for case in [
+            "held",
+            "click_held",
+            "unheld",
+            "escape",
+            "narrow",
+            "close",
+            "normal_close",
+            "failed",
+            "window_error",
+            "drawable_error",
+            "protocol_error",
+            "keyboard_mapping",
+            "modifier_mapping",
+            "pointer_mapping",
+        ] {
+            driver
+                .warp_pointer(x11rb::NONE, root, 0, 0, 0, 0, 700, 500)
+                .unwrap()
+                .check()
+                .unwrap();
+            let keymap = super::super::x11_keymap::KeymapTable::read(&driver).unwrap();
+            let mut viewer = Viewer::connect(
+                Some(&display),
+                320,
+                240,
+                true,
+                true,
+                Some(keymap),
+                true,
+                "F12",
+                "terminal input regression",
+            )
+            .unwrap();
+            viewer.set_seamless_input(case != "click_held");
+            viewer.enable_clipboard_narrowing(true);
+            viewer.enable_source_cycle(true);
+            viewer
+                .draw(DecodedFrame {
+                    sequence: 1,
+                    source_width: 320,
+                    source_height: 240,
+                    image: RgbImage::from_pixel(320, 240, image::Rgb([20, 40, 60])),
+                })
+                .unwrap();
+            viewer.source_presented(viewer.last_frame.as_ref().unwrap().geometry_epoch);
+            viewer.poll_events().unwrap();
+            if matches!(case, "held" | "click_held" | "normal_close") {
+                driver
+                    .warp_pointer(x11rb::NONE, viewer.window, 0, 0, 0, 0, 30, 30)
+                    .unwrap()
+                    .check()
+                    .unwrap();
+                if case == "click_held" {
+                    assert!(viewer.acquire_local_grab().unwrap());
+                } else {
+                    viewer
+                        .update_seamless_input(30, 30, &mut Vec::new())
+                        .unwrap();
+                }
+                assert!(viewer.grabbed);
+                viewer.keyboard.press(38, false, true);
+                viewer.held_buttons.press(1, true);
+            }
+            let close = xproto::ClientMessageEvent::new(
+                32,
+                viewer.window,
+                viewer.wm_protocols,
+                [viewer.wm_delete_window, CURRENT_TIME, 0, 0, 0],
+            );
+            if case == "normal_close" {
+                driver
+                    .send_event(false, viewer.window, EventMask::NO_EVENT, close)
+                    .unwrap()
+                    .check()
+                    .unwrap();
+                viewer.conn.get_input_focus().unwrap().reply().unwrap();
+                let events = viewer.poll_events().unwrap();
+                assert!(events.contains(&ViewerEvent::Close));
+                assert!(events.contains(&ViewerEvent::ReleaseAll));
+            }
+            viewer.begin_local_cleanup().unwrap();
+            assert!(!viewer.grabbed);
+            assert!(viewer.keyboard.held.is_empty());
+            assert!(!viewer.forwarding_input());
+            assert!(
+                !viewer.user_released_grab(),
+                "automatic release is not user escape intent"
+            );
+            assert_eq!(
+                viewer.cleanup_had_grab,
+                matches!(case, "held" | "click_held")
+            );
+            viewer.begin_local_cleanup().unwrap();
+            assert_eq!(
+                viewer.cleanup_had_grab,
+                matches!(case, "held" | "click_held"),
+                "cleanup is idempotent"
+            );
+            assert!(!viewer.user_released_grab());
+            // Real queued entry/button events must not restore grabs or forward input.
+            driver
+                .warp_pointer(x11rb::NONE, viewer.window, 0, 0, 0, 0, 31, 30)
+                .unwrap()
+                .check()
+                .unwrap();
+            driver
+                .send_event(
+                    false,
+                    viewer.window,
+                    EventMask::BUTTON_PRESS,
+                    xproto::ButtonPressEvent {
+                        response_type: xproto::BUTTON_PRESS_EVENT,
+                        detail: 1,
+                        root,
+                        event: viewer.window,
+                        event_x: 31,
+                        event_y: 30,
+                        same_screen: true,
+                        ..Default::default()
+                    },
+                )
+                .unwrap()
+                .check()
+                .unwrap();
+            for (detail, state) in [
+                (38, KeyButMask::default()),
+                (
+                    viewer.escape_keycodes[0],
+                    KeyButMask::SHIFT | KeyButMask::CONTROL | KeyButMask::MOD4,
+                ),
+            ] {
+                driver
+                    .send_event(
+                        false,
+                        viewer.window,
+                        EventMask::KEY_PRESS,
+                        xproto::KeyPressEvent {
+                            response_type: xproto::KEY_PRESS_EVENT,
+                            detail,
+                            root,
+                            event: viewer.window,
+                            same_screen: true,
+                            state,
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap()
+                    .check()
+                    .unwrap();
+            }
+            if matches!(case, "escape" | "narrow") {
+                driver
+                    .send_event(
+                        false,
+                        viewer.window,
+                        EventMask::KEY_PRESS,
+                        xproto::KeyPressEvent {
+                            response_type: xproto::KEY_PRESS_EVENT,
+                            detail: viewer.escape_keycodes[0],
+                            root,
+                            event: viewer.window,
+                            same_screen: true,
+                            state: KeyButMask::CONTROL
+                                | KeyButMask::MOD4
+                                | if case == "narrow" {
+                                    KeyButMask::MOD1
+                                } else {
+                                    KeyButMask::default()
+                                },
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap()
+                    .check()
+                    .unwrap();
+            }
+            if case == "close" {
+                driver
+                    .send_event(false, viewer.window, EventMask::NO_EVENT, close)
+                    .unwrap()
+                    .check()
+                    .unwrap();
+            }
+            viewer.conn.get_input_focus().unwrap().reply().unwrap();
+            if matches!(case, "window_error" | "drawable_error" | "protocol_error") {
+                viewer.deferred_events.push_back(Event::Error(X11Error {
+                    error_kind: match case {
+                        "window_error" => ErrorKind::Window,
+                        "drawable_error" => ErrorKind::Drawable,
+                        _ => ErrorKind::Alloc,
+                    },
+                    error_code: 0,
+                    sequence: 0,
+                    bad_value: viewer.window,
+                    minor_opcode: 0,
+                    major_opcode: 0,
+                    extension_name: None,
+                    request_name: None,
+                }));
+            }
+            if matches!(
+                case,
+                "keyboard_mapping" | "modifier_mapping" | "pointer_mapping"
+            ) {
+                viewer.deferred_events.push_back(Event::MappingNotify(
+                    xproto::MappingNotifyEvent {
+                        response_type: xproto::MAPPING_NOTIFY_EVENT,
+                        request: match case {
+                            "keyboard_mapping" => Mapping::KEYBOARD,
+                            "modifier_mapping" => Mapping::MODIFIER,
+                            _ => Mapping::POINTER,
+                        },
+                        ..Default::default()
+                    },
+                ));
+            }
+            let polled = viewer.poll_events();
+            let expects_error = matches!(
+                case,
+                "protocol_error" | "keyboard_mapping" | "modifier_mapping"
+            );
+            assert_eq!(polled.is_err(), expects_error, "{case}");
+            let events = polled.unwrap_or_default();
+            if matches!(case, "window_error" | "drawable_error") {
+                assert!(viewer.closed);
+                assert!(events.contains(&ViewerEvent::Close));
+            }
+            assert_eq!(viewer.cleanup_failed, expects_error, "{case}");
+            assert!(
+                events.iter().all(|event| matches!(
+                    event,
+                    ViewerEvent::Close | ViewerEvent::NarrowClipboard
+                ))
+            );
+            assert!(!viewer.acquire_local_grab().unwrap());
+            viewer
+                .update_seamless_input(31, 30, &mut Vec::new())
+                .unwrap();
+            assert!(!viewer.grabbed);
+            assert_eq!(viewer.user_released_grab(), case == "escape");
+            assert_eq!(viewer.user_restricted_clipboard, case == "narrow");
+            if case == "failed" {
+                viewer.cleanup_failed = true;
+            }
+            assert_eq!(
+                viewer.reconnect_allowed_after_cleanup().unwrap(),
+                matches!(case, "unheld" | "pointer_mapping"),
+                "{case}"
+            );
+            assert!(!viewer.grabbed);
+        }
     }
 
     #[test]
