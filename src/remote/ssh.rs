@@ -217,8 +217,17 @@ fn wait_until_ready(
             Ok(()) => return Ok(()),
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => {
-                // SSH closed its error stream: it has exited or is about to.
-                return Err(ssh_ended_early(child.wait()?, destination).into());
+                // EOF is not proof that SSH exited: a wrapper can close stderr
+                // and remain alive. Never wait here without a deadline. Return
+                // to run_ssh so its bounded shutdown path can reap the child.
+                let error = match child.try_wait()? {
+                    Some(status) => ssh_ended_early(status, destination),
+                    None => io::Error::new(
+                        io::ErrorKind::ConnectionAborted,
+                        "ssh closed its diagnostic stream before the remote host was ready",
+                    ),
+                };
+                return Err(error.into());
             }
         }
         if let Some(status) = child.try_wait()? {
@@ -992,6 +1001,55 @@ mod tests {
         for good in ["desk", "ubuntu@10.0.15.52", "user@[::1]"] {
             assert!(validate_destination(good).is_ok(), "{good:?}");
         }
+    }
+
+    #[test]
+    fn diagnostic_eof_before_ready_does_not_wait_for_a_live_ssh_child() {
+        // A real process closes stderr but remains alive. Its eventual exit is
+        // a test safety net; readiness handling must not wait for that exit.
+        let mut child = Command::new("sh")
+            .args(["-c", "exec 2>&-; exec sleep 2"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let stderr = child.stderr.take().unwrap();
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let relay = thread::spawn(move || {
+            relay_host_messages(BufReader::new(stderr), &ready_tx);
+        });
+        let started = Instant::now();
+        let result = wait_until_ready("test-host", &mut child, None, "", &ready_rx);
+        let elapsed = started.elapsed();
+        let still_alive = child.try_wait().unwrap().is_none();
+        let _ = child.kill();
+        child.wait().unwrap();
+        relay.join().unwrap();
+        let error = result.unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<io::Error>().unwrap().kind(),
+            io::ErrorKind::ConnectionAborted
+        );
+        assert!(elapsed < Duration::from_secs(1), "waited {elapsed:?}");
+        assert!(
+            still_alive,
+            "readiness handling waited for the child to exit"
+        );
+    }
+
+    #[test]
+    fn diagnostic_eof_preserves_an_already_exited_ssh_status() {
+        let mut child = Command::new("sh").args(["-c", "exit 255"]).spawn().unwrap();
+        child.wait().unwrap();
+        let (ready_tx, ready_rx) = mpsc::channel();
+        drop(ready_tx);
+        let error = wait_until_ready("test-host", &mut child, None, "", &ready_rx).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("could not connect or log in to test-host")
+        );
     }
 
     #[test]
