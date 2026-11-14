@@ -273,13 +273,60 @@ fn stop_child(child: &mut Child) {
     let _ = child.wait();
 }
 
-/// Relay the remote host's diagnostics, signalling once it listens.
-fn relay_host_messages(reader: impl BufRead, ready: &mpsc::Sender<()>) {
-    for line in reader.lines() {
-        let Ok(line) = line else { break };
-        match classify_host_line(&line) {
+/// Keep SSH/host diagnostics bounded even when a peer never writes a newline.
+/// Oversized lines are discarded whole, so a truncated prefix cannot signal
+/// readiness. Continue draining the stream so SSH cannot block on a full pipe.
+const MAX_HOST_LINE_BYTES: usize = 16 * 1024;
+
+fn read_host_line(reader: &mut impl BufRead, line: &mut Vec<u8>) -> io::Result<bool> {
+    line.clear();
+    let mut oversized = false;
+    loop {
+        let chunk = match reader.fill_buf() {
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            result => result?,
+        };
+        if chunk.is_empty() {
+            return Ok(!oversized && !line.is_empty());
+        }
+        let newline = chunk.iter().position(|&byte| byte == b'\n');
+        let length = newline.unwrap_or(chunk.len());
+        if !oversized {
+            if length > MAX_HOST_LINE_BYTES - line.len() {
+                oversized = true;
+                line.clear();
+            } else {
+                line.extend_from_slice(&chunk[..length]);
+            }
+        }
+        reader.consume(length + usize::from(newline.is_some()));
+        if newline.is_some() {
+            if oversized {
+                oversized = false;
+                continue;
+            }
+            if line.last() == Some(&b'\r') {
+                line.pop();
+            }
+            return Ok(true);
+        }
+    }
+}
+
+/// Relay diagnostics, emitting at most one readiness notification per session.
+fn relay_host_messages(mut reader: impl BufRead, ready: &mpsc::Sender<()>) {
+    let mut line = Vec::with_capacity(MAX_HOST_LINE_BYTES);
+    let mut signalled = false;
+    while matches!(read_host_line(&mut reader, &mut line), Ok(true)) {
+        let Ok(line) = std::str::from_utf8(&line) else {
+            break;
+        };
+        match classify_host_line(line) {
             HostLine::Listening => {
-                let _ = ready.send(());
+                if !signalled {
+                    let _ = ready.send(());
+                    signalled = true;
+                }
             }
             HostLine::Telemetry => {}
             HostLine::Host(message) => eprintln!("jwm-remote: host: {message}"),
@@ -1075,6 +1122,56 @@ mod tests {
         let input = "jwm-remote: sharing it\njwm-remote: listening on 127.0.0.1:1\n";
         relay_host_messages(io::Cursor::new(input), &ready_tx);
         assert!(ready_rx.try_recv().is_ok());
+    }
+
+    #[test]
+    fn repeated_host_readiness_is_only_signalled_once() {
+        let input = "jwm-remote: listening on 127.0.0.1:1\n".repeat(100_000);
+        let (ready_tx, ready_rx) = mpsc::channel();
+        relay_host_messages(io::Cursor::new(input), &ready_tx);
+        assert_eq!(ready_rx.try_iter().count(), 1);
+    }
+
+    #[test]
+    fn oversized_host_lines_are_discarded_without_false_readiness() {
+        let mut input = b"jwm-remote: listening on ".to_vec();
+        input.extend(vec![b'x'; MAX_HOST_LINE_BYTES * 8]);
+        input.extend_from_slice(b"\njwm-remote: listening on real-host\r\n");
+        let mut reader = BufReader::with_capacity(7, io::Cursor::new(input));
+        let mut line = Vec::with_capacity(MAX_HOST_LINE_BYTES);
+        assert!(read_host_line(&mut reader, &mut line).unwrap());
+        assert_eq!(line, b"jwm-remote: listening on real-host");
+        assert_eq!(line.capacity(), MAX_HOST_LINE_BYTES);
+        assert!(!read_host_line(&mut reader, &mut line).unwrap());
+    }
+
+    #[test]
+    fn oversized_unterminated_host_line_is_not_retained_or_signalled() {
+        let mut input = b"jwm-remote: listening on ".to_vec();
+        input.extend(vec![b'x'; MAX_HOST_LINE_BYTES * 8]);
+        let mut reader = BufReader::with_capacity(4096, io::Cursor::new(&input));
+        let mut line = Vec::with_capacity(MAX_HOST_LINE_BYTES);
+        assert!(!read_host_line(&mut reader, &mut line).unwrap());
+        assert!(line.is_empty());
+        assert_eq!(line.capacity(), MAX_HOST_LINE_BYTES);
+        let (ready_tx, ready_rx) = mpsc::channel();
+        relay_host_messages(io::Cursor::new(input), &ready_tx);
+        assert!(ready_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn bounded_host_lines_preserve_boundary_empty_and_eof_lines() {
+        let mut input = vec![b'x'; MAX_HOST_LINE_BYTES];
+        input.extend_from_slice(b"\n\r\nlast line");
+        let mut reader = BufReader::with_capacity(31, io::Cursor::new(input));
+        let mut line = Vec::with_capacity(MAX_HOST_LINE_BYTES);
+        assert!(read_host_line(&mut reader, &mut line).unwrap());
+        assert_eq!(line.len(), MAX_HOST_LINE_BYTES);
+        assert!(read_host_line(&mut reader, &mut line).unwrap());
+        assert!(line.is_empty());
+        assert!(read_host_line(&mut reader, &mut line).unwrap());
+        assert_eq!(line, b"last line");
+        assert!(!read_host_line(&mut reader, &mut line).unwrap());
     }
 
     #[test]
