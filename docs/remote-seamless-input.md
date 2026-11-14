@@ -16,6 +16,14 @@ of that image, including into letterboxing, to release the local grab and all
 forwarded remote keys/buttons. The pointer is never confined. The pre-existing
 local focus is not rewritten. The title indicates the current input mode.
 
+Entry checks the X server's hit path before acquisition and again while input
+is synchronously grabbed. This rejects queued entry events when another local
+window already covers the viewer, while allowing WM frames and viewer child
+windows. These separate queries are not an atomic server transaction; the
+post-grab checks observe frozen logical input state, not a continuously sampled
+physical state. They do not eliminate every race with later window or pointer
+changes.
+
 Entry waits until physical keys and core mouse buttons are released, so a local
 chord or drag is not transferred halfway through. Ctrl+Super+F12 (or the configured
 escape key) releases input and suspends re-entry until the pointer leaves the

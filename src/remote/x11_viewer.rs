@@ -276,6 +276,27 @@ fn seamless_entry_is_clean(keys: &[u8; 32], mask: x11rb::protocol::xproto::KeyBu
     keys.iter().all(|key| *key == 0) && u16::from(mask & buttons) == 0
 }
 
+// Follow the server's current hit path, not merely coordinates relative to an
+// obscured window. A bounded walk supports WM frames and fails closed on stale
+// or excessively deep paths. Separate replies are not an atomic server snapshot.
+fn pointer_path_reaches_viewer(
+    root: u32,
+    viewer: u32,
+    mut child_at: impl FnMut(u32) -> RemoteResult<Option<u32>>,
+) -> RemoteResult<bool> {
+    let mut window = root;
+    for _ in 0..64 {
+        if window == viewer {
+            return Ok(true);
+        }
+        let Some(child) = child_at(window)? else {
+            return Ok(false);
+        };
+        window = child;
+    }
+    Ok(false)
+}
+
 fn focus_out_releases_input(mode: NotifyMode, owns_grab: bool) -> bool {
     mode == NotifyMode::NORMAL || (mode == NotifyMode::GRAB && !owns_grab)
 }
@@ -2518,6 +2539,7 @@ impl Viewer {
         if !pointer.same_screen
             || !self.pointer_is_inside_image(pointer.win_x, pointer.win_y)
             || !seamless_entry_is_clean(&keys.keys, pointer.mask)
+            || !self.pointer_targets_viewer()?
         {
             return Ok(());
         }
@@ -2533,7 +2555,8 @@ impl Viewer {
                 let pointer = self.conn.query_pointer(self.window)?.reply()?;
                 Ok(pointer.same_screen
                     && self.pointer_is_inside_image(pointer.win_x, pointer.win_y)
-                    && seamless_entry_is_clean(&keys.keys, pointer.mask))
+                    && seamless_entry_is_clean(&keys.keys, pointer.mask)
+                    && self.pointer_targets_viewer()?)
             })();
             match clean {
                 Ok(true) => {
@@ -2560,6 +2583,17 @@ impl Viewer {
             }
         }
         Ok(())
+    }
+
+    fn pointer_targets_viewer(&self) -> RemoteResult<bool> {
+        let root = self.conn.setup().roots[self.cursor_screen].root;
+        pointer_path_reaches_viewer(root, self.window, |window| {
+            let pointer = self.conn.query_pointer(window)?.reply()?;
+            Ok(
+                (pointer.same_screen && pointer.root == root && pointer.child != x11rb::NONE)
+                    .then_some(pointer.child),
+            )
+        })
     }
 
     fn forwarding_input(&self) -> bool {
@@ -5807,6 +5841,42 @@ mod tests {
     }
 
     #[test]
+    fn seamless_hit_path_supports_frames_and_bounds_stale_paths() {
+        assert!(
+            pointer_path_reaches_viewer(1, 3, |window| {
+                Ok(match window {
+                    1 => Some(2),
+                    2 => Some(3),
+                    _ => panic!("do not reject viewer descendants"),
+                })
+            })
+            .unwrap()
+        );
+        assert!(
+            !pointer_path_reaches_viewer(1, 3, |window| {
+                Ok(if window == 1 { Some(4) } else { None })
+            })
+            .unwrap()
+        );
+        assert!(!pointer_path_reaches_viewer(1, 3, |_| Ok(None)).unwrap());
+        let mut queries = 0;
+        assert!(
+            !pointer_path_reaches_viewer(1, 3, |_| {
+                queries += 1;
+                Ok(Some(1))
+            })
+            .unwrap()
+        );
+        assert_eq!(queries, 64);
+        assert!(
+            pointer_path_reaches_viewer(1, 3, |_| Err(
+                std::io::Error::other("window disappeared").into()
+            ))
+            .is_err()
+        );
+    }
+
+    #[test]
     fn seamless_entry_rejects_pressed_keys_and_buttons_but_not_locks() {
         use x11rb::protocol::xproto::KeyButMask;
         let mut keys = [0; 32];
@@ -6626,8 +6696,8 @@ mod tests {
 
     #[test]
     #[ignore = "requires a dedicated owned JWM_TEST_X11_DISPLAY Xvfb server"]
-    fn seamless_stale_entry_must_not_grab_an_occluding_local_window() {
-        use x11rb::protocol::xproto;
+    fn seamless_hit_path_accepts_reparented_viewer_and_its_child() {
+        use x11rb::protocol::{shape, shape::ConnectionExt as _, xproto};
         assert_eq!(
             std::env::var("JWM_REMOTE_TEST_VIEWER_OWNED").as_deref(),
             Ok("1")
@@ -6641,30 +6711,6 @@ mod tests {
             .unwrap()
             .check()
             .unwrap();
-        let local = driver.generate_id().unwrap();
-        driver
-            .create_window(
-                x11rb::COPY_DEPTH_FROM_PARENT,
-                local,
-                root,
-                500,
-                350,
-                320,
-                240,
-                0,
-                xproto::WindowClass::INPUT_OUTPUT,
-                x11rb::COPY_FROM_PARENT,
-                &xproto::CreateWindowAux::new().event_mask(EventMask::FOCUS_CHANGE),
-            )
-            .unwrap()
-            .check()
-            .unwrap();
-        driver.map_window(local).unwrap().check().unwrap();
-        driver
-            .set_input_focus(xproto::InputFocus::PARENT, local, CURRENT_TIME)
-            .unwrap()
-            .check()
-            .unwrap();
         let keymap = super::super::x11_keymap::KeymapTable::read(&driver).unwrap();
         let mut viewer = Viewer::connect(
             Some(&display),
@@ -6675,10 +6721,54 @@ mod tests {
             Some(keymap),
             true,
             "F12",
-            "stale seamless entry regression",
+            "reparented seamless regression",
         )
         .unwrap();
         viewer.set_seamless_input(true);
+        let frame = driver.generate_id().unwrap();
+        driver
+            .create_window(
+                x11rb::COPY_DEPTH_FROM_PARENT,
+                frame,
+                root,
+                100,
+                100,
+                360,
+                280,
+                0,
+                xproto::WindowClass::INPUT_OUTPUT,
+                x11rb::COPY_FROM_PARENT,
+                &xproto::CreateWindowAux::new(),
+            )
+            .unwrap()
+            .check()
+            .unwrap();
+        driver
+            .reparent_window(viewer.window, frame, 20, 20)
+            .unwrap()
+            .check()
+            .unwrap();
+        driver.map_window(frame).unwrap().check().unwrap();
+        driver.map_window(viewer.window).unwrap().check().unwrap();
+        let child = driver.generate_id().unwrap();
+        driver
+            .create_window(
+                x11rb::COPY_DEPTH_FROM_PARENT,
+                child,
+                viewer.window,
+                10,
+                10,
+                80,
+                80,
+                0,
+                xproto::WindowClass::INPUT_OUTPUT,
+                x11rb::COPY_FROM_PARENT,
+                &xproto::CreateWindowAux::new(),
+            )
+            .unwrap()
+            .check()
+            .unwrap();
+        driver.map_window(child).unwrap().check().unwrap();
         viewer
             .draw(DecodedFrame {
                 sequence: 1,
@@ -6688,60 +6778,266 @@ mod tests {
             })
             .unwrap();
         viewer.source_presented(viewer.last_frame.as_ref().unwrap().geometry_epoch);
+        // Drain reparent/unmap notifications, then re-arm at the known outside position.
         viewer.poll_events().unwrap();
-        assert!(!viewer.grabbed);
-        assert!(!viewer.seamless_suspended);
-        // Queue real Enter/Motion events but do not let the viewer process them.
+        viewer
+            .update_seamless_input(-1, -1, &mut Vec::new())
+            .unwrap();
         driver
-            .warp_pointer(x11rb::NONE, viewer.window, 0, 0, 0, 0, 20, 20)
+            .warp_pointer(x11rb::NONE, child, 0, 0, 0, 0, 20, 20)
             .unwrap()
             .check()
             .unwrap();
-        let origin = driver
-            .translate_coordinates(viewer.window, root, 0, 0)
-            .unwrap()
-            .reply()
+        assert_eq!(
+            driver.query_pointer(root).unwrap().reply().unwrap().child,
+            frame
+        );
+        assert_eq!(
+            driver.query_pointer(frame).unwrap().reply().unwrap().child,
+            viewer.window
+        );
+        assert_eq!(
+            driver
+                .query_pointer(viewer.window)
+                .unwrap()
+                .reply()
+                .unwrap()
+                .child,
+            child
+        );
+        assert!(viewer.pointer_targets_viewer().unwrap());
+        viewer
+            .update_seamless_input(30, 30, &mut Vec::new())
             .unwrap();
+        assert!(
+            viewer.grabbed,
+            "a visible viewer inside a WM frame must still acquire input"
+        );
+        viewer.release_local_grab().unwrap();
+        // WM decoration is in the frame's hit path, but not the viewer's.
         driver
-            .configure_window(
-                local,
-                &xproto::ConfigureWindowAux::new()
-                    .x(i32::from(origin.dst_x))
-                    .y(i32::from(origin.dst_y))
-                    .stack_mode(xproto::StackMode::ABOVE),
+            .warp_pointer(x11rb::NONE, frame, 0, 0, 0, 0, 5, 5)
+            .unwrap()
+            .check()
+            .unwrap();
+        assert_eq!(
+            driver.query_pointer(frame).unwrap().reply().unwrap().child,
+            x11rb::NONE
+        );
+        assert!(!viewer.pointer_targets_viewer().unwrap());
+        viewer
+            .update_seamless_input(30, 30, &mut Vec::new())
+            .unwrap();
+        assert!(
+            !viewer.grabbed,
+            "frame titlebar must not acquire remote input"
+        );
+        // An input-transparent overlay must not be mistaken for an occluder.
+        let overlay = driver.generate_id().unwrap();
+        driver
+            .create_window(
+                x11rb::COPY_DEPTH_FROM_PARENT,
+                overlay,
+                root,
+                120,
+                120,
+                320,
+                240,
+                0,
+                xproto::WindowClass::INPUT_OUTPUT,
+                x11rb::COPY_FROM_PARENT,
+                &xproto::CreateWindowAux::new(),
             )
             .unwrap()
             .check()
             .unwrap();
-        let hit = driver.query_pointer(root).unwrap().reply().unwrap();
+        driver
+            .shape_rectangles(
+                shape::SO::SET,
+                shape::SK::INPUT,
+                xproto::ClipOrdering::UNSORTED,
+                overlay,
+                0,
+                0,
+                &[],
+            )
+            .unwrap()
+            .check()
+            .unwrap();
+        driver.map_window(overlay).unwrap().check().unwrap();
+        driver
+            .configure_window(
+                overlay,
+                &xproto::ConfigureWindowAux::new().stack_mode(xproto::StackMode::ABOVE),
+            )
+            .unwrap()
+            .check()
+            .unwrap();
+        driver
+            .warp_pointer(x11rb::NONE, viewer.window, 0, 0, 0, 0, 30, 30)
+            .unwrap()
+            .check()
+            .unwrap();
         assert_eq!(
-            hit.child, local,
-            "the local window actually covers the pointer"
+            driver.query_pointer(root).unwrap().reply().unwrap().child,
+            frame,
+            "empty input shape must let the hit path reach the WM frame"
         );
-        while driver.poll_for_event().unwrap().is_some() {}
-        for _ in 0..10 {
-            viewer.poll_events().unwrap();
-        }
-        driver.get_input_focus().unwrap().reply().unwrap();
-        let mut transient_grabs = Vec::new();
-        while let Some(event) = driver.poll_for_event().unwrap() {
-            if let Event::FocusOut(event) = event
-                && event.event == local
-                && event.mode == NotifyMode::GRAB
-            {
-                transient_grabs.push(event);
-            }
-        }
-        eprintln!(
-            "occluded entry: final_grabbed={}, transient_local_focus_grabs={transient_grabs:?}",
-            viewer.grabbed
-        );
+        assert!(viewer.pointer_targets_viewer().unwrap());
+        viewer
+            .update_seamless_input(30, 30, &mut Vec::new())
+            .unwrap();
         assert!(
-            transient_grabs.is_empty(),
-            "stale entry stole the covering local window's keyboard"
+            viewer.grabbed,
+            "input-transparent overlay must permit clean entry"
         );
-        assert!(!viewer.grabbed);
-        driver.destroy_window(local).unwrap().check().unwrap();
+        viewer.release_local_grab().unwrap();
+        driver.destroy_window(overlay).unwrap().check().unwrap();
+        drop(viewer);
+        driver.destroy_window(frame).unwrap().check().unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires a dedicated owned JWM_TEST_X11_DISPLAY Xvfb server"]
+    fn seamless_stale_entry_must_not_grab_an_occluding_local_window() {
+        use x11rb::protocol::xproto;
+        for class in [
+            xproto::WindowClass::INPUT_OUTPUT,
+            xproto::WindowClass::INPUT_ONLY,
+        ] {
+            assert_eq!(
+                std::env::var("JWM_REMOTE_TEST_VIEWER_OWNED").as_deref(),
+                Ok("1")
+            );
+            let display = std::env::var("JWM_TEST_X11_DISPLAY").unwrap();
+            assert!(display.starts_with(':'));
+            let (driver, screen) = x11rb::connect(Some(&display)).unwrap();
+            let root = driver.setup().roots[screen].root;
+            driver
+                .warp_pointer(x11rb::NONE, root, 0, 0, 0, 0, 700, 500)
+                .unwrap()
+                .check()
+                .unwrap();
+            let local = driver.generate_id().unwrap();
+            driver
+                .create_window(
+                    x11rb::COPY_DEPTH_FROM_PARENT,
+                    local,
+                    root,
+                    500,
+                    350,
+                    320,
+                    240,
+                    0,
+                    xproto::WindowClass::INPUT_OUTPUT,
+                    x11rb::COPY_FROM_PARENT,
+                    &xproto::CreateWindowAux::new().event_mask(EventMask::FOCUS_CHANGE),
+                )
+                .unwrap()
+                .check()
+                .unwrap();
+            driver.map_window(local).unwrap().check().unwrap();
+            driver
+                .set_input_focus(xproto::InputFocus::PARENT, local, CURRENT_TIME)
+                .unwrap()
+                .check()
+                .unwrap();
+            // Keep a separate ordinary window focused for both overlay classes.
+            let cover = driver.generate_id().unwrap();
+            driver
+                .create_window(
+                    x11rb::COPY_DEPTH_FROM_PARENT,
+                    cover,
+                    root,
+                    500,
+                    350,
+                    320,
+                    240,
+                    0,
+                    class,
+                    x11rb::COPY_FROM_PARENT,
+                    &xproto::CreateWindowAux::new(),
+                )
+                .unwrap()
+                .check()
+                .unwrap();
+            driver.map_window(cover).unwrap().check().unwrap();
+            let keymap = super::super::x11_keymap::KeymapTable::read(&driver).unwrap();
+            let mut viewer = Viewer::connect(
+                Some(&display),
+                320,
+                240,
+                true,
+                true,
+                Some(keymap),
+                true,
+                "F12",
+                "stale seamless entry regression",
+            )
+            .unwrap();
+            viewer.set_seamless_input(true);
+            viewer
+                .draw(DecodedFrame {
+                    sequence: 1,
+                    source_width: 320,
+                    source_height: 240,
+                    image: RgbImage::from_pixel(320, 240, image::Rgb([20, 40, 60])),
+                })
+                .unwrap();
+            viewer.source_presented(viewer.last_frame.as_ref().unwrap().geometry_epoch);
+            viewer.poll_events().unwrap();
+            assert!(!viewer.grabbed);
+            assert!(!viewer.seamless_suspended);
+            // Queue real Enter/Motion events but do not let the viewer process them.
+            driver
+                .warp_pointer(x11rb::NONE, viewer.window, 0, 0, 0, 0, 20, 20)
+                .unwrap()
+                .check()
+                .unwrap();
+            let origin = driver
+                .translate_coordinates(viewer.window, root, 0, 0)
+                .unwrap()
+                .reply()
+                .unwrap();
+            driver
+                .configure_window(
+                    cover,
+                    &xproto::ConfigureWindowAux::new()
+                        .x(i32::from(origin.dst_x))
+                        .y(i32::from(origin.dst_y))
+                        .stack_mode(xproto::StackMode::ABOVE),
+                )
+                .unwrap()
+                .check()
+                .unwrap();
+            let hit = driver.query_pointer(root).unwrap().reply().unwrap();
+            assert_eq!(hit.child, cover, "the overlay actually covers the pointer");
+            while driver.poll_for_event().unwrap().is_some() {}
+            for _ in 0..10 {
+                viewer.poll_events().unwrap();
+            }
+            driver.get_input_focus().unwrap().reply().unwrap();
+            let mut transient_grabs = Vec::new();
+            while let Some(event) = driver.poll_for_event().unwrap() {
+                if let Event::FocusOut(event) = event
+                    && event.event == local
+                    && event.mode == NotifyMode::GRAB
+                {
+                    transient_grabs.push(event);
+                }
+            }
+            eprintln!(
+                "occluded entry ({class:?}): final_grabbed={}, transient_local_focus_grabs={transient_grabs:?}",
+                viewer.grabbed
+            );
+            assert!(
+                transient_grabs.is_empty(),
+                "stale entry stole the covering local window's keyboard"
+            );
+            assert!(!viewer.grabbed);
+            driver.destroy_window(cover).unwrap().check().unwrap();
+            driver.destroy_window(local).unwrap().check().unwrap();
+        }
     }
 
     #[test]
