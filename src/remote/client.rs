@@ -1,5 +1,9 @@
 //! Remote desktop viewer/client orchestration.
 
+#[cfg(test)]
+#[path = "client_cleanup_probe.rs"]
+mod cleanup_probe;
+
 #[path = "client_control.rs"]
 mod control;
 #[path = "client_popup.rs"]
@@ -1189,6 +1193,8 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
 
     let mut cancel = SessionCancel::new(control, Arc::clone(&state));
     let receive_state = Arc::clone(&state);
+    #[cfg(test)]
+    let cleanup_probe = cleanup_probe::current();
     let receiver = ReceiverThread::spawn(move || {
         // Move the authenticated first-frame allocation into the receiver
         // thread. It remains thread-local while avoiding a second large
@@ -1202,6 +1208,10 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
             tile_decoder,
             clipboard_inbox,
         );
+        #[cfg(test)]
+        if let Some(probe) = cleanup_probe {
+            probe.receiver_finished();
+        }
     })?;
 
     let pointer_enabled = hello.pointer_enabled && !options.view_only;
@@ -3630,6 +3640,10 @@ impl ReceiverThread {
     }
 
     fn join_timeout(mut self, timeout: Duration) -> ReceiverExit {
+        #[cfg(test)]
+        if let Some(probe) = cleanup_probe::current() {
+            probe.join_started();
+        }
         let handle = self.handle.take().expect("receiver handle");
         let joined = match reap_worker(handle) {
             Ok(joined) => joined,
