@@ -1220,6 +1220,16 @@ session. Close that session explicitly, then start the new one; a policy change
 does not silently close it. Switching monitors with identical policy retains
 the existing monitor-switch behavior. Local window size does not change identity.
 
+Connection identity also includes the exact destination, ordered `ssh -o`
+arguments and explicit remote helper path. Different arguments conservatively
+require closing the old session, even when they might resolve to the same host.
+The legacy lock filename remains unchanged: destinations whose names map to
+that same slot cannot run concurrently, but no longer reuse or close each
+other's viewer. Existing policy-aware clients reject the new versioned label;
+stop or upgrade older clients without policy checks before mixing versions.
+This identifies the supplied arguments, not the resolved machine: changes to
+SSH config, DNS, proxy state or a helper binary at the same path are not detected.
+
 Text-only does not request image/file payloads or read copied file contents.
 A file manager may still offer its paths as ordinary text, which text-only can
 share. Receive-only endpoints do not capture local clipboard contents. Initial

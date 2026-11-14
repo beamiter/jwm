@@ -496,7 +496,7 @@ fn dispatch_held_session<T>(
     if !same_session_policy(holder, label) {
         return Err(io::Error::new(
             io::ErrorKind::AlreadyExists,
-            "the existing SSH session has a different or legacy permission/input policy; close it explicitly before starting this session",
+            "the existing SSH session has a different or legacy connection identity or permission/input policy; close it explicitly before starting this session",
         ).into());
     }
     if holder == label {
@@ -617,6 +617,9 @@ fn peer_label(options: &SshOptions) -> String {
     // Never focus an older session with a different permission scope. Always
     // include the policy fingerprint, including disabled clipboard, so legacy
     // labels without a policy cannot accidentally reuse a broader session.
+    // Preserve exact connection arguments and their order: the legacy lock name
+    // can collide, and SSH overrides can target a different host or account.
+    // This is argument identity, not a resolution of SSH config or DNS.
     // Local input behavior is immutable too: focusing an existing window cannot
     // enable/disable seamless handoff, change grabs, or update its escape key.
     let (content, direction) = super::clipboard_policy::requested(
@@ -633,7 +636,8 @@ fn peer_label(options: &SshOptions) -> String {
     use sha2::{Digest, Sha256};
     let digest = Sha256::digest(
         format!(
-            "{:?};clipboard={content},{direction},{file_limit};view_only={};frames={:?};local_input={:?}",
+            "session-v2;connection={:?};{:?};clipboard={content},{direction},{file_limit};view_only={};frames={:?};local_input={:?}",
+            (&options.destination, &options.ssh_options, &options.remote_command),
             options.shared_sources,
             options.view_only,
             options.frame_limits,
@@ -642,14 +646,14 @@ fn peer_label(options: &SshOptions) -> String {
         .as_bytes(),
     );
     let fingerprint: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
-    format!("{initial} [policy {fingerprint}]")
+    format!("{initial} [policy-v2 {fingerprint}]")
 }
 
 // A monitor change can reuse the machine slot only after checking identical
 // immutable policy. Legacy labels have no policy and fail closed.
 fn same_session_policy(left: &str, right: &str) -> bool {
     fn fingerprint(label: &str) -> Option<&str> {
-        let (_, suffix) = label.rsplit_once(" [policy ")?;
+        let (_, suffix) = label.rsplit_once(" [policy-v2 ")?;
         let hash = suffix.strip_suffix(']')?;
         (hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())).then_some(hash)
     }
@@ -943,6 +947,128 @@ mod tests {
             .unwrap(),
             Some(123)
         );
+    }
+
+    #[test]
+    fn colliding_destination_slots_never_switch_to_a_different_machine() {
+        for (left, right) in [("2001:db8::1", "2001_db8__1"), ("[::1]", "___1_")] {
+            let mut first = options();
+            let user = format!("test-{:016x}@", rand::random::<u64>());
+            first.destination = format!("{user}{left}");
+            let mut second = first.clone();
+            second.destination = format!("{user}{right}");
+            validate_destination(&first.destination).unwrap();
+            validate_destination(&second.destination).unwrap();
+            // Keep the historical inode for coexistence with already running clients.
+            assert_eq!(
+                session_lock_path(&first.destination),
+                session_lock_path(&second.destination)
+            );
+            for (held, requested) in [(&first, &second), (&second, &first)] {
+                let mut lock = SessionLock::acquire(&held.destination)
+                    .unwrap()
+                    .ok()
+                    .unwrap();
+                lock.record(&peer_label(held)).unwrap();
+                let holder = SessionLock::acquire(&requested.destination)
+                    .unwrap()
+                    .err()
+                    .unwrap();
+                for monitor in [None, Some("DP-2".to_owned())] {
+                    let mut requested = requested.clone();
+                    requested.monitor = monitor;
+                    let error = dispatch_held_session::<()>(
+                        &holder,
+                        &peer_label(&requested),
+                        || panic!("a different destination must not focus the old viewer"),
+                        || panic!("a different destination must not close the old viewer"),
+                    )
+                    .unwrap_err();
+                    assert!(error.to_string().contains("close it explicitly"));
+                }
+                drop(lock);
+                // The same slot becomes available normally; no second lock is created.
+                assert!(
+                    SessionLock::acquire(&requested.destination)
+                        .unwrap()
+                        .is_ok()
+                );
+            }
+            std::fs::remove_file(session_lock_path(&first.destination)).unwrap();
+        }
+    }
+
+    #[test]
+    fn explicit_connection_overrides_never_silently_reuse_a_viewer() {
+        let base = options();
+        let mut alternatives = Vec::new();
+        for option in [
+            "HostName=other.example",
+            "Port=2222",
+            "User=other",
+            "ProxyJump=jump.example",
+        ] {
+            let mut changed = base.clone();
+            changed.ssh_options.push(option.into());
+            alternatives.push(changed);
+        }
+        let mut helper = base.clone();
+        helper.remote_command = Some("/opt/other/jwm-remote".into());
+        alternatives.push(helper);
+        for changed in alternatives {
+            for (held, requested) in [(&base, &changed), (&changed, &base)] {
+                for monitor in [None, Some("DP-2".to_owned())] {
+                    let mut requested = requested.clone();
+                    requested.monitor = monitor;
+                    let error = dispatch_held_session::<()>(
+                        &peer_label(held),
+                        &peer_label(&requested),
+                        || panic!("changed connection must not focus the old viewer"),
+                        || panic!("changed connection must not close the old viewer"),
+                    )
+                    .unwrap_err();
+                    assert!(error.to_string().contains("close it explicitly"));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn connection_argument_order_is_preserved_and_not_disclosed_in_labels() {
+        let mut left = options();
+        left.ssh_options = vec![
+            "HostName=first.example".into(),
+            "HostName=second.example".into(),
+        ];
+        left.remote_command = Some("/private/helper".into());
+        let mut right = left.clone();
+        right.ssh_options.reverse();
+        let label = peer_label(&left);
+        assert!(!same_session_policy(&label, &peer_label(&right)));
+        assert!(!label.contains("first.example"));
+        assert!(!label.contains("second.example"));
+        assert!(!label.contains("/private/helper"));
+        assert_eq!(label, peer_label(&left.clone()));
+    }
+
+    #[test]
+    fn legacy_policy_labels_cannot_cross_the_identity_version_boundary() {
+        let current = peer_label(&options());
+        let legacy = current.replace(" [policy-v2 ", " [policy ");
+        for (holder, requested) in [(&current, &legacy), (&legacy, &current), (&legacy, &legacy)] {
+            assert!(
+                dispatch_held_session::<()>(
+                    holder,
+                    requested,
+                    || panic!("legacy identity must not focus"),
+                    || panic!("legacy identity must not close"),
+                )
+                .is_err()
+            );
+        }
+        // The policy-aware legacy parser requires this exact old marker.
+        // Pre-policy binaries are outside this compatibility guarantee.
+        assert!(current.rsplit_once(" [policy ").is_none());
     }
 
     #[test]
