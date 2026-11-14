@@ -23,6 +23,7 @@ use super::clipboard_policy::{ClipboardDirection, ClipboardMode};
 use super::key::{KeySource, generate_session_key};
 use super::messages::FrameLimits;
 use super::scaling::ScalingPolicy;
+use super::ssh_diagnostics::DiagnosticPump;
 use super::x11_capture::CaptureArea;
 use super::x11_viewer::{close_existing_viewer, focus_existing_viewer};
 use std::fs::{File, OpenOptions};
@@ -98,6 +99,7 @@ pub fn run_ssh(options: SshOptions) -> RemoteResult<()> {
     }
     options.frame_limits.validate()?;
     validate_destination(&options.destination)?;
+    let _diagnostics = DiagnosticPump::install()?;
     let label = peer_label(&options);
     let Some(_session_lock) = claim_session(&options, &label)? else {
         return Ok(());
@@ -142,7 +144,11 @@ pub fn run_ssh(options: SshOptions) -> RemoteResult<()> {
     let reader = RelayReader::new(stderr, Arc::clone(&relay_stop));
     let relay = thread::Builder::new()
         .name("jwm-remote-ssh-relay".into())
-        .spawn(move || relay_host_messages(BufReader::new(reader), &ready_tx));
+        .spawn(move || {
+            relay_host_messages_with_output(BufReader::new(reader), &ready_tx, |line| {
+                eprintln!("{line}")
+            });
+        });
     let result = match relay {
         Ok(_) => wait_until_ready(
             &options.destination,
@@ -395,7 +401,11 @@ fn read_host_line(reader: &mut impl BufRead, line: &mut Vec<u8>) -> io::Result<b
 }
 
 /// Relay diagnostics, emitting at most one readiness notification per session.
-fn relay_host_messages(mut reader: impl BufRead, ready: &mpsc::Sender<()>) {
+fn relay_host_messages_with_output(
+    mut reader: impl BufRead,
+    ready: &mpsc::Sender<()>,
+    mut emit: impl FnMut(&str),
+) {
     let mut line = Vec::with_capacity(MAX_HOST_LINE_BYTES);
     let mut signalled = false;
     while matches!(read_host_line(&mut reader, &mut line), Ok(true)) {
@@ -410,12 +420,17 @@ fn relay_host_messages(mut reader: impl BufRead, ready: &mpsc::Sender<()>) {
                 }
             }
             HostLine::Telemetry => {}
-            HostLine::Host(message) => eprintln!("jwm-remote: host: {message}"),
+            HostLine::Host(message) => emit(&format!("jwm-remote: host: {message}")),
             // SSH's own messages already say "ssh:"; anything else is the
             // remote program speaking without the helper's prefix.
-            HostLine::Other => eprintln!("{line}"),
+            HostLine::Other => emit(line),
         }
     }
+}
+
+#[cfg(test)]
+fn relay_host_messages(reader: impl BufRead, ready: &mpsc::Sender<()>) {
+    relay_host_messages_with_output(reader, ready, |_| {});
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1280,6 +1295,28 @@ mod tests {
             reader.read(&mut buffer).unwrap_err().kind(),
             io::ErrorKind::ConnectionAborted
         );
+    }
+
+    #[test]
+    fn blocked_diagnostic_output_does_not_delay_host_readiness_or_shutdown() {
+        let (_reader, output) = std::os::unix::net::UnixStream::pair().unwrap();
+        let mut pump =
+            DiagnosticPump::start_to("/bin/cat", Stdio::from(std::os::fd::OwnedFd::from(output)))
+                .unwrap();
+        let mut writer = pump.take_writer();
+        let input = format!(
+            "{}jwm-remote: listening on test\n",
+            "jwm-remote: diagnostic\n".repeat(100_000)
+        );
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let start = Instant::now();
+        relay_host_messages_with_output(io::Cursor::new(input), &ready_tx, |line| {
+            writer.emit(line)
+        });
+        assert!(ready_rx.try_recv().is_ok());
+        drop(writer);
+        drop(pump);
+        assert!(start.elapsed() < Duration::from_secs(3));
     }
 
     #[test]

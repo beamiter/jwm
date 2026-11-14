@@ -5,6 +5,13 @@
 //! through an independent XTEST connection, keeping all socket and JPEG work
 //! outside the window manager's latency-sensitive event loop.
 
+// Remote diagnostics use a shared, nonblocking sink while an SSH session is
+// active. Otherwise retain std stderr behavior. Keep this scoped to the remote
+// module; command-line parsing/final error reporting is not redirected.
+macro_rules! eprintln {
+    ($($argument:tt)*) => { $crate::remote::ssh_diagnostics::emit(format_args!($($argument)*)) };
+}
+
 use std::error::Error;
 use std::time::Duration;
 
@@ -47,6 +54,7 @@ pub mod session_env;
 pub mod source_session;
 pub mod source_wire;
 pub mod ssh;
+mod ssh_diagnostics;
 mod tile;
 mod triangle_patch;
 pub mod usability;

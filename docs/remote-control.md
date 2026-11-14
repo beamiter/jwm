@@ -61,6 +61,24 @@ export PATH="/usr/local/lib/jwm/current/bin:$PATH"
 
 ## Quickest: over SSH
 
+SSH diagnostic relay output is best-effort: it uses a supervised local `/bin/cat`
+(from coreutils) to keep a slow or undrained stderr sink from blocking host
+readiness. This helper is required for `jwm-remote ssh`; a missing helper reports
+a startup error before SSH is launched. Records are bounded to Linux `PIPE_BUF`,
+long records are visibly truncated, and a full relay pipe drops records rather
+than blocking control. When space returns, the next record reports the dropped
+count. Shutdown gives the helper 200 ms to drain, then kills and reaps it.
+No diagnostic output thread is detached, and the original stderr flags, shared
+file offset, and append mode are preserved. Concurrent SSH sessions share one
+helper; the last session releases it. While SSH is active, remote-module diagnostics
+(including the client and viewer) use this sink. Other CLI parsing/final error output and interactive source-selection
+prompts are not redirected. Lock contention may also drop messages; ordering is
+best-effort across threads. Forced helper termination may lose accepted records
+that have not reached stderr, so the pipe-drop count is not a delivery guarantee. Linux uninterruptible
+filesystem writes can still delay process reaping; this is not a hard kernel-I/O
+shutdown guarantee.
+
+
 If you can already SSH to the other machine as the user logged in to its JWM
 session, nothing needs to be set up there beyond installing the same
 `jwm-remote` version.

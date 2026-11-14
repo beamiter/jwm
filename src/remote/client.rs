@@ -3315,8 +3315,7 @@ impl ClientTelemetryReport {
         } else {
             "viewer"
         };
-        let _ = writeln!(
-            io::stderr().lock(),
+        super::ssh_diagnostics::emit_best_effort(format_args!(
             "jwm-remote: {label} received {:.1} fps ({}), decoded {}, replaced {}, drawn {}, acked {}, decode/queue/draw {:.1}/{:.1}/{:.1} ms",
             per_second(self.window.received, self.elapsed),
             self.window.received,
@@ -3327,7 +3326,7 @@ impl ClientTelemetryReport {
             average_millis(self.window.decode_elapsed, self.window.decoded),
             average_millis(self.window.queue_elapsed, self.window.drawn),
             average_millis(self.window.draw_elapsed, self.window.drawn),
-        );
+        ));
     }
 }
 
@@ -5005,6 +5004,19 @@ fn invalid_data(message: impl Into<String>) -> io::Error {
 
 #[cfg(test)]
 pub(super) mod tests {
+    pub(in crate::remote) fn emit_telemetry_for_diagnostic_regression() {
+        for final_report in [false, true] {
+            super::ClientTelemetryReport {
+                window: super::ClientTelemetryWindow {
+                    received: 1,
+                    ..Default::default()
+                },
+                elapsed: std::time::Duration::from_secs(1),
+            }
+            .emit(final_report);
+        }
+    }
+
     #[test]
     fn visual_repair_never_grants_renews_or_revives_keyboard_lease() {
         use super::super::wayland_keyboard_wire::{LeaseStatus, LeaseStatusKind};
