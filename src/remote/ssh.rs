@@ -496,7 +496,7 @@ fn dispatch_held_session<T>(
     if !same_session_policy(holder, label) {
         return Err(io::Error::new(
             io::ErrorKind::AlreadyExists,
-            "the existing SSH session has a different or legacy permission policy; close it explicitly before starting this session",
+            "the existing SSH session has a different or legacy permission/input policy; close it explicitly before starting this session",
         ).into());
     }
     if holder == label {
@@ -624,6 +624,8 @@ fn peer_label(options: &SshOptions) -> String {
     // Never focus an older session with a different permission scope. Always
     // include the policy fingerprint, including disabled clipboard, so legacy
     // labels without a policy cannot accidentally reuse a broader session.
+    // Local input behavior is immutable too: focusing an existing window cannot
+    // enable/disable seamless handoff, change grabs, or update its escape key.
     let (content, direction) = super::clipboard_policy::requested(
         options.clipboard,
         options.clipboard_mode,
@@ -638,8 +640,11 @@ fn peer_label(options: &SshOptions) -> String {
     use sha2::{Digest, Sha256};
     let digest = Sha256::digest(
         format!(
-            "{:?};clipboard={content},{direction},{file_limit};view_only={};frames={:?}",
-            options.shared_sources, options.view_only, options.frame_limits
+            "{:?};clipboard={content},{direction},{file_limit};view_only={};frames={:?};local_input={:?}",
+            options.shared_sources,
+            options.view_only,
+            options.frame_limits,
+            (options.grab_input, options.seamless_input, &options.escape_key)
         )
         .as_bytes(),
     );
@@ -945,6 +950,36 @@ mod tests {
             .unwrap(),
             Some(123)
         );
+    }
+
+    #[test]
+    fn changed_local_input_contract_never_reuses_or_closes_a_session() {
+        let base = options();
+        let mut seamless = base.clone();
+        seamless.seamless_input = true;
+        let mut ungrabbed = base.clone();
+        ungrabbed.grab_input = false;
+        let mut escape = base.clone();
+        escape.escape_key = "F11".into();
+        for changed in [seamless, ungrabbed, escape] {
+            // Both requesting new behavior and withdrawing old behavior must
+            // fail explicitly, even if a monitor change would otherwise close
+            // the old viewer. Never silently retain an old escape shortcut.
+            for (held, requested) in [(&base, &changed), (&changed, &base)] {
+                for monitor in [None, Some("DP-2".to_owned())] {
+                    let mut requested = requested.clone();
+                    requested.monitor = monitor;
+                    let error = dispatch_held_session::<()>(
+                        &peer_label(held),
+                        &peer_label(&requested),
+                        || panic!("changed input contract must not focus the old viewer"),
+                        || panic!("changed input contract must not close the old viewer"),
+                    )
+                    .unwrap_err();
+                    assert!(error.to_string().contains("close it explicitly"));
+                }
+            }
+        }
     }
 
     #[test]

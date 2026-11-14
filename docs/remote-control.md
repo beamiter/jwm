@@ -1201,7 +1201,10 @@ jwm-remote ssh user@desktop --clipboard --clipboard-mode text-images --clipboard
 ```
 
 SSH session reuse includes clipboard consent, effective content/direction and
-file limit, input permission, source grants and frame limits. A different
+file limit, input permission, source grants and frame limits. Local input grabs,
+seamless handoff consent and the escape shortcut must also match: reopening an
+existing viewer cannot silently enable or disable handoff or change its shortcut.
+A different
 immutable policy is never applied to or used to focus a broader existing
 session. Close that session explicitly, then start the new one; a policy change
 does not silently close it. Switching monitors with identical policy retains
