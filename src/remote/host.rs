@@ -3044,7 +3044,10 @@ where
         let worker_key = Arc::clone(&key);
         let worker_serve = Arc::clone(&serve);
         let worker_slot = Arc::clone(&session_active);
-        let worker_finished = finished_tx.clone();
+        // Only --once consumes a completed session result. A persistent host
+        // must drop each outcome after logging it rather than retain every
+        // session (and its error payload) in an unread, unbounded queue.
+        let worker_finished = once.then(|| finished_tx.clone());
         let spawned = thread::Builder::new()
             .name("jwm-remote-session".into())
             .spawn(move || {
@@ -3076,7 +3079,9 @@ where
                 if let Err(error) = &outcome {
                     eprintln!("jwm-remote: session with {peer} ended: {error}");
                 }
-                let _ = worker_finished.send(outcome);
+                if let Some(finished) = worker_finished {
+                    let _ = finished.send(outcome);
+                }
             });
         match spawned {
             Ok(worker) => workers.push(worker),
@@ -11301,6 +11306,62 @@ mod tests {
             release_tx.send(()).unwrap();
             shutdown.store(true, Ordering::Release);
             handle.join().unwrap().unwrap();
+        }
+
+        #[derive(Debug)]
+        struct TrackedSessionError(std::sync::mpsc::Sender<()>);
+
+        impl std::fmt::Display for TrackedSessionError {
+            fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("tracked session failure")
+            }
+        }
+
+        impl std::error::Error for TrackedSessionError {}
+
+        impl Drop for TrackedSessionError {
+            fn drop(&mut self) {
+                let _ = self.0.send(());
+            }
+        }
+
+        #[test]
+        fn persistent_host_releases_each_completed_session_error_before_shutdown() {
+            let (dropped_tx, dropped_rx) = std::sync::mpsc::channel();
+            let (address, shutdown, handle) = spawn_loop(false, move |peer| {
+                acknowledge(peer)?;
+                Err(TrackedSessionError(dropped_tx.clone()).into())
+            });
+            let mut released = 0;
+            for _ in 0..8 {
+                let (kind, _, _stream) = negotiate(address);
+                assert_eq!(kind, MessageKind::HelloAck);
+                if dropped_rx.recv_timeout(Duration::from_secs(2)).is_err() {
+                    break;
+                }
+                released += 1;
+            }
+            // Always stop and join before asserting: the old implementation
+            // only releases these errors when it drops the result receiver.
+            shutdown.store(true, Ordering::Release);
+            handle.join().unwrap().unwrap();
+            assert_eq!(released, 8, "completed errors were retained until shutdown");
+        }
+
+        #[test]
+        fn once_host_preserves_ownership_of_the_completed_session_error() {
+            let (dropped_tx, dropped_rx) = std::sync::mpsc::channel();
+            let (address, _shutdown, handle) = spawn_loop(true, move |peer| {
+                acknowledge(peer)?;
+                Err(TrackedSessionError(dropped_tx.clone()).into())
+            });
+            let (kind, _, _stream) = negotiate(address);
+            assert_eq!(kind, MessageKind::HelloAck);
+            let error = handle.join().unwrap().unwrap_err();
+            assert!(error.is::<TrackedSessionError>());
+            assert!(dropped_rx.try_recv().is_err());
+            drop(error);
+            dropped_rx.recv_timeout(Duration::from_secs(2)).unwrap();
         }
 
         #[test]
