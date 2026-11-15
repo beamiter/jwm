@@ -24,7 +24,7 @@ import struct
 import subprocess
 import tempfile
 import time
-from fixtures import frame_feedback_probe
+from fixtures import frame_feedback_probe, dock_configure_check
 from fixtures.media_command_probe import invocations, new_invocation, successful_result
 from fixtures.mpv_syscall_probe import launcher_prefix
 
@@ -104,6 +104,7 @@ def main():
     parser.add_argument("--size", default="1280x800")
     parser.add_argument("--theme", choices=("light", "dark"), default="light")
     parser.add_argument("--deep", action="store_true")
+    parser.add_argument("--dock-configure-check", action="store_true", help="verify real dock ConfigureRequest acknowledgements in the private display")
     parser.add_argument("--trace-mpv", action="store_true", help="require private mpv syscall capture (strace) during media/deep acceptance")
     parser.add_argument("--media-only", action="store_true", help="test empty-player launch and real MPRIS controls after the standard smoke")
     parser.add_argument("--ui-font", help="optional private system UI font override for visual fixtures")
@@ -775,6 +776,13 @@ def main():
             monitor = msg("get_monitors")[0]
             assert monitor["wx"] > 0 and monitor["wy"] > 0 and monitor["ww"] < width and monitor["wh"] < height, monitor
             record("pinned panels reserve workspace on all three sides")
+            if args.dock_configure_check:
+                candidates = [int(xid) for xid in run("xdotool", "search", "--pid", primary_pid).split()
+                              if visible(xid) and run("xdotool", "getwindowname", xid).strip() == args.bar]
+                assert len(candidates) == 1, ("unique verified top dock", candidates)
+                result["dock_configure_check"] = dock_configure_check.run(
+                    candidates[0], primary_pid, evidence, env, legacy.process_identity)
+                record("dock requests receive exactly one authoritative synthetic acknowledgement")
             # Prove an actual painted top survives, rather than accepting a
             # mapped transparent webview. The wallpaper is fixed and effects
             # are disabled, so this comparison isolates the primary bar strip.

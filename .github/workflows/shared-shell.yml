@@ -13,6 +13,9 @@ on:
       - 'scripts/test-daemon-stderr-evidence.py'
       - 'scripts/test-daemon-native-log-evidence.py'
       - 'scripts/fixtures/daemon_native_log.py'
+      - 'scripts/fixtures/dock_configure_check.py'
+      - 'scripts/fixtures/dock_configure_client.c'
+      - 'scripts/test-dock-configure-check.py'
       - 'scripts/fixtures/frame_feedback_probe.py'
       - 'scripts/test-frame-feedback-probe.py'
       - 'scripts/fixtures/mpv_syscall_probe.py'
@@ -39,6 +42,9 @@ on:
       - 'scripts/test-daemon-stderr-evidence.py'
       - 'scripts/test-daemon-native-log-evidence.py'
       - 'scripts/fixtures/daemon_native_log.py'
+      - 'scripts/fixtures/dock_configure_check.py'
+      - 'scripts/fixtures/dock_configure_client.c'
+      - 'scripts/test-dock-configure-check.py'
       - 'scripts/fixtures/frame_feedback_probe.py'
       - 'scripts/test-frame-feedback-probe.py'
       - 'scripts/fixtures/mpv_syscall_probe.py'
@@ -140,6 +146,23 @@ jobs:
               --backend "$backend" --bin-dir target/release --shell-bin crates/jwm_shell/target/debug/jwm-shell \
               --evidence-dir artifacts/shared-shell/sparse-header
           done
+      - name: Repeat original React acceptance without intervention
+        if: matrix.bar == 'tauri_react_bar'
+        env:
+          JWM_X11_FRAME_SYNC: '1'
+        run: |
+          binary=$(python3 -c 'import json; print(json.load(open("artifacts/shared-shell/tauri_react_bar.json"))["frontends"][0]["binary"])')
+          sha256sum "$binary" target/release/jwm target/release/jwm-tool crates/jwm_shell/target/debug/jwm-shell > artifacts/shared-shell/react-repeat-binaries.sha256
+          failed=0
+          for attempt in $(seq 1 24); do
+            if ! python3 scripts/test-shared-sidebar-shell-x11.py --bar tauri_react_bar --bar-bin "$binary" \
+                --backend x11rb --bin-dir target/release --shell-bin crates/jwm_shell/target/debug/jwm-shell \
+                --evidence-dir "artifacts/shared-shell/react-repeat/$attempt"; then
+              failed=1
+            fi
+          done
+          sha256sum --check artifacts/shared-shell/react-repeat-binaries.sha256
+          exit "$failed"
       - name: Verify the default Xilem production frontend
         if: matrix.bar == 'xilem_bar'
         run: |
@@ -179,12 +202,13 @@ jobs:
       - name: Exercise supervisor recovery and rollback
         if: matrix.bar == 'tao_glow_bar'
         run: |
+          python3 scripts/test-dock-configure-check.py
           python3 scripts/test-mpv-syscall-probe.py
           python3 scripts/test-shared-shell-preview-oracle.py
           python3 scripts/test-media-command-probe.py
           cargo build --locked --manifest-path bars/tao_pixels_bar/Cargo.toml
-          python3 scripts/test-shared-sidebar-shell-x11.py --bar tao_glow_bar --backend xcb --deep --trace-mpv --bin-dir target/release
-          python3 scripts/test-shared-sidebar-shell-x11.py --bar tao_glow_bar --backend x11rb --deep --trace-mpv --bin-dir target/release
+          python3 scripts/test-shared-sidebar-shell-x11.py --bar tao_glow_bar --backend xcb --deep --trace-mpv --dock-configure-check --bin-dir target/release
+          python3 scripts/test-shared-sidebar-shell-x11.py --bar tao_glow_bar --backend x11rb --deep --trace-mpv --dock-configure-check --bin-dir target/release
           python3 scripts/test-shared-sidebar-shell-x11.py --bar tao_glow_bar --backend xcb --deep --trace-mpv --legacy-four-edge --bin-dir target/release --evidence-dir artifacts/shared-shell/legacy
           python3 scripts/test-shared-sidebar-shell-x11.py --bar tao_glow_bar --backend x11rb --deep --trace-mpv --legacy-edge-shell --bin-dir target/release --evidence-dir artifacts/shared-shell/legacy
       - name: Verify sidebar mode persistence and sparse workspace interactions
