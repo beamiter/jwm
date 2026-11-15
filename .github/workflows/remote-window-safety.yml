@@ -53,9 +53,14 @@ jobs:
           cargo test --locked --no-default-features --features remote-x11 --lib resize_owner_lifetime_ends_at_disconnect_or_read_half_close
           cargo test --locked --no-default-features --features remote-x11,backend-x11rb,backend-xcb --lib resize_history_fence
           cargo build --locked --no-default-features --features remote-x11,backend-x11rb --bin jwm --bin jwm-remote
+      - name: Sequential viewer lifecycle tests on one owned X server
+        run: |
+          # Do not reset the server between independent client lifetimes.
+          xvfb-run -a -s '-screen 0 1024x768x24 -nolisten tcp -noreset' \
+            sh -ec 'JWM_REMOTE_TEST_VIEWER_OWNED=1 JWM_TEST_X11_DISPLAY="$DISPLAY" cargo test --locked --no-default-features --features remote-x11 --lib remote::x11_viewer::tests:: -- --ignored --test-threads=1 --nocapture'
       - name: Real X11 lifecycle and pixel isolation tests
         run: |
-          xvfb-run -a -s '-screen 0 800x600x24 -nolisten tcp' sh -ec '
+          xvfb-run -a -s '-screen 0 800x600x24 -nolisten tcp -noreset' sh -ec '
             export JWM_REMOTE_TEST_DISPLAY="$DISPLAY"
             export JWM_TEST_X11_DISPLAY="$DISPLAY"
             export JWM_REMOTE_TEST_VIEWER_OWNED=1
