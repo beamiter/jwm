@@ -3,8 +3,10 @@
   const report = (stage, message) => {
     const invoke = window.__TAURI_INTERNALS__?.invoke;
     if (typeof invoke === "function") {
-      invoke("frontend_diagnostic", {stage, message: String(message).slice(0, 2048)}).catch(() => {});
+      return invoke("frontend_diagnostic", {stage, message: String(message).slice(0, 2048)})
+        .then(() => true, () => false);
     }
+    return Promise.resolve(false);
   };
   const error = value => {
     if (errors++ < 16) report("error", value?.stack || value?.message || value);
@@ -19,11 +21,37 @@
     error(args.map(value => String(value)).join(" "));
   };
   let rendered = false;
+  let phase = "waiting-dom";
+  // Bounded observations only: these never advance the render gate. Use the
+  // existing BOOT property so the native failure artifact captures the last
+  // phase without introducing an unsupported diagnostic command stage.
+  const diagnosticTimers = [5000, 20000, 45000].map(delay => setTimeout(() => {
+    const row = document.querySelector(".button-row");
+    report("boot", JSON.stringify({
+      phase,
+      readyState: document.readyState,
+      visibilityState: document.visibilityState,
+      clock: !!document.querySelector(".time-pill"),
+      emoji: !!document.querySelector(".emoji-button"),
+      row: !!row,
+      loading: row?.textContent?.trim() === "Loading...",
+    }));
+  }, delay));
   const observer = new MutationObserver(() => {
     if (rendered || !document.querySelector(".time-pill") || !document.querySelector(".emoji-button") || document.querySelector(".button-row")?.textContent?.trim() === "Loading...") return;
     rendered = true;
     observer.disconnect();
-    requestAnimationFrame(() => requestAnimationFrame(() => report("rendered", "state projected into workspace controls and clock")));
+    phase = "waiting-frame-1";
+    requestAnimationFrame(() => {
+      phase = "waiting-frame-2";
+      requestAnimationFrame(() => {
+        phase = "render-ipc-pending";
+        report("rendered", "state projected into workspace controls and clock").then(ok => {
+          phase = ok ? "render-ipc-acknowledged" : "render-ipc-failed";
+          if (ok) diagnosticTimers.forEach(clearTimeout);
+        });
+      });
+    });
   });
   observer.observe(document, {childList: true, subtree: true});
   report("boot", "WebView initialization script loaded");

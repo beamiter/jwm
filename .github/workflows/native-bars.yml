@@ -11,6 +11,7 @@ on:
       - vendor/glib/**
       - tests/glib_backport/**
       - scripts/test-bar-startup.mjs
+      - scripts/test_frontend_diagnostics.mjs
       - scripts/test_bar_layout.mjs
       - scripts/test_bar_web_frontends.mjs
       - crates/xbar_core/**
@@ -28,6 +29,7 @@ on:
       - vendor/glib/**
       - tests/glib_backport/**
       - scripts/test-bar-startup.mjs
+      - scripts/test_frontend_diagnostics.mjs
       - scripts/test_bar_layout.mjs
       - scripts/test_bar_web_frontends.mjs
       - crates/xbar_core/**
@@ -556,6 +558,9 @@ jobs:
 
       - name: Test asynchronous frontend readiness without a browser
         run: node scripts/test-bar-startup.mjs
+
+      - name: Test bounded WebView phase diagnostics without a browser
+        run: node --test scripts/test_frontend_diagnostics.mjs
 
       - name: Assert generation-aware source contracts (not a frontend build)
         shell: bash
