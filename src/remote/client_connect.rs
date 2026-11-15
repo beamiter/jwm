@@ -7,10 +7,8 @@ use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::time::{Duration, Instant};
 
 pub(super) fn connect_with_timeout(address: &str, timeout: Duration) -> RemoteResult<TcpStream> {
-    let resolved = address
-        .to_socket_addrs()
-        .map_err(|error| super::invalid_data(format!("cannot resolve {address}: {error}")))?
-        .collect::<Vec<_>>();
+    let resolved = resolve_address(address)
+        .map_err(|error| super::invalid_data(format!("cannot resolve {address}: {error}")))?;
     if resolved.is_empty() {
         return Err(super::invalid_data(format!("{address} resolved to no addresses")).into());
     }
@@ -28,6 +26,23 @@ pub(super) fn connect_with_timeout(address: &str, timeout: Duration) -> RemoteRe
         )
         .into()
     })
+}
+
+/// Rust's string endpoint resolver keeps the brackets for a named IPv6 zone
+/// when its SocketAddr fast path fails. Pass the host separately so getaddrinfo
+/// can resolve an interface name. Numeric scopes and ordinary endpoints keep
+/// the same system resolution and connect-budget behavior.
+fn resolve_address(address: &str) -> io::Result<Vec<SocketAddr>> {
+    if let Some(bracketed) = address.strip_prefix('[')
+        && let Some((host, port)) = bracketed.split_once("]:")
+        && host.contains('%')
+    {
+        let port = port
+            .parse::<u16>()
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid scoped IPv6 port"))?;
+        return (host, port).to_socket_addrs().map(Iterator::collect);
+    }
+    address.to_socket_addrs().map(Iterator::collect)
 }
 
 /// Recompute a fair share from the remaining budget after each attempt, rather
@@ -92,6 +107,40 @@ mod tests {
         (1..=count)
             .map(|port| SocketAddr::from(([127, 0, 0, 1], port)))
             .collect()
+    }
+
+    #[test]
+    fn scoped_ipv6_resolution_accepts_local_interface_names_and_numeric_ids() {
+        let scope = unsafe { nix::libc::if_nametoindex(c"lo".as_ptr()) };
+        assert_ne!(scope, 0, "Linux loopback interface must exist");
+        for zone in ["lo".to_owned(), scope.to_string()] {
+            let endpoint =
+                crate::remote::usability::normalize_address(&format!("[fe80::1%{zone}]:1234"))
+                    .unwrap();
+            let resolved = resolve_address(&endpoint).unwrap();
+            assert!(!resolved.is_empty());
+            for address in resolved {
+                let SocketAddr::V6(address) = address else {
+                    panic!("expected IPv6")
+                };
+                assert_eq!(
+                    *address.ip(),
+                    "fe80::1".parse::<std::net::Ipv6Addr>().unwrap()
+                );
+                assert_eq!(address.scope_id(), scope);
+                assert_eq!(address.port(), 1234);
+            }
+        }
+        assert!(resolve_address("[fe80::1%jwm-no-such-interface]:1234").is_err());
+        assert!(resolve_address("[fe80::1%lo]:no-port").is_err());
+        assert_eq!(
+            resolve_address("[::1]:1234").unwrap(),
+            ["[::1]:1234".parse::<SocketAddr>().unwrap()]
+        );
+        assert_eq!(
+            resolve_address("127.0.0.1:1234").unwrap(),
+            ["127.0.0.1:1234".parse::<SocketAddr>().unwrap()]
+        );
     }
 
     #[test]

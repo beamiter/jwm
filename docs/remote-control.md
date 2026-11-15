@@ -244,6 +244,15 @@ The host also preserves explicit port `0`: the OS chooses an available port,
 and the viewer must use the actual port printed by the host. `connect` still
 rejects port 0.
 
+For link-local IPv6, `connect` also accepts a viewer-local interface zone, for
+example `jwm-remote connect '[fe80::1234%enp3s0]:48221' --view-only` or
+`jwm-remote connect 'fe80::1234%enp3s0' --view-only` with the default port.
+Use the interface name (or numeric scope ID) on the **viewer**, not the host;
+interface names can differ between the machines. Quote the address in the shell.
+Parsing preserves the zone and leaves its lookup and routing to the operating
+system. It does not discover interfaces, change permissions or firewall rules,
+or guarantee link-local reachability across different network links.
+
 `host` still binds `127.0.0.1:48221` by default. A listener resolved to a
 non-loopback address still needs `--allow-lan`; omitted ports never grant that
 permission. None of these conveniences opens a firewall or enables LAN access.

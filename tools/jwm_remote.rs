@@ -500,7 +500,7 @@ enum Command {
         /// Native viewer Wayland socket; never an X11 display.
         #[arg(long, value_name = "SOCKET")]
         viewer_wayland_display: Option<String>,
-        /// Hostname/IP, optionally with port (default 48221). Use [IPv6]:PORT.
+        /// Hostname/IP, optionally with port (default 48221). Use [IPv6%ZONE]:PORT for scoped IPv6.
         #[arg(value_name = "HOST[:PORT]", value_parser = normalize_address)]
         address: String,
 
@@ -3190,6 +3190,32 @@ mod tests {
         };
         assert_eq!(listen, "192.0.2.10:48221");
         assert!(allow_lan);
+    }
+
+    #[test]
+    fn connect_accepts_scoped_ipv6_without_changing_permissions() {
+        for (input, expected) in [
+            ("fe80::1%eth0", "[fe80::1%eth0]:48221"),
+            ("[fe80::1%eth0]:1234", "[fe80::1%eth0]:1234"),
+        ] {
+            let Command::Connect {
+                address,
+                view_only,
+                grab_input,
+                ..
+            } = Cli::try_parse_from(["jwm-remote", "connect", input, "--view-only"])
+                .unwrap()
+                .command
+            else {
+                panic!("connect variant expected")
+            };
+            assert_eq!(address, expected);
+            assert!(view_only);
+            assert!(!grab_input);
+        }
+        for invalid in ["[fe80::1%eth0]:0", "[fe80::1%]:1234", "fe80::1%eth0:1234"] {
+            assert!(Cli::try_parse_from(["jwm-remote", "connect", invalid]).is_err());
+        }
     }
 
     #[test]
