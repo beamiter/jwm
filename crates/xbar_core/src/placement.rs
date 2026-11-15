@@ -734,9 +734,9 @@ mod tests {
             assert_eq!(strut.basic, basic, "{edge}");
             assert_eq!(&strut.partial[..4], &basic);
             assert_eq!(&strut.partial[range..range + 2], &endpoints);
-            for index in 4..12 {
+            for (index, value) in strut.partial.iter().enumerate().skip(4) {
                 if !(range..range + 2).contains(&index) {
-                    assert_eq!(strut.partial[index], 0, "unused range on {edge}");
+                    assert_eq!(*value, 0, "unused range on {edge}");
                 }
             }
         }

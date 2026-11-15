@@ -98,10 +98,12 @@ mod tests {
     }
     #[test]
     fn custom_labels_dimensions_and_vertical_policy_survive() {
-        let mut config = PresentationConfig::default();
-        config.font_size = 18.0;
-        config.item_gap = 17.0;
-        config.tag_labels = vec!["Work".into()];
+        let mut config = PresentationConfig {
+            font_size: 18.0,
+            item_gap: 17.0,
+            tag_labels: vec!["Work".into()],
+            ..Default::default()
+        };
         config.labels.cpu = "Processor".into();
         let custom = config.clone();
         assert!(config.apply_desktop_header_profile());

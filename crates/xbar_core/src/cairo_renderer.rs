@@ -2268,8 +2268,8 @@ mod tests {
                 surface.flush();
                 let data = surface.data().unwrap();
                 let mut ink_pixels = 0;
-                for bytes in data.chunks_exact(4) {
-                    let pixel = u32::from_ne_bytes(bytes.try_into().unwrap());
+                for bytes in data.as_chunks::<4>().0 {
+                    let pixel = u32::from_ne_bytes(*bytes);
                     let alpha = (pixel >> 24) as u8;
                     ink_pixels += usize::from(alpha > 0);
                     // Premultiplied antialiased edges must contain only the
