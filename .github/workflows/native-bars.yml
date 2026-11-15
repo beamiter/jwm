@@ -415,6 +415,12 @@ jobs:
       - name: Check all targets at the selected upstream branch
         run: cargo check --manifest-path "${{ matrix.manifest }}" --all-targets
 
+      # Compile-time API adaptation must not replace the existing pure behavior
+      # regressions. Reuse the resolution selected by the check above.
+      - name: Run iced behavior regressions at the selected upstream branch
+        if: matrix.name == 'iced'
+        run: cargo test --locked --manifest-path "${{ matrix.manifest }}" --all-targets
+
   tauri-wasm-ui:
     name: Tauri Rust/WASM UI (${{ matrix.name }})
     runs-on: ubuntu-latest
