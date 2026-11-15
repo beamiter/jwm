@@ -4,6 +4,10 @@
 use std::io::{Read, Write};
 use std::os::fd::OwnedFd;
 use std::os::unix::net::UnixStream;
+
+#[path = "exit_diagnostics.rs"]
+mod exit_diagnostics;
+use exit_diagnostics::{Diagnostics, Phase};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
@@ -214,11 +218,13 @@ impl Worker {
                     let result = mpv.action(request.action, request.deadline);
                     let _ = request.reply.send(result);
                     if quit {
+                        mpv.diagnose(Phase::QuitRequested, None);
                         requested_quit = true;
                         break;
                     }
                 }
                 Err(mpsc::TryRecvError::Disconnected) => {
+                    mpv.diagnose(Phase::RequestsDisconnected, None);
                     requested_quit = true;
                     break;
                 }
@@ -235,6 +241,7 @@ impl Worker {
                 mpv.publish_seek_position();
             }
             if let Some(status) = mpv.child.try_wait().map_err(|e| e.to_string())? {
+                mpv.diagnose(Phase::ExitObserved, Some(&status));
                 return if status.success() {
                     Ok(())
                 } else {
@@ -250,6 +257,7 @@ impl Worker {
         let deadline = Instant::now() + Duration::from_secs(1);
         while Instant::now() < deadline {
             if let Some(status) = mpv.child.try_wait().map_err(|e| e.to_string())? {
+                mpv.diagnose(Phase::ExitObserved, Some(&status));
                 return if status.success() {
                     Ok(())
                 } else {
@@ -308,6 +316,7 @@ impl LoadRefresh {
 struct Mpv {
     socket: UnixStream,
     child: Child,
+    diagnostics: Diagnostics,
     buffer: Vec<u8>,
     request_id: u64,
     state: SharedState,
@@ -334,6 +343,7 @@ impl Mpv {
             super::ui::Script::create().map_err(|e| format!("cannot prepare player UI: {e}"))?;
         let mut command = Command::new("mpv");
         command.env_remove(eva::ENV);
+        command.env_remove(exit_diagnostics::ENV);
         command.args([
             "--no-config",
             "--no-terminal",
@@ -377,9 +387,12 @@ impl Mpv {
             .map_err(|error| {
                 format!("cannot start mpv: {error}. Install the mpv package to enable playback.")
             })?;
-        Ok(Self {
+        let enabled = std::env::var(exit_diagnostics::ENV).as_deref() == Ok("1");
+        let diagnostics = Diagnostics::new(enabled, child.id());
+        let mut mpv = Self {
             socket,
             child,
+            diagnostics,
             buffer: Vec::new(),
             request_id: 0,
             state,
@@ -390,7 +403,24 @@ impl Mpv {
             _ui: Some(ui),
             eva_receipts: Arc::new(Mutex::new(VecDeque::new())),
             last_open_command_id: None,
-        })
+        };
+        mpv.diagnose(Phase::Spawned, None);
+        Ok(mpv)
+    }
+
+    fn diagnose(&mut self, phase: Phase, status: Option<&std::process::ExitStatus>) {
+        if let Some(record) = self.diagnostics.observe(phase, status) {
+            log::warn!(
+                "JWM_PLAYER_EXIT phase={} player_pid={} mpv_pid={} elapsed_ms={} first_eof_ms={:?} exit_code={:?} signal={:?}",
+                record.phase,
+                record.player_pid,
+                record.mpv_pid,
+                record.elapsed_ms,
+                record.first_eof_ms,
+                record.exit_code,
+                record.signal
+            );
+        }
     }
 
     fn snapshot(&self) -> State {
@@ -441,6 +471,7 @@ impl Mpv {
             let capacity = chunk.len().min(FRAME_LIMIT - self.buffer.len());
             match self.socket.read(&mut chunk[..capacity]) {
                 Ok(0) => {
+                    self.diagnose(Phase::IpcEof, None);
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::UnexpectedEof,
                         "mpv closed IPC",
@@ -948,21 +979,29 @@ impl Mpv {
 
 impl Drop for Mpv {
     fn drop(&mut self) {
+        self.diagnose(Phase::CleanupStarted, None);
         let _ = self.send(json!(["quit"]));
         let _ = self.socket.shutdown(std::net::Shutdown::Both);
         let deadline = Instant::now() + Duration::from_secs(1);
         while Instant::now() < deadline {
             match self.child.try_wait() {
-                Ok(Some(_)) => return,
+                Ok(Some(status)) => {
+                    self.diagnose(Phase::CleanupExitObserved, Some(&status));
+                    return;
+                }
                 Ok(None) => std::thread::sleep(Duration::from_millis(10)),
                 Err(_) => break,
             }
         }
+        self.diagnose(Phase::KillRequested, None);
         let _ = self.child.kill();
         let deadline = Instant::now() + Duration::from_millis(500);
         while Instant::now() < deadline {
             match self.child.try_wait() {
-                Ok(Some(_)) => return,
+                Ok(Some(status)) => {
+                    self.diagnose(Phase::CleanupExitObserved, Some(&status));
+                    return;
+                }
                 Ok(None) => std::thread::sleep(Duration::from_millis(10)),
                 Err(_) => return,
             }
@@ -1164,6 +1203,7 @@ mod tests {
         let mut mpv = Mpv {
             socket,
             child: Command::new("true").spawn().unwrap(),
+            diagnostics: Diagnostics::new(false, 0),
             buffer: Vec::new(),
             request_id: 0,
             state,
@@ -1207,6 +1247,7 @@ mod tests {
         let mut mpv = Mpv {
             socket,
             child: Command::new("true").spawn().unwrap(),
+            diagnostics: Diagnostics::new(false, 0),
             buffer: vec![b'x'; FRAME_LIMIT],
             request_id: 0,
             state: Arc::new(Mutex::new(State::default())),
@@ -1234,6 +1275,7 @@ mod tests {
         let mut mpv = Mpv {
             socket,
             child: Command::new("true").spawn().unwrap(),
+            diagnostics: Diagnostics::new(false, 0),
             buffer: Vec::new(),
             request_id: 0,
             state: Arc::new(Mutex::new(State::default())),

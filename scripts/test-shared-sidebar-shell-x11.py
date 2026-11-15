@@ -164,6 +164,8 @@ def main():
             # JWM normally redirects application stderr to a bounded /tmp
             # log outside this artifact. Preserve this private fixture's real
             # launcher/decoder errors and PID without changing process identity.
+            # Opt-in fixed-size PID/exit/EOF diagnostics only for private fixtures.
+            env["JWM_PLAYER_EXIT_DIAGNOSTICS"] = "1"
             player_log = shlex.quote(str(evidence / "player-stderr.log"))
             launcher = work / "bin/jwm-player"
             launcher.write_text(
