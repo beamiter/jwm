@@ -508,7 +508,16 @@ fn frontend_diagnostic<R: Runtime>(
     message: String,
 ) -> Result<(), String> {
     let message: String = message.chars().take(2048).collect();
-    if !matches!(stage.as_str(), "boot" | "error" | "rendered") {
+    if !matches!(
+        stage.as_str(),
+        "boot"
+            | "error"
+            | "rendered"
+            | "dom-ready"
+            | "raf-first"
+            | "raf-second"
+            | "render-report-rejected"
+    ) {
         return Err("unknown frontend diagnostic stage".to_owned());
     }
     eprintln!("xbar frontend {stage}: {message}");
@@ -556,7 +565,12 @@ fn publish_frontend_property<R: Runtime>(
                 "ready" => b"_JWM_FRONTEND_READY".as_slice(),
                 "rendered" => b"_JWM_FRONTEND_RENDERED".as_slice(),
                 "boot" => b"_JWM_FRONTEND_BOOT".as_slice(),
-                _ => b"_JWM_FRONTEND_ERROR".as_slice(),
+                "error" => b"_JWM_FRONTEND_ERROR".as_slice(),
+                "dom-ready" => b"_JWM_FRONTEND_DOM_READY".as_slice(),
+                "raf-first" => b"_JWM_FRONTEND_RAF_FIRST".as_slice(),
+                "raf-second" => b"_JWM_FRONTEND_RAF_SECOND".as_slice(),
+                "render-report-rejected" => b"_JWM_FRONTEND_RENDER_REPORT_REJECTED".as_slice(),
+                _ => return Err("unknown frontend diagnostic stage".to_owned()),
             },
         )
         .map_err(|error| error.to_string())?

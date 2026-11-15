@@ -773,7 +773,9 @@ def main():
                 frontend_diagnostics = {}
                 def frontend_ready():
                     for xid in run("xdotool", "search", "--pid", primary_pid).split():
-                        raw = run("xprop", "-id", xid, "_JWM_FRONTEND_READY", "_JWM_FRONTEND_RENDERED", "_JWM_FRONTEND_BOOT", "_JWM_FRONTEND_ERROR")
+                        raw = run("xprop", "-id", xid, "_JWM_FRONTEND_READY", "_JWM_FRONTEND_RENDERED", "_JWM_FRONTEND_BOOT", "_JWM_FRONTEND_ERROR",
+                                  "_JWM_FRONTEND_DOM_READY", "_JWM_FRONTEND_RAF_FIRST",
+                                  "_JWM_FRONTEND_RAF_SECOND", "_JWM_FRONTEND_RENDER_REPORT_REJECTED")
                         frontend_diagnostics[xid] = raw
                         if re.search(r"_JWM_FRONTEND_READY\([^)]*\)\s*=\s*1\s*$", raw, re.M) and re.search(r"_JWM_FRONTEND_RENDERED\([^)]*\)\s*=\s*1\s*$", raw, re.M):
                             return True
@@ -1162,6 +1164,12 @@ def main():
         except Exception as error:
             result.update(status="failed", reason=str(error))
             diagnostics = {}
+            # Capture the actual display before teardown, including readiness failures.
+            # Evidence collection must never replace the original exception.
+            try:
+                capture("failure-desktop", final_display=True)
+            except Exception as failure:
+                diagnostics["screenshot_error"] = str(failure)
             for name, probe in (("shell", state), ("monitors", lambda: msg("get_monitors")), ("randr", lambda: run("xrandr", "--listmonitors")), ("randr_active", lambda: run("xrandr", "--listactivemonitors"))):
                 try:
                     diagnostics[name] = probe()
