@@ -24,7 +24,7 @@ import struct
 import subprocess
 import tempfile
 import time
-from fixtures import frame_feedback_probe
+from fixtures import frame_feedback_probe, configure_notify_probe
 from fixtures.media_command_probe import invocations, new_invocation, successful_result
 from fixtures.mpv_syscall_probe import launcher_prefix
 
@@ -104,6 +104,7 @@ def main():
     parser.add_argument("--size", default="1280x800")
     parser.add_argument("--theme", choices=("light", "dark"), default="light")
     parser.add_argument("--deep", action="store_true")
+    parser.add_argument("--configure-notify-probe", action="store_true", help="post-failure private ConfigureNotify diagnostic; never changes acceptance result")
     parser.add_argument("--trace-mpv", action="store_true", help="require private mpv syscall capture (strace) during media/deep acceptance")
     parser.add_argument("--media-only", action="store_true", help="test empty-player launch and real MPRIS controls after the standard smoke")
     parser.add_argument("--ui-font", help="optional private system UI font override for visual fixtures")
@@ -129,6 +130,7 @@ def main():
     result = {"bar": args.bar, "backend": args.backend, "size": [width, height],
               "theme": args.theme, "binary": str(bar_bin), "configuration": "legacy_four_edge" if args.legacy_four_edge else ("legacy_edge_shell" if args.legacy_edge_shell else "desktop_shell"), "steps": [], "status": "running"}
     native_logs = None
+    configure_probe_target = None
     started_at = time.time()
     started = time.monotonic()
     children = []
@@ -780,6 +782,12 @@ def main():
             # are disabled, so this comparison isolates the primary bar strip.
             if args.bar.startswith("tauri_"):
                 frontend_diagnostics = {}
+                probe_identity = None
+                if args.configure_notify_probe:
+                    try:
+                        probe_identity = configure_notify_probe.process(primary_pid)
+                    except Exception as failure:
+                        result["configure_notify_probe_unavailable"] = str(failure)
                 def frontend_ready():
                     for xid in run("xdotool", "search", "--pid", primary_pid).split():
                         raw = run("xprop", "-id", xid, "_JWM_FRONTEND_READY", "_JWM_FRONTEND_RENDERED", "_JWM_FRONTEND_BOOT", "_JWM_FRONTEND_ERROR",
@@ -791,6 +799,19 @@ def main():
                     return False
                 try:
                     wait_for(frontend_ready, "Tauri frontend service and actual DOM-render acknowledgements", timeout=60)
+                except AssertionError as error:
+                    if args.configure_notify_probe and str(error).startswith("Tauri frontend service and actual DOM-render acknowledgements; last="):
+                        try:
+                            exact = [int(xid, 0) for xid, raw in frontend_diagnostics.items()
+                                     if configure_notify_probe.phase(raw, 'READY')]
+                            if len(exact) == 1 and probe_identity and probe_identity['exe'] == str(bar_bin) and probe_identity['identity']:
+                                counters = frame_feedback_probe.collect(run, exact)
+                                raw = next(raw for xid, raw in frontend_diagnostics.items() if int(xid, 0) == exact[0])
+                                if configure_notify_probe.stalled(raw, counters, exact[0]):
+                                    configure_probe_target = dict(probe_identity, pid=primary_pid, xid=exact[0])
+                        except Exception as failure:
+                            result["configure_notify_probe_unavailable"] = str(failure)
+                    raise
                 finally:
                     result["tauri_frontend_diagnostics"] = frontend_diagnostics
                     try:
@@ -1185,6 +1206,11 @@ def main():
                 capture("failure-desktop", final_display=True)
             except Exception as failure:
                 diagnostics["screenshot_error"] = str(failure)
+            if configure_probe_target is not None:
+                try:
+                    result["configure_notify_probe"] = configure_notify_probe.launch(configure_probe_target, evidence, env)
+                except Exception as failure:
+                    result["configure_notify_probe"] = {"original_acceptance": "failed", "error": str(failure)}
             for name, probe in (("shell", state), ("monitors", lambda: msg("get_monitors")), ("randr", lambda: run("xrandr", "--listmonitors")), ("randr_active", lambda: run("xrandr", "--listactivemonitors"))):
                 try:
                     diagnostics[name] = probe()

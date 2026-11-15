@@ -25,7 +25,7 @@ class FailureEvidenceTests(unittest.TestCase):
         # Run the exact production except body with a genuine active exception.
         module = ast.Module(body=[ast.Try(body=[ast.Raise(exc=ast.Name(id='original', ctx=ast.Load()))],
                                          handlers=[HANDLER], orelse=[], finalbody=[])], type_ignores=[])
-        scope = dict(original=original, result=result, capture=capture,
+        scope = dict(original=original, result=result, capture=capture, configure_probe_target=None,
                      state=lambda: {}, msg=lambda *args: {}, run=lambda *args: "")
         with self.assertRaises(AssertionError) as caught:
             exec(compile(ast.fix_missing_locations(module), str(SOURCE), 'exec'), scope)
