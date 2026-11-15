@@ -17,6 +17,8 @@ import subprocess
 import tempfile
 import time
 
+from fixtures.daemon_native_log import NativeLogEvidence
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -85,6 +87,8 @@ def main():
               "binaries": {name: {"path": str(path), "sha256": digest(path)} for name, path in binaries.items()}}
     children = []
     started = time.monotonic()
+    started_at = time.time()
+    native_logs = None
     with tempfile.TemporaryDirectory(prefix="jwm-daemon-case-") as directory:
         work = Path(directory)
         result["private_directory"] = str(work)
@@ -233,6 +237,8 @@ def main():
             result["managed_child_stderr_fd"] = os.readlink(f"/proc/{wm_pid}/fd/2")
             assert digest(f"/proc/{wm_pid}/exe") == result["binaries"]["jwm"]["sha256"]
             assert digest(f'/proc/{before["host"]["pid"]}/exe') == result["binaries"]["host"]["sha256"]
+            native_logs = NativeLogEvidence(wm_pid, wm_identity, binaries["jwm"], identity, started_at)
+            native_logs.discover()
             record("final daemon owns final JWM; backend comes only from environment, no CLI backend")
 
             applications = []
@@ -295,6 +301,11 @@ def main():
             result["failure_snapshot"] = snapshot("failure")
             raise
         finally:
+            if native_logs is not None:
+                native_logs.discover()
+                result["native_log_archives"] = {
+                    "before_cleanup": native_logs.archive(evidence, "before-cleanup")
+                }
             result["child_stderr_archives"] = {
                 "before_cleanup": archive_child_stderr(work / "runtime", evidence, "before-cleanup")
             }
@@ -310,6 +321,13 @@ def main():
                         except ProcessLookupError:
                             pass
                         child.wait(timeout=10)
+            if native_logs is not None:
+                # Use pinned inodes only: the process may already be gone or its
+                # PID reused. Never rediscover files after child termination.
+                try:
+                    result["native_log_archives"]["after_cleanup"] = native_logs.archive(evidence, "after-cleanup")
+                finally:
+                    native_logs.close()
             result["child_stderr_archives"]["after_cleanup"] = archive_child_stderr(
                 work / "runtime", evidence, "after-cleanup")
             daemon_log = work / "home/.local/share/jwm/jwm_daemon.log"
