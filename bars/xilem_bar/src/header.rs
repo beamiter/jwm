@@ -2,7 +2,7 @@
 use super::*;
 use masonry::core::render_text;
 use masonry::kurbo::{Affine, BezPath, RoundedRect};
-use masonry::parley::style::{FontFamily, FontFamilyName, StyleProperty};
+use masonry::parley::style::{FontFamily, FontFamilyName, GenericFamily, StyleProperty};
 use masonry::parley::{FontContext, LayoutContext};
 use std::cell::RefCell;
 use xbar_core::presentation::{InteractionState, LayoutEngine, SceneNode, TextAlign, TextMeasurer};
@@ -12,6 +12,23 @@ thread_local! {
     static METRICS: RefCell<(FontContext, LayoutContext<()>)> =
         RefCell::new((FontContext::new(), LayoutContext::new()));
     static IMAGES: RefCell<Vec<(u64, Option<masonry::peniko::ImageData>)>> = const { RefCell::new(Vec::new()) };
+}
+
+// Pango's generic aliases are not concrete font-family names in Parley.
+// Keep measurement and drawing on the same family selection path.
+fn font_family(family: &str) -> FontFamilyName<'_> {
+    let generic = match family.to_ascii_lowercase().as_str() {
+        "sans" | "sans-serif" => Some(GenericFamily::SansSerif),
+        "serif" => Some(GenericFamily::Serif),
+        "monospace" => Some(GenericFamily::Monospace),
+        "cursive" => Some(GenericFamily::Cursive),
+        "fantasy" => Some(GenericFamily::Fantasy),
+        _ => None,
+    };
+    generic.map_or_else(
+        || FontFamilyName::Named(std::borrow::Cow::Borrowed(family)),
+        FontFamilyName::Generic,
+    )
 }
 
 struct Metrics {
@@ -24,9 +41,9 @@ impl TextMeasurer for Metrics {
             let (fonts, context) = &mut *metrics;
             let mut builder = context.ranged_builder(fonts, text, 1.0, true);
             builder.push_default(StyleProperty::FontSize(size));
-            builder.push_default(StyleProperty::FontFamily(FontFamily::Single(
-                FontFamilyName::Named(std::borrow::Cow::Borrowed(&self.family)),
-            )));
+            builder.push_default(StyleProperty::FontFamily(FontFamily::Single(font_family(
+                &self.family,
+            ))));
             let mut layout = builder.build(text);
             layout.break_all_lines(None);
             xbar_core::presentation::Size::new(layout.width(), layout.height())
@@ -207,7 +224,7 @@ pub fn view(state: &mut XilemBar) -> Box<xilem::AnyWidgetView<XilemBar>> {
                         let mut builder = layouts.ranged_builder(fonts, text, 1.0, true);
                         builder.push_default(StyleProperty::FontSize(*size));
                         builder.push_default(StyleProperty::FontFamily(FontFamily::Single(
-                            FontFamilyName::Named(std::borrow::Cow::Borrowed(&family)),
+                            font_family(&family),
                         )));
                         let mut layout = builder.build(text);
                         layout.break_all_lines(None);
@@ -314,4 +331,50 @@ pub fn view(state: &mut XilemBar) -> Box<xilem::AnyWidgetView<XilemBar>> {
     sized_box(zstack((drawing, controls)))
         .dims(Dimensions::new(Dim::Stretch, Dim::Stretch))
         .boxed()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn generic_aliases_are_not_named_fonts() {
+        for (alias, expected) in [
+            ("Sans", GenericFamily::SansSerif),
+            ("sans-serif", GenericFamily::SansSerif),
+            ("SANS", GenericFamily::SansSerif),
+            ("Serif", GenericFamily::Serif),
+            ("Monospace", GenericFamily::Monospace),
+            ("Cursive", GenericFamily::Cursive),
+            ("Fantasy", GenericFamily::Fantasy),
+        ] {
+            assert_eq!(font_family(alias), FontFamilyName::Generic(expected));
+        }
+        for name in [
+            "DejaVu Sans",
+            "Noto Sans CJK SC",
+            "Liberation Serif",
+            "Unknown Custom Font",
+        ] {
+            assert_eq!(font_family(name), FontFamilyName::Named(name.into()));
+        }
+    }
+
+    #[test]
+    fn default_header_font_measures_digits_and_status_text() {
+        let metrics = Metrics {
+            family: "Sans".into(),
+        };
+        for text in ["1", "3", "5", "8", "CPU"] {
+            let size = metrics.measure(text, 12.0);
+            assert!(
+                size.width.is_finite() && size.width > 0.0,
+                "{text}: {size:?}"
+            );
+            assert!(
+                size.height.is_finite() && size.height > 0.0,
+                "{text}: {size:?}"
+            );
+        }
+    }
 }
