@@ -129,6 +129,7 @@ jobs:
       - name: Exercise supervisor recovery and rollback
         if: matrix.bar == 'tao_glow_bar'
         run: |
+          python3 scripts/test-shared-shell-preview-oracle.py
           cargo build --locked --manifest-path bars/tao_pixels_bar/Cargo.toml
           python3 scripts/test-shared-sidebar-shell-x11.py --bar tao_glow_bar --backend xcb --deep --bin-dir target/release
           python3 scripts/test-shared-sidebar-shell-x11.py --bar tao_glow_bar --backend x11rb --deep --bin-dir target/release
