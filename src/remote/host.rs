@@ -2814,7 +2814,7 @@ pub fn run_host(options: HostOptions) -> RemoteResult<()> {
         None
     };
     let window_capture = Mutex::new(window_capture);
-    let listener = TcpListener::bind(&options.listen)
+    let listener = bind_listener(&options.listen)
         .map_err(|error| listener_bind_error(&options.listen, error))?;
     listener.set_nonblocking(true)?;
     let shutdown = Arc::new(AtomicBool::new(false));
@@ -2846,6 +2846,23 @@ pub fn run_host(options: HostOptions) -> RemoteResult<()> {
     accept_connections(&listener, key, &shutdown, once, move |peer| {
         serve_authenticated(peer, &options, &session_shutdown, &window_capture)
     })
+}
+
+/// Keep the IPv6 host separate from its port so the system resolver can look
+/// up named interface zones. The string resolver otherwise retains brackets
+/// when its numeric SocketAddr fast path fails. Ordinary endpoints retain the
+/// standard bind path, including candidate order and last-error behavior.
+fn bind_listener(address: &str) -> io::Result<TcpListener> {
+    if let Some(bracketed) = address.strip_prefix('[')
+        && let Some((host, port)) = bracketed.split_once("]:")
+        && host.contains('%')
+    {
+        let port = port
+            .parse::<u16>()
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid scoped IPv6 port"))?;
+        return TcpListener::bind((host, port));
+    }
+    TcpListener::bind(address)
 }
 
 /// Stop the host once standard input reaches end of file.
@@ -6477,6 +6494,48 @@ fn permission_denied(message: impl Into<String>) -> io::Error {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn scoped_listener_resolves_named_and_numeric_interface_zones() {
+        let scope = unsafe { nix::libc::if_nametoindex(c"lo".as_ptr()) };
+        assert_ne!(scope, 0, "Linux loopback interface must exist");
+        for zone in ["lo".to_owned(), scope.to_string()] {
+            let endpoint =
+                crate::remote::usability::normalize_listen_address(&format!("[fe80::1%{zone}]:0"))
+                    .unwrap();
+            match bind_listener(&endpoint) {
+                Ok(listener) => {
+                    let address = listener.local_addr().unwrap();
+                    assert!(!address.ip().is_loopback());
+                    assert_ne!(address.port(), 0);
+                }
+                // A normal test machine has no link-local address on lo. This
+                // proves resolution reached bind, not that two hosts can connect.
+                Err(error) => assert_eq!(error.raw_os_error(), Some(nix::libc::EADDRNOTAVAIL)),
+            }
+        }
+        assert!(bind_listener("[fe80::1%jwm-no-such-interface]:0").is_err());
+        for port in ["bad", "65536"] {
+            assert_eq!(
+                bind_listener(&format!("[fe80::1%lo]:{port}"))
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::InvalidInput
+            );
+        }
+    }
+
+    #[test]
+    fn listener_preserves_ephemeral_ports_and_actual_bound_address() {
+        for endpoint in ["127.0.0.1:0", "[::1]:0", "[::1%0]:0"] {
+            let listener = bind_listener(endpoint).unwrap();
+            let address = listener.local_addr().unwrap();
+            assert!(address.ip().is_loopback());
+            assert_ne!(address.port(), 0);
+        }
+        let listener = bind_listener("0.0.0.0:0").unwrap();
+        assert!(!listener.local_addr().unwrap().ip().is_loopback());
+    }
+
     #[test]
     fn static_lossless_requires_two_seconds_exact_stability_and_committed_repair() {
         let at = Instant::now();

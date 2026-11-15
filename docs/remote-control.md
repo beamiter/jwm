@@ -239,7 +239,9 @@ address. A hostname is also accepted; the parser does not look it up, and the
 existing system bind operation resolves it when the host actually starts.
 A bare IPv6 address always uses the default port; bracket it to specify another
 port. Existing explicit ports and IPv6 scope-zone spelling are passed through
-to the system bind. For example, `--listen '[::1]:48221'` is explicit IPv6.
+to the system bind. Named zones are resolved on the **host** for `--listen`;
+the link-local address must already be configured on that interface. A zone
+does not bypass the `--allow-lan` requirement for non-loopback listeners. For example, `--listen '[::1]:48221'` is explicit IPv6.
 The host also preserves explicit port `0`: the OS chooses an available port,
 and the viewer must use the actual port printed by the host. `connect` still
 rejects port 0.
