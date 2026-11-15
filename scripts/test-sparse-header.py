@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 """Private X11 acceptance for real sparse top-bar pixels and original tag click bindings."""
+from frontend_failure_evidence import collect as collect_frontend_failure
+
 import argparse
 import hashlib
 import json
@@ -152,10 +154,14 @@ def main():
             result['top_window'], result['top_rect'] = xid, rect
             if args.bar.startswith('tauri_'):
                 def rendered():
-                    raw = run('xprop', '-id', xid, '_JWM_FRONTEND_READY', '_JWM_FRONTEND_RENDERED', '_JWM_FRONTEND_ERROR')
+                    raw = run('xprop', '-id', xid, '_JWM_FRONTEND_READY', '_JWM_FRONTEND_RENDERED', '_JWM_FRONTEND_BOOT', '_JWM_FRONTEND_ERROR')
                     result['frontend_diagnostics'] = raw
                     return all(re.search(name + r'\([^)]*\)\s*=\s*1\s*$', raw, re.M) for name in ['_JWM_FRONTEND_READY', '_JWM_FRONTEND_RENDERED'])
-                wait_for(rendered, 'actual Tauri frontend rendered acknowledgement', 60)
+                try:
+                    wait_for(rendered, 'actual Tauri frontend rendered acknowledgement', 60)
+                except Exception:
+                    result['tauri_native_failure'] = collect_frontend_failure([xid], evidence, env)
+                    raise
             run('xdotool', 'mousemove', '640', '400')
             record('fresh actual top, host and WM binary hashes recorded; real mapped frontend ready')
             def capture(name):
