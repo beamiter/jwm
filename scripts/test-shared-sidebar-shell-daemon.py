@@ -17,6 +17,8 @@ import subprocess
 import tempfile
 import time
 
+from fixtures.daemon_native_log import NativeLogEvidence
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -38,6 +40,35 @@ def digest(path):
     return value.hexdigest()
 
 
+def archive_child_stderr(runtime, evidence, phase):
+    """Preserve both private daemon log generations without masking a failure.
+
+    Snapshot before termination as well as after the session is reaped: cleanup
+    can append or rotate diagnostics, and TemporaryDirectory removes the source.
+    Missing generations are normal and are distinguished from read/write errors.
+    """
+    archived = {}
+    for name in ("jwm_child_stderr.log", "jwm_child_stderr.log.1"):
+        source = runtime / name
+        destination = evidence / f"{phase}-{name}"
+        try:
+            payload = source.read_bytes()
+        except FileNotFoundError:
+            archived[name] = {"status": "missing"}
+            continue
+        except OSError as error:
+            archived[name] = {"status": "error", "error": str(error)}
+            continue
+        try:
+            destination.write_bytes(payload)
+        except OSError as error:
+            archived[name] = {"status": "error", "error": str(error)}
+            continue
+        archived[name] = {"status": "saved", "file": destination.name,
+                          "bytes": len(payload), "sha256": hashlib.sha256(payload).hexdigest()}
+    return archived
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--bin-dir", type=Path, default=ROOT / "target/release")
@@ -56,6 +87,8 @@ def main():
               "binaries": {name: {"path": str(path), "sha256": digest(path)} for name, path in binaries.items()}}
     children = []
     started = time.monotonic()
+    started_at = time.time()
+    native_logs = None
     with tempfile.TemporaryDirectory(prefix="jwm-daemon-case-") as directory:
         work = Path(directory)
         result["private_directory"] = str(work)
@@ -204,6 +237,8 @@ def main():
             result["managed_child_stderr_fd"] = os.readlink(f"/proc/{wm_pid}/fd/2")
             assert digest(f"/proc/{wm_pid}/exe") == result["binaries"]["jwm"]["sha256"]
             assert digest(f'/proc/{before["host"]["pid"]}/exe') == result["binaries"]["host"]["sha256"]
+            native_logs = NativeLogEvidence(wm_pid, wm_identity, binaries["jwm"], identity, started_at)
+            native_logs.discover()
             record("final daemon owns final JWM; backend comes only from environment, no CLI backend")
 
             applications = []
@@ -266,6 +301,14 @@ def main():
             result["failure_snapshot"] = snapshot("failure")
             raise
         finally:
+            if native_logs is not None:
+                native_logs.discover()
+                result["native_log_archives"] = {
+                    "before_cleanup": native_logs.archive(evidence, "before-cleanup")
+                }
+            result["child_stderr_archives"] = {
+                "before_cleanup": archive_child_stderr(work / "runtime", evidence, "before-cleanup")
+            }
             # Only this fixture's exact child process groups are terminated.
             for child in reversed(children):
                 if child.poll() is None:
@@ -278,11 +321,20 @@ def main():
                         except ProcessLookupError:
                             pass
                         child.wait(timeout=10)
+            if native_logs is not None:
+                # Use pinned inodes only: the process may already be gone or its
+                # PID reused. Never rediscover files after child termination.
+                try:
+                    result["native_log_archives"]["after_cleanup"] = native_logs.archive(evidence, "after-cleanup")
+                finally:
+                    native_logs.close()
+            result["child_stderr_archives"]["after_cleanup"] = archive_child_stderr(
+                work / "runtime", evidence, "after-cleanup")
             daemon_log = work / "home/.local/share/jwm/jwm_daemon.log"
             if daemon_log.exists():
                 shutil.copyfile(daemon_log, evidence / "daemon-complete.log")
             result["elapsed_seconds"] = round(time.monotonic() - started, 3)
-            result["child_stderr_observation"] = "exec wrapper redirects stderr; same PID and authoritative executable verified" if args.capture_child_stderr else "exact daemon launch redirects managed child stderr to /dev/null; daemon stderr is captured"
+            result["child_stderr_observation"] = "exec wrapper redirects stderr; same PID and authoritative executable verified" if args.capture_child_stderr else "exact daemon launch captures managed child stderr in bounded private runtime logs; both generations archived before and after cleanup"
             (evidence / "result.json").write_text(json.dumps(result, indent=2) + "\n")
             for log in logs.values():
                 log.close()

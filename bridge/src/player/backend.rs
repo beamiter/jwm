@@ -2,8 +2,9 @@
 //! filesystem socket, libmpv linkage, or compositor-thread I/O is involved.
 
 use std::io::{Read, Write};
-use std::os::fd::OwnedFd;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::net::UnixStream;
+use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
@@ -320,6 +321,44 @@ struct Mpv {
     last_open_command_id: Option<u64>,
 }
 
+// Keep IPC away from stdin: graphics/device initialization in mpv can close
+// fd 0 and reuse it. Reserve a real descriptor before Command creates its exec
+// error pipe; never dup2 onto a fixed number in pre_exec.
+fn spawn_decoder(mut command: Command, child_socket: UnixStream) -> std::io::Result<Child> {
+    // Always duplicate with CLOEXEC, including when a closed standard stream
+    // caused socketpair to allocate fd 0, 1 or 2. Other concurrent execs must not
+    // inherit this endpoint while we prepare the decoder.
+    let raw = unsafe { libc::fcntl(child_socket.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 3) };
+    if raw == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: fcntl returned a new descriptor owned only by this scope.
+    let ipc_fd = unsafe { OwnedFd::from_raw_fd(raw) };
+    command
+        .arg(format!("--input-ipc-client=fd://{raw}"))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit());
+    // SAFETY: only async-signal-safe fcntl is called after fork. The owned fd
+    // remains live through spawn, and only the child's copy loses CLOEXEC.
+    unsafe {
+        command.pre_exec(move || {
+            if libc::fcntl(raw, libc::F_SETFD, 0) == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    // Retain the original CLOEXEC endpoint too: if it occupied stdin, do not
+    // free fd 0 while Command is preparing its /dev/null standard streams.
+    let result = command.spawn();
+    // Also close on spawn failure. The parent must not keep a second endpoint
+    // alive and hide decoder EOF from the worker.
+    drop(ipc_fd);
+    drop(child_socket);
+    result
+}
+
 impl Mpv {
     fn spawn(state: SharedState, mode: Mode, headless: bool) -> Result<Self, String> {
         let (socket, child_socket) = UnixStream::pair().map_err(|e| e.to_string())?;
@@ -329,7 +368,6 @@ impl Mpv {
         socket
             .set_write_timeout(Some(COMMAND_TIMEOUT))
             .map_err(|e| e.to_string())?;
-        let child_fd: OwnedFd = child_socket.into();
         let ui =
             super::ui::Script::create().map_err(|e| format!("cannot prepare player UI: {e}"))?;
         let mut command = Command::new("mpv");
@@ -339,7 +377,6 @@ impl Mpv {
             "--no-terminal",
             "--input-terminal=no",
             "--idle=yes",
-            "--input-ipc-client=fd://0",
             "--force-window=yes",
             "--keep-open=no",
             "--title=JWM Player${?media-title: — ${media-title}}",
@@ -369,14 +406,9 @@ impl Mpv {
         if headless {
             command.args(["--ao=null", "--vo=null", "--force-window=no"]);
         }
-        let child = command
-            .stdin(Stdio::from(child_fd))
-            .stdout(Stdio::null())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .map_err(|error| {
-                format!("cannot start mpv: {error}. Install the mpv package to enable playback.")
-            })?;
+        let child = spawn_decoder(command, child_socket).map_err(|error| {
+            format!("cannot start mpv: {error}. Install the mpv package to enable playback.")
+        })?;
         Ok(Self {
             socket,
             child,
@@ -977,6 +1009,110 @@ impl Drop for Mpv {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // No GUI or mpv installation needed: the fake decoder deliberately closes
+    // and reuses stdin, then exchanges JSON over the actual inherited IPC fd.
+    fn check_decoder_dedicated_fd(mut socket: UnixStream, child_socket: UnixStream) {
+        socket
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let parent_link =
+            std::fs::read_link(format!("/proc/self/fd/{}", socket.as_raw_fd())).unwrap();
+        let child_link =
+            std::fs::read_link(format!("/proc/self/fd/{}", child_socket.as_raw_fd())).unwrap();
+        let mut command = Command::new("python3");
+        command.args([
+            "-c",
+            r#"
+import json, os, socket, sys
+fd = int(sys.argv[1].split('fd://')[1])
+assert fd >= 3
+assert os.read(0, 1) == b''  # stdin starts as /dev/null, not IPC
+os.close(0)
+assert os.open('/dev/null', os.O_RDONLY) == 0
+links = []
+for name in os.listdir('/proc/self/fd'):
+    try: links.append(os.readlink('/proc/self/fd/' + name))
+    except FileNotFoundError: pass
+assert os.environ['PARENT_LINK'] not in links
+assert links.count(os.environ['CHILD_LINK']) == 1
+ipc = socket.socket(fileno=fd)
+assert json.loads(ipc.recv(4096)) == {'command': ['show-text', 'reuse']}
+ipc.sendall(b'{"error":"success"}\n')
+"#,
+        ]);
+        command
+            .env("PARENT_LINK", parent_link)
+            .env("CHILD_LINK", child_link);
+        let mut child = spawn_decoder(command, child_socket).unwrap();
+        // The parent's endpoint is still CLOEXEC; only the child inherited IPC.
+        assert_ne!(
+            unsafe { libc::fcntl(socket.as_raw_fd(), libc::F_GETFD) } & libc::FD_CLOEXEC,
+            0
+        );
+        socket
+            .write_all(b"{\"command\":[\"show-text\",\"reuse\"]}\n")
+            .unwrap();
+        let mut reply = [0u8; 20];
+        socket.read_exact(&mut reply).unwrap();
+        assert_eq!(&reply, b"{\"error\":\"success\"}\n");
+        assert!(child.wait().unwrap().success());
+        // No parent-side duplicate may keep the peer alive after decoder exit.
+        assert_eq!(socket.read(&mut [0u8; 1]).unwrap(), 0);
+    }
+
+    #[test]
+    fn decoder_ipc_survives_stdin_close_and_reuse() {
+        let (socket, child_socket) = UnixStream::pair().unwrap();
+        check_decoder_dedicated_fd(socket, child_socket);
+    }
+
+    #[test]
+    fn decoder_spawn_failure_closes_private_endpoint() {
+        let (mut socket, child_socket) = UnixStream::pair().unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        let result = spawn_decoder(Command::new("/no/such/jwm-test-decoder"), child_socket);
+        assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::NotFound);
+        assert_eq!(socket.read(&mut [0u8; 1]).unwrap(), 0);
+        assert_ne!(
+            unsafe { libc::fcntl(socket.as_raw_fd(), libc::F_GETFD) } & libc::FD_CLOEXEC,
+            0
+        );
+    }
+
+    #[test]
+    fn decoder_ipc_handles_closed_parent_stdin() {
+        // Isolate closing standard descriptors from the parallel test runner.
+        let status = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "player::backend::tests::decoder_closed_stdin_child",
+                "--nocapture",
+            ])
+            .env("JWM_TEST_CLOSED_STDIN", "1")
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+
+    #[test]
+    fn decoder_closed_stdin_child() {
+        if std::env::var_os("JWM_TEST_CLOSED_STDIN").is_none() {
+            return;
+        }
+        unsafe {
+            libc::close(0);
+        }
+        // The parent's endpoint obtains 0 and must not leak into the decoder.
+        let (socket, child_socket) = UnixStream::pair().unwrap();
+        assert_eq!(socket.as_raw_fd(), 0);
+        check_decoder_dedicated_fd(socket, child_socket);
+        // Also cover the child endpoint obtaining a standard descriptor.
+        let (child_socket, socket) = UnixStream::pair().unwrap();
+        assert_eq!(child_socket.as_raw_fd(), 0);
+        check_decoder_dedicated_fd(socket, child_socket);
+    }
 
     #[test]
     fn action_deadline_is_rechecked_after_capability_readback() {
