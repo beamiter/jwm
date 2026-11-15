@@ -11,6 +11,7 @@ import signal
 import subprocess
 import tempfile
 import time
+from fixtures import frame_feedback_probe
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -36,10 +37,13 @@ def main():
     evidence.mkdir(parents=True, exist_ok=True)
     result = {'status': 'running', 'backend': args.backend, 'bar': args.bar, 'theme': args.theme, 'steps': [], 'fixture_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest()}
     children = []
+    native_logs = None
+    started_at = time.time()
     started = time.monotonic()
     with tempfile.TemporaryDirectory(prefix='jwm-sparse-header-') as directory:
         work = Path(directory)
         env = dict(os.environ, LIBGL_ALWAYS_SOFTWARE='1', GDK_BACKEND='x11', JWM_SHELL_BIN=str(args.shell_bin.resolve()), JWM_COMPOSITOR_API='glx')
+        frame_feedback_probe.enable(env, args.bar)
         for key in ['DISPLAY', 'WAYLAND_DISPLAY', 'XAUTHORITY', 'DBUS_SESSION_BUS_ADDRESS', 'JWM_SOCKET', 'JWM_BACKEND', 'JWM_DESKTOP_SHELL', 'JWM_BAR_LAYOUT', 'JWM_DAEMON_PID']:
             env.pop(key, None)
         for key, folder in [('XDG_CONFIG_HOME', 'config'), ('XDG_CACHE_HOME', 'cache'), ('XDG_DATA_HOME', 'data'), ('XDG_STATE_HOME', 'state'), ('XDG_RUNTIME_DIR', 'runtime'), ('XDG_PICTURES_DIR', 'pictures')]:
@@ -151,6 +155,10 @@ def main():
             assert result['binary_sha256']['host'] == hashlib.sha256(args.shell_bin.read_bytes()).hexdigest()
             result['top_window'], result['top_rect'] = xid, rect
             if args.bar.startswith('tauri_'):
+                try:
+                    native_logs = frame_feedback_probe.pin_logs(wm_pid, args.bin_dir / 'jwm', started_at)
+                except Exception as error:
+                    result['frame_feedback_native_log_error'] = str(error)
                 def rendered():
                     raw = run('xprop', '-id', xid, '_JWM_FRONTEND_READY', '_JWM_FRONTEND_RENDERED',
                               '_JWM_FRONTEND_BOOT', '_JWM_FRONTEND_ERROR', '_JWM_FRONTEND_DOM_READY', '_JWM_FRONTEND_VISIBILITY', '_JWM_FRONTEND_NATIVE_DOM_READY', '_JWM_FRONTEND_NATIVE_VISIBILITY',
@@ -158,7 +166,13 @@ def main():
                               '_JWM_FRONTEND_RENDER_REPORT_REJECTED')
                     result['frontend_diagnostics'] = raw
                     return all(re.search(name + r'\([^)]*\)\s*=\s*1\s*$', raw, re.M) for name in ['_JWM_FRONTEND_READY', '_JWM_FRONTEND_RENDERED'])
-                wait_for(rendered, 'actual Tauri frontend rendered acknowledgement', 60)
+                try:
+                    wait_for(rendered, 'actual Tauri frontend rendered acknowledgement', 60)
+                finally:
+                    try:
+                        result['frame_feedback'] = frame_feedback_probe.collect(run, [xid])
+                    except Exception as error:
+                        result['frame_feedback_error'] = str(error)
             run('xdotool', 'mousemove', '640', '400')
             record('fresh actual top, host and WM binary hashes recorded; real mapped frontend ready')
             def capture(name):
@@ -291,6 +305,7 @@ def main():
             except Exception as state_error: result['failure_state_error'] = str(state_error)
             raise
         finally:
+            frame_feedback_probe.archive(native_logs, evidence, result)
             for child in reversed(children):
                 if child.poll() is None:
                     try:

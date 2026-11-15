@@ -24,6 +24,7 @@ import struct
 import subprocess
 import tempfile
 import time
+from fixtures import frame_feedback_probe
 from fixtures.media_command_probe import invocations, new_invocation, successful_result
 from fixtures.mpv_syscall_probe import launcher_prefix
 
@@ -127,6 +128,8 @@ def main():
     evidence.mkdir(parents=True, exist_ok=True)
     result = {"bar": args.bar, "backend": args.backend, "size": [width, height],
               "theme": args.theme, "binary": str(bar_bin), "configuration": "legacy_four_edge" if args.legacy_four_edge else ("legacy_edge_shell" if args.legacy_edge_shell else "desktop_shell"), "steps": [], "status": "running"}
+    native_logs = None
+    started_at = time.time()
     started = time.monotonic()
     children = []
     launched_application = None
@@ -135,6 +138,7 @@ def main():
         work = Path(directory)
         env = dict(os.environ, LIBGL_ALWAYS_SOFTWARE="1", GDK_BACKEND="x11",
                    JWM_COMPOSITOR_API="glx", JWM_SHELL_BIN=str(args.shell_bin.resolve()))
+        frame_feedback_probe.enable(env, args.bar)
         for key in ("DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY", "DBUS_SESSION_BUS_ADDRESS",
                     "JWM_SOCKET", "JWM_BACKEND", "JWM_DESKTOP_SHELL", "JWM_BAR_LAYOUT"):
             env.pop(key, None)
@@ -761,6 +765,11 @@ def main():
             wm_pid = int(next(line.split(":", 1)[1] for line in Path(f"/proc/{host_pid}/status").read_text().splitlines() if line.startswith("PPid:")))
             result["binary_sha256"] = {"frontend": executable_hash(primary_pid), "host": executable_hash(host_pid), "jwm": executable_hash(wm_pid)}
             wm_identity = legacy.process_identity(wm_pid)
+            if args.bar.startswith("tauri_"):
+                try:
+                    native_logs = frame_feedback_probe.pin_logs(wm_pid, args.bin_dir / "jwm", started_at)
+                except Exception as error:
+                    result["frame_feedback_native_log_error"] = str(error)
             result["fixture_sha256"] = FIXTURE_SHA256
             record("current frontend top and three unique registered shared panels")
             monitor = msg("get_monitors")[0]
@@ -784,6 +793,12 @@ def main():
                     wait_for(frontend_ready, "Tauri frontend service and actual DOM-render acknowledgements", timeout=60)
                 finally:
                     result["tauri_frontend_diagnostics"] = frontend_diagnostics
+                    try:
+                        exact_windows = [xid for xid, raw in frontend_diagnostics.items()
+                                         if re.search(r"_JWM_FRONTEND_READY\([^)]*\)\s*=\s*1\s*$", raw, re.M)]
+                        result["frame_feedback"] = frame_feedback_probe.collect(run, exact_windows)
+                    except Exception as error:
+                        result["frame_feedback_error"] = str(error)
             msg("togglebar")
             wait_for(lambda: not state()["outputs"][0]["visible"], "hide for wallpaper reference")
             time.sleep(0.25)
@@ -1178,6 +1193,7 @@ def main():
             result["failure_diagnostics"] = diagnostics
             raise
         finally:
+            frame_feedback_probe.archive(native_logs, evidence, result)
             cleanup_errors = []
             for identity in reversed(service_identities):
                 if legacy.process_identity(identity[0]) == identity:
