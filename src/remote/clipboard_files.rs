@@ -228,8 +228,17 @@ fn unique_name(base: &[u8], used: &mut std::collections::HashSet<Vec<u8>>) -> Ve
         return base.to_vec();
     }
     for index in 2.. {
-        let mut candidate = base.to_vec();
-        candidate.extend_from_slice(format!(" ({index})").as_bytes());
+        let suffix = format!(" ({index})");
+        let mut end = base.len().min(MAX_COMPONENT_LEN - suffix.len());
+        // Names are raw Unix bytes. Preserve that contract, but do not turn a
+        // valid UTF-8 name into an invalid one when making room for the suffix.
+        if let Ok(text) = std::str::from_utf8(base) {
+            while !text.is_char_boundary(end) {
+                end -= 1;
+            }
+        }
+        let mut candidate = base[..end].to_vec();
+        candidate.extend_from_slice(suffix.as_bytes());
         if used.insert(candidate.clone()) {
             return candidate;
         }
@@ -814,6 +823,102 @@ mod tests {
         let top = receiver.finish().unwrap();
         assert_eq!(top[1], destination.0.join("x (2)"));
         assert_eq!(fs::read(&top[1]).unwrap(), b"second");
+    }
+
+    #[test]
+    fn duplicate_max_length_names_round_trip_without_losing_contents() {
+        for name in [
+            vec![b'x'; MAX_COMPONENT_LEN],
+            "界".repeat(85).into_bytes(),
+            vec![0xff; MAX_COMPONENT_LEN],
+        ] {
+            let source = TempDir::new("long-dup");
+            let mut paths = Vec::new();
+            for index in 0..12 {
+                let parent = source.0.join(index.to_string());
+                fs::create_dir(&parent).unwrap();
+                let path = parent.join(OsStr::from_bytes(&name));
+                fs::write(&path, index.to_string()).unwrap();
+                paths.push(path);
+            }
+            let manifest = Manifest::build(&paths, u64::MAX).unwrap();
+            let destination = TempDir::new("long-dup-dst");
+            let mut receiver =
+                ArchiveReceiver::new(destination.0.clone(), manifest.entry_count()).unwrap();
+            for chunk in stream(manifest, 31).chunks(7) {
+                receiver.feed(chunk).unwrap();
+            }
+            let top = receiver.finish().unwrap();
+            assert_eq!(top.len(), paths.len());
+            for (index, path) in top.iter().enumerate() {
+                assert_eq!(fs::read(path).unwrap(), index.to_string().as_bytes());
+                let result = path.file_name().unwrap().as_bytes();
+                assert!(result.len() <= MAX_COMPONENT_LEN);
+                if std::str::from_utf8(&name).is_ok() {
+                    assert!(std::str::from_utf8(result).is_ok());
+                }
+            }
+            assert_eq!(top[0].file_name().unwrap().as_bytes(), name);
+        }
+    }
+
+    #[test]
+    fn truncated_duplicate_names_still_avoid_preexisting_suffixes() {
+        let base = vec![b'x'; MAX_COMPONENT_LEN];
+        let mut used = std::collections::HashSet::new();
+        let mut reserved = base[..MAX_COMPONENT_LEN - 4].to_vec();
+        reserved.extend_from_slice(b" (2)");
+        assert_eq!(unique_name(&reserved, &mut used), reserved);
+        assert_eq!(unique_name(&base, &mut used), base);
+        let name = unique_name(&base, &mut used);
+        assert_eq!(name.len(), MAX_COMPONENT_LEN);
+        assert!(name.ends_with(b" (3)"));
+        assert_eq!(used.len(), 3);
+    }
+
+    #[test]
+    fn duplicate_long_directories_keep_their_children_separate() {
+        let source = TempDir::new("long-dir");
+        let base = "d".repeat(MAX_COMPONENT_LEN);
+        let paths: Vec<_> = ["a", "b"]
+            .iter()
+            .map(|parent| source.0.join(parent).join(&base))
+            .collect();
+        for (index, path) in paths.iter().enumerate() {
+            fs::create_dir_all(path).unwrap();
+            fs::write(path.join("child"), index.to_string()).unwrap();
+        }
+        let manifest = Manifest::build(&paths, u64::MAX).unwrap();
+        let destination = TempDir::new("long-dir-dst");
+        let mut receiver =
+            ArchiveReceiver::new(destination.0.clone(), manifest.entry_count()).unwrap();
+        receiver.feed(&stream(manifest, 17)).unwrap();
+        let top = receiver.finish().unwrap();
+        assert_eq!(top.len(), 2);
+        for (index, path) in top.iter().enumerate() {
+            assert_eq!(
+                fs::read(path.join("child")).unwrap(),
+                index.to_string().as_bytes()
+            );
+        }
+    }
+
+    #[test]
+    fn different_long_bases_with_the_same_shortened_prefix_do_not_collide() {
+        let mut first = vec![b'x'; MAX_COMPONENT_LEN];
+        let mut second = first.clone();
+        first[MAX_COMPONENT_LEN - 1] = b'a';
+        second[MAX_COMPONENT_LEN - 1] = b'b';
+        let mut used = std::collections::HashSet::new();
+        assert_eq!(unique_name(&first, &mut used), first);
+        assert_eq!(unique_name(&second, &mut used), second);
+        let a = unique_name(&first, &mut used);
+        let b = unique_name(&second, &mut used);
+        assert!(a.ends_with(b" (2)"));
+        assert!(b.ends_with(b" (3)"));
+        assert_ne!(a, b);
+        assert!(validate_name(&a).is_ok());
+        assert!(validate_name(&b).is_ok());
     }
 
     #[test]

@@ -1327,6 +1327,12 @@ the terminal. The receiver rebuilds the tree inside a fresh private directory:
 every name component is checked, nothing is created through a symlink, and
 every file and folder must be new, so a peer cannot write outside it.
 
+Selected top-level items with the same name receive a numeric suffix, such as
+`name (2)`. For names near the 255-byte component limit, the duplicate name
+is shortened to make room for the suffix; valid UTF-8 is not split mid-character.
+The first name and all source files remain unchanged. Different shortened names
+are still checked for collisions before the transfer is sent.
+
 **Size.** `--clipboard-file-limit SIZE` (default `2G`, on `host`, `connect`
 and `ssh`) bounds one file copy; each end enforces its own limit, as sender
 and as receiver, and checks it before reading a byte. `0` shares text and
