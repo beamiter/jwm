@@ -7,6 +7,7 @@ on:
     paths:
       - 'bars/xilem_bar/**'
       - 'bars/tao_glow_bar/**'
+      - 'bridge/src/player/**'
       - 'scripts/test-shared-sidebar-shell-x11.py'
       - 'scripts/fixtures/mpv_syscall_probe.py'
       - 'scripts/test-mpv-syscall-probe.py'
@@ -18,6 +19,7 @@ on:
   pull_request:
     paths:
       - 'bars/**'
+      - 'bridge/src/player/**'
       - 'crates/jwm_shell/**'
       - 'crates/xbar_core/**'
       - 'crates/shared_structures/**'
