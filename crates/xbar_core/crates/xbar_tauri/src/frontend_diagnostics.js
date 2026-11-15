@@ -20,6 +20,17 @@
     consoleError(...args);
     error(args.map(value => String(value)).join(" "));
   };
+  let visibilityChanges = 0;
+  const visibility = stage => {
+    // Diagnostics must not prevent the original double-rAF acknowledgement.
+    try {
+      report(stage, JSON.stringify({visibilityState: document.visibilityState,
+        hidden: document.hidden, width: window.innerWidth, height: window.innerHeight}));
+    } catch (_) {}
+  };
+  document.addEventListener("visibilitychange", () => {
+    if (visibilityChanges++ < 16) visibility("visibility");
+  });
   let rendered = false;
   const observer = new MutationObserver(() => {
     if (rendered || !document.querySelector(".time-pill") || !document.querySelector(".emoji-button") || document.querySelector(".button-row")?.textContent?.trim() === "Loading...") return;
@@ -27,7 +38,7 @@
     observer.disconnect();
     // Independent properties retain each milestone even if IPC completes out of order.
     // These probes are evidence only: rendered still requires both animation frames.
-    report("dom-ready", "workspace controls and clock present");
+    visibility("dom-ready");
     requestAnimationFrame(() => {
       report("raf-first", "first animation frame reached");
       requestAnimationFrame(() => {

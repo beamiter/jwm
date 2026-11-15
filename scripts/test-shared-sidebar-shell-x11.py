@@ -774,7 +774,7 @@ def main():
                 def frontend_ready():
                     for xid in run("xdotool", "search", "--pid", primary_pid).split():
                         raw = run("xprop", "-id", xid, "_JWM_FRONTEND_READY", "_JWM_FRONTEND_RENDERED", "_JWM_FRONTEND_BOOT", "_JWM_FRONTEND_ERROR",
-                                  "_JWM_FRONTEND_DOM_READY", "_JWM_FRONTEND_RAF_FIRST",
+                                  "_JWM_FRONTEND_DOM_READY", "_JWM_FRONTEND_VISIBILITY", "_JWM_FRONTEND_NATIVE_DOM_READY", "_JWM_FRONTEND_NATIVE_VISIBILITY", "_JWM_FRONTEND_RAF_FIRST",
                                   "_JWM_FRONTEND_RAF_SECOND", "_JWM_FRONTEND_RENDER_REPORT_REJECTED")
                         frontend_diagnostics[xid] = raw
                         if re.search(r"_JWM_FRONTEND_READY\([^)]*\)\s*=\s*1\s*$", raw, re.M) and re.search(r"_JWM_FRONTEND_RENDERED\([^)]*\)\s*=\s*1\s*$", raw, re.M):

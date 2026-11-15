@@ -514,6 +514,7 @@ fn frontend_diagnostic<R: Runtime>(
             | "error"
             | "rendered"
             | "dom-ready"
+            | "visibility"
             | "raf-first"
             | "raf-second"
             | "render-report-rejected"
@@ -521,6 +522,37 @@ fn frontend_diagnostic<R: Runtime>(
         return Err("unknown frontend diagnostic stage".to_owned());
     }
     eprintln!("xbar frontend {stage}: {message}");
+    #[cfg(target_os = "linux")]
+    if matches!(stage.as_str(), "dom-ready" | "visibility") {
+        // with_webview schedules the closure on the native UI thread. Never
+        // query GTK from a command worker or change widget state for this probe.
+        let target = window.clone();
+        let native_stage = if stage == "dom-ready" {
+            "native-dom-ready"
+        } else {
+            "native-visibility"
+        };
+        if let Err(error) = window.with_webview(move |webview| {
+            use gtk::prelude::WidgetExt;
+            let view = webview.inner();
+            let allocation = view.allocation();
+            let top = view.toplevel().and_then(|widget| widget.window());
+            let snapshot = format!(
+                "mapped={} visible={} realized={} allocation={},{},{},{} top_state={:?} top_geometry={:?} top_viewable={:?}",
+                view.is_mapped(), view.is_visible(), view.is_realized(),
+                allocation.x(), allocation.y(), allocation.width(), allocation.height(),
+                top.as_ref().map(|window| window.state()),
+                top.as_ref().map(|window| window.geometry()),
+                top.as_ref().map(|window| window.is_viewable()),
+            );
+            eprintln!("xbar frontend {native_stage}: {snapshot}");
+            if let Err(error) = publish_frontend_property(&target, native_stage, &snapshot) {
+                eprintln!("xbar native visibility diagnostic failed: {error}");
+            }
+        }) {
+            eprintln!("xbar native visibility diagnostic scheduling failed: {error}");
+        }
+    }
     publish_frontend_property(&window, &stage, &message)
 }
 
@@ -567,6 +599,9 @@ fn publish_frontend_property<R: Runtime>(
                 "boot" => b"_JWM_FRONTEND_BOOT".as_slice(),
                 "error" => b"_JWM_FRONTEND_ERROR".as_slice(),
                 "dom-ready" => b"_JWM_FRONTEND_DOM_READY".as_slice(),
+                "visibility" => b"_JWM_FRONTEND_VISIBILITY".as_slice(),
+                "native-dom-ready" => b"_JWM_FRONTEND_NATIVE_DOM_READY".as_slice(),
+                "native-visibility" => b"_JWM_FRONTEND_NATIVE_VISIBILITY".as_slice(),
                 "raf-first" => b"_JWM_FRONTEND_RAF_FIRST".as_slice(),
                 "raf-second" => b"_JWM_FRONTEND_RAF_SECOND".as_slice(),
                 "render-report-rejected" => b"_JWM_FRONTEND_RENDER_REPORT_REJECTED".as_slice(),

@@ -153,7 +153,7 @@ def main():
             if args.bar.startswith('tauri_'):
                 def rendered():
                     raw = run('xprop', '-id', xid, '_JWM_FRONTEND_READY', '_JWM_FRONTEND_RENDERED',
-                              '_JWM_FRONTEND_BOOT', '_JWM_FRONTEND_ERROR', '_JWM_FRONTEND_DOM_READY',
+                              '_JWM_FRONTEND_BOOT', '_JWM_FRONTEND_ERROR', '_JWM_FRONTEND_DOM_READY', '_JWM_FRONTEND_VISIBILITY', '_JWM_FRONTEND_NATIVE_DOM_READY', '_JWM_FRONTEND_NATIVE_VISIBILITY',
                               '_JWM_FRONTEND_RAF_FIRST', '_JWM_FRONTEND_RAF_SECOND',
                               '_JWM_FRONTEND_RENDER_REPORT_REJECTED')
                     result['frontend_diagnostics'] = raw
