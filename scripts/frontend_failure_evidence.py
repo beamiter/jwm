@@ -1,6 +1,7 @@
 """Passive, bounded X11 observations for private acceptance displays only."""
 from itertools import islice
 import re
+import struct
 import subprocess
 import time
 import tempfile
@@ -58,12 +59,36 @@ def collect(window_ids, evidence, env):
     # final display pixels without a compositor IPC request or a repaint.
     remaining = deadline - time.monotonic()
     if remaining > 0:
-        destination = Path(evidence) / "frontend-timeout-display.png"
+        destination = Path(evidence) / "frontend-timeout-display.xwd"
         try:
-            subprocess.run(["import", "-window", "root", str(destination)], env=env,
+            subprocess.run(["xwd", "-root", "-silent", "-out", str(destination)], env=env,
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                            timeout=min(1, remaining), check=True)
+            # Preserve the real XWD format. Do not pretend this is a PNG or
+            # accept an empty/partial dump as visual evidence.
+            with destination.open("rb") as capture:
+                header = capture.read(100)
+            if len(header) != 100 or destination.stat().st_size > 16 * 1024 * 1024:
+                raise ValueError("invalid XWD size")
+            fields = struct.unpack(">25I", header)
+            if fields[1] != 7 or not 100 <= fields[0] <= 65536 or not all(0 < value <= 4096 for value in fields[4:6]):
+                raise ValueError("invalid XWD header")
             result["private_display_capture"] = destination.name
-        except (OSError, subprocess.SubprocessError):
+            result["capture_format"] = "xwd"
+        except ValueError:
             result["capture_failed"] = True
+            result["capture_failure"] = {"kind": "invalid-dump"}
+        except FileNotFoundError as error:
+            result["capture_failed"] = True
+            kind = "missing-dump" if error.filename == str(destination) else "missing-tool"
+            result["capture_failure"] = {"kind": kind}
+        except subprocess.TimeoutExpired:
+            result["capture_failed"] = True
+            result["capture_failure"] = {"kind": "timeout"}
+        except subprocess.CalledProcessError as error:
+            result["capture_failed"] = True
+            result["capture_failure"] = {"kind": "exit-status", "code": error.returncode}
+        except OSError as error:
+            result["capture_failed"] = True
+            result["capture_failure"] = {"kind": "os-error", "errno": error.errno}
     return result
