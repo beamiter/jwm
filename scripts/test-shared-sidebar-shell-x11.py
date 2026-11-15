@@ -25,6 +25,7 @@ import subprocess
 import tempfile
 import time
 from fixtures.media_command_probe import invocations, new_invocation, successful_result
+from fixtures.mpv_syscall_probe import launcher_prefix
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE_SHA256 = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
@@ -102,6 +103,7 @@ def main():
     parser.add_argument("--size", default="1280x800")
     parser.add_argument("--theme", choices=("light", "dark"), default="light")
     parser.add_argument("--deep", action="store_true")
+    parser.add_argument("--trace-mpv", action="store_true", help="require private mpv syscall capture (strace) during media/deep acceptance")
     parser.add_argument("--media-only", action="store_true", help="test empty-player launch and real MPRIS controls after the standard smoke")
     parser.add_argument("--ui-font", help="optional private system UI font override for visual fixtures")
     parser.add_argument("--submenu-themes", action="store_true", help="capture Hub child pages and verify live theme changes without replacing the shared host")
@@ -118,6 +120,7 @@ def main():
     bridge_bin = (args.bridge_bin or args.bin_dir / "jwm-bridge").resolve()
     player_bin = (args.player_bin or args.bin_dir / "jwm-player").resolve()
     width, height = map(int, args.size.split("x"))
+    assert not args.trace_mpv or args.deep or args.media_only, "--trace-mpv requires --deep or --media-only"
     assert not (args.legacy_four_edge and args.legacy_edge_shell), "choose one legacy source"
     suffix = "-legacy-four-edge" if args.legacy_four_edge else ("-legacy-edge-shell" if args.legacy_edge_shell else "")
     evidence = (args.evidence_dir / f"{args.bar}-{args.backend}-{args.size}-{args.theme}{suffix}").resolve()
@@ -179,11 +182,13 @@ def main():
             # Each private decoder gets its own log; exec preserves its PID.
             mpv_bin = shutil.which("mpv")
             assert mpv_bin, "private media tests require mpv"
+            trace_prefix = launcher_prefix(evidence) if args.trace_mpv else ""
             mpv_launcher = work / "bin/mpv"
             mpv_launcher.write_text(
                 "#!/bin/sh\n"
+                "umask 077\n"
                 f"log={shlex.quote(str(evidence / 'mpv-'))}\"$$\".log\n"
-                f"exec {shlex.quote(mpv_bin)} --log-file=\"$log\" --msg-level=all=debug \"$@\"\n"
+                f"exec {trace_prefix}{shlex.quote(mpv_bin)} --log-file=\"$log\" --msg-level=all=debug \"$@\"\n"
             )
             mpv_launcher.chmod(0o700)
             gdbus_bin = shutil.which("gdbus")
