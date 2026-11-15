@@ -7,13 +7,13 @@ thread_local! {
     static ACTIVE: RefCell<Option<Arc<Probe>>> = const { RefCell::new(None) };
 }
 
-pub(super) struct Probe {
-    finished: mpsc::Sender<Instant>,
-    join: mpsc::Sender<Instant>,
-    gate: Mutex<mpsc::Receiver<()>>,
+pub(in crate::remote) struct Probe {
+    pub(in crate::remote) finished: mpsc::Sender<Instant>,
+    pub(in crate::remote) join: mpsc::Sender<Instant>,
+    pub(in crate::remote) gate: Mutex<mpsc::Receiver<()>>,
 }
 
-pub(super) fn current() -> Option<Arc<Probe>> {
+pub(in crate::remote) fn current() -> Option<Arc<Probe>> {
     ACTIVE.with(|slot| slot.borrow().clone())
 }
 
@@ -35,7 +35,7 @@ impl Probe {
     }
 }
 
-fn scoped<T>(probe: Arc<Probe>, run: impl FnOnce() -> T) -> T {
+pub(in crate::remote) fn scoped<T>(probe: Arc<Probe>, run: impl FnOnce() -> T) -> T {
     struct Reset;
     impl Drop for Reset {
         fn drop(&mut self) {

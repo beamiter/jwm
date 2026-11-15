@@ -718,6 +718,7 @@ impl Harness {
         let resumable_acks = Arc::new(Mutex::new(Vec::new()));
         let client_acks = resumable_acks.clone();
         let (client_tx, client_done) = mpsc::channel();
+        let cleanup_probe = crate::remote::client::cleanup_probe::current();
         let client = thread::spawn(move || {
             let opts = ClientOptions {
                 control_duration,
@@ -770,7 +771,10 @@ impl Harness {
                                                 with_wayland_test_stream(stream, || {
                                                     crate::remote::client::with_resumable_control_test_driver(
                                                         client_commands, client_acks, || {
-                                                            let run = || run_client(opts);
+                                                            let run = || match cleanup_probe {
+                                                                Some(probe) => crate::remote::client::cleanup_probe::scoped(probe, || run_client(opts)),
+                                                                None => run_client(opts),
+                                                            };
                                                             match ack_barrier {
                                                                 Some((reached, release)) => crate::remote::client::with_resumable_control_ack_barrier(reached, release, run),
                                                                 None => run(),

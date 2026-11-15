@@ -360,8 +360,12 @@ began, automatic retry is also disabled: subsequent Escape input goes back to
 local applications and can no longer be reliably observed by the viewer. This
 applies to both ordinary click-to-grab and seamless input. Sessions without an
 active grab retain the existing retry checks; any local release failure still
-prevents retry and does not skip other worker cleanup. Native Wayland handoff
-teardown is unchanged by this X11-specific release boundary.
+prevents retry and does not skip other worker cleanup. Native Wayland seamless handoff is also terminated before these worker waits.
+Its destroy request uses a bounded 50 ms flush; failure shuts down only this
+viewer's private Wayland connection and is still reported as a cleanup error.
+The compositor, not the client, restores prior focus and quarantines physically
+held keys until their real release. Sending the request is not an acknowledgement
+that the compositor has already restored focus.
 Explicitly reported layout/selection
 rejections and identity/authentication failures do not silently retry or
 downgrade. Every replacement connection repeats normal permission negotiation.

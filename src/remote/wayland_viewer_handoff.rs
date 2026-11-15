@@ -5,6 +5,7 @@ use crate::viewer_handoff_protocol::client::{
     jwm_remote_viewer_handoff_session_v1::{self as session, JwmRemoteViewerHandoffSessionV1},
 };
 use wayland_client::Proxy;
+const CLEANUP_FLUSH_TIMEOUT: Duration = Duration::from_millis(50);
 const TRANSITION_TIMEOUT: Duration = Duration::from_secs(2);
 #[derive(Default)]
 pub(super) struct Handoff {
@@ -24,15 +25,35 @@ pub(super) struct Handoff {
     enter_serial: Option<u32>,
     consumed_serial: Option<u32>,
     pub(super) failure: Option<&'static str>,
+    cleanup_result: Option<Result<(), String>>,
 }
 impl Handoff {
+    fn cleanup(&mut self, flush: impl FnOnce() -> RemoteResult<()>) -> RemoteResult<()> {
+        if let Some(result) = &self.cleanup_result {
+            return result.clone().map_err(Into::into);
+        }
+        // Terminal even for a viewer that never enabled handoff. Its default
+        // forwarding policy must not authorize input after cleanup begins.
+        self.cleanup_result = Some(Ok(()));
+        if !self.enabled {
+            return Ok(());
+        }
+        // Terminal before any I/O: late ACKs and input cannot renew authority.
+        self.fail("local handoff ended during session cleanup");
+        // A previous fail may already have taken session, leaving its destroy
+        // queued. Always flush even when no session proxy remains.
+        let result = flush();
+        self.cleanup_result = Some(result.as_ref().map(|_| ()).map_err(ToString::to_string));
+        result
+    }
     pub(super) fn forwarding(&self) -> bool {
-        !self.enabled
-            || (self.active
-                && !self.exit_required
-                && self.inside
-                && self.pending.is_none()
-                && self.failure.is_none())
+        self.cleanup_result.is_none()
+            && (!self.enabled
+                || (self.active
+                    && !self.exit_required
+                    && self.inside
+                    && self.pending.is_none()
+                    && self.failure.is_none()))
     }
     pub(super) fn expects_focus_exit(&self) -> bool {
         self.enabled
@@ -151,7 +172,7 @@ impl Handoff {
         }
     }
     pub(super) fn drive(&mut self, may_enter: bool, inside: bool) {
-        if !self.enabled {
+        if !self.enabled || self.cleanup_result.is_some() {
             return;
         }
         self.position(inside);
@@ -169,14 +190,113 @@ impl Drop for WaylandViewer {
         }
     }
 }
+/// No event dispatch or state.check: either can reject the already-terminal
+/// handoff before its queued destroy reaches the compositor. Both flush and
+/// writable waits share one deadline, including interruptions.
+fn flush_teardown(
+    mut flush: impl FnMut() -> io::Result<()>,
+    mut wait_writable: impl FnMut(Duration) -> io::Result<()>,
+    shutdown: impl FnOnce() -> io::Result<()>,
+    mut now: impl FnMut() -> Instant,
+) -> RemoteResult<()> {
+    let deadline = now() + CLEANUP_FLUSH_TIMEOUT;
+    let result = loop {
+        let remaining = deadline.saturating_duration_since(now());
+        if remaining.is_zero() {
+            break Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "local handoff destroy flush expired",
+            ));
+        }
+        match flush() {
+            Ok(()) => break Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                let remaining = deadline.saturating_duration_since(now());
+                if remaining.is_zero() {
+                    continue;
+                }
+                match wait_writable(remaining) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                    Err(error) => break Err(error),
+                }
+            }
+            Err(error) => break Err(error),
+        }
+    };
+    if let Err(error) = result {
+        // The connection is private to this terminating viewer. EOF lets the
+        // compositor revoke even when a destroy cannot fit in its socket.
+        return match shutdown() {
+            Ok(()) => Err(error.into()),
+            Err(shutdown_error) => Err(format!(
+                "local handoff teardown failed: {error}; connection shutdown failed: {shutdown_error}"
+            ).into()),
+        };
+    }
+    Ok(())
+}
+
 impl WaylandViewer {
+    pub(in crate::remote) fn begin_local_cleanup(&mut self) -> RemoteResult<()> {
+        let backend = self.conn.backend();
+        self.state.handoff.cleanup(|| {
+            flush_teardown(
+                || {
+                    backend.flush().map_err(|error| match error {
+                        WaylandError::Io(error) => error,
+                        error => io::Error::other(error),
+                    })
+                },
+                |remaining| {
+                    let mut fds = [PollFd::new(backend.poll_fd(), PollFlags::POLLOUT)];
+                    let timeout = PollTimeout::try_from(remaining).map_err(io::Error::other)?;
+                    poll(&mut fds, timeout).map_err(io::Error::from)?;
+                    if fds[0]
+                        .revents()
+                        .unwrap_or(PollFlags::empty())
+                        .intersects(PollFlags::POLLERR | PollFlags::POLLHUP | PollFlags::POLLNVAL)
+                    {
+                        return Err(io::Error::new(
+                            io::ErrorKind::BrokenPipe,
+                            "local Wayland connection closed",
+                        ));
+                    }
+                    Ok(())
+                },
+                || {
+                    use std::os::fd::AsRawFd;
+                    // SAFETY: poll_fd is the live socket of this viewer's own
+                    // backend. Shutdown changes neither fd ownership nor its
+                    // lifetime; Connection/its proxies still close it normally.
+                    if unsafe { libc::shutdown(backend.poll_fd().as_raw_fd(), libc::SHUT_RDWR) }
+                        == 0
+                    {
+                        Ok(())
+                    } else {
+                        let error = io::Error::last_os_error();
+                        if error.kind() == io::ErrorKind::NotConnected {
+                            Ok(())
+                        } else {
+                            Err(error)
+                        }
+                    }
+                },
+                Instant::now,
+            )
+        })
+    }
     pub(in crate::remote) fn enable_wayland_seamless_input(
         &mut self,
         deadline: Instant,
         remaining_ms: u32,
         extended: bool,
     ) -> RemoteResult<()> {
-        if !self.state.control_mode || self.state.handoff.enabled {
+        if !self.state.control_mode
+            || self.state.handoff.enabled
+            || self.state.handoff.cleanup_result.is_some()
+        {
             return Err("native seamless input requires fresh combined control".into());
         }
         let manager = self
@@ -325,6 +445,127 @@ impl Dispatch<JwmRemoteViewerHandoffSessionV1, ()> for State {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn terminal_cleanup_is_idempotent_and_never_reauthorizes_input() {
+        for enabled in [false, true] {
+            let mut h = Handoff {
+                enabled,
+                active: enabled,
+                granted: enabled,
+                inside: true,
+                ..Default::default()
+            };
+            let mut flushes = 0;
+            h.cleanup(|| {
+                flushes += 1;
+                Ok(())
+            })
+            .unwrap();
+            h.cleanup(|| panic!("cleanup must not repeat I/O")).unwrap();
+            h.pointer_enter(9, true);
+            h.drive(true, true);
+            assert!(!h.forwarding());
+            assert!(h.pending.is_none());
+            assert_eq!(flushes, usize::from(enabled));
+        }
+    }
+
+    #[test]
+    fn terminal_cleanup_flushes_after_prior_failure_and_preserves_error() {
+        let mut h = Handoff {
+            enabled: true,
+            ..Default::default()
+        };
+        h.fail("previous failure already queued destroy");
+        assert!(h.session.is_none());
+        let error = h.cleanup(|| Err("flush failure".into())).unwrap_err();
+        assert_eq!(error.to_string(), "flush failure");
+        assert_eq!(
+            h.cleanup(|| panic!("failed cleanup must not retry I/O"))
+                .unwrap_err()
+                .to_string(),
+            "flush failure"
+        );
+        assert_eq!(h.failure, Some("previous failure already queued destroy"));
+        h.drive(true, true);
+        assert!(!h.forwarding());
+    }
+
+    #[test]
+    fn teardown_flush_retry_shares_deadline_and_success_does_not_shutdown() {
+        use std::cell::Cell;
+        let start = Instant::now();
+        let clock = Cell::new(start);
+        let mut flushes = 0;
+        let mut waits = Vec::new();
+        flush_teardown(
+            || {
+                flushes += 1;
+                if flushes < 3 {
+                    Err(io::ErrorKind::WouldBlock.into())
+                } else {
+                    Ok(())
+                }
+            },
+            |remaining| {
+                waits.push(remaining);
+                clock.set(clock.get() + Duration::from_millis(10));
+                Err(io::ErrorKind::Interrupted.into())
+            },
+            || panic!("successful flush cannot disconnect viewer"),
+            || clock.get(),
+        )
+        .unwrap();
+        assert_eq!(flushes, 3);
+        assert_eq!(
+            waits,
+            [
+                CLEANUP_FLUSH_TIMEOUT,
+                CLEANUP_FLUSH_TIMEOUT - Duration::from_millis(10)
+            ]
+        );
+    }
+
+    #[test]
+    fn teardown_flush_timeout_and_errors_shutdown_once_and_remain_errors() {
+        use std::cell::Cell;
+        for interrupted_flush in [false, true] {
+            let clock = Cell::new(Instant::now());
+            let mut shutdowns = 0;
+            let error = flush_teardown(
+                || {
+                    if interrupted_flush {
+                        clock.set(clock.get() + Duration::from_millis(10));
+                        Err(io::ErrorKind::Interrupted.into())
+                    } else {
+                        Err(io::ErrorKind::WouldBlock.into())
+                    }
+                },
+                |remaining| {
+                    clock.set(clock.get() + remaining);
+                    Ok(())
+                },
+                || {
+                    shutdowns += 1;
+                    Ok(())
+                },
+                || clock.get(),
+            )
+            .unwrap_err();
+            assert_eq!(shutdowns, 1);
+            assert!(error.to_string().contains("expired"));
+        }
+        let error = flush_teardown(
+            || Err(io::ErrorKind::BrokenPipe.into()),
+            |_| panic!("hard flush failure must not wait"),
+            || Err(io::Error::other("shutdown failed too")),
+            Instant::now,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("shutdown failed too"));
+        assert!(error.to_string().contains("teardown failed"));
+    }
+
     #[test]
     fn pending_enter_exit_is_latched_across_reentry_and_late_active_ack() {
         let mut h = Handoff {

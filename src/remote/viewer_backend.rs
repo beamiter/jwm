@@ -245,12 +245,12 @@ impl Viewer {
             Self::Wayland(_) => false,
         }
     }
-    /// Early local release currently applies only to the X11 input-grab path.
+    /// End local X11 grabs or explicit native Wayland handoff before worker joins.
     pub(super) fn begin_local_cleanup(&mut self) -> RemoteResult<()> {
         match self {
             Self::X11(v) => v.begin_local_cleanup(),
             #[cfg(feature = "remote-wayland")]
-            Self::Wayland(_) => Ok(()),
+            Self::Wayland(v) => v.begin_local_cleanup(),
         }
     }
     pub(super) fn reconnect_allowed_after_cleanup(&mut self) -> RemoteResult<bool> {

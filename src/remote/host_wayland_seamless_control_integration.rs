@@ -319,3 +319,182 @@ fn actual_seamless_user_close_completes_cleanup_successfully_with_held_key() {
     h.client.take().unwrap().join().unwrap();
     h.host.take().unwrap().join().unwrap();
 }
+
+/// The real receiver is paused after publishing disconnect, at its actual
+/// join boundary. Only owned compositor state is observed; no release is
+/// injected by this probe and eventual Viewer Drop cannot satisfy it.
+#[test]
+fn actual_seamless_disconnect_returns_local_focus_before_receiver_join() {
+    disconnect_cleanup_probe(false);
+}
+
+#[test]
+fn actual_seamless_disconnect_quarantines_held_key_before_receiver_join() {
+    disconnect_cleanup_probe(true);
+}
+
+fn disconnect_cleanup_probe(held_key: bool) {
+    use crate::remote::client::cleanup_probe::{Probe, scoped};
+    let Some(mut gl) = HeadlessSmithayGles::new() else {
+        return;
+    };
+    struct ReleaseGate(Option<mpsc::Sender<()>>);
+    impl Drop for ReleaseGate {
+        fn drop(&mut self) {
+            if let Some(sender) = self.0.take() {
+                let _ = sender.send(());
+            }
+        }
+    }
+    let (finished_tx, finished_rx) = mpsc::channel();
+    let (join_tx, join_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let mut release = ReleaseGate(Some(release_tx));
+    let probe = Arc::new(Probe {
+        finished: finished_tx,
+        join: join_tx,
+        gate: Mutex::new(release_rx),
+    });
+    let mut h = scoped(probe, || Harness::new_seamless(&mut gl));
+    h.activate(&mut gl);
+    h.seamless_pointer_focus(false);
+    h.wait(&mut gl, "initial handoff exits", true, |s| {
+        !viewer_handoff::active(&s.local.state)
+            && s.resumable_acks
+                .lock()
+                .unwrap()
+                .last()
+                .is_some_and(|ack| ack.kind == Kind::Paused)
+    });
+    let mut prior = App::with_size_color(&mut h.local, [0, 255, 0, 255], 100, 80);
+    let (prior_pointer, prior_keyboard) = bind_inputs(&mut h.local, &mut prior, 7);
+    focus(&mut h.local, &prior);
+    prior.client.events();
+    let prior_surface = h.local.state.surface_for_window(prior.window).unwrap();
+    assert_eq!(
+        h.local.state.seat.get_keyboard().unwrap().current_focus(),
+        Some(prior_surface.clone()),
+        "prior recipient must actually own local keyboard focus before reentry"
+    );
+    h.seamless_pointer_focus(true);
+    h.wait(&mut gl, "fresh handoff with prior local focus", true, |s| {
+        viewer_handoff::active(&s.local.state)
+            && s.resumable_acks
+                .lock()
+                .unwrap()
+                .last()
+                .is_some_and(|ack| ack.kind == Kind::Resumed)
+    });
+    assert!(viewer_handoff::inhibits(&h.local.state));
+    assert_eq!(
+        h.local.state.seat.get_keyboard().unwrap().current_focus(),
+        Some(h.identified_viewer.as_ref().unwrap().clone()),
+        "the identified viewer must own local keyboard focus before disconnect"
+    );
+    if held_key {
+        let resumed = *h.resumable_acks.lock().unwrap().last().unwrap();
+        h.wait(
+            &mut gl,
+            "resumed proof before held-key disconnect",
+            true,
+            |s| {
+                s.ready.lock().unwrap().is_some_and(|seq| {
+                    seq > resumed.proof && s.frames.lock().unwrap().1 == Some(seq)
+                })
+            },
+        );
+        h.key(800, 42, true);
+        h.wait(&mut gl, "held key delivered before disconnect", true, |s| {
+            s.received.keys == [(42, 1)]
+        });
+    }
+    h.shutdown.store(true, Ordering::Release);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let (mut finished, mut joined) = (None, None);
+    while finished.is_none() || joined.is_none() {
+        h.tick(&mut gl, false);
+        finished = finished.or_else(|| finished_rx.try_recv().ok());
+        joined = joined.or_else(|| join_rx.try_recv().ok());
+        assert!(
+            Instant::now() < deadline,
+            "receiver cleanup checkpoint missing"
+        );
+        thread::sleep(Duration::from_millis(1));
+    }
+    let joined = joined.unwrap();
+    // Poll actual compositor state, not a sleep-based assumption that queued
+    // requests have been processed. The gate stays closed throughout and this
+    // deadline precedes the production receiver-join timeout.
+    let observation_end = joined + Duration::from_millis(500);
+    let observed = loop {
+        h.local.dispatch_timers(Duration::ZERO);
+        h.local.roundtrip();
+        let observed = (
+            viewer_handoff::registered_for_test(&h.local.state),
+            viewer_handoff::active(&h.local.state),
+            viewer_handoff::inhibits(&h.local.state),
+            h.local.state.seat.get_keyboard().unwrap().current_focus()
+                == if held_key {
+                    None
+                } else {
+                    Some(prior_surface.clone())
+                },
+            viewer_handoff::quarantined(&h.local.state),
+        );
+        if observed == (false, false, false, true, held_key) || Instant::now() >= observation_end {
+            break observed;
+        }
+        thread::sleep(Duration::from_millis(1));
+    };
+    let before_timeout = joined.elapsed() < Duration::from_secs(1)
+        && finished.unwrap().elapsed() < Duration::from_secs(2);
+    let still_running = matches!(h.client_done.try_recv(), Err(mpsc::TryRecvError::Empty));
+    let held_release = if held_key {
+        let mut received = Recipient::default();
+        received.collect(&mut prior, prior_pointer, prior_keyboard);
+        h.key(802, 42, false);
+        h.local.roundtrip();
+        received.collect(&mut prior, prior_pointer, prior_keyboard);
+        Some((
+            h.local.state.seat.get_keyboard().unwrap().current_focus() == Some(prior_surface),
+            viewer_handoff::quarantined(&h.local.state),
+            received.keys.is_empty(),
+            received
+                .keyboard_wire
+                .iter()
+                .filter(|(op, _)| *op == 1)
+                .all(|(_, args)| args.get(2) == Some(&0)),
+        ))
+    } else {
+        None
+    };
+    release.0.take().unwrap().send(()).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !h.client.as_ref().unwrap().is_finished() || !h.host.as_ref().unwrap().is_finished() {
+        h.tick(&mut gl, false);
+        assert!(
+            Instant::now() < deadline,
+            "released cleanup workers did not finish"
+        );
+        thread::sleep(Duration::from_millis(1));
+    }
+    h.client.take().unwrap().join().unwrap();
+    h.host.take().unwrap().join().unwrap();
+    assert!(
+        before_timeout && still_running,
+        "observation must precede cleanup completion/timeouts"
+    );
+    assert_eq!(
+        observed,
+        (false, false, false, true, held_key),
+        "local handoff must end before receiver join; registered/active/inhibits/expected-focus/quarantine"
+    );
+    if let Some(released) = held_release {
+        assert_eq!(
+            released,
+            (true, false, true, true),
+            "physical release must restore prior focus without replaying held input"
+        );
+        assert_eq!(h.received.keys, [(42, 1), (42, 0)]);
+    }
+}

@@ -39,7 +39,13 @@ an explicit reconnect, even with retry options: after local input is returned,
 Escape typed in the original local application no longer reaches the viewer.
 Sessions without an active grab retain the existing retry checks. A local
 release failure prevents automatic retry but does not skip other cleanup.
-This early-release change does not alter native Wayland handoff teardown.
+Native Wayland seamless sessions likewise terminate local handoff before
+waiting for workers. The destroy request has a bounded 50 ms flush; failure
+closes only this viewer's private connection and remains a reported cleanup
+error. Compositor-side restoration is asynchronous: it restores the previous
+eligible focus, or quarantines physically held keys until their real release.
+No synthetic key release is sent to the previous local application. Native
+authorization still ends permanently, with no automatic reconnect.
 
 This first implementation targets an X11 viewer and X11 host. Native Wayland's
 scoped, one-shot authorizations still revoke on surface leave and are never

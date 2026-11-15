@@ -2,7 +2,7 @@
 
 #[cfg(test)]
 #[path = "client_cleanup_probe.rs"]
-mod cleanup_probe;
+pub(super) mod cleanup_probe;
 
 #[path = "client_control.rs"]
 mod control;
@@ -1235,7 +1235,7 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
             close_release_flushed: true
         })
     );
-    // Return local X11 input before any transport/clipboard join. Capture the
+    // Return local input authority before any transport/clipboard join. Capture the
     // failure instead of skipping the remaining mandatory cleanup steps.
     let local_cleanup = viewer.begin_local_cleanup();
     let (local_cleanup, (cancel_result, receiver_exit, sender_result, clipboard_result)) =
