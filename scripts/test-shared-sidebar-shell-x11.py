@@ -172,6 +172,17 @@ def main():
                 f"exec {shlex.quote(str(player_bin))} \"$@\" 2>> {player_log}\n"
             )
             launcher.chmod(0o700)
+            # Keep decoder IPC/exit ordering, not only the parent-side EOF.
+            # Each private decoder gets its own log; exec preserves its PID.
+            mpv_bin = shutil.which("mpv")
+            assert mpv_bin, "private media tests require mpv"
+            mpv_launcher = work / "bin/mpv"
+            mpv_launcher.write_text(
+                "#!/bin/sh\n"
+                f"log={shlex.quote(str(evidence / 'mpv-'))}\"$$\".log\n"
+                f"exec {shlex.quote(mpv_bin)} --log-file=\"$log\" --msg-level=all=debug \"$@\"\n"
+            )
+            mpv_launcher.chmod(0o700)
             gdbus_bin = shutil.which("gdbus")
             assert gdbus_bin, "private media tests require gdbus"
             gdbus_log = shlex.quote(str(evidence / "gdbus.log"))
