@@ -110,11 +110,13 @@ jobs:
         with:
           shared-key: shared-shell-${{ matrix.bar }}
       - name: Build JWM and the independent host
+        id: native_build
         run: |
           cargo build --locked --release --no-default-features --features backend-x11rb,backend-xcb --bin jwm --bin jwm-tool
           cargo build --locked --release -p jwm-bridge --bin jwm-bridge
           cargo build --locked --manifest-path crates/jwm_shell/Cargo.toml
       - name: Install web frontend tools
+        id: web_tools
         if: startsWith(matrix.bar, 'tauri_')
         run: |
           npm install -g pnpm
@@ -141,13 +143,28 @@ jobs:
           for backend in xcb x11rb; do
             python3 scripts/test-shared-sidebar-shell-x11.py --bar xilem_bar --bar-bin "$PWD/target/default-release/release/xilem_bar" --backend "$backend" --bin-dir target/release --evidence-dir artifacts/shared-shell/production
           done
-      - name: Verify the Leptos production WebView, not only debug assets
-        if: matrix.bar == 'tauri_leptos_bar'
+      # Runtime failures remain job failures, but must not hide the independent
+      # daemon restart evidence when its actual binaries built successfully.
+      - name: Build the Leptos production WebView
+        id: leptos_production_build
+        if: ${{ !cancelled() && matrix.bar == 'tauri_leptos_bar' && steps.native_build.outcome == 'success' && steps.web_tools.outcome == 'success' }}
         run: |
           python3 scripts/test-daemon-stderr-evidence.py
           bash scripts/build-leptos-bar.sh "$PWD/target/default-release"
+      - name: Verify the Leptos production WebView with XCB
+        id: leptos_production_xcb
+        if: ${{ !cancelled() && matrix.bar == 'tauri_leptos_bar' && steps.leptos_production_build.outcome == 'success' }}
+        run: |
           python3 scripts/test-shared-sidebar-shell-x11.py --bar tauri_leptos_bar --bar-bin "$PWD/target/default-release/release/tauri_leptos_bar" --backend xcb --bin-dir target/release --evidence-dir artifacts/shared-shell/production
+      - name: Verify the Leptos production WebView with X11RB
+        id: leptos_production_x11rb
+        if: ${{ !cancelled() && matrix.bar == 'tauri_leptos_bar' && steps.leptos_production_build.outcome == 'success' }}
+        run: |
           python3 scripts/test-shared-sidebar-shell-x11.py --bar tauri_leptos_bar --bar-bin "$PWD/target/default-release/release/tauri_leptos_bar" --backend x11rb --bin-dir target/release --evidence-dir artifacts/shared-shell/production
+      - name: Verify the independent Leptos daemon restart
+        id: leptos_daemon
+        if: ${{ !cancelled() && matrix.bar == 'tauri_leptos_bar' && steps.leptos_production_build.outcome == 'success' }}
+        run: |
           python3 scripts/test-shared-sidebar-shell-daemon.py --bar-bin "$PWD/target/default-release/release/tauri_leptos_bar" --shell-bin crates/jwm_shell/target/debug/jwm-shell --bin-dir target/release --evidence-dir artifacts/shared-shell/daemon
       - name: Build media launcher for deep recovery tests
         if: matrix.bar == 'tao_glow_bar'

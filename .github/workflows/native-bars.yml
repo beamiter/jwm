@@ -15,6 +15,8 @@ on:
       - scripts/test-shared-shell-failure-evidence.py
       - scripts/test-sparse-header-evidence.py
       - scripts/test-daemon-native-log-evidence.py
+      - scripts/test-leptos-daemon-workflow.py
+      - .github/workflows/shared-shell.yml
       - scripts/fixtures/daemon_native_log.py
       - scripts/test-shared-sidebar-shell-daemon.py
       - scripts/test-sparse-header.py
@@ -40,6 +42,8 @@ on:
       - scripts/test-shared-shell-failure-evidence.py
       - scripts/test-sparse-header-evidence.py
       - scripts/test-daemon-native-log-evidence.py
+      - scripts/test-leptos-daemon-workflow.py
+      - .github/workflows/shared-shell.yml
       - scripts/fixtures/daemon_native_log.py
       - scripts/test-shared-sidebar-shell-daemon.py
       - scripts/test-sparse-header.py
@@ -583,6 +587,7 @@ jobs:
           python3 scripts/test-shared-shell-failure-evidence.py
           python3 scripts/test-sparse-header-evidence.py
           python3 scripts/test-daemon-native-log-evidence.py
+          python3 scripts/test-leptos-daemon-workflow.py
 
       - name: Assert generation-aware source contracts (not a frontend build)
         shell: bash
