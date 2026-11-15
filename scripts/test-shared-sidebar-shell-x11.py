@@ -18,6 +18,7 @@ import os
 from pathlib import Path
 import re
 import select
+import shlex
 import shutil
 import signal
 import socket
@@ -25,6 +26,8 @@ import struct
 import subprocess
 import tempfile
 import time
+from fixtures.media_command_probe import invocations, new_invocation, successful_result
+from fixtures.mpv_syscall_probe import launcher_prefix
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE_SHA256 = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
@@ -102,6 +105,7 @@ def main():
     parser.add_argument("--size", default="1280x800")
     parser.add_argument("--theme", choices=("light", "dark"), default="light")
     parser.add_argument("--deep", action="store_true")
+    parser.add_argument("--trace-mpv", action="store_true", help="require private mpv syscall capture (strace) during media/deep acceptance")
     parser.add_argument("--media-only", action="store_true", help="test empty-player launch and real MPRIS controls after the standard smoke")
     parser.add_argument("--ui-font", help="optional private system UI font override for visual fixtures")
     parser.add_argument("--submenu-themes", action="store_true", help="capture Hub child pages and verify live theme changes without replacing the shared host")
@@ -118,6 +122,7 @@ def main():
     bridge_bin = (args.bridge_bin or args.bin_dir / "jwm-bridge").resolve()
     player_bin = (args.player_bin or args.bin_dir / "jwm-player").resolve()
     width, height = map(int, args.size.split("x"))
+    assert not args.trace_mpv or args.deep or args.media_only, "--trace-mpv requires --deep or --media-only"
     assert not (args.legacy_four_edge and args.legacy_edge_shell), "choose one legacy source"
     suffix = "-legacy-four-edge" if args.legacy_four_edge else ("-legacy-edge-shell" if args.legacy_edge_shell else "")
     evidence = (args.evidence_dir / f"{args.bar}-{args.backend}-{args.size}-{args.theme}{suffix}").resolve()
@@ -162,7 +167,35 @@ def main():
             bridge_launcher.write_text("#!/bin/sh\nprintf '%s\\n' \"$$\" > \"$JWM_TEST_BRIDGE_PID\"\nexec \"$@\"\n")
             bridge_launcher.chmod(0o700)
             assert player_bin.is_file() and os.access(player_bin, os.X_OK), f"build current jwm-player first: {player_bin}"
-            (work / "bin/jwm-player").symlink_to(player_bin)
+            # Observe completion, not just a temporarily surviving window.
+            # The observer has a separate PID; JSON records the actual service
+            # PID. Decoder exec/PID and private D-Bus environment are unchanged.
+            observer = ROOT / "scripts/fixtures/media_command_probe.py"
+            player_results = evidence / "player-results"
+            gdbus_results = evidence / "gdbus-results"
+            player_results.mkdir(exist_ok=True)
+            gdbus_results.mkdir(exist_ok=True)
+            def observed_launcher(path, binary, results, log_name, mode):
+                argv = ["python3", str(observer), str(results), str(evidence / log_name), mode, str(binary)]
+                path.write_text("#!/bin/sh\nexec " + shlex.join(argv) + ' "$@"\n')
+                path.chmod(0o700)
+            observed_launcher(work / "bin/jwm-player", player_bin, player_results, "player-stderr.log", "stderr")
+            # Keep decoder IPC/exit ordering, not only the parent-side EOF.
+            # Each private decoder gets its own log; exec preserves its PID.
+            mpv_bin = shutil.which("mpv")
+            assert mpv_bin, "private media tests require mpv"
+            trace_prefix = launcher_prefix(evidence) if args.trace_mpv else ""
+            mpv_launcher = work / "bin/mpv"
+            mpv_launcher.write_text(
+                "#!/bin/sh\n"
+                "umask 077\n"
+                f"log={shlex.quote(str(evidence / 'mpv-'))}\"$$\".log\n"
+                f"exec {trace_prefix}{shlex.quote(mpv_bin)} --log-file=\"$log\" --msg-level=all=debug \"$@\"\n"
+            )
+            mpv_launcher.chmod(0o700)
+            gdbus_bin = shutil.which("gdbus")
+            assert gdbus_bin, "private media tests require gdbus"
+            observed_launcher(work / "bin/gdbus", gdbus_bin, gdbus_results, "gdbus.log", "both")
         env["PATH"] = str(work / "bin") + os.pathsep + env.get("PATH", "")
         log = (evidence / "session.log").open("w+")
 
@@ -405,16 +438,31 @@ def main():
                     all(not c["enabled"] for c in rows if c["kind"] in ("media_previous", "media_next")) else None), "empty skip controls disabled")
                 assert {c["kind"] for c in controls if c["enabled"]} >= {"media_open", "media_play_pause"}
                 target = wait_for(lambda: panel_control("bottom", kind), "empty " + kind + " target")
+                cold_before = invocations(player_results)
                 click(target[0], target[1])
-                wait_for(player_windows, kind + " opens an actual player window")
+                wait_for(lambda: new_invocation(player_results, cold_before), "cold player invocation recorded")
+                opened = wait_for(player_windows, kind + " opens an actual player window")
                 wait_for(lambda: msg("get_media_status").get("player") == "jwm", "launched player discovered over MPRIS")
+                observation = {"kind": kind, "opened_windows": opened,
+                               "media_before_reopen": msg("get_media_status")}
+                capture("media-before-reopen-" + kind)
                 # Reopening the card raises/reuses the existing player.
                 target = wait_for(lambda: panel_control("bottom", "media_open"), "player card target")
+                reopen_before = invocations(player_results)
                 click(target[0], target[1])
-                time.sleep(0.5)
-                assert len(player_windows()) == 1, "card must reuse the existing player"
+                reopen = wait_for(lambda: new_invocation(player_results, reopen_before), "reopen invocation recorded")
+                observation["reopen_result"] = wait_for(lambda: successful_result(reopen), "reopen command completed successfully")
+                reused = player_windows()
+                observation.update(reused_windows=reused, media_after_reopen=msg("get_media_status"))
+                (evidence / ("media-reuse-" + kind + ".json")).write_text(json.dumps(observation, indent=2) + "\n")
+                capture("media-after-reopen-" + kind)
+                assert len(reused) == 1, "card must reuse the existing player: " + json.dumps(observation)
+                assert reused[0]["id"] == opened[0]["id"], "reopening must preserve player window identity: " + json.dumps(observation)
+                quit_before = invocations(gdbus_results)
                 msg("spawn", {"cmd": ["gdbus", "call", "--session", "--dest", "org.mpris.MediaPlayer2.jwm",
                     "--object-path", "/org/mpris/MediaPlayer2", "--method", "org.mpris.MediaPlayer2.Quit"]})
+                quit_call = wait_for(lambda: new_invocation(gdbus_results, quit_before), "Quit invocation recorded")
+                wait_for(lambda: successful_result(quit_call), "Quit command completed successfully")
                 wait_for(lambda: not player_windows(), "private player closed")
                 wait_for(lambda: not msg("get_media_status").get("active", False), "closed player removed from MPRIS snapshot")
             record("empty play and media card open real JWM Player windows; reopen reuses the window; unavailable skips are disabled")
