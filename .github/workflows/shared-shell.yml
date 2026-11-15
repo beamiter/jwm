@@ -9,6 +9,8 @@ on:
       - 'bars/tao_glow_bar/**'
       - 'scripts/test-shared-sidebar-shell-x11.py'
       - 'scripts/test-sparse-header.py'
+      - 'scripts/fixtures/media_command_probe.py'
+      - 'scripts/test-media-command-probe.py'
       - '.github/workflows/shared-shell.yml'
   workflow_dispatch:
   pull_request:
@@ -25,6 +27,8 @@ on:
       - 'scripts/*shared*shell*'
       - 'scripts/*sidebar*mode*'
       - 'scripts/*sparse*header*'
+      - 'scripts/fixtures/media_command_probe.py'
+      - 'scripts/test-media-command-probe.py'
       - 'docs/shared-shell-coverage.json'
       - '.github/workflows/shared-shell.yml'
 permissions:
@@ -140,6 +144,7 @@ jobs:
         if: matrix.bar == 'tao_glow_bar'
         run: |
           python3 scripts/test-shared-shell-preview-oracle.py
+          python3 scripts/test-media-command-probe.py
           cargo build --locked --manifest-path bars/tao_pixels_bar/Cargo.toml
           python3 scripts/test-shared-sidebar-shell-x11.py --bar tao_glow_bar --backend xcb --deep --bin-dir target/release
           python3 scripts/test-shared-sidebar-shell-x11.py --bar tao_glow_bar --backend x11rb --deep --bin-dir target/release

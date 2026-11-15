@@ -24,6 +24,7 @@ import struct
 import subprocess
 import tempfile
 import time
+from fixtures.media_command_probe import invocations, new_invocation, successful_result
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE_SHA256 = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
@@ -161,17 +162,19 @@ def main():
             bridge_launcher.write_text("#!/bin/sh\nprintf '%s\\n' \"$$\" > \"$JWM_TEST_BRIDGE_PID\"\nexec \"$@\"\n")
             bridge_launcher.chmod(0o700)
             assert player_bin.is_file() and os.access(player_bin, os.X_OK), f"build current jwm-player first: {player_bin}"
-            # JWM normally redirects application stderr to a bounded /tmp
-            # log outside this artifact. Preserve this private fixture's real
-            # launcher/decoder errors and PID without changing process identity.
-            player_log = shlex.quote(str(evidence / "player-stderr.log"))
-            launcher = work / "bin/jwm-player"
-            launcher.write_text(
-                "#!/bin/sh\n"
-                f"printf '\\nfixture player pid=%s args=%s\\n' \"$$\" \"$*\" >> {player_log}\n"
-                f"exec {shlex.quote(str(player_bin))} \"$@\" 2>> {player_log}\n"
-            )
-            launcher.chmod(0o700)
+            # Observe completion, not just a temporarily surviving window.
+            # The observer has a separate PID; JSON records the actual service
+            # PID. Decoder exec/PID and private D-Bus environment are unchanged.
+            observer = ROOT / "scripts/fixtures/media_command_probe.py"
+            player_results = evidence / "player-results"
+            gdbus_results = evidence / "gdbus-results"
+            player_results.mkdir(exist_ok=True)
+            gdbus_results.mkdir(exist_ok=True)
+            def observed_launcher(path, binary, results, log_name, mode):
+                argv = ["python3", str(observer), str(results), str(evidence / log_name), mode, str(binary)]
+                path.write_text("#!/bin/sh\nexec " + shlex.join(argv) + ' "$@"\n')
+                path.chmod(0o700)
+            observed_launcher(work / "bin/jwm-player", player_bin, player_results, "player-stderr.log", "stderr")
             # Keep decoder IPC/exit ordering, not only the parent-side EOF.
             # Each private decoder gets its own log; exec preserves its PID.
             mpv_bin = shutil.which("mpv")
@@ -185,14 +188,7 @@ def main():
             mpv_launcher.chmod(0o700)
             gdbus_bin = shutil.which("gdbus")
             assert gdbus_bin, "private media tests require gdbus"
-            gdbus_log = shlex.quote(str(evidence / "gdbus.log"))
-            gdbus_launcher = work / "bin/gdbus"
-            gdbus_launcher.write_text(
-                "#!/bin/sh\n"
-                f"printf '\\nfixture gdbus pid=%s args=%s\\n' \"$$\" \"$*\" >> {gdbus_log}\n"
-                f"exec {shlex.quote(gdbus_bin)} \"$@\" >> {gdbus_log} 2>&1\n"
-            )
-            gdbus_launcher.chmod(0o700)
+            observed_launcher(work / "bin/gdbus", gdbus_bin, gdbus_results, "gdbus.log", "both")
         env["PATH"] = str(work / "bin") + os.pathsep + env.get("PATH", "")
         log = (evidence / "session.log").open("w+")
 
@@ -435,7 +431,9 @@ def main():
                     all(not c["enabled"] for c in rows if c["kind"] in ("media_previous", "media_next")) else None), "empty skip controls disabled")
                 assert {c["kind"] for c in controls if c["enabled"]} >= {"media_open", "media_play_pause"}
                 target = wait_for(lambda: panel_control("bottom", kind), "empty " + kind + " target")
+                cold_before = invocations(player_results)
                 click(target[0], target[1])
+                wait_for(lambda: new_invocation(player_results, cold_before), "cold player invocation recorded")
                 opened = wait_for(player_windows, kind + " opens an actual player window")
                 wait_for(lambda: msg("get_media_status").get("player") == "jwm", "launched player discovered over MPRIS")
                 observation = {"kind": kind, "opened_windows": opened,
@@ -443,16 +441,21 @@ def main():
                 capture("media-before-reopen-" + kind)
                 # Reopening the card raises/reuses the existing player.
                 target = wait_for(lambda: panel_control("bottom", "media_open"), "player card target")
+                reopen_before = invocations(player_results)
                 click(target[0], target[1])
-                time.sleep(0.5)
+                reopen = wait_for(lambda: new_invocation(player_results, reopen_before), "reopen invocation recorded")
+                observation["reopen_result"] = wait_for(lambda: successful_result(reopen), "reopen command completed successfully")
                 reused = player_windows()
                 observation.update(reused_windows=reused, media_after_reopen=msg("get_media_status"))
                 (evidence / ("media-reuse-" + kind + ".json")).write_text(json.dumps(observation, indent=2) + "\n")
                 capture("media-after-reopen-" + kind)
                 assert len(reused) == 1, "card must reuse the existing player: " + json.dumps(observation)
                 assert reused[0]["id"] == opened[0]["id"], "reopening must preserve player window identity: " + json.dumps(observation)
+                quit_before = invocations(gdbus_results)
                 msg("spawn", {"cmd": ["gdbus", "call", "--session", "--dest", "org.mpris.MediaPlayer2.jwm",
                     "--object-path", "/org/mpris/MediaPlayer2", "--method", "org.mpris.MediaPlayer2.Quit"]})
+                quit_call = wait_for(lambda: new_invocation(gdbus_results, quit_before), "Quit invocation recorded")
+                wait_for(lambda: successful_result(quit_call), "Quit command completed successfully")
                 wait_for(lambda: not player_windows(), "private player closed")
                 wait_for(lambda: not msg("get_media_status").get("active", False), "closed player removed from MPRIS snapshot")
             record("empty play and media card open real JWM Player windows; reopen reuses the window; unavailable skips are disabled")
