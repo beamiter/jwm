@@ -9,6 +9,8 @@ on:
       - 'bars/tao_glow_bar/**'
       - 'bridge/src/player/**'
       - 'scripts/test-shared-sidebar-shell-x11.py'
+      - 'scripts/test-shared-sidebar-shell-daemon.py'
+      - 'scripts/test-daemon-stderr-evidence.py'
       - 'scripts/fixtures/mpv_syscall_probe.py'
       - 'scripts/test-mpv-syscall-probe.py'
       - 'scripts/test-sparse-header.py'
@@ -29,6 +31,7 @@ on:
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'scripts/*shared*shell*'
+      - 'scripts/test-daemon-stderr-evidence.py'
       - 'scripts/fixtures/mpv_syscall_probe.py'
       - 'scripts/test-mpv-syscall-probe.py'
       - 'scripts/*sidebar*mode*'
@@ -136,6 +139,7 @@ jobs:
       - name: Verify the Leptos production WebView, not only debug assets
         if: matrix.bar == 'tauri_leptos_bar'
         run: |
+          python3 scripts/test-daemon-stderr-evidence.py
           bash scripts/build-leptos-bar.sh "$PWD/target/default-release"
           python3 scripts/test-shared-sidebar-shell-x11.py --bar tauri_leptos_bar --bar-bin "$PWD/target/default-release/release/tauri_leptos_bar" --backend xcb --bin-dir target/release --evidence-dir artifacts/shared-shell/production
           python3 scripts/test-shared-sidebar-shell-x11.py --bar tauri_leptos_bar --bar-bin "$PWD/target/default-release/release/tauri_leptos_bar" --backend x11rb --bin-dir target/release --evidence-dir artifacts/shared-shell/production
