@@ -603,6 +603,39 @@ jobs:
             printf '%s\n' "- The six Tauri Rust hosts are format-checked and statically wired by \`tauri-host-contracts\`; that job explicitly documents why it does not claim compilation."
           } >> "$GITHUB_STEP_SUMMARY"
 
+  # Keep all seven real CSS skins and every geometry assertion, but avoid
+  # charging 84 serial layout cases to the React build job's time budget.
+  shared-web-layout:
+    name: Shared web layout (${{ matrix.frontend }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        frontend: [react, solid, svelte, vue, leptos, yew, dioxus]
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v6, verified 2026-10-09
+        with:
+          node-version: "24"
+          package-manager-cache: false
+
+      - name: Install the browser regression runner
+        run: |
+          npm install --prefix "$RUNNER_TEMP/xbar-browser" --ignore-scripts --no-package-lock playwright@1.62.1
+          "$RUNNER_TEMP/xbar-browser/node_modules/.bin/playwright" install --with-deps chromium
+
+      - name: Test shared four-edge layout and focus fixtures
+        env:
+          PLAYWRIGHT_MODULE: ${{ runner.temp }}/xbar-browser/node_modules/playwright
+          BAR_FRONTENDS: ${{ matrix.frontend }}
+        run: node scripts/test_bar_layout.mjs
+
   locked-web-frontends:
     name: Locked web frontend (${{ matrix.frontend }})
     runs-on: ubuntu-latest
@@ -643,12 +676,6 @@ jobs:
         run: |
           npm install --prefix "$RUNNER_TEMP/xbar-browser" --ignore-scripts --no-package-lock playwright@1.62.1
           "$RUNNER_TEMP/xbar-browser/node_modules/.bin/playwright" install --with-deps chromium
-
-      - name: Test all shared four-edge layout and focus fixtures
-        if: ${{ matrix.frontend == 'react' }}
-        env:
-          PLAYWRIGHT_MODULE: ${{ runner.temp }}/xbar-browser/node_modules/playwright
-        run: node scripts/test_bar_layout.mjs
 
       - name: Test the built frontend at all four edges
         env:
