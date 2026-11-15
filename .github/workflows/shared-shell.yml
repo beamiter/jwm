@@ -14,6 +14,7 @@ on:
       - 'scripts/fixtures/mpv_syscall_probe.py'
       - 'scripts/test-mpv-syscall-probe.py'
       - 'scripts/test-sparse-header.py'
+      - 'scripts/test-sparse-header-evidence.py'
       - 'scripts/fixtures/media_command_probe.py'
       - 'scripts/test-media-command-probe.py'
       - '.github/workflows/shared-shell.yml'

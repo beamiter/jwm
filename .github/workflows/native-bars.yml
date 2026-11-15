@@ -13,6 +13,8 @@ on:
       - scripts/test-bar-startup.mjs
       - scripts/test-frontend-diagnostics.mjs
       - scripts/test-shared-shell-failure-evidence.py
+      - scripts/test-sparse-header-evidence.py
+      - scripts/test-sparse-header.py
       - scripts/test-shared-sidebar-shell-x11.py
       - scripts/test_bar_layout.mjs
       - scripts/test_bar_web_frontends.mjs
@@ -33,6 +35,8 @@ on:
       - scripts/test-bar-startup.mjs
       - scripts/test-frontend-diagnostics.mjs
       - scripts/test-shared-shell-failure-evidence.py
+      - scripts/test-sparse-header-evidence.py
+      - scripts/test-sparse-header.py
       - scripts/test-shared-sidebar-shell-x11.py
       - scripts/test_bar_layout.mjs
       - scripts/test_bar_web_frontends.mjs
@@ -571,6 +575,7 @@ jobs:
           node scripts/test-bar-startup.mjs
           node --test scripts/test-frontend-diagnostics.mjs
           python3 scripts/test-shared-shell-failure-evidence.py
+          python3 scripts/test-sparse-header-evidence.py
 
       - name: Assert generation-aware source contracts (not a frontend build)
         shell: bash

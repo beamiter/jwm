@@ -152,7 +152,10 @@ def main():
             result['top_window'], result['top_rect'] = xid, rect
             if args.bar.startswith('tauri_'):
                 def rendered():
-                    raw = run('xprop', '-id', xid, '_JWM_FRONTEND_READY', '_JWM_FRONTEND_RENDERED', '_JWM_FRONTEND_ERROR')
+                    raw = run('xprop', '-id', xid, '_JWM_FRONTEND_READY', '_JWM_FRONTEND_RENDERED',
+                              '_JWM_FRONTEND_BOOT', '_JWM_FRONTEND_ERROR', '_JWM_FRONTEND_DOM_READY',
+                              '_JWM_FRONTEND_RAF_FIRST', '_JWM_FRONTEND_RAF_SECOND',
+                              '_JWM_FRONTEND_RENDER_REPORT_REJECTED')
                     result['frontend_diagnostics'] = raw
                     return all(re.search(name + r'\([^)]*\)\s*=\s*1\s*$', raw, re.M) for name in ['_JWM_FRONTEND_READY', '_JWM_FRONTEND_RENDERED'])
                 wait_for(rendered, 'actual Tauri frontend rendered acknowledgement', 60)
@@ -274,6 +277,16 @@ def main():
             result['status'] = 'passed'
         except Exception as error:
             result.update(status='failed', reason=str(error))
+            try:
+                # Read the final owned X display, even when WM IPC or the
+                # frontend has not reached readiness. Never touch a live display.
+                assert env.get('DISPLAY'), 'owned display not initialized'
+                screenshot = evidence / 'failure-display.png'
+                run('import', '-window', 'root', screenshot)
+                assert screenshot.is_file() and screenshot.stat().st_size > 0, 'failure screenshot missing'
+                result['failure_screenshot'] = screenshot.name
+            except Exception as capture_error:
+                result['failure_screenshot_error'] = str(capture_error)
             try: result['failure_state'] = state()
             except Exception as state_error: result['failure_state_error'] = str(state_error)
             raise
