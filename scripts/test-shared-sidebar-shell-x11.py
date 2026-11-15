@@ -16,6 +16,7 @@ import os
 from pathlib import Path
 import re
 import select
+import shlex
 import shutil
 import signal
 import socket
@@ -160,7 +161,27 @@ def main():
             bridge_launcher.write_text("#!/bin/sh\nprintf '%s\\n' \"$$\" > \"$JWM_TEST_BRIDGE_PID\"\nexec \"$@\"\n")
             bridge_launcher.chmod(0o700)
             assert player_bin.is_file() and os.access(player_bin, os.X_OK), f"build current jwm-player first: {player_bin}"
-            (work / "bin/jwm-player").symlink_to(player_bin)
+            # JWM normally redirects application stderr to a bounded /tmp
+            # log outside this artifact. Preserve this private fixture's real
+            # launcher/decoder errors and PID without changing process identity.
+            player_log = shlex.quote(str(evidence / "player-stderr.log"))
+            launcher = work / "bin/jwm-player"
+            launcher.write_text(
+                "#!/bin/sh\n"
+                f"printf '\\nfixture player pid=%s args=%s\\n' \"$$\" \"$*\" >> {player_log}\n"
+                f"exec {shlex.quote(str(player_bin))} \"$@\" 2>> {player_log}\n"
+            )
+            launcher.chmod(0o700)
+            gdbus_bin = shutil.which("gdbus")
+            assert gdbus_bin, "private media tests require gdbus"
+            gdbus_log = shlex.quote(str(evidence / "gdbus.log"))
+            gdbus_launcher = work / "bin/gdbus"
+            gdbus_launcher.write_text(
+                "#!/bin/sh\n"
+                f"printf '\\nfixture gdbus pid=%s args=%s\\n' \"$$\" \"$*\" >> {gdbus_log}\n"
+                f"exec {shlex.quote(gdbus_bin)} \"$@\" >> {gdbus_log} 2>&1\n"
+            )
+            gdbus_launcher.chmod(0o700)
         env["PATH"] = str(work / "bin") + os.pathsep + env.get("PATH", "")
         log = (evidence / "session.log").open("w+")
 
@@ -404,13 +425,21 @@ def main():
                 assert {c["kind"] for c in controls if c["enabled"]} >= {"media_open", "media_play_pause"}
                 target = wait_for(lambda: panel_control("bottom", kind), "empty " + kind + " target")
                 click(target[0], target[1])
-                wait_for(player_windows, kind + " opens an actual player window")
+                opened = wait_for(player_windows, kind + " opens an actual player window")
                 wait_for(lambda: msg("get_media_status").get("player") == "jwm", "launched player discovered over MPRIS")
+                observation = {"kind": kind, "opened_windows": opened,
+                               "media_before_reopen": msg("get_media_status")}
+                capture("media-before-reopen-" + kind)
                 # Reopening the card raises/reuses the existing player.
                 target = wait_for(lambda: panel_control("bottom", "media_open"), "player card target")
                 click(target[0], target[1])
                 time.sleep(0.5)
-                assert len(player_windows()) == 1, "card must reuse the existing player"
+                reused = player_windows()
+                observation.update(reused_windows=reused, media_after_reopen=msg("get_media_status"))
+                (evidence / ("media-reuse-" + kind + ".json")).write_text(json.dumps(observation, indent=2) + "\n")
+                capture("media-after-reopen-" + kind)
+                assert len(reused) == 1, "card must reuse the existing player: " + json.dumps(observation)
+                assert reused[0]["id"] == opened[0]["id"], "reopening must preserve player window identity: " + json.dumps(observation)
                 msg("spawn", {"cmd": ["gdbus", "call", "--session", "--dest", "org.mpris.MediaPlayer2.jwm",
                     "--object-path", "/org/mpris/MediaPlayer2", "--method", "org.mpris.MediaPlayer2.Quit"]})
                 wait_for(lambda: not player_windows(), "private player closed")
