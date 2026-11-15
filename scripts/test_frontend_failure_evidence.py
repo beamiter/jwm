@@ -72,5 +72,45 @@ class EvidenceTests(unittest.TestCase):
         self.assertEqual(len(result["windows"]["0x123"]["tree_xids"]), 32)
 
 
+class ChildEvidenceTests(unittest.TestCase):
+    def test_tree_root_parent_and_titles_are_not_child_ids(self):
+        tree = 'Root window id: 0x21f "private root"\n Parent window id: 0x21f\n 1 child:\n  0xe00005 "private child": () 1270x42+0+0\n'
+        self.assertEqual(evidence._direct_children(tree), ['0xe00005'])
+
+    def test_child_parser_caps_and_deduplicates(self):
+        tree = '20 children:\n' + ''.join('  0x%x "private": ()\n' % i for i in range(1, 21))
+        self.assertEqual(evidence._direct_children(tree), ['0x1', '0x2', '0x3', '0x4'])
+        self.assertEqual(evidence._direct_children('0 children.\n'), [])
+
+    def test_collects_child_stats_passively_with_existing_budget(self):
+        calls = []
+        def run(args, **kwargs):
+            calls.append(args)
+            if args[-1] == '-tree':
+                kwargs['stdout'].write(b' 1 child:\n  0xe00005 "private": () 1270x42+0+0\n')
+            elif args[0] == 'xwininfo':
+                kwargs['stdout'].write(b' Width: 1270\n Height: 42\n Map State: IsUnMapped\n')
+            else:
+                Path(args[-1]).write_bytes(struct.pack('>25I', 100, 7, 2, 32, 1280, 800, *([0] * 19)))
+        with tempfile.TemporaryDirectory() as directory, patch.object(evidence.subprocess, 'run', run):
+            result = evidence.collect(['12'], directory, {})
+        self.assertEqual(result['child_windows']['0xe00005']['Map State'], 'IsUnMapped')
+        self.assertEqual(len(calls), 4)
+        self.assertEqual(calls[2], ['xwininfo', '-id', '0xe00005', '-stats'])
+        self.assertEqual(result['capture_format'], 'xwd')
+        self.assertNotIn('private child', str(result))
+
+    def test_reserves_root_capture_budget_before_children(self):
+        def run(args, **kwargs):
+            if args[-1] == '-tree':
+                kwargs['stdout'].write(b' 1 child:\n  0xe00005 "private": ()\n')
+            elif args[0] == 'xwd':
+                Path(args[-1]).write_bytes(struct.pack('>25I', 100, 7, 2, 32, 1280, 800, *([0] * 19)))
+        with tempfile.TemporaryDirectory() as directory, patch.object(evidence.subprocess, 'run', run), patch.object(evidence.time, 'monotonic', side_effect=[0, 0, 0, 7.5, 7.5]):
+            result = evidence.collect(['12'], directory, {})
+        self.assertEqual(result['child_windows'], {})
+        self.assertEqual(result['capture_format'], 'xwd')
+
+
 if __name__ == "__main__":
     unittest.main()

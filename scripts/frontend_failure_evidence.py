@@ -18,6 +18,24 @@ def _sanitize(text):
     return fields
 
 
+
+def _direct_children(tree):
+    """Parse only xwininfo's direct-child section, never root/parent IDs."""
+    children = []
+    in_children = False
+    for line in tree[:16384].splitlines():
+        if re.fullmatch(r"\s*[0-9]+ (?:child|children):\s*", line):
+            in_children = True
+            continue
+        if in_children:
+            match = re.match(r"\s+(0x[0-9a-fA-F]{1,8})\s", line)
+            if match and match[1] not in children:
+                children.append(match[1])
+            if len(children) == 4:
+                break
+    return children
+
+
 def collect(window_ids, evidence, env):
     """Never map, raise, resize, refresh or send input; never changes readiness."""
     deadline = time.monotonic() + 8
@@ -52,9 +70,24 @@ def collect(window_ids, evidence, env):
         tree = read(["xwininfo", "-id", xid, "-tree"])
         result["windows"][xid] = {
             "stats": _sanitize(stats) if stats is not None else None,
+            "direct_child_ids": _direct_children(tree) if tree is not None else [],
             # Only XIDs, not window names or class strings.
             "tree_xids": re.findall(r"0x[0-9a-fA-F]+", tree[:16384])[:32] if tree is not None else None,
         }
+    # Snapshot only explicitly listed direct children after top-level evidence.
+    # Keep at least one second of the existing total budget for root capture.
+    # Never traverse grandchildren or change mapping, focus, input or repaint.
+    child_ids = []
+    for row in result["windows"].values():
+        for child in row.pop("direct_child_ids", []):
+            if child not in child_ids and len(child_ids) < 4:
+                child_ids.append(child)
+    result["child_windows"] = {}
+    for child in child_ids:
+        if deadline - time.monotonic() <= 1:
+            break
+        stats = read(["xwininfo", "-id", child, "-stats"])
+        result["child_windows"][child] = _sanitize(stats) if stats is not None else None
     # The caller owns a private Xvfb fixture, never the user's desktop. Capture
     # final display pixels without a compositor IPC request or a repaint.
     remaining = deadline - time.monotonic()
