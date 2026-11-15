@@ -40,6 +40,8 @@ jobs:
           assert len(names) == len(set(names)) == 28
           print('bars=' + json.dumps(names))
           PY
+      - name: Verify bounded player reuse diagnostics
+        run: python3 scripts/test-player-reuse-observation.py
   native:
     needs: inventory
     runs-on: ubuntu-latest

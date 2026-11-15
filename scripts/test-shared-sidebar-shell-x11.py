@@ -28,6 +28,15 @@ ROOT = Path(__file__).resolve().parents[1]
 FIXTURE_SHA256 = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
 
 
+
+def player_reuse_observation(windows):
+    """Bound diagnostics without copying titles, paths, or arbitrary metadata."""
+    return {"window_count": len(windows),
+            "window_ids": [row.get("id") for row in windows[:8]
+                           if isinstance(row.get("id"), int)],
+            "truncated": len(windows) > 8}
+
+
 def changed_preview_marker_pixels(reference, painted, color):
     """Count newly painted client-color pixels, not arbitrary hover damage."""
     assert reference.size == painted.size
@@ -410,7 +419,16 @@ def main():
                 target = wait_for(lambda: panel_control("bottom", "media_open"), "player card target")
                 click(target[0], target[1])
                 time.sleep(0.5)
-                assert len(player_windows()) == 1, "card must reuse the existing player"
+                observed = player_windows()
+                # Save the exact assertion sample before any further IPC or cleanup:
+                # zero windows must not be misdiagnosed as duplicate launch.
+                observation = player_reuse_observation(observed)
+                observation["cold_launch_control"] = kind
+                result.setdefault("player_reuse_observations", []).append(observation)
+                assert len(observed) == 1, (
+                    "card must reuse the existing player: "
+                    + json.dumps(observation, sort_keys=True)
+                )
                 msg("spawn", {"cmd": ["gdbus", "call", "--session", "--dest", "org.mpris.MediaPlayer2.jwm",
                     "--object-path", "/org/mpris/MediaPlayer2", "--method", "org.mpris.MediaPlayer2.Quit"]})
                 wait_for(lambda: not player_windows(), "private player closed")
