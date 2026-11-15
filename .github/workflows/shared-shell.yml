@@ -120,9 +120,16 @@ jobs:
           python3 scripts/test-shared-sidebar-shell-x11.py --bar tauri_leptos_bar --bar-bin "$PWD/target/default-release/release/tauri_leptos_bar" --backend xcb --bin-dir target/release --evidence-dir artifacts/shared-shell/production
           python3 scripts/test-shared-sidebar-shell-x11.py --bar tauri_leptos_bar --bar-bin "$PWD/target/default-release/release/tauri_leptos_bar" --backend x11rb --bin-dir target/release --evidence-dir artifacts/shared-shell/production
           python3 scripts/test-shared-sidebar-shell-daemon.py --bar-bin "$PWD/target/default-release/release/tauri_leptos_bar" --shell-bin crates/jwm_shell/target/debug/jwm-shell --bin-dir target/release --evidence-dir artifacts/shared-shell/daemon
+      - name: Build media launcher for deep recovery tests
+        if: matrix.bar == 'tao_glow_bar'
+        run: |
+          sudo apt-get install -y --no-install-recommends mpv
+          cargo build --locked --release -p jwm-bridge --bin jwm-player
+          test -x target/release/jwm-player
       - name: Exercise supervisor recovery and rollback
         if: matrix.bar == 'tao_glow_bar'
         run: |
+          python3 scripts/test-shared-shell-preview-oracle.py
           cargo build --locked --manifest-path bars/tao_pixels_bar/Cargo.toml
           python3 scripts/test-shared-sidebar-shell-x11.py --bar tao_glow_bar --backend xcb --deep --bin-dir target/release
           python3 scripts/test-shared-sidebar-shell-x11.py --bar tao_glow_bar --backend x11rb --deep --bin-dir target/release

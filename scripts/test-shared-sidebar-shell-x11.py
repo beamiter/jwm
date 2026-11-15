@@ -28,6 +28,16 @@ ROOT = Path(__file__).resolve().parents[1]
 FIXTURE_SHA256 = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
 
 
+def changed_preview_marker_pixels(reference, painted, color):
+    """Count newly painted client-color pixels, not arbitrary hover damage."""
+    assert reference.size == painted.size
+    return sum(
+        max(abs(a - b) for a, b in zip(before, after)) >= 12
+        and max(abs(a - b) for a, b in zip(after, color)) <= 24
+        for before, after in zip(reference.getdata(), painted.getdata())
+    )
+
+
 def release_private_gvfs_mount(work):
     """Detach only GVFS mounted inside this fixture's private runtime folder."""
     target = (work / "runtime" / "gvfs").absolute()
@@ -948,10 +958,17 @@ def main():
                 # rectangles. Restore through pointer input, then ensure the
                 # previous minimized projection is rejected after re-minimize.
                 task_ids = []
-                for name in ("SharedDockFirst", "SharedDockSecond"):
-                    spawn("xmessage", "-name", name, "-title", name, "shared shell task")
+                task_colors = {}
+                # Distinct source markers distinguish captured client pixels
+                # from another white xmessage behind the preview or hover chrome.
+                for name, color in (("SharedDockFirst", (224, 48, 64)),
+                                    ("SharedDockSecond", (32, 192, 96))):
+                    background = "#%02x%02x%02x" % color
+                    spawn("xmessage", "-name", name, "-title", name,
+                          "-xrm", "*background: " + background, "shared shell task")
                     task = wait_for(lambda: next((item for item in msg("get_windows") if item["name"] == name), None), name)
                     task_ids.append(task["id"])
+                    task_colors[task["id"]] = color
                     msg("focus_window", {"id": task["id"]})
                     wait_for(lambda: current_window(task["id"])["is_focused"], "task focus")
                     msg("minimize")
@@ -979,13 +996,15 @@ def main():
                     before_preview = capture("task-before-preview-" + str(task_id))
                     run("xdotool", "mousemove", tx, ty)
                     time.sleep(0.55)
-                    preview_region = (100, max(50, height - 400), width - 100, height - 100)
+                    # Bottom-dock previews sit above the actual task anchor.
+                    # A fixed height-100 cutoff clipped valid preview content.
+                    preview_region = (0, 0, width, int(anchor[1]))
                     reference = Image.open(before_preview).convert("RGB").crop(preview_region)
                     preview_pixels = 0
                     def preview_painted():
                         nonlocal preview_pixels
                         painted = Image.open(capture("task-preview-" + str(task_id))).convert("RGB").crop(preview_region)
-                        preview_pixels = sum(max(pixel) >= 12 for pixel in ImageChops.difference(reference, painted).getdata())
+                        preview_pixels = changed_preview_marker_pixels(reference, painted, task_colors[task_id])
                         return preview_pixels > 5000
                     wait_for(preview_painted, "native minimized task preview contains actual captured client pixels", timeout=12)
                     result.setdefault("task_preview_pixels", {})[str(task_id)] = preview_pixels
