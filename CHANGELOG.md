@@ -5,6 +5,13 @@ monorepo use independent Semantic Versions.
 
 ## [Unreleased]
 
+### Reject replaced remote key FIFOs without blocking startup
+
+- Key loading opens without waiting for a FIFO writer if the path changes
+  after its initial metadata check, then validates the actual opened object.
+  Regular key loading, ownership/private-mode checks and symlink rejection
+  remain unchanged. No existing key files or permissions are modified.
+
 ### Bound remote clipboard source-directory scans
 
 - File sharing now enforces its 100,000-entry scan budget before retaining

@@ -220,6 +220,9 @@ missing parent. `keygen` and `doctor` do not create parent directories or repair
 permissions.
 Do not generate two different keys for the same connection. Run `doctor` again
 after copying the key; its output never contains key bytes.
+A key path replaced by a FIFO between the initial check and opening is rejected
+without waiting for a FIFO writer. Ownership, private permissions and symlink
+rejection are unchanged; this is not a timeout for slow filesystem/device I/O.
 
 Start with viewing only:
 
