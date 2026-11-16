@@ -41,7 +41,8 @@ const HEADER_FIXED_LEN: usize = 1 + 2 + 4 + 8 + 8;
 const MAX_NAME_LEN: usize = 4096;
 const MAX_COMPONENT_LEN: usize = 255;
 const MAX_DEPTH: usize = 64;
-/// Most entries, directories included, that one copy may carry.
+/// Most source entries one copy may scan, including skipped entries.
+/// This also bounds the number of entries the resulting archive may carry.
 pub const MAX_ENTRIES: u32 = 100_000;
 /// Mode bits a received entry may keep: permissions without set-id/sticky.
 const MODE_MASK: u32 = 0o755;
@@ -68,7 +69,10 @@ impl std::fmt::Display for ManifestError {
                 human_bytes(*limit),
                 human_bytes(*at_least)
             ),
-            Self::TooManyEntries => write!(f, "it holds more than {MAX_ENTRIES} files and folders"),
+            Self::TooManyEntries => write!(
+                f,
+                "scanning it exceeds {MAX_ENTRIES} source entries (including skipped entries)"
+            ),
             Self::Nothing => f.write_str("none of the copied files could be read"),
         }
     }
@@ -111,6 +115,14 @@ impl Manifest {
 
     /// Walk the copied paths. `limit` bounds the file contents.
     pub fn build(paths: &[PathBuf], limit: u64) -> Result<Self, ManifestError> {
+        Self::build_with_scan_limit(paths, limit, MAX_ENTRIES)
+    }
+
+    fn build_with_scan_limit(
+        paths: &[PathBuf],
+        limit: u64,
+        mut scan_left: u32,
+    ) -> Result<Self, ManifestError> {
         let mut manifest = Self {
             entries: Vec::new(),
             stream_bytes: 0,
@@ -120,6 +132,7 @@ impl Manifest {
         };
         let mut used_names = std::collections::HashSet::new();
         for path in paths {
+            charge_scan_entry(&mut scan_left)?;
             // A copied symlink is followed: the person picked what it names.
             let Ok(metadata) = fs::metadata(path) else {
                 manifest.skipped += 1;
@@ -131,7 +144,7 @@ impl Manifest {
             };
             let name = unique_name(base.as_bytes(), &mut used_names);
             let before = manifest.entries.len();
-            manifest.add(path, name, &metadata, 1, limit)?;
+            manifest.add(path, name, &metadata, 1, limit, &mut scan_left)?;
             if manifest.entries.len() > before {
                 manifest.items += 1;
             }
@@ -149,6 +162,7 @@ impl Manifest {
         metadata: &fs::Metadata,
         depth: usize,
         limit: u64,
+        scan_left: &mut u32,
     ) -> Result<(), ManifestError> {
         if depth > MAX_DEPTH || name.len() > MAX_NAME_LEN {
             self.skipped += 1;
@@ -192,8 +206,11 @@ impl Manifest {
             self.skipped += 1;
             return Ok(());
         };
-        let mut children: Vec<_> = children.filter_map(Result::ok).collect();
-        children.sort_by_key(fs::DirEntry::file_name);
+        // Charge before retaining each directory entry, not after collecting
+        // and sorting the entire directory. The shared budget also bounds
+        // pending siblings at every recursion depth and skipped/error entries.
+        let mut collected = collect_scanned_children(children, scan_left)?;
+        collected.sort_by_key(fs::DirEntry::file_name);
         self.stream_bytes += (HEADER_FIXED_LEN + name.len()) as u64;
         self.entries.push(Entry {
             name: name.clone(),
@@ -202,7 +219,7 @@ impl Manifest {
             mode,
             mtime,
         });
-        for child in children {
+        for child in collected {
             // Inside a copied folder nothing is followed: a link could point
             // anywhere, including back up the tree.
             let Ok(child_metadata) = fs::symlink_metadata(child.path()) else {
@@ -216,10 +233,38 @@ impl Manifest {
             let mut child_name = name.clone();
             child_name.push(b'/');
             child_name.extend_from_slice(child.file_name().as_bytes());
-            self.add(&child.path(), child_name, &child_metadata, depth + 1, limit)?;
+            self.add(
+                &child.path(),
+                child_name,
+                &child_metadata,
+                depth + 1,
+                limit,
+                scan_left,
+            )?;
         }
         Ok(())
     }
+}
+
+fn collect_scanned_children<T>(
+    children: impl IntoIterator<Item = io::Result<T>>,
+    scan_left: &mut u32,
+) -> Result<Vec<T>, ManifestError> {
+    let mut collected = Vec::new();
+    for child in children {
+        charge_scan_entry(scan_left)?;
+        if let Ok(child) = child {
+            collected.push(child);
+        }
+    }
+    Ok(collected)
+}
+
+fn charge_scan_entry(remaining: &mut u32) -> Result<(), ManifestError> {
+    *remaining = remaining
+        .checked_sub(1)
+        .ok_or(ManifestError::TooManyEntries)?;
+    Ok(())
 }
 
 /// Two selected items may share a base name (`a/x` and `b/x`).
@@ -840,8 +885,16 @@ mod tests {
         replace_with_fifo(&path);
         let source_path = path.clone();
         let manifest = fifo_attempt(&path, move || {
+            let mut scan_left = MAX_ENTRIES;
             manifest
-                .add(&source_path, b"changed".to_vec(), &metadata, 1, u64::MAX)
+                .add(
+                    &source_path,
+                    b"changed".to_vec(),
+                    &metadata,
+                    1,
+                    u64::MAX,
+                    &mut scan_left,
+                )
                 .unwrap();
             manifest
         });
@@ -1037,6 +1090,105 @@ mod tests {
         assert_ne!(a, b);
         assert!(validate_name(&a).is_ok());
         assert!(validate_name(&b).is_ok());
+    }
+
+    #[test]
+    fn child_scan_stops_before_collecting_an_unbounded_iterator() {
+        let mut observed = 0;
+        let children = std::iter::from_fn(|| {
+            observed += 1;
+            assert!(observed <= 4, "read past the first excess entry");
+            Some(Ok(observed))
+        });
+        let mut remaining = 3;
+        assert_eq!(
+            collect_scanned_children(children, &mut remaining).unwrap_err(),
+            ManifestError::TooManyEntries
+        );
+        assert_eq!(observed, 4);
+        assert_eq!(remaining, 0);
+    }
+
+    #[test]
+    fn directory_read_errors_use_scan_budget_without_being_retained() {
+        let children = [Ok(1), Err(io::Error::other("unreadable entry")), Ok(2)];
+        let mut remaining = 3;
+        assert_eq!(
+            collect_scanned_children(children, &mut remaining).unwrap(),
+            vec![1, 2]
+        );
+        assert_eq!(remaining, 0);
+        let errors = std::iter::repeat_with(|| Err::<(), _>(io::Error::other("unreadable")));
+        assert_eq!(
+            collect_scanned_children(errors, &mut 2).unwrap_err(),
+            ManifestError::TooManyEntries
+        );
+    }
+
+    #[test]
+    fn source_scan_limit_accepts_the_boundary_and_rejects_excess_children() {
+        let source = TempDir::new("scan-boundary");
+        for name in ["c", "a", "b"] {
+            fs::write(source.0.join(name), name).unwrap();
+        }
+        let paths = std::slice::from_ref(&source.0);
+        let manifest = Manifest::build_with_scan_limit(paths, u64::MAX, 4).unwrap();
+        assert_eq!(manifest.entry_count(), 4);
+        assert_eq!(manifest.entries[1].name.last(), Some(&b'a'));
+        assert_eq!(manifest.entries[3].name.last(), Some(&b'c'));
+        assert_eq!(
+            Manifest::build_with_scan_limit(paths, u64::MAX, 3).unwrap_err(),
+            ManifestError::TooManyEntries
+        );
+    }
+
+    #[test]
+    fn source_scan_budget_is_shared_across_directories_and_roots() {
+        let source = TempDir::new("scan-shared");
+        for name in ["a", "b"] {
+            let directory = source.0.join(name);
+            fs::create_dir(&directory).unwrap();
+            fs::write(directory.join("file"), b"contents").unwrap();
+        }
+        let paths = std::slice::from_ref(&source.0);
+        assert_eq!(
+            Manifest::build_with_scan_limit(paths, u64::MAX, 5)
+                .unwrap()
+                .entry_count(),
+            5
+        );
+        assert_eq!(
+            Manifest::build_with_scan_limit(paths, u64::MAX, 4).unwrap_err(),
+            ManifestError::TooManyEntries
+        );
+        let roots = [source.0.join("a"), source.0.join("b")];
+        assert!(Manifest::build_with_scan_limit(&roots, u64::MAX, 4).is_ok());
+        assert_eq!(
+            Manifest::build_with_scan_limit(&roots, u64::MAX, 3).unwrap_err(),
+            ManifestError::TooManyEntries
+        );
+    }
+
+    #[test]
+    fn skipped_sources_cannot_bypass_the_scan_budget() {
+        let source = TempDir::new("scan-skipped");
+        fs::write(source.0.join("file"), b"contents").unwrap();
+        for name in ["a", "b", "c"] {
+            std::os::unix::fs::symlink("missing", source.0.join(name)).unwrap();
+        }
+        let paths = std::slice::from_ref(&source.0);
+        let manifest = Manifest::build_with_scan_limit(paths, u64::MAX, 5).unwrap();
+        assert_eq!(manifest.entry_count(), 2);
+        assert_eq!(manifest.skipped, 3);
+        assert_eq!(
+            Manifest::build_with_scan_limit(paths, u64::MAX, 4).unwrap_err(),
+            ManifestError::TooManyEntries
+        );
+        let missing = vec![source.0.join("missing"); 3];
+        assert_eq!(
+            Manifest::build_with_scan_limit(&missing, u64::MAX, 2).unwrap_err(),
+            ManifestError::TooManyEntries
+        );
     }
 
     #[test]

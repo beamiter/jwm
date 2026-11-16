@@ -5,6 +5,14 @@ monorepo use independent Semantic Versions.
 
 ## [Unreleased]
 
+### Bound remote clipboard source-directory scans
+
+- File sharing now enforces its 100,000-entry scan budget before retaining
+  and sorting directory children. The budget is shared across all copied roots
+  and includes skipped entries, preventing huge directories from allocating
+  unbounded lists before the existing archive-entry check runs. An oversized
+  scan rejects the whole copy; normal ordering and file bytes are unchanged.
+
 ### Restore local shortcuts when a remote window crashes
 
 - Shortcut passthrough now ends before its owner window is torn down or

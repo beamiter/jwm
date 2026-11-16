@@ -1346,6 +1346,13 @@ images only. A receiver also refuses a copy that would leave less than
 256 MiB free on its disk. A copy over the limit is not shared and the title
 says `copy not shared: too large`.
 
+The sender scans at most 100,000 source entries per copy across all selected
+roots and their descendants. Skipped symlinks, unreadable entries and directory
+read errors count too. The bound applies while enumerating a directory, before
+sorting it, so a huge folder cannot first allocate an unbounded child list.
+Exceeding the scan limit rejects the whole copy rather than sharing a truncated
+tree. This bounds enumeration work and retained entries, not filesystem I/O time.
+
 **Flow control.** Images and files travel in 128 KiB chunks. The receiver
 acknowledges a chunk only once it is written, and the sender keeps at most
 1 MiB unacknowledged across the whole session, so a slow disk throttles the
