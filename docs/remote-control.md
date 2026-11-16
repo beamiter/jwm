@@ -1333,6 +1333,12 @@ is shortened to make room for the suffix; valid UTF-8 is not split mid-character
 The first name and all source files remain unchanged. Different shortened names
 are still checked for collisions before the transfer is sent.
 
+If a source changes into a FIFO or another non-regular object after the copy
+is measured, streaming refuses it instead of waiting for a FIFO writer. A
+source rejected during the initial walk is skipped; a change discovered while
+streaming fails that transfer because its contents were already announced.
+This is not a filesystem snapshot or a timeout for slow filesystem/device I/O.
+
 **Size.** `--clipboard-file-limit SIZE` (default `2G`, on `host`, `connect`
 and `ssh`) bounds one file copy; each end enforces its own limit, as sender
 and as receiver, and checks it before reading a byte. `0` shares text and

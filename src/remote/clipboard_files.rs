@@ -162,7 +162,7 @@ impl Manifest {
         if metadata.is_file() {
             // Unreadable files are left out now rather than failing the whole
             // transfer halfway through.
-            if File::open(source).is_err() {
+            if open_source_file(source).is_err() {
                 self.skipped += 1;
                 return Ok(());
             }
@@ -307,7 +307,7 @@ impl ManifestReader {
             self.header = encode_header(&entry, size);
             self.header_sent = 0;
             if let EntryKind::File { size } = entry.kind {
-                let file = File::open(&entry.source).map_err(|error| {
+                let file = open_source_file(&entry.source).map_err(|error| {
                     io::Error::new(
                         error.kind(),
                         format!("{} could not be read: {error}", entry.source.display()),
@@ -318,6 +318,22 @@ impl ManifestReader {
         }
         Ok(chunk)
     }
+}
+
+/// Paths may change between the manifest walk and streaming. A FIFO swapped
+/// in at either open must not block the transfer worker waiting for a writer.
+/// Follow explicitly copied symlinks as before, but validate the opened object
+/// rather than relying on the earlier path metadata. O_NONBLOCK has no effect
+/// on ordinary disk files; it does not bound filesystem or device-driver I/O.
+fn open_source_file(path: &Path) -> io::Result<File> {
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC)
+        .open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(invalid("clipboard source is no longer a regular file"));
+    }
+    Ok(file)
 }
 
 fn encode_header(entry: &Entry, size: u64) -> Vec<u8> {
@@ -716,7 +732,7 @@ fn now_unix() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt as _;
+    use std::os::unix::fs::{FileTypeExt as _, PermissionsExt as _};
 
     struct TempDir(PathBuf);
 
@@ -758,6 +774,108 @@ mod tests {
         bytes
     }
 
+    fn replace_with_fifo(path: &Path) {
+        fs::remove_file(path).unwrap();
+        let name = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+        // SAFETY: name is a live, NUL-terminated path with no interior NUL.
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+    }
+
+    // Release a mistakenly blocking old implementation before asserting, so a
+    // regression fails promptly rather than leaving a stuck test worker.
+    fn fifo_attempt<T: Send + 'static>(
+        path: &Path,
+        attempt: impl FnOnce() -> T + Send + 'static,
+    ) -> T {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || tx.send(attempt()).unwrap());
+        let result = rx.recv_timeout(Duration::from_secs(2));
+        let blocked = result.is_err();
+        let result = match result {
+            Ok(value) => value,
+            Err(_) => {
+                let mut rescue = fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .custom_flags(libc::O_NONBLOCK)
+                    .open(path)
+                    .unwrap();
+                // Keep a writer present even if the worker was descheduled
+                // before open; satisfy the original eight-byte file read too.
+                rescue.write_all(b"original").unwrap();
+                rx.recv_timeout(Duration::from_secs(5))
+                    .expect("rescued FIFO worker must finish")
+            }
+        };
+        worker.join().unwrap();
+        assert!(
+            !blocked,
+            "opening a replaced FIFO must not wait for a writer"
+        );
+        result
+    }
+
+    #[test]
+    fn source_replaced_by_fifo_after_manifest_fails_without_blocking() {
+        let source = TempDir::new("replaced-fifo");
+        let path = source.0.join("copied");
+        fs::write(&path, b"original").unwrap();
+        let manifest = Manifest::build(std::slice::from_ref(&path), u64::MAX).unwrap();
+        replace_with_fifo(&path);
+        let error = fifo_attempt(&path, move || {
+            ManifestReader::new(manifest).next_chunk(4096)
+        });
+        assert_eq!(error.unwrap_err().kind(), io::ErrorKind::InvalidData);
+        assert!(fs::symlink_metadata(path).unwrap().file_type().is_fifo());
+    }
+
+    #[test]
+    fn stale_manifest_metadata_cannot_block_on_replaced_fifo() {
+        let source = TempDir::new("walk-fifo");
+        let path = source.0.join("copied");
+        fs::write(&path, b"original").unwrap();
+        let metadata = fs::metadata(&path).unwrap();
+        let mut manifest = Manifest::build(std::slice::from_ref(&path), u64::MAX).unwrap();
+        let before = manifest.entry_count();
+        replace_with_fifo(&path);
+        let source_path = path.clone();
+        let manifest = fifo_attempt(&path, move || {
+            manifest
+                .add(&source_path, b"changed".to_vec(), &metadata, 1, u64::MAX)
+                .unwrap();
+            manifest
+        });
+        assert_eq!(manifest.entry_count(), before);
+        assert_eq!(manifest.skipped, 1);
+    }
+
+    #[test]
+    fn source_open_keeps_copied_symlinks_and_rejects_other_types() {
+        let source = TempDir::new("source-types");
+        let regular = source.0.join("regular");
+        fs::write(&regular, b"contents").unwrap();
+        let link = source.0.join("link");
+        std::os::unix::fs::symlink(&regular, &link).unwrap();
+        let mut contents = Vec::new();
+        open_source_file(&link)
+            .unwrap()
+            .read_to_end(&mut contents)
+            .unwrap();
+        assert_eq!(contents, b"contents");
+        for path in [source.0.as_path(), Path::new("/dev/null")] {
+            assert_eq!(
+                open_source_file(path).unwrap_err().kind(),
+                io::ErrorKind::InvalidData
+            );
+        }
+        let manifest = Manifest::build(&[link], u64::MAX).unwrap();
+        let destination = TempDir::new("source-link-dst");
+        let mut receiver =
+            ArchiveReceiver::new(destination.0.clone(), manifest.entry_count()).unwrap();
+        receiver.feed(&stream(manifest, 31)).unwrap();
+        let top = receiver.finish().unwrap();
+        assert_eq!(fs::read(&top[0]).unwrap(), b"contents");
+    }
     #[test]
     fn a_copied_tree_arrives_intact_whatever_the_chunking() {
         let source = TempDir::new("src");
