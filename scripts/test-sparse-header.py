@@ -18,6 +18,15 @@ from sparse_header_pixels import selected_pixels as xilem_selected_pixels
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def capture_with_geometry(capture, read_geometry):
+    """Pair a screenshot with current window geometry, not its startup rectangle."""
+    before = read_geometry()
+    image = capture()
+    after = read_geometry()
+    assert before == after, f'top geometry changed during capture: {before} -> {after}'
+    return image, before
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--bin-dir', type=Path, default=ROOT / 'target/release')
@@ -178,16 +187,21 @@ def main():
             run('xdotool', 'mousemove', '640', '400')
             record('fresh actual top, host and WM binary hashes recorded; real mapped frontend ready')
             def capture(name):
-                source = Path(msg('take_screenshot_fullscreen')['path'])
-                assert source.is_relative_to(work / 'pictures'), source
-                wait_for(lambda: source.is_file() and source.stat().st_size > 32, 'compositor screenshot')
-                destination = evidence / f'{name}.png'
-                destination.write_bytes(source.read_bytes())
-                from PIL import Image
-                image = Image.open(destination).convert('RGB')
-                assert image.size == (1280, 800), image.size
+                nonlocal rect
+                def read_image():
+                    source = Path(msg('take_screenshot_fullscreen')['path'])
+                    assert source.is_relative_to(work / 'pictures'), source
+                    wait_for(lambda: source.is_file() and source.stat().st_size > 32, 'compositor screenshot')
+                    destination = evidence / f'{name}.png'
+                    destination.write_bytes(source.read_bytes())
+                    from PIL import Image
+                    image = Image.open(destination).convert('RGB')
+                    assert image.size == (1280, 800), image.size
+                    return image
+                image, rect = capture_with_geometry(read_image, lambda: geometry(xid))
+                result.setdefault('frame_rects', {})[name] = rect
                 image.crop((rect[0], rect[1], rect[0] + min(260, rect[2]), rect[1] + rect[3])).resize((1040, rect[3] * 4)).save(evidence / f'{name}-tags.png')
-                result.setdefault('screenshots', []).append(str(destination.relative_to(ROOT)))
+                result.setdefault('screenshots', []).append(str((evidence / f'{name}.png').relative_to(ROOT)))
                 return image
             def fixed_selected_pixels(image, selected, expected_count):
                 # Sample each pill's top-left interior, away from its label.
@@ -263,8 +277,10 @@ def main():
                     # idle boundary, including WebKit pixel-wheel delivery.
                     time.sleep(.30)
                 point = [round(current_pills[slot]["center"]), round(rect[1] + rect[3] / 2)]
+                assert geometry(xid) == rect, 'top geometry changed since validated pixels'
                 run('xdotool', 'mousemove', *point)
                 time.sleep(.15)
+                assert geometry(xid) == rect, 'top geometry changed before click'
                 run('xdotool', 'click', button)
                 time.sleep(.15)
                 run('xdotool', 'mousemove', '640', '400')
