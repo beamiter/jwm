@@ -6,6 +6,8 @@ host ownership through frontend replacement/crashes, mode changes and rollback.
 All desktop configuration and displays are private. Optional hardware probes require
 an explicitly selected local PulseAudio endpoint and restore exact mixer values.
 """
+from frontend_failure_evidence import collect as collect_frontend_failure
+
 import argparse
 import ctypes
 import importlib.util
@@ -811,6 +813,12 @@ def main():
                     return False
                 try:
                     wait_for(frontend_ready, "Tauri frontend service and actual DOM-render acknowledgements", timeout=60)
+                except Exception:
+                    try:
+                        result["tauri_native_failure"] = collect_frontend_failure(frontend_diagnostics, evidence, env)
+                    except Exception:
+                        result["tauri_native_failure"] = {"capture_failed": True}
+                    raise
                 finally:
                     result["tauri_frontend_diagnostics"] = frontend_diagnostics
                     try:

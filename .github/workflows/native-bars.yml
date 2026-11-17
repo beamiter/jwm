@@ -11,6 +11,7 @@ on:
       - vendor/glib/**
       - tests/glib_backport/**
       - scripts/test-bar-startup.mjs
+      - scripts/test_frontend_diagnostics.mjs
       - scripts/test-frontend-diagnostics.mjs
       - scripts/test-shared-shell-failure-evidence.py
       - scripts/test-frame-feedback-probe.py
@@ -41,6 +42,7 @@ on:
       - vendor/glib/**
       - tests/glib_backport/**
       - scripts/test-bar-startup.mjs
+      - scripts/test_frontend_diagnostics.mjs
       - scripts/test-frontend-diagnostics.mjs
       - scripts/test-shared-shell-failure-evidence.py
       - scripts/test-frame-feedback-probe.py
@@ -596,6 +598,9 @@ jobs:
           python3 scripts/test-daemon-native-log-evidence.py
           python3 scripts/test-leptos-daemon-workflow.py
           python3 scripts/test-react-repeat-workflow.py
+
+      - name: Test bounded WebView phase diagnostics without a browser
+        run: node --test scripts/test_frontend_diagnostics.mjs
 
       - name: Assert generation-aware source contracts (not a frontend build)
         shell: bash

@@ -53,6 +53,7 @@ on:
       - 'scripts/*sparse*header*'
       - 'scripts/fixtures/media_command_probe.py'
       - 'scripts/test-media-command-probe.py'
+      - 'scripts/*frontend_failure_evidence*'
       - 'docs/shared-shell-coverage.json'
       - '.github/workflows/shared-shell.yml'
 permissions:
@@ -69,6 +70,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
+      - name: Test bounded passive frontend failure evidence
+        run: python3 scripts/test_frontend_failure_evidence.py
       - id: inventory
         run: |
           python3 - <<'PY' >> "$GITHUB_OUTPUT"

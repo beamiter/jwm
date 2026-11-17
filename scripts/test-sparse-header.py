@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 """Private X11 acceptance for real sparse top-bar pixels and original tag click bindings."""
+from frontend_failure_evidence import collect as collect_frontend_failure
+
 import argparse
 import hashlib
 import json
@@ -170,6 +172,12 @@ def main():
                     return all(re.search(name + r'\([^)]*\)\s*=\s*1\s*$', raw, re.M) for name in ['_JWM_FRONTEND_READY', '_JWM_FRONTEND_RENDERED'])
                 try:
                     wait_for(rendered, 'actual Tauri frontend rendered acknowledgement', 60)
+                except Exception:
+                    try:
+                        result['tauri_native_failure'] = collect_frontend_failure([xid], evidence, env)
+                    except Exception:
+                        result["tauri_native_failure"] = {"capture_failed": True}
+                    raise
                 finally:
                     try:
                         result['frame_feedback'] = frame_feedback_probe.collect(run, [xid])

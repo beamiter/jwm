@@ -17,6 +17,7 @@ function fixture(rejectStage) {
     console: { error() {} },
     document: { visibilityState: "visible", hidden: false, addEventListener(name, callback) { listeners[name] = callback; }, querySelector(selector) { return ready ? { textContent: 'workspace 1' } : (selector === '.button-row' ? { textContent: 'Loading...' } : null); } },
     MutationObserver: class { constructor(callback) { mutation = callback; } observe() {} disconnect() { disconnected = true; } },
+    setTimeout() { return 1; }, clearTimeout() {},
     requestAnimationFrame(callback) { frames.push(callback); },
   };
   vm.runInNewContext(source, context);
