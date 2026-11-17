@@ -2633,6 +2633,7 @@ mod tests {
         fail_restack_countdown: AtomicI64,
         fail_configure: AtomicBool,
         fail_next_configure: AtomicBool,
+        ignore_configure: AtomicBool,
         fail_configure_countdown: AtomicI64,
         fail_configure_size: Mutex<Option<(u32, u32)>>,
         fail_apply_window_changes: AtomicBool,
@@ -2692,6 +2693,9 @@ mod tests {
                 || size_failed
             {
                 return Err(BackendError::Message("injected configure failure".into()));
+            }
+            if self.ignore_configure.load(Ordering::Relaxed) {
+                return Ok(());
             }
             self.configures
                 .lock()
@@ -2865,6 +2869,7 @@ mod tests {
         fail_next_iconify_cancel: AtomicBool,
         iconify_cancel_leaves_unmapped: AtomicBool,
         supports_client_list: bool,
+        has_compositor: bool,
     }
 
     impl MinimizeSpyBackend {
@@ -2890,6 +2895,7 @@ mod tests {
                 fail_next_iconify_cancel: AtomicBool::new(false),
                 iconify_cancel_leaves_unmapped: AtomicBool::new(false),
                 supports_client_list: false,
+                has_compositor: true,
             }
         }
     }
@@ -2993,7 +2999,7 @@ mod tests {
     impl DisplayControl for MinimizeSpyBackend {}
     impl RenderScheduler for MinimizeSpyBackend {
         fn has_compositor(&self) -> bool {
-            true
+            self.has_compositor
         }
     }
 
@@ -3476,6 +3482,116 @@ mod tests {
             .setup_initial_windows(&mut backend)
             .expect_err("a failed QueryTree must cancel adoption");
         assert!(error.to_string().contains("injected root scan failure"));
+    }
+
+    #[test]
+    fn restart_preflight_consumes_real_window_hide_before_immediate_restart() {
+        use crate::core::animation::{AnimationKind, ClientAnimation, Easing};
+        use std::time::{Duration, Instant};
+
+        assert!(
+            CONFIG.load().animation_enabled(),
+            "exercise the existing Hide deferral guard"
+        );
+        for failure in [None, Some("configure"), Some("readback"), Some("v1")] {
+            let mut backend = MinimizeSpyBackend::new();
+            backend.supports_client_list = true;
+            backend.has_compositor = false;
+            let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+            let window = WindowId::from_raw(0x4f03);
+            let key = add_restart_hidden_client(&mut jwm, &backend, window);
+            let client = &jwm.state.clients[key];
+            let restore = client.geometry.hidden_restore_rect.unwrap();
+            let order = client.state.minimized_order;
+            let target = Rect::new(client.geometry.x, restore.y, restore.w, restore.h);
+            backend
+                .window_ops
+                .force_unmapped
+                .store(false, Ordering::Relaxed);
+            // Semantic minimize has completed, but the actual non-composited
+            // X11 surface is still at the first frame of its Hide animation.
+            backend.window_ops.geometries.lock().unwrap().insert(
+                window,
+                Geometry {
+                    x: restore.x,
+                    y: restore.y,
+                    w: restore.w as u32,
+                    h: restore.h as u32,
+                    border: 0,
+                },
+            );
+            jwm.animations.active.insert(
+                key,
+                ClientAnimation {
+                    from: restore,
+                    to: target,
+                    started_at: Instant::now(),
+                    duration: Duration::from_secs(60),
+                    easing: Easing::Linear,
+                    kind: AnimationKind::Hide,
+                },
+            );
+            // An unrelated transition must survive the restart boundary.
+            let other = jwm.insert_client(WMClient::new(WindowId::from_raw(0x4f04)));
+            let mut layout = jwm.animations.active[&key].clone();
+            layout.kind = AnimationKind::Layout;
+            jwm.animations.active.insert(other, layout);
+            // Keep this synthetic unrelated client out of the X11 admission list.
+            jwm.state.client_order.retain(|entry| *entry != other);
+            if failure == Some("configure") {
+                backend
+                    .window_ops
+                    .fail_next_configure
+                    .store(true, Ordering::Relaxed);
+            } else if failure == Some("readback") {
+                backend
+                    .window_ops
+                    .ignore_configure
+                    .store(true, Ordering::Relaxed);
+            } else if failure == Some("v1") {
+                backend
+                    .property_ops
+                    .fail_restore_set
+                    .store(true, Ordering::Relaxed);
+            }
+
+            let result = jwm.prepare_restart_clients(&mut backend);
+            match failure {
+                None => {
+                    result.expect("immediate restart must finish real-window parking");
+                }
+                Some("configure") => assert!(
+                    result
+                        .unwrap_err()
+                        .to_string()
+                        .contains("configure failure")
+                ),
+                Some("readback") => assert!(
+                    result
+                        .unwrap_err()
+                        .to_string()
+                        .contains("remained inside the desktop")
+                ),
+                Some("v1") => assert!(result.unwrap_err().to_string().contains("V1 readback")),
+                _ => unreachable!(),
+            }
+            assert!(
+                !jwm.animations.active.contains_key(&key),
+                "Hide must not later unpark the client"
+            );
+            assert_eq!(jwm.animations.active[&other].kind, AnimationKind::Layout);
+            let client = &jwm.state.clients[key];
+            assert!(client.state.is_hidden);
+            assert_eq!(client.state.minimized_order, order);
+            assert_eq!(client.geometry.hidden_restore_rect, Some(restore));
+            assert!(backend.iconify_cancels.is_empty());
+            if failure != Some("configure") && failure != Some("readback") {
+                assert!(x11_geometry_fully_left_of_desktop(
+                    backend.window_ops.get_geometry(window).unwrap(),
+                    jwm.desktop_left_edge()
+                ));
+            }
+        }
     }
 
     #[test]

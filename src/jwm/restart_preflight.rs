@@ -376,6 +376,14 @@ impl Jwm {
             };
             let hidden = initial_client.state.is_hidden;
             if hidden {
+                // The event loop has stopped for exec handoff, so a real-window
+                // Hide animation cannot finish on another tick. Consume only
+                // that animation before forcing and reading back its endpoint.
+                // Never resurrect it on a later preflight failure: it could
+                // move an already parked window back onto the desktop.
+                if !backend.has_compositor() {
+                    self.animations.remove_if_hide(client_key);
+                }
                 self.retry_x11_minimized_client_park(backend, client_key)?;
             }
 
