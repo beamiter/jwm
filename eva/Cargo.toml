@@ -28,7 +28,7 @@ toml_edit = "0.25"
 tempfile = "3"
 clap = { version = "4.6", features = ["derive"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "process", "io-util", "signal"] }
-tokio-tungstenite = { version = "0.29", features = ["rustls-tls-native-roots"] }
+tokio-tungstenite = { version = "0.30", features = ["rustls-tls-native-roots"] }
 # Select the per-connection crypto backend explicitly. Workspace feature
 # unification must not make rustls guess a process-wide provider.
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
