@@ -5,6 +5,12 @@ monorepo use independent Semantic Versions.
 
 ## [Unreleased]
 
+### Preserve existing recording concat sidecars
+
+- Multi-segment recording finalization exclusively creates its private concat
+  list. A pre-existing file, directory or symlink now stops the merge without
+  overwriting or deleting it, and keeps the source recording segments intact.
+
 ### Reject replaced remote key FIFOs without blocking startup
 
 - Key loading opens without waiting for a FIFO writer if the path changes
