@@ -69,6 +69,31 @@ def archive_child_stderr(runtime, evidence, phase):
     return archived
 
 
+def prepare_restart_cycle(applications, cycle, msg, wait):
+    """Resolve session-local IDs afresh and re-minimize a rotating pair."""
+    windows = {row["name"]: row for row in msg("get_windows")}
+    for application in applications:
+        application["window"] = windows[application["name"]]["id"]
+        if cycle > 1:
+            msg("focus_window", {"id": application["window"]})
+            wait(lambda application=application: not next(
+                row for row in msg("get_windows") if row["id"] == application["window"]
+            )["is_minimized"], "previous task restored before next minimize/restart cycle")
+    start = (len(applications) - 2 + 2 * (cycle - 1)) % len(applications)
+    selected = [applications[(start + offset) % len(applications)] for offset in range(2)]
+    for application in selected:
+        msg("focus_window", {"id": application["window"]})
+        msg("minimize")
+        wait(lambda application=application: next(
+            row for row in msg("get_windows") if row["id"] == application["window"]
+        )["is_minimized"], "minimized task before daemon-managed restart")
+    expected = {application["name"] for application in selected}
+    current = {row["name"]: row for row in msg("get_windows")}
+    assert all(current[app["name"]]["is_minimized"] == (app["name"] in expected)
+               for app in applications), "rotating minimized pair was not established"
+    return sorted(expected)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--bin-dir", type=Path, default=ROOT / "target/release")
@@ -76,6 +101,7 @@ def main():
     parser.add_argument("--bar-bin", type=Path, default=ROOT / "target/tauri-release/release/tauri_leptos_bar")
     parser.add_argument("--evidence-dir", type=Path, default=ROOT / "artifacts/shared-shell/daemon-final")
     parser.add_argument("--capture-child-stderr", action="store_true", help="additional observer variant: shell exec wrapper only redirects the managed child's stdout/stderr")
+    parser.add_argument("--cycles", type=int, choices=range(1, 11), default=1, help="bounded minimize/restart cycles in the same daemon session (1-10)")
     args = parser.parse_args()
     binaries = {"jwm": (args.bin_dir / "jwm").resolve(), "tool": (args.bin_dir / "jwm-tool").resolve(),
                 "host": args.shell_bin.resolve(), "bar": args.bar_bin.resolve()}
@@ -83,7 +109,7 @@ def main():
     evidence = (args.evidence_dir / mode).resolve()
     evidence.mkdir(parents=True, exist_ok=True)
     result = {"status": "running", "mode": mode, "steps": [], "backend_source": "JWM_BACKEND environment only",
-              "fixture_sha256": digest(__file__),
+              "fixture_sha256": digest(__file__), "requested_cycles": args.cycles, "cycles": [],
               "binaries": {name: {"path": str(path), "sha256": digest(path)} for name, path in binaries.items()}}
     children = []
     started = time.monotonic()
@@ -248,54 +274,62 @@ def main():
                 window = wait(lambda: next((row for row in msg("get_windows") if row["name"] == name), None), name)
                 xid = int(run("xdotool", "search", "--name", "^" + re.escape(name) + "$ ".rstrip()).strip().splitlines()[0])
                 applications.append({"name": name, "identity": identity(process.pid), "window": window["id"], "x11_window": xid})
-            for application in applications[-2:]:
-                msg("focus_window", {"id": application["window"]})
-                msg("minimize")
-                wait(lambda: next(row for row in msg("get_windows") if row["id"] == application["window"])["is_minimized"], "minimized task before daemon-managed restart")
-            before_snapshot = snapshot("before_restart")
-            result.update(before=before_snapshot, daemon_identity=daemon_identity, jwm_identity=wm_identity, xserver_identity=server_identity,
-                          applications=applications, jwm_arguments=[arg.decode() for arg in wm_arguments if arg])
-            result["daemon_status_before"] = run(binaries["tool"], "status")
-            record("five real application processes/windows exist, including two minimized tasks")
+            for cycle in range(1, args.cycles + 1):
+                before = wait(ready, "current shell ready before cycle", timeout=60)
+                cycle_result = {"cycle": cycle, "status": "running"}
+                result["cycles"].append(cycle_result)
+                print(f"CYCLE: {cycle}/{args.cycles}", flush=True)
+                cycle_result["minimized_names"] = prepare_restart_cycle(applications, cycle, msg, wait)
+                before_snapshot = snapshot("before_restart")
+                cycle_result["before"] = before_snapshot
+                result.update(before=before_snapshot, daemon_identity=daemon_identity, jwm_identity=wm_identity, xserver_identity=server_identity,
+                              applications=applications, jwm_arguments=[arg.decode() for arg in wm_arguments if arg])
+                result["daemon_status_before"] = run(binaries["tool"], "status")
+                record("five real application processes/windows exist, including two minimized tasks")
 
-            msg("restart")
-            after = wait(lambda: (current if (current := ready()) and current["session"] != before["session"] else None), "IPC restart under daemon completes", timeout=60)
-            result["frontend_after"] = wait(frontend_ready, "replacement final Leptos actual rendered acknowledgement", timeout=60)
-            assert result["frontend_after"]["sha256"] == result["binaries"]["bar"]["sha256"]
-            assert identity(daemon_pid) == daemon_identity, "parent daemon changed or exited"
-            assert identity(wm_pid) == wm_identity, "restart did not preserve managed JWM process identity"
-            assert identity(server.pid) == server_identity and server.poll() is None, "private X server changed or exited"
-            assert session.poll() is None, "daemon session supervisor exited"
-            run("xdpyinfo")
-            after_windows = {row["name"]: row for row in msg("get_windows")}
-            before_windows = {row["id"]: row for row in before_snapshot["windows"]}
-            for application in applications:
-                assert identity(application["identity"]["pid"]) == application["identity"], application
-                assert application["name"] in after_windows, application
-                # WM WindowId tokens belong to a session; the actual X11 XID
-                # and external application's process are the durable objects.
-                xid = int(run("xdotool", "search", "--name", "^" + re.escape(application["name"]) + "$ ".rstrip()).strip().splitlines()[0])
-                assert xid == application["x11_window"], application
-                assert after_windows[application["name"]]["is_minimized"] == before_windows[application["window"]]["is_minimized"], application
-                application["after_window"] = after_windows[application["name"]]["id"]
-                application["x11_after"] = run("xwininfo", "-id", xid)
-            after_environment = dict(entry.split(b"=", 1) for entry in Path(f"/proc/{wm_pid}/environ").read_bytes().split(b"\0") if b"=" in entry)
-            assert after_environment[b"JWM_BACKEND"] == b"x11rb" and after_environment[b"JWM_DAEMON_PID"] == str(daemon_pid).encode()
-            assert after["host"]["backend"] == "x11rb"
-            assert after["host"]["pid"] != before["host"]["pid"]
-            result["after"] = snapshot("after_restart")
-            result["daemon_status_after"] = run(binaries["tool"], "status")
-            time.sleep(1)
-            assert identity(daemon_pid) == daemon_identity and session.poll() is None
-            daemon_log = work / "home/.local/share/jwm/jwm_daemon.log"
-            log_text = daemon_log.read_text()
-            assert "检测到JWM意外退出" not in log_text
-            (evidence / "daemon-before-cleanup.log").write_text(log_text)
-            record("IPC exec restart preserves daemon, JWM PID, private X server and all five apps/minimized states")
-            record("replacement shared host registers, final Leptos remains managed and daemon loop still answers status")
+                msg("restart")
+                after = wait(lambda: (current if (current := ready()) and current["session"] != before["session"] else None), "IPC restart under daemon completes", timeout=60)
+                result["frontend_after"] = wait(frontend_ready, "replacement final Leptos actual rendered acknowledgement", timeout=60)
+                assert result["frontend_after"]["sha256"] == result["binaries"]["bar"]["sha256"]
+                assert identity(daemon_pid) == daemon_identity, "parent daemon changed or exited"
+                assert identity(wm_pid) == wm_identity, "restart did not preserve managed JWM process identity"
+                assert identity(server.pid) == server_identity and server.poll() is None, "private X server changed or exited"
+                assert session.poll() is None, "daemon session supervisor exited"
+                run("xdpyinfo")
+                after_windows = {row["name"]: row for row in msg("get_windows")}
+                before_windows = {row["id"]: row for row in before_snapshot["windows"]}
+                for application in applications:
+                    assert identity(application["identity"]["pid"]) == application["identity"], application
+                    assert application["name"] in after_windows, application
+                    # WM WindowId tokens belong to a session; the actual X11 XID
+                    # and external application's process are the durable objects.
+                    xid = int(run("xdotool", "search", "--name", "^" + re.escape(application["name"]) + "$ ".rstrip()).strip().splitlines()[0])
+                    assert xid == application["x11_window"], application
+                    assert after_windows[application["name"]]["is_minimized"] == before_windows[application["window"]]["is_minimized"], application
+                    application["after_window"] = after_windows[application["name"]]["id"]
+                    application["x11_after"] = run("xwininfo", "-id", xid)
+                after_environment = dict(entry.split(b"=", 1) for entry in Path(f"/proc/{wm_pid}/environ").read_bytes().split(b"\0") if b"=" in entry)
+                assert after_environment[b"JWM_BACKEND"] == b"x11rb" and after_environment[b"JWM_DAEMON_PID"] == str(daemon_pid).encode()
+                assert after["host"]["backend"] == "x11rb"
+                assert after["host"]["pid"] != before["host"]["pid"]
+                result["after"] = snapshot("after_restart")
+                result["daemon_status_after"] = run(binaries["tool"], "status")
+                time.sleep(1)
+                assert identity(daemon_pid) == daemon_identity and session.poll() is None
+                daemon_log = work / "home/.local/share/jwm/jwm_daemon.log"
+                log_text = daemon_log.read_text()
+                assert "检测到JWM意外退出" not in log_text
+                (evidence / "daemon-before-cleanup.log").write_text(log_text)
+                record("IPC exec restart preserves daemon, JWM PID, private X server and all five apps/minimized states")
+                record("replacement shared host registers, final Leptos remains managed and daemon loop still answers status")
+                cycle_result.update(status="passed", before=before_snapshot, after=result["after"],
+                                    frontend_after=result["frontend_after"])
+            assert len(result["cycles"]) == args.cycles
             result["status"] = "passed"
         except BaseException as error:
             result.update(status="failed", error=repr(error))
+            if result["cycles"] and result["cycles"][-1]["status"] == "running":
+                result["cycles"][-1].update(status="failed", error=repr(error))
             if isinstance(error, subprocess.CalledProcessError):
                 result["command_output"] = str(error.output)[-8000:]
             result["failure_snapshot"] = snapshot("failure")

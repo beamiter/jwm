@@ -46,7 +46,7 @@ class LeptosWorkflowTests(unittest.TestCase):
                 self.assertTrue(any(fnmatch.fnmatchcase(path, pattern) for pattern in paths))
         for path in ['src/jwm/features/recording_plan.rs', 'README.md']:
             self.assertFalse(any(fnmatch.fnmatchcase(path, pattern) for pattern in paths))
-        self.assertIn('run: python3 scripts/test-leptos-daemon-workflow.py', SOURCE)
+        self.assertIn('python3 scripts/test-leptos-daemon-workflow.py', SOURCE)
 
     def test_build_requires_real_prerequisites_not_prior_runtime_success(self):
         self.assertIn('Build JWM and the independent host', STEPS['native_build'])
@@ -86,6 +86,8 @@ class LeptosWorkflowTests(unittest.TestCase):
         self.assertIn('--backend xcb', STEPS['leptos_production_xcb'])
         self.assertIn('--backend x11rb', STEPS['leptos_production_x11rb'])
         self.assertIn('--shell-bin crates/jwm_shell/target/debug/jwm-shell', STEPS['leptos_daemon'])
+        self.assertIn('--cycles 3', STEPS['leptos_daemon'])
+        self.assertIn('python3 scripts/test-daemon-restart-cycles.py', SOURCE)
         self.assertNotIn('continue-on-error:', SOURCE)
         self.assertIn('python3 scripts/validate-shared-shell-matrix.py', SOURCE)
         self.assertIn('python3 scripts/test-sparse-header.py', SOURCE)
