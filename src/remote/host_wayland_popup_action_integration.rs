@@ -2560,4 +2560,3 @@ fn authenticated_popup_destroy_after_native_delivery_reports_terminal_without_re
 fn authenticated_popup_destroy_after_tcp_acceptance_permanently_ends_authority() {
     popup_destroy_after_delivery(false);
 }
-
