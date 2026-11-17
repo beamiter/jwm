@@ -78,6 +78,10 @@ jobs:
           assert len(names) == len(set(names)) == 28
           print('bars=' + json.dumps(names))
           PY
+      - name: Verify sparse-header geometry and rejection contracts
+        run: |
+          python3 -m pip install Pillow
+          python3 scripts/test-sparse-header-pixels.py
   native:
     needs: inventory
     runs-on: ubuntu-latest

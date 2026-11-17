@@ -13,6 +13,8 @@ import tempfile
 import time
 from fixtures import frame_feedback_probe
 
+from sparse_header_pixels import selected_pixels as xilem_selected_pixels
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -22,7 +24,7 @@ def main():
     parser.add_argument('--backend', choices=['xcb', 'x11rb'], default='x11rb')
     parser.add_argument('--bar', default='xilem_bar')
     parser.add_argument('--theme', choices=['light', 'dark'], default='light')
-    parser.add_argument('--first-tag-center', type=float, default=68, help='physical x of first numeric tag, relative to the actual top window')
+    parser.add_argument('--first-tag-center', type=float, default=68, help='fixed sampler for non-Xilem frontends')
     parser.add_argument('--tag-step', type=float, default=40)
     parser.add_argument('--expect-wm-sha256')
     parser.add_argument('--bar-bin', type=Path)
@@ -187,7 +189,7 @@ def main():
                 image.crop((rect[0], rect[1], rect[0] + min(260, rect[2]), rect[1] + rect[3])).resize((1040, rect[3] * 4)).save(evidence / f'{name}-tags.png')
                 result.setdefault('screenshots', []).append(str(destination.relative_to(ROOT)))
                 return image
-            def selected_pixels(image, selected, expected_count):
+            def fixed_selected_pixels(image, selected, expected_count):
                 # Sample each pill's top-left interior, away from its label.
                 # This is the same opaque shared blue selection used by the
                 # native scene and serialized TagPalette in real webviews.
@@ -239,10 +241,19 @@ def main():
                 selected = [index + 1 for index, tag in enumerate(tags) if tag['selected']]
                 return snapshot if occupied == [1, 3, 8] and selected == expected else None
             result['sparse_snapshot'] = wait_for(lambda: sparse_selected([5]), 'occupied 1/3/8 union empty active 5')
+            current_pills = []
             def painted(name, selected, expected_count=4):
                 def sample():
+                    nonlocal current_pills
                     image = capture(name)
-                    return selected_pixels(image, selected, expected_count)
+                    if args.bar == "xilem_bar":
+                        readings = xilem_selected_pixels(image, rect, selected, expected_count)
+                    else:
+                        readings = fixed_selected_pixels(image, selected, expected_count)
+                        for row in readings:
+                            row["center"] = rect[0] + args.first_tag_center + row["slot"] * args.tag_step
+                    current_pills = readings
+                    return readings
                 return wait_for(sample, 'actual selected tag pixels ' + name, 30)
             result['sparse_pixels'] = painted('sparse-1-3-5-8-active5', [2])
             record('actual compositor pixels show four sparse pills and empty active tag 5 selection')
@@ -251,7 +262,7 @@ def main():
                     # Separate the two intended gestures by the shared 250ms
                     # idle boundary, including WebKit pixel-wheel delivery.
                     time.sleep(.30)
-                point = [round(rect[0] + args.first_tag_center + slot * args.tag_step), round(rect[1] + rect[3] / 2)]
+                point = [round(current_pills[slot]["center"]), round(rect[1] + rect[3] / 2)]
                 run('xdotool', 'mousemove', *point)
                 time.sleep(.15)
                 run('xdotool', 'click', button)
@@ -269,7 +280,7 @@ def main():
             result['multi_selected_pixels'] = painted('sparse-1-3-5-8-active5-8', [2, 3])
             record('actual compositor pixels highlight both selected tags 5 and 8')
             # The second displayed pill is original tag 3, not tag 2.
-            click_x = round(rect[0] + args.first_tag_center + args.tag_step)
+            click_x = round(current_pills[1]["center"])
             click_y = round(rect[1] + rect[3] / 2)
             run('xdotool', 'mousemove', click_x, click_y)
             run('xdotool', 'click', '1')
