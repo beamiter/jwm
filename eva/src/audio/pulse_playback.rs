@@ -636,14 +636,15 @@ mod tests {
 
             // Native capture plus controlled low-gain synthetic PCM must drive
             // interruption of active output, not only exercise manual stop.
-            // This fixture's sine source delivers two-second bursts, so warm
-            // capture first and apply gain to its PCM after native framing.
-            // No real device or source volume is changed.
+            // This fixture's sine source delivers two-second bursts. Start
+            // capture only after output is audible, then consume its first
+            // burst immediately. Warming capture before playback setup ages
+            // its usable tail past the gate's 250 ms freshness limit; the next
+            // burst can arrive after the 1500 ms bookkeeping operation.
+            // Gain is applied after native framing. No timestamp, real device
+            // or source volume is changed.
             let store = Arc::new(Mutex::new(crate::store::Store::open_at(
                 socket.parent().unwrap().join("eva-barge-state")).unwrap()));
-            let (sender, mut receiver) = tokio::sync::mpsc::channel(128);
-            let capture = super::super::Capture::start("default", sender).unwrap();
-            tokio::time::timeout(Duration::from_secs(5), receiver.recv()).await.unwrap().unwrap().unwrap();
             let mut playback = super::super::Playback::start().unwrap();
             let history = playback.history();
             playback.write_item("interruptible-reply", 0, &vec![0; BYTES_PER_SECOND as usize]).await.unwrap();
@@ -652,6 +653,8 @@ mod tests {
                     tokio::time::sleep(Duration::from_millis(5)).await;
                 }
             }).await.unwrap();
+            let (sender, mut receiver) = tokio::sync::mpsc::channel(128);
+            let capture = super::super::Capture::start("default", sender).unwrap();
             let mut gate = super::super::BargeInGate::default();
             let mut peak = 0.0f32;
             let slow_write = crate::store::access(&store, |storage| {
@@ -659,7 +662,7 @@ mod tests {
                 storage.reserve("native-barge-slow-write", "plan", &crate::config::Config::default())
             });
             tokio::pin!(slow_write);
-            {
+            let onset_result = {
             let onset = tokio::time::timeout(Duration::from_secs(2), async {
                 loop {
                     let mut frame = receiver.recv().await.unwrap().unwrap();
@@ -677,10 +680,11 @@ mod tests {
             });
             tokio::pin!(onset);
             tokio::select! { biased;
-                result = &mut slow_write => panic!("slow bookkeeping blocked native barge-in: {result:?}"),
-                result = &mut onset => result.expect("low-gain native input did not interrupt during store I/O"),
+                result = &mut slow_write => Err(format!("bookkeeping completed before native onset: {result:?}")),
+                result = &mut onset => result.map_err(|_| "low-gain native input onset timed out".to_owned()),
             }
-            }
+            };
+            assert!(onset_result.is_ok(), "{onset_result:?}; gate={}", gate.statistics());
             let stopped = Instant::now();
             drop(playback);
             assert!(stopped.elapsed() < Duration::from_millis(200));
