@@ -26,6 +26,7 @@ import struct
 import subprocess
 import tempfile
 import time
+from fixtures import frame_feedback_probe, dock_configure_check
 from fixtures.media_command_probe import invocations, new_invocation, successful_result
 from fixtures.mpv_syscall_probe import launcher_prefix
 
@@ -105,6 +106,7 @@ def main():
     parser.add_argument("--size", default="1280x800")
     parser.add_argument("--theme", choices=("light", "dark"), default="light")
     parser.add_argument("--deep", action="store_true")
+    parser.add_argument("--dock-configure-check", action="store_true", help="verify real dock ConfigureRequest acknowledgements in the private display")
     parser.add_argument("--trace-mpv", action="store_true", help="require private mpv syscall capture (strace) during media/deep acceptance")
     parser.add_argument("--media-only", action="store_true", help="test empty-player launch and real MPRIS controls after the standard smoke")
     parser.add_argument("--ui-font", help="optional private system UI font override for visual fixtures")
@@ -129,6 +131,8 @@ def main():
     evidence.mkdir(parents=True, exist_ok=True)
     result = {"bar": args.bar, "backend": args.backend, "size": [width, height],
               "theme": args.theme, "binary": str(bar_bin), "configuration": "legacy_four_edge" if args.legacy_four_edge else ("legacy_edge_shell" if args.legacy_edge_shell else "desktop_shell"), "steps": [], "status": "running"}
+    native_logs = None
+    started_at = time.time()
     started = time.monotonic()
     children = []
     launched_application = None
@@ -137,6 +141,7 @@ def main():
         work = Path(directory)
         env = dict(os.environ, LIBGL_ALWAYS_SOFTWARE="1", GDK_BACKEND="x11",
                    JWM_COMPOSITOR_API="glx", JWM_SHELL_BIN=str(args.shell_bin.resolve()))
+        frame_feedback_probe.enable(env, args.bar)
         for key in ("DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY", "DBUS_SESSION_BUS_ADDRESS",
                     "JWM_SOCKET", "JWM_BACKEND", "JWM_DESKTOP_SHELL", "JWM_BAR_LAYOUT"):
             env.pop(key, None)
@@ -763,11 +768,23 @@ def main():
             wm_pid = int(next(line.split(":", 1)[1] for line in Path(f"/proc/{host_pid}/status").read_text().splitlines() if line.startswith("PPid:")))
             result["binary_sha256"] = {"frontend": executable_hash(primary_pid), "host": executable_hash(host_pid), "jwm": executable_hash(wm_pid)}
             wm_identity = legacy.process_identity(wm_pid)
+            if args.bar.startswith("tauri_"):
+                try:
+                    native_logs = frame_feedback_probe.pin_logs(wm_pid, args.bin_dir / "jwm", started_at)
+                except Exception as error:
+                    result["frame_feedback_native_log_error"] = str(error)
             result["fixture_sha256"] = FIXTURE_SHA256
             record("current frontend top and three unique registered shared panels")
             monitor = msg("get_monitors")[0]
             assert monitor["wx"] > 0 and monitor["wy"] > 0 and monitor["ww"] < width and monitor["wh"] < height, monitor
             record("pinned panels reserve workspace on all three sides")
+            if args.dock_configure_check:
+                candidates = [int(xid) for xid in run("xdotool", "search", "--pid", primary_pid).split()
+                              if visible(xid) and run("xdotool", "getwindowname", xid).strip() == args.bar]
+                assert len(candidates) == 1, ("unique verified top dock", candidates)
+                result["dock_configure_check"] = dock_configure_check.run(
+                    candidates[0], primary_pid, evidence, env, legacy.process_identity)
+                record("dock requests receive exactly one authoritative synthetic acknowledgement")
             # Prove an actual painted top survives, rather than accepting a
             # mapped transparent webview. The wallpaper is fixed and effects
             # are disabled, so this comparison isolates the primary bar strip.
@@ -775,7 +792,9 @@ def main():
                 frontend_diagnostics = {}
                 def frontend_ready():
                     for xid in run("xdotool", "search", "--pid", primary_pid).split():
-                        raw = run("xprop", "-id", xid, "_JWM_FRONTEND_READY", "_JWM_FRONTEND_RENDERED", "_JWM_FRONTEND_BOOT", "_JWM_FRONTEND_ERROR")
+                        raw = run("xprop", "-id", xid, "_JWM_FRONTEND_READY", "_JWM_FRONTEND_RENDERED", "_JWM_FRONTEND_BOOT", "_JWM_FRONTEND_ERROR",
+                                  "_JWM_FRONTEND_DOM_READY", "_JWM_FRONTEND_VISIBILITY", "_JWM_FRONTEND_NATIVE_DOM_READY", "_JWM_FRONTEND_NATIVE_VISIBILITY", "_JWM_FRONTEND_RAF_FIRST",
+                                  "_JWM_FRONTEND_RAF_SECOND", "_JWM_FRONTEND_RENDER_REPORT_REJECTED")
                         frontend_diagnostics[xid] = raw
                         if re.search(r"_JWM_FRONTEND_READY\([^)]*\)\s*=\s*1\s*$", raw, re.M) and re.search(r"_JWM_FRONTEND_RENDERED\([^)]*\)\s*=\s*1\s*$", raw, re.M):
                             return True
@@ -783,10 +802,19 @@ def main():
                 try:
                     wait_for(frontend_ready, "Tauri frontend service and actual DOM-render acknowledgements", timeout=60)
                 except Exception:
-                    result["tauri_native_failure"] = collect_frontend_failure(frontend_diagnostics, evidence, env)
+                    try:
+                        result["tauri_native_failure"] = collect_frontend_failure(frontend_diagnostics, evidence, env)
+                    except Exception:
+                        result["tauri_native_failure"] = {"capture_failed": True}
                     raise
                 finally:
                     result["tauri_frontend_diagnostics"] = frontend_diagnostics
+                    try:
+                        exact_windows = [xid for xid, raw in frontend_diagnostics.items()
+                                         if re.search(r"_JWM_FRONTEND_READY\([^)]*\)\s*=\s*1\s*$", raw, re.M)]
+                        result["frame_feedback"] = frame_feedback_probe.collect(run, exact_windows)
+                    except Exception as error:
+                        result["frame_feedback_error"] = str(error)
             msg("togglebar")
             wait_for(lambda: not state()["outputs"][0]["visible"], "hide for wallpaper reference")
             time.sleep(0.25)
@@ -1167,6 +1195,12 @@ def main():
         except Exception as error:
             result.update(status="failed", reason=str(error))
             diagnostics = {}
+            # Capture the actual display before teardown, including readiness failures.
+            # Evidence collection must never replace the original exception.
+            try:
+                capture("failure-desktop", final_display=True)
+            except Exception as failure:
+                diagnostics["screenshot_error"] = str(failure)
             for name, probe in (("shell", state), ("monitors", lambda: msg("get_monitors")), ("randr", lambda: run("xrandr", "--listmonitors")), ("randr_active", lambda: run("xrandr", "--listactivemonitors"))):
                 try:
                     diagnostics[name] = probe()
@@ -1175,6 +1209,7 @@ def main():
             result["failure_diagnostics"] = diagnostics
             raise
         finally:
+            frame_feedback_probe.archive(native_logs, evidence, result)
             cleanup_errors = []
             for identity in reversed(service_identities):
                 if legacy.process_identity(identity[0]) == identity:

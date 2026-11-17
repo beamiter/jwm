@@ -13,6 +13,9 @@ import signal
 import subprocess
 import tempfile
 import time
+from fixtures import frame_feedback_probe
+
+from sparse_header_pixels import selected_pixels as xilem_selected_pixels
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -23,7 +26,7 @@ def main():
     parser.add_argument('--backend', choices=['xcb', 'x11rb'], default='x11rb')
     parser.add_argument('--bar', default='xilem_bar')
     parser.add_argument('--theme', choices=['light', 'dark'], default='light')
-    parser.add_argument('--first-tag-center', type=float, default=68, help='physical x of first numeric tag, relative to the actual top window')
+    parser.add_argument('--first-tag-center', type=float, default=68, help='fixed sampler for non-Xilem frontends')
     parser.add_argument('--tag-step', type=float, default=40)
     parser.add_argument('--expect-wm-sha256')
     parser.add_argument('--bar-bin', type=Path)
@@ -38,10 +41,13 @@ def main():
     evidence.mkdir(parents=True, exist_ok=True)
     result = {'status': 'running', 'backend': args.backend, 'bar': args.bar, 'theme': args.theme, 'steps': [], 'fixture_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest()}
     children = []
+    native_logs = None
+    started_at = time.time()
     started = time.monotonic()
     with tempfile.TemporaryDirectory(prefix='jwm-sparse-header-') as directory:
         work = Path(directory)
         env = dict(os.environ, LIBGL_ALWAYS_SOFTWARE='1', GDK_BACKEND='x11', JWM_SHELL_BIN=str(args.shell_bin.resolve()), JWM_COMPOSITOR_API='glx')
+        frame_feedback_probe.enable(env, args.bar)
         for key in ['DISPLAY', 'WAYLAND_DISPLAY', 'XAUTHORITY', 'DBUS_SESSION_BUS_ADDRESS', 'JWM_SOCKET', 'JWM_BACKEND', 'JWM_DESKTOP_SHELL', 'JWM_BAR_LAYOUT', 'JWM_DAEMON_PID']:
             env.pop(key, None)
         for key, folder in [('XDG_CONFIG_HOME', 'config'), ('XDG_CACHE_HOME', 'cache'), ('XDG_DATA_HOME', 'data'), ('XDG_STATE_HOME', 'state'), ('XDG_RUNTIME_DIR', 'runtime'), ('XDG_PICTURES_DIR', 'pictures')]:
@@ -153,15 +159,30 @@ def main():
             assert result['binary_sha256']['host'] == hashlib.sha256(args.shell_bin.read_bytes()).hexdigest()
             result['top_window'], result['top_rect'] = xid, rect
             if args.bar.startswith('tauri_'):
+                try:
+                    native_logs = frame_feedback_probe.pin_logs(wm_pid, args.bin_dir / 'jwm', started_at)
+                except Exception as error:
+                    result['frame_feedback_native_log_error'] = str(error)
                 def rendered():
-                    raw = run('xprop', '-id', xid, '_JWM_FRONTEND_READY', '_JWM_FRONTEND_RENDERED', '_JWM_FRONTEND_BOOT', '_JWM_FRONTEND_ERROR')
+                    raw = run('xprop', '-id', xid, '_JWM_FRONTEND_READY', '_JWM_FRONTEND_RENDERED',
+                              '_JWM_FRONTEND_BOOT', '_JWM_FRONTEND_ERROR', '_JWM_FRONTEND_DOM_READY', '_JWM_FRONTEND_VISIBILITY', '_JWM_FRONTEND_NATIVE_DOM_READY', '_JWM_FRONTEND_NATIVE_VISIBILITY',
+                              '_JWM_FRONTEND_RAF_FIRST', '_JWM_FRONTEND_RAF_SECOND',
+                              '_JWM_FRONTEND_RENDER_REPORT_REJECTED')
                     result['frontend_diagnostics'] = raw
                     return all(re.search(name + r'\([^)]*\)\s*=\s*1\s*$', raw, re.M) for name in ['_JWM_FRONTEND_READY', '_JWM_FRONTEND_RENDERED'])
                 try:
                     wait_for(rendered, 'actual Tauri frontend rendered acknowledgement', 60)
                 except Exception:
-                    result['tauri_native_failure'] = collect_frontend_failure([xid], evidence, env)
+                    try:
+                        result['tauri_native_failure'] = collect_frontend_failure([xid], evidence, env)
+                    except Exception:
+                        result["tauri_native_failure"] = {"capture_failed": True}
                     raise
+                finally:
+                    try:
+                        result['frame_feedback'] = frame_feedback_probe.collect(run, [xid])
+                    except Exception as error:
+                        result['frame_feedback_error'] = str(error)
             run('xdotool', 'mousemove', '640', '400')
             record('fresh actual top, host and WM binary hashes recorded; real mapped frontend ready')
             def capture(name):
@@ -176,7 +197,7 @@ def main():
                 image.crop((rect[0], rect[1], rect[0] + min(260, rect[2]), rect[1] + rect[3])).resize((1040, rect[3] * 4)).save(evidence / f'{name}-tags.png')
                 result.setdefault('screenshots', []).append(str(destination.relative_to(ROOT)))
                 return image
-            def selected_pixels(image, selected, expected_count):
+            def fixed_selected_pixels(image, selected, expected_count):
                 # Sample each pill's top-left interior, away from its label.
                 # This is the same opaque shared blue selection used by the
                 # native scene and serialized TagPalette in real webviews.
@@ -228,10 +249,19 @@ def main():
                 selected = [index + 1 for index, tag in enumerate(tags) if tag['selected']]
                 return snapshot if occupied == [1, 3, 8] and selected == expected else None
             result['sparse_snapshot'] = wait_for(lambda: sparse_selected([5]), 'occupied 1/3/8 union empty active 5')
+            current_pills = []
             def painted(name, selected, expected_count=4):
                 def sample():
+                    nonlocal current_pills
                     image = capture(name)
-                    return selected_pixels(image, selected, expected_count)
+                    if args.bar == "xilem_bar":
+                        readings = xilem_selected_pixels(image, rect, selected, expected_count)
+                    else:
+                        readings = fixed_selected_pixels(image, selected, expected_count)
+                        for row in readings:
+                            row["center"] = rect[0] + args.first_tag_center + row["slot"] * args.tag_step
+                    current_pills = readings
+                    return readings
                 return wait_for(sample, 'actual selected tag pixels ' + name, 30)
             result['sparse_pixels'] = painted('sparse-1-3-5-8-active5', [2])
             record('actual compositor pixels show four sparse pills and empty active tag 5 selection')
@@ -240,7 +270,7 @@ def main():
                     # Separate the two intended gestures by the shared 250ms
                     # idle boundary, including WebKit pixel-wheel delivery.
                     time.sleep(.30)
-                point = [round(rect[0] + args.first_tag_center + slot * args.tag_step), round(rect[1] + rect[3] / 2)]
+                point = [round(current_pills[slot]["center"]), round(rect[1] + rect[3] / 2)]
                 run('xdotool', 'mousemove', *point)
                 time.sleep(.15)
                 run('xdotool', 'click', button)
@@ -258,7 +288,7 @@ def main():
             result['multi_selected_pixels'] = painted('sparse-1-3-5-8-active5-8', [2, 3])
             record('actual compositor pixels highlight both selected tags 5 and 8')
             # The second displayed pill is original tag 3, not tag 2.
-            click_x = round(rect[0] + args.first_tag_center + args.tag_step)
+            click_x = round(current_pills[1]["center"])
             click_y = round(rect[1] + rect[3] / 2)
             run('xdotool', 'mousemove', click_x, click_y)
             run('xdotool', 'click', '1')
@@ -280,10 +310,21 @@ def main():
             result['status'] = 'passed'
         except Exception as error:
             result.update(status='failed', reason=str(error))
+            try:
+                # Read the final owned X display, even when WM IPC or the
+                # frontend has not reached readiness. Never touch a live display.
+                assert env.get('DISPLAY'), 'owned display not initialized'
+                screenshot = evidence / 'failure-display.png'
+                run('import', '-window', 'root', screenshot)
+                assert screenshot.is_file() and screenshot.stat().st_size > 0, 'failure screenshot missing'
+                result['failure_screenshot'] = screenshot.name
+            except Exception as capture_error:
+                result['failure_screenshot_error'] = str(capture_error)
             try: result['failure_state'] = state()
             except Exception as state_error: result['failure_state_error'] = str(state_error)
             raise
         finally:
+            frame_feedback_probe.archive(native_logs, evidence, result)
             for child in reversed(children):
                 if child.poll() is None:
                     try:

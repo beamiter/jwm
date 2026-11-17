@@ -11,9 +11,9 @@ function harness({rejectRender = false, pendingRender = false} = {}) {
     window: {addEventListener() {}, __TAURI_INTERNALS__: {invoke(_, payload) {
       calls.push(payload);
       if (payload.stage === "rendered" && pendingRender) return new Promise(() => {});
-      return payload.stage === "rendered" && rejectRender ? Promise.reject(new Error("private error")) : Promise.resolve();
+      return payload.stage === "rendered" && rejectRender ? Promise.reject(new Error("test rejection")) : Promise.resolve();
     }}},
-    document: {readyState: "complete", visibilityState: "visible", querySelector: name => nodes.get(name)},
+    document: {addEventListener() {}, readyState: "complete", visibilityState: "visible", querySelector: name => nodes.get(name)},
     console: {error() {}}, Promise,
     MutationObserver: class {
       constructor(callback) { mutation = callback; }
@@ -76,7 +76,7 @@ for (const pendingRender of [false, true]) {
     await flush(); h.snapshot(); await flush();
     assert.equal(h.phase(), pendingRender ? "render-ipc-pending" : "render-ipc-failed");
     assert.equal(h.calls.filter(x => x.stage === "rendered").length, 1);
-    assert.equal(JSON.stringify(h.calls).includes("private error"), false);
+    assert.equal(h.calls.filter(x => x.stage === "render-report-rejected").length, pendingRender ? 0 : 1);
     assert.equal(h.timers.size, 0);
   });
 }

@@ -12,6 +12,19 @@ on:
       - tests/glib_backport/**
       - scripts/test-bar-startup.mjs
       - scripts/test_frontend_diagnostics.mjs
+      - scripts/test-frontend-diagnostics.mjs
+      - scripts/test-shared-shell-failure-evidence.py
+      - scripts/test-frame-feedback-probe.py
+      - scripts/fixtures/frame_feedback_probe.py
+      - scripts/test-sparse-header-evidence.py
+      - scripts/test-daemon-native-log-evidence.py
+      - scripts/test-leptos-daemon-workflow.py
+      - scripts/test-react-repeat-workflow.py
+      - .github/workflows/shared-shell.yml
+      - scripts/fixtures/daemon_native_log.py
+      - scripts/test-shared-sidebar-shell-daemon.py
+      - scripts/test-sparse-header.py
+      - scripts/test-shared-sidebar-shell-x11.py
       - scripts/test_bar_layout.mjs
       - scripts/test_bar_web_frontends.mjs
       - crates/xbar_core/**
@@ -30,6 +43,19 @@ on:
       - tests/glib_backport/**
       - scripts/test-bar-startup.mjs
       - scripts/test_frontend_diagnostics.mjs
+      - scripts/test-frontend-diagnostics.mjs
+      - scripts/test-shared-shell-failure-evidence.py
+      - scripts/test-frame-feedback-probe.py
+      - scripts/fixtures/frame_feedback_probe.py
+      - scripts/test-sparse-header-evidence.py
+      - scripts/test-daemon-native-log-evidence.py
+      - scripts/test-leptos-daemon-workflow.py
+      - scripts/test-react-repeat-workflow.py
+      - .github/workflows/shared-shell.yml
+      - scripts/fixtures/daemon_native_log.py
+      - scripts/test-shared-sidebar-shell-daemon.py
+      - scripts/test-sparse-header.py
+      - scripts/test-shared-sidebar-shell-x11.py
       - scripts/test_bar_layout.mjs
       - scripts/test_bar_web_frontends.mjs
       - crates/xbar_core/**
@@ -563,7 +589,15 @@ jobs:
           package-manager-cache: false
 
       - name: Test asynchronous frontend readiness without a browser
-        run: node scripts/test-bar-startup.mjs
+        run: |
+          node scripts/test-bar-startup.mjs
+          node --test scripts/test-frontend-diagnostics.mjs
+          python3 scripts/test-shared-shell-failure-evidence.py
+          python3 scripts/test-frame-feedback-probe.py
+          python3 scripts/test-sparse-header-evidence.py
+          python3 scripts/test-daemon-native-log-evidence.py
+          python3 scripts/test-leptos-daemon-workflow.py
+          python3 scripts/test-react-repeat-workflow.py
 
       - name: Test bounded WebView phase diagnostics without a browser
         run: node --test scripts/test_frontend_diagnostics.mjs

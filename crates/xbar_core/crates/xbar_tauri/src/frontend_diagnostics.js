@@ -3,8 +3,10 @@
   const report = (stage, message) => {
     const invoke = window.__TAURI_INTERNALS__?.invoke;
     if (typeof invoke === "function") {
-      return invoke("frontend_diagnostic", {stage, message: String(message).slice(0, 2048)})
-        .then(() => true, () => false);
+      return invoke("frontend_diagnostic", {stage, message: String(message).slice(0, 2048)}).then(() => true, reason => {
+        if (stage === "rendered") report("render-report-rejected", reason?.message || reason);
+        return false;
+      });
     }
     return Promise.resolve(false);
   };
@@ -20,6 +22,17 @@
     consoleError(...args);
     error(args.map(value => String(value)).join(" "));
   };
+  let visibilityChanges = 0;
+  const visibility = stage => {
+    // Diagnostics must not prevent the original double-rAF acknowledgement.
+    try {
+      report(stage, JSON.stringify({visibilityState: document.visibilityState,
+        hidden: document.hidden, width: window.innerWidth, height: window.innerHeight}));
+    } catch (_) {}
+  };
+  document.addEventListener("visibilitychange", () => {
+    if (visibilityChanges++ < 16) visibility("visibility");
+  });
   let rendered = false;
   let phase = "waiting-dom";
   // Bounded observations only: these never advance the render gate. Use the
@@ -41,10 +54,15 @@
     if (rendered || !document.querySelector(".time-pill") || !document.querySelector(".emoji-button") || document.querySelector(".button-row")?.textContent?.trim() === "Loading...") return;
     rendered = true;
     observer.disconnect();
+    // Independent properties retain each milestone even if IPC completes out of order.
+    // These probes are evidence only: rendered still requires both animation frames.
     phase = "waiting-frame-1";
+    visibility("dom-ready");
     requestAnimationFrame(() => {
       phase = "waiting-frame-2";
+      report("raf-first", "first animation frame reached");
       requestAnimationFrame(() => {
+        report("raf-second", "second animation frame reached");
         phase = "render-ipc-pending";
         report("rendered", "state projected into workspace controls and clock").then(ok => {
           phase = ok ? "render-ipc-acknowledged" : "render-ipc-failed";
