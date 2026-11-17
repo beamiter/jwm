@@ -119,5 +119,62 @@ class FrontendIsolation(unittest.TestCase):
                             for n in sample.body))
 
 
+class FrameGeometry(unittest.TestCase):
+    def setUp(self):
+        self.tree = ast.parse(Path(__file__).with_name('test-sparse-header.py').read_text())
+        functions = [n for n in ast.walk(self.tree) if isinstance(n, ast.FunctionDef)
+                     and n.name in ('capture_with_geometry', 'fixed_selected_pixels')]
+        self.namespace = {'rect': (0, 0, 1280, 42),
+                          'args': SimpleNamespace(first_tag_center=68, tag_step=40)}
+        exec(compile(ast.Module(body=functions, type_ignores=[]), 'actual geometry sampler', 'exec'),
+             self.namespace)
+
+    def test_mapped_window_moves_after_startup_before_capture(self):
+        image, _ = fixture()
+        sampler = self.namespace['fixed_selected_pixels']
+        with self.assertRaises(AssertionError):
+            sampler(image, [2], 4)  # Original cached startup rectangle is wrong.
+        frame, rect = self.namespace['capture_with_geometry'](lambda: image, lambda: RECT)
+        self.namespace['rect'] = rect
+        rows = sampler(frame, [2], 4)
+        self.assertEqual([r['slot'] for r in rows if r['selected_blue']], [2])
+        # Correct geometry must not excuse a wrong selection or a missing pill.
+        with self.assertRaises(AssertionError): sampler(frame, [3], 4)
+        with self.assertRaises(AssertionError): sampler(frame, [2], 3)
+
+    def test_geometry_change_during_capture_is_rejected_without_internal_retry(self):
+        events = []
+        rectangles = iter([(0, 0, 1280, 42), RECT])
+        def geometry():
+            events.append('geometry')
+            return next(rectangles)
+        def capture():
+            events.append('capture')
+            return fixture()[0]
+        with self.assertRaisesRegex(AssertionError, 'changed during capture'):
+            self.namespace['capture_with_geometry'](capture, geometry)
+        self.assertEqual(events, ['geometry', 'capture', 'geometry'])
+
+    def test_capture_updates_enclosing_rect_from_same_window(self):
+        capture = next(n for n in ast.walk(self.tree) if isinstance(n, ast.FunctionDef)
+                       and n.name == 'capture')
+        self.assertTrue(any(isinstance(n, ast.Nonlocal) and 'rect' in n.names
+                            for n in capture.body))
+        source = ast.unparse(capture)
+        self.assertIn('image, rect = capture_with_geometry(read_image, lambda: geometry(xid))', source)
+        self.assertIn("result.setdefault('frame_rects', {})[name] = rect", source)
+
+    def test_pointer_rechecks_validated_geometry_before_move_and_click(self):
+        pointer = next(n for n in ast.walk(self.tree) if isinstance(n, ast.FunctionDef)
+                       and n.name == 'pointer_click')
+        guards = [n for n in pointer.body if isinstance(n, ast.Assert)]
+        self.assertEqual([ast.unparse(n.test) for n in guards], ['geometry(xid) == rect'] * 2)
+        statements = [ast.unparse(n) for n in pointer.body]
+        move = statements.index("run('xdotool', 'mousemove', *point)")
+        click = statements.index("run('xdotool', 'click', button)")
+        self.assertTrue(statements[move - 1].startswith('assert geometry(xid) == rect'))
+        self.assertTrue(statements[click - 1].startswith('assert geometry(xid) == rect'))
+
+
 if __name__ == '__main__':
     unittest.main()
