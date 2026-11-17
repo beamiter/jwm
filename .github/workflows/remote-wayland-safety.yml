@@ -199,7 +199,7 @@ jobs:
           for filter in "$real" "$wire" "$client" "$hello" "$budget" "$capabilities" "$sender" "$cli"; do
             target=(--lib)
             case "$filter" in
-              "$real") expected=11 ;;
+              "$real") expected=15 ;;
               "$wire") expected=28 ;;
               "$client") expected=18 ;;
               "$hello") expected=2 ;;
@@ -694,3 +694,4 @@ jobs:
           path: ${{ runner.temp }}/region-pressure-optimized-summary-*.json
           if-no-files-found: warn
           retention-days: 3
+

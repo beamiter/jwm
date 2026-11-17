@@ -1420,6 +1420,144 @@ fn authenticated_popup_lock_or_root_unmap_ends_current_lease_without_new_input()
     }
 }
 
+/// Retain unique refresh observations, but re-evaluate the current proof on
+/// every sample. A proof first seen before the tail window can remain fresh
+/// inside it; deduplication must not discard that later evidence.
+#[derive(Default)]
+struct PeriodicReadyEvidence {
+    observations: Vec<(Instant, u64)>,
+    terminal_tail: Option<(Instant, u64, Instant)>,
+}
+
+impl PeriodicReadyEvidence {
+    fn observe(
+        &mut self,
+        now: Instant,
+        sequence: u64,
+        deadline: Instant,
+        current_sequence: Option<u64>,
+        current_acked: bool,
+        captured_at: Option<Instant>,
+    ) {
+        if self
+            .observations
+            .last()
+            .is_some_and(|(_, old)| sequence < *old)
+        {
+            return;
+        }
+        if self
+            .observations
+            .last()
+            .is_none_or(|(_, old)| sequence > *old)
+        {
+            self.observations.push((now, sequence));
+        }
+        if self.terminal_tail.is_none()
+            && now < deadline
+            && deadline.duration_since(now) <= Duration::from_millis(500)
+            && current_acked
+            && current_sequence == Some(sequence)
+        {
+            let captured_at = captured_at.expect("ACK must name a real retained proof");
+            if captured_at + Duration::from_secs(1) > deadline {
+                self.terminal_tail = Some((now, sequence, captured_at));
+            }
+        }
+    }
+}
+
+#[test]
+fn authenticated_popup_periodic_ready_evidence_rechecks_same_sequence_inside_tail_window() {
+    let start = Instant::now();
+    let deadline = start + Duration::from_secs(30);
+    let captured = deadline - Duration::from_millis(550);
+    let mut evidence = PeriodicReadyEvidence::default();
+    evidence.observe(
+        deadline - Duration::from_millis(501),
+        60,
+        deadline,
+        Some(60),
+        true,
+        Some(captured),
+    );
+    assert!(evidence.terminal_tail.is_none());
+    evidence.observe(
+        deadline - Duration::from_millis(499),
+        60,
+        deadline,
+        Some(60),
+        true,
+        Some(captured),
+    );
+    assert_eq!(evidence.observations.len(), 1);
+    assert_eq!(
+        evidence.terminal_tail,
+        Some((deadline - Duration::from_millis(499), 60, captured))
+    );
+}
+
+#[test]
+fn authenticated_popup_periodic_ready_evidence_rechecks_late_ack_snapshot_without_new_sequence() {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let now = deadline - Duration::from_millis(480);
+    let captured = deadline - Duration::from_millis(510);
+    let mut evidence = PeriodicReadyEvidence::default();
+    evidence.observe(now, 60, deadline, Some(60), false, Some(captured));
+    assert!(evidence.terminal_tail.is_none());
+    evidence.observe(now, 60, deadline, Some(60), true, Some(captured));
+    assert_eq!(evidence.observations.len(), 1);
+    assert_eq!(evidence.terminal_tail, Some((now, 60, captured)));
+}
+
+#[test]
+fn authenticated_popup_periodic_ready_evidence_rejects_regressed_sequence() {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let captured = deadline - Duration::from_millis(550);
+    let mut evidence = PeriodicReadyEvidence::default();
+    evidence.observe(
+        deadline - Duration::from_millis(501),
+        61,
+        deadline,
+        Some(61),
+        true,
+        Some(captured),
+    );
+    evidence.observe(
+        deadline - Duration::from_millis(499),
+        60,
+        deadline,
+        Some(60),
+        true,
+        Some(captured),
+    );
+    assert_eq!(evidence.observations.len(), 1);
+    assert!(evidence.terminal_tail.is_none());
+}
+
+#[test]
+fn authenticated_popup_periodic_ready_evidence_preserves_freshness_ack_and_deadline_gates() {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    for (before_ms, capture_age_ms, acked, current) in [
+        (0, 510, true, Some(60)),
+        (480, 1000, true, Some(60)),
+        (480, 510, true, Some(61)),
+        (480, 510, false, Some(60)),
+        (501, 550, true, Some(60)),
+    ] {
+        let mut evidence = PeriodicReadyEvidence::default();
+        evidence.observe(
+            deadline - Duration::from_millis(before_ms),
+            60,
+            deadline,
+            current,
+            acked,
+            Some(deadline - Duration::from_millis(capture_age_ms)),
+        );
+        assert!(evidence.terminal_tail.is_none());
+    }
+}
+
 #[test]
 fn authenticated_popup_periodic_real_presentation_does_not_renew_original_lease() {
     use crate::remote::client::PopupLifetimeFailureReason;
@@ -1464,9 +1602,7 @@ fn authenticated_popup_periodic_real_presentation_does_not_renew_original_lease(
     assert!(fixed_deadline < host_original.deadline && host_original.deadline <= native_original.2);
     let midpoint = requested + fixed_deadline.duration_since(requested) / 2;
     let overall_deadline = fixed_deadline + Duration::from_secs(5);
-    let mut ready_observations: Vec<(Instant, u64)> = Vec::new();
-    let mut last_ready = None;
-    let mut terminal_tail: Option<(Instant, u64, Instant)> = None;
+    let mut evidence = PeriodicReadyEvidence::default();
     let mut client_result = None;
     let mut host_result = None;
     loop {
@@ -1476,7 +1612,7 @@ fn authenticated_popup_periodic_real_presentation_does_not_renew_original_lease(
         // avoids reading a viewer surface concurrently with its natural teardown.
         h.tick(
             &mut gl,
-            if terminal_tail.is_none() {
+            if evidence.terminal_tail.is_none() {
                 Some((false, false))
             } else {
                 None
@@ -1531,26 +1667,16 @@ fn authenticated_popup_periodic_real_presentation_does_not_renew_original_lease(
         }
         if let Some(sequence) = *h.ready.lock().unwrap() {
             let frames = *h.frames.lock().unwrap();
-            if frames.1 == Some(sequence)
-                && h.last_presented == Some(sequence)
-                && last_ready.is_none_or(|old| sequence > old)
-            {
+            if frames.1 == Some(sequence) && h.last_presented == Some(sequence) {
                 assert_eq!(h.last_visual, Some((false, false)));
-                ready_observations.push((now, sequence));
-                last_ready = Some(sequence);
-                if terminal_tail.is_none()
-                    && now < fixed_deadline
-                    && fixed_deadline.duration_since(now) <= Duration::from_millis(500)
-                    && host.current_acked
-                    && host.current_sequence == Some(sequence)
-                {
-                    let captured_at = host
-                        .current_captured_at
-                        .expect("ACK must name a real retained proof");
-                    if captured_at + Duration::from_secs(1) > fixed_deadline {
-                        terminal_tail = Some((now, sequence, captured_at));
-                    }
-                }
+                evidence.observe(
+                    now,
+                    sequence,
+                    fixed_deadline,
+                    host.current_sequence,
+                    host.current_acked,
+                    host.current_captured_at,
+                );
             }
         }
         assert!(
@@ -1572,7 +1698,7 @@ fn authenticated_popup_periodic_real_presentation_does_not_renew_original_lease(
             assert_eq!(failure.deadline, Some(fixed_deadline));
             assert!(failure.at >= fixed_deadline);
             assert!(
-                terminal_tail.is_some(),
+                evidence.terminal_tail.is_some(),
                 "must have fresh actual Ready evidence near the original deadline"
             );
         }
@@ -1590,19 +1716,20 @@ fn authenticated_popup_periodic_real_presentation_does_not_renew_original_lease(
         thread::yield_now();
     }
     assert!(
-        ready_observations.len() >= 3,
+        evidence.observations.len() >= 3,
         "must actually refresh, not wait on one frame"
     );
     assert!(
-        ready_observations
+        evidence
+            .observations
             .windows(2)
             .all(|pair| pair[1].1 > pair[0].1)
     );
-    assert!(ready_observations.iter().any(|(at, _)| *at >= midpoint));
-    let (tail_at, tail_sequence, tail_capture) = terminal_tail.unwrap();
+    assert!(evidence.observations.iter().any(|(at, _)| *at >= midpoint));
+    let (tail_at, tail_sequence, tail_capture) = evidence.terminal_tail.unwrap();
     assert!(tail_at < fixed_deadline && tail_capture + Duration::from_secs(1) > fixed_deadline);
     assert!(
-        tail_at.duration_since(ready_observations[0].0) >= Duration::from_secs(1),
+        tail_at.duration_since(evidence.observations[0].0) >= Duration::from_secs(1),
         "separate periodic refreshes, not one startup batch"
     );
     let failed = h
@@ -2433,3 +2560,4 @@ fn authenticated_popup_destroy_after_native_delivery_reports_terminal_without_re
 fn authenticated_popup_destroy_after_tcp_acceptance_permanently_ends_authority() {
     popup_destroy_after_delivery(false);
 }
+
