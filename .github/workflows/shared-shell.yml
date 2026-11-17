@@ -82,6 +82,8 @@ jobs:
         run: |
           python3 -m pip install Pillow
           python3 scripts/test-sparse-header-pixels.py
+      - name: Verify bounded player reuse diagnostics
+        run: python3 scripts/test-player-reuse-observation.py
   native:
     needs: inventory
     runs-on: ubuntu-latest

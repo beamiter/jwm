@@ -32,6 +32,15 @@ ROOT = Path(__file__).resolve().parents[1]
 FIXTURE_SHA256 = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
 
 
+
+def player_reuse_observation(windows):
+    """Bound diagnostics without copying titles, paths, or arbitrary metadata."""
+    return {"window_count": len(windows),
+            "window_ids": [row.get("id") for row in windows[:8]
+                           if isinstance(row.get("id"), int)],
+            "truncated": len(windows) > 8}
+
+
 def changed_preview_marker_pixels(reference, painted, color):
     """Count newly painted client-color pixels, not arbitrary hover damage."""
     assert reference.size == painted.size
@@ -456,6 +465,9 @@ def main():
                 reopen = wait_for(lambda: new_invocation(player_results, reopen_before), "reopen invocation recorded")
                 observation["reopen_result"] = wait_for(lambda: successful_result(reopen), "reopen command completed successfully")
                 reused = player_windows()
+                summary = player_reuse_observation(reused)
+                summary["cold_launch_control"] = kind
+                result.setdefault("player_reuse_observations", []).append(summary)
                 observation.update(reused_windows=reused, media_after_reopen=msg("get_media_status"))
                 (evidence / ("media-reuse-" + kind + ".json")).write_text(json.dumps(observation, indent=2) + "\n")
                 capture("media-after-reopen-" + kind)
