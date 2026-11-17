@@ -2,8 +2,9 @@
 //! filesystem socket, libmpv linkage, or compositor-thread I/O is involved.
 
 use std::io::{Read, Write};
-use std::os::fd::OwnedFd;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::net::UnixStream;
+use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
@@ -109,6 +110,29 @@ impl Controller {
     }
 }
 
+// mpv acknowledges playlist selection before asynchronous file loading finishes.
+// An idle player can therefore already have a selected entry that must not be
+// replaced by a later enqueue request. Only an unselected queue needs starting.
+fn enqueue_should_start(idle: bool, playlist_pos: i64) -> bool {
+    idle && playlist_pos == -1
+}
+
+fn check_action_deadline(now: Instant, deadline: Instant) -> Result<(), String> {
+    if now >= deadline {
+        Err("player request expired before execution".into())
+    } else {
+        Ok(())
+    }
+}
+
+fn open_load_flag(enqueue: bool, start_enqueued: bool, index: usize) -> &'static str {
+    match (enqueue, start_enqueued, index) {
+        (false, _, 0) => "replace",
+        (true, true, 0) => "append-play",
+        _ => "append",
+    }
+}
+
 impl Worker {
     pub(super) fn spawn_inner(
         self,
@@ -175,6 +199,9 @@ impl Worker {
         }
         let mut requested_quit = false;
         loop {
+            // Capability readback failure is not player failure. Keep transport
+            // exit handling below live, and permit Stop/Quit/Open regardless.
+            let _ = mpv.refresh_loaded_properties();
             // One request per iteration keeps streaming property events and
             // child exit handling live even under a sustained command burst.
             match self.rx.try_recv() {
@@ -236,6 +263,49 @@ impl Worker {
     }
 }
 
+#[derive(Default)]
+struct LoadRefresh {
+    generation: u64,
+    exhausted: bool,
+    pending: Option<u64>,
+    failure: Option<String>,
+    retry_after: Option<Instant>,
+    failures: u8,
+}
+
+impl LoadRefresh {
+    fn event(&mut self, event: Option<&str>) {
+        match event {
+            Some("start-file" | "end-file" | "shutdown") => {
+                self.pending = None;
+                self.failure = None;
+                self.retry_after = None;
+                self.failures = 0;
+                if let Some(next) = self.generation.checked_add(1) {
+                    self.generation = next;
+                } else {
+                    self.exhausted = true;
+                }
+            }
+            Some("file-loaded") if !self.exhausted => self.pending = Some(self.generation),
+            _ => {}
+        }
+    }
+
+    fn failed(&mut self, error: String, now: Instant) {
+        self.failure = Some(error);
+        self.failures = self.failures.saturating_add(1);
+        self.retry_after = Some(now + Duration::from_millis(250));
+        if self.failures >= 3 {
+            self.pending = None;
+        }
+    }
+
+    fn current(&self, generation: u64) -> bool {
+        !self.exhausted && self.generation == generation && self.pending == Some(generation)
+    }
+}
+
 struct Mpv {
     socket: UnixStream,
     child: Child,
@@ -244,10 +314,49 @@ struct Mpv {
     state: SharedState,
     resume_index: usize,
     refresh_position: bool,
+    load_refresh: LoadRefresh,
     seek_pending: bool,
     _ui: Option<super::ui::Script>,
     eva_receipts: EvaReceipts,
     last_open_command_id: Option<u64>,
+}
+
+// Keep IPC away from stdin: graphics/device initialization in mpv can close
+// fd 0 and reuse it. Reserve a real descriptor before Command creates its exec
+// error pipe; never dup2 onto a fixed number in pre_exec.
+fn spawn_decoder(mut command: Command, child_socket: UnixStream) -> std::io::Result<Child> {
+    // Always duplicate with CLOEXEC, including when a closed standard stream
+    // caused socketpair to allocate fd 0, 1 or 2. Other concurrent execs must not
+    // inherit this endpoint while we prepare the decoder.
+    let raw = unsafe { libc::fcntl(child_socket.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 3) };
+    if raw == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: fcntl returned a new descriptor owned only by this scope.
+    let ipc_fd = unsafe { OwnedFd::from_raw_fd(raw) };
+    command
+        .arg(format!("--input-ipc-client=fd://{raw}"))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit());
+    // SAFETY: only async-signal-safe fcntl is called after fork. The owned fd
+    // remains live through spawn, and only the child's copy loses CLOEXEC.
+    unsafe {
+        command.pre_exec(move || {
+            if libc::fcntl(raw, libc::F_SETFD, 0) == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    // Retain the original CLOEXEC endpoint too: if it occupied stdin, do not
+    // free fd 0 while Command is preparing its /dev/null standard streams.
+    let result = command.spawn();
+    // Also close on spawn failure. The parent must not keep a second endpoint
+    // alive and hide decoder EOF from the worker.
+    drop(ipc_fd);
+    drop(child_socket);
+    result
 }
 
 impl Mpv {
@@ -259,7 +368,6 @@ impl Mpv {
         socket
             .set_write_timeout(Some(COMMAND_TIMEOUT))
             .map_err(|e| e.to_string())?;
-        let child_fd: OwnedFd = child_socket.into();
         let ui =
             super::ui::Script::create().map_err(|e| format!("cannot prepare player UI: {e}"))?;
         let mut command = Command::new("mpv");
@@ -269,7 +377,6 @@ impl Mpv {
             "--no-terminal",
             "--input-terminal=no",
             "--idle=yes",
-            "--input-ipc-client=fd://0",
             "--force-window=yes",
             "--keep-open=no",
             "--title=JWM Player${?media-title: — ${media-title}}",
@@ -299,14 +406,9 @@ impl Mpv {
         if headless {
             command.args(["--ao=null", "--vo=null", "--force-window=no"]);
         }
-        let child = command
-            .stdin(Stdio::from(child_fd))
-            .stdout(Stdio::null())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .map_err(|error| {
-                format!("cannot start mpv: {error}. Install the mpv package to enable playback.")
-            })?;
+        let child = spawn_decoder(command, child_socket).map_err(|error| {
+            format!("cannot start mpv: {error}. Install the mpv package to enable playback.")
+        })?;
         Ok(Self {
             socket,
             child,
@@ -315,6 +417,7 @@ impl Mpv {
             state,
             resume_index: 0,
             refresh_position: false,
+            load_refresh: LoadRefresh::default(),
             seek_pending: false,
             _ui: Some(ui),
             eva_receipts: Arc::new(Mutex::new(VecDeque::new())),
@@ -327,6 +430,7 @@ impl Mpv {
     }
 
     fn event(&mut self, message: &Value) {
+        self.load_refresh.event(message["event"].as_str());
         match message["event"].as_str() {
             Some("seek") => self.seek_pending = true,
             Some("playback-restart") if self.seek_pending => {
@@ -430,6 +534,79 @@ impl Mpv {
         Ok(result)
     }
 
+    fn refresh_loaded_properties(&mut self) -> Result<(), String> {
+        if self
+            .load_refresh
+            .retry_after
+            .is_some_and(|at| Instant::now() < at)
+        {
+            return Err("player capabilities are awaiting readback".into());
+        }
+        let result = self.read_loaded_properties();
+        if let Err(error) = &result {
+            // Never advertise stale seek permission after a failed readback.
+            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            state.seekable = false;
+            state.duration_us = None;
+            // Three bounded attempts per load, spaced apart. A new load resets
+            // the budget; a permanently failing property cannot busy-loop.
+            if self.load_refresh.pending.is_some() {
+                self.load_refresh.failed(error.clone(), Instant::now());
+            }
+        }
+        result
+    }
+
+    fn read_loaded_properties(&mut self) -> Result<(), String> {
+        // Property notifications are coalesced. A same-file loop can retain
+        // identical mpv values while start-file cleared our cached capabilities.
+        // Never call command from event(): replies can themselves dispatch events.
+        for _ in 0..4 {
+            if self.load_refresh.exhausted {
+                return Err("player load generation exhausted".into());
+            }
+            let Some(generation) = self.load_refresh.pending else {
+                return self.load_refresh.failure.clone().map_or(Ok(()), Err);
+            };
+            // Raw command replies must not mutate State before the generation
+            // check: another start/end-file can arrive while waiting for either.
+            let seekable = self.command(json!(["get_property", "seekable"]));
+            if !self.load_refresh.current(generation) {
+                continue;
+            }
+            let seekable = seekable?;
+            let duration = self.command(json!(["get_property", "duration"]));
+            if !self.load_refresh.current(generation) {
+                continue;
+            }
+            // Streams may legitimately have no duration. Other failures are not
+            // successful refreshes and must not admit a dependent command.
+            let duration = match duration {
+                Ok(value) => value,
+                Err(error) if error == "mpv: property unavailable" => Value::Null,
+                Err(error) => return Err(error),
+            };
+            if !seekable.is_boolean() {
+                return Err("mpv returned an invalid seekability value".into());
+            }
+            if !duration.is_null() && super::model::microseconds(&duration).is_none() {
+                return Err("mpv returned an invalid duration value".into());
+            }
+            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            if !state.loaded {
+                return Err("player load changed during capability refresh".into());
+            }
+            state.property("seekable", &seekable);
+            state.property("duration", &duration);
+            self.load_refresh.pending = None;
+            self.load_refresh.failure = None;
+            self.load_refresh.retry_after = None;
+            self.load_refresh.failures = 0;
+            return Ok(());
+        }
+        Err("player load kept changing during capability refresh".into())
+    }
+
     fn publish_seek_position(&mut self) {
         let track = self.snapshot().track_id;
         if let Ok(position) = self.command(json!(["get_property", "time-pos"])) {
@@ -478,8 +655,22 @@ impl Mpv {
             );
         }
         let idle = self.get("idle-active")?.as_bool().unwrap_or(true);
+        let start_enqueued = if open.enqueue && idle {
+            let selected = self
+                .get("playlist-pos")?
+                .as_i64()
+                .filter(|position| *position >= -1)
+                .ok_or("mpv returned an invalid playlist position")?;
+            enqueue_should_start(idle, selected)
+        } else {
+            false
+        };
         // Local normalization happens at every API boundary, not in a shell.
-        // loadfile with just replace/append works before and after mpv 0.38.
+        // These three-argument loadfile forms work before and after mpv 0.38.
+        // append-play selects and starts an unselected queue atomically. Do not
+        // append then set playlist-pos: startup prepare_playlist can select the
+        // same index between those commands, making the setter a no-op while
+        // mpv remains idle. append-play also preserves an already selected entry.
         for (index, file) in open.files.iter().enumerate() {
             if Instant::now() >= deadline {
                 return Err(
@@ -487,22 +678,17 @@ impl Mpv {
                         .into(),
                 );
             }
-            let flag = if !open.enqueue && index == 0 {
-                "replace"
-            } else {
-                "append"
-            };
+            let flag = open_load_flag(open.enqueue, start_enqueued, index);
             self.command(json!(["loadfile", file, flag]))?;
             self.last_open_command_id = Some(self.request_id);
         }
         if !open.enqueue {
             self.resume_index = 0;
         }
-        if open.enqueue && idle {
-            self.command(json!(["set_property", "playlist-pos", count]))?;
+        if start_enqueued {
             self.resume_index = count;
         }
-        if !open.enqueue || idle {
+        if !open.enqueue || start_enqueued {
             self.command(json!(["set_property", "pause", false]))?;
         }
         Ok(())
@@ -625,13 +811,36 @@ impl Mpv {
             .map(|_| ())
     }
 
+    fn theme_revision(&mut self) -> Result<Value, String> {
+        // mpv >= 0.38 removed shared-script-properties. Read the modern native
+        // leaf first; legacy versions without user-data retain their old map.
+        match self.get("user-data/jwm-player/theme-revision") {
+            Ok(revision) => Ok(revision),
+            Err(error)
+                if error == "mpv: property not found" || error == "mpv: property unavailable" =>
+            {
+                self.get("shared-script-properties")
+                    .map(|properties| properties["jwm-theme-revision"].clone())
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     fn action(&mut self, action: Action, deadline: Instant) -> Result<(), String> {
+        check_action_deadline(Instant::now(), deadline)?;
+        if matches!(
+            action,
+            Action::Seek(_) | Action::SetPosition { .. } | Action::Rate(_)
+        ) {
+            self.refresh_loaded_properties()?;
+            // Readback can consume the remaining request budget. Never execute
+            // a delayed seek/rate command after its caller's authority expires.
+            check_action_deadline(Instant::now(), deadline)?;
+        }
         match action {
             Action::Theme(theme) => {
                 self.command(json!(["script-message", "jwm-theme", theme.to_string()]))?;
-                if self.get("shared-script-properties")?["jwm-theme-revision"]
-                    != theme["config_revision"]
-                {
+                if self.theme_revision()? != theme["config_revision"] {
                     return Err("player theme is awaiting its Lua readback".into());
                 }
                 Ok(())
@@ -800,6 +1009,284 @@ impl Drop for Mpv {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // No GUI or mpv installation needed: the fake decoder deliberately closes
+    // and reuses stdin, then exchanges JSON over the actual inherited IPC fd.
+    fn check_decoder_dedicated_fd(mut socket: UnixStream, child_socket: UnixStream) {
+        socket
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let parent_link =
+            std::fs::read_link(format!("/proc/self/fd/{}", socket.as_raw_fd())).unwrap();
+        let child_link =
+            std::fs::read_link(format!("/proc/self/fd/{}", child_socket.as_raw_fd())).unwrap();
+        let mut command = Command::new("python3");
+        command.args([
+            "-c",
+            r#"
+import json, os, socket, sys
+fd = int(sys.argv[1].split('fd://')[1])
+assert fd >= 3
+assert os.read(0, 1) == b''  # stdin starts as /dev/null, not IPC
+os.close(0)
+assert os.open('/dev/null', os.O_RDONLY) == 0
+links = []
+for name in os.listdir('/proc/self/fd'):
+    try: links.append(os.readlink('/proc/self/fd/' + name))
+    except FileNotFoundError: pass
+assert os.environ['PARENT_LINK'] not in links
+assert links.count(os.environ['CHILD_LINK']) == 1
+ipc = socket.socket(fileno=fd)
+assert json.loads(ipc.recv(4096)) == {'command': ['show-text', 'reuse']}
+ipc.sendall(b'{"error":"success"}\n')
+"#,
+        ]);
+        command
+            .env("PARENT_LINK", parent_link)
+            .env("CHILD_LINK", child_link);
+        let mut child = spawn_decoder(command, child_socket).unwrap();
+        // The parent's endpoint is still CLOEXEC; only the child inherited IPC.
+        assert_ne!(
+            unsafe { libc::fcntl(socket.as_raw_fd(), libc::F_GETFD) } & libc::FD_CLOEXEC,
+            0
+        );
+        socket
+            .write_all(b"{\"command\":[\"show-text\",\"reuse\"]}\n")
+            .unwrap();
+        let mut reply = [0u8; 20];
+        socket.read_exact(&mut reply).unwrap();
+        assert_eq!(&reply, b"{\"error\":\"success\"}\n");
+        assert!(child.wait().unwrap().success());
+        // No parent-side duplicate may keep the peer alive after decoder exit.
+        assert_eq!(socket.read(&mut [0u8; 1]).unwrap(), 0);
+    }
+
+    #[test]
+    fn decoder_ipc_survives_stdin_close_and_reuse() {
+        let (socket, child_socket) = UnixStream::pair().unwrap();
+        check_decoder_dedicated_fd(socket, child_socket);
+    }
+
+    #[test]
+    fn decoder_spawn_failure_closes_private_endpoint() {
+        let (mut socket, child_socket) = UnixStream::pair().unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        let result = spawn_decoder(Command::new("/no/such/jwm-test-decoder"), child_socket);
+        assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::NotFound);
+        assert_eq!(socket.read(&mut [0u8; 1]).unwrap(), 0);
+        assert_ne!(
+            unsafe { libc::fcntl(socket.as_raw_fd(), libc::F_GETFD) } & libc::FD_CLOEXEC,
+            0
+        );
+    }
+
+    #[test]
+    fn decoder_ipc_handles_closed_parent_stdin() {
+        // Isolate closing standard descriptors from the parallel test runner.
+        let status = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "player::backend::tests::decoder_closed_stdin_child",
+                "--nocapture",
+            ])
+            .env("JWM_TEST_CLOSED_STDIN", "1")
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+
+    #[test]
+    fn decoder_closed_stdin_child() {
+        if std::env::var_os("JWM_TEST_CLOSED_STDIN").is_none() {
+            return;
+        }
+        unsafe {
+            libc::close(0);
+        }
+        // The parent's endpoint obtains 0 and must not leak into the decoder.
+        let (socket, child_socket) = UnixStream::pair().unwrap();
+        assert_eq!(socket.as_raw_fd(), 0);
+        check_decoder_dedicated_fd(socket, child_socket);
+        // Also cover the child endpoint obtaining a standard descriptor.
+        let (child_socket, socket) = UnixStream::pair().unwrap();
+        assert_eq!(child_socket.as_raw_fd(), 0);
+        check_decoder_dedicated_fd(socket, child_socket);
+    }
+
+    #[test]
+    fn action_deadline_is_rechecked_after_capability_readback() {
+        let start = Instant::now();
+        let deadline = start + Duration::from_secs(1);
+        assert!(check_action_deadline(start, deadline).is_ok());
+        assert!(check_action_deadline(deadline, deadline).is_err());
+        assert!(check_action_deadline(deadline + Duration::from_nanos(1), deadline).is_err());
+        assert!(check_action_deadline(deadline - Duration::from_nanos(1), deadline).is_ok());
+    }
+
+    #[test]
+    fn capability_readback_failures_are_bounded_and_new_load_can_recover() {
+        let mut refresh = LoadRefresh::default();
+        refresh.event(Some("start-file"));
+        refresh.event(Some("file-loaded"));
+        let now = Instant::now();
+        for attempt in 1..=3 {
+            refresh.failed("mpv: property unavailable".into(), now);
+            assert_eq!(refresh.failures, attempt);
+            assert_eq!(refresh.retry_after, Some(now + Duration::from_millis(250)));
+            assert_eq!(refresh.pending.is_some(), attempt < 3);
+        }
+        assert!(refresh.failure.is_some());
+        refresh.event(Some("start-file"));
+        refresh.event(Some("file-loaded"));
+        assert!(refresh.pending.is_some());
+        assert!(refresh.failure.is_none());
+        assert!(refresh.retry_after.is_none());
+        assert_eq!(refresh.failures, 0);
+    }
+
+    #[test]
+    fn loaded_refresh_rejects_old_replies_even_for_same_track_reload() {
+        let mut refresh = LoadRefresh::default();
+        let mut state = State::default();
+        for cycle in 0..2 {
+            let start = json!({"event":"start-file", "playlist_entry_id":2});
+            refresh.event(start["event"].as_str());
+            state.event(&start);
+            refresh.event(Some("file-loaded"));
+            state.event(&json!({"event":"file-loaded"}));
+            assert!(!state.seekable);
+            assert_eq!(state.duration_us, None);
+            let generation = refresh.pending.unwrap();
+            assert!(refresh.current(generation));
+            // Simulate actual readback values, not a repeated property event.
+            state.property("seekable", &json!(true));
+            state.property("duration", &json!(4.0));
+            refresh.pending = None;
+            assert!(state.seekable);
+            assert_eq!(state.duration_us, Some(4_000_000));
+            if cycle == 0 {
+                refresh.event(Some("end-file"));
+                assert!(!refresh.current(generation));
+            }
+        }
+        refresh.event(Some("file-loaded"));
+        let stale = refresh.pending.unwrap();
+        refresh.event(Some("start-file"));
+        refresh.event(Some("file-loaded"));
+        assert!(!refresh.current(stale));
+        assert!(refresh.current(refresh.pending.unwrap()));
+        refresh.event(Some("shutdown"));
+        assert!(refresh.pending.is_none());
+        refresh.generation = u64::MAX;
+        refresh.event(Some("start-file"));
+        refresh.event(Some("file-loaded"));
+        assert!(refresh.exhausted);
+        assert!(refresh.pending.is_none());
+    }
+
+    #[test]
+    fn enqueue_does_not_reselect_a_track_while_initial_loading_is_pending() {
+        // First launch selected index 0, but file-loaded has not arrived yet.
+        // A forwarded enqueue must append, not skip to its new index 1.
+        assert!(!enqueue_should_start(true, 0));
+        assert!(!enqueue_should_start(true, 4));
+        assert!(!enqueue_should_start(false, 0));
+    }
+
+    #[test]
+    fn enqueue_starts_a_genuinely_idle_unselected_playlist() {
+        assert!(enqueue_should_start(true, -1));
+        assert!(!enqueue_should_start(false, -1));
+        assert!(!enqueue_should_start(true, -2));
+    }
+
+    #[test]
+    fn load_flags_start_only_the_first_unselected_enqueue_atomically() {
+        assert_eq!(open_load_flag(false, false, 0), "replace");
+        assert_eq!(open_load_flag(false, false, 1), "append");
+        assert_eq!(open_load_flag(true, true, 0), "append-play");
+        assert_eq!(open_load_flag(true, true, 1), "append");
+        assert_eq!(open_load_flag(true, false, 0), "append");
+        assert_eq!(open_load_flag(true, false, 1), "append");
+    }
+
+    #[test]
+    fn atomic_enqueue_has_no_append_select_startup_gap() {
+        // A model of mpv's documented command.c/loadfile.c transitions, not a
+        // substitute for the real concurrent-launch private-bus integration.
+        #[derive(Default)]
+        struct Queue {
+            count: usize,
+            current: Option<usize>,
+            started: bool,
+        }
+        impl Queue {
+            fn prepare(&mut self) {
+                if self.count > 0 {
+                    self.current = Some(0);
+                }
+            }
+            fn load(&mut self, flag: &str) {
+                let added = self.count;
+                self.count += 1;
+                if flag == "append-play" && self.current.is_none() {
+                    self.current = Some(added);
+                    self.started = true;
+                }
+            }
+            fn select(&mut self, index: usize) {
+                // mpv's playlist-pos setter returns immediately for same index.
+                if self.current != Some(index) {
+                    self.current = Some(index);
+                    self.started = true;
+                }
+            }
+        }
+        let mut old = Queue::default();
+        old.load("append");
+        old.prepare();
+        old.select(0);
+        assert!(!old.started, "old two-command startup can remain idle");
+        for prepare_before in [false, true] {
+            let mut queue = Queue::default();
+            if prepare_before {
+                queue.prepare();
+            }
+            queue.load(open_load_flag(true, enqueue_should_start(true, -1), 0));
+            if !prepare_before {
+                queue.prepare();
+            }
+            assert!(queue.started);
+            assert_eq!(queue.current, Some(0));
+            // A stale unselected observation must still not replace a current
+            // entry when the atomic command executes.
+            queue.load(open_load_flag(true, true, 0));
+            assert_eq!(queue.current, Some(0));
+            assert_eq!(queue.count, 2);
+        }
+        let mut unselected = Queue {
+            count: 3,
+            ..Queue::default()
+        };
+        unselected.load(open_load_flag(true, enqueue_should_start(true, -1), 0));
+        assert_eq!(unselected.current, Some(3));
+        assert_eq!(unselected.count, 4);
+        assert!(unselected.started);
+        for already_started in [false, true] {
+            let mut selected = Queue {
+                count: 5,
+                current: Some(2),
+                started: already_started,
+            };
+            // Even a stale observation that requested append-play cannot
+            // restart or replace a nonzero current selection.
+            selected.load(open_load_flag(true, true, 0));
+            assert_eq!(selected.current, Some(2));
+            assert_eq!(selected.count, 6);
+            assert_eq!(selected.started, already_started);
+        }
+    }
 
     #[test]
     fn fragmented_events_and_unrelated_replies_do_not_confuse_command_reply() {
@@ -818,6 +1305,7 @@ mod tests {
             state,
             resume_index: 0,
             refresh_position: false,
+            load_refresh: LoadRefresh::default(),
             seek_pending: false,
             _ui: None,
             eva_receipts: Arc::new(Mutex::new(VecDeque::new())),
@@ -860,6 +1348,7 @@ mod tests {
             state: Arc::new(Mutex::new(State::default())),
             resume_index: 0,
             refresh_position: false,
+            load_refresh: LoadRefresh::default(),
             seek_pending: false,
             _ui: None,
             eva_receipts: Arc::new(Mutex::new(VecDeque::new())),
@@ -886,6 +1375,7 @@ mod tests {
             state: Arc::new(Mutex::new(State::default())),
             resume_index: 0,
             refresh_position: false,
+            load_refresh: LoadRefresh::default(),
             seek_pending: false,
             _ui: None,
             eva_receipts: Arc::new(Mutex::new(VecDeque::new())),
@@ -1236,13 +1726,14 @@ mod tests {
         let theme = json!({"protocol_version":1,"native_colors":vec![[0.2,0.3,0.4,1.0];8],"font":"Sans 18","surface_opacity":0.85,"config_revision":"style-1"});
         let deadline = Instant::now() + Duration::from_secs(3);
         loop {
-            if mpv.action(Action::Theme(theme.clone()), deadline).is_ok() {
-                break;
+            match mpv.action(Action::Theme(theme.clone()), deadline) {
+                Ok(()) => break,
+                Err(error) => assert!(
+                    Instant::now() < deadline,
+                    "real mpv never applied a valid theme: {error}; revision={:?}",
+                    mpv.theme_revision()
+                ),
             }
-            assert!(
-                Instant::now() < deadline,
-                "real mpv never applied a valid theme"
-            );
             std::thread::sleep(Duration::from_millis(10));
         }
         let invalid = json!({"protocol_version":1,"native_colors":[],"font":"Sans 11","config_revision":"invalid"});
@@ -1253,10 +1744,7 @@ mod tests {
             )
             .is_err()
         );
-        assert_eq!(
-            mpv.get("shared-script-properties").unwrap()["jwm-theme-revision"],
-            "style-1"
-        );
+        assert_eq!(mpv.theme_revision().unwrap(), "style-1");
     }
     #[test]
     fn real_mpv_crash_reaps_child_and_removes_ui() {

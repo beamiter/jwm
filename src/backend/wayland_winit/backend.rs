@@ -1695,6 +1695,10 @@ fn process_input_event_windowed<B: InputBackend>(
     shared: &Arc<Mutex<SharedState>>,
     pending_events: &Arc<Mutex<VecDeque<BackendEvent>>>,
 ) {
+    crate::backend::wayland_udev::remote_keyboard::revoke(
+        state,
+        crate::backend::wayland_udev::remote_keyboard::LOCAL,
+    );
     match event {
         InputEvent::PointerMotion { event, .. } => {
             let delta = event.delta();

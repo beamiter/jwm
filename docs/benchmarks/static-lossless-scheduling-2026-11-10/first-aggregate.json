@@ -1,0 +1,233 @@
+{
+  "candidate": "0987a0d153aed65baba3bcce9ab6ef262197375e",
+  "workflow_run": 42894832038,
+  "report": {
+    "schema_version": 1,
+    "benchmark": "static_lossless_scheduler_tcp_ab",
+    "scope": "aggregate synthetic CI results; not physical latency; sent_bytes is source-envelope payload; codec counts include discarded attempts",
+    "sessions": [
+      {
+        "arm": "off",
+        "order": 0,
+        "success": true,
+        "planned_generation_budget": 16,
+        "submitted_generations": 16,
+        "not_submitted": 0,
+        "presented_generations": 16,
+        "missing_after_submission": 0,
+        "late_presented_generations": 0,
+        "scheduled_to_present": {
+          "count": 16,
+          "p50_ms": 252.754909,
+          "p95_ms": 293.65498,
+          "max_ms": 293.65498
+        },
+        "commit_to_present": {
+          "count": 16,
+          "p50_ms": 250.352709,
+          "p95_ms": 287.170775,
+          "max_ms": 287.170775
+        },
+        "first_static_exact_presented_ns": null,
+        "decoded_png_frames": 0,
+        "decoded_frames": 16,
+        "aggregate_host_counters": {
+          "encoded_jpeg": 17,
+          "encoded_png": 0,
+          "encode_ns": 162335172,
+          "jpeg_ns": 148445958,
+          "png_ns": 0,
+          "sent_bytes": 220191,
+          "comparisons": 0,
+          "comparison_ns": 0,
+          "stale_png_dropped": 0
+        }
+      },
+      {
+        "arm": "legacy",
+        "order": 1,
+        "success": true,
+        "planned_generation_budget": 16,
+        "submitted_generations": 16,
+        "not_submitted": 0,
+        "presented_generations": 16,
+        "missing_after_submission": 0,
+        "late_presented_generations": 1,
+        "scheduled_to_present": {
+          "count": 16,
+          "p50_ms": 300.440379,
+          "p95_ms": 532.726627,
+          "max_ms": 532.726627
+        },
+        "commit_to_present": {
+          "count": 16,
+          "p50_ms": 290.686884,
+          "p95_ms": 530.891378,
+          "max_ms": 530.891378
+        },
+        "first_static_exact_presented_ns": 4336145824,
+        "decoded_png_frames": 8,
+        "decoded_frames": 24,
+        "aggregate_host_counters": {
+          "encoded_jpeg": 17,
+          "encoded_png": 8,
+          "encode_ns": 767110680,
+          "jpeg_ns": 149187318,
+          "png_ns": 226875086,
+          "sent_bytes": 242007,
+          "comparisons": 0,
+          "comparison_ns": 0,
+          "stale_png_dropped": 0
+        }
+      },
+      {
+        "arm": "proposed",
+        "order": 2,
+        "success": true,
+        "planned_generation_budget": 16,
+        "submitted_generations": 16,
+        "not_submitted": 0,
+        "presented_generations": 16,
+        "missing_after_submission": 0,
+        "late_presented_generations": 0,
+        "scheduled_to_present": {
+          "count": 16,
+          "p50_ms": 295.173457,
+          "p95_ms": 420.275861,
+          "max_ms": 420.275861
+        },
+        "commit_to_present": {
+          "count": 16,
+          "p50_ms": 270.470608,
+          "p95_ms": 418.256674,
+          "max_ms": 418.256674
+        },
+        "first_static_exact_presented_ns": 7089804827,
+        "decoded_png_frames": 8,
+        "decoded_frames": 24,
+        "aggregate_host_counters": {
+          "encoded_jpeg": 17,
+          "encoded_png": 8,
+          "encode_ns": 825539163,
+          "jpeg_ns": 151534142,
+          "png_ns": 272604578,
+          "sent_bytes": 242007,
+          "comparisons": 8,
+          "comparison_ns": 152746,
+          "stale_png_dropped": 0
+        }
+      },
+      {
+        "arm": "proposed",
+        "order": 3,
+        "success": true,
+        "planned_generation_budget": 16,
+        "submitted_generations": 16,
+        "not_submitted": 0,
+        "presented_generations": 16,
+        "missing_after_submission": 0,
+        "late_presented_generations": 0,
+        "scheduled_to_present": {
+          "count": 16,
+          "p50_ms": 289.560271,
+          "p95_ms": 427.596784,
+          "max_ms": 427.596784
+        },
+        "commit_to_present": {
+          "count": 16,
+          "p50_ms": 270.566236,
+          "p95_ms": 415.031893,
+          "max_ms": 415.031893
+        },
+        "first_static_exact_presented_ns": 6589035998,
+        "decoded_png_frames": 8,
+        "decoded_frames": 24,
+        "aggregate_host_counters": {
+          "encoded_jpeg": 17,
+          "encoded_png": 8,
+          "encode_ns": 814441623,
+          "jpeg_ns": 149180431,
+          "png_ns": 263456770,
+          "sent_bytes": 242007,
+          "comparisons": 8,
+          "comparison_ns": 12706,
+          "stale_png_dropped": 0
+        }
+      },
+      {
+        "arm": "legacy",
+        "order": 4,
+        "success": true,
+        "planned_generation_budget": 16,
+        "submitted_generations": 16,
+        "not_submitted": 0,
+        "presented_generations": 16,
+        "missing_after_submission": 0,
+        "late_presented_generations": 0,
+        "scheduled_to_present": {
+          "count": 16,
+          "p50_ms": 282.142693,
+          "p95_ms": 468.299999,
+          "max_ms": 468.299999
+        },
+        "commit_to_present": {
+          "count": 16,
+          "p50_ms": 278.095709,
+          "p95_ms": 429.024122,
+          "max_ms": 429.024122
+        },
+        "first_static_exact_presented_ns": 4647595522,
+        "decoded_png_frames": 8,
+        "decoded_frames": 24,
+        "aggregate_host_counters": {
+          "encoded_jpeg": 17,
+          "encoded_png": 8,
+          "encode_ns": 782205034,
+          "jpeg_ns": 148830511,
+          "png_ns": 236294037,
+          "sent_bytes": 242007,
+          "comparisons": 0,
+          "comparison_ns": 0,
+          "stale_png_dropped": 0
+        }
+      },
+      {
+        "arm": "off",
+        "order": 5,
+        "success": true,
+        "planned_generation_budget": 16,
+        "submitted_generations": 16,
+        "not_submitted": 0,
+        "presented_generations": 16,
+        "missing_after_submission": 0,
+        "late_presented_generations": 0,
+        "scheduled_to_present": {
+          "count": 16,
+          "p50_ms": 243.179593,
+          "p95_ms": 287.124542,
+          "max_ms": 287.124542
+        },
+        "commit_to_present": {
+          "count": 16,
+          "p50_ms": 241.076221,
+          "p95_ms": 279.151274,
+          "max_ms": 279.151274
+        },
+        "first_static_exact_presented_ns": null,
+        "decoded_png_frames": 0,
+        "decoded_frames": 16,
+        "aggregate_host_counters": {
+          "encoded_jpeg": 17,
+          "encoded_png": 0,
+          "encode_ns": 163126703,
+          "jpeg_ns": 147573192,
+          "png_ns": 0,
+          "sent_bytes": 220191,
+          "comparisons": 0,
+          "comparison_ns": 0,
+          "stale_png_dropped": 0
+        }
+      }
+    ]
+  }
+}

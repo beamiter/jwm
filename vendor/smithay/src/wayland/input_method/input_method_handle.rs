@@ -254,26 +254,22 @@ where
         }
         match request {
             zwp_input_method_v2::Request::CommitString { text } => {
-                self.text_input_handle.with_active_text_input(|ti, _surface| {
-                    ti.commit_string(Some(text.clone()));
-                });
+                self.text_input_handle.send_input_method_text(text);
             }
             zwp_input_method_v2::Request::SetPreeditString {
                 text,
                 cursor_begin,
                 cursor_end,
             } => {
-                self.text_input_handle.with_active_text_input(|ti, _surface| {
-                    ti.preedit_string(Some(text.clone()), cursor_begin, cursor_end);
-                });
+                self.text_input_handle
+                    .send_input_method_preedit(text, cursor_begin, cursor_end);
             }
             zwp_input_method_v2::Request::DeleteSurroundingText {
                 before_length,
                 after_length,
             } => {
-                self.text_input_handle.with_active_text_input(|ti, _surface| {
-                    ti.delete_surrounding_text(before_length, after_length);
-                });
+                self.text_input_handle
+                    .send_input_method_delete(before_length, after_length);
             }
             zwp_input_method_v2::Request::Commit { serial } => {
                 let current_serial = self
@@ -374,6 +370,7 @@ where
         // Only the active instance leaving frees the seat.
         if self.handle.is_active_instance(input_method) {
             self.handle.inner.lock().unwrap().instance = None;
+            self.text_input_handle.set_authorized_input_method(None);
             self.text_input_handle.leave();
         }
     }

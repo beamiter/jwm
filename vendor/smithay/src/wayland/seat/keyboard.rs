@@ -59,6 +59,10 @@ where
     pub(crate) fn new_kbd(&self, kbd: WlKeyboard) {
         trace!("Sending keymap to client");
 
+        // Match input/keymap updates and authorized snapshots: internal first.
+        // Keep registration atomic with respect to focus and keymap changes.
+        let guard = self.arc.internal.lock().unwrap();
+        crate::input::keyboard::invalidate_keyboard_authority(&guard.authority_generation);
         // prepare a tempfile with the keymap, to send it to the client
         let keymap_file = self.arc.keymap.lock().unwrap();
         let ret = keymap_file.send(&kbd);
@@ -71,7 +75,6 @@ where
             return;
         };
 
-        let guard = self.arc.internal.lock().unwrap();
         if kbd.version() >= 4 {
             kbd.repeat_info(guard.repeat_rate, guard.repeat_delay);
         }
@@ -135,6 +138,9 @@ where
 
     fn destroyed(&self, _state: &mut D, _client_id: ClientId, keyboard: &WlKeyboard) {
         if let Some(ref handle) = self.handle {
+            // Serialize lifecycle invalidation with snapshot validation/delivery.
+            let guard = handle.arc.internal.lock().unwrap();
+            crate::input::keyboard::invalidate_keyboard_authority(&guard.authority_generation);
             handle
                 .arc
                 .known_kbds

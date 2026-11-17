@@ -219,6 +219,9 @@ where
                     },
                 );
                 handle.add_instance(&instance);
+                if handle.is_active_instance(&instance) {
+                    text_input_handle.set_authorized_input_method(Some(instance.clone()));
+                }
             }
             zwp_input_method_manager_v2::Request::Destroy => {
                 // Nothing to do

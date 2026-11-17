@@ -865,6 +865,10 @@ impl EvaOverlayState {
         use crate::backend::compositor_font::{fit_ui_text_lines, measure_ui_text_width};
         let config = crate::config::CONFIG.load();
         let font = config.system_ui_font();
+        #[cfg(test)]
+        let test_font = CONFIRMATION_TEST_FONT.with(|slot| slot.borrow().clone());
+        #[cfg(test)]
+        let font = test_font.as_deref().unwrap_or(font);
         let size = crate::backend::compositor_font::ui_font_pixel_size(font);
         let [_, _, w, h] = self.viewport.unwrap_or([0.0, 0.0, 1280.0, 720.0]);
         let viewport = [0.0, 0.0, w, h];
@@ -1246,10 +1250,89 @@ fn clean_message(text: &str, limit: usize) -> String {
     clean(&normalized, limit)
 }
 
+// Test-only layout input isolation. Never changes production font selection or
+// bypasses actual measurement, reviewability, signature or authority checks.
+#[cfg(test)]
+thread_local! {
+    static CONFIRMATION_TEST_FONT: std::cell::RefCell<Option<String>> = const {
+        std::cell::RefCell::new(None)
+    };
+}
+
+#[cfg(test)]
+pub(crate) struct ConfirmationTestFont {
+    previous: Option<String>,
+    // A guard must be restored on its originating thread.
+    _not_send: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+#[cfg(test)]
+impl ConfirmationTestFont {
+    pub(crate) fn new(font: &str) -> Self {
+        Self {
+            previous: CONFIRMATION_TEST_FONT.with(|slot| slot.replace(Some(font.to_owned()))),
+            _not_send: std::marker::PhantomData,
+        }
+    }
+}
+
+#[cfg(test)]
+impl Drop for ConfirmationTestFont {
+    fn drop(&mut self) {
+        CONFIRMATION_TEST_FONT.with(|slot| {
+            slot.replace(self.previous.take());
+        });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn confirmation_test_font_restores_after_unwind_and_is_thread_local() {
+        assert!(CONFIRMATION_TEST_FONT.with(|slot| slot.borrow().is_none()));
+        {
+            let _outer = ConfirmationTestFont::new("Sans 11");
+            let panic = std::panic::catch_unwind(|| {
+                let _inner = ConfirmationTestFont::new("Sans 18");
+                assert_eq!(
+                    CONFIRMATION_TEST_FONT
+                        .with(|slot| slot.borrow().clone())
+                        .as_deref(),
+                    Some("Sans 18")
+                );
+                panic!("exercise guard restoration");
+            });
+            assert!(panic.is_err());
+            assert_eq!(
+                CONFIRMATION_TEST_FONT
+                    .with(|slot| slot.borrow().clone())
+                    .as_deref(),
+                Some("Sans 11")
+            );
+            std::thread::spawn(|| {
+                assert!(CONFIRMATION_TEST_FONT.with(|slot| slot.borrow().is_none()));
+                let _other = ConfirmationTestFont::new("Sans 22");
+                assert_eq!(
+                    CONFIRMATION_TEST_FONT
+                        .with(|slot| slot.borrow().clone())
+                        .as_deref(),
+                    Some("Sans 22")
+                );
+            })
+            .join()
+            .unwrap();
+            assert_eq!(
+                CONFIRMATION_TEST_FONT
+                    .with(|slot| slot.borrow().clone())
+                    .as_deref(),
+                Some("Sans 11")
+            );
+        }
+        assert!(CONFIRMATION_TEST_FONT.with(|slot| slot.borrow().is_none()));
+    }
+
     #[test]
     fn standby_is_compact_and_result_headers_describe_the_local_outcome() {
         let now = Instant::now();

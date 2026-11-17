@@ -22,11 +22,27 @@ pub mod ipc;
 pub mod ipc_connection;
 pub mod ipc_server;
 pub mod jwm;
+#[cfg(any(feature = "remote-wayland", feature = "wayland-backends"))]
+pub mod readonly_popup_capture_protocol;
+#[cfg(any(feature = "remote-wayland", feature = "wayland-backends"))]
+pub mod readonly_resize_capture_protocol;
 #[cfg(feature = "remote-x11")]
 pub mod remote;
+#[cfg(any(feature = "remote-wayland", feature = "wayland-backends"))]
+pub mod remote_control_protocol;
+#[cfg(any(feature = "remote-wayland", feature = "wayland-backends"))]
+pub mod remote_keyboard_protocol;
+#[cfg(any(feature = "remote-wayland", feature = "wayland-backends"))]
+pub mod remote_pointer_protocol;
+#[cfg(any(feature = "remote-wayland", feature = "wayland-backends"))]
+pub mod remote_popup_protocol;
+#[cfg(any(feature = "remote-wayland", feature = "wayland-backends"))]
+pub mod remote_text_protocol;
 pub mod renderer;
 pub mod sync_ext;
 pub mod terminal_prober;
+#[cfg(any(feature = "remote-wayland", feature = "wayland-backends"))]
+pub mod viewer_handoff_protocol;
 
 pub use jwm::Jwm;
 

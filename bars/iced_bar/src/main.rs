@@ -8,7 +8,7 @@ use xbar_core::tag_contrast::{TagColors, TagContrastMode, TagPalette};
 // Keep heterogeneous widget boundaries as Elements.
 use iced::widget::{Space, Stack, button, rich_text, tooltip};
 use iced::widget::{mouse_area, span};
-use iced::{Font, stream, theme};
+use iced::{Font, Widget as _, stream, theme};
 
 use iced::window::Id;
 use iced::{
@@ -263,6 +263,15 @@ fn surface_alpha_capable(conn: Arc<XCBConnection>, screen_num: usize) -> bool {
     capable
 }
 
+fn tooltip_position_for_edge(edge: xbar_core::BarEdge) -> tooltip::Position {
+    match edge {
+        xbar_core::BarEdge::Top => tooltip::Position::Bottom,
+        xbar_core::BarEdge::Bottom => tooltip::Position::Top,
+        xbar_core::BarEdge::Left => tooltip::Position::Right,
+        xbar_core::BarEdge::Right => tooltip::Position::Left,
+    }
+}
+
 fn main() -> iced::Result {
     let args: Vec<String> = env::args().collect();
     // JWM matches both halves of WM_CLASS against status_bar.name. Keep the
@@ -313,7 +322,7 @@ fn main() -> iced::Result {
             level: window::Level::AlwaysOnTop,
             ..Default::default()
         })
-        .default_font(NERD_FONT)
+        .font(NERD_FONT)
         .subscription(IcedBar::subscription)
         .style(IcedBar::style)
         .title("iced_bar")
@@ -877,7 +886,7 @@ impl IcedBar {
             }
         })
         .on_press(Message::TabSelected(index))
-        .into();
+        .boxed();
 
         // The passive overlay preserves the button's size and pointer events.
         // Keep an identical transparent marker for empty tags to avoid jumps.
@@ -901,11 +910,11 @@ impl IcedBar {
                 bottom: 3.0,
                 ..Padding::ZERO
             })
-            .into();
-        Stack::<Message>::new()
+            .boxed();
+        Stack::<Element<'_, Message>>::new()
             .push(workspace)
             .push(indicator)
-            .into()
+            .boxed()
     }
 
     // -------- Pills --------
@@ -948,7 +957,7 @@ impl IcedBar {
             .padding([3, 10])
             .height(Self::PILL_HEIGHT)
             .style(move |_theme: &Theme| Self::pill_style(bg, bg, fg))
-            .into()
+            .boxed()
     }
 
     fn battery_pill<'a>(&self) -> Element<'a, Message> {
@@ -972,7 +981,7 @@ impl IcedBar {
             .padding([3, 10])
             .height(Self::PILL_HEIGHT)
             .style(move |_theme: &Theme| Self::pill_style(bg, bg, fg))
-            .into()
+            .boxed()
     }
 
     fn brightness_pill<'a>(&self) -> Element<'a, Message> {
@@ -998,7 +1007,7 @@ impl IcedBar {
                 up: Some(UserAction::AdjustBrightness(5)),
                 down: Some(UserAction::AdjustBrightness(-5)),
             })
-            .into()
+            .boxed()
     }
 
     fn volume_pill<'a>(&self) -> Element<'a, Message> {
@@ -1044,7 +1053,7 @@ impl IcedBar {
                 up: Some(UserAction::AdjustVolume(5)),
                 down: Some(UserAction::AdjustVolume(-5)),
             })
-            .into()
+            .boxed()
     }
 
     /// Entry point into JWM's own shell surface.
@@ -1070,9 +1079,9 @@ impl IcedBar {
 
         let area = mouse_area(pill);
         if available {
-            area.on_press(Message::OpenShell).into()
+            area.on_press(Message::OpenShell).boxed()
         } else {
-            area.into()
+            area.boxed()
         }
     }
 
@@ -1094,7 +1103,7 @@ impl IcedBar {
             .on_enter(Message::MouseEnterScreenShot)
             .on_exit(Message::MouseExitScreenShot)
             .on_press(Message::LeftClick)
-            .into()
+            .boxed()
     }
 
     fn time_pill<'a>(&self) -> Element<'a, Message> {
@@ -1108,7 +1117,9 @@ impl IcedBar {
         .height(Self::PILL_HEIGHT)
         .style(move |_theme: &Theme| Self::pill_style(bg, bg, Color::WHITE));
 
-        mouse_area(pill).on_press(Message::ShowSecondsToggle).into()
+        mouse_area(pill)
+            .on_press(Message::ShowSecondsToggle)
+            .boxed()
     }
 
     fn monitor_pill<'a>(&self, monitor_num: i32) -> Element<'a, Message> {
@@ -1125,7 +1136,7 @@ impl IcedBar {
         .padding([3, 10])
         .height(Self::PILL_HEIGHT)
         .style(move |_theme: &Theme| Self::pill_style(bg, bg, Color::WHITE))
-        .into()
+        .boxed()
     }
 
     fn scale_pill<'a>(&self, scale: Option<f32>) -> Element<'a, Message> {
@@ -1138,7 +1149,7 @@ impl IcedBar {
             .padding([3, 10])
             .height(Self::PILL_HEIGHT)
             .style(move |_theme: &Theme| Self::pill_style(bg, bg, Color::WHITE))
-            .into()
+            .boxed()
     }
 
     fn layout_toggle_button<'a>(&self) -> Element<'a, Message> {
@@ -1174,7 +1185,7 @@ impl IcedBar {
                 }
             })
             .on_press(Message::ToggleLayoutSelector)
-            .into()
+            .boxed()
     }
 
     /// One button per layout the *window manager* offers.
@@ -1203,7 +1214,7 @@ impl IcedBar {
             })
             .collect();
 
-        let mut row = Row::<Message>::new().spacing(6);
+        let mut row = Row::<Element<'_, Message>>::new().spacing(6);
         for (sym, idx, is_current) in layouts {
             let btn = button(text(sym).color(Color::WHITE))
                 .padding([3, 10])
@@ -1236,10 +1247,10 @@ impl IcedBar {
                 })
                 .on_press(Message::LayoutClicked(idx));
 
-            row = row.push(btn);
+            row = row.push(btn.boxed());
         }
 
-        row.into()
+        row.boxed()
     }
 
     fn place_dock_element<'a>(
@@ -1256,7 +1267,7 @@ impl IcedBar {
             })
             .width(Length::Fill)
             .height(Length::Fill)
-            .into()
+            .boxed()
     }
 
     fn minimized_dock(&self) -> Element<'_, Message> {
@@ -1322,11 +1333,10 @@ impl IcedBar {
                     ..Default::default()
                 })
                 .on_press(Message::DockRestore { binding });
-            let target = mouse_area(tooltip(
-                target,
-                container(text(title).size(12)).padding([4, 8]),
-                self.tooltip_position(),
-            ))
+            let target = mouse_area(
+                tooltip(target, container(text(title).size(12)).padding([4, 8]))
+                    .position(self.tooltip_position()),
+            )
             .on_enter(Message::DockHover {
                 binding,
                 hovered: true,
@@ -1336,7 +1346,7 @@ impl IcedBar {
                 hovered: false,
             });
             items.push(Self::place_dock_element(
-                target.into(),
+                target.boxed(),
                 slot.x - shelf.x,
                 slot.y - shelf.y,
             ));
@@ -1369,9 +1379,9 @@ impl IcedBar {
                         .size(12),
                     )
                     .padding([4, 8]),
-                    self.tooltip_position(),
                 )
-                .into(),
+                .position(self.tooltip_position())
+                .boxed(),
                 bounds.x - shelf.x,
                 bounds.y - shelf.y,
             ));
@@ -1379,7 +1389,7 @@ impl IcedBar {
         container(iced::widget::stack(items))
             .width(shelf.width)
             .height(shelf.height)
-            .into()
+            .boxed()
     }
 
     fn pinned_dock(&self) -> Element<'_, Message> {
@@ -1389,7 +1399,7 @@ impl IcedBar {
 
     fn view_work_space(&self) -> Element<'_, Message> {
         // Workspace tag buttons
-        let mut tags_row = Row::<Message>::new().spacing(Self::TAB_SPACING * 0.5);
+        let mut tags_row = Row::<Element<'_, Message>>::new().spacing(Self::TAB_SPACING * 0.5);
         for (index, label) in self.tabs.iter().enumerate() {
             tags_row = tags_row
                 .push(self.workspace_button(index, label))
@@ -1400,7 +1410,7 @@ impl IcedBar {
         let layout_selector = if self.runtime.view().layout_selector_open {
             self.layout_options_row()
         } else {
-            Row::<Message>::new().into()
+            Row::<Element<'_, Message>>::new().boxed()
         };
 
         // System info pills
@@ -1423,44 +1433,44 @@ impl IcedBar {
 
         let scale_pill = self.scale_pill(Some(self.scale_factor));
 
-        Row::<Message>::new()
-            .push(tags_row)
-            .push(Space::new().width(6).height(Length::Fill))
+        Row::<Element<'_, Message>>::new()
+            .push(tags_row.boxed())
+            .push(Space::new().width(6).height(Length::Fill).boxed())
             .push(layout_button)
-            .push(Space::new().width(6).height(Length::Fill))
+            .push(Space::new().width(6).height(Length::Fill).boxed())
             .push(layout_selector)
-            .push(Space::new().width(Length::Fill).height(Length::Fill))
+            .push(
+                Space::new()
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .boxed(),
+            )
             .push(cpu_pill)
-            .push(Space::new().width(6).height(Length::Fill))
+            .push(Space::new().width(6).height(Length::Fill).boxed())
             .push(memory_pill)
-            .push(Space::new().width(6).height(Length::Fill))
+            .push(Space::new().width(6).height(Length::Fill).boxed())
             .push(battery_pill)
-            .push(Space::new().width(8).height(Length::Fill))
+            .push(Space::new().width(8).height(Length::Fill).boxed())
             .push(brightness_pill)
-            .push(Space::new().width(6).height(Length::Fill))
+            .push(Space::new().width(6).height(Length::Fill).boxed())
             .push(volume_pill)
-            .push(Space::new().width(6).height(Length::Fill))
+            .push(Space::new().width(6).height(Length::Fill).boxed())
             .push(shell_pill)
-            .push(Space::new().width(6).height(Length::Fill))
+            .push(Space::new().width(6).height(Length::Fill).boxed())
             .push(screenshot_pill)
-            .push(Space::new().width(6).height(Length::Fill))
+            .push(Space::new().width(6).height(Length::Fill).boxed())
             .push(time_pill)
-            .push(Space::new().width(6).height(Length::Fill))
+            .push(Space::new().width(6).height(Length::Fill).boxed())
             .push(monitor_pill)
-            .push(Space::new().width(6).height(Length::Fill))
+            .push(Space::new().width(6).height(Length::Fill).boxed())
             .push(scale_pill)
-            .push(Space::new().width(4).height(Length::Fill))
+            .push(Space::new().width(4).height(Length::Fill).boxed())
             .align_y(iced::Alignment::Center)
-            .into()
+            .boxed()
     }
 
     fn tooltip_position(&self) -> tooltip::Position {
-        match self.presentation.edge {
-            xbar_core::BarEdge::Top => tooltip::Position::Bottom,
-            xbar_core::BarEdge::Bottom => tooltip::Position::Top,
-            xbar_core::BarEdge::Left => tooltip::Position::Right,
-            xbar_core::BarEdge::Right => tooltip::Position::Left,
-        }
+        tooltip_position_for_edge(self.presentation.edge)
     }
 
     fn sidebar_cell(&self, spec: xbar_core::ControlSpec) -> Element<'_, Message> {
@@ -1540,18 +1550,17 @@ impl IcedBar {
                 });
             }
         }
-        tooltip(
-            area,
-            container(text(title).size(12)).padding([4, 8]),
-            self.tooltip_position(),
-        )
-        .into()
+        tooltip(area, container(text(title).size(12)).padding([4, 8]))
+            .position(self.tooltip_position())
+            .boxed()
     }
 
     fn sidebar(&self) -> Element<'_, Message> {
         let projection =
             xbar_core::PresentationProjector::project(self.runtime.view(), &self.presentation);
-        let mut leading = Column::<Message>::new().spacing(4).width(Length::Fill);
+        let mut leading = Column::<Element<'_, Message>>::new()
+            .spacing(4)
+            .width(Length::Fill);
         for spec in projection
             .tags
             .into_iter()
@@ -1560,20 +1569,30 @@ impl IcedBar {
         {
             leading = leading.push(self.sidebar_cell(spec));
         }
-        let mut trailing = Column::<Message>::new().spacing(4).width(Length::Fill);
+        let mut trailing = Column::<Element<'_, Message>>::new()
+            .spacing(4)
+            .width(Length::Fill);
         for spec in projection.status.into_iter().rev() {
             trailing = trailing.push(self.sidebar_cell(spec));
         }
-        Column::<Message>::new()
+        Column::<Element<'_, Message>>::new()
             .padding(3)
             .spacing(6)
-            .push(iced::widget::scrollable(leading).height(Length::FillPortion(1)))
-            .push(iced::widget::scrollable(trailing).height(Length::FillPortion(1)))
+            .push(
+                iced::widget::scrollable(leading)
+                    .height(Length::FillPortion(1))
+                    .boxed(),
+            )
+            .push(
+                iced::widget::scrollable(trailing)
+                    .height(Length::FillPortion(1))
+                    .boxed(),
+            )
             .width(Length::Fill)
             .height(self.dock.shelf_bounds().map_or(Length::Fill, |bounds| {
                 Length::Fixed((bounds.y - 6.0).max(0.0))
             }))
-            .into()
+            .boxed()
     }
 
     fn view(&self) -> Element<'_, Message> {
@@ -1585,7 +1604,7 @@ impl IcedBar {
             })
             .width(Length::Fill)
             .height(Length::Fill)
-            .into();
+            .boxed();
         }
         let controls = if self.presentation.edge.is_vertical() {
             self.sidebar()
@@ -1594,7 +1613,7 @@ impl IcedBar {
                 .dock
                 .shelf_bounds()
                 .map_or(4.0, |bounds| bounds.width + 10.0);
-            Column::<Message>::new()
+            Column::<Element<'_, Message>>::new()
                 .padding(Padding {
                     left: 4.0,
                     top: 4.0,
@@ -1605,12 +1624,12 @@ impl IcedBar {
                 .push(self.view_work_space())
                 .width(Length::Fill)
                 .height(Length::Fill)
-                .into()
+                .boxed()
         };
         iced::widget::stack([controls, self.pinned_dock()])
             .width(Length::Fill)
             .height(Length::Fill)
-            .into()
+            .boxed()
     }
 }
 
@@ -1618,6 +1637,20 @@ impl IcedBar {
 mod alpha_probe_tests {
     use super::native_argb_alpha_supported;
     use wgpu::{Backend, CompositeAlphaMode as Alpha};
+    #[test]
+    fn tooltip_positions_point_inward_on_all_four_edges() {
+        use iced::widget::tooltip::Position;
+        use xbar_core::BarEdge;
+        for (edge, expected) in [
+            (BarEdge::Top, Position::Bottom),
+            (BarEdge::Bottom, Position::Top),
+            (BarEdge::Left, Position::Right),
+            (BarEdge::Right, Position::Left),
+        ] {
+            assert_eq!(super::tooltip_position_for_edge(edge), expected);
+        }
+    }
+
     #[test]
     fn opaque_gles_requires_a_verified_native_argb_window() {
         let advertised = [Alpha::Opaque];

@@ -5,6 +5,34 @@ monorepo use independent Semantic Versions.
 
 ## [Unreleased]
 
+### Preserve recordings with unrepresentable concat paths
+
+- Multi-segment finalization rejects segment names containing line breaks or
+  NUL before creating a manifest. ffconcat cannot represent these names
+  faithfully and could otherwise open a different file. All source segments
+  are retained; single-segment recordings and quoted/Unicode paths are unchanged.
+
+### Preserve existing recording concat sidecars
+
+- Multi-segment recording finalization exclusively creates its private concat
+  list. A pre-existing file, directory or symlink now stops the merge without
+  overwriting or deleting it, and keeps the source recording segments intact.
+
+### Reject replaced remote key FIFOs without blocking startup
+
+- Key loading opens without waiting for a FIFO writer if the path changes
+  after its initial metadata check, then validates the actual opened object.
+  Regular key loading, ownership/private-mode checks and symlink rejection
+  remain unchanged. No existing key files or permissions are modified.
+
+### Bound remote clipboard source-directory scans
+
+- File sharing now enforces its 100,000-entry scan budget before retaining
+  and sorting directory children. The budget is shared across all copied roots
+  and includes skipped entries, preventing huge directories from allocating
+  unbounded lists before the existing archive-entry check runs. An oversized
+  scan rejects the whole copy; normal ordering and file bytes are unchanged.
+
 ### Restore local shortcuts when a remote window crashes
 
 - Shortcut passthrough now ends before its owner window is torn down or
@@ -60,11 +88,13 @@ monorepo use independent Semantic Versions.
 
 - On NVIDIA's proprietary driver the remote view intermittently flashed the
   bare blurred wallpaper or blocky black-and-white noise, mostly across the
-  top of the screen: XRender reads of the GL-composited screen could return a
-  frame still being drawn. The host now reads the screen directly there
-  (`--scaling auto`, the default) and shrinks it with a new multi-threaded
-  area-average downscaler; measured flashes fell from 20 to 0 in 45 s.
-  `--scaling gpu|cpu` overrides the choice.
+  top of the screen: XRender operations on GL-composited or offscreen pixmaps
+  could return un-synchronized in-flight frames. Both the host and the viewer
+  now avoid XRender on NVIDIA systems under `--scaling auto` (the default).
+  The host reads the screen with core `GetImage` and downscales on the CPU;
+  the viewer upscales with multi-threaded CPU interpolation, eliminating the
+  noise jitter across target windows. `--scaling auto|gpu|cpu` is now supported
+  across `jwm-remote host`, `connect`, and `ssh`.
 
 ### One-command remote control over SSH
 

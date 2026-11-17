@@ -55,6 +55,35 @@ pub fn normalize_address(value: &str) -> Result<String, String> {
     if let Ok(address) = value.parse::<Ipv6Addr>() {
         return Ok(format!("[{address}]:{DEFAULT_PORT}"));
     }
+    // A zone identifies an interface on the viewer machine. Preserve its
+    // spelling for the system resolver instead of trying to parse it as part
+    // of Ipv6Addr (which has no scope field).
+    if value.contains('%') {
+        let (host, port) = if let Some(bracketed) = value.strip_prefix('[') {
+            let (host, suffix) = bracketed
+                .split_once(']')
+                .ok_or("invalid bracketed IPv6 address")?;
+            let port = if suffix.is_empty() {
+                DEFAULT_PORT
+            } else {
+                suffix
+                    .strip_prefix(':')
+                    .ok_or("use [IPv6%ZONE]:PORT for an explicit IPv6 port")?
+                    .parse::<u16>()
+                    .map_err(|_| "port must be between 1 and 65535")?
+            };
+            (host, port)
+        } else {
+            (value, DEFAULT_PORT)
+        };
+        if !is_ipv6_host(host) {
+            return Err("invalid scoped IPv6 address; use IPv6%ZONE or [IPv6%ZONE]:PORT".into());
+        }
+        if port == 0 {
+            return Err("port must be between 1 and 65535".into());
+        }
+        return Ok(format!("[{host}]:{port}"));
+    }
     if let Some(inner) = value.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
         let address = inner
             .parse::<Ipv6Addr>()
@@ -98,7 +127,7 @@ pub fn normalize_listen_address(value: &str) -> Result<String, String> {
     }
     if let Some(bracketed) = value.strip_prefix('[') {
         let (host, suffix) = bracketed.split_once(']').ok_or_else(invalid)?;
-        if !is_ipv6_listener_host(host) {
+        if !is_ipv6_host(host) {
             return Err(invalid());
         }
         if suffix.is_empty() {
@@ -113,7 +142,7 @@ pub fn normalize_listen_address(value: &str) -> Result<String, String> {
     if value.contains(['[', ']']) {
         return Err(invalid());
     }
-    if is_ipv6_listener_host(value) {
+    if is_ipv6_host(value) {
         // A bare IPv6 address is always the whole address, never a guessed port.
         return Ok(format!("[{value}]:{DEFAULT_PORT}"));
     }
@@ -127,7 +156,7 @@ pub fn normalize_listen_address(value: &str) -> Result<String, String> {
     }
 }
 
-fn is_ipv6_listener_host(value: &str) -> bool {
+fn is_ipv6_host(value: &str) -> bool {
     let address = if let Some((address, zone)) = value.split_once('%') {
         if zone.is_empty() || zone.contains(['%', ':', '[', ']']) {
             return false;
@@ -485,6 +514,54 @@ mod tests {
             assert!(normalize_address(invalid).is_err(), "{invalid}");
         }
     }
+    #[test]
+    fn scoped_viewer_addresses_preserve_zone_and_require_nonzero_port() {
+        for (input, expected) in [
+            ("fe80::1%eth0", "[fe80::1%eth0]:48221"),
+            ("[fe80::1%eth0]", "[fe80::1%eth0]:48221"),
+            ("[fe80::1%eth0]:1234", "[fe80::1%eth0]:1234"),
+            ("[fe80::1%3]:65535", "[fe80::1%3]:65535"),
+            ("[FE80::1%enp0s3.7]:1234", "[FE80::1%enp0s3.7]:1234"),
+        ] {
+            assert_eq!(normalize_address(input).unwrap(), expected, "{input}");
+        }
+        for invalid in [
+            "fe80::1%",
+            "fe80::1%a%b",
+            "fe80::1%eth0:1234",
+            "[fe80::1%eth0]:0",
+            "[fe80::1%eth0]:65536",
+            "[fe80::1%eth0]:",
+            "[fe80::1%eth0]tail",
+            "[fe80::1%eth0]:12:34",
+            "[fe80::1%eth0",
+            "fe80::1%eth0]",
+            "[host%eth0]:1234",
+            "[fe80::1%eth 0]:1234",
+            "[fe80::1%eth0\n]:1234",
+        ] {
+            assert!(normalize_address(invalid).is_err(), "{invalid:?}");
+        }
+    }
+
+    #[test]
+    fn scoped_viewer_address_reaches_the_system_resolver() {
+        use std::net::ToSocketAddrs;
+        // Numeric scope lookup is independent of machine interface names and
+        // never contacts DNS. Actual link-local routing still needs hardware.
+        let address = normalize_address("[fe80::1%1]:1234").unwrap();
+        let resolved = address.to_socket_addrs().unwrap().collect::<Vec<_>>();
+        assert!(!resolved.is_empty());
+        for address in resolved {
+            let SocketAddr::V6(address) = address else {
+                panic!("expected IPv6")
+            };
+            assert_eq!(*address.ip(), "fe80::1".parse::<Ipv6Addr>().unwrap());
+            assert_eq!(address.scope_id(), 1);
+            assert_eq!(address.port(), 1234);
+        }
+    }
+
     #[test]
     fn hints_distinguish_connection_and_authenticated_refusal() {
         let refused = Some(io::ErrorKind::ConnectionRefused);

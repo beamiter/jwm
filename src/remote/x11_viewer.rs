@@ -35,6 +35,7 @@ use x11rb::x11_utils::{TryParseFd, X11Error};
 use super::cursor::{CursorPosition, CursorShape};
 use super::frame::{DamageRegions, DecodedFrame, FrameDamage, RecyclableDecodedFrame};
 use super::pacing::EventPollBudget;
+use super::scaling::{ScalingPolicy, nvidia_driver};
 use super::triangle_patch::TrianglePatch;
 use super::usability::viewer_title;
 use super::{RemoteError, RemoteResult};
@@ -58,6 +59,21 @@ const RENDER_FILTER_BILINEAR: &[u8] = b"bilinear";
 /// source/root coordinate space, even when the viewer window is letterboxed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ViewerEvent {
+    WaylandPointer {
+        frame_sequence: u64,
+        geometry_epoch: u64,
+        x: u16,
+        y: u16,
+        local_x: i16,
+        local_y: i16,
+        kind: WaylandPointerEventKind,
+    },
+    WaylandPointerCancel,
+    /// An unmappable local left-button edge; never a remote action.
+    WaylandPointerButtonCancel {
+        pressed: bool,
+    },
+    WaylandPointerRevoke,
     CycleSource,
     NarrowClipboard,
     Close,
@@ -75,6 +91,17 @@ pub enum ViewerEvent {
     },
     /// Release every key and button held by the remote input injector.
     ReleaseAll,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WaylandPointerEventKind {
+    ScrollUp,
+    ScrollDown,
+    ScrollLeft,
+    ScrollRight,
+    Motion,
+    LeftDown,
+    LeftUp,
 }
 
 #[derive(Default)]
@@ -239,6 +266,37 @@ fn reset_input_geometry(
 // An external keyboard grab diverts releases even though the ordinary focus
 // has not changed. Our own grab's synthetic focus notifications must not tear
 // down the grab we just acquired.
+fn seamless_entry_is_clean(keys: &[u8; 32], mask: x11rb::protocol::xproto::KeyButMask) -> bool {
+    // Lock/NumLock are latched state, not a held local chord.
+    let buttons = x11rb::protocol::xproto::KeyButMask::BUTTON1
+        | x11rb::protocol::xproto::KeyButMask::BUTTON2
+        | x11rb::protocol::xproto::KeyButMask::BUTTON3
+        | x11rb::protocol::xproto::KeyButMask::BUTTON4
+        | x11rb::protocol::xproto::KeyButMask::BUTTON5;
+    keys.iter().all(|key| *key == 0) && u16::from(mask & buttons) == 0
+}
+
+// Follow the server's current hit path, not merely coordinates relative to an
+// obscured window. A bounded walk supports WM frames and fails closed on stale
+// or excessively deep paths. Separate replies are not an atomic server snapshot.
+fn pointer_path_reaches_viewer(
+    root: u32,
+    viewer: u32,
+    mut child_at: impl FnMut(u32) -> RemoteResult<Option<u32>>,
+) -> RemoteResult<bool> {
+    let mut window = root;
+    for _ in 0..64 {
+        if window == viewer {
+            return Ok(true);
+        }
+        let Some(child) = child_at(window)? else {
+            return Ok(false);
+        };
+        window = child;
+    }
+    Ok(false)
+}
+
 fn focus_out_releases_input(mode: NotifyMode, owns_grab: bool) -> bool {
     mode == NotifyMode::NORMAL || (mode == NotifyMode::GRAB && !owns_grab)
 }
@@ -595,6 +653,11 @@ pub struct Viewer {
     /// upload overwrote.
     backing_letterbox: Option<Letterbox>,
     grab_input: bool,
+    seamless_input: bool,
+    seamless_suspended: bool,
+    cleanup_started: bool,
+    cleanup_had_grab: bool,
+    cleanup_failed: bool,
     forward_input: bool,
     source_switching: bool,
     source_cycle_enabled: bool,
@@ -604,7 +667,12 @@ pub struct Viewer {
     source_label: Option<String>,
     presented_geometry: Option<u64>,
     pointer_enabled: bool,
+    wayland_pointer: bool,
+    pointer_presented: Option<u64>,
+    pointer_status: Option<&'static str>,
     forward_keyboard: bool,
+    #[cfg(feature = "remote-wayland")]
+    wayland_keymap: Option<super::keyboard_keymap::KeyboardKeymap>,
     verified_keymap: Option<super::x11_keymap::KeymapTable>,
     grabbed: bool,
     escape_keycodes: Vec<u8>,
@@ -869,6 +937,7 @@ impl Viewer {
             initial_width,
             initial_height,
             None,
+            ScalingPolicy::Auto,
             pointer_enabled,
             forward_keyboard,
             verified_keymap,
@@ -884,6 +953,7 @@ impl Viewer {
         initial_width: u16,
         initial_height: u16,
         window_size: Option<super::window_size::WindowSize>,
+        scaling: ScalingPolicy,
         pointer_enabled: bool,
         forward_keyboard: bool,
         verified_keymap: Option<super::x11_keymap::KeymapTable>,
@@ -897,6 +967,7 @@ impl Viewer {
             initial_height,
             window_size,
             None,
+            scaling,
             pointer_enabled,
             forward_keyboard,
             verified_keymap,
@@ -913,6 +984,7 @@ impl Viewer {
         initial_height: u16,
         window_size: Option<super::window_size::WindowSize>,
         window_position: Option<super::window_position::WindowPosition>,
+        scaling: ScalingPolicy,
         pointer_enabled: bool,
         forward_keyboard: bool,
         verified_keymap: Option<super::x11_keymap::KeymapTable>,
@@ -1013,7 +1085,7 @@ impl Viewer {
             ShmUpload::Disabled
         };
         let mut render_upscale =
-            RenderUpscale::connect(&conn, screen_num, root, root_depth, root_visual)?;
+            RenderUpscale::connect(&conn, screen_num, root, root_depth, root_visual, scaling)?;
 
         let presentation_atom = intern_atom(&conn, b"_JWM_REMOTE_PRESENTED")?;
         let wm_protocols = intern_atom(&conn, b"WM_PROTOCOLS")?;
@@ -1027,6 +1099,8 @@ impl Viewer {
         let event_mask = EventMask::EXPOSURE
             | EventMask::STRUCTURE_NOTIFY
             | EventMask::FOCUS_CHANGE
+            | EventMask::ENTER_WINDOW
+            | EventMask::LEAVE_WINDOW
             | EventMask::POINTER_MOTION
             | EventMask::BUTTON_PRESS
             | EventMask::BUTTON_RELEASE
@@ -1167,9 +1241,19 @@ impl Viewer {
             source_label: None,
             presented_geometry: None,
             pointer_enabled,
+            wayland_pointer: false,
+            pointer_presented: None,
+            pointer_status: None,
             forward_keyboard,
             verified_keymap,
+            #[cfg(feature = "remote-wayland")]
+            wayland_keymap: None,
             grabbed: false,
+            seamless_input: false,
+            seamless_suspended: false,
+            cleanup_started: false,
+            cleanup_had_grab: false,
+            cleanup_failed: false,
             escape_keycodes,
             escape_keysym,
             escape_name: escape_key.to_string(),
@@ -1196,23 +1280,104 @@ impl Viewer {
         self.user_released_grab
     }
 
-    /// Final local-only event pass after transport workers stop. Never forward
-    /// these events to a replacement session. A backlog is ambiguous, so it
-    /// disables retry instead of draining unboundedly through a close/escape.
-    pub(crate) fn reconnect_allowed_after_cleanup(&mut self) -> RemoteResult<bool> {
-        let events = self.poll_events();
-        // Always try to release even when polling failed. Drop remains the
-        // fallback on connection errors; such errors never authorize retry.
+    /// Terminal local input boundary, before waiting on transport workers.
+    pub(crate) fn begin_local_cleanup(&mut self) -> RemoteResult<()> {
+        self.cleanup_had_grab |= self.grabbed;
+        self.cleanup_started = true;
+        self.seamless_suspended = true;
         let released = self.release_local_grab();
-        let events = events?;
-        released?;
+        self.cleanup_failed |= released.is_err();
+        self.keyboard = ViewerKeyboardState::default();
+        self.held_buttons.clear();
+        self.clipboard_shortcut = ViewerKeyboardState::default();
+        released
+    }
+
+    /// Final bounded intent-only pass. Once input is returned to local apps,
+    /// their physical escape chords no longer reach this viewer; a session
+    /// that still held a grab at cleanup entry must not automatically retry.
+    pub(crate) fn reconnect_allowed_after_cleanup(&mut self) -> RemoteResult<bool> {
+        self.begin_local_cleanup()?;
+        let events = self.poll_cleanup_intent()?;
+        if self.cleanup_had_grab || self.cleanup_failed {
+            return Ok(false);
+        }
+        let pending = self.has_pending_events();
+        self.cleanup_failed |= pending.is_err();
         Ok(local_retry_intent_allows(
             &events,
             self.user_close_requested,
             self.user_released_grab,
             self.user_restricted_clipboard,
-            self.has_pending_events()?,
+            pending?,
         ))
+    }
+
+    fn poll_cleanup_intent(&mut self) -> RemoteResult<Vec<ViewerEvent>> {
+        let result = self.poll_cleanup_intent_inner();
+        self.cleanup_failed |= result.is_err();
+        result
+    }
+
+    fn poll_cleanup_intent_inner(&mut self) -> RemoteResult<Vec<ViewerEvent>> {
+        let mut result = Vec::new();
+        let mut budget = EventPollBudget::new();
+        while budget.take() {
+            let event = if let Some(event) = self.deferred_events.pop_front() {
+                event
+            } else if let Some(event) = self.conn.poll_for_event()? {
+                event
+            } else {
+                break;
+            };
+            match event {
+                Event::ClientMessage(event)
+                    if event.window == self.window
+                        && event.format == 32
+                        && event.type_ == self.wm_protocols
+                        && event.data.as_data32()[0] == self.wm_delete_window =>
+                {
+                    self.user_close_requested = true;
+                    self.closed = true;
+                    result.push(ViewerEvent::Close);
+                }
+                Event::DestroyNotify(event) if event.window == self.window => {
+                    self.user_close_requested = true;
+                    self.closed = true;
+                    result.push(ViewerEvent::Close);
+                }
+                Event::KeyPress(event)
+                    if event.event == self.window && self.is_escape(event.detail) =>
+                {
+                    if self.clipboard_narrowing_enabled
+                        && clipboard_narrow_modifiers_match(event.state)
+                    {
+                        self.user_restricted_clipboard = true;
+                        result.push(ViewerEvent::NarrowClipboard);
+                    } else if self.grab_input && escape_modifiers_match(event.state) {
+                        self.user_released_grab = true;
+                    }
+                }
+                Event::Error(error) if is_closed_window_error(&error, self.window) => {
+                    self.closed = true;
+                    result.push(ViewerEvent::Close);
+                    break;
+                }
+                Event::Error(error) => {
+                    return Err(io::Error::other(format!(
+                        "X11 viewer received a protocol error during cleanup: {error:?}"
+                    ))
+                    .into());
+                }
+                Event::MappingNotify(event) if event.request != Mapping::POINTER => {
+                    return Err(invalid_data(
+                        "local X11 keyboard mapping changed during cleanup; explicit reconnect required"
+                    ).into());
+                }
+                _ => {} // No ordinary input, source switch, rendering or acquisition.
+            }
+        }
+        Ok(result)
     }
 
     /// Drain a bounded batch of X11 events without blocking.
@@ -1222,8 +1387,202 @@ impl Viewer {
     /// keyboard and pointer. Ctrl+Super plus the escape key releases both
     /// grabs and emits
     /// `ReleaseAll` so the remote host cannot retain a half-finished chord.
+    #[cfg(feature = "remote-wayland")]
+    pub(super) fn enable_wayland_keyboard(
+        &mut self,
+        display: Option<&str>,
+    ) -> RemoteResult<[u8; 32]> {
+        if self.pointer_enabled || self.grab_input || self.forward_keyboard {
+            return Err(invalid_data(
+                "Wayland keyboard lease cannot share legacy input permission",
+            )
+            .into());
+        }
+        let guard =
+            super::keyboard_keymap::KeyboardKeymap::connect(display, &self.conn, self.window)?;
+        let digest = guard.digest();
+        self.wayland_keymap = Some(guard);
+        self.forward_keyboard = true;
+        self.forward_input = true;
+        Ok(digest)
+    }
+    #[cfg(feature = "remote-wayland")]
+    pub(super) fn check_wayland_keyboard(&mut self, initial: bool) -> RemoteResult<()> {
+        self.wayland_keymap
+            .as_mut()
+            .ok_or_else(|| invalid_data("Wayland keyboard lease is disabled"))?
+            .check(initial)
+    }
+    #[cfg(feature = "remote-wayland")]
+    pub(super) fn disable_wayland_keyboard(&mut self) {
+        self.wayland_keymap = None;
+        self.forward_keyboard = false;
+        self.forward_input = false;
+        self.keyboard = ViewerKeyboardState::default();
+    }
+
+    pub(super) fn enable_wayland_pointer(&mut self) -> RemoteResult<()> {
+        if self.pointer_enabled || self.forward_keyboard || self.grab_input {
+            return Err(
+                invalid_data("scoped pointer cannot share legacy input or keyboard").into(),
+            );
+        }
+        self.wayland_pointer = true;
+        self.set_wayland_pointer_status("Pointer: Waiting for authorization");
+        Ok(())
+    }
+    pub(super) fn set_wayland_pointer_status(&mut self, status: &'static str) {
+        if self.pointer_status != Some(status) {
+            self.pointer_status = Some(status);
+            self.update_title();
+        }
+    }
+    /// Test-only observer. Never read by input authorization or presentation.
+    #[cfg(test)]
+    pub(super) fn observe_keyboard_state(&self, armed: bool, ended: bool) -> RemoteResult<()> {
+        let atom = intern_atom(&self.conn, b"_JWM_TEST_KEYBOARD_STATE")?;
+        let value = if ended {
+            2
+        } else if armed {
+            1
+        } else {
+            0
+        };
+        self.conn
+            .change_property32(
+                PropMode::REPLACE,
+                self.window,
+                atom,
+                AtomEnum::CARDINAL,
+                &[value],
+            )?
+            .check()?;
+        Ok(())
+    }
+    /// Test observation only: never read by the authorization or ACK path.
+    #[cfg(test)]
+    pub(super) fn observe_scroll(&self, count: u64) -> RemoteResult<()> {
+        let atom = self
+            .conn
+            .intern_atom(false, b"_JWM_TEST_SCROLL_OBSERVED")?
+            .reply()?
+            .atom;
+        self.conn
+            .change_property32(
+                PropMode::REPLACE,
+                self.window,
+                atom,
+                AtomEnum::CARDINAL,
+                &[count as u32, (count >> 32) as u32],
+            )?
+            .check()?;
+        Ok(())
+    }
+    #[cfg(test)]
+    pub(super) fn observe_pointer_ready(&self, sequence: Option<u64>) -> RemoteResult<()> {
+        let atom = intern_atom(&self.conn, b"_JWM_TEST_POINTER_READY")?;
+        if let Some(sequence) = sequence {
+            self.conn
+                .change_property32(
+                    PropMode::REPLACE,
+                    self.window,
+                    atom,
+                    AtomEnum::CARDINAL,
+                    &[sequence as u32, (sequence >> 32) as u32],
+                )?
+                .check()?;
+        } else {
+            self.conn.delete_property(self.window, atom)?.check()?;
+        }
+        Ok(())
+    }
+    /// Test-only snapshot of real local candidate state, never input authority.
+    #[cfg(test)]
+    pub(super) fn observe_pointer_candidate(
+        &self,
+        candidate: Option<u64>,
+        left_down: bool,
+        sequence: u64,
+    ) -> RemoteResult<()> {
+        let atom = intern_atom(&self.conn, b"_JWM_TEST_POINTER_CANDIDATE")?;
+        let frame = candidate.unwrap_or(0);
+        self.conn
+            .change_property32(
+                PropMode::REPLACE,
+                self.window,
+                atom,
+                AtomEnum::CARDINAL,
+                &[
+                    u32::from(candidate.is_some()),
+                    frame as u32,
+                    (frame >> 32) as u32,
+                    u32::from(left_down),
+                    sequence as u32,
+                    (sequence >> 32) as u32,
+                ],
+            )?
+            .check()?;
+        Ok(())
+    }
+    pub(super) fn wayland_pointer_presented(&mut self, sequence: u64) {
+        self.pointer_presented = Some(sequence);
+    }
+    fn scoped_pointer_event(&self, x: i16, y: i16, kind: WaylandPointerEventKind) -> ViewerEvent {
+        let cancelled = match kind {
+            WaylandPointerEventKind::Motion
+            | WaylandPointerEventKind::ScrollUp
+            | WaylandPointerEventKind::ScrollDown
+            | WaylandPointerEventKind::ScrollLeft
+            | WaylandPointerEventKind::ScrollRight => ViewerEvent::WaylandPointerCancel,
+            WaylandPointerEventKind::LeftDown => {
+                ViewerEvent::WaylandPointerButtonCancel { pressed: true }
+            }
+            WaylandPointerEventKind::LeftUp => {
+                ViewerEvent::WaylandPointerButtonCancel { pressed: false }
+            }
+        };
+        let Some(frame) = self.last_frame.as_ref() else {
+            return cancelled;
+        };
+        if self.pending_resize
+            || self.pointer_presented != Some(frame.sequence)
+            || self.presented_geometry != Some(frame.geometry_epoch)
+            || !self.pointer_is_inside_image(x, y)
+        {
+            return cancelled;
+        }
+        let Some((sx, sy)) = map_scoped_pointer_to_source(
+            x,
+            y,
+            self.width,
+            self.height,
+            frame.image().width() as u16,
+            frame.image().height() as u16,
+            frame.source_width,
+            frame.source_height,
+        ) else {
+            return cancelled;
+        };
+        ViewerEvent::WaylandPointer {
+            frame_sequence: frame.sequence,
+            geometry_epoch: frame.geometry_epoch,
+            x: sx,
+            y: sy,
+            local_x: x,
+            local_y: y,
+            kind,
+        }
+    }
+
     pub fn poll_events(&mut self) -> RemoteResult<Vec<ViewerEvent>> {
+        if self.cleanup_started {
+            return self.poll_cleanup_intent();
+        }
         let mut result = Vec::new();
+        #[cfg(feature = "remote-wayland")]
+        if let Some(guard) = self.wayland_keymap.as_mut() {
+            guard.check(false)?;
+        }
         if self.closed {
             self.report_close(&mut result)?;
             return Ok(result);
@@ -1262,7 +1621,27 @@ impl Viewer {
                 Event::ConfigureNotify(event) if event.window == self.window => {
                     let (new_width, new_height) =
                         configured_viewer_dimensions(event.width, event.height)?;
+                    #[cfg(test)]
+                    if self.wayland_pointer && (new_width, new_height) != (self.width, self.height)
+                    {
+                        eprintln!(
+                            "viewer pointer revoke: ConfigureNotify {:?} -> {:?}",
+                            (self.width, self.height),
+                            (new_width, new_height)
+                        );
+                    }
+                    revoke_scoped_pointer_on_resize(
+                        self.wayland_pointer,
+                        (self.width, self.height),
+                        (new_width, new_height),
+                        &mut result,
+                    );
                     if (new_width, new_height) != (self.width, self.height) {
+                        if self.seamless_input {
+                            self.release_local_grab()?;
+                            self.release_all_input(&mut result);
+                            self.seamless_suspended = true;
+                        }
                         self.width = new_width;
                         self.height = new_height;
                         redraw = true;
@@ -1286,7 +1665,10 @@ impl Viewer {
                     break;
                 }
                 Event::UnmapNotify(event) if event.window == self.window => {
+                    #[cfg(test)]
+                    eprintln!("viewer input revoke: UnmapNotify {event:?}");
                     self.clipboard_shortcut = ViewerKeyboardState::default();
+                    self.seamless_suspended = true;
                     self.release_local_grab()?;
                     self.release_all_input(&mut result);
                 }
@@ -1294,9 +1676,91 @@ impl Viewer {
                     if event.event == self.window
                         && focus_out_releases_input(event.mode, self.grabbed) =>
                 {
+                    #[cfg(test)]
+                    {
+                        let focus = self.conn.get_input_focus()?.reply()?;
+                        eprintln!(
+                            "viewer input revoke: FocusOut event={:#x} mode={:?} detail={:?} sequence={}; current focus={:#x} revert_to={:?}",
+                            event.event,
+                            event.mode,
+                            event.detail,
+                            event.sequence,
+                            focus.focus,
+                            focus.revert_to
+                        );
+                    }
                     self.clipboard_shortcut = ViewerKeyboardState::default();
+                    self.seamless_suspended = true;
                     self.release_local_grab()?;
                     self.release_all_input(&mut result);
+                }
+                Event::EnterNotify(event)
+                    if event.event == self.window
+                        && self.seamless_input
+                        && event.mode == NotifyMode::NORMAL =>
+                {
+                    self.update_seamless_input(event.event_x, event.event_y, &mut result)?;
+                }
+                Event::LeaveNotify(event)
+                    if event.event == self.window
+                        && self.seamless_input
+                        && event.mode == NotifyMode::NORMAL
+                        && event.detail != x11rb::protocol::xproto::NotifyDetail::INFERIOR =>
+                {
+                    self.release_local_grab()?;
+                    self.release_all_input(&mut result);
+                    self.seamless_suspended = false;
+                }
+                Event::MotionNotify(event) if event.event == self.window && self.seamless_input => {
+                    self.update_seamless_input(event.event_x, event.event_y, &mut result)?;
+                    if self.forwarding_input() {
+                        if let Some((x, y)) = self.map_pointer(event.event_x, event.event_y) {
+                            push_pointer(&mut result, x, y);
+                        }
+                    }
+                }
+                Event::MotionNotify(event)
+                    if event.event == self.window && self.wayland_pointer =>
+                {
+                    result.push(self.scoped_pointer_event(
+                        event.event_x,
+                        event.event_y,
+                        WaylandPointerEventKind::Motion,
+                    ));
+                }
+                Event::ButtonPress(event) if event.event == self.window && self.wayland_pointer => {
+                    result.push(if event.detail == 1 {
+                        self.scoped_pointer_event(
+                            event.event_x,
+                            event.event_y,
+                            WaylandPointerEventKind::LeftDown,
+                        )
+                    } else if matches!(event.detail, 4..=7) {
+                        match scoped_wheel_press(event.detail, event.state) {
+                            ScopedWheelPress::Scroll(kind) => {
+                                self.scoped_pointer_event(event.event_x, event.event_y, kind)
+                            }
+                            ScopedWheelPress::LeftHeld => {
+                                ViewerEvent::WaylandPointerButtonCancel { pressed: true }
+                            }
+                            ScopedWheelPress::Unsupported => ViewerEvent::WaylandPointerCancel,
+                        }
+                    } else {
+                        ViewerEvent::WaylandPointerCancel
+                    });
+                }
+                Event::ButtonRelease(event)
+                    if event.event == self.window && self.wayland_pointer =>
+                {
+                    result.push(if event.detail == 1 {
+                        self.scoped_pointer_event(
+                            event.event_x,
+                            event.event_y,
+                            WaylandPointerEventKind::LeftUp,
+                        )
+                    } else {
+                        ViewerEvent::WaylandPointerCancel
+                    });
                 }
                 Event::MotionNotify(event)
                     if event.event == self.window && self.forwarding_input() =>
@@ -1311,6 +1775,7 @@ impl Viewer {
                         continue;
                     }
                     if self.source_switching
+                        || (self.seamless_input && !self.grabbed)
                         || (self.grab_input && !self.grabbed && !self.acquire_local_grab()?)
                     {
                         continue;
@@ -1395,6 +1860,7 @@ impl Viewer {
                     {
                         KeyPressAction::ReleaseGrab => {
                             self.user_released_grab = true;
+                            self.seamless_suspended = true;
                             self.release_local_grab()?;
                             self.release_all_input(&mut result);
                         }
@@ -1412,6 +1878,12 @@ impl Viewer {
                         .defer_release(event.detail, event.time, Instant::now());
                 }
                 Event::MappingNotify(event) if event.request != Mapping::POINTER => {
+                    #[cfg(feature = "remote-wayland")]
+                    if self.wayland_keymap.is_some() {
+                        return Err(
+                            invalid_data("local keyboard map changed; lease revoked").into()
+                        );
+                    }
                     if self.forward_keyboard {
                         let expected = self.verified_keymap.as_ref().ok_or_else(|| {
                             invalid_data("keyboard input has no verified X11 keymap")
@@ -1617,6 +2089,7 @@ impl Viewer {
 
     pub(crate) fn invalidate_source(&mut self, label: String) -> RemoteResult<()> {
         self.release_local_grab()?;
+        self.seamless_suspended = true;
         self.keyboard = ViewerKeyboardState::default();
         self.held_buttons.clear();
         self.begin_source_switch(label);
@@ -2069,6 +2542,18 @@ impl Viewer {
             self.clipboard_activity.as_deref(),
             &self.escape_name,
         );
+        if self.seamless_input {
+            title = title.replace("; input released - click to control", "");
+            title.push_str(if self.grabbed {
+                "; seamless: leave image to release"
+            } else {
+                "; seamless: enter image to control (after release, leave first)"
+            });
+        }
+        if let Some(status) = self.pointer_status {
+            title.push_str("; ");
+            title.push_str(status);
+        }
         if self.clipboard_enabled {
             title.push_str("; sharing ");
             title.push_str(&self.clipboard_policy);
@@ -2106,8 +2591,107 @@ impl Viewer {
         self.escape_keycodes.contains(&keycode)
     }
 
+    /// Explicit per-session local policy; does not grant remote input permission.
+    pub(super) fn set_seamless_input(&mut self, enabled: bool) {
+        self.seamless_input =
+            enabled && self.grab_input && self.pointer_enabled && self.forward_keyboard;
+        self.update_title();
+    }
+
+    fn update_seamless_input(
+        &mut self,
+        x: i16,
+        y: i16,
+        events: &mut Vec<ViewerEvent>,
+    ) -> RemoteResult<()> {
+        if self.cleanup_started {
+            return Ok(());
+        }
+        if !self.pointer_is_inside_image(x, y) {
+            if self.grabbed {
+                self.release_local_grab()?;
+                self.release_all_input(events);
+            }
+            self.seamless_suspended = false;
+            return Ok(());
+        }
+        if self.grabbed
+            || self.seamless_suspended
+            || self.source_switching
+            || !self
+                .last_frame
+                .as_ref()
+                .is_some_and(|frame| self.presented_geometry == Some(frame.geometry_epoch))
+        {
+            return Ok(());
+        }
+        // Never steal the tail of a local drag or key chord. Do not synthesize
+        // presses for keys already down on entry. A later clean motion can enter.
+        let keys = self.conn.query_keymap()?.reply()?;
+        let pointer = self.conn.query_pointer(self.window)?.reply()?;
+        if !pointer.same_screen
+            || !self.pointer_is_inside_image(pointer.win_x, pointer.win_y)
+            || !seamless_entry_is_clean(&keys.keys, pointer.mask)
+            || !self.pointer_targets_viewer()?
+        {
+            return Ok(());
+        }
+        // This grab is intentionally unconfined: outside motion must remain
+        // observable, and ungrab restores the pre-existing local focus.
+        if self.acquire_local_grab()? {
+            // Seamless grabs freeze logical device state. A press that reached
+            // a local app before GrabKeyboard remains visible here even if its
+            // physical release raced the request. Rejecting the grab unfreezes
+            // that release back to the local focus instead of swallowing it.
+            let clean: RemoteResult<bool> = (|| {
+                let keys = self.conn.query_keymap()?.reply()?;
+                let pointer = self.conn.query_pointer(self.window)?.reply()?;
+                Ok(pointer.same_screen
+                    && self.pointer_is_inside_image(pointer.win_x, pointer.win_y)
+                    && seamless_entry_is_clean(&keys.keys, pointer.mask)
+                    && self.pointer_targets_viewer()?)
+            })();
+            match clean {
+                Ok(true) => {
+                    let resumed: RemoteResult<()> = (|| {
+                        self.conn
+                            .allow_events(x11rb::protocol::xproto::Allow::ASYNC_BOTH, CURRENT_TIME)?
+                            .check()?;
+                        self.conn.flush()?;
+                        Ok(())
+                    })();
+                    if let Err(error) = resumed {
+                        self.release_local_grab()?;
+                        return Err(error);
+                    }
+                }
+                Ok(false) => {
+                    self.release_local_grab()?;
+                    self.release_all_input(events);
+                }
+                Err(error) => {
+                    self.release_local_grab()?;
+                    return Err(error);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn pointer_targets_viewer(&self) -> RemoteResult<bool> {
+        let root = self.conn.setup().roots[self.cursor_screen].root;
+        pointer_path_reaches_viewer(root, self.window, |window| {
+            let pointer = self.conn.query_pointer(window)?.reply()?;
+            Ok(
+                (pointer.same_screen && pointer.root == root && pointer.child != x11rb::NONE)
+                    .then_some(pointer.child),
+            )
+        })
+    }
+
     fn forwarding_input(&self) -> bool {
-        self.forward_input
+        !self.cleanup_started
+            && self.forward_input
             && !self.source_switching
             && self
                 .last_frame
@@ -2117,19 +2701,21 @@ impl Viewer {
     }
 
     fn acquire_local_grab(&mut self) -> RemoteResult<bool> {
+        if self.cleanup_started {
+            return Ok(false);
+        }
         if self.grabbed {
             return Ok(true);
         }
 
+        let mode = if self.seamless_input {
+            GrabMode::SYNC
+        } else {
+            GrabMode::ASYNC
+        };
         let keyboard = self
             .conn
-            .grab_keyboard(
-                false,
-                self.window,
-                CURRENT_TIME,
-                GrabMode::ASYNC,
-                GrabMode::ASYNC,
-            )?
+            .grab_keyboard(false, self.window, CURRENT_TIME, GrabMode::ASYNC, mode)?
             .reply()?;
         if keyboard.status != GrabStatus::SUCCESS {
             eprintln!(
@@ -2145,9 +2731,16 @@ impl Viewer {
                 .grab_pointer(
                     false,
                     self.window,
-                    EventMask::POINTER_MOTION | EventMask::BUTTON_PRESS | EventMask::BUTTON_RELEASE,
-                    GrabMode::ASYNC,
-                    GrabMode::ASYNC,
+                    EventMask::POINTER_MOTION
+                        | EventMask::BUTTON_PRESS
+                        | EventMask::BUTTON_RELEASE
+                        | if self.seamless_input {
+                            EventMask::ENTER_WINDOW | EventMask::LEAVE_WINDOW
+                        } else {
+                            EventMask::NO_EVENT
+                        },
+                    mode,
+                    mode,
                     x11rb::NONE,
                     self.blank_cursor,
                     CURRENT_TIME,
@@ -2204,6 +2797,9 @@ impl Viewer {
     }
 
     fn release_all_input(&mut self, events: &mut Vec<ViewerEvent>) {
+        if self.wayland_pointer {
+            events.push(ViewerEvent::WaylandPointerRevoke);
+        }
         clear_forwarded_input(&mut self.keyboard, &mut self.held_buttons, events);
     }
 
@@ -2723,7 +3319,19 @@ impl RenderUpscale {
         root: Window,
         depth: u8,
         root_visual: u32,
+        scaling: ScalingPolicy,
     ) -> RemoteResult<Self> {
+        let is_nvidia = nvidia_driver(conn);
+        if !scaling.allows_gpu(is_nvidia) {
+            if is_nvidia && scaling == ScalingPolicy::Auto {
+                eprintln!(
+                    "jwm-remote: NVIDIA driver: viewer upscaling on the CPU, because XRender \
+                     operations can return unfinished frames (--scaling gpu overrides)"
+                );
+            }
+            return Ok(Self::Disabled);
+        }
+
         let Some(extension) = conn.extension_information(render::X11_EXTENSION_NAME)? else {
             eprintln!("jwm-remote: XRender unavailable for viewer upscaling; using CPU scaling");
             return Ok(Self::Disabled);
@@ -4124,9 +4732,26 @@ fn letterbox(
     })
 }
 
-/// Map local window coordinates through the fitted image rectangle into the
-/// original remote source space.  Coordinates in the black bars clamp to the
-/// nearest source edge, making pointer motion continuous at the image border.
+/// Scoped grants reject black bars and outside coordinates before mapping.
+/// They never inherit the legacy drag-friendly clamping policy.
+fn map_scoped_pointer_to_source(
+    x: i16,
+    y: i16,
+    ww: u16,
+    wh: u16,
+    iw: u16,
+    ih: u16,
+    sw: u16,
+    sh: u16,
+) -> Option<(u16, u16)> {
+    let bounds = letterbox(ww, wh, iw, ih)?;
+    if !pointer_inside_letterbox(x, y, bounds) {
+        return None;
+    }
+    map_pointer_to_source(x, y, ww, wh, iw, ih, sw, sh)
+}
+
+/// Legacy pointer mapping clamps outside coordinates for held drags.
 fn map_pointer_to_source(
     x: i16,
     y: i16,
@@ -4271,6 +4896,42 @@ fn find_viewer_window(
     Ok(None)
 }
 
+fn revoke_scoped_pointer_on_resize(
+    enabled: bool,
+    old: (u16, u16),
+    new: (u16, u16),
+    events: &mut Vec<ViewerEvent>,
+) {
+    // Record every native transition, not just the final dimensions after a
+    // coalesced event batch. Resize-and-restore must not resurrect a gate.
+    if enabled && old != new {
+        events.push(ViewerEvent::WaylandPointerRevoke);
+    }
+}
+
+#[cfg(test)]
+mod scoped_pointer_resize_history_tests {
+    use super::*;
+
+    #[test]
+    fn resize_restore_in_one_batch_revokes_even_with_equal_final_dimensions() {
+        let mut events = vec![ViewerEvent::WaylandPointerCancel];
+        revoke_scoped_pointer_on_resize(true, (1000, 600), (900, 600), &mut events);
+        revoke_scoped_pointer_on_resize(true, (900, 600), (1000, 600), &mut events);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| **e == ViewerEvent::WaylandPointerRevoke)
+                .count(),
+            2
+        );
+        let mut unchanged = Vec::new();
+        revoke_scoped_pointer_on_resize(true, (1000, 600), (1000, 600), &mut unchanged);
+        revoke_scoped_pointer_on_resize(false, (1000, 600), (900, 600), &mut unchanged);
+        assert!(unchanged.is_empty());
+    }
+}
+
 /// Whether a viewer window title belongs to `peer_label`.
 fn is_viewer_of(title: &[u8], peer_label: &str) -> bool {
     title.starts_with(format!("{peer_label} - JWM Remote").as_bytes())
@@ -4323,6 +4984,31 @@ fn append_source_title(title: &mut String, current: Option<&str>, switching: Opt
     } else if let Some(label) = current {
         title.push_str(&format!(" | source {label}"));
     }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ScopedWheelPress {
+    Scroll(WaylandPointerEventKind),
+    LeftHeld,
+    Unsupported,
+}
+
+fn scoped_wheel_press(detail: u8, state: KeyButMask) -> ScopedWheelPress {
+    if !matches!(detail, 4..=7) {
+        return ScopedWheelPress::Unsupported;
+    }
+    // X11's state reports a physical hold even if its original press was
+    // outside this viewer or before pointer mode was enabled.
+    if state.contains(KeyButMask::BUTTON1) {
+        return ScopedWheelPress::LeftHeld;
+    }
+    ScopedWheelPress::Scroll(match detail {
+        4 => WaylandPointerEventKind::ScrollUp,
+        5 => WaylandPointerEventKind::ScrollDown,
+        6 => WaylandPointerEventKind::ScrollLeft,
+        7 => WaylandPointerEventKind::ScrollRight,
+        _ => unreachable!(),
+    })
 }
 
 fn source_cycle_modifiers_match(state: KeyButMask) -> bool {
@@ -4411,6 +5097,34 @@ fn invalid_data(message: impl Into<String>) -> io::Error {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn scoped_wheel_press_tracks_initial_physical_left_hold() {
+        use super::{KeyButMask, ScopedWheelPress, WaylandPointerEventKind, scoped_wheel_press};
+        for (button, kind) in [
+            (4, WaylandPointerEventKind::ScrollUp),
+            (5, WaylandPointerEventKind::ScrollDown),
+            (6, WaylandPointerEventKind::ScrollLeft),
+            (7, WaylandPointerEventKind::ScrollRight),
+        ] {
+            assert_eq!(
+                scoped_wheel_press(button, KeyButMask::default()),
+                ScopedWheelPress::Scroll(kind)
+            );
+            assert_eq!(
+                scoped_wheel_press(button, KeyButMask::BUTTON1),
+                ScopedWheelPress::LeftHeld
+            );
+            assert_eq!(
+                scoped_wheel_press(button, KeyButMask::BUTTON1 | KeyButMask::SHIFT),
+                ScopedWheelPress::LeftHeld
+            );
+        }
+        assert_eq!(
+            scoped_wheel_press(8, KeyButMask::default()),
+            ScopedWheelPress::Unsupported
+        );
+    }
+
     use super::*;
     use crate::remote::frame::{
         DecodedFrame, RecyclableDecodedFrame, decode_pool_snapshot, new_decode_buffer_pool,
@@ -4595,6 +5309,7 @@ mod tests {
             1,
             Some(size),
             Some(position),
+            ScalingPolicy::Auto,
             false,
             false,
             None,
@@ -4640,6 +5355,7 @@ mod tests {
             1,
             Some(size),
             Some(outside),
+            ScalingPolicy::Auto,
             false,
             false,
             None,
@@ -5219,6 +5935,67 @@ mod tests {
         );
         assert_eq!(keyboard.press(37, false, true), KeyPressAction::Forward);
         assert_eq!(keyboard.press(96, false, true), KeyPressAction::Forward);
+    }
+
+    #[test]
+    fn seamless_hit_path_supports_frames_and_bounds_stale_paths() {
+        assert!(
+            pointer_path_reaches_viewer(1, 3, |window| {
+                Ok(match window {
+                    1 => Some(2),
+                    2 => Some(3),
+                    _ => panic!("do not reject viewer descendants"),
+                })
+            })
+            .unwrap()
+        );
+        assert!(
+            !pointer_path_reaches_viewer(1, 3, |window| {
+                Ok(if window == 1 { Some(4) } else { None })
+            })
+            .unwrap()
+        );
+        assert!(!pointer_path_reaches_viewer(1, 3, |_| Ok(None)).unwrap());
+        let mut queries = 0;
+        assert!(
+            !pointer_path_reaches_viewer(1, 3, |_| {
+                queries += 1;
+                Ok(Some(1))
+            })
+            .unwrap()
+        );
+        assert_eq!(queries, 64);
+        assert!(
+            pointer_path_reaches_viewer(1, 3, |_| Err(
+                std::io::Error::other("window disappeared").into()
+            ))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn seamless_entry_rejects_pressed_keys_and_buttons_but_not_locks() {
+        use x11rb::protocol::xproto::KeyButMask;
+        let mut keys = [0; 32];
+        assert!(seamless_entry_is_clean(&keys, KeyButMask::default()));
+        assert!(seamless_entry_is_clean(
+            &keys,
+            KeyButMask::LOCK | KeyButMask::MOD2
+        ));
+        for button in [
+            KeyButMask::BUTTON1,
+            KeyButMask::BUTTON2,
+            KeyButMask::BUTTON3,
+            KeyButMask::BUTTON4,
+            KeyButMask::BUTTON5,
+        ] {
+            assert!(!seamless_entry_is_clean(&keys, button));
+        }
+        for index in 0..32 {
+            keys[index] = 1;
+            assert!(!seamless_entry_is_clean(&keys, KeyButMask::default()));
+            keys[index] = 0;
+        }
     }
 
     #[test]
@@ -6015,6 +6792,861 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires a dedicated owned JWM_TEST_X11_DISPLAY Xvfb server"]
+    fn terminal_cleanup_releases_input_preserves_intent_and_never_regrabs() {
+        use x11rb::protocol::xproto;
+        assert_eq!(
+            std::env::var("JWM_REMOTE_TEST_VIEWER_OWNED").as_deref(),
+            Ok("1")
+        );
+        let display = std::env::var("JWM_TEST_X11_DISPLAY").unwrap();
+        assert!(display.starts_with(':'));
+        let (driver, screen) = x11rb::connect(Some(&display)).unwrap();
+        let root = driver.setup().roots[screen].root;
+        for case in [
+            "held",
+            "click_held",
+            "unheld",
+            "escape",
+            "narrow",
+            "close",
+            "normal_close",
+            "failed",
+            "window_error",
+            "drawable_error",
+            "protocol_error",
+            "keyboard_mapping",
+            "modifier_mapping",
+            "pointer_mapping",
+        ] {
+            driver
+                .warp_pointer(x11rb::NONE, root, 0, 0, 0, 0, 700, 500)
+                .unwrap()
+                .check()
+                .unwrap();
+            let keymap = super::super::x11_keymap::KeymapTable::read(&driver).unwrap();
+            let mut viewer = Viewer::connect(
+                Some(&display),
+                320,
+                240,
+                true,
+                true,
+                Some(keymap),
+                true,
+                "F12",
+                "terminal input regression",
+            )
+            .unwrap();
+            viewer.set_seamless_input(case != "click_held");
+            viewer.enable_clipboard_narrowing(true);
+            viewer.enable_source_cycle(true);
+            viewer
+                .draw(DecodedFrame {
+                    sequence: 1,
+                    source_width: 320,
+                    source_height: 240,
+                    image: RgbImage::from_pixel(320, 240, image::Rgb([20, 40, 60])),
+                })
+                .unwrap();
+            viewer.source_presented(viewer.last_frame.as_ref().unwrap().geometry_epoch);
+            viewer.poll_events().unwrap();
+            if matches!(case, "held" | "click_held" | "normal_close") {
+                driver
+                    .warp_pointer(x11rb::NONE, viewer.window, 0, 0, 0, 0, 30, 30)
+                    .unwrap()
+                    .check()
+                    .unwrap();
+                if case == "click_held" {
+                    assert!(viewer.acquire_local_grab().unwrap());
+                } else {
+                    viewer
+                        .update_seamless_input(30, 30, &mut Vec::new())
+                        .unwrap();
+                }
+                assert!(viewer.grabbed);
+                viewer.keyboard.press(38, false, true);
+                viewer.held_buttons.press(1, true);
+            }
+            let close = xproto::ClientMessageEvent::new(
+                32,
+                viewer.window,
+                viewer.wm_protocols,
+                [viewer.wm_delete_window, CURRENT_TIME, 0, 0, 0],
+            );
+            if case == "normal_close" {
+                driver
+                    .send_event(false, viewer.window, EventMask::NO_EVENT, close)
+                    .unwrap()
+                    .check()
+                    .unwrap();
+                viewer.conn.get_input_focus().unwrap().reply().unwrap();
+                let events = viewer.poll_events().unwrap();
+                assert!(events.contains(&ViewerEvent::Close));
+                assert!(events.contains(&ViewerEvent::ReleaseAll));
+            }
+            viewer.begin_local_cleanup().unwrap();
+            assert!(!viewer.grabbed);
+            assert!(viewer.keyboard.held.is_empty());
+            assert!(!viewer.forwarding_input());
+            assert!(
+                !viewer.user_released_grab(),
+                "automatic release is not user escape intent"
+            );
+            assert_eq!(
+                viewer.cleanup_had_grab,
+                matches!(case, "held" | "click_held")
+            );
+            viewer.begin_local_cleanup().unwrap();
+            assert_eq!(
+                viewer.cleanup_had_grab,
+                matches!(case, "held" | "click_held"),
+                "cleanup is idempotent"
+            );
+            assert!(!viewer.user_released_grab());
+            // Real queued entry/button events must not restore grabs or forward input.
+            driver
+                .warp_pointer(x11rb::NONE, viewer.window, 0, 0, 0, 0, 31, 30)
+                .unwrap()
+                .check()
+                .unwrap();
+            driver
+                .send_event(
+                    false,
+                    viewer.window,
+                    EventMask::BUTTON_PRESS,
+                    xproto::ButtonPressEvent {
+                        response_type: xproto::BUTTON_PRESS_EVENT,
+                        detail: 1,
+                        root,
+                        event: viewer.window,
+                        event_x: 31,
+                        event_y: 30,
+                        same_screen: true,
+                        ..Default::default()
+                    },
+                )
+                .unwrap()
+                .check()
+                .unwrap();
+            for (detail, state) in [
+                (38, KeyButMask::default()),
+                (
+                    viewer.escape_keycodes[0],
+                    KeyButMask::SHIFT | KeyButMask::CONTROL | KeyButMask::MOD4,
+                ),
+            ] {
+                driver
+                    .send_event(
+                        false,
+                        viewer.window,
+                        EventMask::KEY_PRESS,
+                        xproto::KeyPressEvent {
+                            response_type: xproto::KEY_PRESS_EVENT,
+                            detail,
+                            root,
+                            event: viewer.window,
+                            same_screen: true,
+                            state,
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap()
+                    .check()
+                    .unwrap();
+            }
+            if matches!(case, "escape" | "narrow") {
+                driver
+                    .send_event(
+                        false,
+                        viewer.window,
+                        EventMask::KEY_PRESS,
+                        xproto::KeyPressEvent {
+                            response_type: xproto::KEY_PRESS_EVENT,
+                            detail: viewer.escape_keycodes[0],
+                            root,
+                            event: viewer.window,
+                            same_screen: true,
+                            state: KeyButMask::CONTROL
+                                | KeyButMask::MOD4
+                                | if case == "narrow" {
+                                    KeyButMask::MOD1
+                                } else {
+                                    KeyButMask::default()
+                                },
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap()
+                    .check()
+                    .unwrap();
+            }
+            if case == "close" {
+                driver
+                    .send_event(false, viewer.window, EventMask::NO_EVENT, close)
+                    .unwrap()
+                    .check()
+                    .unwrap();
+            }
+            viewer.conn.get_input_focus().unwrap().reply().unwrap();
+            if matches!(case, "window_error" | "drawable_error" | "protocol_error") {
+                viewer.deferred_events.push_back(Event::Error(X11Error {
+                    error_kind: match case {
+                        "window_error" => ErrorKind::Window,
+                        "drawable_error" => ErrorKind::Drawable,
+                        _ => ErrorKind::Alloc,
+                    },
+                    error_code: 0,
+                    sequence: 0,
+                    bad_value: viewer.window,
+                    minor_opcode: 0,
+                    major_opcode: 0,
+                    extension_name: None,
+                    request_name: None,
+                }));
+            }
+            if matches!(
+                case,
+                "keyboard_mapping" | "modifier_mapping" | "pointer_mapping"
+            ) {
+                viewer.deferred_events.push_back(Event::MappingNotify(
+                    xproto::MappingNotifyEvent {
+                        response_type: xproto::MAPPING_NOTIFY_EVENT,
+                        request: match case {
+                            "keyboard_mapping" => Mapping::KEYBOARD,
+                            "modifier_mapping" => Mapping::MODIFIER,
+                            _ => Mapping::POINTER,
+                        },
+                        ..Default::default()
+                    },
+                ));
+            }
+            let polled = viewer.poll_events();
+            let expects_error = matches!(
+                case,
+                "protocol_error" | "keyboard_mapping" | "modifier_mapping"
+            );
+            assert_eq!(polled.is_err(), expects_error, "{case}");
+            let events = polled.unwrap_or_default();
+            if matches!(case, "window_error" | "drawable_error") {
+                assert!(viewer.closed);
+                assert!(events.contains(&ViewerEvent::Close));
+            }
+            assert_eq!(viewer.cleanup_failed, expects_error, "{case}");
+            assert!(
+                events.iter().all(|event| matches!(
+                    event,
+                    ViewerEvent::Close | ViewerEvent::NarrowClipboard
+                ))
+            );
+            assert!(!viewer.acquire_local_grab().unwrap());
+            viewer
+                .update_seamless_input(31, 30, &mut Vec::new())
+                .unwrap();
+            assert!(!viewer.grabbed);
+            assert_eq!(viewer.user_released_grab(), case == "escape");
+            assert_eq!(viewer.user_restricted_clipboard, case == "narrow");
+            if case == "failed" {
+                viewer.cleanup_failed = true;
+            }
+            assert_eq!(
+                viewer.reconnect_allowed_after_cleanup().unwrap(),
+                matches!(case, "unheld" | "pointer_mapping"),
+                "{case}"
+            );
+            assert!(!viewer.grabbed);
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a dedicated owned JWM_TEST_X11_DISPLAY Xvfb server"]
+    fn seamless_hit_path_accepts_reparented_viewer_and_its_child() {
+        use x11rb::protocol::{shape, shape::ConnectionExt as _, xproto};
+        assert_eq!(
+            std::env::var("JWM_REMOTE_TEST_VIEWER_OWNED").as_deref(),
+            Ok("1")
+        );
+        let display = std::env::var("JWM_TEST_X11_DISPLAY").unwrap();
+        assert!(display.starts_with(':'));
+        let (driver, screen) = x11rb::connect(Some(&display)).unwrap();
+        let root = driver.setup().roots[screen].root;
+        driver
+            .warp_pointer(x11rb::NONE, root, 0, 0, 0, 0, 700, 500)
+            .unwrap()
+            .check()
+            .unwrap();
+        let keymap = super::super::x11_keymap::KeymapTable::read(&driver).unwrap();
+        let mut viewer = Viewer::connect(
+            Some(&display),
+            320,
+            240,
+            true,
+            true,
+            Some(keymap),
+            true,
+            "F12",
+            "reparented seamless regression",
+        )
+        .unwrap();
+        viewer.set_seamless_input(true);
+        let frame = driver.generate_id().unwrap();
+        driver
+            .create_window(
+                x11rb::COPY_DEPTH_FROM_PARENT,
+                frame,
+                root,
+                100,
+                100,
+                360,
+                280,
+                0,
+                xproto::WindowClass::INPUT_OUTPUT,
+                x11rb::COPY_FROM_PARENT,
+                &xproto::CreateWindowAux::new(),
+            )
+            .unwrap()
+            .check()
+            .unwrap();
+        driver
+            .reparent_window(viewer.window, frame, 20, 20)
+            .unwrap()
+            .check()
+            .unwrap();
+        driver.map_window(frame).unwrap().check().unwrap();
+        driver.map_window(viewer.window).unwrap().check().unwrap();
+        let child = driver.generate_id().unwrap();
+        driver
+            .create_window(
+                x11rb::COPY_DEPTH_FROM_PARENT,
+                child,
+                viewer.window,
+                10,
+                10,
+                80,
+                80,
+                0,
+                xproto::WindowClass::INPUT_OUTPUT,
+                x11rb::COPY_FROM_PARENT,
+                &xproto::CreateWindowAux::new(),
+            )
+            .unwrap()
+            .check()
+            .unwrap();
+        driver.map_window(child).unwrap().check().unwrap();
+        viewer
+            .draw(DecodedFrame {
+                sequence: 1,
+                source_width: 320,
+                source_height: 240,
+                image: RgbImage::from_pixel(320, 240, image::Rgb([20, 40, 60])),
+            })
+            .unwrap();
+        viewer.source_presented(viewer.last_frame.as_ref().unwrap().geometry_epoch);
+        // Drain reparent/unmap notifications, then re-arm at the known outside position.
+        viewer.poll_events().unwrap();
+        viewer
+            .update_seamless_input(-1, -1, &mut Vec::new())
+            .unwrap();
+        driver
+            .warp_pointer(x11rb::NONE, child, 0, 0, 0, 0, 20, 20)
+            .unwrap()
+            .check()
+            .unwrap();
+        assert_eq!(
+            driver.query_pointer(root).unwrap().reply().unwrap().child,
+            frame
+        );
+        assert_eq!(
+            driver.query_pointer(frame).unwrap().reply().unwrap().child,
+            viewer.window
+        );
+        assert_eq!(
+            driver
+                .query_pointer(viewer.window)
+                .unwrap()
+                .reply()
+                .unwrap()
+                .child,
+            child
+        );
+        assert!(viewer.pointer_targets_viewer().unwrap());
+        viewer
+            .update_seamless_input(30, 30, &mut Vec::new())
+            .unwrap();
+        assert!(
+            viewer.grabbed,
+            "a visible viewer inside a WM frame must still acquire input"
+        );
+        viewer.release_local_grab().unwrap();
+        // WM decoration is in the frame's hit path, but not the viewer's.
+        driver
+            .warp_pointer(x11rb::NONE, frame, 0, 0, 0, 0, 5, 5)
+            .unwrap()
+            .check()
+            .unwrap();
+        assert_eq!(
+            driver.query_pointer(frame).unwrap().reply().unwrap().child,
+            x11rb::NONE
+        );
+        assert!(!viewer.pointer_targets_viewer().unwrap());
+        viewer
+            .update_seamless_input(30, 30, &mut Vec::new())
+            .unwrap();
+        assert!(
+            !viewer.grabbed,
+            "frame titlebar must not acquire remote input"
+        );
+        // An input-transparent overlay must not be mistaken for an occluder.
+        let overlay = driver.generate_id().unwrap();
+        driver
+            .create_window(
+                x11rb::COPY_DEPTH_FROM_PARENT,
+                overlay,
+                root,
+                120,
+                120,
+                320,
+                240,
+                0,
+                xproto::WindowClass::INPUT_OUTPUT,
+                x11rb::COPY_FROM_PARENT,
+                &xproto::CreateWindowAux::new(),
+            )
+            .unwrap()
+            .check()
+            .unwrap();
+        driver
+            .shape_rectangles(
+                shape::SO::SET,
+                shape::SK::INPUT,
+                xproto::ClipOrdering::UNSORTED,
+                overlay,
+                0,
+                0,
+                &[],
+            )
+            .unwrap()
+            .check()
+            .unwrap();
+        driver.map_window(overlay).unwrap().check().unwrap();
+        driver
+            .configure_window(
+                overlay,
+                &xproto::ConfigureWindowAux::new().stack_mode(xproto::StackMode::ABOVE),
+            )
+            .unwrap()
+            .check()
+            .unwrap();
+        driver
+            .warp_pointer(x11rb::NONE, viewer.window, 0, 0, 0, 0, 30, 30)
+            .unwrap()
+            .check()
+            .unwrap();
+        assert_eq!(
+            driver.query_pointer(root).unwrap().reply().unwrap().child,
+            frame,
+            "empty input shape must let the hit path reach the WM frame"
+        );
+        assert!(viewer.pointer_targets_viewer().unwrap());
+        viewer
+            .update_seamless_input(30, 30, &mut Vec::new())
+            .unwrap();
+        assert!(
+            viewer.grabbed,
+            "input-transparent overlay must permit clean entry"
+        );
+        viewer.release_local_grab().unwrap();
+        driver.destroy_window(overlay).unwrap().check().unwrap();
+        drop(viewer);
+        driver.destroy_window(frame).unwrap().check().unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires a dedicated owned JWM_TEST_X11_DISPLAY Xvfb server"]
+    fn seamless_stale_entry_must_not_grab_an_occluding_local_window() {
+        use x11rb::protocol::xproto;
+        assert_eq!(
+            std::env::var("JWM_REMOTE_TEST_VIEWER_OWNED").as_deref(),
+            Ok("1")
+        );
+        let display = std::env::var("JWM_TEST_X11_DISPLAY").unwrap();
+        assert!(display.starts_with(':'));
+        // Keep one client alive across cases: Xvfb may reset when its last
+        // client exits, racing the next case's initial connection handshake.
+        let (driver, screen) = x11rb::connect(Some(&display)).unwrap();
+        let root = driver.setup().roots[screen].root;
+        for class in [
+            xproto::WindowClass::INPUT_OUTPUT,
+            xproto::WindowClass::INPUT_ONLY,
+        ] {
+            driver
+                .warp_pointer(x11rb::NONE, root, 0, 0, 0, 0, 700, 500)
+                .unwrap()
+                .check()
+                .unwrap();
+            let local = driver.generate_id().unwrap();
+            driver
+                .create_window(
+                    x11rb::COPY_DEPTH_FROM_PARENT,
+                    local,
+                    root,
+                    500,
+                    350,
+                    320,
+                    240,
+                    0,
+                    xproto::WindowClass::INPUT_OUTPUT,
+                    x11rb::COPY_FROM_PARENT,
+                    &xproto::CreateWindowAux::new().event_mask(EventMask::FOCUS_CHANGE),
+                )
+                .unwrap()
+                .check()
+                .unwrap();
+            driver.map_window(local).unwrap().check().unwrap();
+            driver
+                .set_input_focus(xproto::InputFocus::PARENT, local, CURRENT_TIME)
+                .unwrap()
+                .check()
+                .unwrap();
+            // Keep a separate ordinary window focused for both overlay classes.
+            let cover = driver.generate_id().unwrap();
+            driver
+                .create_window(
+                    x11rb::COPY_DEPTH_FROM_PARENT,
+                    cover,
+                    root,
+                    500,
+                    350,
+                    320,
+                    240,
+                    0,
+                    class,
+                    x11rb::COPY_FROM_PARENT,
+                    &xproto::CreateWindowAux::new(),
+                )
+                .unwrap()
+                .check()
+                .unwrap();
+            driver.map_window(cover).unwrap().check().unwrap();
+            let keymap = super::super::x11_keymap::KeymapTable::read(&driver).unwrap();
+            let mut viewer = Viewer::connect(
+                Some(&display),
+                320,
+                240,
+                true,
+                true,
+                Some(keymap),
+                true,
+                "F12",
+                "stale seamless entry regression",
+            )
+            .unwrap();
+            viewer.set_seamless_input(true);
+            viewer
+                .draw(DecodedFrame {
+                    sequence: 1,
+                    source_width: 320,
+                    source_height: 240,
+                    image: RgbImage::from_pixel(320, 240, image::Rgb([20, 40, 60])),
+                })
+                .unwrap();
+            viewer.source_presented(viewer.last_frame.as_ref().unwrap().geometry_epoch);
+            viewer.poll_events().unwrap();
+            assert!(!viewer.grabbed);
+            assert!(!viewer.seamless_suspended);
+            // Queue real Enter/Motion events but do not let the viewer process them.
+            driver
+                .warp_pointer(x11rb::NONE, viewer.window, 0, 0, 0, 0, 20, 20)
+                .unwrap()
+                .check()
+                .unwrap();
+            let origin = driver
+                .translate_coordinates(viewer.window, root, 0, 0)
+                .unwrap()
+                .reply()
+                .unwrap();
+            driver
+                .configure_window(
+                    cover,
+                    &xproto::ConfigureWindowAux::new()
+                        .x(i32::from(origin.dst_x))
+                        .y(i32::from(origin.dst_y))
+                        .stack_mode(xproto::StackMode::ABOVE),
+                )
+                .unwrap()
+                .check()
+                .unwrap();
+            let hit = driver.query_pointer(root).unwrap().reply().unwrap();
+            assert_eq!(hit.child, cover, "the overlay actually covers the pointer");
+            while driver.poll_for_event().unwrap().is_some() {}
+            for _ in 0..10 {
+                viewer.poll_events().unwrap();
+            }
+            driver.get_input_focus().unwrap().reply().unwrap();
+            let mut transient_grabs = Vec::new();
+            while let Some(event) = driver.poll_for_event().unwrap() {
+                if let Event::FocusOut(event) = event
+                    && event.event == local
+                    && event.mode == NotifyMode::GRAB
+                {
+                    transient_grabs.push(event);
+                }
+            }
+            eprintln!(
+                "occluded entry ({class:?}): final_grabbed={}, transient_local_focus_grabs={transient_grabs:?}",
+                viewer.grabbed
+            );
+            assert!(
+                transient_grabs.is_empty(),
+                "stale entry stole the covering local window's keyboard"
+            );
+            assert!(!viewer.grabbed);
+            driver.destroy_window(cover).unwrap().check().unwrap();
+            driver.destroy_window(local).unwrap().check().unwrap();
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a dedicated owned JWM_TEST_X11_DISPLAY Xvfb server"]
+    fn seamless_input_crossing_releases_and_escape_requires_exit_on_x11() {
+        use x11rb::protocol::{xproto, xtest::ConnectionExt as _};
+        assert_eq!(
+            std::env::var("JWM_REMOTE_TEST_VIEWER_OWNED").as_deref(),
+            Ok("1")
+        );
+        let display = std::env::var("JWM_TEST_X11_DISPLAY").unwrap();
+        assert!(display.starts_with(':'));
+        let (driver, screen) = x11rb::connect(Some(&display)).unwrap();
+        let root = driver.setup().roots[screen].root;
+        driver
+            .warp_pointer(x11rb::NONE, root, 0, 0, 0, 0, 1, 1)
+            .unwrap()
+            .check()
+            .unwrap();
+        let keymap = super::super::x11_keymap::KeymapTable::read(&driver).unwrap();
+        let mut viewer = Viewer::connect(
+            Some(&display),
+            320,
+            240,
+            true,
+            true,
+            Some(keymap),
+            true,
+            "F12",
+            "seamless regression",
+        )
+        .unwrap();
+        viewer.set_seamless_input(true);
+        viewer
+            .draw(DecodedFrame {
+                sequence: 1,
+                source_width: 320,
+                source_height: 240,
+                image: RgbImage::from_pixel(320, 240, image::Rgb([20, 40, 60])),
+            })
+            .unwrap();
+        viewer.source_presented(viewer.last_frame.as_ref().unwrap().geometry_epoch);
+        viewer.poll_events().unwrap();
+        let pump = |viewer: &mut Viewer| {
+            driver.get_input_focus().unwrap().reply().unwrap();
+            let mut events = Vec::new();
+            for _ in 0..10 {
+                events.extend(viewer.poll_events().unwrap());
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            events
+        };
+        // Regression for the acquisition race: a local press exists at the
+        // freeze point, but its release arrives before validation. QueryKeymap
+        // must still expose the press until rejection unfreezes the devices.
+        driver
+            .xtest_fake_input(xproto::KEY_PRESS_EVENT, 38, CURRENT_TIME, root, 0, 0, 0)
+            .unwrap()
+            .check()
+            .unwrap();
+        assert!(viewer.acquire_local_grab().unwrap());
+        driver
+            .xtest_fake_input(xproto::KEY_RELEASE_EVENT, 38, CURRENT_TIME, root, 0, 0, 0)
+            .unwrap()
+            .check()
+            .unwrap();
+        let frozen = driver.query_keymap().unwrap().reply().unwrap();
+        assert_ne!(
+            frozen.keys[38 / 8] & (1 << (38 % 8)),
+            0,
+            "a release racing the grab must remain frozen until validation"
+        );
+        viewer.release_local_grab().unwrap();
+        pump(&mut viewer);
+        let released = driver.query_keymap().unwrap().reply().unwrap();
+        assert_eq!(released.keys[38 / 8] & (1 << (38 % 8)), 0);
+        let window = viewer.window;
+        let motion = |x, y| {
+            driver
+                .warp_pointer(x11rb::NONE, window, 0, 0, 0, 0, x, y)
+                .unwrap()
+                .check()
+                .unwrap();
+        };
+        // A local held key must not cross the boundary as half of a chord.
+        driver
+            .xtest_fake_input(xproto::KEY_PRESS_EVENT, 38, CURRENT_TIME, root, 0, 0, 0)
+            .unwrap()
+            .check()
+            .unwrap();
+        motion(20, 20);
+        pump(&mut viewer);
+        assert!(!viewer.grabbed);
+        driver
+            .xtest_fake_input(xproto::KEY_RELEASE_EVENT, 38, CURRENT_TIME, root, 0, 0, 0)
+            .unwrap()
+            .check()
+            .unwrap();
+        motion(21, 20);
+        pump(&mut viewer);
+        assert!(
+            viewer.grabbed,
+            "clean entry must acquire both devices without a click"
+        );
+        // The OS ungrab must not retain any forwarded remote key/button.
+        driver
+            .xtest_fake_input(xproto::KEY_PRESS_EVENT, 38, CURRENT_TIME, root, 0, 0, 0)
+            .unwrap()
+            .check()
+            .unwrap();
+        driver
+            .xtest_fake_input(xproto::BUTTON_PRESS_EVENT, 1, CURRENT_TIME, root, 0, 0, 0)
+            .unwrap()
+            .check()
+            .unwrap();
+        pump(&mut viewer);
+        assert!(viewer.keyboard.held.contains(&38));
+        motion(-10, 20);
+        let events = pump(&mut viewer);
+        assert!(!viewer.grabbed);
+        assert!(viewer.keyboard.held.is_empty());
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, ViewerEvent::ReleaseAll))
+        );
+        driver
+            .xtest_fake_input(xproto::KEY_RELEASE_EVENT, 38, CURRENT_TIME, root, 0, 0, 0)
+            .unwrap()
+            .check()
+            .unwrap();
+        driver
+            .xtest_fake_input(xproto::BUTTON_RELEASE_EVENT, 1, CURRENT_TIME, root, 0, 0, 0)
+            .unwrap()
+            .check()
+            .unwrap();
+        motion(20, 20);
+        pump(&mut viewer);
+        assert!(viewer.grabbed);
+        // Deliver the escape edge through the real event queue, not a helper call.
+        driver
+            .send_event(
+                false,
+                viewer.window,
+                EventMask::KEY_PRESS,
+                xproto::KeyPressEvent {
+                    response_type: xproto::KEY_PRESS_EVENT,
+                    detail: viewer.escape_keycodes[0],
+                    sequence: 0,
+                    time: 10,
+                    root,
+                    event: viewer.window,
+                    child: x11rb::NONE,
+                    root_x: 0,
+                    root_y: 0,
+                    event_x: 20,
+                    event_y: 20,
+                    state: KeyButMask::CONTROL | KeyButMask::MOD4,
+                    same_screen: true,
+                },
+            )
+            .unwrap()
+            .check()
+            .unwrap();
+        pump(&mut viewer);
+        assert!(!viewer.grabbed);
+        assert!(viewer.user_released_grab());
+        motion(22, 20);
+        pump(&mut viewer);
+        assert!(
+            !viewer.grabbed,
+            "escape must not immediately re-grab on motion"
+        );
+        motion(-10, 20);
+        pump(&mut viewer);
+        motion(20, 20);
+        pump(&mut viewer);
+        assert!(
+            viewer.grabbed,
+            "actual exit and re-entry re-arms seamless input"
+        );
+        // Moving the window away under a stationary pointer must also release:
+        // this requires crossing events in the active pointer-grab mask.
+        driver
+            .configure_window(window, &xproto::ConfigureWindowAux::new().x(600).y(400))
+            .unwrap()
+            .check()
+            .unwrap();
+        let events = pump(&mut viewer);
+        assert!(
+            !viewer.grabbed,
+            "window movement must not strand keyboard ownership"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, ViewerEvent::ReleaseAll))
+        );
+        motion(20, 20);
+        pump(&mut viewer);
+        assert!(viewer.grabbed);
+        driver
+            .send_event(
+                false,
+                window,
+                EventMask::FOCUS_CHANGE,
+                xproto::FocusOutEvent {
+                    response_type: xproto::FOCUS_OUT_EVENT,
+                    detail: xproto::NotifyDetail::NONLINEAR,
+                    sequence: 0,
+                    event: window,
+                    mode: NotifyMode::NORMAL,
+                },
+            )
+            .unwrap()
+            .check()
+            .unwrap();
+        assert!(
+            pump(&mut viewer)
+                .iter()
+                .any(|event| matches!(event, ViewerEvent::ReleaseAll))
+        );
+        assert!(!viewer.grabbed);
+        motion(22, 20);
+        pump(&mut viewer);
+        assert!(
+            !viewer.grabbed,
+            "focus loss suspends reacquisition until exit"
+        );
+        motion(-10, 20);
+        pump(&mut viewer);
+        motion(20, 20);
+        pump(&mut viewer);
+        assert!(viewer.grabbed);
+        driver.unmap_window(window).unwrap().check().unwrap();
+        assert!(
+            pump(&mut viewer)
+                .iter()
+                .any(|event| matches!(event, ViewerEvent::ReleaseAll))
+        );
+        assert!(!viewer.grabbed);
+    }
+
+    #[test]
     #[ignore = "requires a dedicated JWM_TEST_X11_DISPLAY Xvfb server"]
     fn source_switch_preserves_pending_shm_ownership_on_x11() {
         let display = std::env::var("JWM_TEST_X11_DISPLAY")
@@ -6488,4 +8120,36 @@ mod tests {
             false
         ));
     }
+
+    #[test]
+    fn viewer_scaling_policy_controls_render_upscale() {
+        assert!(ScalingPolicy::Auto.allows_gpu(false));
+        assert!(!ScalingPolicy::Auto.allows_gpu(true));
+        assert!(ScalingPolicy::Gpu.allows_gpu(true));
+        assert!(!ScalingPolicy::Cpu.allows_gpu(false));
+    }
 }
+
+#[cfg(test)]
+mod scoped_pointer_coordinate_tests {
+    use super::*;
+    #[test]
+    fn scoped_pointer_rejects_black_bars_and_outside_without_clamping() {
+        assert!(map_scoped_pointer_to_source(-1, 50, 100, 100, 100, 50, 200, 100).is_none());
+        assert!(map_scoped_pointer_to_source(50, 0, 100, 100, 100, 50, 200, 100).is_none());
+        assert!(map_scoped_pointer_to_source(50, 99, 100, 100, 100, 50, 200, 100).is_none());
+        assert!(map_scoped_pointer_to_source(100, 50, 100, 100, 100, 50, 200, 100).is_none());
+        assert_eq!(
+            map_scoped_pointer_to_source(0, 25, 100, 100, 100, 50, 200, 100),
+            Some((0, 0))
+        );
+        assert_eq!(
+            map_scoped_pointer_to_source(99, 74, 100, 100, 100, 50, 200, 100),
+            Some((199, 99))
+        );
+    }
+}
+
+#[cfg(test)]
+#[path = "top_edge_pixel_integration.rs"]
+mod top_edge_pixel_integration;

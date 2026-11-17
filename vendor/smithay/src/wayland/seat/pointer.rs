@@ -16,7 +16,7 @@ use wayland_server::{
 use crate::{
     backend::input::{Axis, AxisSource, ButtonState, InputTime},
     input::{
-        Seat,
+        GrabStatus, Seat,
         pointer::{
             AxisFrame, ButtonEvent, CursorImageAttributes, CursorImageStatus, GestureHoldBeginEvent,
             GestureHoldEndEvent, GesturePinchBeginEvent, GesturePinchEndEvent, GesturePinchUpdateEvent,
@@ -59,6 +59,336 @@ impl<D: SeatHandler + 'static> PointerHandle<D> {
     }
 }
 
+/// Compositor-owned snapshot for a single already-focused surface.
+/// This is not a client capability: callers must additionally enforce owner,
+/// mapped lifetime, presentation tickets, bounds, lock and local-input policy.
+#[derive(Debug)]
+pub struct AuthorizedPointerSnapshot {
+    target: WlSurface,
+    generation: u64,
+    receivers: Vec<WlPointer>,
+}
+
+/// Exact receiver set for a compositor-owned private seat with no ordinary
+/// focus, buttons or grab. Raw delivery never creates general serial authority.
+#[derive(Debug)]
+pub struct PrivatePointerSnapshot {
+    owner: ClientId,
+    generation: u64,
+    receivers: Vec<WlPointer>,
+    focused: Option<WlSurface>,
+}
+
+impl<D: SeatHandler + 'static> PointerHandle<D>
+where
+    D::PointerFocus: WaylandFocus,
+{
+    /// Freeze all current receivers of an otherwise unused private pointer.
+    pub fn snapshot_private_pointer(&self, owner: ClientId) -> Option<PrivatePointerSnapshot> {
+        let inner = self.inner.lock().unwrap();
+        if inner.authority_generation == u64::MAX
+            || inner.focus.is_some()
+            || !matches!(inner.grab, GrabStatus::None)
+            || !inner.pressed_buttons.is_empty()
+        {
+            return None;
+        }
+        let pointers = self.wl_pointer.known_pointers.lock().unwrap();
+        let receivers: Vec<_> = pointers.iter().filter_map(|p| p.upgrade().ok()).collect();
+        if receivers.is_empty()
+            || receivers.len() > 16
+            || receivers.iter().any(|p| {
+                !p.is_alive()
+                    || p.client().is_none_or(|c| c.id() != owner)
+                    || p.data::<PointerUserData<D>>()
+                        .is_none_or(|d| d.client_scale.load(Ordering::Acquire) != 1.0)
+            })
+        {
+            return None;
+        }
+        Some(PrivatePointerSnapshot {
+            owner,
+            generation: inner.authority_generation,
+            receivers,
+            focused: None,
+        })
+    }
+
+    /// Check the frozen private receiver set without creating seat focus.
+    pub fn private_pointer_is_current(&self, snapshot: &PrivatePointerSnapshot) -> bool {
+        self.with_private_pointer(snapshot, |_| {})
+    }
+
+    fn with_private_pointer(
+        &self,
+        snapshot: &PrivatePointerSnapshot,
+        send: impl FnOnce(&[WlPointer]),
+    ) -> bool {
+        let inner = self.inner.lock().unwrap();
+        if inner.authority_generation == u64::MAX
+            || inner.authority_generation != snapshot.generation
+            || inner.focus.is_some()
+            || !matches!(inner.grab, GrabStatus::None)
+            || !inner.pressed_buttons.is_empty()
+        {
+            return false;
+        }
+        let pointers = self.wl_pointer.known_pointers.lock().unwrap();
+        let live: Vec<_> = pointers.iter().filter_map(|p| p.upgrade().ok()).collect();
+        if live.len() != snapshot.receivers.len()
+            || snapshot.receivers.is_empty()
+            || snapshot.receivers.iter().any(|p| {
+                !p.is_alive()
+                    || !live.contains(p)
+                    || p.client().is_none_or(|c| c.id() != snapshot.owner)
+                    || p.data::<PointerUserData<D>>()
+                        .is_none_or(|d| d.client_scale.load(Ordering::Acquire) != 1.0)
+            })
+        {
+            return false;
+        }
+        send(&snapshot.receivers);
+        true
+    }
+
+    /// Deliver one exact family-target event group. The compositor must validate
+    /// the target, fresh captured hit-test proof and bounded coordinates first.
+    /// Enter and click serials are NOT installed in last_enter or implicit grab.
+    pub fn send_private_pointer(
+        &self,
+        snapshot: &mut PrivatePointerSnapshot,
+        target: &WlSurface,
+        position: (f64, f64),
+        click: bool,
+        serial: Serial,
+        time: InputTime,
+    ) -> bool {
+        let (x, y) = position;
+        if !target.is_alive()
+            || target.client().is_none_or(|c| c.id() != snapshot.owner)
+            || !x.is_finite()
+            || !y.is_finite()
+            || !(0.0..=16384.0).contains(&x)
+            || !(0.0..=16384.0).contains(&y)
+        {
+            return false;
+        }
+        let changed = snapshot.focused.as_ref() != Some(target);
+        let sent = self.with_private_pointer(snapshot, |receivers| {
+            for pointer in receivers {
+                if changed {
+                    if let Some(old) = &snapshot.focused {
+                        if old.is_alive() {
+                            pointer.leave(serial.into(), old);
+                        }
+                    }
+                    pointer.enter(serial.into(), target, x, y);
+                }
+                pointer.motion(time.millis(), x, y);
+                if click {
+                    pointer.button(serial.into(), time.millis(), 0x110, WlButtonState::Pressed);
+                    pointer.button(serial.into(), time.millis(), 0x110, WlButtonState::Released);
+                }
+                if pointer.version() >= 5 {
+                    pointer.frame();
+                }
+            }
+        });
+        if sent {
+            snapshot.focused = Some(target.clone());
+        }
+        sent
+    }
+
+    /// End only this private focus. No physical or newly bound receiver is touched.
+    pub fn cleanup_private_pointer(&self, snapshot: &mut PrivatePointerSnapshot, serial: Serial) {
+        if let Some(surface) = snapshot.focused.take() {
+            if surface.is_alive() {
+                for pointer in snapshot.receivers.iter().filter(|p| p.is_alive()) {
+                    pointer.leave(serial.into(), &surface);
+                    if pointer.version() >= 5 {
+                        pointer.frame();
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl<D: SeatHandler + 'static> PointerHandle<D>
+where
+    D::PointerFocus: WaylandFocus,
+{
+    /// Snapshot only the exact existing focus with no physical button or grab.
+    /// Remote delivery never enters a surface or changes the compositor focus.
+    pub fn snapshot_authorized_pointer(&self, expected: &WlSurface) -> Option<AuthorizedPointerSnapshot> {
+        let inner = self.inner.lock().unwrap();
+        if inner.authority_generation == u64::MAX
+            || !expected.is_alive()
+            || inner.focus.as_ref()?.0.wl_surface().as_deref() != Some(expected)
+            || !matches!(inner.grab, GrabStatus::None)
+            || !inner.pressed_buttons.is_empty()
+        {
+            return None;
+        }
+        let client = expected.client()?;
+        let pointers = self.wl_pointer.known_pointers.lock().unwrap();
+        let receivers: Vec<_> = pointers
+            .iter()
+            .filter_map(|pointer| pointer.upgrade().ok())
+            .filter(|pointer| pointer.is_alive() && pointer.client().is_some_and(|c| c.id() == client.id()))
+            .collect();
+        if receivers.is_empty()
+            || receivers.iter().any(|pointer| {
+                pointer
+                    .data::<PointerUserData<D>>()
+                    .is_none_or(|data| data.client_scale.load(Ordering::Acquire) != 1.0)
+            })
+        {
+            return None;
+        }
+        Some(AuthorizedPointerSnapshot {
+            target: expected.clone(),
+            generation: inner.authority_generation,
+            receivers,
+        })
+    }
+
+    fn with_authorized_pointer(
+        &self,
+        snapshot: &AuthorizedPointerSnapshot,
+        deliver: impl FnOnce(&[WlPointer]),
+    ) -> bool {
+        let inner = self.inner.lock().unwrap();
+        if inner.authority_generation == u64::MAX
+            || inner.authority_generation != snapshot.generation
+            || !snapshot.target.is_alive()
+            || inner
+                .focus
+                .as_ref()
+                .and_then(|(focus, _)| focus.wl_surface())
+                .as_deref()
+                != Some(&snapshot.target)
+            || !matches!(inner.grab, GrabStatus::None)
+            || !inner.pressed_buttons.is_empty()
+        {
+            return false;
+        }
+        let pointers = self.wl_pointer.known_pointers.lock().unwrap();
+        if snapshot.receivers.is_empty()
+            || snapshot.receivers.iter().any(|pointer| {
+                !pointer.is_alive()
+                    || !pointers.iter().any(|known| known.id() == pointer.id())
+                    || pointer
+                        .data::<PointerUserData<D>>()
+                        .is_none_or(|data| data.client_scale.load(Ordering::Acquire) != 1.0)
+            })
+        {
+            return false;
+        }
+        // Keep both locks through the entire atomic motion/click, so receiver
+        // registration or focus mutation cannot interleave with the pair.
+        deliver(&snapshot.receivers);
+        true
+    }
+
+    /// Recheck the exact snapshot without generating any input.
+    pub fn authorized_pointer_snapshot_is_current(&self, snapshot: &AuthorizedPointerSnapshot) -> bool {
+        self.with_authorized_pointer(snapshot, |_| {})
+    }
+
+    /// Deliver exactly one vertical wheel detent to the original authorized
+    /// receivers. No global pointer coordinates, axis accumulators, buttons,
+    /// serials, implicit grabs or seat dispatch routes are mutated. The caller
+    /// must separately authorize scroll and validate a fresh frame and bounds.
+    pub fn send_authorized_scroll(
+        &self,
+        snapshot: &AuthorizedPointerSnapshot,
+        x: f64,
+        y: f64,
+        step: i32,
+        time: InputTime,
+    ) -> bool {
+        self.send_authorized_scroll_axis(snapshot, x, y, Axis::Vertical, step, time)
+    }
+
+    /// Deliver one detent on one explicitly authorized axis to the exact
+    /// receiver snapshot. This never changes the seat or synthesizes an
+    /// implicit grab. Axis authorization remains the caller's responsibility.
+    pub fn send_authorized_scroll_axis(
+        &self,
+        snapshot: &AuthorizedPointerSnapshot,
+        x: f64,
+        y: f64,
+        axis: Axis,
+        step: i32,
+        time: InputTime,
+    ) -> bool {
+        let axis = match axis {
+            Axis::Vertical => WlAxis::VerticalScroll,
+            Axis::Horizontal => WlAxis::HorizontalScroll,
+        };
+        if !matches!(step, -1 | 1)
+            || !x.is_finite()
+            || !y.is_finite()
+            || x < 0.0
+            || y < 0.0
+            || x > 16384.0
+            || y > 16384.0
+        {
+            return false;
+        }
+        self.with_authorized_pointer(snapshot, |receivers| {
+            for pointer in receivers {
+                pointer.motion(time.millis(), x, y);
+                if pointer.version() >= 5 {
+                    pointer.axis_source(WlAxisSource::Wheel);
+                }
+                if pointer.version() >= 8 {
+                    pointer.axis_value120(axis, step * 120);
+                } else if pointer.version() >= 5 {
+                    pointer.axis_discrete(axis, step);
+                }
+                pointer.axis(time.millis(), axis, f64::from(step) * 10.0);
+                if pointer.version() >= 5 {
+                    pointer.frame();
+                }
+            }
+        })
+    }
+
+    /// Send one surface-local motion and optionally an indivisible left click.
+    /// Does not mutate seat coordinates, held buttons, grabs, enter serials or
+    /// shortcuts. The serial is deliberately not registered as a seat grab,
+    /// so it cannot authorize xdg move/resize, popup grabs or drag-and-drop.
+    /// Callers must validate the fresh frame ticket and exact surface bounds.
+    pub fn send_authorized_pointer(
+        &self,
+        snapshot: &AuthorizedPointerSnapshot,
+        x: f64,
+        y: f64,
+        click: bool,
+        serial: Serial,
+        time: InputTime,
+    ) -> bool {
+        if !x.is_finite() || !y.is_finite() || x < 0.0 || y < 0.0 || x > 16384.0 || y > 16384.0 {
+            return false;
+        }
+        self.with_authorized_pointer(snapshot, |receivers| {
+            for pointer in receivers {
+                pointer.motion(time.millis(), x, y);
+                if click {
+                    pointer.button(serial.into(), time.millis(), 0x110, WlButtonState::Pressed);
+                    pointer.button(serial.into(), time.millis(), 0x110, WlButtonState::Released);
+                }
+                if pointer.version() >= 5 {
+                    pointer.frame();
+                }
+            }
+        })
+    }
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct WlPointerHandle {
     pub(crate) last_enter: Mutex<Option<Serial>>,
@@ -70,10 +400,11 @@ impl WlPointerHandle {
     where
         <D as SeatHandler>::PointerFocus: WaylandFocus,
     {
-        self.known_pointers.lock().unwrap().push(pointer.downgrade());
-
         let data = pointer.data::<PointerUserData<D>>().unwrap();
-        let guard = data.handle.as_ref().unwrap().inner.lock().unwrap();
+        // All authorization and normal delivery use internal -> receivers.
+        let mut guard = data.handle.as_ref().unwrap().inner.lock().unwrap();
+        guard.authority_generation = guard.authority_generation.saturating_add(1);
+        self.known_pointers.lock().unwrap().push(pointer.downgrade());
         if let Some((focus, location)) = &guard.focus {
             if focus.same_client_as(&pointer.id()) {
                 if let Some(surface) = focus.wl_surface() {
@@ -477,6 +808,8 @@ where
 
     fn destroyed(&self, _state: &mut D, _: ClientId, pointer: &WlPointer) {
         if let Some(ref handle) = self.handle {
+            let mut inner = handle.inner.lock().unwrap();
+            inner.authority_generation = inner.authority_generation.saturating_add(1);
             handle
                 .wl_pointer
                 .known_pointers

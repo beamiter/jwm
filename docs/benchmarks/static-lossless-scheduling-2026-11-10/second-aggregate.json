@@ -1,0 +1,695 @@
+{
+  "candidate": "204c4a5a1ae38a26510160490318d383f33e8c62",
+  "workflow_run": 42897397006,
+  "report": {
+    "schema_version": 1,
+    "benchmark": "static_lossless_scheduler_tcp_ab",
+    "scope": "aggregate synthetic CI results; within_window is <=9s experiment time; unprefixed presentation metrics include cleanup; exact time is relative to post-first-JPEG setup baseline, not first capture; host counters include setup/shutdown, are not 9s throughput; sent_bytes is source-envelope payload; codec counts include discarded attempts",
+    "sessions": [
+      {
+        "arm": "off",
+        "order": 0,
+        "success": true,
+        "planned_generation_budget": 16,
+        "submitted_generations": 16,
+        "not_submitted": 0,
+        "presented_generations": 16,
+        "missing_after_submission": 0,
+        "late_presented_generations": 0,
+        "scheduled_to_present": {
+          "count": 16,
+          "p50_ms": 127.207909,
+          "p95_ms": 189.002047,
+          "max_ms": 189.002047
+        },
+        "commit_to_present": {
+          "count": 16,
+          "p50_ms": 125.820922,
+          "p95_ms": 183.546716,
+          "max_ms": 183.546716
+        },
+        "first_static_exact_presented_ns": null,
+        "decoded_png_frames": 0,
+        "decoded_frames": 16,
+        "source_schedule_delay": {
+          "count": 16,
+          "p50_ms": 0.567614,
+          "p95_ms": 4.182609,
+          "max_ms": 4.182609
+        },
+        "source_preparation": {
+          "count": 16,
+          "p50_ms": 1.21807,
+          "p95_ms": 1.435948,
+          "max_ms": 1.435948
+        },
+        "commit_dispatch": {
+          "count": 16,
+          "p50_ms": 0.28619,
+          "p95_ms": 0.319329,
+          "max_ms": 0.319329
+        },
+        "fixture_stages": {
+          "gl_readback": {
+            "count": 16,
+            "p50_ms": 8.230669,
+            "p95_ms": 13.125754,
+            "max_ms": 13.125754
+          },
+          "validation": {
+            "count": 16,
+            "p50_ms": 44.91913,
+            "p95_ms": 46.411293,
+            "max_ms": 46.411293
+          },
+          "validation_to_feedback": {
+            "count": 16,
+            "p50_ms": 0.002934,
+            "p95_ms": 0.003646,
+            "max_ms": 0.003646
+          },
+          "feedback_dispatch": {
+            "count": 16,
+            "p50_ms": 0.138588,
+            "p95_ms": 0.173091,
+            "max_ms": 0.173091
+          },
+          "feedback_started_to_presented": {
+            "count": 16,
+            "p50_ms": 0.253878,
+            "p95_ms": 0.311081,
+            "max_ms": 0.311081
+          }
+        },
+        "unknown_marker_frames": 0,
+        "within_window_presented_generations": 16,
+        "within_window_missing_after_submission": 0,
+        "cleanup_only_presented_generations": 0,
+        "within_window_scheduled_to_present": {
+          "count": 16,
+          "p50_ms": 127.207909,
+          "p95_ms": 189.002047,
+          "max_ms": 189.002047
+        },
+        "within_window_commit_to_present": {
+          "count": 16,
+          "p50_ms": 125.820922,
+          "p95_ms": 183.546716,
+          "max_ms": 183.546716
+        },
+        "within_window_first_static_exact_presented_ns": null,
+        "on_time_presented_generations": 16,
+        "within_window_on_time_presented_generations": 16,
+        "static_quality_eventual": {
+          "regressed_frames_after_exact": null,
+          "max_sse_after_exact": null
+        },
+        "static_quality_within_window": {
+          "regressed_frames_after_exact": null,
+          "max_sse_after_exact": null
+        },
+        "aggregate_host_counters": {
+          "encoded_jpeg": 17,
+          "encoded_png": 0,
+          "encode_ns": 92129323,
+          "jpeg_ns": 82148476,
+          "png_ns": 0,
+          "sent_bytes": 220191,
+          "comparisons": 0,
+          "comparison_ns": 0,
+          "stale_png_dropped": 0
+        }
+      },
+      {
+        "arm": "legacy",
+        "order": 1,
+        "success": true,
+        "planned_generation_budget": 16,
+        "submitted_generations": 16,
+        "not_submitted": 0,
+        "presented_generations": 16,
+        "missing_after_submission": 0,
+        "late_presented_generations": 0,
+        "scheduled_to_present": {
+          "count": 16,
+          "p50_ms": 131.369936,
+          "p95_ms": 239.139945,
+          "max_ms": 239.139945
+        },
+        "commit_to_present": {
+          "count": 16,
+          "p50_ms": 127.869608,
+          "p95_ms": 237.652256,
+          "max_ms": 237.652256
+        },
+        "first_static_exact_presented_ns": 3111518229,
+        "decoded_png_frames": 8,
+        "decoded_frames": 24,
+        "source_schedule_delay": {
+          "count": 16,
+          "p50_ms": 0.410806,
+          "p95_ms": 37.816675,
+          "max_ms": 37.816675
+        },
+        "source_preparation": {
+          "count": 16,
+          "p50_ms": 1.185992,
+          "p95_ms": 1.467845,
+          "max_ms": 1.467845
+        },
+        "commit_dispatch": {
+          "count": 16,
+          "p50_ms": 0.290827,
+          "p95_ms": 0.341863,
+          "max_ms": 0.341863
+        },
+        "fixture_stages": {
+          "gl_readback": {
+            "count": 24,
+            "p50_ms": 8.393434,
+            "p95_ms": 12.382689,
+            "max_ms": 13.318005
+          },
+          "validation": {
+            "count": 24,
+            "p50_ms": 45.06813,
+            "p95_ms": 47.071141,
+            "max_ms": 47.821007
+          },
+          "validation_to_feedback": {
+            "count": 24,
+            "p50_ms": 0.003906,
+            "p95_ms": 0.004697,
+            "max_ms": 0.004778
+          },
+          "feedback_dispatch": {
+            "count": 24,
+            "p50_ms": 0.148433,
+            "p95_ms": 0.177627,
+            "max_ms": 0.184567
+          },
+          "feedback_started_to_presented": {
+            "count": 24,
+            "p50_ms": 0.275769,
+            "p95_ms": 0.315203,
+            "max_ms": 0.331254
+          }
+        },
+        "unknown_marker_frames": 0,
+        "within_window_presented_generations": 16,
+        "within_window_missing_after_submission": 0,
+        "cleanup_only_presented_generations": 0,
+        "within_window_scheduled_to_present": {
+          "count": 16,
+          "p50_ms": 131.369936,
+          "p95_ms": 239.139945,
+          "max_ms": 239.139945
+        },
+        "within_window_commit_to_present": {
+          "count": 16,
+          "p50_ms": 127.869608,
+          "p95_ms": 237.652256,
+          "max_ms": 237.652256
+        },
+        "within_window_first_static_exact_presented_ns": 3111518229,
+        "on_time_presented_generations": 16,
+        "within_window_on_time_presented_generations": 16,
+        "static_quality_eventual": {
+          "regressed_frames_after_exact": 0,
+          "max_sse_after_exact": 0
+        },
+        "static_quality_within_window": {
+          "regressed_frames_after_exact": 0,
+          "max_sse_after_exact": 0
+        },
+        "aggregate_host_counters": {
+          "encoded_jpeg": 17,
+          "encoded_png": 8,
+          "encode_ns": 480369902,
+          "jpeg_ns": 83084982,
+          "png_ns": 147350344,
+          "sent_bytes": 242007,
+          "comparisons": 0,
+          "comparison_ns": 0,
+          "stale_png_dropped": 0
+        }
+      },
+      {
+        "arm": "proposed",
+        "order": 2,
+        "success": true,
+        "planned_generation_budget": 16,
+        "submitted_generations": 16,
+        "not_submitted": 0,
+        "presented_generations": 16,
+        "missing_after_submission": 0,
+        "late_presented_generations": 0,
+        "scheduled_to_present": {
+          "count": 16,
+          "p50_ms": 147.771897,
+          "p95_ms": 249.967814,
+          "max_ms": 249.967814
+        },
+        "commit_to_present": {
+          "count": 16,
+          "p50_ms": 144.866298,
+          "p95_ms": 205.204305,
+          "max_ms": 205.204305
+        },
+        "first_static_exact_presented_ns": 5594873328,
+        "decoded_png_frames": 8,
+        "decoded_frames": 24,
+        "source_schedule_delay": {
+          "count": 16,
+          "p50_ms": 0.5096,
+          "p95_ms": 53.639944,
+          "max_ms": 53.639944
+        },
+        "source_preparation": {
+          "count": 16,
+          "p50_ms": 1.239553,
+          "p95_ms": 1.633915,
+          "max_ms": 1.633915
+        },
+        "commit_dispatch": {
+          "count": 16,
+          "p50_ms": 0.2994,
+          "p95_ms": 0.422395,
+          "max_ms": 0.422395
+        },
+        "fixture_stages": {
+          "gl_readback": {
+            "count": 24,
+            "p50_ms": 8.741656,
+            "p95_ms": 14.066698,
+            "max_ms": 15.269256
+          },
+          "validation": {
+            "count": 24,
+            "p50_ms": 46.472744,
+            "p95_ms": 56.0374,
+            "max_ms": 63.24442
+          },
+          "validation_to_feedback": {
+            "count": 24,
+            "p50_ms": 0.003865,
+            "p95_ms": 0.008743,
+            "max_ms": 0.06009
+          },
+          "feedback_dispatch": {
+            "count": 24,
+            "p50_ms": 0.160341,
+            "p95_ms": 0.328404,
+            "max_ms": 0.421874
+          },
+          "feedback_started_to_presented": {
+            "count": 24,
+            "p50_ms": 0.297813,
+            "p95_ms": 0.491622,
+            "max_ms": 0.718043
+          }
+        },
+        "unknown_marker_frames": 0,
+        "within_window_presented_generations": 16,
+        "within_window_missing_after_submission": 0,
+        "cleanup_only_presented_generations": 0,
+        "within_window_scheduled_to_present": {
+          "count": 16,
+          "p50_ms": 147.771897,
+          "p95_ms": 249.967814,
+          "max_ms": 249.967814
+        },
+        "within_window_commit_to_present": {
+          "count": 16,
+          "p50_ms": 144.866298,
+          "p95_ms": 205.204305,
+          "max_ms": 205.204305
+        },
+        "within_window_first_static_exact_presented_ns": 5594873328,
+        "on_time_presented_generations": 16,
+        "within_window_on_time_presented_generations": 16,
+        "static_quality_eventual": {
+          "regressed_frames_after_exact": 0,
+          "max_sse_after_exact": 0
+        },
+        "static_quality_within_window": {
+          "regressed_frames_after_exact": 0,
+          "max_sse_after_exact": 0
+        },
+        "aggregate_host_counters": {
+          "encoded_jpeg": 17,
+          "encoded_png": 8,
+          "encode_ns": 479180384,
+          "jpeg_ns": 78866892,
+          "png_ns": 137994099,
+          "sent_bytes": 242007,
+          "comparisons": 8,
+          "comparison_ns": 20722,
+          "stale_png_dropped": 0
+        }
+      },
+      {
+        "arm": "proposed",
+        "order": 3,
+        "success": true,
+        "planned_generation_budget": 16,
+        "submitted_generations": 16,
+        "not_submitted": 0,
+        "presented_generations": 16,
+        "missing_after_submission": 0,
+        "late_presented_generations": 0,
+        "scheduled_to_present": {
+          "count": 16,
+          "p50_ms": 142.801083,
+          "p95_ms": 199.884761,
+          "max_ms": 199.884761
+        },
+        "commit_to_present": {
+          "count": 16,
+          "p50_ms": 141.580186,
+          "p95_ms": 190.882959,
+          "max_ms": 190.882959
+        },
+        "first_static_exact_presented_ns": 5455531694,
+        "decoded_png_frames": 8,
+        "decoded_frames": 24,
+        "source_schedule_delay": {
+          "count": 16,
+          "p50_ms": 0.535111,
+          "p95_ms": 7.852114,
+          "max_ms": 7.852114
+        },
+        "source_preparation": {
+          "count": 16,
+          "p50_ms": 1.210148,
+          "p95_ms": 1.346013,
+          "max_ms": 1.346013
+        },
+        "commit_dispatch": {
+          "count": 16,
+          "p50_ms": 0.291407,
+          "p95_ms": 0.330206,
+          "max_ms": 0.330206
+        },
+        "fixture_stages": {
+          "gl_readback": {
+            "count": 24,
+            "p50_ms": 8.912193,
+            "p95_ms": 13.841036,
+            "max_ms": 14.007747
+          },
+          "validation": {
+            "count": 24,
+            "p50_ms": 45.875416,
+            "p95_ms": 48.285047,
+            "max_ms": 51.248223
+          },
+          "validation_to_feedback": {
+            "count": 24,
+            "p50_ms": 0.004217,
+            "p95_ms": 0.005548,
+            "max_ms": 0.005649
+          },
+          "feedback_dispatch": {
+            "count": 24,
+            "p50_ms": 0.160311,
+            "p95_ms": 0.203025,
+            "max_ms": 0.21288
+          },
+          "feedback_started_to_presented": {
+            "count": 24,
+            "p50_ms": 0.292269,
+            "p95_ms": 0.374743,
+            "max_ms": 0.37617
+          }
+        },
+        "unknown_marker_frames": 0,
+        "within_window_presented_generations": 16,
+        "within_window_missing_after_submission": 0,
+        "cleanup_only_presented_generations": 0,
+        "within_window_scheduled_to_present": {
+          "count": 16,
+          "p50_ms": 142.801083,
+          "p95_ms": 199.884761,
+          "max_ms": 199.884761
+        },
+        "within_window_commit_to_present": {
+          "count": 16,
+          "p50_ms": 141.580186,
+          "p95_ms": 190.882959,
+          "max_ms": 190.882959
+        },
+        "within_window_first_static_exact_presented_ns": 5455531694,
+        "on_time_presented_generations": 16,
+        "within_window_on_time_presented_generations": 16,
+        "static_quality_eventual": {
+          "regressed_frames_after_exact": 0,
+          "max_sse_after_exact": 0
+        },
+        "static_quality_within_window": {
+          "regressed_frames_after_exact": 0,
+          "max_sse_after_exact": 0
+        },
+        "aggregate_host_counters": {
+          "encoded_jpeg": 17,
+          "encoded_png": 8,
+          "encode_ns": 469733197,
+          "jpeg_ns": 89809276,
+          "png_ns": 135142636,
+          "sent_bytes": 242007,
+          "comparisons": 8,
+          "comparison_ns": 18298,
+          "stale_png_dropped": 0
+        }
+      },
+      {
+        "arm": "legacy",
+        "order": 4,
+        "success": true,
+        "planned_generation_budget": 16,
+        "submitted_generations": 16,
+        "not_submitted": 0,
+        "presented_generations": 16,
+        "missing_after_submission": 0,
+        "late_presented_generations": 0,
+        "scheduled_to_present": {
+          "count": 16,
+          "p50_ms": 160.055262,
+          "p95_ms": 277.665794,
+          "max_ms": 277.665794
+        },
+        "commit_to_present": {
+          "count": 16,
+          "p50_ms": 158.554746,
+          "p95_ms": 275.730481,
+          "max_ms": 275.730481
+        },
+        "first_static_exact_presented_ns": 3534515086,
+        "decoded_png_frames": 8,
+        "decoded_frames": 24,
+        "source_schedule_delay": {
+          "count": 16,
+          "p50_ms": 0.832732,
+          "p95_ms": 35.551042,
+          "max_ms": 35.551042
+        },
+        "source_preparation": {
+          "count": 16,
+          "p50_ms": 1.238401,
+          "p95_ms": 3.683556,
+          "max_ms": 3.683556
+        },
+        "commit_dispatch": {
+          "count": 16,
+          "p50_ms": 0.277507,
+          "p95_ms": 0.54609,
+          "max_ms": 0.54609
+        },
+        "fixture_stages": {
+          "gl_readback": {
+            "count": 24,
+            "p50_ms": 8.297309,
+            "p95_ms": 12.635548,
+            "max_ms": 13.176421
+          },
+          "validation": {
+            "count": 24,
+            "p50_ms": 46.118266,
+            "p95_ms": 49.171493,
+            "max_ms": 57.634181
+          },
+          "validation_to_feedback": {
+            "count": 24,
+            "p50_ms": 0.003085,
+            "p95_ms": 0.003695,
+            "max_ms": 0.003866
+          },
+          "feedback_dispatch": {
+            "count": 24,
+            "p50_ms": 0.115233,
+            "p95_ms": 0.148844,
+            "max_ms": 0.15982
+          },
+          "feedback_started_to_presented": {
+            "count": 24,
+            "p50_ms": 0.214653,
+            "p95_ms": 0.273291,
+            "max_ms": 0.303532
+          }
+        },
+        "unknown_marker_frames": 0,
+        "within_window_presented_generations": 16,
+        "within_window_missing_after_submission": 0,
+        "cleanup_only_presented_generations": 0,
+        "within_window_scheduled_to_present": {
+          "count": 16,
+          "p50_ms": 160.055262,
+          "p95_ms": 277.665794,
+          "max_ms": 277.665794
+        },
+        "within_window_commit_to_present": {
+          "count": 16,
+          "p50_ms": 158.554746,
+          "p95_ms": 275.730481,
+          "max_ms": 275.730481
+        },
+        "within_window_first_static_exact_presented_ns": 3534515086,
+        "on_time_presented_generations": 16,
+        "within_window_on_time_presented_generations": 16,
+        "static_quality_eventual": {
+          "regressed_frames_after_exact": 0,
+          "max_sse_after_exact": 0
+        },
+        "static_quality_within_window": {
+          "regressed_frames_after_exact": 0,
+          "max_sse_after_exact": 0
+        },
+        "aggregate_host_counters": {
+          "encoded_jpeg": 17,
+          "encoded_png": 8,
+          "encode_ns": 475583690,
+          "jpeg_ns": 77813085,
+          "png_ns": 142954792,
+          "sent_bytes": 242007,
+          "comparisons": 0,
+          "comparison_ns": 0,
+          "stale_png_dropped": 0
+        }
+      },
+      {
+        "arm": "off",
+        "order": 5,
+        "success": true,
+        "planned_generation_budget": 16,
+        "submitted_generations": 16,
+        "not_submitted": 0,
+        "presented_generations": 16,
+        "missing_after_submission": 0,
+        "late_presented_generations": 0,
+        "scheduled_to_present": {
+          "count": 16,
+          "p50_ms": 157.229184,
+          "p95_ms": 185.639883,
+          "max_ms": 185.639883
+        },
+        "commit_to_present": {
+          "count": 16,
+          "p50_ms": 155.699976,
+          "p95_ms": 181.819747,
+          "max_ms": 181.819747
+        },
+        "first_static_exact_presented_ns": null,
+        "decoded_png_frames": 0,
+        "decoded_frames": 16,
+        "source_schedule_delay": {
+          "count": 16,
+          "p50_ms": 0.457003,
+          "p95_ms": 5.495724,
+          "max_ms": 5.495724
+        },
+        "source_preparation": {
+          "count": 16,
+          "p50_ms": 1.161275,
+          "p95_ms": 1.795368,
+          "max_ms": 1.795368
+        },
+        "commit_dispatch": {
+          "count": 16,
+          "p50_ms": 0.2595,
+          "p95_ms": 0.282234,
+          "max_ms": 0.282234
+        },
+        "fixture_stages": {
+          "gl_readback": {
+            "count": 16,
+            "p50_ms": 8.01229,
+            "p95_ms": 8.352498,
+            "max_ms": 8.352498
+          },
+          "validation": {
+            "count": 16,
+            "p50_ms": 45.481106,
+            "p95_ms": 46.515811,
+            "max_ms": 46.515811
+          },
+          "validation_to_feedback": {
+            "count": 16,
+            "p50_ms": 0.003104,
+            "p95_ms": 0.004907,
+            "max_ms": 0.004907
+          },
+          "feedback_dispatch": {
+            "count": 16,
+            "p50_ms": 0.114462,
+            "p95_ms": 0.161573,
+            "max_ms": 0.161573
+          },
+          "feedback_started_to_presented": {
+            "count": 16,
+            "p50_ms": 0.215127,
+            "p95_ms": 0.312113,
+            "max_ms": 0.312113
+          }
+        },
+        "unknown_marker_frames": 0,
+        "within_window_presented_generations": 16,
+        "within_window_missing_after_submission": 0,
+        "cleanup_only_presented_generations": 0,
+        "within_window_scheduled_to_present": {
+          "count": 16,
+          "p50_ms": 157.229184,
+          "p95_ms": 185.639883,
+          "max_ms": 185.639883
+        },
+        "within_window_commit_to_present": {
+          "count": 16,
+          "p50_ms": 155.699976,
+          "p95_ms": 181.819747,
+          "max_ms": 181.819747
+        },
+        "within_window_first_static_exact_presented_ns": null,
+        "on_time_presented_generations": 16,
+        "within_window_on_time_presented_generations": 16,
+        "static_quality_eventual": {
+          "regressed_frames_after_exact": null,
+          "max_sse_after_exact": null
+        },
+        "static_quality_within_window": {
+          "regressed_frames_after_exact": null,
+          "max_sse_after_exact": null
+        },
+        "aggregate_host_counters": {
+          "encoded_jpeg": 17,
+          "encoded_png": 0,
+          "encode_ns": 87552075,
+          "jpeg_ns": 81511133,
+          "png_ns": 0,
+          "sent_bytes": 220191,
+          "comparisons": 0,
+          "comparison_ns": 0,
+          "stale_png_dropped": 0
+        }
+      }
+    ]
+  }
+}

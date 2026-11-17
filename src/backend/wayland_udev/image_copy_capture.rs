@@ -4,8 +4,11 @@
 /// tools (OBS, portals, grim v2) to capture output and toplevel content.
 use crate::sync_ext::MutexExt;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(feature = "backend-wayland-udev")]
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use log::{debug, info, warn};
 
@@ -110,7 +113,413 @@ fn record_damage_rect(damage: &mut Vec<CaptureDamageRect>, rect: CaptureDamageRe
 #[derive(Clone)]
 pub enum CaptureSource {
     Output(Output),
-    Toplevel(WindowId),
+    Toplevel(Arc<CaptureAuthority>),
+}
+
+/// A source is a capability for one mapped surface lifetime, not a name
+/// that can resolve to another window after unmap, lock, or size changes.
+#[derive(Debug)]
+pub struct CaptureAuthority {
+    pub(crate) window: WindowId,
+    pub(crate) surface: smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) include_popups: bool,
+    pub(crate) family: Option<Arc<super::capture_popup_authority::FamilyAuthority>>,
+    popup_xdg_origin: Option<(i32, i32)>,
+    popup_manager: Option<PopupManager>,
+    pub(crate) follow_origin: Option<(i32, i32)>,
+    owner: ClientId,
+    lock_epoch: u64,
+    buffer_layout: (
+        i32,
+        smithay::reexports::wayland_server::protocol::wl_output::Transform,
+    ),
+    revoked: AtomicBool,
+    input_consumed: AtomicU8,
+    follow: Option<Mutex<FollowLayout>>,
+    follow_parent: Option<(Arc<CaptureAuthority>, u32)>,
+    #[cfg(feature = "backend-wayland-udev")]
+    ready_serial: AtomicU64,
+}
+// A bundle atomically consumes both non-renewable channel attempts.
+fn consume_input_attempt(consumed: &AtomicU8, mask: u8) -> bool {
+    let mut previous = consumed.load(Ordering::Acquire);
+    loop {
+        if previous & mask != 0 {
+            return false;
+        }
+        match consumed.compare_exchange(
+            previous,
+            previous | mask,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => return true,
+            Err(actual) => previous = actual,
+        }
+    }
+}
+impl CaptureAuthority {
+    pub(crate) fn owned_by(&self, client: &ClientId) -> bool {
+        &self.owner == client
+    }
+    pub(crate) fn is_original_root(&self) -> bool {
+        !self.include_popups
+            && self.family.is_none()
+            && self.follow.is_none()
+            && self.follow_parent.is_none()
+    }
+    pub(crate) fn consume_pointer_attempt(&self) -> bool {
+        !self.include_popups
+            && self.family.is_none()
+            && self.follow.is_none()
+            && self.follow_parent.is_none()
+            && consume_input_attempt(&self.input_consumed, 2)
+    }
+    pub(crate) fn consume_keyboard_attempt(&self) -> bool {
+        !self.include_popups
+            && self.family.is_none()
+            && self.follow.is_none()
+            && self.follow_parent.is_none()
+            && consume_input_attempt(&self.input_consumed, 1)
+    }
+    pub(crate) fn consume_text_attempt(&self) -> bool {
+        self.consume_control_attempt()
+    }
+    pub(crate) fn consume_control_attempt(&self) -> bool {
+        !self.include_popups
+            && self.family.is_none()
+            && self.follow.is_none()
+            && self.follow_parent.is_none()
+            && consume_input_attempt(&self.input_consumed, 3)
+    }
+}
+#[derive(Default)]
+pub(crate) struct ToplevelCaptureAuthorities {
+    by_window: HashMap<WindowId, Vec<std::sync::Weak<CaptureAuthority>>>,
+    blocked: u8,
+}
+#[cfg(feature = "backend-wayland-udev")]
+pub(crate) const CAPTURE_BLOCK_BUILTIN_LOCK: u8 = 1;
+pub(crate) const CAPTURE_BLOCK_MONITOR_LOCK: u8 = 2;
+#[cfg(feature = "backend-wayland-udev")]
+pub(crate) const CAPTURE_BLOCK_INACTIVE: u8 = 4;
+const MAX_TOPLEVEL_SOURCES: usize = 256;
+const MAX_TOPLEVEL_SESSIONS: usize = 512;
+
+fn surface_buffer_layout(
+    surface: &smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
+) -> (
+    i32,
+    smithay::reexports::wayland_server::protocol::wl_output::Transform,
+) {
+    smithay::wayland::compositor::with_states(surface, |states| {
+        let mut cached = states
+            .cached_state
+            .get::<smithay::wayland::compositor::SurfaceAttributes>();
+        let attributes = cached.current();
+        (attributes.buffer_scale, attributes.buffer_transform)
+    })
+}
+pub(crate) fn toplevel_capture_surface_committed(
+    state: &mut JwmWaylandState,
+    surface: &smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
+) {
+    let layout = surface_buffer_layout(surface);
+    let popup_roots: Vec<_> = state
+        .toplevel_capture_authorities
+        .by_window
+        .values()
+        .flatten()
+        .filter_map(std::sync::Weak::upgrade)
+        .filter(|a| a.include_popups && a.surface == *surface)
+        .collect();
+    for root in popup_roots {
+        if popup_root_origin(state, surface) != root.popup_xdg_origin {
+            if root.follow.is_some() {
+                stop_follow_family(state, &root);
+            } else {
+                stop_popup_family(state, &root);
+            }
+        }
+    }
+    let roots: Vec<_> = state
+        .toplevel_capture_authorities
+        .by_window
+        .values()
+        .flatten()
+        .filter_map(std::sync::Weak::upgrade)
+        .filter(|a| {
+            a.follow.is_some() && a.surface == *surface && !a.revoked.load(Ordering::Acquire)
+        })
+        .collect();
+    for root in roots {
+        if !smithay::wayland::compositor::get_children(&root.surface).is_empty() {
+            stop_follow_family(state, &root);
+            continue;
+        }
+        let mut follow = root.follow.as_ref().unwrap().lock().unwrap();
+        let exact = follow_effective_geometry(state, surface).is_some_and(|r| {
+            r.size.w > 0
+                && r.size.h > 0
+                && (r.size.w as u32, r.size.h as u32) == (follow.width, follow.height)
+                && Some((r.loc.x, r.loc.y)) == follow.origin
+        });
+        if !follow.suspended && !exact {
+            if follow.epoch >= 1024 {
+                drop(follow);
+                revoke_authority(&root);
+            } else {
+                follow.epoch += 1;
+                follow.suspended = true;
+                follow.manager.suspended(follow.epoch);
+                drop(follow);
+            }
+            stop_window_sessions_only(state, root.window);
+            state.request_client_flush();
+        }
+    }
+    let changed: Vec<_> = state
+        .toplevel_capture_authorities
+        .by_window
+        .iter()
+        .filter_map(|(window, guards)| {
+            guards
+                .iter()
+                .filter_map(std::sync::Weak::upgrade)
+                .any(|guard| guard.surface == *surface && guard.buffer_layout != layout)
+                .then_some(*window)
+        })
+        .collect();
+    for window in changed {
+        if stop_toplevel_capture_sessions(state, window) {
+            state.request_client_flush();
+        }
+    }
+}
+pub(crate) fn authority_is_current(state: &JwmWaylandState, authority: &CaptureAuthority) -> bool {
+    if authority
+        .family
+        .as_ref()
+        .is_some_and(|family| !family.current(state))
+    {
+        return false;
+    }
+    let live = !authority.revoked.load(Ordering::Acquire)
+        && !state.session_locked
+        && state.toplevel_capture_authorities.blocked == 0
+        && state.session_lock_epoch == authority.lock_epoch
+        && state.mapped_windows.contains(&authority.window)
+        && authority.surface.is_alive()
+        && surface_buffer_layout(&authority.surface) == authority.buffer_layout
+        && state.surface_for_window(authority.window).as_ref() == Some(&authority.surface);
+    if !live {
+        revoke_authority(authority);
+        return false;
+    }
+    if authority.include_popups
+        && popup_root_origin(state, &authority.surface) != authority.popup_xdg_origin
+    {
+        revoke_authority(authority);
+        return false;
+    }
+    if let Some((parent, epoch)) = &authority.follow_parent {
+        if !follow_effective_geometry(state, &authority.surface).is_some_and(|r| {
+            r.size.w > 0
+                && r.size.h > 0
+                && (r.size.w as u32, r.size.h as u32) == (authority.width, authority.height)
+                && Some((r.loc.x, r.loc.y)) == authority.follow_origin
+        }) {
+            return false;
+        }
+        if !authority_is_current(state, parent)
+            || parent.follow.as_ref().unwrap().lock().unwrap().epoch != *epoch
+        {
+            return false;
+        }
+    }
+    if let Some(follow) = &authority.follow {
+        return !follow.lock().unwrap().suspended;
+    }
+    let current = state
+        .window_geometry
+        .get(&authority.window)
+        .is_some_and(|g| (g.w, g.h) == (authority.width, authority.height));
+    if !current {
+        revoke_authority(authority);
+    }
+    current
+}
+
+pub(crate) fn create_interactive_family_source(
+    state: &mut JwmWaylandState,
+    root: &Arc<CaptureAuthority>,
+    family: Arc<super::capture_popup_authority::FamilyAuthority>,
+) -> Option<CaptureSource> {
+    if !root.is_original_root() || !Arc::ptr_eq(root, &family.root) || !family.current(state) {
+        return None;
+    }
+    let derived = Arc::new(CaptureAuthority {
+        window: root.window,
+        surface: root.surface.clone(),
+        width: root.width,
+        height: root.height,
+        include_popups: false,
+        family: Some(family),
+        popup_xdg_origin: None,
+        popup_manager: None,
+        follow_origin: None,
+        owner: root.owner.clone(),
+        lock_epoch: root.lock_epoch,
+        buffer_layout: root.buffer_layout,
+        revoked: AtomicBool::new(false),
+        input_consumed: AtomicU8::new(3),
+        follow: None,
+        follow_parent: None,
+        #[cfg(feature = "backend-wayland-udev")]
+        ready_serial: AtomicU64::new(0),
+    });
+    state
+        .toplevel_capture_authorities
+        .by_window
+        .entry(root.window)
+        .or_default()
+        .push(Arc::downgrade(&derived));
+    Some(CaptureSource::Toplevel(derived))
+}
+
+fn create_toplevel_source(
+    state: &mut JwmWaylandState,
+    window: WindowId,
+    _owner: ClientId,
+) -> Option<CaptureSource> {
+    if state.session_locked
+        || state.toplevel_capture_authorities.blocked != 0
+        || !state.mapped_windows.contains(&window)
+    {
+        return None;
+    }
+    let surface = state
+        .surface_for_window(window)
+        .filter(Resource::is_alive)?;
+    let geometry = state.window_geometry.get(&window)?;
+    let (width, height) = (geometry.w, geometry.h);
+    if width == 0
+        || height == 0
+        || width > 16384
+        || height > 16384
+        || u64::from(width) * u64::from(height) > 64 * 1024 * 1024
+    {
+        return None;
+    }
+    let registry = &mut state.toplevel_capture_authorities;
+    registry.by_window.retain(|_, grants| {
+        grants.retain(|grant| grant.strong_count() != 0);
+        !grants.is_empty()
+    });
+    if registry.by_window.values().map(Vec::len).sum::<usize>() >= MAX_TOPLEVEL_SOURCES {
+        return None;
+    }
+    let authority = Arc::new(CaptureAuthority {
+        window,
+        buffer_layout: surface_buffer_layout(&surface),
+        surface,
+        width,
+        height,
+        include_popups: false,
+        family: None,
+        popup_xdg_origin: None,
+        popup_manager: None,
+        follow_origin: None,
+        owner: _owner,
+        lock_epoch: state.session_lock_epoch,
+        revoked: AtomicBool::new(false),
+        input_consumed: AtomicU8::new(0),
+        follow: None,
+        follow_parent: None,
+        #[cfg(feature = "backend-wayland-udev")]
+        ready_serial: AtomicU64::new(0),
+    });
+    registry
+        .by_window
+        .entry(window)
+        .or_default()
+        .push(Arc::downgrade(&authority));
+    Some(CaptureSource::Toplevel(authority))
+}
+/// Lock transitions revoke all existing sources, including idle sources that
+/// have not created a session yet. Clearing a block never revives those guards.
+pub(crate) fn set_toplevel_capture_block(state: &mut JwmWaylandState, bit: u8, blocked: bool) {
+    let was = state.toplevel_capture_authorities.blocked;
+    if blocked {
+        state.toplevel_capture_authorities.blocked |= bit;
+    } else {
+        state.toplevel_capture_authorities.blocked &= !bit;
+    }
+    if blocked && was & bit == 0 {
+        stop_all_toplevel_capture_sessions(state);
+    }
+}
+pub(crate) fn stop_all_toplevel_capture_sessions(state: &mut JwmWaylandState) {
+    let windows: Vec<_> = state
+        .toplevel_capture_authorities
+        .by_window
+        .keys()
+        .chain(state.toplevel_capture_sessions.keys())
+        .copied()
+        .collect();
+    let mut sent = false;
+    for window in windows {
+        sent |= stop_toplevel_capture_sessions(state, window);
+    }
+    if sent {
+        state.request_client_flush();
+    }
+}
+pub(crate) fn toplevel_capture_geometry_changing(
+    state: &mut JwmWaylandState,
+    window: WindowId,
+    width: u32,
+    height: u32,
+) {
+    let guards: Vec<_> = state
+        .toplevel_capture_authorities
+        .by_window
+        .get(&window)
+        .into_iter()
+        .flatten()
+        .filter_map(std::sync::Weak::upgrade)
+        .collect();
+    let mut changed = false;
+    for guard in guards {
+        if guard.revoked.load(Ordering::Acquire) {
+            continue;
+        }
+        if let Some(follow) = &guard.follow {
+            let mut layout = follow.lock().unwrap();
+            if (layout.width, layout.height) != (width, height) {
+                changed = true;
+                if layout.epoch >= 1024 || !valid_follow_size(width, height) {
+                    drop(layout);
+                    revoke_authority(&guard);
+                    continue;
+                }
+                layout.epoch += 1;
+                layout.width = width;
+                layout.height = height;
+                layout.suspended = true;
+                layout.manager.suspended(layout.epoch);
+            }
+        } else if (guard.width, guard.height) != (width, height) {
+            changed = true;
+            revoke_authority(&guard);
+        }
+    }
+    if changed {
+        stop_window_sessions_only(state, window);
+        state.request_client_flush();
+    }
 }
 
 pub struct ImageCaptureSourceData {
@@ -162,6 +571,9 @@ impl CaptureSessionData {
 pub struct CaptureFrameData {
     /// A frame accepts one capture; afterwards only destroy is legal.
     pub captured: AtomicBool,
+    pub(crate) ready: AtomicBool,
+    pub(crate) ready_stamp: Mutex<Option<(u64, Instant)>>,
+    pub(crate) family_proof: Mutex<Option<Arc<super::capture_popup_authority::FamilyProof>>>,
     /// `None` for a frame of a stopped session; capturing it fails.
     pub source: Option<CaptureSource>,
     /// The session that created this frame, stopped once the frame shows
@@ -193,6 +605,84 @@ pub struct PendingImageCapture {
     pub damage: Vec<CaptureDamageRect>,
 }
 unsafe impl Send for PendingImageCapture {}
+
+// Only the udev renderer fulfills capture frames. Nested backends never
+// publish ready authority or authorize input from an unrendered frame.
+impl PendingImageCapture {
+    #[cfg(feature = "backend-wayland-udev")]
+    pub(crate) fn mark_ready(&self) {
+        if let Some(data) = self.frame.data::<CaptureFrameData>() {
+            if data.ready.load(Ordering::Acquire) {
+                return;
+            }
+            if let CaptureSource::Toplevel(authority) = &self.source {
+                if authority.family.as_ref().is_some_and(|family| {
+                    data.family_proof
+                        .lock()
+                        .unwrap()
+                        .as_ref()
+                        .is_none_or(|proof| !Arc::ptr_eq(family, &proof.authority))
+                }) {
+                    return;
+                }
+                let mut old = authority.ready_serial.load(Ordering::Acquire);
+                while let Some(next) = old.checked_add(1) {
+                    match authority.ready_serial.compare_exchange(
+                        old,
+                        next,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    ) {
+                        Ok(_) => {
+                            *data.ready_stamp.lock().unwrap() = Some((next, Instant::now()));
+                            break;
+                        }
+                        Err(actual) => old = actual,
+                    }
+                }
+            }
+            data.ready.store(true, Ordering::Release);
+        }
+    }
+    #[cfg(any(test, feature = "backend-wayland-udev"))]
+    pub(crate) fn authorized(&self, state: &JwmWaylandState) -> bool {
+        if !self.frame.is_alive() {
+            return false;
+        }
+        let Some(data) = self.frame.data::<CaptureFrameData>() else {
+            return false;
+        };
+        let session_live = data.session.upgrade().ok().is_some_and(|session| {
+            session.is_alive()
+                && session
+                    .data::<CaptureSessionData>()
+                    .is_some_and(|data| !data.stopped.load(Ordering::Acquire))
+        });
+        let owner_matches = match &self.source {
+            CaptureSource::Toplevel(authority) => self
+                .frame
+                .client()
+                .is_some_and(|client| client.id() == authority.owner),
+            CaptureSource::Output(_) => true,
+        };
+        let family_valid = data
+            .family_proof
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_none_or(|proof| {
+                matches!(&self.source, CaptureSource::Toplevel(authority)
+                    if authority.family.as_ref().is_some_and(|family| Arc::ptr_eq(family, &proof.authority)))
+                    && proof.current(state)
+            });
+        let valid =
+            session_live && owner_matches && family_valid && !source_is_gone(state, &self.source);
+        if !valid {
+            stop_frame_session(data);
+        }
+        valid
+    }
+}
 
 pub type PendingImageCaptureQueue = Arc<Mutex<Vec<PendingImageCapture>>>;
 
@@ -226,7 +716,7 @@ fn stop_session(session: &ExtImageCopyCaptureSessionV1) -> bool {
 fn source_is_gone(state: &JwmWaylandState, source: &CaptureSource) -> bool {
     match source {
         CaptureSource::Output(output) => !state.outputs.contains(output),
-        CaptureSource::Toplevel(win) => !state.window_geometry.contains_key(win),
+        CaptureSource::Toplevel(authority) => !authority_is_current(state, authority),
     }
 }
 
@@ -263,8 +753,11 @@ fn track_session(
         }
         // Only a live window: a session on a closed one is stopped at
         // creation, and nothing would ever remove its entry.
-        Some(CaptureSource::Toplevel(win)) if state.window_geometry.contains_key(win) => {
-            let sessions = state.toplevel_capture_sessions.entry(*win).or_default();
+        Some(CaptureSource::Toplevel(authority)) if authority_is_current(state, authority) => {
+            let sessions = state
+                .toplevel_capture_sessions
+                .entry(authority.window)
+                .or_default();
             sessions.retain(Weak::is_alive);
             sessions.push(session.downgrade());
         }
@@ -312,6 +805,17 @@ pub fn stop_output_capture_sessions(output: &Output) -> bool {
 /// The caller drops the window's `window_geometry` first, so frames created
 /// or captured afterwards fail through `source_is_gone`.
 pub(crate) fn stop_toplevel_capture_sessions(state: &mut JwmWaylandState, win: WindowId) -> bool {
+    if let Some(authorities) = state.toplevel_capture_authorities.by_window.remove(&win) {
+        for authority in authorities.into_iter().filter_map(|weak| weak.upgrade()) {
+            revoke_authority(&authority);
+        }
+    }
+    stop_window_sessions_only(state, win)
+}
+fn stop_window_sessions_only(state: &mut JwmWaylandState, win: WindowId) -> bool {
+    super::remote_keyboard::revoke_for_window(state, win);
+    super::remote_pointer::revoke_for_window(state, win);
+    super::remote_control::revoke_for_window(state, win);
     let Some(sessions) = state.toplevel_capture_sessions.remove(&win) else {
         return false;
     };
@@ -367,11 +871,9 @@ fn send_session_constraints(
             .current_mode()
             .map(|mode| (mode.size.w as u32, mode.size.h as u32)),
         Some(CaptureSource::Output(_)) => None,
-        Some(CaptureSource::Toplevel(win)) => state
-            .window_geometry
-            .get(win)
-            .filter(|geo| geo.w > 0 && geo.h > 0)
-            .map(|geo| (geo.w, geo.h)),
+        Some(CaptureSource::Toplevel(authority)) => {
+            authority_is_current(state, authority).then_some((authority.width, authority.height))
+        }
         None => None,
     };
     let Some((w, h)) = size else {
@@ -391,8 +893,11 @@ fn send_session_constraints(
                 output.name()
             );
         }
-        Some(CaptureSource::Toplevel(win)) => {
-            debug!("[image-capture] session created: toplevel={win:?} size={w}x{h}");
+        Some(CaptureSource::Toplevel(authority)) => {
+            debug!(
+                "[image-capture] session created: toplevel={:?} size={w}x{h}",
+                authority.window
+            );
         }
         None => {}
     }
@@ -416,6 +921,8 @@ pub fn init_image_copy_capture(dh: &DisplayHandle) -> PendingImageCaptureQueue {
         ToplevelSourceManagerData,
     );
     dh.create_global::<JwmWaylandState, ExtImageCopyCaptureManagerV1, _>(1, CaptureManagerData);
+    dh.create_global::<JwmWaylandState, ResizeManager, _>(2, ());
+    dh.create_global::<JwmWaylandState, PopupManager, _>(1, ());
     info!(
         "[udev/wayland] ext-image-copy-capture-v1 + ext-image-capture-source-v1 globals registered \
          (output + foreign-toplevel sources)"
@@ -513,7 +1020,7 @@ impl Dispatch<ExtForeignToplevelImageCaptureSourceManagerV1, ToplevelSourceManag
 {
     fn request(
         state: &mut Self,
-        _client: &Client,
+        client: &Client,
         _resource: &ExtForeignToplevelImageCaptureSourceManagerV1,
         request: ext_foreign_toplevel_image_capture_source_manager_v1::Request,
         _data: &ToplevelSourceManagerData,
@@ -561,7 +1068,8 @@ impl Dispatch<ExtForeignToplevelImageCaptureSourceManagerV1, ToplevelSourceManag
                 data_init.init(
                     source,
                     ImageCaptureSourceData {
-                        source: win.map(CaptureSource::Toplevel),
+                        source: win
+                            .and_then(|window| create_toplevel_source(state, window, client.id())),
                     },
                 );
             }
@@ -589,6 +1097,25 @@ impl Dispatch<ExtImageCaptureSourceV1, ImageCaptureSourceData> for JwmWaylandSta
             ext_image_capture_source_v1::Request::Destroy => {}
             _ => {}
         }
+    }
+    fn destroyed(
+        state: &mut Self,
+        _client: ClientId,
+        resource: &ExtImageCaptureSourceV1,
+        data: &ImageCaptureSourceData,
+    ) {
+        if let Some(CaptureSource::Toplevel(root)) = &data.source {
+            if root.follow.is_some() {
+                stop_follow_family(state, root);
+            }
+            if root.include_popups {
+                stop_popup_family(state, root);
+            }
+        }
+        super::remote_pointer::source_destroyed(state, resource);
+        super::remote_control::source_destroyed(state, resource);
+        super::remote_text::source_destroyed(state, resource);
+        super::remote_popup::source_destroyed(state, resource);
     }
 }
 
@@ -636,6 +1163,26 @@ impl Dispatch<ExtImageCopyCaptureManagerV1, CaptureManagerData> for JwmWaylandSt
                     .data::<ImageCaptureSourceData>()
                     .and_then(|d| d.source.clone());
 
+                let capture_source =
+                    capture_source.and_then(|source| snapshot_follow_source(state, source));
+                let capture_source = capture_source.filter(|source| !source_is_gone(state, source));
+                state.toplevel_capture_sessions.retain(|_, sessions| {
+                    sessions.retain(Weak::is_alive);
+                    !sessions.is_empty()
+                });
+                let capture_source = if matches!(capture_source, Some(CaptureSource::Toplevel(_)))
+                    && state
+                        .toplevel_capture_sessions
+                        .values()
+                        .map(Vec::len)
+                        .sum::<usize>()
+                        >= MAX_TOPLEVEL_SESSIONS
+                {
+                    None
+                } else {
+                    capture_source
+                };
+
                 let paint_cursors = options
                     .into_result()
                     .map(|o| o.contains(ext_image_copy_capture_manager_v1::Options::PaintCursors))
@@ -663,7 +1210,7 @@ impl Dispatch<ExtImageCopyCaptureManagerV1, CaptureManagerData> for JwmWaylandSt
                 // the cursor session's capture sub-session is stopped.
                 let capture_source = source
                     .data::<ImageCaptureSourceData>()
-                    .and_then(|d| d.source.clone());
+                    .and_then(|d| d.source.clone()).filter(|source| !matches!(source, CaptureSource::Toplevel(a) if a.follow.is_some() || a.follow_parent.is_some() || a.include_popups || a.family.is_some()));
 
                 data_init.init(
                     session,
@@ -725,6 +1272,9 @@ impl Dispatch<ExtImageCopyCaptureSessionV1, CaptureSessionData> for JwmWaylandSt
                     frame,
                     CaptureFrameData {
                         captured: AtomicBool::new(false),
+                        ready: AtomicBool::new(false),
+                        ready_stamp: Mutex::new(None),
+                        family_proof: Mutex::new(None),
                         source,
                         session: resource.downgrade(),
                         paint_cursors: data.paint_cursors,
@@ -794,7 +1344,13 @@ impl Dispatch<ExtImageCopyCaptureFrameV1, CaptureFrameData> for JwmWaylandState 
                 // Move the attached buffer into the pending queue; the render
                 // loop fulfills it on the next frame for the source output.
                 let buffer = data.buffer.lock_safe().take();
-                let source = match data.source.clone() {
+                let session_live = data.session.upgrade().ok().is_some_and(|session| {
+                    session.is_alive()
+                        && session
+                            .data::<CaptureSessionData>()
+                            .is_some_and(|data| !data.stopped.load(Ordering::Acquire))
+                });
+                let source = match data.source.clone().filter(|_| session_live) {
                     Some(source) if source_is_gone(state, &source) => {
                         // The output or window went away after this frame
                         // was created: its session is over as well.
@@ -985,6 +1541,15 @@ pub(crate) mod wire_test_client {
             self.display.flush_clients().expect("flush client events");
         }
 
+        /// Exercise production calloop timers in owned protocol fixtures.
+        #[cfg(feature = "backend-wayland-udev")]
+        pub(crate) fn dispatch_timers(&mut self, duration: std::time::Duration) {
+            self._event_loop
+                .dispatch(duration, &mut self.state)
+                .expect("dispatch test timers");
+            self.roundtrip();
+        }
+
         /// Connect a raw client and collect the globals it is advertised.
         pub(crate) fn connect(&mut self) -> Client {
             let (server_end, peer) = UnixStream::pair().expect("create Wayland socket pair");
@@ -1043,6 +1608,15 @@ pub(crate) mod wire_test_client {
     }
 
     impl Client {
+        /// Count only the actual initial registry advertisements in this test client.
+        #[cfg(feature = "remote-wayland")]
+        pub(crate) fn global_count(&self, interface: &str) -> usize {
+            self.globals
+                .iter()
+                .filter(|(_, name, _)| name == interface)
+                .count()
+        }
+
         /// Allocate the next client-side object id.
         pub(crate) fn new_id(&mut self) -> u32 {
             self.next_id += 1;
@@ -1198,7 +1772,6 @@ mod tests {
         FULL_BUFFER_DAMAGE, MAX_DAMAGE_RECTS_PER_FRAME, init_image_copy_capture,
         record_damage_rect, stop_output_capture_sessions, stop_toplevel_capture_sessions,
     };
-    use crate::backend::api::Geometry;
     use crate::backend::common_define::WindowId;
     use crate::backend::wayland::state::JwmWaylandState;
     use smithay::output::Output;
@@ -1229,6 +1802,21 @@ mod tests {
         client: &mut Client,
         window: WindowId,
     ) -> u32 {
+        // Real App fixtures already publish handles. Limit this legacy helper's
+        // list to the explicitly requested window rather than select the first
+        // of unrelated handles.
+        let handles: Vec<_> = server
+            .state
+            .foreign_toplevel_handles
+            .drain()
+            .map(|(_, handle)| handle)
+            .collect();
+        for handle in handles {
+            server
+                .state
+                .foreign_toplevel_list_state
+                .remove_toplevel(&handle);
+        }
         let handle = server
             .state
             .foreign_toplevel_list_state
@@ -1510,17 +2098,8 @@ mod tests {
     #[test]
     fn a_closed_windows_capture_session_stops_and_its_next_frame_fails() {
         let mut server = capture_server();
-        let window = WindowId::from_raw(0x52);
-        server.state.window_geometry.insert(
-            window,
-            Geometry {
-                x: 0,
-                y: 0,
-                w: 32,
-                h: 24,
-                border: 0,
-            },
-        );
+        let _app = super::authority_tests::App::new(&mut server);
+        let window = _app.window;
         let mut client = server.connect();
         let sources = client.bind("ext_foreign_toplevel_image_capture_source_manager_v1", 1);
         let capture = client.bind("ext_image_copy_capture_manager_v1", 1);
@@ -1534,7 +2113,7 @@ mod tests {
         let session_events = object_events(&events, session);
         assert_eq!(
             session_events.first(),
-            Some(&(SESSION_BUFFER_SIZE, vec![32, 24])),
+            Some(&(SESSION_BUFFER_SIZE, vec![800, 600])),
             "a live window's session advertises the window size"
         );
         assert_eq!(
@@ -1575,17 +2154,8 @@ mod tests {
     #[test]
     fn destroying_a_frame_of_a_closed_window_stops_its_session() {
         let mut server = capture_server();
-        let window = WindowId::from_raw(0x53);
-        server.state.window_geometry.insert(
-            window,
-            Geometry {
-                x: 0,
-                y: 0,
-                w: 32,
-                h: 24,
-                border: 0,
-            },
-        );
+        let _app = super::authority_tests::App::new(&mut server);
+        let window = _app.window;
         let mut client = server.connect();
         let sources = client.bind("ext_foreign_toplevel_image_capture_source_manager_v1", 1);
         let capture = client.bind("ext_image_copy_capture_manager_v1", 1);
@@ -1615,16 +2185,6 @@ mod tests {
     /// unpublished again once the session exists (the session keeps the
     /// window), so a later client's list announces only its own window.
     fn toplevel_session(server: &mut Server, client: &mut Client, window: WindowId) -> u32 {
-        server.state.window_geometry.insert(
-            window,
-            Geometry {
-                x: 0,
-                y: 0,
-                w: 32,
-                h: 24,
-                border: 0,
-            },
-        );
         let sources = client.bind("ext_foreign_toplevel_image_capture_source_manager_v1", 1);
         let capture = client.bind("ext_image_copy_capture_manager_v1", 1);
         let toplevel = published_toplevel_handle(server, client, window);
@@ -1653,8 +2213,10 @@ mod tests {
     #[test]
     fn closing_a_window_stops_its_idle_capture_session_at_once() {
         let mut server = capture_server();
-        let closed = WindowId::from_raw(0x54);
-        let kept = WindowId::from_raw(0x55);
+        let _closed_app = super::authority_tests::App::new(&mut server);
+        let closed = _closed_app.window;
+        let _kept_app = super::authority_tests::App::new(&mut server);
+        let kept = _kept_app.window;
         let mut closed_client = server.connect();
         let closed_session = toplevel_session(&mut server, &mut closed_client, closed);
         let mut kept_client = server.connect();
@@ -1824,4 +2386,691 @@ mod tests {
         }
         assert_eq!(damage, [(1, 2, 3, 4)]);
     }
+}
+
+#[cfg(test)]
+#[path = "image_copy_capture_authority_tests.rs"]
+pub(crate) mod authority_tests;
+
+#[cfg(test)]
+mod input_attempt_tests {
+    use super::*;
+    #[test]
+    fn bundle_consumes_both_channels_without_partial_retry() {
+        let consumed = AtomicU8::new(0);
+        assert!(consume_input_attempt(&consumed, 3));
+        for mask in [1, 2, 3] {
+            assert!(!consume_input_attempt(&consumed, mask));
+        }
+        for first in [1, 2] {
+            let consumed = AtomicU8::new(0);
+            assert!(consume_input_attempt(&consumed, first));
+            assert!(!consume_input_attempt(&consumed, 3));
+            assert_eq!(consumed.load(Ordering::Acquire), first);
+        }
+    }
+}
+
+use crate::readonly_resize_capture_protocol::server::jwm_readonly_resize_capture_manager_v1::{
+    self as resize_manager, JwmReadonlyResizeCaptureManagerV1 as ResizeManager,
+};
+#[derive(Debug)]
+struct FollowLayout {
+    origin: Option<(i32, i32)>,
+    manager: ResizeManager,
+    epoch: u32,
+    width: u32,
+    height: u32,
+    suspended: bool,
+}
+#[derive(Default)]
+pub struct ResizeManagerData {
+    used: AtomicBool,
+    authority: Mutex<Option<Arc<CaptureAuthority>>>,
+}
+fn valid_follow_size(w: u32, h: u32) -> bool {
+    w > 0 && h > 0 && w <= 16384 && h <= 16384 && u64::from(w) * u64::from(h) <= 64 * 1024 * 1024
+}
+pub(crate) fn revoke_authority(authority: &CaptureAuthority) {
+    if !authority.revoked.swap(true, Ordering::AcqRel) {
+        if let Some(layout) = &authority.follow {
+            layout.lock().unwrap().manager.stopped();
+        }
+        if let Some(manager) = &authority.popup_manager {
+            manager.stopped();
+        }
+    }
+}
+fn snapshot_follow_source(state: &JwmWaylandState, source: CaptureSource) -> Option<CaptureSource> {
+    let CaptureSource::Toplevel(root) = &source else {
+        return Some(source);
+    };
+    let Some(follow) = &root.follow else {
+        return Some(source);
+    };
+    if !authority_is_current(state, root) {
+        return None;
+    }
+    let layout = follow.lock().unwrap();
+    if layout.suspended {
+        return None;
+    }
+    Some(CaptureSource::Toplevel(Arc::new(CaptureAuthority {
+        window: root.window,
+        surface: root.surface.clone(),
+        width: layout.width,
+        height: layout.height,
+        include_popups: root.include_popups,
+        family: None,
+        popup_xdg_origin: root.popup_xdg_origin,
+        popup_manager: None,
+        follow_origin: layout.origin,
+        owner: root.owner.clone(),
+        lock_epoch: root.lock_epoch,
+        buffer_layout: root.buffer_layout,
+        revoked: AtomicBool::new(false),
+        input_consumed: AtomicU8::new(3),
+        follow: None,
+        follow_parent: Some((Arc::clone(root), layout.epoch)),
+        #[cfg(feature = "backend-wayland-udev")]
+        ready_serial: AtomicU64::new(0),
+    })))
+}
+/// Called only after the root commit has applied its buffer and xdg geometry.
+/// Desired WM dimensions alone never make a replacement session ready.
+pub(crate) fn readonly_resize_surface_committed(
+    state: &mut JwmWaylandState,
+    surface: &smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
+) {
+    let roots: Vec<_> = state
+        .toplevel_capture_authorities
+        .by_window
+        .values()
+        .flatten()
+        .filter_map(std::sync::Weak::upgrade)
+        .filter(|a| a.follow.is_some() && a.surface == *surface)
+        .collect();
+    for root in roots {
+        publish_follow_layout(state, &root);
+    }
+}
+// Defensive combo boundary: ordinary resize-follow does not freeze its origin.
+// This predicate checks immutable metadata, not a claim about reachable wire layouts.
+fn popup_follow_origin_matches(
+    include_popups: bool,
+    frozen: Option<(i32, i32)>,
+    current: Option<(i32, i32)>,
+) -> bool {
+    !include_popups || frozen.is_some_and(|origin| current == Some(origin))
+}
+
+fn publish_follow_layout(state: &mut JwmWaylandState, root: &CaptureAuthority) {
+    if root.revoked.load(Ordering::Acquire) {
+        return;
+    }
+    // Do not use authority_is_current here: suspension is intentionally not current.
+    if state.session_locked
+        || state.toplevel_capture_authorities.blocked != 0
+        || state.session_lock_epoch != root.lock_epoch
+        || !state.mapped_windows.contains(&root.window)
+        || !root.surface.is_alive()
+        || state.surface_for_window(root.window).as_ref() != Some(&root.surface)
+        || surface_buffer_layout(&root.surface) != root.buffer_layout
+    {
+        revoke_authority(root);
+        return;
+    }
+    let Some(rect) = follow_effective_geometry(state, &root.surface) else {
+        stop_follow_family(state, root);
+        return;
+    };
+    if !popup_follow_origin_matches(
+        root.include_popups,
+        root.follow_origin,
+        Some((rect.loc.x, rect.loc.y)),
+    ) {
+        stop_follow_family(state, root);
+        return;
+    }
+    let Some(geometry) = state.window_geometry.get(&root.window) else {
+        return;
+    };
+    let mut layout = root.follow.as_ref().unwrap().lock().unwrap();
+    if !layout.suspended {
+        return;
+    }
+    if rect.size.w > 0
+        && rect.size.h > 0
+        && (rect.size.w as u32, rect.size.h as u32) == (layout.width, layout.height)
+        && (geometry.w, geometry.h) == (layout.width, layout.height)
+    {
+        layout.origin = Some((rect.loc.x, rect.loc.y));
+        layout.suspended = false;
+        layout
+            .manager
+            .layout(layout.epoch, layout.width, layout.height);
+        state.request_client_flush();
+    }
+}
+impl GlobalDispatch<ResizeManager, ()> for JwmWaylandState {
+    fn bind(
+        _state: &mut Self,
+        _dh: &DisplayHandle,
+        _client: &Client,
+        resource: New<ResizeManager>,
+        _data: &(),
+        init: &mut DataInit<'_, Self>,
+    ) {
+        init.init(resource, ResizeManagerData::default());
+    }
+    fn can_view(client: Client, _data: &()) -> bool {
+        capture_global_visible(&client)
+    }
+}
+impl Dispatch<ResizeManager, ResizeManagerData> for JwmWaylandState {
+    fn request(
+        state: &mut Self,
+        client: &Client,
+        resource: &ResizeManager,
+        request: resize_manager::Request,
+        data: &ResizeManagerData,
+        _dh: &DisplayHandle,
+        init: &mut DataInit<'_, Self>,
+    ) {
+        let include_popups = matches!(
+            &request,
+            resize_manager::Request::CreateSourceWithPopups { .. }
+        );
+        match request {
+            resize_manager::Request::Destroy => {}
+            resize_manager::Request::CreateSource { id, source }
+            | resize_manager::Request::CreateSourceWithPopups { id, source } => {
+                let root = if !data.used.swap(true, Ordering::AcqRel)
+                    && source
+                        .client()
+                        .is_some_and(|owner| owner.id() == client.id())
+                {
+                    source
+                        .data::<ImageCaptureSourceData>()
+                        .and_then(|d| d.source.as_ref())
+                        .and_then(|s| {
+                            let CaptureSource::Toplevel(original) = s else {
+                                return None;
+                            };
+                            if original.owner != client.id()
+                                || original.include_popups
+                                || original.family.is_some()
+                                || original.follow.is_some()
+                                || original.follow_parent.is_some()
+                                || !authority_is_current(state, original)
+                                || !original.consume_control_attempt()
+                            {
+                                return None;
+                            }
+                            let effective = follow_effective_geometry(state, &original.surface)?;
+                            let popup_xdg_origin = if include_popups {
+                                Some(popup_root_origin(state, &original.surface)?)
+                            } else {
+                                None
+                            };
+                            let origin =
+                                include_popups.then_some((effective.loc.x, effective.loc.y));
+                            let CaptureSource::Toplevel(root) =
+                                create_toplevel_source(state, original.window, client.id())?
+                            else {
+                                return None;
+                            };
+                            let derived = Arc::new(CaptureAuthority {
+                                window: root.window,
+                                surface: root.surface.clone(),
+                                width: root.width,
+                                height: root.height,
+                                include_popups,
+                                family: None,
+                                popup_xdg_origin,
+                                popup_manager: None,
+                                follow_origin: origin,
+                                owner: root.owner.clone(),
+                                lock_epoch: root.lock_epoch,
+                                buffer_layout: root.buffer_layout,
+                                revoked: AtomicBool::new(false),
+                                input_consumed: AtomicU8::new(3),
+                                follow: Some(Mutex::new(FollowLayout {
+                                    origin: None,
+                                    manager: resource.clone(),
+                                    epoch: 1,
+                                    width: root.width,
+                                    height: root.height,
+                                    suspended: true,
+                                })),
+                                follow_parent: None,
+                                #[cfg(feature = "backend-wayland-udev")]
+                                ready_serial: AtomicU64::new(0),
+                            });
+                            let guards = state
+                                .toplevel_capture_authorities
+                                .by_window
+                                .get_mut(&root.window)
+                                .unwrap();
+                            guards.retain(|weak| !weak.ptr_eq(&Arc::downgrade(&root)));
+                            guards.push(Arc::downgrade(&derived));
+                            Some(derived)
+                        })
+                } else {
+                    None
+                };
+                init.init(
+                    id,
+                    ImageCaptureSourceData {
+                        source: root
+                            .as_ref()
+                            .map(|a| CaptureSource::Toplevel(Arc::clone(a))),
+                    },
+                );
+                if let Some(root) = root {
+                    *data.authority.lock().unwrap() = Some(Arc::clone(&root));
+                    resource.suspended(1);
+                    publish_follow_layout(state, &root);
+                } else {
+                    if let Some(root) = data.authority.lock().unwrap().take() {
+                        stop_follow_family(state, &root);
+                    } else {
+                        resource.stopped();
+                    }
+                }
+            }
+        }
+    }
+    fn destroyed(
+        state: &mut Self,
+        _client: ClientId,
+        _resource: &ResizeManager,
+        data: &ResizeManagerData,
+    ) {
+        if let Some(root) = data.authority.lock().unwrap().take() {
+            stop_follow_family(state, &root);
+        }
+    }
+}
+
+fn stop_follow_family(state: &mut JwmWaylandState, root: &CaptureAuthority) {
+    revoke_authority(root);
+    if let Some(sessions) = state.toplevel_capture_sessions.get(&root.window) {
+        for session in sessions.iter().filter_map(|s| s.upgrade().ok()) {
+            if session.data::<CaptureSessionData>().and_then(|d| d.source.as_ref()).is_some_and(|s| {
+                matches!(s, CaptureSource::Toplevel(a) if a.follow_parent.as_ref().is_some_and(|(parent,_)| std::ptr::eq(parent.as_ref(),root)))
+            }) { stop_session(&session); }
+        }
+    }
+    state.request_client_flush();
+}
+#[cfg(all(test, feature = "backend-wayland-udev"))]
+#[path = "image_copy_capture_resize_tests.rs"]
+mod resize_tests;
+
+// xdg_surface geometry is optional and, when present, is clipped to the
+// committed root extent. Never substitute a desired WM size for actual pixels.
+type FollowRect = smithay::utils::Rectangle<i32, smithay::utils::Logical>;
+fn bounded_follow_geometry(bbox: FollowRect, explicit: Option<FollowRect>) -> Option<FollowRect> {
+    if bbox.size.w <= 0 || bbox.size.h <= 0 {
+        return None;
+    }
+    let mut edges = (
+        i64::from(bbox.loc.x),
+        i64::from(bbox.loc.y),
+        i64::from(bbox.loc.x) + i64::from(bbox.size.w),
+        i64::from(bbox.loc.y) + i64::from(bbox.size.h),
+    );
+    if let Some(rect) = explicit {
+        if rect.size.w <= 0 || rect.size.h <= 0 {
+            return None;
+        }
+        edges.0 = edges.0.max(i64::from(rect.loc.x));
+        edges.1 = edges.1.max(i64::from(rect.loc.y));
+        edges.2 = edges.2.min(i64::from(rect.loc.x) + i64::from(rect.size.w));
+        edges.3 = edges.3.min(i64::from(rect.loc.y) + i64::from(rect.size.h));
+    }
+    let (x, y, w, h) = (
+        i32::try_from(edges.0).ok()?,
+        i32::try_from(edges.1).ok()?,
+        u32::try_from(edges.2 - edges.0).ok()?,
+        u32::try_from(edges.3 - edges.1).ok()?,
+    );
+    if !valid_follow_size(w, h)
+        || x.checked_neg().is_none()
+        || y.checked_neg().is_none()
+        || i32::try_from(edges.2).is_err()
+        || i32::try_from(edges.3).is_err()
+    {
+        return None;
+    }
+    Some(FollowRect::new((x, y).into(), (w as i32, h as i32).into()))
+}
+fn follow_effective_geometry(
+    state: &JwmWaylandState,
+    surface: &smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
+) -> Option<FollowRect> {
+    use smithay::backend::renderer::utils::RendererSurfaceStateUserData;
+    use smithay::wayland::compositor::{get_children, with_states};
+    // Follow's first layout contract is a single root. Do not inherit the
+    // unchecked coordinate merging of arbitrary subsurface trees.
+    if !get_children(surface).is_empty() {
+        return None;
+    }
+    let view = with_states(surface, |states| {
+        states
+            .data_map
+            .get::<RendererSurfaceStateUserData>()
+            .and_then(|data| data.lock().unwrap().view())
+    })?;
+    bounded_follow_geometry(
+        FollowRect::new(view.offset, view.dst),
+        state.surface_window_geometry_rect(surface),
+    )
+}
+pub(crate) fn readonly_resize_new_subsurface(
+    state: &mut JwmWaylandState,
+    parent: &smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
+) {
+    let roots: Vec<_> = state
+        .toplevel_capture_authorities
+        .by_window
+        .values()
+        .flatten()
+        .filter_map(std::sync::Weak::upgrade)
+        .filter(|a| a.follow.is_some() && a.surface == *parent)
+        .collect();
+    for root in roots {
+        stop_follow_family(state, &root);
+    }
+}
+
+#[cfg(test)]
+mod follow_geometry_tests {
+    use super::*;
+    #[test]
+    fn popup_follow_effective_origin_defense_requires_a_present_exact_match() {
+        // Synthetic metadata exercises the defensive branch only. Real root
+        // SurfaceView offsets cannot independently move with fixed xdg origin.
+        assert!(popup_follow_origin_matches(
+            true,
+            Some((0, 0)),
+            Some((0, 0))
+        ));
+        assert!(popup_follow_origin_matches(
+            true,
+            Some((-4, 3)),
+            Some((-4, 3))
+        ));
+        assert!(!popup_follow_origin_matches(
+            true,
+            Some((0, 0)),
+            Some((1, 0))
+        ));
+        assert!(!popup_follow_origin_matches(
+            true,
+            Some((0, 0)),
+            Some((0, -1))
+        ));
+        assert!(!popup_follow_origin_matches(true, Some((0, 0)), None));
+        assert!(!popup_follow_origin_matches(true, None, Some((0, 0))));
+        assert!(!popup_follow_origin_matches(true, None, None));
+        // Root-only follow retains its existing origin policy; its separate
+        // committed-geometry validity and epoch checks remain mandatory.
+        assert!(popup_follow_origin_matches(
+            false,
+            Some((0, 0)),
+            Some((1, 2))
+        ));
+        assert!(popup_follow_origin_matches(false, None, None));
+    }
+
+    fn rect(x: i32, y: i32, w: i32, h: i32) -> FollowRect {
+        FollowRect::new((x, y).into(), (w, h).into())
+    }
+    #[test]
+    fn implicit_committed_extent_preserves_origin_and_explicit_geometry_is_clipped() {
+        let bbox = rect(-10, -20, 330, 260);
+        assert_eq!(bounded_follow_geometry(bbox, None), Some(bbox));
+        assert_eq!(
+            bounded_follow_geometry(bbox, Some(rect(0, 0, 400, 300))),
+            Some(rect(0, 0, 320, 240))
+        );
+        assert_eq!(
+            bounded_follow_geometry(bbox, Some(rect(500, 500, 10, 10))),
+            None
+        );
+    }
+    #[test]
+    fn empty_oversized_and_nonrepresentable_capture_extents_are_denied() {
+        for bad in [
+            rect(0, 0, 0, 240),
+            rect(0, 0, 16385, 240),
+            rect(0, 0, 16384, 16384),
+            rect(i32::MIN, 0, 320, 240),
+        ] {
+            assert!(bounded_follow_geometry(bad, None).is_none());
+        }
+    }
+}
+
+use crate::readonly_popup_capture_protocol::server::jwm_readonly_popup_capture_manager_v1::{
+    self as popup_manager, JwmReadonlyPopupCaptureManagerV1 as PopupManager,
+};
+#[derive(Default)]
+pub struct PopupManagerData {
+    used: AtomicBool,
+    authority: Mutex<Option<Arc<CaptureAuthority>>>,
+}
+impl GlobalDispatch<PopupManager, ()> for JwmWaylandState {
+    fn bind(
+        _state: &mut Self,
+        _dh: &DisplayHandle,
+        _client: &Client,
+        resource: New<PopupManager>,
+        _data: &(),
+        init: &mut DataInit<'_, Self>,
+    ) {
+        init.init(resource, PopupManagerData::default());
+    }
+    fn can_view(client: Client, _data: &()) -> bool {
+        capture_global_visible(&client)
+    }
+}
+impl Dispatch<PopupManager, PopupManagerData> for JwmWaylandState {
+    fn request(
+        state: &mut Self,
+        client: &Client,
+        resource: &PopupManager,
+        request: popup_manager::Request,
+        data: &PopupManagerData,
+        _dh: &DisplayHandle,
+        init: &mut DataInit<'_, Self>,
+    ) {
+        match request {
+            popup_manager::Request::Destroy => {}
+            popup_manager::Request::CreateSource { id, source } => {
+                let derived = if !data.used.swap(true, Ordering::AcqRel)
+                    && source
+                        .client()
+                        .is_some_and(|owner| owner.id() == client.id())
+                {
+                    source
+                        .data::<ImageCaptureSourceData>()
+                        .and_then(|d| d.source.as_ref())
+                        .and_then(|s| {
+                            let CaptureSource::Toplevel(original) = s else {
+                                return None;
+                            };
+                            if original.owner != client.id()
+                                || original.include_popups
+                                || original.family.is_some()
+                                || original.follow.is_some()
+                                || original.follow_parent.is_some()
+                                || !authority_is_current(state, original)
+                                || !original.consume_control_attempt()
+                            {
+                                return None;
+                            }
+                            let origin = popup_root_origin(state, &original.surface)?;
+                            let CaptureSource::Toplevel(base) =
+                                create_toplevel_source(state, original.window, client.id())?
+                            else {
+                                return None;
+                            };
+                            let authority = Arc::new(CaptureAuthority {
+                                window: base.window,
+                                surface: base.surface.clone(),
+                                width: base.width,
+                                height: base.height,
+                                owner: base.owner.clone(),
+                                lock_epoch: base.lock_epoch,
+                                buffer_layout: base.buffer_layout,
+                                revoked: AtomicBool::new(false),
+                                input_consumed: AtomicU8::new(3),
+                                include_popups: true,
+                                family: None,
+                                popup_xdg_origin: Some(origin),
+                                popup_manager: Some(resource.clone()),
+                                follow_origin: Some(origin),
+                                follow: None,
+                                follow_parent: None,
+                                #[cfg(feature = "backend-wayland-udev")]
+                                ready_serial: AtomicU64::new(0),
+                            });
+                            let guards = state
+                                .toplevel_capture_authorities
+                                .by_window
+                                .get_mut(&base.window)
+                                .unwrap();
+                            guards.retain(|weak| !weak.ptr_eq(&Arc::downgrade(&base)));
+                            guards.push(Arc::downgrade(&authority));
+                            Some(authority)
+                        })
+                } else {
+                    None
+                };
+                init.init(
+                    id,
+                    ImageCaptureSourceData {
+                        source: derived
+                            .as_ref()
+                            .map(|a| CaptureSource::Toplevel(Arc::clone(a))),
+                    },
+                );
+                if let Some(authority) = derived {
+                    *data.authority.lock().unwrap() = Some(Arc::clone(&authority));
+                    resource.ready(authority.width, authority.height);
+                } else if let Some(authority) = data.authority.lock().unwrap().take() {
+                    stop_popup_family(state, &authority);
+                } else {
+                    resource.stopped();
+                }
+            }
+        }
+    }
+    fn destroyed(
+        state: &mut Self,
+        _client: ClientId,
+        _resource: &PopupManager,
+        data: &PopupManagerData,
+    ) {
+        if let Some(authority) = data.authority.lock().unwrap().take() {
+            stop_popup_family(state, &authority);
+        }
+    }
+}
+fn stop_popup_family(state: &mut JwmWaylandState, authority: &CaptureAuthority) {
+    revoke_authority(authority);
+    if let Some(sessions) = state.toplevel_capture_sessions.get(&authority.window) {
+        for session in sessions.iter().filter_map(|weak| weak.upgrade().ok()) {
+            if session.data::<CaptureSessionData>().and_then(|d| d.source.as_ref()).is_some_and(|s| matches!(s, CaptureSource::Toplevel(a) if std::ptr::eq(a.as_ref(),authority))) {
+                stop_session(&session);
+            }
+        }
+    }
+    state.request_client_flush();
+}
+#[cfg(all(test, feature = "backend-wayland-udev"))]
+#[path = "image_copy_capture_popup_tests.rs"]
+pub(crate) mod popup_tests;
+
+fn popup_root_origin(
+    state: &JwmWaylandState,
+    surface: &smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
+) -> Option<(i32, i32)> {
+    let origin = state
+        .surface_window_geometry_rect(surface)
+        .map(|r| (r.loc.x, r.loc.y))
+        .unwrap_or((0, 0));
+    origin.0.checked_neg()?;
+    origin.1.checked_neg()?;
+    Some(origin)
+}
+
+/// Read-only v2 export validation. The caller must additionally validate its
+/// live lease/epoch and popup admission. This never consumes a frame or renews
+/// a lease, and never reconstructs rendered metadata from current scene state.
+pub(crate) fn export_interactive_family_frame(
+    state: &JwmWaylandState,
+    family: &Arc<super::capture_popup_authority::FamilyAuthority>,
+    source: &ExtImageCaptureSourceV1,
+    frame: &ExtImageCopyCaptureFrameV1,
+    owner: &ClientId,
+) -> Option<(
+    u64,
+    Instant,
+    Arc<super::capture_popup_authority::FamilyProof>,
+)> {
+    if !source.is_alive()
+        || !frame.is_alive()
+        || source.client()?.id() != *owner
+        || frame.client()?.id() != *owner
+    {
+        return None;
+    }
+    let CaptureSource::Toplevel(expected) =
+        source.data::<ImageCaptureSourceData>()?.source.as_ref()?
+    else {
+        return None;
+    };
+    if !expected.owned_by(owner)
+        || expected
+            .family
+            .as_ref()
+            .is_none_or(|f| !Arc::ptr_eq(f, family))
+    {
+        return None;
+    }
+    let data = frame.data::<CaptureFrameData>()?;
+    if !data.captured.load(Ordering::Acquire) || !data.ready.load(Ordering::Acquire) {
+        return None;
+    }
+    let CaptureSource::Toplevel(actual) = data.source.as_ref()? else {
+        return None;
+    };
+    if !Arc::ptr_eq(expected, actual) {
+        return None;
+    }
+    let session = data.session.upgrade().ok()?;
+    if !session.is_alive() || session.client()?.id() != *owner {
+        return None;
+    }
+    let session_data = session.data::<CaptureSessionData>()?;
+    if session_data.stopped.load(Ordering::Acquire)
+        || !matches!(&session_data.source, Some(CaptureSource::Toplevel(a)) if Arc::ptr_eq(a, expected))
+    {
+        return None;
+    }
+    let proof = data.family_proof.lock().unwrap().clone()?;
+    if !Arc::ptr_eq(&proof.authority, family) || !proof.current(state) {
+        return None;
+    }
+    proof.export_layout()?;
+    let (serial, at) = (*data.ready_stamp.lock().unwrap())?;
+    if serial == 0 || Instant::now().checked_duration_since(at)? > std::time::Duration::from_secs(1)
+    {
+        return None;
+    }
+    Some((serial, at, proof))
 }

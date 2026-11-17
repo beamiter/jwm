@@ -686,10 +686,34 @@ mod tests {
             {
                 break;
             }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "single-instance player failed to load both queued requests"
-            );
+            if std::time::Instant::now() >= deadline {
+                // Preserve the original readiness assertion, but distinguish
+                // a failed launcher from a loaded queue whose cursor skipped.
+                let readiness = tokio::time::timeout(Duration::from_secs(2), async {
+                    let next = property(&client, "CanGoNext").await;
+                    let previous = property(&client, "CanGoPrevious").await;
+                    let status = property(&client, "PlaybackStatus").await;
+                    let queued = property_on(&client, NATIVE, "QueuedUrls").await;
+                    (next, previous, status, queued)
+                })
+                .await;
+                let first_result = if first.is_finished() {
+                    Some(first.await)
+                } else {
+                    None
+                };
+                let second_result = if second.is_finished() {
+                    Some(second.await)
+                } else {
+                    None
+                };
+                panic!(
+                    "single-instance player failed to load both queued requests: \
+                     readiness(next,previous,status,queued)={readiness:?}, \
+                     first={first_result:?}, second={second_result:?} \
+                     (None means launcher still running)"
+                );
+            }
             tokio::time::sleep(Duration::from_millis(30)).await;
         }
         // Exactly one launch stays alive. The other forwarded its request
@@ -947,13 +971,21 @@ mod tests {
     }
 
     async fn property(connection: &Connection, name: &str) -> zbus::Result<OwnedValue> {
+        property_on(connection, PLAYER, name).await
+    }
+
+    async fn property_on(
+        connection: &Connection,
+        interface: &str,
+        name: &str,
+    ) -> zbus::Result<OwnedValue> {
         let reply = connection
             .call_method(
                 Some(NAME),
                 PATH,
                 Some("org.freedesktop.DBus.Properties"),
                 "Get",
-                &(PLAYER, name),
+                &(interface, name),
             )
             .await?;
         reply.body().deserialize()

@@ -605,11 +605,14 @@ pub(crate) fn decode_rgb8_into_pool(
         .into());
     }
     let mut pixels = prepare_decode_buffer(pool, expected_len)?;
+    // The tolerant JPEG backend can return success after only a partial scan.
+    // A recycled buffer must never contribute pixels from its previous frame.
+    pixels.clear();
     pixels.resize(expected_len, 0);
     if let Err(error) = decode(&mut pixels) {
         // A decoder can fail after partially filling the destination. The
         // buffer remains private in the pool; no frame publishes those bytes,
-        // and a later successful read_image overwrites its complete slice.
+        // and the next decode attempt initializes the entire slice again.
         recycle_decode_buffer(pool, pixels);
         return Err(error.into());
     }
@@ -917,6 +920,22 @@ mod tests {
     }
 
     #[test]
+    fn partial_success_uses_initialized_pixels_in_recycled_destination() {
+        let pool = new_decode_buffer_pool();
+        let pixels = vec![213; 48];
+        let pointer = pixels.as_ptr();
+        recycle_decode_buffer(&pool, pixels);
+        let reused = decode_rgb8_into_pool(4, 4, 48, &pool, |pixels| {
+            pixels[..12].fill(42);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(reused.as_raw().as_ptr(), pointer);
+        assert_eq!(&reused.as_raw()[..12], &[42; 12]);
+        assert_eq!(&reused.as_raw()[12..], &[0; 36]);
+    }
+
+    #[test]
     fn frame_round_trip_keeps_metadata_and_dimensions() {
         let image = RgbImage::from_fn(8, 4, |x, y| Rgb([(x * 20) as u8, (y * 40) as u8, 90]));
         let payload = encode_frame(
@@ -1209,14 +1228,14 @@ mod tests {
     }
 
     #[test]
-    fn same_size_reuse_skips_zero_fill_and_growth_initializes_only_the_delta() {
+    fn same_size_and_grown_reuse_initialize_the_complete_destination() {
         let pool = new_decode_buffer_pool();
         let seeded = vec![0x5a; 24];
         let pointer = seeded.as_ptr();
         recycle_decode_buffer(&pool, seeded);
 
         let same_size = decode_rgb8_into_pool(4, 2, 24, &pool, |pixels| {
-            assert!(pixels.iter().all(|byte| *byte == 0x5a));
+            assert!(pixels.iter().all(|byte| *byte == 0));
             pixels.fill(0x11);
             Ok(())
         })
@@ -1228,8 +1247,7 @@ mod tests {
         shorter.fill(0x33);
         recycle_decode_buffer(&pool, shorter);
         let grown = decode_rgb8_into_pool(4, 2, 24, &pool, |pixels| {
-            assert!(pixels[..12].iter().all(|byte| *byte == 0x33));
-            assert!(pixels[12..].iter().all(|byte| *byte == 0));
+            assert!(pixels.iter().all(|byte| *byte == 0));
             pixels.fill(0x22);
             Ok(())
         })

@@ -286,6 +286,16 @@ impl CairoRenderer {
                 if let Some(backdrop) = backdrop.filter(|_| !self.capsule) {
                     paint_backdrop(context, backdrop, scene_clip)?;
                 }
+                // LCD subpixel coverage assumes an opaque destination. On
+                // alpha surfaces it can produce colored channels above alpha,
+                // which become fringes when the bar is composited. Keep text
+                // coverage grayscale while preserving other font options and
+                // the caller's saved Cairo state.
+                if context.target().content() == cairo::Content::ColorAlpha {
+                    let mut options = context.font_options()?;
+                    options.set_antialias(cairo::Antialias::Gray);
+                    context.set_font_options(&options);
+                }
                 let layout = pangocairo::functions::create_layout(context);
                 layout.set_single_paragraph_mode(true);
 
@@ -2259,17 +2269,25 @@ mod tests {
                 };
                 {
                     let context = Context::new(&surface).unwrap();
+                    let mut options = cairo::FontOptions::new().unwrap();
+                    options.set_antialias(cairo::Antialias::Subpixel);
+                    options.set_subpixel_order(cairo::SubpixelOrder::Rgb);
+                    context.set_font_options(&options);
                     context.scale(scale, scale);
                     CairoRenderer::new(FontDescription::from_string("Sans"))
                         .with_background_opacity(0.0)
                         .render(&context, &scene)
                         .unwrap();
+                    assert_eq!(
+                        context.font_options().unwrap().antialias(),
+                        cairo::Antialias::Subpixel
+                    );
                 }
                 surface.flush();
                 let data = surface.data().unwrap();
                 let mut ink_pixels = 0;
-                for bytes in data.chunks_exact(4) {
-                    let pixel = u32::from_ne_bytes(bytes.try_into().unwrap());
+                for bytes in data.as_chunks::<4>().0 {
+                    let pixel = u32::from_ne_bytes(*bytes);
                     let alpha = (pixel >> 24) as u8;
                     ink_pixels += usize::from(alpha > 0);
                     // Premultiplied antialiased edges must contain only the

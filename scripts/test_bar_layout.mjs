@@ -35,6 +35,13 @@ for (const name of requestedFrontends) {
 }
 const styles = allStyles.filter(([name]) => requestedFrontends.includes(name));
 
+// This is the Playwright library, not the test runner: locator actions would
+// otherwise wait indefinitely. Fail with the original selector/actionability
+// trace while retaining every fixture and assertion.
+const actionTimeout = 15_000;
+const progress = (description, phase) =>
+  console.log(`[bar-layout] ${description}: ${phase}`);
+
 // Runs in the page, against live layout boxes rather than stylesheet text.
 // Keep this function self-contained so it can also run in a standalone
 // Chromium fixture when Playwright is unavailable in a constrained runner.
@@ -128,9 +135,11 @@ async function assertHoverStability(page, description) {
     });
   for (const selector of ['.volume-pill', '.brightness-pill', '.layout-toggle', '.layout-option']) {
     const target = page.locator(selector).first();
+    progress(description, `hover ${selector}: scroll into view`);
     await target.scrollIntoViewIfNeeded();
     await page.mouse.move(-10, -10);
     const before = await page.evaluate(rects);
+    progress(description, `hover ${selector}: pointer action`);
     await target.hover();
     assert.equal(await target.evaluate(node => node.matches(':hover')), true, `${description}: actual hover on ${selector}`);
     assert.deepEqual(await page.evaluate(rects), before, `${description}: ${selector} hover must preserve layout and hit rectangles`);
@@ -146,6 +155,7 @@ async function assertLongClock(page, description) {
   let readings = 0;
   try {
     for (const value of ['2026-10-29 13:07', '2026-10-29 13:07:43']) {
+      progress(description, `long clock ${value}`);
       const measured = await clock.evaluate((node, value) => {
         const text = [...node.childNodes].find(child => child.nodeType === Node.TEXT_NODE && child.textContent.trim());
         text.textContent = value;
@@ -179,7 +189,12 @@ async function assertLongClock(page, description) {
 }
 
 async function assertToolbarInteraction(page, install, vertical, description) {
-  const settle = () => page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  let settlement = 0;
+  const settle = () => {
+    progress(description, `toolbar: await animation frames ${++settlement}`);
+    return page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  };
+  progress(description, 'toolbar: tab entry and exit');
   const tabStops = () => page.evaluate(() => [...document.querySelectorAll('.button-row button, .button-row [role="button"]')]
     .filter(node => node.tabIndex === 0).length);
   const volume = page.locator('.volume-pill');
@@ -198,6 +213,7 @@ async function assertToolbarInteraction(page, install, vertical, description) {
   await page.keyboard.press('Shift+Tab');
   assert.equal(await volume.evaluate(node => document.activeElement === node), true, `${description}: Shift+Tab returns to the remembered control`);
 
+  progress(description, 'toolbar: metric keyboard and wheel ownership');
   await page.evaluate(() => {
     window.metricSteps = [];
     document.querySelectorAll('.volume-pill, .brightness-pill').forEach(node =>
@@ -232,6 +248,7 @@ async function assertToolbarInteraction(page, install, vertical, description) {
   assert.deepEqual(await page.evaluate(() => window.metricSteps), [1, 1, -1, 1], `${description}: pixels, notches, direction reversal and fractional lines`);
 
   await page.evaluate(install);
+  progress(description, 'toolbar: scrolling gesture ownership');
   const scroll = await page.evaluate(vertical => {
     window.metricSteps = [];
     const group = document.querySelector('.right-info-container');
@@ -247,6 +264,7 @@ async function assertToolbarInteraction(page, install, vertical, description) {
   await settle();
   assert.equal(await page.locator('.right-info-container').getAttribute('data-xbar-scroll-before'), 'true', `${description}: overflow direction is discoverable`);
 
+  progress(description, 'toolbar: removed option focus repair');
   await page.locator('.layout-option').first().focus();
   await page.evaluate(() => {
     window.removedOption = document.querySelector('.layout-option');
@@ -257,6 +275,7 @@ async function assertToolbarInteraction(page, install, vertical, description) {
   assert.equal(await page.evaluate(() => document.activeElement.classList.contains('layout-toggle')), true, `${description}: removed layout options return focus to their toggle`);
   await page.evaluate(() => window.optionParent.prepend(window.removedOption));
   await settle();
+  progress(description, 'toolbar: replaced window focus repair');
   await page.locator('[data-window-id="2"]').focus();
   await page.evaluate(() => {
     window.originalWindow = document.querySelector('[data-window-id="2"]');
@@ -266,12 +285,14 @@ async function assertToolbarInteraction(page, install, vertical, description) {
   assert.equal(await page.evaluate(() => document.activeElement.dataset.windowId), '2', `${description}: reactive replacement preserves focused window identity`);
   await page.evaluate(() => document.querySelector('[data-window-id="2"]').replaceWith(window.originalWindow));
   await settle();
+  progress(description, 'toolbar: disabled workspace focus repair');
   await page.locator('.emoji-button').first().focus();
   await page.locator('.emoji-button').first().evaluate(node => node.disabled = true);
   await settle();
   assert.equal(await page.evaluate(() => document.activeElement.title), 'Workspace 2', `${description}: a disabled active control repairs focus`);
   await page.locator('.emoji-button').first().evaluate(node => node.disabled = false);
 
+  progress(description, 'toolbar: outside focus preservation');
   await page.locator('#toolbar-exit').focus();
   await page.evaluate(() => document.querySelector('[data-window-id="2"]').replaceWith(window.originalWindow.cloneNode(true)));
   await settle();
@@ -288,6 +309,11 @@ const browser = await chromium.launch({
   executablePath: process.env.CHROME_BIN || undefined,
   headless: true,
 });
+const newPage = async options => {
+  const page = await browser.newPage(options);
+  page.setDefaultTimeout(actionTimeout);
+  return page;
+};
 let cases = 0;
 let metricCases = 0;
 let interactionCases = 0;
@@ -298,9 +324,11 @@ try {
     const css = name === 'vue' ? source.match(/<style[^>]*>([\s\S]*?)<\/style>/)[1] : source;
     for (const edge of ['top', 'bottom', 'left', 'right']) {
       for (const [length, thickness] of [[900, 42], [320, 42], [450, 21]]) {
+        const description = `${name}/${edge}/${length}×${thickness}`;
+        progress(description, 'create page');
         const vertical = edge === 'left' || edge === 'right';
         const viewport = vertical ? { width: thickness, height: length } : { width: length, height: thickness };
-        const page = await browser.newPage({ viewport, reducedMotion: 'reduce' });
+        const page = await newPage({ viewport, reducedMotion: 'reduce' });
         const errors = [];
         page.on('pageerror', error => errors.push(error.message));
         const tags = Array.from({ length: 9 }, (_, i) =>
@@ -309,6 +337,7 @@ try {
           ? `<div class="minimized-dock-slot"><div class="minimized-dock-card" data-window-id="${i + 1}" title="Restore window ${i + 1}">${i + 1}</div></div>`
           : `<button class="minimized-item" data-window-id="${i + 1}" title="Restore window ${i + 1}"><span class="minimized-thumbnail"><span class="minimized-initial">${i + 1}</span></span></button>`).join('');
         const metricTag = name === 'svelte' ? 'button' : 'div';
+        progress(description, 'load fixture');
         await page.setContent(`<!doctype html><html><head><style>${css}</style><style>${layout}</style></head><body><div id="root"><div class="button-row">
           <div class="buttons-container">${tags}<div class="layout-controls"><div class="pill layout-toggle" title="Choose layout">[]=</div><div class="layout-selector"><div class="pill layout-option" title="Tiled">[]=</div><div class="pill layout-option" title="Floating">&gt;&lt;&gt;</div></div></div></div>
           <div class="spacer"></div><div class="right-info-container">
@@ -322,6 +351,7 @@ try {
           <div class="pill monitor-pill">1</div><div class="pill scale-pill">1.00</div>
           </div></div></div></body></html>`);
         const install = `(function(){const edge='${edge}';const thickness=${thickness};${installer}})()`;
+        progress(description, 'install adapter');
         await page.evaluate(install);
         // Readiness replay must replace listeners, not double activation.
         await page.evaluate(install);
@@ -333,7 +363,7 @@ try {
           document.querySelectorAll('button, [role="button"]').forEach(node =>
             node.addEventListener('click', () => window.activations++));
         });
-        const description = `${name}/${edge}/${length}×${thickness}`;
+        progress(description, 'layout and accessibility bounds');
         const bounds = await page.evaluate(vertical => {
           const rect = node => {
             const r = node.getBoundingClientRect();
@@ -372,10 +402,12 @@ try {
           assert(bounds.clock.y >= bounds.status.y - 1 && bounds.clock.y + bounds.clock.height <= bounds.status.y + bounds.status.height + 1,
             `${description}: clock must remain initially visible`);
         }
+        progress(description, 'metric stability');
         const stableMetrics = await page.evaluate(metricStabilityProbe, vertical);
         assert.equal(stableMetrics.metrics, 5, `${description}: CPU, memory, battery, brightness and volume coverage`);
         metricCases += stableMetrics.cases;
         await assertHoverStability(page, description);
+        progress(description, 'keyboard activation and navigation');
         const first = page.locator('.emoji-button').first();
         await first.focus();
         await page.keyboard.press('Enter');
@@ -415,14 +447,17 @@ try {
           await mkdir(process.env.BAR_SCREENSHOTS, { recursive: true });
           await page.screenshot({ path: resolve(process.env.BAR_SCREENSHOTS, `${name}-${edge}.png`) });
         }
+        progress(description, 'close page');
         await page.close();
+        progress(description, 'PASS');
         cases++;
       }
     }
   }
   // Geometry is measured after transforms and nested scrolling in actual DOM.
   // This catches stale animation anchors and re-reporting of hidden cards.
-  const geometryPage = await browser.newPage({ viewport: { width: 300, height: 240 } });
+  progress('transformed/scrolling geometry', 'create page and measure');
+  const geometryPage = await newPage({ viewport: { width: 300, height: 240 } });
   await geometryPage.setContent(`<style>*{box-sizing:border-box}body{margin:0}
     #clip{position:absolute;left:50px;top:30px;width:120px;height:100px;overflow:auto;border:2px solid black}
     #content{position:relative;height:500px;width:110px}
@@ -456,12 +491,14 @@ try {
   assert.equal(geometry.retired, null, 'scrolled-out card withdraws its anchor');
   assert.equal(geometry.detached, null, 'removed card withdraws its anchor');
   await geometryPage.close();
+  progress('transformed/scrolling geometry', 'PASS');
 
   // Core-positioned Dioxus cards must ignore generic flex/width overrides and
   // remain pinned when the neighboring status scroller moves.
   for (const edge of ['top', 'bottom', 'left', 'right']) {
+    progress(`pinned core dock/${edge}`, 'create page and measure');
     const vertical = edge === 'left' || edge === 'right';
-    const page = await browser.newPage({ viewport: vertical ? { width: 42, height: 400 } : { width: 400, height: 42 } });
+    const page = await newPage({ viewport: vertical ? { width: 42, height: 400 } : { width: 400, height: 42 } });
     const css = await read('bars/dioxus_bar/assets/style.css');
     const shelf = vertical ? { x: 0, y: 290, width: 42, height: 104 } : { x: 290, y: 0, width: 104, height: 42 };
     const slot = vertical ? { x: 0, y: 4, width: 42, height: 32 } : { x: 4, y: 0, width: 46, height: 42 };
@@ -489,8 +526,10 @@ try {
     assert.deepEqual(measured.card, { x: shelf.x + slot.x + 6, y: shelf.y + slot.y + 6, width: 30, height: 20 }, `${edge}: exact core visual card`);
     assert.deepEqual(measured.after, measured.slot, `${edge}: status scrolling cannot move core dock`);
     await page.close();
+    progress(`pinned core dock/${edge}`, 'PASS');
   }
 } finally {
+  progress('browser', 'close');
   await browser.close();
 }
 console.log(`PASS: ${cases} browser layout/accessibility cases (${styles.length} frontends × 4 edges × 3 sizes), ${metricCases} metric transitions, ${interactionCases} toolbar interaction cases, ${longClockReadings} long clock readings, stable hover targets, transformed/scrolling geometry, and 4 pinned core dock allocations.`);

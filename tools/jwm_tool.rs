@@ -9676,6 +9676,13 @@ mod daemon_diagnostics_tests {
     fn actual_pipe_capture_bounds_long_unterminated_input() {
         let dir = PrivateDir::new("flood");
         let path = dir.log();
+        // The bounded capture queue may legitimately discard most of a flood.
+        // Seed exactly one generation synchronously so the first accepted
+        // chunk must rotate, independent of how much the logger can retain.
+        let mut seed = RotatingLog::open(&path, LOG_BYTES).unwrap();
+        seed.write_all(&vec![0; LOG_BYTES as usize]).unwrap();
+        drop(seed);
+        assert_eq!(fs::metadata(&path).unwrap().len(), LOG_BYTES);
         let capture = Capture::start(&path).unwrap();
         let mut child = Command::new("sh")
             .args(["-c", "head -c 4194304 /dev/zero >&2"])

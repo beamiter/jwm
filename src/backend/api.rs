@@ -2395,6 +2395,19 @@ pub enum BackendEvent {
 }
 
 pub trait WindowOps: Send {
+    /// Atomically fence retained X11 challenge, lifecycle history, mapped
+    /// state and complete expected geometry, then configure under GrabServer.
+    /// Never wait for IPC/capture or invoke arbitrary callbacks while grabbed.
+    fn configure_remote_resize(
+        &self,
+        _win: WindowId,
+        _challenge: [u8; 32],
+        _expected: Geometry,
+        _target: Geometry,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::Unsupported("atomic X11 remote resize"))
+    }
+
     fn set_position(&self, win: WindowId, x: i32, y: i32) -> Result<(), BackendError>;
     fn configure(
         &self,
@@ -2609,6 +2622,11 @@ impl RestartProperty {
 }
 
 pub trait PropertyOps: Send {
+    /// Bounded STRING/8 challenge, verified behind a native lifecycle fence.
+    fn remote_resize_challenge(&self, _win: WindowId) -> Result<Option<[u8; 32]>, BackendError> {
+        Ok(None)
+    }
+
     /// Missing or malformed X11 properties return None; transport failures remain errors.
     fn get_restart_property(
         &self,

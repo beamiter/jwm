@@ -1,0 +1,108 @@
+name: Remote window safety
+
+on:
+  push:
+    branches: [master, dot/remote-window-plan, dot/remote-readback-snapshot, dot/remote-popup-v2, dot/remote-popup-adapter, dot/remote-popup-action, dot/remote-popup-network, dot/remote-popup-cancel, dot/remote-popup-terminal, dot/remote-viewer-damage, dot/seamless-input]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: remote-window-safety-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  window-safety:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Install compiler and private X11 dependencies
+        timeout-minutes: 10
+        run: |
+          bash scripts/ci-install-deps.sh build-essential pkg-config libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev xvfb xauth \
+            libudev-dev libinput-dev libx11-dev libx11-xcb-dev libxext-dev libxxf86vm-dev libxcursor-dev \
+            libxfixes-dev libxi-dev libxrandr-dev libxrender-dev libgl1-mesa-dev libegl1-mesa-dev \
+            libxcb-composite0-dev libxcb-damage0-dev libxcb-present-dev libxcb-randr0-dev \
+            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev xcompmgr dbus-x11 x11-utils
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          components: rustfmt,clippy
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
+      - name: Format and lint remote targets
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --locked --no-default-features --features remote-x11 --lib --bin jwm-remote --tests --no-deps -- -D warnings
+      - name: Noise v3 handshake, key confirmation and real TCP deadlines
+        run: cargo test --locked --no-default-features --features remote-x11 --lib remote::protocol::noise_ -- --test-threads=1 --nocapture
+      - name: Unit and workload regressions
+        run: |
+          export XDG_RUNTIME_DIR="$(mktemp -d)"
+          cargo test --locked --no-default-features --features remote-x11 --lib remote::
+          cargo test --locked --no-default-features --features remote-x11 --bin jwm-remote
+          python3 scripts/test-remote-workload-report.py
+          python3 scripts/test-remote-benchmark-metadata.py
+      - name: Native authority checks and both X11 backend compilation
+        run: |
+          export XDG_RUNTIME_DIR="$(mktemp -d)"
+          cargo clippy --locked --no-default-features --features remote-x11,backend-x11rb,backend-xcb --lib --bins --tests --no-deps -- -D warnings
+          cargo test --locked --no-default-features --features remote-x11 --lib remote_resize
+          cargo test --locked --no-default-features --features remote-x11 --lib resize_owner_lifetime_ends_at_disconnect_or_read_half_close
+          cargo test --locked --no-default-features --features remote-x11,backend-x11rb,backend-xcb --lib resize_history_fence
+          cargo build --locked --no-default-features --features remote-x11,backend-x11rb --bin jwm --bin jwm-remote
+      - name: Sequential viewer lifecycle tests on one owned X server
+        run: |
+          # Do not reset the server between independent client lifetimes.
+          xvfb-run -a -s '-screen 0 1024x768x24 -nolisten tcp -noreset' \
+            sh -ec 'JWM_REMOTE_TEST_VIEWER_OWNED=1 JWM_TEST_X11_DISPLAY="$DISPLAY" cargo test --locked --no-default-features --features remote-x11 --lib remote::x11_viewer::tests:: -- --ignored --test-threads=1 --nocapture'
+      - name: Real X11 lifecycle and pixel isolation tests
+        run: |
+          xvfb-run -a -s '-screen 0 800x600x24 -nolisten tcp -noreset' sh -ec '
+            export JWM_REMOTE_TEST_DISPLAY="$DISPLAY"
+            export JWM_TEST_X11_DISPLAY="$DISPLAY"
+            export JWM_REMOTE_TEST_VIEWER_OWNED=1
+            cargo test --locked --no-default-features --features remote-x11 --lib seamless_input_crossing_releases_and_escape_requires_exit_on_x11 -- --ignored --test-threads=1 --nocapture
+            cargo test --locked --no-default-features --features remote-x11 --lib seamless_stale_entry_must_not_grab_an_occluding_local_window -- --ignored --test-threads=1 --nocapture
+            cargo test --locked --no-default-features --features remote-x11 --lib seamless_hit_path_accepts_reparented_viewer_and_its_child -- --ignored --test-threads=1 --nocapture
+            cargo test --locked --no-default-features --features remote-x11 --lib terminal_cleanup_releases_input_preserves_intent_and_never_regrabs -- --ignored --test-threads=1 --nocapture
+            cargo test --locked --no-default-features --features remote-x11 --lib transport_cleanup_returns_local_input_before_waiting_for_receiver -- --ignored --test-threads=1 --nocapture
+            cargo test --locked --no-default-features --features remote-x11 --lib window_capture_integration -- --ignored --test-threads=1 --nocapture
+            cargo test --locked --no-default-features --features remote-x11,backend-xcb --lib resize_history_fence_xcb_native -- --ignored --test-threads=1 --nocapture
+          '
+      - name: Actual core readback compatibility and top-edge display pixels
+        run: |
+          cargo test --locked --no-default-features --features remote-x11,backend-x11rb --lib owned_x_core_compatibility_survives_viewport_limits_and_source_switch -- --test-threads=1 --nocapture
+          xvfb-run -a -s '-screen 0 1280x900x24 -nolisten tcp' sh -ec '
+            export JWM_REMOTE_TEST_VIEWER_OWNED=1
+            export JWM_REMOTE_TEST_VIEWER_DISPLAY="$DISPLAY"
+            cargo test --locked --no-default-features --features remote-x11 --lib actual_top_edge_codec_scaled_core_and_shm_pixels -- --ignored --test-threads=1 --nocapture
+          '
+      - name: Real JWM explicit resize authority and viewer round trip
+        run: |
+          python3 scripts/test-remote-window-resize-e2e.py --self-test
+          python3 scripts/test-remote-window-resize-e2e.py --jwm target/debug/jwm --remote target/debug/jwm-remote --report /tmp/remote-window-resize-e2e.json
+      - name: Real JWM continuous read-only source-size following
+        run: |
+          python3 scripts/test-remote-follow-size-e2e.py --self-test
+          for attempt in 1 2 3; do
+            python3 scripts/test-remote-follow-size-e2e.py --jwm target/debug/jwm --remote target/debug/jwm-remote --report "/tmp/remote-follow-size-e2e-${attempt}.json"
+          done
+      - name: Preserve bounded resize test diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: remote-window-resize-diagnostics
+          path: |
+            /tmp/remote-window-resize-e2e.json
+            /tmp/remote-follow-size-e2e-*.json
+            /tmp/jwm-follow-size-e2e-*/*.log
+            /tmp/jwm-follow-size-e2e-*/host/*.log
+            /tmp/jwm-follow-size-e2e-*/viewer/*.log
+            /tmp/jwm-window-resize-e2e-*/*.log
+            /tmp/jwm-window-resize-e2e-*/host/*.log
+            /tmp/jwm-window-resize-e2e-*/viewer/*.log
+          if-no-files-found: ignore
+          retention-days: 3

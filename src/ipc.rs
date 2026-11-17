@@ -367,6 +367,10 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "zoom_master",
     ],
     special_commands: &[
+        "task_workspace_view",
+        "remote_resize_grant",
+        "remote_resize_apply",
+        "remote_resize_revoke",
         "register_agent_session",
         "unregister_agent_session",
         "activate_agent_session",
@@ -559,6 +563,7 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "get_wins",
         "get_wl",
         "get_wly",
+        "get_task_workspace_state",
         "get_workspaces",
         "get_ws",
         "get_xw",

@@ -407,6 +407,11 @@ pub struct JwmWaylandState {
     pub fractional_scale_state: FractionalScaleManagerState,
     pub cursor_shape_state: CursorShapeManagerState,
     pub presentation_state: PresentationState,
+    /// Exact output submissions from an earlier VT tenure can never prove
+    /// presentation after pause/resume. None permanently disables evidence
+    /// after generation exhaustion instead of permitting an ABA wraparound.
+    #[cfg_attr(not(feature = "backend-wayland-udev"), allow(dead_code))]
+    pub(crate) presentation_generation: Option<u64>,
     pub pointer_gestures_state: PointerGesturesState,
     pub single_pixel_buffer_state: SinglePixelBufferState,
     pub content_type_state: ContentTypeState,
@@ -603,6 +608,14 @@ pub struct JwmWaylandState {
         Option<crate::backend::wayland_udev::image_copy_capture::PendingImageCaptureQueue>,
     /// Live ext-image-copy-capture sessions of each captured window, stopped
     /// when the window is retired (see `retire_window_geometry`).
+    pub(crate) remote_pointer: crate::backend::wayland_udev::remote_pointer::RemotePointerState,
+    pub(crate) remote_text: crate::backend::wayland_udev::remote_text::RemoteTextState,
+    pub(crate) viewer_handoff: crate::backend::wayland_udev::viewer_handoff::HandoffState,
+    pub(crate) remote_control: crate::backend::wayland_udev::remote_control::RemoteControlState,
+    pub(crate) remote_popup: crate::backend::wayland_udev::remote_popup::RemotePopupState,
+    pub(crate) remote_keyboard: crate::backend::wayland_udev::remote_keyboard::RemoteKeyboardState,
+    pub(crate) toplevel_capture_authorities:
+        crate::backend::wayland_udev::image_copy_capture::ToplevelCaptureAuthorities,
     pub(crate) toplevel_capture_sessions:
         crate::backend::wayland_udev::image_copy_capture::ToplevelCaptureSessions,
 
@@ -756,9 +769,30 @@ where
     due
 }
 
+fn next_presentation_generation(generation: Option<u64>) -> Option<u64> {
+    generation.and_then(|generation| generation.checked_add(1))
+}
+
 impl JwmWaylandState {
+    #[cfg_attr(not(feature = "backend-wayland-udev"), allow(dead_code))]
+    pub(crate) fn invalidate_presentation_generation(&mut self) {
+        self.presentation_generation = next_presentation_generation(self.presentation_generation);
+    }
+
     #[allow(dead_code)]
     pub(crate) fn set_manager_window_mapped(&mut self, win: WindowId, mapped: bool) {
+        if self.mapped_windows.contains(&win) != mapped
+            || self.manager_unmapped_windows.contains(&win) == mapped
+        {
+            self.invalidate_presentation_generation();
+        }
+        if !mapped
+            && crate::backend::wayland_udev::image_copy_capture::stop_toplevel_capture_sessions(
+                self, win,
+            )
+        {
+            self.request_client_flush();
+        }
         apply_manager_mapping_state(
             &mut self.mapped_windows,
             &mut self.manager_unmapped_windows,
@@ -773,6 +807,14 @@ impl JwmWaylandState {
     }
 
     fn take_window_mapping(&mut self, win: WindowId) -> bool {
+        // Invalidate before mutation: per-window commit counters may reset on
+        // unmap, so checking only current mapped state cannot detect an ABA.
+        self.invalidate_presentation_generation();
+        if crate::backend::wayland_udev::image_copy_capture::stop_toplevel_capture_sessions(
+            self, win,
+        ) {
+            self.request_client_flush();
+        }
         take_window_mapping_state(
             &mut self.mapped_windows,
             &mut self.manager_unmapped_windows,
@@ -1355,6 +1397,14 @@ delegate_dispatch2!(JwmWaylandState);
 // ---------------------------------------------------------------------------
 impl PointerConstraintsHandler for JwmWaylandState {
     fn new_constraint(&mut self, surface: &WlSurface, pointer: &PointerHandle<Self>) {
+        crate::backend::wayland_udev::remote_popup::revoke(
+            self,
+            crate::backend::wayland_udev::remote_popup::SEAT,
+        );
+        crate::backend::wayland_udev::remote_pointer::revoke(
+            self,
+            crate::backend::wayland_udev::remote_pointer::SEAT,
+        );
         if self.session_locked {
             return;
         }
@@ -1385,6 +1435,14 @@ impl PointerConstraintsHandler for JwmWaylandState {
         _pointer: &PointerHandle<Self>,
         location: Point<f64, Logical>,
     ) {
+        crate::backend::wayland_udev::remote_popup::revoke(
+            self,
+            crate::backend::wayland_udev::remote_popup::SEAT,
+        );
+        crate::backend::wayland_udev::remote_pointer::revoke(
+            self,
+            crate::backend::wayland_udev::remote_pointer::SEAT,
+        );
         if self.session_locked {
             return;
         }
@@ -1429,9 +1487,11 @@ impl SessionLockHandler for JwmWaylandState {
         // or gave its request up: the spec lets a new client take over
         // without an `unlock`. Drop stale surfaces so the new locker owns
         // every output cleanly.
+        self.invalidate_presentation_generation();
         self.active_session_lock = None;
         self.lock_surfaces.clear();
         self.session_locked = true;
+        crate::backend::wayland_udev::image_copy_capture::stop_all_toplevel_capture_sessions(self);
         self.session_lock_epoch = self.session_lock_epoch.wrapping_add(1);
         self.revoke_unlocked_input();
         self.discard_locked_wm_input();
@@ -1473,6 +1533,7 @@ impl SessionLockHandler for JwmWaylandState {
 
     fn unlock(&mut self) {
         info!("[udev/wayland] session unlocked");
+        self.invalidate_presentation_generation();
         self.session_locked = false;
         self.lock_surfaces.clear();
         self.active_session_lock = None;
@@ -1587,7 +1648,42 @@ impl JwmWaylandState {
 
     /// Centralize compositor focus changes so late window/popup callbacks
     /// cannot replace the locker's focus with an ordinary client.
+    pub(crate) fn remote_keyboard_target_eligible(
+        &self,
+        authority: &crate::backend::wayland_udev::image_copy_capture::CaptureAuthority,
+    ) -> bool {
+        // XWayland is one Wayland keyboard client for many X windows. Native
+        // surface focus cannot constrain its separate internal X focus.
+        !crate::backend::wayland_udev::remote_popup::active(self)
+            && self
+                .toplevels
+                .get(&authority.window)
+                .is_some_and(|toplevel| toplevel.wl_surface() == &authority.surface)
+            && PopupManager::popups_for_surface(&authority.surface)
+                .next()
+                .is_none()
+    }
+    pub(crate) fn remote_keyboard_seat_eligible(&self) -> bool {
+        !self.session_locked
+            && !self.virtual_input_blocked
+            && self
+                .virtual_keyboards
+                .values()
+                .all(|delivery| !delivery.has_held())
+            && self.im_popups.iter().all(|popup| !popup.alive())
+    }
     pub(crate) fn set_keyboard_focus(&mut self, focus: Option<WlSurface>, serial: Serial) {
+        if self
+            .seat
+            .get_keyboard()
+            .and_then(|keyboard| keyboard.current_focus())
+            != focus
+        {
+            crate::backend::wayland_udev::remote_keyboard::revoke(
+                self,
+                crate::backend::wayland_udev::remote_keyboard::SEAT,
+            );
+        }
         if self.session_locked
             && focus
                 .as_ref()
@@ -2694,6 +2790,7 @@ impl XwmHandler for JwmWaylandState {
         self.window_is_fullscreen.insert(win_id, false);
         self.window_stack.push(win_id);
 
+        self.invalidate_presentation_generation();
         self.mapped_windows.insert(win_id);
         self.needs_redraw = true;
 
@@ -2828,6 +2925,12 @@ impl XwmHandler for JwmWaylandState {
                 .window_geometry
                 .get(&win_id)
                 .map_or(0, |prior| prior.border);
+            crate::backend::wayland_udev::image_copy_capture::toplevel_capture_geometry_changing(
+                self,
+                win_id,
+                geometry.size.w.max(1) as u32,
+                geometry.size.h.max(1) as u32,
+            );
             self.window_geometry.insert(
                 win_id,
                 Geometry {
@@ -3348,6 +3451,11 @@ impl JwmWaylandState {
                 None
             };
 
+        crate::backend::wayland_udev::remote_keyboard::init(dh);
+        crate::backend::wayland_udev::remote_pointer::init(dh);
+        crate::backend::wayland_udev::remote_control::init(dh);
+        crate::backend::wayland_udev::remote_popup::init(dh);
+        crate::backend::wayland_udev::remote_text::init(dh);
         let image_capture_pending = if frame_capture_supported
             && optional_global_enabled(
                 behavior.wayland_enable_image_copy_capture,
@@ -3415,6 +3523,14 @@ impl JwmWaylandState {
         let cursor_shape_state = CursorShapeManagerState::new::<JwmWaylandState>(dh);
         let presentation_state =
             PresentationState::new::<JwmWaylandState>(dh, libc::CLOCK_MONOTONIC as u32);
+        // The same backend capability currently selects the real DRM/KMS
+        // frame pipeline. Nested winit/X11 loops neither fulfill capture nor
+        // provide submission-bound presentation evidence. Remove the global
+        // before dispatch, rather than advertise a protocol that never replies.
+        // Owned protocol tests may explicitly register their own implementation.
+        if !frame_capture_supported {
+            dh.remove_global::<JwmWaylandState>(presentation_state.global());
+        }
         let pointer_gestures_state = PointerGesturesState::new::<JwmWaylandState>(dh);
         let single_pixel_buffer_state = SinglePixelBufferState::new::<JwmWaylandState>(dh);
         let content_type_state = ContentTypeState::new::<JwmWaylandState>(dh);
@@ -3510,6 +3626,7 @@ impl JwmWaylandState {
                 fractional_scale_state,
                 cursor_shape_state,
                 presentation_state,
+                presentation_generation: Some(1),
                 pointer_gestures_state,
                 single_pixel_buffer_state,
                 content_type_state,
@@ -3612,6 +3729,13 @@ impl JwmWaylandState {
 
                 image_capture_pending,
                 toplevel_capture_sessions: HashMap::new(),
+                toplevel_capture_authorities: Default::default(),
+                remote_control: Default::default(),
+                viewer_handoff: Default::default(),
+                remote_popup: Default::default(),
+                remote_text: Default::default(),
+                remote_keyboard: Default::default(),
+                remote_pointer: Default::default(),
 
                 capture_counters: Arc::new(Mutex::new(CaptureCounters::default())),
 
@@ -3779,6 +3903,11 @@ impl JwmWaylandState {
     // compiles this module through `backend::wayland::state` without a caller.
     #[allow(dead_code)]
     pub(crate) fn set_monitor_shades(&mut self, shades: &[crate::backend::api::MonitorShade]) {
+        crate::backend::wayland_udev::image_copy_capture::set_toplevel_capture_block(
+            self,
+            crate::backend::wayland_udev::image_copy_capture::CAPTURE_BLOCK_MONITOR_LOCK,
+            !shades.is_empty(),
+        );
         self.monitor_shades = shades
             .iter()
             .filter(|shade| shade.width > 0 && shade.height > 0)
@@ -4611,7 +4740,19 @@ impl CompositorHandler for JwmWaylandState {
         );
     }
 
+    fn new_subsurface(&mut self, _surface: &WlSurface, parent: &WlSurface) {
+        crate::backend::wayland_udev::remote_pointer::new_subsurface(self, parent);
+        crate::backend::wayland_udev::remote_popup::new_subsurface(self, parent);
+        crate::backend::wayland_udev::image_copy_capture::readonly_resize_new_subsurface(
+            self, parent,
+        );
+    }
     fn commit(&mut self, surface: &WlSurface) {
+        crate::backend::wayland_udev::remote_pointer::surface_committed(self, surface);
+        crate::backend::wayland_udev::remote_popup::surface_committed(self, surface);
+        crate::backend::wayland_udev::image_copy_capture::toplevel_capture_surface_committed(
+            self, surface,
+        );
         self.popup_manager.commit(surface);
         self.popup_manager.cleanup();
         // wp-color-management double-buffer latch: move the image description
@@ -4667,6 +4808,11 @@ impl CompositorHandler for JwmWaylandState {
         // Without this, WaylandSurfaceRenderElement will often have no view/texture and nothing
         // will be drawn even though windows are managed and receive input.
         on_commit_buffer_handler::<JwmWaylandState>(surface);
+        crate::backend::wayland_udev::image_copy_capture::toplevel_capture_surface_committed(
+            self, surface,
+        );
+        crate::backend::wayland_udev::remote_pointer::surface_committed(self, surface);
+        crate::backend::wayland_udev::remote_popup::surface_committed(self, surface);
 
         // Legacy XWayland (< 23.1) associates content via the WL_SURFACE_ID atom. smithay records
         // it as `wl_surface_id` but, unlike the modern xwayland_shell path, never calls
@@ -4708,7 +4854,9 @@ impl CompositorHandler for JwmWaylandState {
         if let Some(win) = win {
             match buf_state {
                 BufferState::NewBuffer => {
-                    if self.manager_allows_surface_map(win) && self.mapped_windows.insert(win) {
+                    if self.manager_allows_surface_map(win) && !self.mapped_windows.contains(&win) {
+                        self.invalidate_presentation_generation();
+                        self.mapped_windows.insert(win);
                         info!("[udev/wayland] window mapped win={win:?}");
 
                         let offset = self.surface_window_geometry_loc(surface);
@@ -4744,6 +4892,7 @@ impl CompositorHandler for JwmWaylandState {
                                 .map(|geo| geo.w != new_w || geo.h != new_h)
                                 .unwrap_or(false);
                             if should_update {
+                                crate::backend::wayland_udev::image_copy_capture::toplevel_capture_geometry_changing(self,win,new_w,new_h);
                                 if let Some(geo) = self.window_geometry.get_mut(&win) {
                                     geo.w = new_w;
                                     geo.h = new_h;
@@ -4885,6 +5034,9 @@ impl CompositorHandler for JwmWaylandState {
         if inactive_layer || matches!(buf_state, BufferState::Removed) {
             self.release_layer_keyboard_focus(surface);
         }
+        crate::backend::wayland_udev::image_copy_capture::readonly_resize_surface_committed(
+            self, surface,
+        );
     }
 
     fn destroyed(&mut self, surface: &WlSurface) {
@@ -4982,6 +5134,8 @@ impl SeatHandler for JwmWaylandState {
     }
 
     fn focus_changed(&mut self, seat: &Seat<Self>, focused: Option<&Self::KeyboardFocus>) {
+        crate::backend::wayland_udev::viewer_handoff::focus_changed(self, focused);
+        crate::backend::wayland_udev::remote_keyboard::focus_changed(self);
         for delivery in self.virtual_keyboards.values_mut() {
             delivery.clear_held();
         }
@@ -4993,6 +5147,10 @@ impl SeatHandler for JwmWaylandState {
 
 impl InputMethodHandler for JwmWaylandState {
     fn new_popup(&mut self, surface: ImPopupSurface) {
+        crate::backend::wayland_udev::remote_keyboard::revoke(
+            self,
+            crate::backend::wayland_udev::remote_keyboard::SEAT,
+        );
         // Drop any popups whose role/surface fcitx5 already destroyed: smithay's
         // ZwpInputPopupSurfaceV2 destructor only flips the alive tracker, it never
         // calls `dismiss_popup`, so stale dead entries would otherwise pile up here.
@@ -5707,6 +5865,16 @@ impl XdgShellHandler for JwmWaylandState {
     }
 
     fn new_popup(&mut self, surface: PopupSurface, positioner: PositionerState) {
+        if crate::backend::wayland_udev::remote_popup::popup_created(self, &surface) {
+            crate::backend::wayland_udev::remote_keyboard::revoke_other_inputs_for_authorized_popup(
+                self,
+            );
+        } else {
+            crate::backend::wayland_udev::remote_keyboard::revoke(
+                self,
+                crate::backend::wayland_udev::remote_keyboard::SEAT,
+            );
+        }
         // Store the initial positioner state and compute a constrained geometry.
         surface.with_pending_state(|state| {
             state.positioner = positioner;
@@ -5730,6 +5898,14 @@ impl XdgShellHandler for JwmWaylandState {
         seat_resource: smithay::reexports::wayland_server::protocol::wl_seat::WlSeat,
         serial: Serial,
     ) {
+        if crate::backend::wayland_udev::remote_popup::popup_grab(
+            self,
+            &surface,
+            &seat_resource,
+            serial,
+        ) {
+            return;
+        }
         let popup = PopupKind::Xdg(surface.clone());
         let seat = self.seat.clone();
         let Ok(root) = find_popup_root_surface(&popup) else {
@@ -5833,6 +6009,7 @@ impl XdgShellHandler for JwmWaylandState {
         positioner: PositionerState,
         token: u32,
     ) {
+        crate::backend::wayland_udev::remote_popup::popup_destroyed(self, surface.wl_surface());
         surface.with_pending_state(|state| {
             state.positioner = positioner;
             state.geometry = state.positioner.get_geometry();
@@ -5952,6 +6129,7 @@ impl XdgShellHandler for JwmWaylandState {
     }
 
     fn popup_destroyed(&mut self, surface: PopupSurface) {
+        crate::backend::wayland_udev::remote_popup::popup_destroyed(self, surface.wl_surface());
         self.popup_manager.cleanup();
         if let Some(grab) = self.active_popup_grab.clone() {
             if grab.has_ended() {
@@ -9019,7 +9197,9 @@ mod protocol_hardening_tests {
     /// stream kept showing a frozen window as live.
     #[test]
     fn closing_a_captured_window_stops_its_idle_capture_session() {
-        use crate::backend::wayland_udev::image_copy_capture::init_image_copy_capture;
+        use crate::backend::wayland_udev::image_copy_capture::{
+            authority_tests::App, init_image_copy_capture,
+        };
         // ext_image_copy_capture_session_v1.done/stopped.
         const SESSION_DONE: u16 = 4;
         const SESSION_STOPPED: u16 = 5;
@@ -9030,7 +9210,11 @@ mod protocol_hardening_tests {
         let display = server.display.handle();
         server.state.image_capture_pending = Some(init_image_copy_capture(&display));
         let mut client = RawClient::connect(&mut server, JwmClientState::default());
-        let (_, toplevel, window) = create_toplevel(&mut server, &mut client);
+        // A role alone is not capturable. Exercise the real configure/ACK,
+        // SHM buffer attach and commit mapping path before creating authority.
+        let mut app = App::new(&mut server);
+        let window = app.window;
+        assert!(server.state.mapped_windows.contains(&window));
         let list = client.bind("ext_foreign_toplevel_list_v1", 1);
         let sources = client.bind("ext_foreign_toplevel_image_capture_source_manager_v1", 1);
         let capture = client.bind("ext_image_copy_capture_manager_v1", 1);
@@ -9052,7 +9236,7 @@ mod protocol_hardening_tests {
         assert!(server.state.toplevel_capture_sessions.contains_key(&window));
 
         // No frame is in flight when the window closes.
-        client.request(toplevel, TOPLEVEL_DESTROY, &[]);
+        app.client.request(app.toplevel, TOPLEVEL_DESTROY, &[]);
         assert_eq!(
             opcodes_for(&mut server, &mut client, session),
             [SESSION_STOPPED]
@@ -9329,3 +9513,20 @@ mod popup_input_authority_tests {
 #[path = "virtual_keyboard.rs"]
 mod virtual_keyboard;
 use virtual_keyboard::VirtualKeyboardDelivery;
+
+#[cfg(test)]
+mod presentation_generation_tests {
+    use super::next_presentation_generation;
+
+    #[test]
+    fn pause_resume_never_reuses_a_submission_generation() {
+        assert_eq!(next_presentation_generation(Some(1)), Some(2));
+        assert_ne!(next_presentation_generation(Some(1)), Some(1));
+    }
+
+    #[test]
+    fn exhausted_presentation_generation_is_permanently_fail_closed() {
+        assert_eq!(next_presentation_generation(Some(u64::MAX)), None);
+        assert_eq!(next_presentation_generation(None), None);
+    }
+}

@@ -57,8 +57,8 @@ use crate::{
     wayland::{Dispatch2, GlobalData, GlobalDispatch2},
 };
 
-pub use text_input_handle::TextInputHandle;
 pub use text_input_handle::TextInputUserData;
+pub use text_input_handle::{AuthorizedTextTarget, TextInputHandle};
 
 use super::input_method::InputMethodHandle;
 

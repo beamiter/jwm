@@ -52,6 +52,44 @@ struct Record {
     payload: Vec<u8>,
 }
 
+/// Test-only provenance of the actual first sender worker socket failure.
+#[cfg(test)]
+#[derive(Debug)]
+pub(super) struct SenderShutdownTransportError {
+    pub(super) kind: io::ErrorKind,
+    pub(super) message: String,
+}
+#[cfg(test)]
+impl std::fmt::Display for SenderShutdownTransportError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.message.fmt(f)
+    }
+}
+#[cfg(test)]
+impl std::error::Error for SenderShutdownTransportError {}
+
+#[cfg(test)]
+fn shutdown_transport_provenance_allowed(shutdown: &io::Result<()>) -> bool {
+    matches!(shutdown, Ok(()))
+        || matches!(shutdown, Err(error) if error.kind() == io::ErrorKind::NotConnected)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PopupTerminal {
+    Queued,
+    InFlight,
+    Flushed,
+}
+
+fn write_and_flush_record(
+    writer: &mut impl RecordWriter,
+    kind: MessageKind,
+    payload: &[u8],
+) -> RemoteResult<()> {
+    writer.write_message(kind, payload)?;
+    writer.flush()
+}
+
 #[derive(Default)]
 struct Queue {
     control: VecDeque<Record>,
@@ -59,9 +97,12 @@ struct Queue {
     control_bytes: usize,
     bulk_bytes: usize,
     closing: bool,
+    popup_terminal: Option<PopupTerminal>,
     stopped: bool,
     cancelling: bool,
     error: Option<String>,
+    #[cfg(test)]
+    error_io_kind: Option<io::ErrorKind>,
     writing_since: Option<Instant>,
     input_scope: Option<(u64, u64)>,
     clipboard_policy: Option<Arc<AtomicU8>>,
@@ -70,11 +111,22 @@ struct Queue {
 }
 
 impl Queue {
+    fn record_worker_error(
+        &mut self,
+        message: impl FnOnce() -> String,
+        _io_kind: Option<io::ErrorKind>,
+    ) {
+        #[cfg(test)]
+        if self.error.is_none() {
+            self.error_io_kind = _io_kind;
+        }
+        self.error.get_or_insert_with(message);
+    }
     fn check(&self) -> RemoteResult<()> {
         if let Some(error) = &self.error {
             return Err(io::Error::new(io::ErrorKind::BrokenPipe, error.clone()).into());
         }
-        if self.stopped || self.closing {
+        if (self.stopped || self.closing) && self.popup_terminal != Some(PopupTerminal::Flushed) {
             return Err(io::Error::new(io::ErrorKind::BrokenPipe, "remote sender stopped").into());
         }
         Ok(())
@@ -82,6 +134,27 @@ impl Queue {
 
     fn push(&mut self, kind: MessageKind, payload: &[u8]) -> RemoteResult<()> {
         self.check()?;
+        if self.popup_terminal.is_some() {
+            return Err(
+                io::Error::new(io::ErrorKind::BrokenPipe, "popup sender is terminal").into(),
+            );
+        }
+        if kind == MessageKind::WaylandPopupRevoke {
+            super::wayland_popup_wire::Binding::decode(payload)?;
+            // Reserved terminal slot. Discard only unsent work; an already
+            // popped record remains ordered before this one on the writer.
+            self.control.clear();
+            self.bulk.clear();
+            self.clipboard_barrier = None;
+            self.control_bytes = payload.len();
+            self.bulk_bytes = 0;
+            self.control.push_back(Record {
+                kind,
+                payload: payload.to_vec(),
+            });
+            self.popup_terminal = Some(PopupTerminal::Queued);
+            return Ok(());
+        }
         if kind == MessageKind::ClipboardRestrict {
             ClipboardRestriction::decode(payload)?;
             if self.clipboard_barrier.is_some() {
@@ -104,12 +177,45 @@ impl Queue {
             MessageKind::Heartbeat => Some(0),
             MessageKind::FrameAck => Some(16),
             MessageKind::Viewport => Some(4),
+            MessageKind::WindowResizeRequest => Some(28),
+            MessageKind::WaylandKeyboardRequest => Some(56),
+            MessageKind::WaylandKeyboardKey => Some(43),
+            MessageKind::WaylandKeyboardRevoke => Some(8),
+            MessageKind::WaylandPointerRequest => Some(24),
+            MessageKind::WaylandPointerAction => Some(45),
+            MessageKind::WaylandPointerRevoke => Some(8),
+            MessageKind::WaylandControlRequest => Some(56),
+            MessageKind::WaylandControlAction => Some(48),
+            MessageKind::WaylandControlRevoke => Some(8),
             _ => None,
         };
         if expected.is_some_and(|length| payload.len() != length) {
             return Err(
                 io::Error::new(io::ErrorKind::InvalidInput, "invalid control record size").into(),
             );
+        }
+        if kind == MessageKind::WaylandControlRevoke {
+            self.control.retain(|r| {
+                !matches!(
+                    r.kind,
+                    MessageKind::WaylandControlRequest | MessageKind::WaylandControlAction
+                )
+            });
+            self.control_bytes = self.control.iter().map(|r| r.payload.len()).sum();
+        }
+        if kind == MessageKind::WaylandPointerRevoke {
+            self.control.retain(|r| {
+                !matches!(
+                    r.kind,
+                    MessageKind::WaylandPointerRequest | MessageKind::WaylandPointerAction
+                )
+            });
+            self.control_bytes = self.control.iter().map(|r| r.payload.len()).sum();
+        }
+        if kind == MessageKind::WaylandKeyboardRevoke {
+            self.control
+                .retain(|r| r.kind != MessageKind::WaylandKeyboardKey);
+            self.control_bytes = self.control.iter().map(|r| r.payload.len()).sum();
         }
         // ReleaseAll is a fence: discard unsent input before the last release,
         // while preserving subsequent edges in this batch. A record already
@@ -171,6 +277,12 @@ impl Queue {
     }
 
     fn close(&mut self, input_enabled: bool) {
+        if self.popup_terminal.is_some() {
+            // Revoke itself is the terminal record, whether queued, currently
+            // being flushed, or already completed. Never append generic Close.
+            self.closing = true;
+            return;
+        }
         // Reserved shutdown path needs no free queue slot. Send a release
         // before Close when input was negotiated.
         self.control.clear();
@@ -200,9 +312,19 @@ impl Queue {
         self.closing = true;
     }
 
+    fn record_flushed(&mut self, kind: MessageKind) {
+        self.writing_since = None;
+        if kind == MessageKind::WaylandPopupRevoke {
+            self.popup_terminal = Some(PopupTerminal::Flushed);
+        }
+    }
+
     fn pop(&mut self) -> Option<Record> {
         if let Some(record) = self.control.pop_front() {
             self.control_bytes -= record.payload.len();
+            if record.kind == MessageKind::WaylandPopupRevoke {
+                self.popup_terminal = Some(PopupTerminal::InFlight);
+            }
             Some(record)
         } else if self
             .clipboard_barrier
@@ -271,14 +393,22 @@ impl Sender {
         self.shared.1.notify_all();
         let shutdown = self.control.shutdown(Shutdown::Both);
         self.join_timeout(timeout)?;
-        if let Some(error) = &self
-            .shared
-            .0
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .error
         {
-            return Err(io::Error::other(error.clone()).into());
+            let queue = self.shared.0.lock().unwrap_or_else(|p| p.into_inner());
+            if let Some(error) = &queue.error {
+                #[cfg(test)]
+                if let Some(kind @ (io::ErrorKind::BrokenPipe | io::ErrorKind::ConnectionReset)) =
+                    queue
+                        .error_io_kind
+                        .filter(|_| shutdown_transport_provenance_allowed(&shutdown))
+                {
+                    return Err(Box::new(SenderShutdownTransportError {
+                        kind,
+                        message: error.clone(),
+                    }));
+                }
+                return Err(io::Error::other(error.clone()).into());
+            }
         }
         match shutdown {
             Ok(()) => Ok(()),
@@ -355,6 +485,10 @@ impl Sender {
                                     if remaining.is_zero() {
                                         queue.error =
                                             Some("remote record write deadline exceeded".into());
+                                        #[cfg(test)]
+                                        {
+                                            queue.error_io_kind = None;
+                                        }
                                         queue.stopped = true;
                                         drop(queue);
                                         let _ = socket.shutdown(Shutdown::Both);
@@ -405,19 +539,24 @@ impl Sender {
                                 None => Some(record.payload),
                             };
                             if let Some(payload) = &payload {
-                                writer.write_message(record.kind, payload)?;
-                                writer.flush()?;
+                                write_and_flush_record(&mut writer, record.kind, payload)?;
                             }
-                            worker_shared
-                                .0
-                                .lock()
-                                .unwrap_or_else(|p| p.into_inner())
-                                .writing_since = None;
+                            {
+                                let mut queue =
+                                    worker_shared.0.lock().unwrap_or_else(|p| p.into_inner());
+                                queue.writing_since = None;
+                                if payload.is_some() {
+                                    queue.record_flushed(record.kind);
+                                }
+                            }
                             worker_shared.1.notify_all();
                             if payload.is_some() {
                                 on_written(record.kind);
                             }
-                            if record.kind == MessageKind::Close {
+                            if matches!(
+                                record.kind,
+                                MessageKind::Close | MessageKind::WaylandPopupRevoke
+                            ) {
                                 return Ok(());
                             }
                         }
@@ -436,6 +575,7 @@ impl Sender {
                         }
                     });
                     let cancelled_io = queue.cancelling
+                        && queue.popup_terminal.is_none()
                         && io_error.is_some_and(|error| {
                             matches!(
                                 error.kind(),
@@ -446,15 +586,24 @@ impl Sender {
                             )
                         });
                     if !cancelled_io {
-                        queue.error.get_or_insert_with(|| error.to_string());
+                        queue.record_worker_error(
+                            || error.to_string(),
+                            io_error.map(io::Error::kind),
+                        );
                     }
                 }
+                let popup_flushed =
+                    queue.popup_terminal == Some(PopupTerminal::Flushed) && queue.error.is_none();
                 drop(queue);
                 worker_shared.1.notify_all();
                 if let Ok(watchdog) = watchdog {
                     let _ = watchdog.join();
                 }
-                let _ = writer.get_ref().shutdown(Shutdown::Both);
+                let _ = writer.get_ref().shutdown(if popup_flushed {
+                    Shutdown::Write
+                } else {
+                    Shutdown::Both
+                });
                 let _ = done_tx.send(());
             })?;
         Ok(Self {
@@ -527,6 +676,108 @@ impl Drop for Sender {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn scoped_control_revoke_clears_pending_request_and_actions() {
+        let mut queue = super::Queue::default();
+        queue
+            .push(super::MessageKind::WaylandControlRequest, &[1; 56])
+            .unwrap();
+        queue
+            .push(super::MessageKind::WaylandControlAction, &[1; 48])
+            .unwrap();
+        queue.push(super::MessageKind::Heartbeat, &[]).unwrap();
+        queue
+            .push(super::MessageKind::WaylandControlRevoke, &[1; 8])
+            .unwrap();
+        assert!(queue.control.iter().all(|r| !matches!(
+            r.kind,
+            super::MessageKind::WaylandControlRequest | super::MessageKind::WaylandControlAction
+        )));
+        assert!(
+            queue
+                .control
+                .iter()
+                .any(|r| r.kind == super::MessageKind::Heartbeat)
+        );
+        assert_eq!(
+            queue.control.back().unwrap().kind,
+            super::MessageKind::WaylandControlRevoke
+        );
+        assert_eq!(queue.control_bytes, 8);
+        for (kind, size) in [
+            (super::MessageKind::WaylandControlRequest, 56),
+            (super::MessageKind::WaylandControlAction, 48),
+            (super::MessageKind::WaylandControlRevoke, 8),
+        ] {
+            assert!(
+                super::Queue::default()
+                    .push(kind, &vec![0; size - 1])
+                    .is_err()
+            );
+            assert!(
+                super::Queue::default()
+                    .push(kind, &vec![0; size + 1])
+                    .is_err()
+            );
+        }
+    }
+    #[test]
+    fn scoped_pointer_revoke_clears_pending_request_and_actions() {
+        let mut queue = super::Queue::default();
+        queue
+            .push(super::MessageKind::WaylandPointerRequest, &[1; 24])
+            .unwrap();
+        queue
+            .push(super::MessageKind::WaylandPointerAction, &[1; 45])
+            .unwrap();
+        queue.push(super::MessageKind::Heartbeat, &[]).unwrap();
+        queue
+            .push(super::MessageKind::WaylandPointerRevoke, &[1; 8])
+            .unwrap();
+        assert!(queue.control.iter().all(|record| !matches!(
+            record.kind,
+            super::MessageKind::WaylandPointerRequest | super::MessageKind::WaylandPointerAction
+        )));
+        assert!(
+            queue
+                .control
+                .iter()
+                .any(|record| record.kind == super::MessageKind::Heartbeat)
+        );
+        assert!(
+            queue
+                .push(super::MessageKind::WaylandPointerAction, &[0; 44])
+                .is_err()
+        );
+    }
+    #[test]
+    fn wayland_keyboard_revoke_discards_queued_key_edges_only() {
+        let mut queue = super::Queue::default();
+        queue
+            .push(super::MessageKind::WaylandKeyboardKey, &[1; 43])
+            .unwrap();
+        queue.push(super::MessageKind::Heartbeat, &[]).unwrap();
+        queue
+            .push(super::MessageKind::WaylandKeyboardRevoke, &[1; 8])
+            .unwrap();
+        assert!(
+            queue
+                .control
+                .iter()
+                .all(|record| record.kind != super::MessageKind::WaylandKeyboardKey)
+        );
+        assert!(
+            queue
+                .control
+                .iter()
+                .any(|record| record.kind == super::MessageKind::Heartbeat)
+        );
+        assert!(
+            queue
+                .push(super::MessageKind::WaylandKeyboardKey, &[0; 42])
+                .is_err()
+        );
+    }
     use super::*;
 
     fn test_encode_input(events: &[InputEvent], bytes: &mut Vec<u8>) -> RemoteResult<()> {
@@ -539,6 +790,91 @@ mod tests {
         let mut bytes = Vec::new();
         test_encode_input(events, &mut bytes).unwrap();
         queue.push(MessageKind::InputBatch, &bytes).unwrap();
+    }
+
+    fn popup_revoke_payload() -> Vec<u8> {
+        super::super::wayland_popup_wire::Binding {
+            source_instance: 1,
+            source_epoch: 2,
+            lease_epoch: 3,
+        }
+        .encode()
+        .unwrap()
+        .to_vec()
+    }
+    #[test]
+    fn popup_terminal_survives_close_queued_inflight_and_flushed() {
+        let payload = popup_revoke_payload();
+        for phase in 0..3 {
+            let mut q = Queue::default();
+            for _ in 0..CONTROL_RECORDS {
+                q.push(MessageKind::WaylandPopupClick, &[1; 80]).unwrap();
+            }
+            q.push(MessageKind::Clipboard, b"unsent").unwrap();
+            q.push(MessageKind::WaylandPopupRevoke, &payload).unwrap();
+            assert_eq!(
+                (q.control.len(), q.control_bytes, q.bulk_bytes),
+                (1, payload.len(), 0)
+            );
+            assert!(q.push(MessageKind::FrameAck, &[0; 16]).is_err());
+            assert!(q.push(MessageKind::WaylandPopupRevoke, &payload).is_err());
+            let popped = if phase > 0 { q.pop() } else { None };
+            if phase == 2 {
+                q.record_flushed(MessageKind::WaylandPopupRevoke);
+                q.stopped = true;
+                assert!(q.check().is_ok());
+            }
+            q.close(false);
+            let record = popped.or_else(|| q.pop()).unwrap();
+            assert_eq!(record.kind, MessageKind::WaylandPopupRevoke);
+            assert_eq!(record.payload, payload);
+            assert!(q.pop().is_none());
+            assert_eq!((q.control_bytes, q.bulk_bytes), (0, 0));
+        }
+    }
+    #[test]
+    fn popup_terminal_memory_writer_emits_only_exact_revoke() {
+        use super::super::protocol::SessionReader;
+        let payload = popup_revoke_payload();
+        let mut q = Queue::default();
+        q.push(MessageKind::FrameAck, &[0; 16]).unwrap();
+        q.push(MessageKind::WaylandPopupRevoke, &payload).unwrap();
+        q.close(false);
+        let record = q.pop().unwrap();
+        let key = [0x42; 32];
+        let mut writer = SessionWriter::new(Vec::new(), key);
+        write_and_flush_record(&mut writer, record.kind, &record.payload).unwrap();
+        q.record_flushed(record.kind);
+        let mut reader = SessionReader::new(std::io::Cursor::new(writer.get_ref().clone()), key);
+        assert_eq!(
+            reader.read_message().unwrap(),
+            (MessageKind::WaylandPopupRevoke, payload)
+        );
+        assert!(reader.read_message().is_err());
+        assert_eq!(q.popup_terminal, Some(PopupTerminal::Flushed));
+        assert!(q.pop().is_none());
+    }
+    #[test]
+    fn popup_terminal_preserves_invalid_binding_and_flush_failure() {
+        struct FailsFlush;
+        impl RecordWriter for FailsFlush {
+            fn write_message(&mut self, _: MessageKind, _: &[u8]) -> RemoteResult<()> {
+                Ok(())
+            }
+            fn flush(&mut self) -> RemoteResult<()> {
+                Err(io::Error::new(io::ErrorKind::BrokenPipe, "flush failed").into())
+            }
+        }
+        let mut q = Queue::default();
+        assert!(q.push(MessageKind::WaylandPopupRevoke, &[0; 20]).is_err());
+        assert_eq!(q.popup_terminal, None);
+        q.push(MessageKind::WaylandPopupRevoke, &popup_revoke_payload())
+            .unwrap();
+        let record = q.pop().unwrap();
+        assert!(write_and_flush_record(&mut FailsFlush, record.kind, &record.payload).is_err());
+        assert_eq!(q.popup_terminal, Some(PopupTerminal::InFlight));
+        q.record_worker_error(|| "flush failed".into(), Some(io::ErrorKind::BrokenPipe));
+        assert!(q.check().is_err());
     }
 
     #[test]
@@ -961,5 +1297,73 @@ mod tests {
                 .contains("panicked")
         );
         assert!(sender.worker.is_none());
+    }
+}
+
+#[cfg(test)]
+mod explicit_resize_tests {
+    use super::*;
+    #[test]
+    fn explicit_resize_is_bounded_and_never_coalesced_as_viewport() {
+        let mut queue = Queue::default();
+        assert!(
+            queue
+                .push(MessageKind::WindowResizeRequest, &[0; 27])
+                .is_err()
+        );
+        queue
+            .push(MessageKind::WindowResizeRequest, &[1; 28])
+            .unwrap();
+        queue
+            .push(MessageKind::WindowResizeRequest, &[2; 28])
+            .unwrap();
+        assert_eq!(queue.control.len(), 2);
+    }
+}
+
+#[cfg(test)]
+mod shutdown_provenance_tests {
+    use super::*;
+    #[test]
+    fn independent_shutdown_failure_cannot_be_sole_worker_provenance() {
+        assert!(shutdown_transport_provenance_allowed(&Ok(())));
+        assert!(shutdown_transport_provenance_allowed(&Err(
+            io::ErrorKind::NotConnected.into()
+        )));
+        for kind in [
+            io::ErrorKind::Other,
+            io::ErrorKind::PermissionDenied,
+            io::ErrorKind::BrokenPipe,
+            io::ErrorKind::ConnectionReset,
+            io::ErrorKind::TimedOut,
+        ] {
+            assert!(!shutdown_transport_provenance_allowed(&Err(kind.into())));
+        }
+    }
+    #[test]
+    fn first_worker_error_and_kind_are_indivisible() {
+        for first in [
+            None,
+            Some(io::ErrorKind::BrokenPipe),
+            Some(io::ErrorKind::TimedOut),
+        ] {
+            let mut queue = Queue::default();
+            queue.record_worker_error(|| "first".into(), first);
+            queue.record_worker_error(
+                || panic!("first error must not be replaced"),
+                Some(io::ErrorKind::ConnectionReset),
+            );
+            assert_eq!(queue.error.as_deref(), Some("first"));
+            assert_eq!(queue.error_io_kind, first);
+        }
+        let mut deadline = Queue {
+            error: Some("deadline".into()),
+            ..Queue::default()
+        };
+        deadline.record_worker_error(
+            || panic!("deadline must not be replaced"),
+            Some(io::ErrorKind::BrokenPipe),
+        );
+        assert_eq!(deadline.error_io_kind, None);
     }
 }

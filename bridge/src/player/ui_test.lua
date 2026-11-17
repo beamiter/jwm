@@ -2,6 +2,7 @@
 local real = require 'mp'
 local utils = require 'mp.utils'
 local bindings, messages, groups, observers, commands, pending, timers = {}, {}, {}, {}, {}, {}, {}
+local modern_theme_properties, legacy_theme_writes = true, 0
 local mouse_x, mouse_y, now, osd_w, osd_h = 0, 0, 0, 960, 600
 local props = {playlist={}, ['track-list']={}, sid='no', hwdec='auto-safe', fullscreen=false,
     ['idle-active']=false, seekable=true, ['play-direction']='forward', shuffle=false,
@@ -22,6 +23,11 @@ local mock = {
     get_property=function(name,default) local v=props[name]; if v==nil then return default end; return v end,
     get_property_native=function(name,default) local v=props[name]; if v==nil then return default,'unavailable' end; return v end,
     set_property=set, set_property_number=set,
+    set_property_native=function(name,value)
+        assert(name=='user-data/jwm-player/theme-revision','use namespaced modern theme receipt')
+        if not modern_theme_properties then return nil,'property not found' end
+        return set(name,value)
+    end,
     commandv=function(...)
         local args={...}; commands[#commands+1]=args
         if args[1]=='cycle' then set(args[2],not props[args[2]]) end
@@ -50,7 +56,7 @@ local mock = {
     register_event=function() end,
 }
 package.loaded.mp=mock
-package.loaded['mp.utils']={parse_json=utils.parse_json,shared_script_property_set=function(key,value) props['shared-script-properties/'..key]=value end,split_path=utils.split_path,file_info=function(path)
+package.loaded['mp.utils']={parse_json=utils.parse_json,shared_script_property_set=function(key,value) legacy_theme_writes=legacy_theme_writes+1; props['shared-script-properties/'..key]=value end,split_path=utils.split_path,file_info=function(path)
     return {is_file=path:sub(1,7)=='/media/'}
 end}
 local function key(group,name,event)
@@ -219,12 +225,24 @@ local ok,err=pcall(function()
     local colors={}
     for i=1,8 do colors[i]={.2,.3,.4,1} end
     messages['jwm-theme'](utils.format_json({protocol_version=1,native_colors=colors,font='Sans 18',surface_opacity=.85,config_revision='style-1'}))
-    assert(props['shared-script-properties/jwm-theme-revision']=='style-1','theme completion requires applied Lua readback')
+    assert(props['user-data/jwm-player/theme-revision']=='style-1','theme completion requires modern applied Lua readback')
+    assert(legacy_theme_writes==0,'modern mpv must not call removed legacy API')
     assert(overlay.data:find('664D33',1,true),'RGB semantic colors must adapt to ASS BGR')
     assert(overlay.data:find('\\fnSans',1,true),'player inherits global font family')
     local previous_theme=overlay.data
     messages['jwm-theme'](utils.format_json({protocol_version=1,native_colors={},font='Sans 11',config_revision='invalid'}))
-    assert(overlay.data==previous_theme and props['shared-script-properties/jwm-theme-revision']=='style-1','malformed theme must retain last complete style')
+    assert(overlay.data==previous_theme and props['user-data/jwm-player/theme-revision']=='style-1','malformed theme must retain last complete style')
+    modern_theme_properties=false
+    messages['jwm-theme'](utils.format_json({protocol_version=1,native_colors=colors,font='Sans 18',surface_opacity=.85,config_revision='legacy-style'}))
+    assert(legacy_theme_writes==1 and props['shared-script-properties/jwm-theme-revision']=='legacy-style','old mpv fallback requires actual applied style')
+    local previous_legacy=overlay.data
+    messages['jwm-theme'](utils.format_json({protocol_version=1,native_colors={},font='Sans 11',config_revision='invalid'}))
+    assert(overlay.data==previous_legacy and legacy_theme_writes==1 and props['shared-script-properties/jwm-theme-revision']=='legacy-style','invalid legacy update cannot publish receipt')
+    -- A modern installation has no helper at all, not merely an unused stub.
+    package.loaded['mp.utils'].shared_script_property_set=nil
+    modern_theme_properties=true
+    messages['jwm-theme'](utils.format_json({protocol_version=1,native_colors=colors,font='Sans 18',surface_opacity=.85,config_revision='modern-no-helper'}))
+    assert(props['user-data/jwm-player/theme-revision']=='modern-no-helper')
 
 end)
 package.loaded.mp=real

@@ -5,9 +5,12 @@ use crate::backend::wayland_udev::color_management::ParametricParams;
 use crate::backend::wayland_udev::color_pipeline::ColorTransform;
 use crate::sync_ext::MutexExt;
 
+#[path = "../fbo_presentation.rs"]
+pub(crate) mod fbo_presentation;
 #[path = "../udev_kms.rs"]
 mod kms;
 use self::kms::KmsState;
+
 use super::compositor::{CompositorOutputTextureOwnership, WaylandCompositor};
 use super::output_management::proposed_output_framebuffer_size;
 use crate::backend::api::{
@@ -83,6 +86,104 @@ use smithay::xwayland::{X11Wm, XWayland, XWaylandEvent};
 
 fn allowed_shortcut_mods() -> Mods {
     Mods::SHIFT | Mods::CONTROL | Mods::ALT | Mods::SUPER | Mods::MOD2 | Mods::MOD3 | Mods::MOD5
+}
+
+/// Result of the real Smithay route used by the explicit local viewer handoff.
+/// A lock binding is returned to the WM only after input was intercepted and
+/// handoff authority was ended. Ordinary forwarded input never becomes a WM key.
+#[derive(Debug, Default)]
+pub(crate) struct HandoffKeyOutcome {
+    pub(crate) wm_key: Option<(u8, u16)>,
+    pub(crate) mods: u16,
+}
+
+/// Revalidate local handoff before physical pointer delivery. A queued button
+/// or wheel must not use stale focus after the scene moved under a still cursor.
+pub(crate) fn refresh_viewer_handoff_pointer_input(state: &mut JwmWaylandState) {
+    super::viewer_handoff::refresh_before_input(state);
+}
+
+/// Route through the actual physical keyboard state before best-effort focus
+/// selection. In particular, quarantined releases cannot create a new local
+/// focus and replay the old remote chord through wl_keyboard.enter's held list.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn route_viewer_handoff_keyboard(
+    state: &mut JwmWaylandState,
+    keycode: smithay::input::keyboard::Keycode,
+    key_state: smithay::backend::input::KeyState,
+    serial: smithay::utils::Serial,
+    time: smithay::backend::input::InputTime,
+    config: &Config,
+    suppressed: &mut HashSet<u8>,
+) -> Option<HandoffKeyOutcome> {
+    use super::viewer_handoff;
+    viewer_handoff::refresh_before_input(state);
+    let inhibited = viewer_handoff::inhibits(state);
+    let quarantine = viewer_handoff::quarantined(state);
+    if state.session_locked || (!inhibited && !quarantine) {
+        return None;
+    }
+    let keyboard = state.seat.get_keyboard()?;
+    let pressed = key_state == smithay::backend::input::KeyState::Pressed;
+    let code = u8::try_from(u32::from(keycode)).ok();
+    let lock_shortcuts = config.reserved_lock_shortcuts();
+    let mut outcome = HandoffKeyOutcome::default();
+    let mut release_handoff = false;
+    keyboard.input::<(), _>(
+        state,
+        keycode,
+        key_state,
+        serial,
+        time,
+        |_, modifiers, handle| {
+            outcome.mods = mods_from_smithay(modifiers).bits();
+            if !pressed {
+                let was_suppressed = code.is_some_and(|code| suppressed.remove(&code));
+                return if quarantine || was_suppressed {
+                    FilterResult::Intercept(())
+                } else {
+                    FilterResult::Forward
+                };
+            }
+            let mods = Mods::from_bits_truncate(outcome.mods) & allowed_shortcut_mods();
+            let symbols = handle.raw_syms();
+            let emergency = mods == (Mods::CONTROL | Mods::SUPER)
+                && symbols
+                    .iter()
+                    .any(|sym| sym.raw() == crate::backend::common_define::keys::KEY_F12);
+            let lock = lock_shortcuts.iter().any(|(mask, key_sym)| {
+                *mask & allowed_shortcut_mods() == mods
+                    && symbols.iter().any(|sym| sym.raw() == *key_sym)
+            });
+            if emergency || lock {
+                release_handoff = true;
+                if let Some(code) = code {
+                    suppressed.insert(code);
+                    if lock && !emergency {
+                        outcome.wm_key = Some((code, outcome.mods));
+                    }
+                }
+                FilterResult::Intercept(())
+            } else if quarantine {
+                if let Some(code) = code {
+                    suppressed.insert(code);
+                }
+                FilterResult::Intercept(())
+            } else {
+                FilterResult::Forward
+            }
+        },
+    );
+    // Duplicate physical edges can be absorbed before the filter. Keep the
+    // backend modifier projection accurate even when the filter did not run.
+    outcome.mods = mods_from_smithay(&keyboard.modifier_state()).bits();
+    // Keyboard input filters run under Smithay's keyboard lock. Never reenter
+    // that lock with focus changes or physical-state queries from the filter.
+    if release_handoff {
+        viewer_handoff::escape(state);
+    }
+    viewer_handoff::quarantine_key_finished(state);
+    Some(outcome)
 }
 
 /// Client buffers acknowledge the configured size, independently of the
@@ -1114,6 +1215,7 @@ impl WindowOps for WaylandWindowOps {
     ) -> Result<(), BackendError> {
         unsafe {
             self.with_state_mut(|state| {
+                crate::backend::wayland_udev::image_copy_capture::toplevel_capture_geometry_changing(state,win,w,h);
                 state.pending_initial_configure.remove(&win);
                 let bw = border as i32;
                 state.window_geometry.insert(
@@ -2755,6 +2857,10 @@ impl UdevBackend {
         )
         .map_err(|e| BackendError::Message(format!("wayland init failed: {e}")))?;
 
+        // Only the actual udev input router implements this private contract.
+        // Shared JwmWaylandState construction (including nested) must not expose it.
+        super::viewer_handoff::init(&display_handle);
+
         if let Some(name) = socket_name.as_deref() {
             // Detect nested mode: if WAYLAND_DISPLAY was already set before we
             // create our own socket, a parent compositor owns it.  In that case
@@ -3053,6 +3159,7 @@ impl UdevBackend {
             event_loop
                 .handle()
                 .insert_source(libinput_backend, move |event, _, state| {
+                    crate::backend::wayland_udev::remote_keyboard::revoke(state, crate::backend::wayland_udev::remote_keyboard::LOCAL);
                     reconcile_touch_routes(state, &shared);
                     let (gesture_modal, wm_swipe_allowed) = {
                         let s = shared.lock_safe();
@@ -3063,6 +3170,14 @@ impl UdevBackend {
                     // Notify idle tracker on any input activity
                     state.idle_notifier_state.notify_activity(&state.seat);
                     state.last_input = std::time::Instant::now();
+                    if matches!(&event, InputEvent::PointerMotion { .. }
+                        | InputEvent::PointerMotionAbsolute { .. }
+                        | InputEvent::PointerButton { .. }
+                        | InputEvent::PointerAxis { .. }) {
+                        // Validate the old position before motion: an ordinary
+                        // leave stays resumable; a scene change revokes first.
+                        refresh_viewer_handoff_pointer_input(state);
+                    }
 
                     match event {
                         InputEvent::DeviceAdded { device } => {
@@ -3466,6 +3581,48 @@ impl UdevBackend {
                             };
                             if let Some(token) = stale_repeat_token {
                                 state.loop_handle.remove(token);
+                            }
+
+                            // Surface-bound handoff is routed before the fallback that
+                            // focuses whatever is under the pointer. Otherwise an exit
+                            // with held keys could replay that chord into a local window.
+                            let modal = {
+                                let s = shared.lock_safe();
+                                s.screenshot_grab_active || s.scroll_capture_active || s.system_ui_grab_active
+                            } || state.layer_shell_state.layer_surfaces().any(|surface| {
+                                surface.with_cached_state(|data| {
+                                    matches!(data.layer, WlrLayer::Top | WlrLayer::Overlay)
+                                        && data.keyboard_interactivity == KeyboardInteractivity::Exclusive
+                                }) && state.outputs.iter().any(|output| {
+                                    layer_map_for_output(output).layers().any(|layer| layer.layer_surface() == &surface)
+                                })
+                            });
+                            if modal {
+                                super::viewer_handoff::escape(state);
+                            } else {
+                                // Do not keep SharedState locked while keyboard focus
+                                // callbacks run; take only the balanced suppression set.
+                                let mut suppressed = std::mem::take(&mut shared.lock_safe().suppressed_keycodes);
+                                let routed = route_viewer_handoff_keyboard(
+                                    state, keycode, state_key, serial, time,
+                                    &CONFIG.load(), &mut suppressed,
+                                );
+                                {
+                                    let mut s = shared.lock_safe();
+                                    s.suppressed_keycodes = suppressed;
+                                    if let Some(outcome) = &routed {
+                                        s.mods_state = outcome.mods;
+                                    }
+                                }
+                                if let Some(outcome) = routed {
+                                    cancel_key_repeat_timer(&state.loop_handle, &shared);
+                                    if let Some((keycode, mods)) = outcome.wm_key {
+                                        pending_events.lock_safe().push_back(BackendEvent::KeyPress {
+                                            keycode, state: mods, time: time.millis(), repeat: false,
+                                        });
+                                    }
+                                    return;
+                                }
                             }
 
                             let debug_keys = std::env::var("JWM_DEBUG_KEYS")
@@ -4133,6 +4290,9 @@ impl UdevBackend {
                 .handle()
                 .insert_source(notifier, move |event, &mut (), state| match event {
                     SessionEvent::PauseSession => {
+                        // Queue-bound presentation proof cannot survive VT ABA.
+                        state.invalidate_presentation_generation();
+                        crate::backend::wayland_udev::image_copy_capture::set_toplevel_capture_block(state,crate::backend::wayland_udev::image_copy_capture::CAPTURE_BLOCK_INACTIVE,true);
                         cancel_native_swipe(state);
                         state.gesture_swipe_device = None;
                         input_devices_for_session.borrow_mut().set_active(false);
@@ -5215,6 +5375,11 @@ impl CompositorWorkspaceEffects for UdevBackend {
     fn compositor_set_system_ui(&mut self, overlay: Option<SystemUiOverlay>) {
         self.compositor_desired.set_system_ui(overlay.clone());
         let locked = overlay.as_ref().is_some_and(|overlay| overlay.locked);
+        crate::backend::wayland_udev::image_copy_capture::set_toplevel_capture_block(
+            &mut self.state,
+            crate::backend::wayland_udev::image_copy_capture::CAPTURE_BLOCK_BUILTIN_LOCK,
+            locked,
+        );
         if locked {
             cancel_key_repeat_timer(&self.state.loop_handle, &self.shared);
             self.pending_events
@@ -6310,6 +6475,22 @@ impl Backend for UdevBackend {
         self.minimized_capture_frame = self.minimized_capture_frame.saturating_add(1);
         let minimized_capture_frame = self.minimized_capture_frame;
 
+        // Capture callbacks only from a real current import. The owned candidate
+        // discards on every failed/unproven path; this function never dispatches
+        // client commits between import, compositor sampling and receipt binding.
+        let mut fbo_candidate = self.kms.as_ref().and_then(|kms| {
+            let mut kms = kms.borrow_mut();
+            if !kms.single_presentation_output() {
+                return None;
+            }
+            kms.with_gles_renderer(|renderer| {
+                fbo_presentation::prepare(&self.state, renderer, scene)
+            })
+        });
+        if let Some(kms) = &self.kms {
+            kms.borrow_mut().set_fbo_presentation(None);
+        }
+
         // Phase 1: Import surface textures into GL cache (borrow kms only, no compositor borrow).
         // Reuse a persistent scratch buffer (taken out so we can freely borrow
         // other self fields below) instead of allocating one each frame.
@@ -7310,6 +7491,8 @@ impl Backend for UdevBackend {
                     staged_external_draws,
                     internalized_classes[kms::ExternalElementClass::Cursor.index()],
                 );
+                compositor
+                    .set_presentation_candidate(fbo_candidate.as_ref().map(|p| p.candidate()));
                 let rendered = kms
                     .borrow_mut()
                     .with_renderer(|gl| {
@@ -7328,6 +7511,13 @@ impl Backend for UdevBackend {
                 if crf_log_this {
                     log::debug!("[crf] render_frame returned {rendered}");
                 }
+                let proof = fbo_candidate.take().and_then(|prepared| {
+                    compositor
+                        .take_presentation_receipt()
+                        .and_then(|receipt| prepared.finish(receipt, &self.state))
+                });
+                kms.borrow_mut().set_fbo_presentation(proof);
+
                 if rendered {
                     // The compositor texture now carries exactly the staged
                     // classes (its draw predicate matches the staging gate:
@@ -8059,6 +8249,12 @@ impl Backend for UdevBackend {
                     || shared.scroll_capture_active
                     || !shared.session_active
             };
+            let capture_inactive = !self.shared.lock_safe().session_active;
+            crate::backend::wayland_udev::image_copy_capture::set_toplevel_capture_block(
+                &mut self.state,
+                crate::backend::wayland_udev::image_copy_capture::CAPTURE_BLOCK_INACTIVE,
+                capture_inactive,
+            );
             self.event_loop
                 .dispatch(timeout, &mut *self.state)
                 .map_err(|e| BackendError::Other(Box::new(e)))?;
@@ -8303,6 +8499,20 @@ fn stop_capture_sessions_of_departed_outputs(
             crate::backend::wayland_udev::image_copy_capture::stop_output_capture_sessions(output);
     }
     stopped
+}
+
+// Keep test-only helpers after production code: structural regression tests
+// deliberately inspect the prefix before the first test-only item.
+/// Test-only entry to the production single-surface renderer, without exposing
+/// the KMS state or duplicating capture logic in the protocol fixtures.
+#[cfg(test)]
+pub(crate) fn fulfill_test_toplevel_capture(
+    renderer: &mut smithay::backend::renderer::gles::GlesRenderer,
+    cache: &mut Option<(i32, i32, smithay::backend::renderer::gles::GlesRenderbuffer)>,
+    state: &JwmWaylandState,
+    pending: &super::image_copy_capture::PendingImageCaptureQueue,
+) {
+    KmsState::fulfill_image_capture_toplevel_frames(renderer, cache, state, pending, None);
 }
 
 // For the headless GL suite, which drives the KMS staging composite under the
@@ -10619,5 +10829,396 @@ mod touchpad_swipe_owner_tests {
         shared.system_ui_grab_active = false;
         shared.expose_gestures = false;
         assert!(!shared.allows_wm_swipe(42, 4));
+    }
+}
+
+#[cfg(test)]
+pub(crate) use self::kms::{
+    KmsRenderElement, composite_fbo_elements_for_test, compositor_frame_element_for_test,
+    fbo_cursor_composition_for_test,
+};
+
+#[cfg(test)]
+mod viewer_handoff_key_route_tests {
+    use super::*;
+    use crate::backend::wayland_udev::{
+        image_copy_capture::{authority_tests::App, wire_test_client::Server},
+        viewer_handoff,
+    };
+    use smithay::backend::input::{InputTime, KeyState};
+    use smithay::input::pointer::MotionEvent;
+
+    struct Fixture {
+        server: Server,
+        viewer: App,
+        local: App,
+        keyboard: u32,
+        local_keyboard: u32,
+        session: u32,
+        suppressed: HashSet<u8>,
+    }
+    fn sync(server: &mut Server) {
+        server.roundtrip();
+        server.roundtrip();
+    }
+    impl Fixture {
+        fn new() -> Self {
+            let mut server = Server::new();
+            viewer_handoff::init(&server.display.handle());
+            let mut local = App::new(&mut server);
+            let local_seat = local.client.bind("wl_seat", 7);
+            let local_keyboard = local.client.new_id();
+            local.client.request(local_seat, 1, &[local_keyboard]);
+            let mut viewer = App::new(&mut server);
+            let seat = viewer.client.bind("wl_seat", 7);
+            let pointer_id = viewer.client.new_id();
+            viewer.client.request(seat, 0, &[pointer_id]);
+            let keyboard = viewer.client.new_id();
+            viewer.client.request(seat, 1, &[keyboard]);
+            sync(&mut server);
+            let local_surface = server.state.surface_for_window(local.window).unwrap();
+            server
+                .state
+                .set_keyboard_focus(Some(local_surface), SCOUNTER.next_serial());
+            let manager = viewer
+                .client
+                .bind("jwm_remote_viewer_handoff_manager_v1", 2);
+            let session = viewer.client.new_id();
+            viewer
+                .client
+                .request(manager, 1, &[session, viewer.surface, seat, 30_000]);
+            sync(&mut server);
+            assert!(
+                viewer
+                    .client
+                    .events()
+                    .iter()
+                    .any(|e| e.sender == session && e.opcode == 0)
+            );
+            let geometry = server.state.window_geometry[&viewer.window];
+            let location = (f64::from(geometry.x) + 4.0, f64::from(geometry.y) + 4.0).into();
+            server.state.pointer_location = location;
+            let focus = server
+                .state
+                .surface_under(location)
+                .map(|(_, surface, origin)| (surface, origin));
+            assert_eq!(
+                focus.as_ref().map(|(surface, _)| surface),
+                server.state.surface_for_window(viewer.window).as_ref()
+            );
+            let pointer = server.state.seat.get_pointer().unwrap();
+            let serial = SCOUNTER.next_serial();
+            pointer.motion(
+                &mut server.state,
+                focus,
+                &MotionEvent {
+                    location,
+                    serial,
+                    time: InputTime::now(),
+                },
+            );
+            pointer.frame(&mut server.state);
+            sync(&mut server);
+            viewer.client.request(session, 1, &[1, serial.into()]);
+            sync(&mut server);
+            assert!(
+                viewer
+                    .client
+                    .events()
+                    .iter()
+                    .any(|e| e.sender == session && e.opcode == 2)
+            );
+            assert!(viewer_handoff::inhibits(&server.state));
+            local.client.events();
+            Self {
+                server,
+                viewer,
+                local,
+                keyboard,
+                local_keyboard,
+                session,
+                suppressed: HashSet::new(),
+            }
+        }
+        fn key(&mut self, evdev: u32, pressed: bool) -> HandoffKeyOutcome {
+            let result = route_viewer_handoff_keyboard(
+                &mut self.server.state,
+                (evdev + 8).into(),
+                if pressed {
+                    KeyState::Pressed
+                } else {
+                    KeyState::Released
+                },
+                SCOUNTER.next_serial(),
+                InputTime::now(),
+                &Config::default(),
+                &mut self.suppressed,
+            )
+            .expect("handoff owns routing");
+            sync(&mut self.server);
+            result
+        }
+        fn viewer_keys(&mut self) -> Vec<(u32, u32)> {
+            self.viewer
+                .client
+                .events()
+                .into_iter()
+                .filter(|e| e.sender == self.keyboard && e.opcode == 3)
+                .map(|e| (e.args[2], e.args[3]))
+                .collect()
+        }
+        fn exit(&mut self) {
+            self.viewer.client.request(self.session, 2, &[2]);
+            sync(&mut self.server);
+            assert!(!viewer_handoff::inhibits(&self.server.state));
+        }
+    }
+    #[test]
+    fn actual_handoff_key_route_forwards_typing_then_quarantines_held_exit_without_replay() {
+        let mut f = Fixture::new();
+        assert!(f.key(30, true).wm_key.is_none());
+        assert_eq!(f.viewer_keys(), vec![(30, 1)]);
+        f.exit();
+        assert!(viewer_handoff::quarantined(&f.server.state));
+        assert!(
+            f.server
+                .state
+                .seat
+                .get_keyboard()
+                .unwrap()
+                .current_focus()
+                .is_none()
+        );
+        assert!(f.key(48, true).wm_key.is_none());
+        assert!(f.key(30, false).wm_key.is_none());
+        assert!(f.key(48, false).wm_key.is_none());
+        assert!(!viewer_handoff::quarantined(&f.server.state));
+        assert!(
+            f.viewer_keys().is_empty(),
+            "old recipient never gets delayed edges"
+        );
+        let events = f.local.client.events();
+        assert!(
+            !events
+                .iter()
+                .any(|e| e.sender == f.local_keyboard && e.opcode == 3)
+        );
+        for enter in events
+            .iter()
+            .filter(|e| e.sender == f.local_keyboard && e.opcode == 1)
+        {
+            assert_eq!(
+                enter.args[2], 0,
+                "restored enter must carry an empty held-key array"
+            );
+        }
+        assert!(
+            f.server
+                .state
+                .seat
+                .get_keyboard()
+                .unwrap()
+                .pressed_keys()
+                .is_empty()
+        );
+    }
+    #[test]
+    fn actual_handoff_key_route_emergency_is_local_and_releases_symmetrically() {
+        let mut f = Fixture::new();
+        f.key(29, true);
+        f.key(125, true);
+        f.viewer_keys();
+        assert!(f.key(88, true).wm_key.is_none());
+        assert!(!viewer_handoff::inhibits(&f.server.state));
+        assert!(f.viewer_keys().is_empty(), "F12 never reaches viewer");
+        f.key(88, false);
+        f.key(125, false);
+        f.key(29, false);
+        assert!(f.suppressed.is_empty());
+        assert!(!viewer_handoff::quarantined(&f.server.state));
+        assert!(f.viewer_keys().is_empty(), "escape release cannot leak");
+    }
+    #[test]
+    fn actual_handoff_key_route_preserves_both_lock_actions_even_with_standard_inhibitor() {
+        for monitor in [false, true] {
+            let mut f = Fixture::new();
+            let seat = f.viewer.client.bind("wl_seat", 7);
+            let manager = f
+                .viewer
+                .client
+                .bind("zwp_keyboard_shortcuts_inhibit_manager_v1", 1);
+            let inhibitor = f.viewer.client.new_id();
+            f.viewer
+                .client
+                .request(manager, 1, &[inhibitor, f.viewer.surface, seat]);
+            sync(&mut f.server);
+            assert!(f.server.state.seat.keyboard_shortcuts_inhibited());
+            f.key(29, true);
+            f.key(56, true);
+            if monitor {
+                f.key(42, true);
+            }
+            f.viewer_keys();
+            let lock = f
+                .key(1, true)
+                .wm_key
+                .expect("configured lock must reach WM");
+            assert_eq!(lock.0, 9);
+            assert_eq!(
+                Mods::from_bits_truncate(lock.1) & allowed_shortcut_mods(),
+                Mods::CONTROL | Mods::ALT | if monitor { Mods::SHIFT } else { Mods::empty() }
+            );
+            assert!(!viewer_handoff::inhibits(&f.server.state));
+            assert!(
+                f.viewer_keys().is_empty(),
+                "lock Escape never reaches viewer"
+            );
+            f.key(1, false);
+            if monitor {
+                f.key(42, false);
+            }
+            f.key(56, false);
+            f.key(29, false);
+            assert!(f.suppressed.is_empty());
+        }
+    }
+    // Model a popup/XWayland grab that refuses to relinquish focus. Cleanup must
+    // not mistake a requested None focus for an actual recipient-free keyboard.
+    struct RefuseUnfocusGrab {
+        start: smithay::input::keyboard::GrabStartData<JwmWaylandState>,
+    }
+    impl smithay::input::keyboard::KeyboardGrab<JwmWaylandState> for RefuseUnfocusGrab {
+        fn input(
+            &mut self,
+            state: &mut JwmWaylandState,
+            handle: &mut smithay::input::keyboard::KeyboardInnerHandle<'_, JwmWaylandState>,
+            key: smithay::input::keyboard::Keycode,
+            pressed: KeyState,
+            mods: Option<smithay::input::keyboard::ModifiersState>,
+            serial: smithay::utils::Serial,
+            time: InputTime,
+        ) {
+            handle.input(state, key, pressed, mods, serial, time);
+        }
+        fn set_focus(
+            &mut self,
+            state: &mut JwmWaylandState,
+            handle: &mut smithay::input::keyboard::KeyboardInnerHandle<'_, JwmWaylandState>,
+            focus: Option<smithay::reexports::wayland_server::protocol::wl_surface::WlSurface>,
+            serial: smithay::utils::Serial,
+        ) {
+            if focus.is_some() {
+                handle.set_focus(state, focus, serial);
+            }
+        }
+        fn start_data(&self) -> &smithay::input::keyboard::GrabStartData<JwmWaylandState> {
+            &self.start
+        }
+        fn unset(&mut self, _state: &mut JwmWaylandState) {}
+    }
+
+    #[test]
+    fn actual_handoff_key_route_new_grab_revokes_before_input_without_timer() {
+        let mut f = Fixture::new();
+        f.key(30, true);
+        assert_eq!(f.viewer_keys(), vec![(30, 1)]);
+        let keyboard = f.server.state.seat.get_keyboard().unwrap();
+        let viewer_surface = f.server.state.surface_for_window(f.viewer.window).unwrap();
+        keyboard.set_grab(
+            &mut f.server.state,
+            RefuseUnfocusGrab {
+                start: smithay::input::keyboard::GrabStartData {
+                    focus: Some(viewer_surface),
+                },
+            },
+            SCOUNTER.next_serial(),
+        );
+        // No timer dispatch or explicit exit: the next physical input must
+        // retire the handoff before it can be delivered through the new grab.
+        f.key(31, true);
+        assert!(!viewer_handoff::registered_for_test(&f.server.state));
+        assert!(viewer_handoff::quarantined(&f.server.state));
+        assert!(f.viewer_keys().is_empty());
+        assert!(
+            f.local
+                .client
+                .events()
+                .iter()
+                .all(|e| e.sender != f.local_keyboard || e.opcode != 3)
+        );
+        f.key(31, false);
+        f.key(30, false);
+        assert!(keyboard.pressed_keys().is_empty());
+        assert!(f.viewer_keys().is_empty());
+    }
+
+    #[test]
+    fn actual_handoff_key_route_grab_refuses_unfocus_without_cleanup_delivery_or_replay() {
+        let mut f = Fixture::new();
+        f.key(30, true);
+        assert_eq!(f.viewer_keys(), vec![(30, 1)]);
+        let keyboard = f.server.state.seat.get_keyboard().unwrap();
+        let viewer_surface = f.server.state.surface_for_window(f.viewer.window).unwrap();
+        keyboard.set_grab(
+            &mut f.server.state,
+            RefuseUnfocusGrab {
+                start: smithay::input::keyboard::GrabStartData {
+                    focus: Some(viewer_surface.clone()),
+                },
+            },
+            SCOUNTER.next_serial(),
+        );
+        f.exit();
+        assert_eq!(keyboard.current_focus(), Some(viewer_surface));
+        assert_eq!(
+            f.server.state.active_toplevel,
+            Some(f.viewer.window),
+            "activation projection must follow actual focus when grab refuses None"
+        );
+        assert!(viewer_handoff::quarantined(&f.server.state));
+        assert_eq!(keyboard.pressed_keys(), HashSet::from([38_u32.into()]));
+        assert!(
+            f.viewer_keys().is_empty(),
+            "cleanup cannot deliver synthetic releases through retained focus"
+        );
+
+        keyboard.unset_grab(&mut f.server.state);
+        let local_surface = f.server.state.surface_for_window(f.local.window).unwrap();
+        f.server
+            .state
+            .set_keyboard_focus(Some(local_surface), SCOUNTER.next_serial());
+        sync(&mut f.server);
+        let events = f.local.client.events();
+        let enters: Vec<_> = events
+            .iter()
+            .filter(|e| e.sender == f.local_keyboard && e.opcode == 1)
+            .collect();
+        assert!(
+            !enters.is_empty(),
+            "real local recipient must receive enter"
+        );
+        assert!(
+            enters.iter().all(|e| e.args[2] == 0),
+            "physical held key must not replay into local enter"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| e.sender == f.local_keyboard && e.opcode == 3)
+        );
+        assert_eq!(keyboard.pressed_keys(), HashSet::from([38_u32.into()]));
+
+        f.key(30, false);
+        assert!(keyboard.pressed_keys().is_empty());
+        assert!(!viewer_handoff::quarantined(&f.server.state));
+        assert!(f.viewer_keys().is_empty());
+        assert!(
+            !f.local
+                .client
+                .events()
+                .iter()
+                .any(|e| e.sender == f.local_keyboard && e.opcode == 3),
+            "physical release must not reach a recipient that never received the press"
+        );
     }
 }

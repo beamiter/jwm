@@ -955,7 +955,11 @@ impl IpcServer {
                         continue;
                     }
                     let id = self.next_id;
-                    self.next_id = self.next_id.wrapping_add(1).max(1);
+                    let Some(next_id) = self.next_id.checked_add(1) else {
+                        warn!("[ipc] connection identity exhausted");
+                        continue;
+                    };
+                    self.next_id = next_id;
                     match IpcClient::new(stream) {
                         Ok(client) => {
                             if let Some(readiness) = self.readiness.as_ref()
@@ -1107,6 +1111,13 @@ impl IpcServer {
         }
 
         incoming
+    }
+
+    /// A resize lease cannot survive a draining read-half-close.
+    pub(crate) fn resize_owner_is_live(&self, id: u64) -> bool {
+        self.clients
+            .get(&id)
+            .is_some_and(|client| !client.read_closed)
     }
 
     /// Send a response to a specific client.
@@ -1295,6 +1306,21 @@ mod tests {
         server.accept_connections();
         assert_eq!(server.poll_clients().len(), 1);
         assert_eq!(outer.wait(&mut events, 0u8).unwrap(), 0);
+    }
+
+    #[test]
+    fn resize_owner_lifetime_ends_at_disconnect_or_read_half_close() {
+        let mut server = make_test_server();
+        let peer = attach_test_client(&mut server, 71);
+        assert!(server.resize_owner_is_live(71));
+        peer.shutdown(std::net::Shutdown::Write).unwrap();
+        server.poll_clients();
+        assert!(!server.resize_owner_is_live(71));
+        let peer = attach_test_client(&mut server, 72);
+        assert!(server.resize_owner_is_live(72));
+        drop(peer);
+        server.poll_clients();
+        assert!(!server.resize_owner_is_live(72));
     }
 
     #[test]

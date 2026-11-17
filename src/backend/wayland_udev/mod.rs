@@ -26,6 +26,11 @@ pub use crate::backend::wayland::state;
 pub mod workspace_protocol;
 
 pub mod image_copy_capture;
+pub(crate) mod remote_control;
+pub(crate) mod remote_keyboard;
+pub(crate) mod remote_pointer;
+pub(crate) mod remote_text;
+pub(crate) mod viewer_handoff;
 
 pub mod gamma_control;
 
@@ -38,3 +43,8 @@ pub mod color_management;
 pub mod icc;
 
 pub mod color_pipeline;
+
+pub(crate) mod capture_popup_authority;
+#[path = "../capture_popup_snapshot.rs"]
+pub(crate) mod capture_popup_snapshot;
+pub(crate) mod remote_popup;

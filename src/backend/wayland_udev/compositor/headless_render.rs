@@ -174,8 +174,8 @@ impl Drop for HeadlessGl {
 /// [`HEADLESS_GL_LOCK`] for its whole life and honours
 /// `JWM_REQUIRE_HEADLESS_GL`.
 #[cfg(feature = "backend-wayland-udev")]
-struct HeadlessSmithayGles {
-    renderer: smithay::backend::renderer::gles::GlesRenderer,
+pub(crate) struct HeadlessSmithayGles {
+    pub(crate) renderer: smithay::backend::renderer::gles::GlesRenderer,
     /// Released only once the renderer above, and with it its context and
     /// display, is gone. Declared last so it drops last.
     _serialized: std::sync::MutexGuard<'static, ()>,
@@ -183,7 +183,7 @@ struct HeadlessSmithayGles {
 
 #[cfg(feature = "backend-wayland-udev")]
 impl HeadlessSmithayGles {
-    fn new() -> Option<Self> {
+    pub(crate) fn new() -> Option<Self> {
         let result = Self::try_new();
         if result.is_none()
             && std::env::var_os("JWM_REQUIRE_HEADLESS_GL").is_some_and(|value| value != "0")
@@ -3845,6 +3845,46 @@ fn wayland_dvr_socket_upload_draw_disconnect_and_resize_are_one_bounded_lifecycl
             pixels
                 .chunks_exact(4)
                 .all(|pixel| pixel == [250, 30, 10, 255])
+        );
+        // Observe the actual completed wakes, not a transient pending=false:
+        // set_waker, authenticated connection, then publication of this frame.
+        // No route exists yet and the producer remains connected and idle.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while compositor
+            .desktop_visual
+            .as_ref()
+            .unwrap()
+            .wake_count_for_test()
+            < 3
+        {
+            assert!(
+                Instant::now() < deadline,
+                "static frame publication wake did not complete within 2 seconds"
+            );
+            std::thread::yield_now();
+        }
+        assert_eq!(
+            compositor
+                .desktop_visual
+                .as_ref()
+                .unwrap()
+                .wake_count_for_test(),
+            3
+        );
+        compositor.poll_desktop_visual(&gl);
+        assert!(
+            compositor.desktop_visual.as_ref().unwrap().visible(),
+            "draining the publication wake must retain the static frame"
+        );
+        gl.BindFramebuffer(ffi::FRAMEBUFFER, compositor.output_fbo);
+        gl.Viewport(0, 0, 64, 48);
+        gl.ClearColor(0., 0., 1., 1.);
+        gl.Clear(ffi::COLOR_BUFFER_BIT);
+        compositor.render_desktop_visual(&gl, &ortho(64., 48.), false);
+        assert_eq!(
+            read_fbo_frame(&gl, compositor.output_fbo, 64, 48),
+            pixels,
+            "draining the publication wake must not change the static pixels"
         );
         assert!(
             !compositor.desktop_visual.as_ref().unwrap().pending(),
@@ -11995,3 +12035,6 @@ fn wayland_hdr_editor_chrome_and_local_cues_preserve_capture_pixels() {
         }
     }
 }
+
+#[path = "fbo_provenance_tests.rs"]
+mod fbo_provenance_tests;

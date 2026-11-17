@@ -26,8 +26,10 @@ members = [
 ]
 exclude = [
     "tests/glib_backport",
+    "tests/wayland_backend_pending",
     "vendor/glib",
     "vendor/smithay",
+    "vendor/wayland-backend",
     # Every bar package (and its vendored/src-tauri crates): exclude must name
     # exact package dirs — globs only work in `members`.
     "bars/dioxus_bar",
@@ -91,6 +93,7 @@ default = [
     "backend-wayland-nested",
     "media-audio",
     "remote-x11",
+    "remote-wayland",
 ]
 # Internal: shared X11 transport helpers and the GLX/EGL compositor.
 # Enabled through the per-transport features; not selected directly.
@@ -100,13 +103,15 @@ default = [
 x11-backends = ["dep:x11", "dep:x11rb-protocol", "dep:x11rb", "dep:input", "dep:udev", "dep:libloading", "xbar_core/x11-connection"]
 # Internal: shared Smithay Wayland frontend. Enabled through the per-backend
 # Wayland features; not selected directly.
-wayland-backends = ["dep:smithay"]
+wayland-backends = ["dep:smithay", "dep:wayland-scanner"]
 # X11RB transport + shared X11 compositor.
 backend-x11rb = ["x11-backends", "dep:x11rb"]
 # JWM-to-JWM remote viewing/control for X11 sessions.  The helper opens an
 # independent x11rb connection, so it works while JWM itself uses either the
 # x11rb or xcb backend.
-remote-x11 = ["dep:rayon", "dep:x11rb", "x11rb/image", "dep:sha2", "dep:chacha20poly1305", "xbar_core/x11-connection"]
+remote-x11 = ["dep:rayon", "dep:x11rb", "x11rb/image", "dep:sha2", "dep:chacha20poly1305", "dep:snow", "dep:zeroize", "xbar_core/x11-connection"]
+# Native Wayland single-surface source; the shared viewer remains X11.
+remote-wayland = ["remote-x11", "dep:wayland-client", "dep:wayland-protocols", "dep:wayland-scanner", "xkbcommon/x11", "dep:xcb"]
 # XCB transport + shared X11 compositor.
 backend-xcb = ["x11-backends", "dep:xcb"]
 # Direct Wayland DRM/KMS session backend.
@@ -159,6 +164,9 @@ path = "tools/jwm_remote.rs"
 required-features = ["remote-x11"]
 
 [dependencies]
+wayland-scanner = { version = "0.31.11", optional = true }
+wayland-client = { version = "0.31.15", optional = true }
+wayland-protocols = { version = "0.32.13", features = ["client", "staging"], optional = true }
 desktop_visual = { path = "crates/desktop_visual" }
 companion-client = { git = "https://github.com/beamiter/jcompanion.git", rev = "9aa569540091524d637a7115b64c587b9177a55b" }
 companion-protocol = { git = "https://github.com/beamiter/jcompanion.git", rev = "9aa569540091524d637a7115b64c587b9177a55b" }
@@ -222,9 +230,11 @@ gbm = { version = "0.18.0", optional = true }
 egl = { version = "0.2.7", optional = true }
 # 1.7.1 raises its build-only quick-xml dependency to the security-fixed 0.41
 # line (RUSTSEC-2026-0194/0195).
-xcb = { version = "1.7.1", features = ["composite", "shape", "randr", "damage", "present", "xfixes", "screensaver"], optional = true }
+xcb = { version = "1.7.1", features = ["as-raw-xcb-connection", "xkb", "composite", "shape", "randr", "damage", "present", "xfixes", "screensaver"], optional = true }
 # ChaCha20-Poly1305 for the remote transport record layer. Pure Rust and
 # no_std-capable: it adds no C toolchain or system dependency to the helper.
+snow = { version = "0.10", default-features = false, features = ["use-chacha20poly1305", "use-sha2", "use-curve25519", "use-getrandom"], optional = true }
+zeroize = { version = "1.8", optional = true }
 chacha20poly1305 = { version = "0.11", default-features = false, features = ["alloc"], optional = true }
 
 [dev-dependencies]
@@ -260,3 +270,7 @@ strip = "none"
 # local touch cancellation correctness patch; see vendor/smithay/JWM_BACKPORT.md.
 [patch."https://github.com/Smithay/smithay.git"]
 smithay = { path = "vendor/smithay" }
+
+# Local dynamic filtered-global lifecycle fix; see vendor/wayland-backend/JWM_PATCH.md.
+[patch.crates-io]
+wayland-backend = { path = "vendor/wayland-backend" }

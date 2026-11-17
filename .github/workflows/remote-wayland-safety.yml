@@ -1,0 +1,696 @@
+name: Remote Wayland source safety
+
+on:
+  push:
+    branches: [master, dot/remote-window-plan, dot/remote-readback-snapshot, dot/remote-popup-v2, dot/remote-popup-adapter, dot/remote-popup-action, dot/remote-popup-network, dot/remote-popup-cancel, dot/remote-popup-terminal, dot/remote-viewer-damage]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: remote-wayland-safety-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  surface-safety:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      EGL_PLATFORM: surfaceless
+      LIBGL_ALWAYS_SOFTWARE: '1'
+      JWM_REQUIRE_HEADLESS_GL: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Install native build and software renderer dependencies
+        timeout-minutes: 10
+        run: |
+          bash scripts/ci-install-deps.sh build-essential pkg-config \
+            libudev-dev libinput-dev libseat-dev libdrm-dev libgbm-dev \
+            libegl1-mesa-dev libgl1-mesa-dev libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev \
+            libegl-mesa0 libgl1-mesa-dri xvfb xauth libx11-dev libx11-xcb-dev \
+            libxcb-composite0-dev libxcb-damage0-dev libxcb-present-dev libxcb-randr0-dev \
+            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxcb-screensaver0-dev
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          components: rustfmt,clippy
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
+      - name: Format and lint native source plus compositor
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib --bin jwm-remote --tests --no-deps -- -D warnings
+      - name: Independent CLI host and viewer native handoff acceptance
+        timeout-minutes: 8
+        run: bash scripts/test-remote-wayland-cli.sh
+      - name: Native viewer damage mapping and upload regressions
+        run: |
+          set -euo pipefail
+          for filter in 'remote::wayland_viewer::damage::tests::' 'remote::wayland_viewer::upload_tests::'; do
+            listed="$(cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --list)"
+            test "$(printf '%s\n' "$listed" | grep -c ': test$')" -eq 7
+            ignored="$(cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --ignored --list)"
+            test "$(printf '%s\n' "$ignored" | grep -c ': test$' || true)" -eq 0
+            cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --test-threads=1
+          done
+      - name: Cumulative native viewer damage and held SHM pixels
+        run: |
+          set -euo pipefail
+          export XDG_RUNTIME_DIR="$(mktemp -d)"
+          trap 'rm -rf "$XDG_RUNTIME_DIR"' EXIT
+          filter='remote::host::wayland_viewer_integration::damage_integration::'
+          listed="$(env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --list)"
+          test "$(printf '%s\n' "$listed" | grep -c ': test$')" -eq 1
+          ignored="$(env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --ignored --list)"
+          test "$(printf '%s\n' "$ignored" | grep -c ': test$' || true)" -eq 0
+          env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --test-threads=1 --nocapture
+      - name: Native viewer sparse memfd upload evidence
+        run: |
+          set -euo pipefail
+          filter='remote::wayland_viewer::damage_benchmark::native_memfd_sparse_damage_matches_full_canvas_and_counts_writes'
+          listed="$(cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --ignored --exact --list)"
+          test "$(printf '%s\n' "$listed" | grep -c ': test$')" -eq 1
+          cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --ignored --exact --test-threads=1 --nocapture
+      - name: Compile nested Wayland input revocation paths
+        run: cargo check --locked --no-default-features --features remote-wayland,backend-wayland-nested --lib
+      - name: KMS contracts, presentation ownership and VT generation regressions
+        run: |
+          cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib backend::wayland_udev::backend::kms::
+          cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib presentation_generation_tests::
+      - name: Actual FBO sampling provenance and callback isolation
+        run: |
+          export XDG_RUNTIME_DIR="$(mktemp -d)"
+          env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib fbo_provenance -- --test-threads=1 --nocapture
+      - name: Explicit read-only resize-follow layout and pixel safety
+        run: |
+          export XDG_RUNTIME_DIR="$(mktemp -d)"
+          cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib image_copy_capture::resize_tests -- --test-threads=1 --nocapture
+          cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib host_resize_integration -- --test-threads=1 --nocapture
+      - name: Explicit read-only popup capture isolation
+        run: |
+          export XDG_RUNTIME_DIR="$(mktemp -d)"
+          cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib image_copy_capture::popup_tests -- --test-threads=1 --nocapture
+          cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib host_popup_integration -- --test-threads=1 --nocapture
+      - name: Backend pending callback guard pure regressions
+        run: |
+          set -euo pipefail
+          manifest='tests/wayland_backend_pending/Cargo.toml'
+          test -f tests/wayland_backend_pending/Cargo.lock
+          listed="$(cargo test --locked --manifest-path "$manifest" --lib -- --list)"
+          test "$(printf '%s\n' "$listed" | grep -c ': test$')" -eq 3
+          ignored="$(cargo test --locked --manifest-path "$manifest" --lib -- --ignored --list)"
+          test "$(printf '%s\n' "$ignored" | grep -c ': test$' || true)" -eq 0
+          cargo test --locked --manifest-path "$manifest" --lib -- --test-threads=1
+      - name: Actual backend callback getter reentry on owned display
+        run: |
+          set -euo pipefail
+          export XDG_RUNTIME_DIR="$(mktemp -d)"
+          filter='backend::wayland_udev::remote_popup::backend_tests::'
+          listed="$(env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --list)"
+          test "$(printf '%s\n' "$listed" | grep -c ': test$')" -eq 1
+          ignored="$(env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --ignored --list)"
+          test "$(printf '%s\n' "$ignored" | grep -c ': test$' || true)" -eq 0
+          env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --test-threads=1 --nocapture
+      - name: Native popup isolated-seat authority and actual pixels
+        env:
+          JWM_REQUIRE_HEADLESS_GL: '1'
+          EGL_PLATFORM: surfaceless
+          LIBGL_ALWAYS_SOFTWARE: '1'
+        run: |
+          set -euo pipefail
+          export XDG_RUNTIME_DIR="$(mktemp -d)"
+          filter='backend::wayland_udev::remote_popup::tests::'
+          listed="$(env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --list)"
+          test "$(printf '%s\n' "$listed" | grep -c ': test$')" -eq 21
+          ignored="$(env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --ignored --list)"
+          test "$(printf '%s\n' "$ignored" | grep -c ': test$' || true)" -eq 0
+          env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --test-threads=1 --nocapture
+          primitive='backend::wayland_udev::remote_popup::primitive_tests::'
+          listed="$(env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$primitive" -- --list)"
+          test "$(printf '%s\n' "$listed" | grep -c ': test$')" -eq 3
+          ignored="$(env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$primitive" -- --ignored --list)"
+          test "$(printf '%s\n' "$ignored" | grep -c ': test$' || true)" -eq 0
+          env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$primitive" -- --test-threads=1
+          exports='backend::wayland_udev::remote_popup::tests::export_tests::'
+          listed="$(env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$exports" -- --list)"
+          test "$(printf '%s\n' "$listed" | grep -c ': test$')" -eq 6
+          layout='backend::wayland_udev::capture_popup_authority::export_tests::'
+          listed="$(cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$layout" -- --list)"
+          test "$(printf '%s\n' "$listed" | grep -c ': test$')" -eq 2
+          ignored="$(cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$layout" -- --ignored --list)"
+          test "$(printf '%s\n' "$ignored" | grep -c ': test$' || true)" -eq 0
+          cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$layout" -- --test-threads=1
+      - name: Native interactive popup adapter real capture and permission regressions
+        env:
+          JWM_REQUIRE_HEADLESS_GL: '1'
+          EGL_PLATFORM: surfaceless
+          LIBGL_ALWAYS_SOFTWARE: '1'
+        run: |
+          set -euo pipefail
+          export XDG_RUNTIME_DIR="$(mktemp -d)"
+          trap 'rm -rf "$XDG_RUNTIME_DIR"' EXIT
+          real='remote::wayland_popup_capture_integration::'
+          pure='remote::wayland_capture::interactive_popup::tests::'
+          for filter in "$real" "$pure"; do
+            if test "$filter" = "$real"; then expected=4; else expected=11; fi
+            listed="$(env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --list)"
+            test "$(printf '%s\n' "$listed" | grep -c ': test$')" -eq "$expected"
+            ignored="$(env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --ignored --list)"
+            test "$(printf '%s\n' "$ignored" | grep -c ': test$' || true)" -eq 0
+            env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --test-threads=1
+          done
+      - name: Popup actions require exact real viewer presentation
+        env:
+          JWM_REQUIRE_HEADLESS_GL: '1'
+          EGL_PLATFORM: surfaceless
+          LIBGL_ALWAYS_SOFTWARE: '1'
+        run: |
+          set -euo pipefail
+          export XDG_RUNTIME_DIR="$(mktemp -d)"
+          trap 'rm -rf "$XDG_RUNTIME_DIR"' EXIT
+          real='remote::host::wayland_viewer_integration::popup_action_integration::'
+          bridge='remote::wayland_viewer::popup_presentation::tests::'
+          for filter in "$real" "$bridge"; do
+            if test "$filter" = "$real"; then expected=5; else expected=3; fi
+            listed="$(env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --list)"
+            test "$(printf '%s\n' "$listed" | grep -c ': test$')" -eq "$expected"
+            ignored="$(env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --ignored --list)"
+            test "$(printf '%s\n' "$ignored" | grep -c ': test$' || true)" -eq 0
+            env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --test-threads=1
+          done
+      - name: Authenticated popup pointer network and exclusive permission safety
+        env:
+          JWM_REQUIRE_HEADLESS_GL: '1'
+          EGL_PLATFORM: surfaceless
+          LIBGL_ALWAYS_SOFTWARE: '1'
+        run: |
+          set -euo pipefail
+          export XDG_RUNTIME_DIR="$(mktemp -d)"
+          trap 'rm -rf "$XDG_RUNTIME_DIR"' EXIT
+          real='remote::host::wayland_viewer_integration::host_pointer_integration::popup_action_integration::'
+          wire='remote::wayland_popup_wire::'
+          client='remote::client::popup::tests::'
+          hello='remote::client::popup_hello_policy_tests::'
+          budget='remote::host::popup::record_budget_tests::'
+          capabilities='remote::messages::popup_capability_tests::'
+          sender='remote::sender::tests::popup_terminal_'
+          cli='popup_pointer_cli_tests::'
+          for filter in "$real" "$wire" "$client" "$hello" "$budget" "$capabilities" "$sender" "$cli"; do
+            target=(--lib)
+            case "$filter" in
+              "$real") expected=11 ;;
+              "$wire") expected=28 ;;
+              "$client") expected=18 ;;
+              "$hello") expected=2 ;;
+              "$budget") expected=7 ;;
+              "$capabilities") expected=1 ;;
+              "$sender") expected=3 ;;
+              "$cli") expected=1; target=(--bin jwm-remote) ;;
+            esac
+            listed="$(env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev "${target[@]}" "$filter" -- --list)"
+            test "$(printf '%s\n' "$listed" | grep -c ': test$')" -eq "$expected"
+            ignored="$(env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev "${target[@]}" "$filter" -- --ignored --list)"
+            test "$(printf '%s\n' "$ignored" | grep -c ': test$' || true)" -eq 0
+            env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev "${target[@]}" "$filter" -- --test-threads=1
+          done
+      - name: Actual scoped keyboard lease recipient and revocation tests
+        run: |
+          export XDG_RUNTIME_DIR="$(mktemp -d)"
+          cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib remote_keyboard -- --test-threads=1 --nocapture
+      - name: Explicit keyboard plus lossless real recipient and lease safety
+        run: |
+          set -euo pipefail
+          export XDG_RUNTIME_DIR="$(mktemp -d)"
+          filter='remote::host::wayland_viewer_integration::host_keyboard_lossless_integration::'
+          listed="$(env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --list)"
+          test "$(printf '%s\n' "$listed" | grep -c ': test$')" -eq 5
+          env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --test-threads=1 --nocapture
+      - name: Explicit pointer plus lossless phase and real presentation safety
+        run: |
+          set -euo pipefail
+          python3 scripts/check-pointer-lossless-budget.py --self-test
+          export XDG_RUNTIME_DIR="$(mktemp -d)"
+          expiry='remote::host::wayland_viewer_integration::host_pointer_integration::actual_wayland_pointer_unpresented_proof_expiry_requires_fresh_presentation'
+          listed="$(env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$expiry" -- --exact --list)"
+          test "$(printf '%s\n' "$listed" | grep -c ': test$')" -eq 1
+          ignored="$(env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$expiry" -- --ignored --exact --list)"
+          test "$(printf '%s\n' "$ignored" | grep -c ': test$' || true)" -eq 0
+          env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$expiry" -- --exact --test-threads=1
+          cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib pointer_repair -- --test-threads=1
+          filter='remote::host::wayland_viewer_integration::host_pointer_integration::pointer_lossless_integration::'
+          listed="$(env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --list)"
+          test "$(printf '%s\n' "$listed" | grep -c ': test$')" -eq 22
+          ignored="$(env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --ignored --list)"
+          test "$(printf '%s\n' "$ignored" | grep -c ': test$')" -eq 1
+          printf '%s\n' "$ignored" | grep -F 'expiry_integration::actual_pointer_lossless_1080p_partial_progress_and_natural_lease_expiry: test'
+          env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --test-threads=1 --nocapture
+      - name: Actual scoped pointer recipients, fresh-frame coordinates and revocation
+        run: |
+          export XDG_RUNTIME_DIR="$(mktemp -d)"
+          cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib remote_pointer -- --test-threads=1 --nocapture
+      - name: Actual unified control recipients and shared lease revocation
+        run: |
+          export XDG_RUNTIME_DIR="$(mktemp -d)"
+          cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib remote_control -- --test-threads=1 --nocapture
+      - name: Explicit JWM local handoff and real seamless TCP safety
+        run: |
+          set -euo pipefail
+          export XDG_RUNTIME_DIR="$(mktemp -d)"
+          for filter in 'handoff' 'seamless_integration' 'duration_integration' 'resumable_control' 'remote::wayland_capture::control::resumable_tests' 'remote::host::control::duration_tests'; do
+            minimum=3
+            if [[ "$filter" == 'remote::host::control::duration_tests' ]]; then minimum=1; fi
+            listed="$(env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --list)"
+            test "$(printf '%s\n' "$listed" | grep -c ': test$' || true)" -ge "$minimum"
+            ignored="$(env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --ignored --list)"
+            test "$(printf '%s\n' "$ignored" | grep -c ': test$' || true)" -eq 0
+            env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --test-threads=1 --nocapture
+          done
+      - name: Explicit unified control plus lossless proof and recipient safety
+        run: |
+          set -euo pipefail
+          export XDG_RUNTIME_DIR="$(mktemp -d)"
+          cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib control_repair -- --test-threads=1
+          filter='remote::host::wayland_viewer_integration::host_control_integration::lossless_integration::'
+          listed="$(env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --list)"
+          test "$(printf '%s\n' "$listed" | grep -c ': test$')" -eq 6
+          ignored="$(env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --ignored --list)"
+          test "$(printf '%s\n' "$ignored" | grep -c ': test$' || true)" -eq 0
+          env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --test-threads=1 --nocapture
+      - name: Measure lossless scheduling with three explicit policies
+        run: |
+          set -euo pipefail
+          export XDG_RUNTIME_DIR="$(mktemp -d)"
+          export JWM_REMOTE_SCHEDULER_REPORT="${{ runner.temp }}/remote-lossless-scheduler-ab.json"
+          python3 scripts/summarize-lossless-scheduler-ab.py --self-test
+          prefix='remote::host::wayland_viewer_integration::host_lossless_integration::scheduler_benchmark'
+          marker="$prefix::unique_gray_markers_survive_production_jpeg_and_reject_uncertain_cells"
+          measure="$prefix::actual_static_lossless_scheduler_three_arm_measurement"
+          for filter in "$marker" "$measure"; do
+            listed="$(env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --exact --list)"
+            test "$(printf '%s\n' "$listed" | grep -c ': test$')" -eq 1
+          done
+          env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$marker" -- --exact --test-threads=1
+          status=0
+          env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$measure" -- --ignored --exact --test-threads=1 > "${{ runner.temp }}/remote-lossless-scheduler-ab.log" 2>&1 || status=$?
+          if test -f "$JWM_REMOTE_SCHEDULER_REPORT"; then
+            python3 scripts/summarize-lossless-scheduler-ab.py --public-summary "$JWM_REMOTE_SCHEDULER_REPORT" > "${{ runner.temp }}/remote-lossless-scheduler-summary.json" 2> "${{ runner.temp }}/remote-lossless-summary-error.log"
+            cat "${{ runner.temp }}/remote-lossless-scheduler-summary.json"
+          fi
+          exit "$status"
+      - name: Preserve allowlisted aggregate lossless scheduling metrics
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: remote-lossless-scheduler-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/remote-lossless-scheduler-summary.json
+          if-no-files-found: warn
+          retention-days: 3
+      - name: Factorial lossless quiet and pacing measurement
+        run: |
+          set -euo pipefail
+          export XDG_RUNTIME_DIR="$(mktemp -d)"
+          export JWM_REMOTE_SCHEDULER_REPORT="${{ runner.temp }}/remote-lossless-factorial-ab.json"
+          filter='remote::host::wayland_viewer_integration::host_lossless_integration::scheduler_benchmark::actual_static_lossless_scheduler_factorial_measurement'
+          listed="$(env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --exact --list)"
+          test "$(printf '%s\n' "$listed" | grep -c ': test$')" -eq 1
+          status=0
+          env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --ignored --exact --test-threads=1 > "${{ runner.temp }}/remote-lossless-factorial-ab.log" 2>&1 || status=$?
+          if test -f "$JWM_REMOTE_SCHEDULER_REPORT"; then
+            python3 scripts/summarize-lossless-scheduler-ab.py --public-summary "$JWM_REMOTE_SCHEDULER_REPORT" > "${{ runner.temp }}/remote-lossless-factorial-summary.json" 2> "${{ runner.temp }}/remote-lossless-factorial-summary-error.log"
+            cat "${{ runner.temp }}/remote-lossless-factorial-summary.json"
+          fi
+          exit "$status"
+      - name: Preserve allowlisted factorial scheduling metrics
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: remote-lossless-factorial-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/remote-lossless-factorial-summary.json
+          if-no-files-found: warn
+          retention-days: 3
+      - name: Mandatory continuous-animation region deadline evidence
+        # Exhaustive 256-marker JPEG coverage plus four real TCP/GL sessions.
+        # Keep bounded headroom for shared-runner software rendering.
+        timeout-minutes: 10
+        env:
+          JWM_REQUIRE_HEADLESS_GL: '1'
+          JWM_REMOTE_REGION_DEADLINE_REPORT: ${{ runner.temp }}/remote-region-deadline-private.json
+        run: |
+          set -euo pipefail
+          python3 scripts/summarize-remote-region-deadline.py --self-test
+          export XDG_RUNTIME_DIR="$(mktemp -d)"
+          trap 'rm -rf "$XDG_RUNTIME_DIR"' EXIT
+          base='remote::host::wayland_viewer_integration::host_lossless_integration::scheduler_benchmark'
+          marker="$base::continuous_gray_markers_survive_production_jpeg_and_reject_uncertain_cells"
+          region="$base::continuous_static_region_excludes_only_the_two_marker_tiles"
+          for filter in "$marker" "$region"; do
+            listed="$(env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --exact --list)"
+            test "$(printf '%s\n' "$listed" | grep -c ': test$')" -eq 1
+            ignored="$(env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --ignored --exact --list)"
+            test "$(printf '%s\n' "$ignored" | grep -c ': test$' || true)" -eq 0
+            env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --exact --test-threads=1 > "${{ runner.temp }}/remote-region-deadline-marker-private.log" 2>&1
+            grep -q 'test result: ok. 1 passed; 0 failed; 0 ignored;' "${{ runner.temp }}/remote-region-deadline-marker-private.log"
+          done
+          filter="$base::actual_static_lossless_region_deadline_continuous_measurement"
+          listed="$(env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --ignored --exact --list)"
+          test "$(printf '%s\n' "$listed" | grep -c ': test$')" -eq 1
+          status=0
+          env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --ignored --exact --test-threads=1 > "${{ runner.temp }}/remote-region-deadline-private.log" 2>&1 || status=$?
+          if test -f "$JWM_REMOTE_REGION_DEADLINE_REPORT"; then
+            python3 scripts/summarize-remote-region-deadline.py --public-summary "$JWM_REMOTE_REGION_DEADLINE_REPORT" > "${{ runner.temp }}/remote-region-deadline-summary.json" 2> "${{ runner.temp }}/remote-region-deadline-summary-error-private.log"
+            cat "${{ runner.temp }}/remote-region-deadline-summary.json"
+          else
+            exit 1
+          fi
+          if test "$status" -eq 0; then
+            grep -q 'test result: ok. 1 passed; 0 failed; 0 ignored;' "${{ runner.temp }}/remote-region-deadline-private.log"
+          fi
+          exit "$status"
+      - name: Preserve allowlisted continuous-animation metrics
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: remote-region-deadline-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/remote-region-deadline-summary.json
+          if-no-files-found: warn
+          retention-days: 3
+      - name: Mandatory latest-frame-priority scheduler evidence
+        # Six mirrored real TCP/GL sessions; production remains unchanged.
+        # Keep bounded headroom for shared-runner software rendering.
+        timeout-minutes: 10
+        env:
+          JWM_REQUIRE_HEADLESS_GL: '1'
+          JWM_REMOTE_REGION_PRIORITY_REPORT: ${{ runner.temp }}/remote-region-priority-private.json
+        run: |
+          set -euo pipefail
+          python3 scripts/summarize-remote-region-deadline.py --self-test
+          export XDG_RUNTIME_DIR="$(mktemp -d)"
+          trap 'rm -rf "$XDG_RUNTIME_DIR"' EXIT
+          base='remote::host::wayland_viewer_integration::host_lossless_integration::scheduler_benchmark'
+          filter="$base::actual_static_lossless_region_priority_continuous_measurement"
+          listed="$(env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --ignored --exact --list)"
+          test "$(printf '%s\n' "$listed" | grep -c ': test$')" -eq 1
+          status=0
+          env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --ignored --exact --test-threads=1 > "${{ runner.temp }}/remote-region-priority-private.log" 2>&1 || status=$?
+          if test -f "$JWM_REMOTE_REGION_PRIORITY_REPORT"; then
+            python3 scripts/summarize-remote-region-deadline.py --public-summary "$JWM_REMOTE_REGION_PRIORITY_REPORT" > "${{ runner.temp }}/remote-region-priority-summary.json" 2> "${{ runner.temp }}/remote-region-priority-summary-error-private.log"
+            cat "${{ runner.temp }}/remote-region-priority-summary.json"
+          else
+            exit 1
+          fi
+          if test "$status" -eq 0; then
+            grep -q 'test result: ok. 1 passed; 0 failed; 0 ignored;' "${{ runner.temp }}/remote-region-priority-private.log"
+          fi
+          exit "$status"
+      - name: Preserve allowlisted priority scheduler metrics
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: remote-region-priority-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/remote-region-priority-summary.json
+          if-no-files-found: warn
+          retention-days: 3
+      - name: Static lossless refinement exact TCP and viewer pixels
+        run: |
+          set -euo pipefail
+          export XDG_RUNTIME_DIR="$(mktemp -d)"
+          filter='remote::host::wayland_viewer_integration::host_lossless_integration::'
+          listed="$(env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --skip scheduler_benchmark --list)"
+          test "$(printf '%s\n' "$listed" | grep -c ': test$')" -eq 10
+          env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --skip scheduler_benchmark --test-threads=1 --nocapture
+      - name: Lossless popup and passive resize family exact pixels and epoch fences
+        run: |
+          set -euo pipefail
+          export XDG_RUNTIME_DIR="$(mktemp -d)"
+          filter='remote::host::wayland_viewer_integration::host_popup_integration::lossless_family_integration::'
+          listed="$(env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --list)"
+          test "$(printf '%s\n' "$listed" | grep -c ': test$')" -eq 5
+          env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --test-threads=1 --nocapture
+      - name: One-shot text native protocol, exact context and revocation
+        run: |
+          set -euo pipefail
+          export XDG_RUNTIME_DIR="$(mktemp -d)"
+          filter='backend::wayland_udev::remote_text::tests::'
+          listed="$(env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --list)"
+          test "$(printf '%s\n' "$listed" | grep -c ': test$')" -eq 5
+          env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --test-threads=1 --nocapture
+      - name: One-shot text authenticated TCP and native viewer GL presentation
+        run: |
+          set -euo pipefail
+          export XDG_RUNTIME_DIR="$(mktemp -d)"
+          filter='remote::host::wayland_viewer_integration::host_text_integration::'
+          listed="$(env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --list)"
+          test "$(printf '%s\n' "$listed" | grep -c ': test$')" -eq 2
+          env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --test-threads=1 --nocapture
+      - name: Actual Wayland protocol authority and offscreen pixel isolation
+        run: |
+          export XDG_RUNTIME_DIR="$(mktemp -d)"
+          cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib image_copy_capture -- --test-threads=1 --nocapture
+      - name: Actual viewer XKB identity and restored-map history guard
+        run: |
+          python3 scripts/test-remote-keyboard-keymap.py --self-test
+          python3 scripts/test-remote-keyboard-keymap.py
+      - name: Native Wayland read-only viewer protocol and pixel contract
+        run: |
+          export XDG_RUNTIME_DIR="$(mktemp -d)"
+          env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib remote::host::wayland_viewer_integration -- --test-threads=1 --nocapture
+      - name: Controlled input to unique visible marker benchmark
+        timeout-minutes: 3
+        env:
+          JWM_REMOTE_LATENCY_REPORT: ${{ runner.temp }}/remote-input-response.json
+        run: |
+          set -o pipefail
+          export XDG_RUNTIME_DIR="$(mktemp -d)"
+          env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib remote::host::wayland_viewer_integration::host_control_integration::latency_benchmark::controlled_input_to_unique_visible_marker_latency -- --ignored --exact --nocapture --test-threads=1 2>&1 | tail -c 1048576 | tee "${{ runner.temp }}/remote-input-response.log"
+          python3 - <<'PYREPORT'
+          import json, os
+          from pathlib import Path
+          path = Path(os.environ["JWM_REMOTE_LATENCY_REPORT"])
+          assert path.is_file() and 0 < path.stat().st_size <= 1048576, "missing, empty or oversized benchmark report"
+          report = json.loads(path.read_text())
+          assert report["schema_version"] == 1 and report["success"] is True
+          assert report["warmup_requested"] == 2 and report["measured_requested"] == 16
+          samples = report["samples"]
+          assert len(samples) == 18 and all(s["status"] == "ok" for s in samples)
+          assert sum(s["phase"] == "warmup" for s in samples) == 2
+          assert sum(s["phase"] == "measured" for s in samples) == 16
+          print("Validated complete 2-warmup / 16-measured response benchmark report")
+          PYREPORT
+      - name: Same-process native input wake A/B evidence
+        timeout-minutes: 4
+        env:
+          JWM_REMOTE_LATENCY_REPORT: ${{ runner.temp }}/remote-input-wake-ab.json
+        run: |
+          set -o pipefail
+          export XDG_RUNTIME_DIR="$(mktemp -d)"
+          env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib remote::host::wayland_viewer_integration::host_control_integration::latency_benchmark::input_wake_benchmark::controlled_input_wake_abba_latency -- --ignored --exact --nocapture --test-threads=1 2>&1 | tail -c 1048576 | tee "${{ runner.temp }}/remote-input-wake-ab.log"
+          python3 - <<'PYREPORT'
+          import json, os
+          from pathlib import Path
+          p = Path(os.environ["JWM_REMOTE_LATENCY_REPORT"])
+          assert p.is_file() and 0 < p.stat().st_size <= 1048576
+          r = json.loads(p.read_text())
+          assert r["schema_version"] == 1 and r["success"] is True
+          assert r["benchmark"] == "input_wake_abba"
+          assert r["order"] == ["A_no_wake", "B_input_wake", "B_input_wake", "A_no_wake"]
+          assert len(r["sessions"]) == 4 and r["comparison"] is not None
+          for index, session in enumerate(r["sessions"]):
+              assert session["success"] is True
+              assert session["input_wake_enabled"] is (index in (1, 2))
+              samples = session["samples"]
+              assert len(samples) == 18 and all(s["status"] == "ok" for s in samples)
+              assert sum(s["phase"] == "warmup" for s in samples) == 2
+              assert sum(s["phase"] == "measured" for s in samples) == 16
+              assert session["wake_counters"]["activity_waits"] <= 100000
+          print("Validated input-wake A/B/B/A: 72 samples with per-session wake counters")
+          PYREPORT
+      - name: Same-input native proof delta A/B evidence
+        timeout-minutes: 4
+        env:
+          JWM_REMOTE_LATENCY_REPORT: ${{ runner.temp }}/remote-proof-delta-ab.json
+        run: |
+          set -o pipefail
+          export XDG_RUNTIME_DIR="$(mktemp -d)"
+          env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib remote::host::wayland_viewer_integration::host_control_integration::latency_benchmark::proof_delta_benchmark::controlled_proof_delta_abba_latency_and_bytes -- --ignored --exact --nocapture --test-threads=1 2>&1 | tail -c 1048576 | tee "${{ runner.temp }}/remote-proof-delta-ab.log"
+          python3 - <<'PYREPORT'
+          import json, os
+          from pathlib import Path
+          p = Path(os.environ["JWM_REMOTE_LATENCY_REPORT"])
+          assert p.is_file() and 0 < p.stat().st_size <= 1048576
+          r = json.loads(p.read_text())
+          assert r["schema_version"] == 3 and r["success"] is True
+          assert r["benchmark"] == "proof_delta_abba"
+          assert r["order"] == ["Alegacy", "Blegacy", "Anew", "Bnew", "Bnew", "Anew", "Blegacy", "Alegacy"]
+          assert len(r["sessions"]) == 8 and r["comparison"] is not None
+          expected = [(True, False), (False, False), (True, True), (False, True), (False, True), (True, True), (False, False), (True, False)]
+          assert [(s["legacy_forced_keyframe"], s["ack_wake_enabled"]) for s in r["sessions"]] == expected
+          assert all(s["retained_proof_slots_legacy"] is (not s["ack_wake_enabled"]) for s in r["sessions"])
+          assert len(r["groups"]) == 2 and all(g["comparison"] is not None for g in r["groups"])
+          assert r["four_configuration_summary"] is not None
+          for session in r["sessions"]:
+              assert session["success"] is True
+              samples = session["samples"]
+              assert len(samples) == 18 and all(s["status"] == "ok" for s in samples)
+              assert all(s["inject_to_client_ready_ms"] >= s["inject_to_present_observed_ms"] for s in samples)
+              assert sum(s["phase"] == "warmup" for s in samples) == 2
+              assert sum(s["phase"] == "measured" for s in samples) == 16
+              assert len(session["checks"]) == 2 and all(c["status"] == "ok" for c in session["checks"])
+          for index in range(18):
+              assert len({s["samples"][index]["source_rgb_sha256"] for s in r["sessions"]}) == 1
+          print("Validated symmetric proof/ACK-wake comparison: 144 equal-input samples plus static/full-change controls")
+          PYREPORT
+      - name: Preserve bounded controlled input response evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: remote-input-response-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/remote-input-response.json
+            ${{ runner.temp }}/remote-input-response.log
+            ${{ runner.temp }}/remote-input-wake-ab.json
+            ${{ runner.temp }}/remote-input-wake-ab.log
+            ${{ runner.temp }}/remote-proof-delta-ab.json
+            ${{ runner.temp }}/remote-proof-delta-ab.log
+          if-no-files-found: warn
+          retention-days: 3
+      - name: Actual owned X11 viewer presentation and scoped pointer interaction
+        run: |
+          export XDG_RUNTIME_DIR="$(mktemp -d)"
+          python3 scripts/test-remote-viewer-e2e.py --self-test
+          python3 scripts/test-remote-viewer-e2e.py
+      - name: Offline software codec evidence self-tests
+        run: |
+          python3 scripts/benchmark-software-h264.py --self-test
+          python3 scripts/remote-codec-rate-distortion.py --self-test
+          cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib tile_scroll_copy_offline_ab_benchmark -- --ignored --nocapture --test-threads=1
+      - name: Native source adapter, transport, and CLI regressions
+        run: |
+          export XDG_RUNTIME_DIR="$(mktemp -d)"
+          cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib remote:: -- --nocapture
+          cargo test --locked --no-default-features --features remote-wayland,backend-wayland-udev --bin jwm-remote
+
+  optimized-pointer-expiry:
+    name: Mandatory optimized 1080p natural expiry
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      EGL_PLATFORM: surfaceless
+      LIBGL_ALWAYS_SOFTWARE: '1'
+      JWM_REQUIRE_HEADLESS_GL: '1'
+      CARGO_BUILD_JOBS: '2'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Install native build and software renderer dependencies
+        timeout-minutes: 10
+        run: |
+          bash scripts/ci-install-deps.sh build-essential pkg-config \
+            libudev-dev libinput-dev libseat-dev libdrm-dev libgbm-dev \
+            libegl1-mesa-dev libgl1-mesa-dev libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev \
+            libegl-mesa0 libgl1-mesa-dri xvfb xauth libx11-dev libx11-xcb-dev \
+            libxcb-composite0-dev libxcb-damage0-dev libxcb-present-dev libxcb-randr0-dev \
+            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxcb-screensaver0-dev
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          components: rustfmt,clippy
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
+        with:
+          shared-key: remote-wayland-optimized-expiry
+          cache-on-failure: true
+      - name: Run the exact 1080p lease test with production-grade optimization
+        run: |
+          set -euo pipefail
+          export XDG_RUNTIME_DIR="$(mktemp -d)"
+          filter='remote::host::wayland_viewer_integration::host_pointer_integration::pointer_lossless_integration::expiry_integration::actual_pointer_lossless_1080p_partial_progress_and_natural_lease_expiry'
+          listed="$(env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --profile profiling --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --ignored --exact --list)"
+          test "$(printf '%s\n' "$listed" | grep -c ': test$')" -eq 1
+          env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --profile profiling --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --ignored --exact --test-threads=1 --nocapture 2>&1 | tee "$RUNNER_TEMP/pointer-expiry-optimized.log"
+          grep -F 'test result: ok. 1 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/pointer-expiry-optimized.log"
+      - name: Repeated optimized continuous-animation evidence
+        # Reuse the already-built profiling executable, not debug timings.
+        # Two complete mirrored runs; never pool candidates or select a best run.
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          python3 scripts/summarize-remote-region-deadline.py --self-test
+          export XDG_RUNTIME_DIR="$(mktemp -d)"
+          trap 'rm -rf "$XDG_RUNTIME_DIR"' EXIT
+          base='remote::host::wayland_viewer_integration::host_lossless_integration::scheduler_benchmark'
+          filter="$base::actual_static_lossless_region_priority_continuous_measurement"
+          listed="$(env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --profile profiling --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --ignored --exact --list)"
+          test "$(printf '%s\n' "$listed" | grep -c ': test$')" -eq 1
+          status=0
+          for repetition in 1 2; do
+            export JWM_REMOTE_REGION_PRIORITY_REPORT="$RUNNER_TEMP/region-priority-optimized-private-$repetition.json"
+            log="$RUNNER_TEMP/region-priority-optimized-private-$repetition.log"
+            summary="$RUNNER_TEMP/region-priority-optimized-summary-$repetition.json"
+            current=0
+            env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --profile profiling --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --ignored --exact --test-threads=1 > "$log" 2>&1 || current=$?
+            if test -f "$JWM_REMOTE_REGION_PRIORITY_REPORT"; then
+              if python3 scripts/summarize-remote-region-deadline.py --require-no-debug-assertions --public-summary "$JWM_REMOTE_REGION_PRIORITY_REPORT" > "$summary.tmp" 2> "$RUNNER_TEMP/region-priority-optimized-error-private-$repetition.log"; then
+                mv "$summary.tmp" "$summary"
+              else
+                current=1
+              fi
+            else
+              current=1
+            fi
+            if test "$current" -eq 0; then
+              grep -q 'test result: ok. 1 passed; 0 failed; 0 ignored;' "$log" || current=1
+            fi
+            if test "$current" -ne 0; then status=1; fi
+          done
+          exit "$status"
+      - name: Preserve both allowlisted optimized scheduler repetitions
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: remote-region-priority-optimized-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/region-priority-optimized-summary-*.json
+          if-no-files-found: warn
+          retention-days: 3
+      - name: Repeated optimized display-credit pressure evidence
+        # Reuse the already-built profiling executable, not debug timings.
+        # Two complete mirrored runs; never pool candidates or select a best run.
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          python3 scripts/summarize-remote-region-deadline.py --self-test
+          export XDG_RUNTIME_DIR="$(mktemp -d)"
+          trap 'rm -rf "$XDG_RUNTIME_DIR"' EXIT
+          base='remote::host::wayland_viewer_integration::host_lossless_integration::scheduler_benchmark'
+          filter="$base::actual_static_lossless_region_priority_credit_pressure_measurement"
+          listed="$(env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --profile profiling --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --ignored --exact --list)"
+          test "$(printf '%s\n' "$listed" | grep -c ': test$')" -eq 1
+          status=0
+          for repetition in 1 2; do
+            export JWM_REMOTE_REGION_PRESSURE_REPORT="$RUNNER_TEMP/region-pressure-optimized-private-$repetition.json"
+            log="$RUNNER_TEMP/region-pressure-optimized-private-$repetition.log"
+            summary="$RUNNER_TEMP/region-pressure-optimized-summary-$repetition.json"
+            current=0
+            env -u DISPLAY -u WAYLAND_DISPLAY cargo test --locked --profile profiling --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter" -- --ignored --exact --test-threads=1 > "$log" 2>&1 || current=$?
+            if test -f "$JWM_REMOTE_REGION_PRESSURE_REPORT"; then
+              if python3 scripts/summarize-remote-region-deadline.py --require-no-debug-assertions --public-summary "$JWM_REMOTE_REGION_PRESSURE_REPORT" > "$summary.tmp" 2> "$RUNNER_TEMP/region-pressure-optimized-error-private-$repetition.log"; then
+                mv "$summary.tmp" "$summary"
+              else
+                current=1
+              fi
+            else
+              current=1
+            fi
+            if test "$current" -eq 0; then
+              grep -q 'test result: ok. 1 passed; 0 failed; 0 ignored;' "$log" || current=1
+            fi
+            if test "$current" -ne 0; then status=1; fi
+          done
+          exit "$status"
+      - name: Preserve both allowlisted pressure scheduler repetitions
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: remote-region-pressure-optimized-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/region-pressure-optimized-summary-*.json
+          if-no-files-found: warn
+          retention-days: 3

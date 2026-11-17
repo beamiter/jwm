@@ -1,3 +1,9 @@
+use crate::backend::wayland_udev::capture_popup_snapshot;
+
+#[path = "presentation_batch.rs"]
+mod presentation_batch;
+use presentation_batch::{Completion, PresentationBatch, Submission};
+
 #[path = "udev_screenshot_route.rs"]
 mod screenshot_route;
 
@@ -30,7 +36,7 @@ use smithay::backend::renderer::element::surface::{
     WaylandSurfaceRenderElement, render_elements_from_surface_tree,
 };
 use smithay::backend::renderer::element::texture::TextureRenderElement;
-use smithay::backend::renderer::element::{AsRenderElements, Id, Kind};
+use smithay::backend::renderer::element::{AsRenderElements, Element, Id, Kind};
 use smithay::backend::renderer::gles::GlesRenderbuffer;
 use smithay::backend::renderer::gles::{GlesRenderer, GlesTexture};
 use smithay::backend::renderer::utils::{RendererSurfaceStateUserData, import_surface_tree};
@@ -54,7 +60,7 @@ use smithay::utils::{Buffer as BufferCoord, Clock, Monotonic, Size};
 use smithay::utils::{DeviceFd, Physical, Point, Rectangle, Scale, Transform};
 use smithay::wayland::compositor::{TraversalAction, with_states, with_surface_tree_downward};
 use smithay::wayland::dmabuf::get_dmabuf;
-use smithay::wayland::presentation::{PresentationFeedbackCachedState, Refresh};
+use smithay::wayland::presentation::{PresentationFeedbackCachedState, PresentationFeedbackCallback, Refresh};
 use smithay::wayland::shell::wlr_layer::Layer as WlrLayer;
 use smithay::wayland::shell::xdg::SurfaceCachedState;
 
@@ -120,6 +126,9 @@ struct KmsOutputState {
 
     frame_pending: bool,
     frame_pending_boundary: Option<FrameQueueBoundary>,
+    presentation_output_generation: u64,
+    presentation_submission: Option<Submission>,
+    presentation_uncertain: bool,
     /// A watchdog/DPMS cancellation can race a late page-flip event. The first
     /// subsequent event re-establishes ordering but is not trusted as a color
     /// delivery observation.
@@ -525,28 +534,54 @@ fn queued_capture_disposition<'a>(
     }
 }
 
-/// Resolve a queued toplevel capture to the window's surface and size, or to
-/// the reason its frame fails. `size` is the window's `window_geometry`
-/// entry, the liveness key session setup uses too; `None` means the window
-/// closed after the frame was queued.
-///
-/// A closed window is gone for good: its frame fails `stopped`, and the
-/// session's `stopped` follows once the client destroys the frame. `unknown`
-/// told the client to retry, so a window-capture stream of a closed window
-/// looped through capture, a forced render and failure until the client gave
-/// up. A live window without a surface or a size yet may recover, so it fails
-/// retryably.
-fn toplevel_capture_target<S>(
-    surface: Option<S>,
-    size: Option<(i32, i32)>,
-) -> Result<(S, (i32, i32)), ImageCaptureFailureReason> {
-    let Some((width, height)) = size else {
-        return Err(ImageCaptureFailureReason::Stopped);
-    };
-    match surface {
-        Some(surface) if width > 0 && height > 0 => Ok((surface, (width, height))),
-        _ => Err(ImageCaptureFailureReason::Unknown),
+/// Validate the entire destination before writing any captured pixel.
+#[derive(Debug)]
+struct ToplevelShmLayout {
+    offset: usize,
+    stride: usize,
+    row_bytes: usize,
+    height: usize,
+    opaque: bool,
+}
+
+fn toplevel_shm_layout(
+    size: (i32, i32),
+    data: &smithay::wayland::shm::BufferData,
+    pool_len: usize,
+) -> Option<ToplevelShmLayout> {
+    use smithay::reexports::wayland_server::protocol::wl_shm::Format;
+    let (width, height) = size;
+    if width <= 0
+        || height <= 0
+        || width > 16384
+        || height > 16384
+        || i64::from(width) * i64::from(height) > 64 * 1024 * 1024
+        || data.width != width
+        || data.height != height
+        || !matches!(data.format, Format::Argb8888 | Format::Xrgb8888)
+    {
+        return None;
     }
+    let offset = usize::try_from(data.offset).ok()?;
+    let stride = usize::try_from(data.stride).ok()?;
+    let height = usize::try_from(height).ok()?;
+    let row_bytes = usize::try_from(width).ok()?.checked_mul(4)?;
+    if stride < row_bytes {
+        return None;
+    }
+    let end = offset
+        .checked_add((height - 1).checked_mul(stride)?)?
+        .checked_add(row_bytes)?;
+    if end > pool_len {
+        return None;
+    }
+    Some(ToplevelShmLayout {
+        offset,
+        stride,
+        row_bytes,
+        height,
+        opaque: data.format == Format::Xrgb8888,
+    })
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -2134,8 +2169,10 @@ impl FrameColorTransaction {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 struct QueuedFrameData {
+    presentation: Option<PresentationBatch<PresentationFeedbackCallback>>,
+    presentation_generation: Option<u64>,
     color_transaction: Option<FrameColorTransaction>,
     companion: Option<crate::backend::compositor_common::companion_scene::FrameEvidence>,
     color_delivery: Option<ColorDeliveryPlan>,
@@ -2738,6 +2775,7 @@ pub(super) struct KmsState {
 
     pub(super) needs_render: bool,
     compositor_texture_cache: Option<(u32, u32, u32, u32, u64, GlesTexture)>,
+    fbo_presentation: Option<super::fbo_presentation::Proof>,
     /// Same wrapper cache for the compositor's dedicated capture-view texture,
     /// used only while an offscreen capture render runs.
     capture_texture_cache: Option<(u32, u32, u32, u32, u64, GlesTexture)>,
@@ -3011,12 +3049,147 @@ fn linear_tail_blocker_names(
     names
 }
 
+// Identities never reuse a CRTC or output name after hotplug/reconstruction.
+fn next_presentation_identity() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    // compare_exchange is available at the Rust 1.89 MSRV; try_update is not.
+    let mut current = NEXT.load(Ordering::Relaxed);
+    loop {
+        let next = current
+            .checked_add(1)
+            .expect("presentation identity exhausted");
+        match NEXT.compare_exchange_weak(current, next, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => return current,
+            Err(observed) => current = observed,
+        }
+    }
+}
+
+// First FBO proof supports no output slicing, scaling or rotation. A visible
+// whole-texture element alone cannot establish that the sampled window lies
+// inside the particular physical output's slice of a global FBO.
+fn fbo_output_domain_is_exact(
+    origin: (i32, i32),
+    mode: (i32, i32),
+    fbo: (u32, u32),
+    scale: f64,
+    transform: Transform,
+) -> bool {
+    origin == (0, 0)
+        && mode.0 > 0
+        && mode.1 > 0
+        && (mode.0 as u32, mode.1 as u32) == fbo
+        && scale == 1.0
+        && transform == Transform::Normal
+}
+
+// Half-open pixel rectangles. Empty/overflowing domains are unknown, not
+// evidence of separation. i64 arithmetic avoids wrapping at hostile edges.
+fn fbo_cursor_rect_is_disjoint(
+    target: (i32, i32, u32, u32),
+    cursor: Rectangle<i32, Physical>,
+) -> bool {
+    let (tx, ty, tw, th) = target;
+    if tx < 0 || ty < 0 || tw == 0 || th == 0 || cursor.size.w <= 0 || cursor.size.h <= 0 {
+        return false;
+    }
+    let tr = i64::from(tx) + i64::from(tw);
+    let tb = i64::from(ty) + i64::from(th);
+    let cr = i64::from(cursor.loc.x) + i64::from(cursor.size.w);
+    let cb = i64::from(cursor.loc.y) + i64::from(cursor.size.h);
+    if [tr, tb, cr, cb]
+        .into_iter()
+        .any(|edge| edge > i64::from(i32::MAX) || edge < i64::from(i32::MIN))
+    {
+        return false;
+    }
+    cr <= i64::from(tx)
+        || cb <= i64::from(ty)
+        || i64::from(cursor.loc.x) >= tr
+        || i64::from(cursor.loc.y) >= tb
+}
+
+fn fbo_proof_frame_flags(mut flags: FrameFlags, has_proof: bool) -> FrameFlags {
+    if has_proof {
+        // Smithay's cursor-copy fast path may leave hardware plane padding
+        // uninitialized. Only software primary composition has the exact
+        // element bounds proven here; do not widen this into a vendor fix.
+        flags.remove(
+            FrameFlags::ALLOW_CURSOR_PLANE_SCANOUT | FrameFlags::ALLOW_OVERLAY_PLANE_SCANOUT,
+        );
+    }
+    flags
+}
+
+fn fbo_cursor_composition_is_safe(
+    elements: &[KmsRenderElement],
+    cursor_prefix_len: usize,
+    compositor_index: Option<usize>,
+    target: (i32, i32, u32, u32),
+) -> bool {
+    if compositor_index != Some(cursor_prefix_len)
+        || cursor_prefix_len.checked_add(1) != Some(elements.len())
+    {
+        return false;
+    }
+    // Only the actual cursor assembly prefix is trusted, not an arbitrary
+    // external element that happens to advertise Kind::Cursor. Later code only
+    // appends elements; the screenshot texture swap touches the FBO index alone.
+    elements[..cursor_prefix_len].iter().all(|element| {
+        matches!(
+            element,
+            KmsRenderElement::Memory(_) | KmsRenderElement::Solid(_)
+        ) && element.kind() == Kind::Cursor
+            && fbo_cursor_rect_is_disjoint(target, element.geometry(Scale::from(1.0)))
+    })
+}
+
+fn take_rendered_presentation_callbacks(
+    roots: &[WlSurface],
+    render_states: &smithay::backend::renderer::element::RenderElementStates,
+    proven_route: bool,
+) -> Vec<PresentationFeedbackCallback> {
+    let mut sampled = Vec::new();
+    for root in roots {
+        with_surface_tree_downward(
+            root,
+            (),
+            |_, _, _| TraversalAction::DoChildren(()),
+            |surface, states, _| {
+                let visible = proven_route
+                    && render_states
+                        .element_render_state(surface)
+                        .is_some_and(|r| {
+                            r.visible_area > 0 && r.presentation_state !=
+                        smithay::backend::renderer::element::RenderElementPresentationState::Skipped
+                        });
+                let mut cached = states.cached_state.get::<PresentationFeedbackCachedState>();
+                for callback in cached.current().callbacks.drain(..) {
+                    if visible {
+                        sampled.push(callback);
+                    } else {
+                        callback.discarded();
+                    }
+                }
+            },
+            |_, _, _| true,
+        );
+    }
+    sampled
+}
+
 impl KmsState {
+    pub(super) fn single_presentation_output(&self) -> bool {
+        self.outputs.len() == 1
+    }
+    pub(super) fn set_fbo_presentation(&mut self, proof: Option<super::fbo_presentation::Proof>) {
+        self.fbo_presentation = proof;
+    }
     fn deliver_frame_callbacks(
         out: &mut KmsOutputState,
         flush_tx: &Sender<()>,
         flush_pending: &AtomicBool,
-        presentation_time: Option<std::time::Duration>,
+        _presentation_time: Option<std::time::Duration>,
     ) {
         if !out.send_frame_callbacks {
             return;
@@ -3038,7 +3211,6 @@ impl KmsState {
             reason = "Wayland Weak hashes by stable protocol-object identity; its internal liveness flag is not part of Hash or Eq"
         )]
         let visible = &out.frame_callback_visible;
-        let refresh = out.refresh_interval;
         for root in &out.frame_callback_roots {
             let mut root_tree_visible = visible.contains(&root.downgrade());
             if !root_tree_visible {
@@ -3055,32 +3227,8 @@ impl KmsState {
                 );
             }
 
-            // Send presentation feedback for wp_presentation protocol when this
-            // callback is tied to an actual vblank. Empty-damage callback
-            // delivery below intentionally omits presentation feedback.
-            if let Some(vblank_time) = presentation_time {
-                with_surface_tree_downward(
-                    root,
-                    (),
-                    |_, _, _| TraversalAction::DoChildren(()),
-                    |_surface, states, _| {
-                        let mut cached =
-                            states.cached_state.get::<PresentationFeedbackCachedState>();
-                        let feedback = cached.current();
-                        for cb in feedback.callbacks.drain(..) {
-                            cb.presented(
-                                &output,
-                                vblank_time,
-                                Refresh::fixed(refresh),
-                                0,
-                                smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind::Vsync
-                                    | smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind::HwClock,
-                            );
-                        }
-                    },
-                    |_, _, _| true,
-                );
-            }
+            // Presentation feedback is owned by the exact submitted batch,
+            // never by the surface's potentially newer current commit here.
 
             // wp-fifo/wp-commit-timing are intentionally advertised in
             // unmanaged mode; that mode installs no Smithay barriers to
@@ -3265,6 +3413,7 @@ impl KmsState {
         if !out.dpms_off {
             if out.frame_pending {
                 out.color_delivery_observation_uncertain = true;
+                out.presentation_uncertain = true;
             }
             out.color_delivery_retry_required = true;
             self.needs_render = true;
@@ -3363,10 +3512,12 @@ impl KmsState {
             out.frame_pending = false;
             out.frame_pending_since = None;
             out.frame_pending_boundary = None;
+            out.presentation_submission = None;
             // Unknown whether it reached the screen: the next locked frame
             // confirms instead.
             out.frame_pending_lock_epoch = None;
             out.color_delivery_observation_uncertain = true;
+            out.presentation_uncertain = true;
             out.color_delivery_retry_required = true;
             out.color_delivery.invalidate();
             recovered += 1;
@@ -5066,8 +5217,10 @@ impl KmsState {
                 self.outputs[output_idx].frame_pending = false;
                 self.outputs[output_idx].frame_pending_since = None;
                 self.outputs[output_idx].frame_pending_boundary = None;
+                self.outputs[output_idx].presentation_submission = None;
                 self.outputs[output_idx].frame_pending_lock_epoch = None;
                 self.outputs[output_idx].color_delivery_observation_uncertain = true;
+                self.outputs[output_idx].presentation_uncertain = true;
             }
             // Change the connector power state first. If that write fails the
             // still-visible scanout must retain its matching LUT/CTM instead
@@ -7009,10 +7162,7 @@ impl KmsState {
         let phys: Size<i32, Physical> = (width, height).into();
         let mut dt = OutputDamageTracker::new(phys, Scale::from(1.0f64), Transform::Normal);
         match dt.render_output(renderer, &mut target, 0, elements, clear) {
-            Ok(res) => {
-                let _ = res.sync.wait();
-                true
-            }
+            Ok(res) => res.sync.wait().is_ok(),
             Err(e) => {
                 log::error!("{}: {e:?}", renderer_ctx("capture/dmabuf: render_output"));
                 false
@@ -7547,7 +7697,7 @@ impl KmsState {
     /// Unlike output capture, this renders only one window's surface tree into a
     /// window-sized offscreen buffer and reads it back into the client buffer.
     /// Runs once per render cycle since toplevel frames are not tied to an output.
-    fn fulfill_image_capture_toplevel_frames(
+    pub(crate) fn fulfill_image_capture_toplevel_frames(
         renderer: &mut GlesRenderer,
         offscreen_cache: &mut Option<(i32, i32, GlesRenderbuffer)>,
         state: &crate::backend::wayland::state::JwmWaylandState,
@@ -7580,48 +7730,144 @@ impl KmsState {
         }
 
         for frame_info in frames {
-            let CaptureSource::Toplevel(win) = frame_info.source else {
+            let CaptureSource::Toplevel(authority) = &frame_info.source else {
                 continue;
             };
-
-            let size = state
-                .window_geometry
-                .get(&win)
-                .map(|geo| (geo.w as i32, geo.h as i32));
-            let (surface, (width, height)) =
-                match toplevel_capture_target(state.surface_for_window(win), size) {
-                    Ok(target) => target,
-                    Err(reason) => {
-                        Self::note_image_capture_frame_failed(counters, reason);
-                        frame_info.frame.failed(reason);
-                        continue;
-                    }
+            if !frame_info.authorized(state) {
+                Self::note_image_capture_frame_failed(counters, FailureReason::Stopped);
+                frame_info.frame.failed(FailureReason::Stopped);
+                continue;
+            }
+            // Freeze the interactive layout before rendering any pixel. The
+            // same immutable proof is checked again by every write/ready fence.
+            let family_proof = if let Some(family) = &authority.family {
+                let Some(proof) = family.snapshot(state) else {
+                    Self::note_image_capture_frame_failed(counters, FailureReason::Stopped);
+                    frame_info.frame.failed(FailureReason::Stopped);
+                    continue;
                 };
+                let Some(data) = frame_info
+                    .frame
+                    .data::<crate::backend::wayland_udev::image_copy_capture::CaptureFrameData>(
+                ) else {
+                    continue;
+                };
+                *data.family_proof.lock().unwrap() = Some(proof.clone());
+                Some(proof)
+            } else {
+                None
+            };
+            let surface = &authority.surface;
+            // Session authorities are immutable snapshots, including for a
+            // resize-follow source. Never render using the mutable root layout.
+            let (width, height) = (authority.width as i32, authority.height as i32);
 
             // Shift the surface buffer origin by -window_geometry.loc so client-side
             // shadow/CSD margins don't push the content off the capture buffer.
-            let (off_x, off_y) = with_states(&surface, |states| {
-                let mut cached = states.cached_state.get::<SurfaceCachedState>();
-                cached
-                    .current()
-                    .geometry
-                    .map(|r| (r.loc.x, r.loc.y))
-                    .unwrap_or((0, 0))
+            // Follow snapshots freeze the actual committed crop origin, including
+            // the legal no-set_window_geometry case. Ordinary capture retains
+            // its existing xdg geometry behavior.
+            let (off_x, off_y) = authority.follow_origin.unwrap_or_else(|| {
+                with_states(surface, |states| {
+                    let mut cached = states.cached_state.get::<SurfaceCachedState>();
+                    cached
+                        .current()
+                        .geometry
+                        .map(|r| (r.loc.x, r.loc.y))
+                        .unwrap_or((0, 0))
+                })
             });
 
             let scale = Scale::from(1.0f64);
-            let location: Point<i32, Physical> = (-off_x, -off_y).into();
-            let tree = SurfaceTree::from_surface(&surface);
-            let elements: Vec<KmsRenderElement> = AsRenderElements::<GlesRenderer>::render_elements(
-                &tree, renderer, location, scale, 1.0,
-            );
+            let (Some(x), Some(y)) = (off_x.checked_neg(), off_y.checked_neg()) else {
+                Self::note_image_capture_frame_failed(counters, FailureReason::BufferConstraints);
+                frame_info.frame.failed(FailureReason::BufferConstraints);
+                continue;
+            };
+            let location: Point<i32, Physical> = (x, y).into();
+            let elements: Vec<KmsRenderElement> =
+                if authority.include_popups || family_proof.is_some() {
+                    let trees = if let Some(proof) = &family_proof {
+                        let mut trees = Vec::new();
+                        if let Some(popup) = &proof.layout.popup {
+                            trees.push(capture_popup_snapshot::CaptureTree {
+                                surface: popup.surface.clone(),
+                                origin: (popup.rect.0, popup.rect.1),
+                                mapped: 1,
+                            });
+                        }
+                        trees.push(capture_popup_snapshot::CaptureTree {
+                            surface: proof.layout.root.clone(),
+                            origin: (0, 0),
+                            mapped: 1,
+                        });
+                        Some(trees)
+                    } else {
+                        capture_popup_snapshot::snapshot(state, surface, (x, y))
+                    };
+                    let Some(trees) = trees else {
+                        Self::note_image_capture_frame_failed(
+                            counters,
+                            FailureReason::BufferConstraints,
+                        );
+                        frame_info.frame.failed(FailureReason::BufferConstraints);
+                        continue;
+                    };
+                    let mut elements = Vec::new();
+                    let mut complete = true;
+                    for item in trees {
+                        let tree = SurfaceTree::from_surface(&item.surface);
+                        let location: Point<i32, Physical> = item.origin.into();
+                        let rendered: Vec<KmsRenderElement> =
+                            AsRenderElements::<GlesRenderer>::render_elements(
+                                &tree, renderer, location, scale, 1.0,
+                            );
+                        complete &= rendered.len() == item.mapped;
+                        elements.extend(rendered);
+                    }
+                    if !complete {
+                        Self::note_image_capture_frame_failed(counters, FailureReason::Unknown);
+                        frame_info.frame.failed(FailureReason::Unknown);
+                        continue;
+                    }
+                    elements
+                } else {
+                    let tree = SurfaceTree::from_surface(surface);
+                    AsRenderElements::<GlesRenderer>::render_elements(
+                        &tree, renderer, location, scale, 1.0,
+                    )
+                };
 
             // dmabuf fast path: render the window straight into the client buffer.
             if let Some(dmabuf) = get_dmabuf(&frame_info.buffer).ok().cloned() {
+                use smithay::backend::allocator::Buffer as _;
+                if dmabuf.size() != (width, height).into()
+                    || !renderer
+                        .egl_context()
+                        .dmabuf_render_formats()
+                        .contains(&dmabuf.format())
+                {
+                    Self::note_image_capture_frame_failed(
+                        counters,
+                        FailureReason::BufferConstraints,
+                    );
+                    frame_info.frame.failed(FailureReason::BufferConstraints);
+                    continue;
+                }
+                if !frame_info.authorized(state) {
+                    Self::note_image_capture_frame_failed(counters, FailureReason::Stopped);
+                    frame_info.frame.failed(FailureReason::Stopped);
+                    continue;
+                }
                 let clear = smithay::backend::renderer::Color32F::new(0.0, 0.0, 0.0, 0.0);
                 if Self::render_into_client_dmabuf(
                     renderer, &dmabuf, width, height, &elements, clear,
                 ) {
+                    if !frame_info.authorized(state) {
+                        Self::note_image_capture_frame_failed(counters, FailureReason::Stopped);
+                        frame_info.frame.failed(FailureReason::Stopped);
+                        continue;
+                    }
                     frame_info.frame.transform(wl_output::Transform::Normal);
                     frame_info.frame.damage(0, 0, width, height);
                     let now = std::time::SystemTime::now()
@@ -7633,6 +7879,7 @@ impl KmsState {
                         (tv_sec & 0xFFFFFFFF) as u32,
                         now.subsec_nanos(),
                     );
+                    frame_info.mark_ready();
                     frame_info.frame.ready();
                     Self::note_image_capture_fulfilled(counters);
                 } else {
@@ -7683,6 +7930,13 @@ impl KmsState {
                 continue;
             }
 
+            // A resize-follow frame belongs to its original session layout.
+            // Never read back an old render target after that session expires.
+            if !frame_info.authorized(state) {
+                Self::note_image_capture_frame_failed(counters, FailureReason::Stopped);
+                frame_info.frame.failed(FailureReason::Stopped);
+                continue;
+            }
             let region = Rectangle::from_size(size);
             let mapping = match renderer.copy_framebuffer(&target, region, Fourcc::Abgr8888) {
                 Ok(m) => m,
@@ -7711,39 +7965,43 @@ impl KmsState {
 
             let copy_result =
                 with_buffer_contents_mut(&frame_info.buffer, |ptr, pool_len, buf_data| {
-                    let buf_offset = buf_data.offset as usize;
-                    let buf_stride = buf_data.stride as usize;
-                    let buf_h = buf_data.height as usize;
-                    let buf_w = buf_data.width as usize;
-                    let src_stride = width as usize * 4;
-                    let copy_h = buf_h.min(height as usize);
-                    let copy_w = buf_w.min(width as usize);
-
-                    for row in 0..copy_h {
-                        let src_row_start = row * src_stride;
-                        let dst_row_start = buf_offset + row * buf_stride;
-                        if dst_row_start + copy_w * 4 > pool_len {
-                            break;
-                        }
-                        for col in 0..copy_w {
-                            let si = src_row_start + col * 4;
-                            let di = dst_row_start + col * 4;
-                            if si + 3 >= pixels.len() {
-                                break;
-                            }
-                            // GL ABGR8888 [R,G,B,A] → shm ARGB8888 [B,G,R,A].
+                    if !frame_info.authorized(state) {
+                        return Err(FailureReason::Stopped);
+                    }
+                    let layout = toplevel_shm_layout((width, height), &buf_data, pool_len)
+                        .ok_or(FailureReason::BufferConstraints)?;
+                    let source_len = layout
+                        .row_bytes
+                        .checked_mul(layout.height)
+                        .ok_or(FailureReason::BufferConstraints)?;
+                    if pixels.len() < source_len {
+                        return Err(FailureReason::Unknown);
+                    }
+                    for row in 0..layout.height {
+                        let src = row * layout.row_bytes;
+                        let dst = layout.offset + row * layout.stride;
+                        for col in (0..layout.row_bytes).step_by(4) {
+                            let si = src + col;
+                            let di = dst + col;
+                            // Complete source/destination ranges were checked before the first write.
                             unsafe {
                                 *ptr.add(di) = pixels[si + 2];
                                 *ptr.add(di + 1) = pixels[si + 1];
                                 *ptr.add(di + 2) = pixels[si];
-                                *ptr.add(di + 3) = pixels[si + 3];
+                                *ptr.add(di + 3) = if layout.opaque { 255 } else { pixels[si + 3] };
                             }
                         }
                     }
+                    Ok(())
                 });
 
             match copy_result {
-                Ok(()) => {
+                Ok(Ok(())) => {
+                    if !frame_info.authorized(state) {
+                        Self::note_image_capture_frame_failed(counters, FailureReason::Stopped);
+                        frame_info.frame.failed(FailureReason::Stopped);
+                        continue;
+                    }
                     frame_info.frame.transform(wl_output::Transform::Normal);
                     frame_info.frame.damage(0, 0, width, height);
                     let now = std::time::SystemTime::now()
@@ -7755,8 +8013,13 @@ impl KmsState {
                         (tv_sec & 0xFFFFFFFF) as u32,
                         now.subsec_nanos(),
                     );
+                    frame_info.mark_ready();
                     frame_info.frame.ready();
                     Self::note_image_capture_fulfilled(counters);
+                }
+                Ok(Err(reason)) => {
+                    Self::note_image_capture_frame_failed(counters, reason);
+                    frame_info.frame.failed(reason);
                 }
                 Err(e) => {
                     log::warn!(
@@ -8384,6 +8647,9 @@ impl KmsState {
                 drm_output,
                 frame_pending: false,
                 frame_pending_boundary: None,
+                presentation_output_generation: next_presentation_identity(),
+                presentation_submission: None,
+                presentation_uncertain: false,
                 color_delivery_observation_uncertain: false,
                 color_delivery_retry_required: false,
                 color_delivery: OutputColorDeliveryTracker::default(),
@@ -8450,6 +8716,7 @@ impl KmsState {
             renderer,
             needs_render: true,
             compositor_texture_cache: None,
+            fbo_presentation: None,
             capture_texture_cache: None,
             compositor_texture_keepalive: Vec::new(),
             background_id: Id::new(),
@@ -8498,7 +8765,12 @@ impl KmsState {
                 DrmEvent::VBlank(crtc) => {
                     let presented = {
                         let mut kms = handle_clone.borrow_mut();
-                        kms.on_vblank(crtc, metadata, state.color_manager.as_ref());
+                        kms.on_vblank(
+                            crtc,
+                            metadata,
+                            state.color_manager.as_ref(),
+                            state.presentation_generation,
+                        );
                         kms.take_presented_locked_frames()
                     };
                     for (output_name, epoch) in presented {
@@ -8638,6 +8910,10 @@ impl KmsState {
         let im_popups = state.im_popup_positions();
         let mut any_skipped = false;
         let mut any_failed = false;
+        let unambiguous_presentation_output = self.outputs.len() == 1;
+        // Take ownership once. Any skipped output/render error drops callbacks;
+        // no cached texture or subsequent client commit can reacquire them.
+        let mut fbo_presentation = self.fbo_presentation.take();
         for out_idx in 0..self.outputs.len() {
             // Outputs marked soft-disabled by wlr-output-management
             // `disable_head` Apply stop receiving frames but keep their
@@ -8768,6 +9044,10 @@ impl KmsState {
                     }
                 }
             }
+
+            // Provenance is the exact prefix assembled above, including every
+            // fallback body and shadow rectangle. Do not derive it from Kind.
+            let cursor_prefix_len = elements.len();
 
             let out = &mut self.outputs[out_idx];
 
@@ -9739,10 +10019,13 @@ impl KmsState {
                 // guarantees a real replacement queue/vblank observation.
                 out.drm_output.reset_buffers();
             }
-            let frame_flags = frame_flags_for_color_delivery(
-                color_delivery_retry_required,
-                manual_surface_path,
-                direct_scanout_eligible,
+            let frame_flags = fbo_proof_frame_flags(
+                frame_flags_for_color_delivery(
+                    color_delivery_retry_required,
+                    manual_surface_path,
+                    direct_scanout_eligible,
+                ),
+                fbo_presentation.is_some(),
             );
 
             match out.drm_output.render_frame(
@@ -9752,6 +10035,41 @@ impl KmsState {
                 frame_flags,
             ) {
                 Ok(res) => {
+                    // Render and callback extraction occur without dispatching
+                    // another client commit. Direct surfaces use actual element
+                    // states; the narrow FBO route consumes only the earlier
+                    // owned import/draw receipt. Unproven routes discard.
+                    let mut callbacks = take_rendered_presentation_callbacks(
+                        &frame_roots,
+                        &res.states,
+                        unambiguous_presentation_output && !use_compositor && !res.is_empty,
+                    );
+                    if use_compositor && unambiguous_presentation_output && !res.is_empty
+                        && fbo_presentation.as_ref().is_some_and(|proof|
+                            fbo_cursor_composition_is_safe(&elements, cursor_prefix_len,
+                                compositor_element_index, proof.target_rect()))
+                        && compositor.is_some_and(|comp| fbo_output_domain_is_exact(
+                            (ox, oy), (out_w, out_h), comp.screen_size(),
+                            out.output.current_scale().fractional_scale(), out.output.current_transform()))
+                        && compositor_element_index.and_then(|index| elements.get(index))
+                            .and_then(|element| res.states.element_render_state(element.id().clone())).is_some_and(|r|
+                            r.visible_area > 0 && r.presentation_state != smithay::backend::renderer::element::RenderElementPresentationState::Skipped)
+                        && let (Some(proof), Some(comp)) = (fbo_presentation.take(), compositor)
+                    {
+                        callbacks.extend(proof.consume(state, comp.output_texture_id(),
+                            comp.output_texture_generation(), comp.output_content_serial()));
+                    }
+                    let queue_boundary = FrameQueueBoundary::now();
+                    let submission = Submission {
+                        output_generation: out.presentation_output_generation,
+                        serial: next_presentation_identity(),
+                    };
+                    let presentation = PresentationBatch::new(
+                        submission,
+                        queue_boundary.monotonic,
+                        callbacks,
+                        PresentationFeedbackCallback::discarded,
+                    );
                     let client_direct_scanout = client_direct_scanout_presented(
                         direct_scanout_eligible,
                         matches!(
@@ -9799,6 +10117,8 @@ impl KmsState {
                     };
                     let out = &mut self.outputs[out_idx];
                     let frame_data = QueuedFrameData {
+                        presentation: Some(presentation),
+                        presentation_generation: state.presentation_generation,
                         color_transaction: Some(FrameColorTransaction {
                             generation: out.desired_color_generation,
                             hdr: out.installed_hdr_metadata_blob.is_some(),
@@ -9816,9 +10136,8 @@ impl KmsState {
                                 ticket
                             }),
                     };
-                    // Sample both DRM timestamp domains before submitting: a
-                    // flip can happen immediately after the ioctl returns.
-                    let queue_boundary = FrameQueueBoundary::now();
+                    // The boundary was sampled before extracting this batch;
+                    // callbacks travel only with this exact framebuffer.
                     if let Err(err) = out
                         .drm_output
                         .queue_frame_with_properties(frame_data, properties)
@@ -9869,6 +10188,7 @@ impl KmsState {
                         out.frame_pending = true;
                         out.frame_pending_since = Some(std::time::Instant::now());
                         out.frame_pending_boundary = Some(queue_boundary);
+                        out.presentation_submission = Some(submission);
                         out.frame_pending_lock_epoch =
                             state.session_locked.then_some(state.session_lock_epoch);
                         out.send_frame_callbacks = true;
@@ -9925,6 +10245,7 @@ impl KmsState {
         crtc: crtc::Handle,
         metadata: &mut Option<DrmEventMetadata>,
         color_manager: Option<&crate::backend::wayland_udev::color_management::ColorManagerState>,
+        presentation_generation: Option<u64>,
     ) {
         let flush_tx = self.flush_tx.clone();
         let flush_pending = self.flush_pending.clone();
@@ -9966,13 +10287,33 @@ impl KmsState {
         let (submitted_color_delivery, retry_color_delivery_observation) = {
             let out = &mut self.outputs[output_idx];
             let uncertain = out.color_delivery_observation_uncertain;
-            let submitted_frame = match out.drm_output.frame_submitted() {
+            let mut submitted_frame = match out.drm_output.frame_submitted() {
                 Ok(frame) => frame,
                 Err(err) => {
                     log::debug!("drm frame_submitted error: {err:?}");
                     None
                 }
             };
+            if let Some(frame) = submitted_frame.as_mut()
+                && let Some(batch) = frame.presentation.take()
+            {
+                if let Some(submission) = out.presentation_submission.take() {
+                    let evidence = Completion {
+                        submission,
+                        monotonic_time: presentation_time,
+                        uncertain: out.presentation_uncertain
+                            || uncertain
+                            || presentation_generation.is_none()
+                            || frame.presentation_generation != presentation_generation,
+                    };
+                    batch.complete(evidence, |callback, time| {
+                        callback.presented(&out.output, time, Refresh::Unknown,
+                            metadata.as_ref().map_or(0, |m| u64::from(m.sequence)),
+                            smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind::HwClock);
+                    });
+                }
+                // Missing queue identity drops the batch and discards.
+            }
             if !uncertain {
                 if let Some(transaction) = submitted_frame
                     .as_ref()
@@ -10016,10 +10357,12 @@ impl KmsState {
                     );
                 }
             }
+            out.presentation_uncertain = false;
             let observation = submitted_color_delivery_observation(submitted_frame, uncertain);
             out.frame_pending = false;
             out.frame_pending_since = None;
             out.frame_pending_boundary = None;
+            out.presentation_submission = None;
             if let Some(epoch) = out.frame_pending_lock_epoch.take() {
                 self.presented_locked_frames
                     .push((out.output_name.clone(), epoch));
@@ -11633,61 +11976,54 @@ mod compositor_texture_ownership_tests {
     }
 
     #[test]
-    fn a_capture_of_a_closed_window_fails_stopped_instead_of_retryably() {
-        use super::{ImageCaptureFailureReason, toplevel_capture_target};
-
-        // A live, sized window with a surface renders at its geometry size.
-        assert_eq!(
-            toplevel_capture_target(Some("surface"), Some((640, 480))),
-            Ok(("surface", (640, 480)))
+    fn toplevel_capture_shm_requires_exact_complete_supported_buffer() {
+        use smithay::reexports::wayland_server::protocol::wl_shm::Format;
+        use smithay::wayland::shm::BufferData;
+        let data = BufferData {
+            offset: 8,
+            width: 4,
+            height: 2,
+            stride: 20,
+            format: Format::Xrgb8888,
+        };
+        let layout = super::toplevel_shm_layout((4, 2), &data, 44).unwrap();
+        assert!(layout.opaque);
+        assert!(super::toplevel_shm_layout((4, 2), &data, 43).is_none());
+        assert!(super::toplevel_shm_layout((3, 2), &data, 100).is_none());
+        assert!(super::toplevel_shm_layout((5, 2), &data, 100).is_none());
+        assert!(
+            super::toplevel_shm_layout((4, 2), &BufferData { offset: -1, ..data }, 100).is_none()
         );
-        // The window closed after the frame was queued: its source is gone
-        // for good, so the client must not be told to retry.
-        assert_eq!(
-            toplevel_capture_target(Some("surface"), None),
-            Err(ImageCaptureFailureReason::Stopped)
+        assert!(
+            super::toplevel_shm_layout((4, 2), &BufferData { stride: -1, ..data }, 100).is_none()
         );
-        assert_eq!(
-            toplevel_capture_target(None::<&str>, None),
-            Err(ImageCaptureFailureReason::Stopped)
+        assert!(
+            super::toplevel_shm_layout((4, 2), &BufferData { stride: 15, ..data }, 100).is_none()
         );
-        // A live window without a surface or a size yet may recover.
-        assert_eq!(
-            toplevel_capture_target(None::<&str>, Some((640, 480))),
-            Err(ImageCaptureFailureReason::Unknown)
+        assert!(
+            super::toplevel_shm_layout(
+                (4, 2),
+                &BufferData {
+                    format: Format::Rgb565,
+                    ..data
+                },
+                100
+            )
+            .is_none()
         );
-        assert_eq!(
-            toplevel_capture_target(Some("surface"), Some((0, 480))),
-            Err(ImageCaptureFailureReason::Unknown)
+        assert!(
+            !super::toplevel_shm_layout(
+                (4, 2),
+                &BufferData {
+                    format: Format::Argb8888,
+                    ..data
+                },
+                44
+            )
+            .unwrap()
+            .opaque
         );
-
-        // The renderer resolves every queued toplevel frame through it.
-        const SOURCE: &str = include_str!("udev_kms.rs");
-        let fulfill = SOURCE
-            .split_once("fn fulfill_image_capture_toplevel_frames(")
-            .expect("the toplevel capture pass exists")
-            .1
-            .split_once("with_states(&surface")
-            .expect("the pass reads the surface geometry after resolving it")
-            .0;
-        assert!(fulfill.contains("toplevel_capture_target(state.surface_for_window(win), size)"));
-        assert!(fulfill.contains("frame_info.frame.failed(reason);"));
-        // The failure is counted by its reason, not as a render fault.
-        let counted = format!(
-            "Self::{}(counters, reason);",
-            "note_image_capture_frame_failed"
-        );
-        assert!(fulfill.contains(&counted));
-        let drain = SOURCE
-            .split_once("fn fail_unservable_output_captures(")
-            .expect("the unservable-capture drain exists")
-            .1
-            .split_once("\n    fn ")
-            .expect("the drain ends")
-            .0;
-        assert!(drain.contains(&format!(
-            "{counted}\n                frame.frame.failed(reason);"
-        )));
+        assert!(super::toplevel_shm_layout((0, 2), &data, 100).is_none());
     }
 
     #[test]
@@ -13263,6 +13599,8 @@ mod compositor_texture_ownership_tests {
         // fail-closed and arm a replacement frame.
         let (first, retry) = submitted_color_delivery_observation(
             Some(QueuedFrameData {
+                presentation: None,
+                presentation_generation: None,
                 color_transaction: None,
                 companion: None,
                 color_delivery: Some(plan.clone()),
@@ -13274,6 +13612,8 @@ mod compositor_texture_ownership_tests {
 
         let (second, retry) = submitted_color_delivery_observation(
             Some(QueuedFrameData {
+                presentation: None,
+                presentation_generation: None,
                 color_transaction: None,
                 companion: None,
                 color_delivery: Some(plan),
@@ -14262,4 +14602,193 @@ mod frame_color_transaction_tests {
         );
         assert!(queue.contains(".queue_frame_with_properties(frame_data, properties)"));
     }
+}
+
+#[cfg(test)]
+mod fbo_output_domain_tests {
+    use super::{Transform, fbo_output_domain_is_exact};
+    #[test]
+    fn only_identity_single_output_pixel_domain_is_proven() {
+        assert!(fbo_output_domain_is_exact(
+            (0, 0),
+            (800, 600),
+            (800, 600),
+            1.0,
+            Transform::Normal
+        ));
+    }
+    #[test]
+    fn global_fbo_with_shifted_physical_slice_is_not_proof() {
+        assert!(!fbo_output_domain_is_exact(
+            (800, 0),
+            (800, 600),
+            (1600, 600),
+            1.0,
+            Transform::Normal
+        ));
+        assert!(!fbo_output_domain_is_exact(
+            (-800, 0),
+            (800, 600),
+            (800, 600),
+            1.0,
+            Transform::Normal
+        ));
+        assert!(!fbo_output_domain_is_exact(
+            (0, 0),
+            (800, 600),
+            (1600, 600),
+            1.0,
+            Transform::Normal
+        ));
+    }
+    #[test]
+    fn scaled_rotated_or_empty_domains_fail_closed() {
+        assert!(!fbo_output_domain_is_exact(
+            (0, 0),
+            (800, 600),
+            (800, 600),
+            2.0,
+            Transform::Normal
+        ));
+        assert!(!fbo_output_domain_is_exact(
+            (0, 0),
+            (800, 600),
+            (800, 600),
+            1.0,
+            Transform::_90
+        ));
+        assert!(!fbo_output_domain_is_exact(
+            (0, 0),
+            (0, 600),
+            (0, 600),
+            1.0,
+            Transform::Normal
+        ));
+        assert!(!fbo_output_domain_is_exact(
+            (0, 0),
+            (-1, 600),
+            (u32::MAX, 600),
+            1.0,
+            Transform::Normal
+        ));
+    }
+}
+
+#[cfg(test)]
+mod fbo_cursor_rect_tests {
+    use super::{Physical, Rectangle, fbo_cursor_rect_is_disjoint};
+    fn rect(x: i32, y: i32, w: i32, h: i32) -> Rectangle<i32, Physical> {
+        Rectangle::new((x, y).into(), (w, h).into())
+    }
+    const TARGET: (i32, i32, u32, u32) = (20, 20, 40, 30);
+    #[test]
+    fn cursor_outside_and_exact_edge_are_disjoint() {
+        for r in [
+            rect(0, 0, 8, 8),
+            rect(0, 20, 20, 10),
+            rect(60, 20, 10, 10),
+            rect(20, 50, 10, 10),
+            rect(-8, 20, 8, 12),
+        ] {
+            assert!(fbo_cursor_rect_is_disjoint(TARGET, r));
+        }
+    }
+    #[test]
+    fn one_pixel_and_shadow_overlap_are_not_disjoint() {
+        for r in [
+            rect(19, 20, 2, 10),
+            rect(59, 20, 10, 10),
+            rect(20, 49, 10, 10),
+            rect(25, 25, 2, 2),
+        ] {
+            assert!(!fbo_cursor_rect_is_disjoint(TARGET, r));
+        }
+        assert!(fbo_cursor_rect_is_disjoint(TARGET, rect(0, 10, 20, 10)));
+        assert!(
+            !fbo_cursor_rect_is_disjoint(TARGET, rect(1, 11, 20, 10)),
+            "shadow alone overlaps"
+        );
+    }
+    #[test]
+    fn malformed_or_overflowing_rectangles_fail_closed() {
+        // Smithay's safe constructor rejects negative dimensions first. Model
+        // malformed stored geometry explicitly so the production gate is tested.
+        let mut negative_width = rect(0, 0, 1, 4);
+        negative_width.size.w = -1;
+        for r in [
+            rect(0, 0, 0, 4),
+            negative_width,
+            rect(i32::MAX, 0, 1, 4),
+            rect(0, i32::MAX, 4, 1),
+        ] {
+            assert!(!fbo_cursor_rect_is_disjoint(TARGET, r));
+        }
+        for t in [(0, 0, 0, 1), (0, 0, u32::MAX, 1), (-1, 0, 1, 1)] {
+            assert!(!fbo_cursor_rect_is_disjoint(t, rect(100, 100, 1, 1)));
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn compositor_frame_element_for_test(
+    renderer: &GlesRenderer,
+    texture: GlesTexture,
+) -> KmsRenderElement {
+    KmsState::compositor_frame_element(renderer, texture, (0, 0))
+}
+
+#[cfg(test)]
+pub(crate) fn composite_fbo_elements_for_test(
+    renderer: &mut GlesRenderer,
+    elements: &[KmsRenderElement],
+    size: (i32, i32),
+) -> Option<Vec<u8>> {
+    let texture = KmsState::composite_elements_to_texture(renderer, elements, size, 1.0)?;
+    let mapping = renderer
+        .copy_texture(
+            &texture,
+            Rectangle::from_size(size.into()),
+            Fourcc::Abgr8888,
+        )
+        .ok()?;
+    Some(renderer.map_texture(&mapping).ok()?.to_vec())
+}
+
+#[cfg(test)]
+mod fbo_cursor_frame_flag_tests {
+    use super::{FrameFlags, fbo_proof_frame_flags};
+    #[test]
+    fn proof_forces_cursor_and_overlay_software_without_changing_other_flags() {
+        let input = FrameFlags::all();
+        let actual = fbo_proof_frame_flags(input, true);
+        assert!(!actual.intersects(
+            FrameFlags::ALLOW_CURSOR_PLANE_SCANOUT | FrameFlags::ALLOW_OVERLAY_PLANE_SCANOUT
+        ));
+        assert_eq!(
+            actual,
+            input
+                & !(FrameFlags::ALLOW_CURSOR_PLANE_SCANOUT
+                    | FrameFlags::ALLOW_OVERLAY_PLANE_SCANOUT)
+        );
+        assert_eq!(
+            fbo_proof_frame_flags(FrameFlags::empty(), true),
+            FrameFlags::empty()
+        );
+    }
+    #[test]
+    fn ordinary_frames_retain_original_plane_policy() {
+        for flags in [FrameFlags::empty(), FrameFlags::DEFAULT, FrameFlags::all()] {
+            assert_eq!(fbo_proof_frame_flags(flags, false), flags);
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn fbo_cursor_composition_for_test(
+    elements: &[KmsRenderElement],
+    cursor_prefix_len: usize,
+    compositor_index: Option<usize>,
+    target: (i32, i32, u32, u32),
+) -> bool {
+    fbo_cursor_composition_is_safe(elements, cursor_prefix_len, compositor_index, target)
 }

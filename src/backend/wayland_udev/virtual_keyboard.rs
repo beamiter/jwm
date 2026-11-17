@@ -27,6 +27,9 @@ pub(super) struct VirtualKeyboardDelivery {
 }
 
 impl VirtualKeyboardDelivery {
+    pub(super) fn has_held(&self) -> bool {
+        !self.held.is_empty()
+    }
     pub(super) fn clear_held(&mut self) {
         self.held.clear();
     }
@@ -68,6 +71,10 @@ impl VirtualKeyboardDelivery {
 
 impl VirtualKeyboardHandler for JwmWaylandState {
     fn process_virtual_keyboard_event(&mut self, event: InputEvent<VirtualKeyboardBackend>) {
+        crate::backend::wayland_udev::remote_keyboard::revoke(
+            self,
+            crate::backend::wayland_udev::remote_keyboard::LOCAL,
+        );
         use VirtualKeyboardSpecialEvent::{KeymapChanged, Modifiers};
         let device = match &event {
             InputEvent::DeviceAdded { device }

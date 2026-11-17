@@ -8,9 +8,12 @@ use super::x11_keymap::{KeymapTable, MAX_ENCODED_KEYMAP_LEN};
 use std::io;
 
 const APPLICATION_MAGIC: &[u8; 8] = b"JWMREM01";
-pub const APPLICATION_VERSION: u16 = 14;
+/// v35 adds exact, mutually authorized resumable-control duration negotiation.
+/// Native action receipts and proof-gated repair phases remain mandatory.
+/// Both peers must upgrade; no fallback to an older authorization contract.
+pub const APPLICATION_VERSION: u16 = 35;
 const HELLO_PREFIX_LEN: usize = 11;
-const STREAM_CAPABILITIES_LEN: usize = 25;
+const STREAM_CAPABILITIES_LEN: usize = 36;
 const SERVER_HELLO_LEN: usize = HELLO_PREFIX_LEN + STREAM_CAPABILITIES_LEN;
 const CLIENT_HELLO_HEADER_LEN: usize = SERVER_HELLO_LEN + 4;
 /// Largest client hello: the shared prefix plus a full keymap table.
@@ -108,6 +111,27 @@ pub struct StreamCapabilities {
     pub clipboard_content: u8,
     /// Direction bits: viewer to host (1), host to viewer (2).
     pub clipboard_directions: u8,
+    /// Explicit native window resize, independent of input and viewport.
+    pub window_resize: bool,
+    /// Independent source-bound Wayland keyboard lease; never global input.
+    pub wayland_keyboard: bool,
+    /// Independent single-action, frame-gated native pointer lease.
+    pub wayland_pointer: bool,
+    /// Separate opt-in for discrete vertical wheel notches. Requires pointer.
+    pub wayland_scroll: bool,
+    pub wayland_horizontal_scroll: bool,
+    /// Experimental video-only vertical copy deltas; no input authority.
+    pub scroll_copy: bool,
+    pub static_lossless: bool,
+    /// Explicit single combined authority, never inferred from old flags.
+    pub wayland_control: bool,
+    /// Explicit version-1 resumable protocol opt-in; never implied by control.
+    pub resumable_control: bool,
+    /// Exact requested/accepted duration, not the host ceiling. Default 30 does
+    /// not authorize input; values above 30 require explicit resumable control.
+    pub control_duration: super::resumable_control::ControlDuration,
+    pub wayland_text: bool,
+    pub wayland_popup_pointer: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -156,6 +180,17 @@ impl StreamCapabilities {
         payload[15..23].copy_from_slice(&self.frame_limits.max_pixels.to_be_bytes());
         payload[23] = self.clipboard_content;
         payload[24] = self.clipboard_directions;
+        payload[25] = u8::from(self.window_resize);
+        payload[26] = u8::from(self.wayland_keyboard);
+        payload[27] = u8::from(self.wayland_pointer);
+        payload[28] =
+            u8::from(self.wayland_scroll) | (u8::from(self.wayland_horizontal_scroll) << 1);
+        payload[29] = u8::from(self.scroll_copy);
+        payload[30] = u8::from(self.wayland_control) | (u8::from(self.resumable_control) << 1);
+        payload[31] = u8::from(self.wayland_text);
+        payload[32] = u8::from(self.static_lossless);
+        payload[33] = u8::from(self.wayland_popup_pointer);
+        payload[34..36].copy_from_slice(&self.control_duration.as_secs().to_be_bytes());
         payload
     }
 
@@ -163,13 +198,47 @@ impl StreamCapabilities {
         if payload.len() != STREAM_CAPABILITIES_LEN {
             return Err(invalid_data("invalid bounded stream profile length").into());
         }
+        let control_duration = super::resumable_control::ControlDuration::from_secs(
+            u16::from_be_bytes(payload[34..36].try_into().unwrap()),
+        )?;
+        if control_duration.is_extended() && payload[30] != 3 {
+            return Err(
+                invalid_data("extended duration requires explicit resumable control").into(),
+            );
+        }
         let cursor = match &payload[..3] {
             [1, 1, 1] => CursorMode::Composited,
             [1, 2, 1] => CursorMode::Independent,
             _ => return Err(invalid_data("unsupported remote codec, cursor or input mode").into()),
         };
-        if !matches!(payload[23], 0 | 1 | 3 | 7)
+        if payload[33] > 1
+            || (payload[33] == 1 && payload[23..33].iter().any(|b| *b != 0))
+            || !matches!(payload[23], 0 | 1 | 3 | 7)
             || payload[24] > 3
+            || payload[25] > 1
+            || payload[26] > 1
+            || payload[27] > 1
+            || payload[28] > 3
+            || payload[29] > 1
+            || payload[32] > 1
+            || (payload[32] == 1
+                && (payload[23..26].iter().any(|b| *b != 0)
+                    || (payload[28] != 0 && payload[27] != 1)
+                    || payload[31] != 0))
+            || payload[31] > 1
+            || (payload[31] == 1 && payload[23..29].iter().any(|b| *b != 0))
+            || (payload[31] == 1 && payload[30] != 0)
+            || !matches!(payload[30], 0 | 1 | 3)
+            || (payload[30] == 3 && payload[32] != 0)
+            || (payload[30] & 1 == 1
+                && (payload[25] != 0
+                    || payload[26] != 0
+                    || payload[27] != 0
+                    || payload[23] != 0
+                    || payload[24] != 0))
+            || (payload[28] != 0
+                && (payload[26] == 1 || (payload[27] != 1 && payload[30] & 1 != 1)))
+            || (payload[26] == 1 && payload[27] == 1)
             || (payload[23] == 0) != (payload[24] == 0)
         {
             return Err(invalid_data("invalid clipboard content or direction policy").into());
@@ -186,8 +255,77 @@ impl StreamCapabilities {
             clipboard_file_limit: u64::from_be_bytes(payload[3..11].try_into().unwrap()),
             clipboard_content: payload[23],
             clipboard_directions: payload[24],
+            window_resize: payload[25] == 1,
+            wayland_keyboard: payload[26] == 1,
+            wayland_pointer: payload[27] == 1,
+            wayland_scroll: payload[28] & 1 != 0,
+            wayland_horizontal_scroll: payload[28] & 2 != 0,
+            scroll_copy: payload[29] == 1,
+            static_lossless: payload[32] == 1,
+            wayland_control: payload[30] & 1 != 0,
+            resumable_control: payload[30] & 2 != 0,
+            control_duration,
+            wayland_text: payload[31] == 1,
+            wayland_popup_pointer: payload[33] == 1,
             ..Self::default()
         })
+    }
+
+    /// Negotiate the exact client duration against independent local permission.
+    /// Never silently shorten a request or inherit a larger host ceiling.
+    pub fn negotiate_control_duration(
+        self,
+        host_enabled: bool,
+        host_max: super::resumable_control::ControlDuration,
+    ) -> RemoteResult<super::resumable_control::ControlDuration> {
+        use super::resumable_control::{LocalOptIn, Negotiated, VERSION};
+        if !self.negotiate_resumable_control(host_enabled)? {
+            if self.control_duration.is_extended() {
+                return Err(invalid_data("extended duration without resumable control").into());
+            }
+            return Ok(self.control_duration);
+        }
+        Ok(Negotiated::with_duration(
+            LocalOptIn::Explicit,
+            Some(VERSION),
+            self.control_duration,
+            host_max,
+        )?
+        .duration())
+    }
+
+    /// The authenticated server must echo the original client request exactly.
+    pub fn confirm_control_duration(
+        self,
+        requested: super::resumable_control::ControlDuration,
+        requested_resumable: bool,
+    ) -> RemoteResult<()> {
+        if self.control_duration != requested || self.resumable_control != requested_resumable {
+            return Err(invalid_data(
+                "server changed requested control duration or resumable permission",
+            )
+            .into());
+        }
+        Ok(())
+    }
+
+    /// Version-one resumption is never inferred from an ordinary control grant.
+    /// Refuse a requested-but-unavailable mode rather than silently downgrade.
+    pub fn negotiate_resumable_control(self, host_enabled: bool) -> RemoteResult<bool> {
+        if self.resumable_control
+            && (!self.wayland_control || self.static_lossless || !host_enabled)
+        {
+            return Err(
+                invalid_data("resumable control requires both explicit permissions").into(),
+            );
+        }
+        Ok(self.resumable_control)
+    }
+
+    /// Video codec extension requires host opt-in and peer decoder support.
+    #[must_use]
+    pub fn negotiate_scroll_copy(self, host_enabled: bool) -> bool {
+        host_enabled && self.scroll_copy
     }
 
     /// Both directions use the stricter operator limit. A zero on either side
@@ -241,12 +379,16 @@ impl ClientHello {
     }
 
     pub fn decode(payload: &[u8]) -> RemoteResult<Self> {
-        if payload.len() < HELLO_PREFIX_LEN || payload.len() > MAX_CLIENT_HELLO_LEN {
+        if payload.len() < HELLO_PREFIX_LEN {
             return Err(invalid_data("client hello has an invalid length").into());
         }
-        // The version is checked before the keymap, so an older viewer is
-        // told its version is unsupported rather than that its table is bad.
+        // Check the stable prefix before version-specific size limits. A newer
+        // viewer's larger capabilities header can exceed this version's maximum
+        // when it sends a full keymap; report the version mismatch in that case.
         let flags = decode_prefix(&payload[..HELLO_PREFIX_LEN])?;
+        if payload.len() > MAX_CLIENT_HELLO_LEN {
+            return Err(invalid_data("client hello has an invalid length").into());
+        }
         if payload.len() < CLIENT_HELLO_HEADER_LEN {
             return Err(invalid_data("client hello header is truncated").into());
         }
@@ -310,6 +452,14 @@ impl ServerHello {
 }
 
 fn validate_clipboard_flags(flags: u8, stream: StreamCapabilities) -> RemoteResult<()> {
+    if (stream.wayland_control
+        || stream.wayland_text
+        || stream.static_lossless
+        || stream.wayland_popup_pointer)
+        && flags & (INPUT_FLAGS | FLAG_CLIPBOARD | FLAG_CLIPBOARD_FILES) != 0
+    {
+        return Err(invalid_data("control cannot combine legacy input or clipboard flags").into());
+    }
     if (flags & FLAG_CLIPBOARD != 0) != (stream.clipboard_content != 0)
         || (flags & FLAG_CLIPBOARD_FILES != 0) != (stream.clipboard_content & 4 != 0)
         || (stream.clipboard_file_limit != 0) != (stream.clipboard_content & 4 != 0)
@@ -717,6 +867,58 @@ fn invalid_data(message: impl Into<String>) -> io::Error {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn horizontal_scroll_capability_is_independent_and_bounded() {
+        use super::StreamCapabilities;
+        for control in [false, true] {
+            for (vertical, horizontal) in
+                [(false, false), (true, false), (false, true), (true, true)]
+            {
+                let caps = StreamCapabilities {
+                    wayland_pointer: !control,
+                    wayland_control: control,
+                    wayland_scroll: vertical,
+                    wayland_horizontal_scroll: horizontal,
+                    ..Default::default()
+                };
+                assert_eq!(StreamCapabilities::decode(&caps.encode()).unwrap(), caps);
+                assert_eq!(
+                    caps.encode()[28],
+                    u8::from(vertical) | (u8::from(horizontal) << 1)
+                );
+            }
+        }
+        let invalid = StreamCapabilities {
+            wayland_horizontal_scroll: true,
+            ..Default::default()
+        };
+        assert!(StreamCapabilities::decode(&invalid.encode()).is_err());
+    }
+    #[test]
+    fn wayland_keyboard_capability_is_independent_and_strict() {
+        let stream = super::StreamCapabilities {
+            wayland_keyboard: true,
+            ..Default::default()
+        };
+        let mut bytes = stream.encode();
+        assert_eq!(super::StreamCapabilities::decode(&bytes).unwrap(), stream);
+        assert_eq!(bytes[25], 0, "keyboard must not enable resize");
+        bytes[26] = 2;
+        assert!(super::StreamCapabilities::decode(&bytes).is_err());
+    }
+
+    #[test]
+    fn explicit_window_resize_capability_is_bounded() {
+        let stream = super::StreamCapabilities {
+            window_resize: true,
+            ..Default::default()
+        };
+        let mut encoded = stream.encode();
+        assert_eq!(super::StreamCapabilities::decode(&encoded).unwrap(), stream);
+        encoded[25] = 2;
+        assert!(super::StreamCapabilities::decode(&encoded).is_err());
+        assert!(super::StreamCapabilities::decode(&encoded[..25]).is_err());
+    }
     use super::*;
 
     #[test]
@@ -959,8 +1161,48 @@ mod tests {
             ClientHello::decode(&legacy).unwrap_err(),
             ServerHello::decode(&legacy).unwrap_err(),
         ] {
-            assert!(error.to_string().contains("version 6; expected 14"));
+            assert!(
+                error
+                    .to_string()
+                    .contains(&format!("version 6; expected {APPLICATION_VERSION}"))
+            );
         }
+    }
+
+    #[test]
+    fn oversized_client_hello_reports_version_mismatch_before_length() {
+        let mut payload = ClientHello {
+            stream: Default::default(),
+            initial_viewport: None,
+            request_input: false,
+            request_clipboard: false,
+            request_clipboard_files: false,
+            keymap: KeymapTable::empty(),
+        }
+        .encode();
+        // Versions 15-17 each added one capability byte. With a full keymap,
+        // their hellos exceed version 14's maximum even though the prefix fits.
+        payload.resize(MAX_CLIENT_HELLO_LEN + 3, 0);
+        for version in [APPLICATION_VERSION - 1, APPLICATION_VERSION + 1] {
+            payload[8..10].copy_from_slice(&version.to_be_bytes());
+            assert_eq!(
+                ClientHello::decode(&payload).unwrap_err().to_string(),
+                format!(
+                    "unsupported JWM remote application version {version}; expected {APPLICATION_VERSION}"
+                )
+            );
+        }
+        // Moving the check must not admit oversized messages of our version.
+        payload[8..10].copy_from_slice(&APPLICATION_VERSION.to_be_bytes());
+        assert_eq!(
+            ClientHello::decode(&payload).unwrap_err().to_string(),
+            "client hello has an invalid length"
+        );
+        payload[0] ^= 1;
+        assert_eq!(
+            ClientHello::decode(&payload).unwrap_err().to_string(),
+            "peer is not using the JWM remote protocol"
+        );
     }
 
     #[test]
@@ -1072,7 +1314,7 @@ mod tests {
     }
 
     #[test]
-    fn hello_uses_version_fourteen_and_rejects_neighbouring_versions() {
+    fn hello_uses_current_version_and_rejects_neighbouring_versions() {
         let payload = ServerHello {
             stream: Default::default(),
             pointer_enabled: false,
@@ -1081,24 +1323,22 @@ mod tests {
             clipboard_files_enabled: false,
         }
         .encode();
-        assert_eq!(&payload[8..10], &14_u16.to_be_bytes());
+        assert_eq!(&payload[8..10], &APPLICATION_VERSION.to_be_bytes());
 
         // Version 5 had no clipboard transfer records: a version-5 peer
         // would end the session on the first copied image or file. It must
         // fail on its version instead. Version 4 sent one digest of the whole
         // keymap where later versions send a per-keycode table.
-        for older in [4_u16, 5, 6, 7, 8, 9, 10, 11, 12, 13] {
+        for older in 4_u16..APPLICATION_VERSION {
             let mut previous = payload;
             previous[8..10].copy_from_slice(&older.to_be_bytes());
             let error = ServerHello::decode(&previous).unwrap_err();
-            assert!(
-                error
-                    .to_string()
-                    .contains(&format!("application version {older}; expected 14"))
-            );
+            assert!(error.to_string().contains(&format!(
+                "application version {older}; expected {APPLICATION_VERSION}"
+            )));
         }
 
-        for rejected in [0_u16, 2, 3, 15, u16::MAX] {
+        for rejected in [0_u16, 2, 3, APPLICATION_VERSION + 1, u16::MAX] {
             let mut other = payload;
             other[8..10].copy_from_slice(&rejected.to_be_bytes());
             assert!(
@@ -1501,5 +1741,610 @@ mod tests {
         let decoded = ServerHello::decode(&payload).unwrap();
         assert!(decoded.pointer_enabled);
         assert!(!decoded.keyboard_enabled);
+    }
+}
+
+#[cfg(test)]
+mod scroll_capability_tests {
+    use super::*;
+    #[test]
+    fn scroll_is_explicit_boolean_and_requires_pointer_or_control_in_version_23() {
+        assert_eq!(APPLICATION_VERSION, 35);
+        assert_eq!(STREAM_CAPABILITIES_LEN, 36);
+        let mut caps = StreamCapabilities::default();
+        assert!(
+            !StreamCapabilities::decode(&caps.encode())
+                .unwrap()
+                .wayland_scroll
+        );
+        caps.wayland_scroll = true;
+        assert!(StreamCapabilities::decode(&caps.encode()).is_err());
+        caps.wayland_pointer = true;
+        assert_eq!(StreamCapabilities::decode(&caps.encode()).unwrap(), caps);
+        for flag in [4, 128, 255] {
+            let mut payload = caps.encode();
+            payload[28] = flag;
+            assert!(StreamCapabilities::decode(&payload).is_err());
+        }
+        assert!(StreamCapabilities::decode(&caps.encode()[..28]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod scroll_copy_capability_tests {
+    use super::*;
+    #[test]
+    fn scroll_copy_is_bounded_video_only_capability() {
+        let mut caps = StreamCapabilities::default();
+        assert!(!caps.scroll_copy);
+        caps.scroll_copy = true;
+        assert_eq!(StreamCapabilities::decode(&caps.encode()).unwrap(), caps);
+        assert!(!caps.wayland_pointer && !caps.wayland_scroll && !caps.wayland_keyboard);
+        for host in [false, true] {
+            for peer in [false, true] {
+                caps.scroll_copy = peer;
+                assert_eq!(caps.negotiate_scroll_copy(host), host && peer);
+            }
+        }
+        caps.scroll_copy = true;
+        for invalid in [2, 255] {
+            let mut payload = caps.encode();
+            payload[29] = invalid;
+            assert!(StreamCapabilities::decode(&payload).is_err());
+        }
+        assert!(StreamCapabilities::decode(&caps.encode()[..29]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod control_capability_tests {
+    use super::*;
+    #[test]
+    fn resumable_control_is_explicit_version_one_and_cannot_downgrade() {
+        for host in [false, true] {
+            for peer in [false, true] {
+                let caps = StreamCapabilities {
+                    wayland_control: true,
+                    resumable_control: peer,
+                    ..Default::default()
+                };
+                assert_eq!(StreamCapabilities::decode(&caps.encode()).unwrap(), caps);
+                match caps.negotiate_resumable_control(host) {
+                    Ok(enabled) => assert_eq!(enabled, host && peer),
+                    Err(_) => assert!(peer && !host),
+                }
+            }
+        }
+        let caps = StreamCapabilities {
+            wayland_control: true,
+            resumable_control: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            caps.encode()[30],
+            3,
+            "old peers reject the new version bit rather than interpreting a one-shot grant"
+        );
+        for bad in [
+            StreamCapabilities {
+                wayland_control: false,
+                ..caps
+            },
+            StreamCapabilities {
+                static_lossless: true,
+                ..caps
+            },
+        ] {
+            assert!(StreamCapabilities::decode(&bad.encode()).is_err());
+            assert!(bad.negotiate_resumable_control(true).is_err());
+        }
+        for flags in [FLAG_POINTER, FLAG_KEYBOARD, FLAG_CLIPBOARD] {
+            assert!(ServerHello::decode(&encode_hello(flags, caps)).is_err());
+        }
+    }
+
+    #[test]
+    fn control_is_explicit_bounded_boolean_and_excludes_old_permissions() {
+        let caps = StreamCapabilities {
+            wayland_control: true,
+            resumable_control: false,
+            ..Default::default()
+        };
+        let bytes = caps.encode();
+        assert_eq!(bytes.len(), STREAM_CAPABILITIES_LEN);
+        assert_eq!(StreamCapabilities::decode(&bytes).unwrap(), caps);
+        for v in [2, 255] {
+            let mut bad = bytes;
+            bad[30] = v;
+            assert!(StreamCapabilities::decode(&bad).is_err());
+        }
+        let mut scroll = caps;
+        scroll.wayland_scroll = true;
+        assert_eq!(
+            StreamCapabilities::decode(&scroll.encode()).unwrap(),
+            scroll
+        );
+        scroll.wayland_keyboard = true;
+        assert!(StreamCapabilities::decode(&scroll.encode()).is_err());
+        for index in [23, 24, 25, 26, 27] {
+            let mut bad = bytes;
+            bad[index] = 1;
+            assert!(StreamCapabilities::decode(&bad).is_err());
+        }
+        assert!(StreamCapabilities::decode(&bytes[..30]).is_err());
+        assert!(!StreamCapabilities::default().wayland_control);
+        for flags in [
+            FLAG_POINTER,
+            FLAG_KEYBOARD,
+            INPUT_FLAGS,
+            FLAG_CLIPBOARD,
+            FLAG_CLIPBOARD_FILES,
+        ] {
+            let hello = encode_hello(flags, caps);
+            assert!(ServerHello::decode(&hello).is_err());
+        }
+    }
+}
+
+#[cfg(test)]
+mod text_capability_tests {
+    use super::*;
+    #[test]
+    fn text_is_separate_default_off_and_exclusive() {
+        assert!(!StreamCapabilities::default().wayland_text);
+        let c = StreamCapabilities {
+            wayland_text: true,
+            ..Default::default()
+        };
+        let bytes = c.encode();
+        assert_eq!(bytes.len(), STREAM_CAPABILITIES_LEN);
+        assert_eq!(StreamCapabilities::decode(&bytes).unwrap(), c);
+        for i in [23, 24, 25, 26, 27, 28, 30] {
+            let mut b = bytes;
+            b[i] = 1;
+            assert!(StreamCapabilities::decode(&b).is_err(), "{i}");
+        }
+        for v in [2, 255] {
+            let mut b = bytes;
+            b[31] = v;
+            assert!(StreamCapabilities::decode(&b).is_err());
+        }
+    }
+}
+
+#[cfg(test)]
+mod static_lossless_capability_tests {
+    use super::*;
+    #[test]
+    fn explicit_readonly_and_bounded_boolean() {
+        assert!(!StreamCapabilities::default().static_lossless);
+        let c = StreamCapabilities {
+            static_lossless: true,
+            ..Default::default()
+        };
+        let bytes = c.encode();
+        assert_eq!(StreamCapabilities::decode(&bytes).unwrap(), c);
+        for i in [23, 24, 25, 28, 31] {
+            let mut b = bytes;
+            b[i] = 1;
+            assert!(StreamCapabilities::decode(&b).is_err(), "{i}");
+        }
+        let mut control = bytes;
+        control[30] = 1;
+        assert!(
+            StreamCapabilities::decode(&control)
+                .unwrap()
+                .wayland_control
+        );
+        let mut keyboard = bytes;
+        keyboard[26] = 1;
+        assert!(
+            StreamCapabilities::decode(&keyboard)
+                .unwrap()
+                .wayland_keyboard
+        );
+        let mut pointer = bytes;
+        pointer[27] = 1;
+        assert!(
+            StreamCapabilities::decode(&pointer)
+                .unwrap()
+                .wayland_pointer
+        );
+        // Each scroll axis is independently allowed with native pointer only.
+        // Every other input/clipboard/resize combination remains rejected.
+        let mut vertical = pointer;
+        vertical[28] = 1;
+        assert!(
+            StreamCapabilities::decode(&vertical)
+                .unwrap()
+                .wayland_scroll
+        );
+        for i in [23, 24, 25, 26, 30, 31] {
+            let mut mixed = pointer;
+            mixed[i] = 1;
+            assert!(StreamCapabilities::decode(&mixed).is_err(), "mixed {i}");
+        }
+        for v in [2, 3] {
+            let mut scroll = pointer;
+            scroll[28] = v;
+            let decoded = StreamCapabilities::decode(&scroll).unwrap();
+            assert!(decoded.wayland_horizontal_scroll);
+            assert_eq!(decoded.wayland_scroll, v == 3);
+        }
+        for v in [2, 255] {
+            let mut b = bytes;
+            b[32] = v;
+            assert!(StreamCapabilities::decode(&b).is_err());
+        }
+        for flags in [
+            FLAG_POINTER,
+            FLAG_KEYBOARD,
+            FLAG_CLIPBOARD,
+            FLAG_CLIPBOARD_FILES,
+        ] {
+            assert!(ServerHello::decode(&encode_hello(flags, c)).is_err());
+        }
+    }
+}
+
+#[cfg(test)]
+mod lossless_scroll_hello_tests {
+    use super::*;
+
+    fn client(stream: StreamCapabilities) -> ClientHello {
+        ClientHello {
+            stream,
+            initial_viewport: None,
+            request_input: false,
+            request_clipboard: false,
+            request_clipboard_files: false,
+            keymap: KeymapTable::empty(),
+        }
+    }
+    fn server(stream: StreamCapabilities) -> ServerHello {
+        ServerHello {
+            stream,
+            pointer_enabled: false,
+            keyboard_enabled: false,
+            clipboard_enabled: false,
+            clipboard_files_enabled: false,
+        }
+    }
+
+    #[test]
+    fn lossless_vertical_pointer_roundtrips_both_real_hellos() {
+        let caps = StreamCapabilities {
+            static_lossless: true,
+            wayland_pointer: true,
+            wayland_scroll: true,
+            ..Default::default()
+        };
+        let c = client(caps);
+        let s = server(caps);
+        assert_eq!(ClientHello::decode(&c.encode()).unwrap(), c);
+        assert_eq!(ServerHello::decode(&s.encode()).unwrap(), s);
+        for version in [27_u16, 28, 29, 30, 31, 32, 33, 34, APPLICATION_VERSION + 1] {
+            let mut cb = c.encode();
+            cb[8..10].copy_from_slice(&version.to_be_bytes());
+            assert!(ClientHello::decode(&cb).is_err());
+            let mut sb = s.encode();
+            sb[8..10].copy_from_slice(&version.to_be_bytes());
+            assert!(ServerHello::decode(&sb).is_err());
+        }
+    }
+
+    #[test]
+    fn horizontal_only_and_both_axes_roundtrip_without_implicit_vertical_permission() {
+        for vertical in [false, true] {
+            let caps = StreamCapabilities {
+                static_lossless: true,
+                wayland_pointer: true,
+                wayland_scroll: vertical,
+                wayland_horizontal_scroll: true,
+                ..Default::default()
+            };
+            assert_eq!(StreamCapabilities::decode(&caps.encode()).unwrap(), caps);
+            assert_eq!(
+                ClientHello::decode(&client(caps).encode()).unwrap(),
+                client(caps)
+            );
+            assert_eq!(
+                ServerHello::decode(&server(caps).encode()).unwrap(),
+                server(caps)
+            );
+        }
+    }
+
+    #[test]
+    fn lossless_input_matrix_is_identical_in_both_hello_decoders() {
+        // Exhaustively vary native mode and axis bits with PNG enabled.
+        for mask in 0_u8..64 {
+            let caps = StreamCapabilities {
+                static_lossless: true,
+                wayland_keyboard: mask & 1 != 0,
+                wayland_pointer: mask & 2 != 0,
+                wayland_control: mask & 4 != 0,
+                wayland_text: mask & 8 != 0,
+                wayland_scroll: mask & 16 != 0,
+                wayland_horizontal_scroll: mask & 32 != 0,
+                ..Default::default()
+            };
+            let permitted = !(caps.wayland_control
+                && (caps.wayland_keyboard
+                    || caps.wayland_pointer
+                    || caps.wayland_scroll
+                    || caps.wayland_horizontal_scroll))
+                && !caps.wayland_text
+                && !(caps.wayland_keyboard && caps.wayland_pointer)
+                && (!(caps.wayland_scroll || caps.wayland_horizontal_scroll)
+                    || (caps.wayland_pointer && !caps.wayland_keyboard));
+            assert_eq!(
+                StreamCapabilities::decode(&caps.encode()).is_ok(),
+                permitted,
+                "caps mask {mask}"
+            );
+            assert_eq!(
+                ClientHello::decode(&client(caps).encode()).is_ok(),
+                permitted,
+                "client mask {mask}"
+            );
+            assert_eq!(
+                ServerHello::decode(&server(caps).encode()).is_ok(),
+                permitted,
+                "server mask {mask}"
+            );
+        }
+    }
+
+    #[test]
+    fn lossless_vertical_pointer_rejects_legacy_clipboard_resize_and_unknown_bits() {
+        let caps = StreamCapabilities {
+            static_lossless: true,
+            wayland_pointer: true,
+            wayland_scroll: true,
+            ..Default::default()
+        };
+        for kind in 0..4 {
+            let mut c = client(caps);
+            let mut s = server(caps);
+            match kind {
+                0 => {
+                    c.request_input = true;
+                    s.pointer_enabled = true;
+                }
+                1 => {
+                    c.request_clipboard = true;
+                    s.clipboard_enabled = true;
+                }
+                2 => {
+                    c.request_clipboard = true;
+                    s.clipboard_enabled = true;
+                    c.request_clipboard_files = true;
+                    s.clipboard_files_enabled = true;
+                }
+                _ => {
+                    c.stream.window_resize = true;
+                    s.stream.window_resize = true;
+                }
+            }
+            assert!(ClientHello::decode(&c.encode()).is_err());
+            assert!(ServerHello::decode(&s.encode()).is_err());
+        }
+        for bits in [4, 5, 6, 7, 128, 255] {
+            let mut cb = client(caps).encode();
+            cb[HELLO_PREFIX_LEN + 28] = bits;
+            assert!(ClientHello::decode(&cb).is_err());
+            let mut sb = server(caps).encode();
+            sb[HELLO_PREFIX_LEN + 28] = bits;
+            assert!(ServerHello::decode(&sb).is_err());
+        }
+    }
+}
+
+#[cfg(test)]
+mod popup_capability_tests {
+    use super::*;
+    fn client(stream: StreamCapabilities) -> ClientHello {
+        ClientHello {
+            stream,
+            initial_viewport: None,
+            request_input: false,
+            request_clipboard: false,
+            request_clipboard_files: false,
+            keymap: KeymapTable::empty(),
+        }
+    }
+    fn server(stream: StreamCapabilities) -> ServerHello {
+        ServerHello {
+            stream,
+            pointer_enabled: false,
+            keyboard_enabled: false,
+            clipboard_enabled: false,
+            clipboard_files_enabled: false,
+        }
+    }
+    #[test]
+    fn popup_actual_hellos_are_default_off_exclusive_and_strict() {
+        assert!(!StreamCapabilities::default().wayland_popup_pointer);
+        let caps = StreamCapabilities {
+            wayland_popup_pointer: true,
+            ..Default::default()
+        };
+        assert_eq!(StreamCapabilities::decode(&caps.encode()).unwrap(), caps);
+        assert_eq!(
+            ClientHello::decode(&client(caps).encode()).unwrap(),
+            client(caps)
+        );
+        assert_eq!(
+            ServerHello::decode(&server(caps).encode()).unwrap(),
+            server(caps)
+        );
+        for index in 23..33 {
+            for value in [1, 2, 3, 255] {
+                let mut c = client(caps).encode();
+                c[HELLO_PREFIX_LEN + index] = value;
+                let mut s = server(caps).encode();
+                s[HELLO_PREFIX_LEN + index] = value;
+                assert!(ClientHello::decode(&c).is_err(), "client {index}/{value}");
+                assert!(ServerHello::decode(&s).is_err(), "server {index}/{value}");
+            }
+        }
+        for value in [2, 3, 128, 255] {
+            let mut c = client(caps).encode();
+            c[HELLO_PREFIX_LEN + 33] = value;
+            let mut s = server(caps).encode();
+            s[HELLO_PREFIX_LEN + 33] = value;
+            assert!(ClientHello::decode(&c).is_err());
+            assert!(ServerHello::decode(&s).is_err());
+        }
+        for flag in [
+            FLAG_POINTER,
+            FLAG_KEYBOARD,
+            FLAG_CLIPBOARD,
+            FLAG_CLIPBOARD_FILES,
+            128,
+        ] {
+            let mut c = client(caps).encode();
+            c[10] |= flag;
+            let mut s = server(caps).encode();
+            s[10] |= flag;
+            assert!(ClientHello::decode(&c).is_err());
+            assert!(ServerHello::decode(&s).is_err());
+        }
+        for version in [
+            0_u16,
+            29,
+            30,
+            31,
+            32,
+            33,
+            34,
+            APPLICATION_VERSION + 1,
+            u16::MAX,
+        ] {
+            let mut c = client(caps).encode();
+            c[8..10].copy_from_slice(&version.to_be_bytes());
+            let mut s = server(caps).encode();
+            s[8..10].copy_from_slice(&version.to_be_bytes());
+            assert!(ClientHello::decode(&c).is_err());
+            assert!(ServerHello::decode(&s).is_err());
+        }
+        let b = caps.encode();
+        assert!(StreamCapabilities::decode(&b[..33]).is_err());
+        let mut b = b.to_vec();
+        b.push(0);
+        assert!(StreamCapabilities::decode(&b).is_err());
+    }
+}
+
+#[cfg(test)]
+mod control_duration_tests {
+    use super::*;
+    use crate::remote::resumable_control::ControlDuration;
+    fn seconds(n: u16) -> ControlDuration {
+        ControlDuration::from_secs(n).unwrap()
+    }
+    fn profile(n: u16) -> StreamCapabilities {
+        StreamCapabilities {
+            wayland_control: true,
+            resumable_control: true,
+            control_duration: seconds(n),
+            ..Default::default()
+        }
+    }
+    #[test]
+    fn control_duration_wire_is_exact_bounded_and_permission_scoped() {
+        for n in [30, 31, 120, 300] {
+            let caps = profile(n);
+            let bytes = caps.encode();
+            assert_eq!(&bytes[34..], &n.to_be_bytes());
+            assert_eq!(StreamCapabilities::decode(&bytes).unwrap(), caps);
+            assert!(StreamCapabilities::decode(&bytes[..34]).is_err());
+        }
+        for n in [0_u16, 29, 301, u16::MAX] {
+            let mut bytes = profile(30).encode();
+            bytes[34..].copy_from_slice(&n.to_be_bytes());
+            assert!(StreamCapabilities::decode(&bytes).is_err());
+        }
+        for bits in [0, 1, 2] {
+            let mut bytes = profile(120).encode();
+            bytes[30] = bits;
+            assert!(StreamCapabilities::decode(&bytes).is_err());
+        }
+    }
+    #[test]
+    fn control_duration_requires_both_opt_ins_exact_echo_and_host_ceiling() {
+        assert!(
+            profile(120)
+                .negotiate_control_duration(false, seconds(300))
+                .is_err()
+        );
+        assert!(
+            profile(120)
+                .negotiate_control_duration(true, seconds(30))
+                .is_err()
+        );
+        assert_eq!(
+            profile(120)
+                .negotiate_control_duration(true, seconds(300))
+                .unwrap(),
+            seconds(120)
+        );
+        assert_eq!(
+            profile(30)
+                .negotiate_control_duration(true, seconds(300))
+                .unwrap(),
+            seconds(30)
+        );
+        assert!(
+            profile(120)
+                .confirm_control_duration(seconds(120), true)
+                .is_ok()
+        );
+        assert!(
+            profile(30)
+                .confirm_control_duration(seconds(120), true)
+                .is_err()
+        );
+        assert!(
+            profile(300)
+                .confirm_control_duration(seconds(120), true)
+                .is_err()
+        );
+        assert!(
+            profile(120)
+                .confirm_control_duration(seconds(120), false)
+                .is_err()
+        );
+        assert!(
+            StreamCapabilities::default()
+                .confirm_control_duration(seconds(30), true)
+                .is_err()
+        );
+        assert_eq!(
+            StreamCapabilities::default()
+                .negotiate_control_duration(false, seconds(300))
+                .unwrap(),
+            seconds(30)
+        );
+    }
+    #[test]
+    fn duration_hello_rejects_old_application_version_without_fallback() {
+        assert_eq!(APPLICATION_VERSION, 35);
+        let mut bytes = ServerHello {
+            pointer_enabled: false,
+            keyboard_enabled: false,
+            clipboard_enabled: false,
+            clipboard_files_enabled: false,
+            stream: profile(120),
+        }
+        .encode();
+        bytes[8..10].copy_from_slice(&34_u16.to_be_bytes());
+        assert!(
+            ServerHello::decode(&bytes)
+                .unwrap_err()
+                .to_string()
+                .contains("version 34; expected 35")
+        );
     }
 }

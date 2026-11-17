@@ -1,19 +1,9 @@
 //! Authenticated and encrypted wire protocol for JWM's remote-control transport.
 //!
-//! The handshake proves possession of a 32-byte pre-shared key and derives
-//! independent keys for each traffic direction:
-//!
-//! ```text
-//! server -> client: "JWMRT" || version (u16, BE) || server_nonce (32 bytes)
-//! client -> server: "JWMRT" || version (u16, BE) || client_nonce (32 bytes)
-//!                       || client_proof (32 bytes)
-//! server -> client: server_proof (32 bytes)
-//! ```
-//!
-//! Both proofs and both traffic keys are derived over the complete handshake
-//! transcript, which includes each side's advertised version. A downgrade
-//! therefore changes every derived secret and fails closed rather than
-//! silently negotiating weaker terms.
+//! Transport v3 uses standard Noise NNpsk2 (25519/ChaChaPoly/SHA256), then
+//! exchanges an encrypted random directional-key envelope and both Finished
+//! confirmations. Public role-ordered headers/nonces are bound by the prologue.
+//! No early application data, negotiation fallback, or raw Noise key export.
 //!
 //! After the handshake, records have the following layout:
 //!
@@ -42,7 +32,7 @@ use std::io::{self, Read, Write};
 
 use chacha20poly1305::aead::AeadInOut;
 use chacha20poly1305::{ChaCha20Poly1305, Key, KeyInit, Nonce, Tag};
-use sha2::{Digest, Sha256};
+use zeroize::{Zeroize, Zeroizing};
 
 /// Required size of the pre-shared key.
 pub const PSK_LEN: usize = 32;
@@ -50,7 +40,7 @@ pub const PSK_LEN: usize = 32;
 /// Size of each handshake nonce.
 pub const NONCE_LEN: usize = 32;
 
-/// Size of every HMAC-SHA256 handshake proof, and of a derived traffic key.
+/// Size of each directional record key.
 pub const MAC_LEN: usize = 32;
 
 /// Size of the Poly1305 authentication tag on every record.
@@ -60,32 +50,22 @@ pub const TAG_LEN: usize = 16;
 const TRANSPORT_MAGIC: &[u8; 5] = b"JWMRT";
 
 /// Transport version. Version 1 was authenticated-but-unencrypted; version 2
-/// encrypts every record and binds the transcript into key derivation.
-pub const TRANSPORT_VERSION: u16 = 2;
+/// encrypts every record; version 3 adds a forward-secret Noise handshake.
+pub const TRANSPORT_VERSION: u16 = 3;
 
 const TRANSPORT_PREFIX_LEN: usize = TRANSPORT_MAGIC.len() + 2;
-const SERVER_HANDSHAKE_LEN: usize = TRANSPORT_PREFIX_LEN + NONCE_LEN;
 
 /// Maximum accepted payload size for one authenticated record (32 MiB).
 pub const MAX_PAYLOAD_LEN: usize = 32 * 1024 * 1024;
 
 const RECORD_HEADER_LEN: usize = 1 + 8 + 4;
-const CLIENT_HANDSHAKE_LEN: usize = TRANSPORT_PREFIX_LEN + NONCE_LEN + MAC_LEN;
 /// Marks the end of the real payload inside a padded plaintext.
 const PADDING_MARKER: u8 = 0x01;
 /// Buckets small records so their length stops identifying their contents.
 /// Anything larger is dominated by screen content and is not worth padding.
 const PADDING_BUCKETS: [usize; 3] = [64, 256, 704];
-const SHA256_BLOCK_LEN: usize = 64;
 const RETAINED_PAYLOAD_SOFT_LIMIT: usize = 8 * 1024 * 1024;
 const UNDERUSED_PAYLOADS_BEFORE_SHRINK: u8 = 32;
-
-// Domains are versioned with the transport. A v1 peer's proofs and keys can
-// never collide with v2's even for an identical pre-shared key and nonces.
-const CLIENT_PROOF_DOMAIN: &[u8] = b"jwm-remote/v2/client-proof";
-const SERVER_PROOF_DOMAIN: &[u8] = b"jwm-remote/v2/server-proof";
-const C2S_KEY_DOMAIN: &[u8] = b"jwm-remote/v2/key/client-to-server";
-const S2C_KEY_DOMAIN: &[u8] = b"jwm-remote/v2/key/server-to-client";
 
 /// Applies conservative hysteresis to long-lived reusable record buffers.
 ///
@@ -174,6 +154,37 @@ pub enum MessageKind {
     ClipboardRestrict = 21,
     /// Host worker, backend and ordered writer have crossed the restriction.
     ClipboardRestricted = 22,
+    WindowResizeRequest = 23,
+    WindowResizeResult = 24,
+    WaylandKeyboardRequest = 25,
+    WaylandKeyboardStatus = 26,
+    WaylandKeyboardKey = 27,
+    WaylandKeyboardRevoke = 28,
+    WaylandPointerRequest = 29,
+    WaylandPointerStatus = 30,
+    WaylandPointerAction = 31,
+    WaylandPointerRevoke = 32,
+    WaylandControlRequest = 33,
+    WaylandControlStatus = 34,
+    WaylandControlAction = 35,
+    WaylandControlRevoke = 36,
+    WaylandTextCommit = 37,
+    WaylandTextResult = 38,
+    WaylandPointerActionCompleted = 39,
+    WaylandPointerRepairOffer = 40,
+    WaylandPointerRepairRequest = 41,
+    WaylandPointerRepairDecline = 42,
+    WaylandPointerRepairStatus = 43,
+    WaylandControlActionCompleted = 44,
+    WaylandControlRepairOffer = 45,
+    WaylandControlRepairRequest = 46,
+    WaylandControlRepairDecline = 47,
+    WaylandControlRepairStatus = 48,
+    WaylandPopupStatus = 49,
+    WaylandPopupClick = 50,
+    WaylandPopupRevoke = 51,
+    WaylandPopupRevokeAck = 52,
+    WaylandResumableControl = 53,
 }
 
 impl TryFrom<u8> for MessageKind {
@@ -201,6 +212,37 @@ impl TryFrom<u8> for MessageKind {
             18 => Ok(Self::SourceRequest),
             19 => Ok(Self::SourceChanged),
             20 => Ok(Self::SessionClose),
+            23 => Ok(Self::WindowResizeRequest),
+            24 => Ok(Self::WindowResizeResult),
+            25 => Ok(Self::WaylandKeyboardRequest),
+            26 => Ok(Self::WaylandKeyboardStatus),
+            27 => Ok(Self::WaylandKeyboardKey),
+            28 => Ok(Self::WaylandKeyboardRevoke),
+            29 => Ok(Self::WaylandPointerRequest),
+            30 => Ok(Self::WaylandPointerStatus),
+            31 => Ok(Self::WaylandPointerAction),
+            32 => Ok(Self::WaylandPointerRevoke),
+            33 => Ok(Self::WaylandControlRequest),
+            34 => Ok(Self::WaylandControlStatus),
+            35 => Ok(Self::WaylandControlAction),
+            36 => Ok(Self::WaylandControlRevoke),
+            37 => Ok(Self::WaylandTextCommit),
+            38 => Ok(Self::WaylandTextResult),
+            39 => Ok(Self::WaylandPointerActionCompleted),
+            40 => Ok(Self::WaylandPointerRepairOffer),
+            41 => Ok(Self::WaylandPointerRepairRequest),
+            42 => Ok(Self::WaylandPointerRepairDecline),
+            43 => Ok(Self::WaylandPointerRepairStatus),
+            44 => Ok(Self::WaylandControlActionCompleted),
+            45 => Ok(Self::WaylandControlRepairOffer),
+            46 => Ok(Self::WaylandControlRepairRequest),
+            47 => Ok(Self::WaylandControlRepairDecline),
+            48 => Ok(Self::WaylandControlRepairStatus),
+            49 => Ok(Self::WaylandPopupStatus),
+            50 => Ok(Self::WaylandPopupClick),
+            51 => Ok(Self::WaylandPopupRevoke),
+            52 => Ok(Self::WaylandPopupRevokeAck),
+            53 => Ok(Self::WaylandResumableControl),
             21 => Ok(Self::ClipboardRestrict),
             22 => Ok(Self::ClipboardRestricted),
             other => Err(ProtocolError::UnknownMessageKind(other)),
@@ -276,21 +318,6 @@ impl From<io::Error> for ProtocolError {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-enum Direction {
-    ClientToServer,
-    ServerToClient,
-}
-
-impl Direction {
-    fn key_domain(self) -> &'static [u8] {
-        match self {
-            Self::ClientToServer => C2S_KEY_DOMAIN,
-            Self::ServerToClient => S2C_KEY_DOMAIN,
-        }
-    }
-}
-
 /// Directional record keys produced by a successful handshake.
 ///
 /// The fields are public so a caller can clone its connected `TcpStream` and
@@ -299,6 +326,15 @@ impl Direction {
 pub struct SessionKeys {
     pub c2s: [u8; MAC_LEN],
     pub s2c: [u8; MAC_LEN],
+}
+
+// Owned buffers are wiped on drop, but Rust copies and Snow internals are not
+// guaranteed erased. Callers still own any copied array returned by this API.
+impl Drop for SessionKeys {
+    fn drop(&mut self) {
+        self.c2s.zeroize();
+        self.s2c.zeroize();
+    }
 }
 
 impl SessionKeys {
@@ -316,7 +352,7 @@ impl SessionKeys {
 /// Authenticated reader for one direction of a remote session.
 pub struct SessionReader<R> {
     inner: R,
-    key: [u8; MAC_LEN],
+    key: Zeroizing<[u8; MAC_LEN]>,
     expected_sequence: u64,
     max_payload_len: usize,
 }
@@ -326,7 +362,7 @@ impl<R> SessionReader<R> {
     pub fn new(inner: R, key: [u8; MAC_LEN]) -> Self {
         Self {
             inner,
-            key,
+            key: Zeroizing::new(key),
             expected_sequence: 0,
             max_payload_len: MAX_PAYLOAD_LEN,
         }
@@ -408,13 +444,16 @@ impl<R: Read> SessionReader<R> {
                 });
             }
 
-            // The declared length is still plaintext, so allocation stays
-            // bounded before a single byte of ciphertext is read.
-            payload.resize(payload_len, 0);
+            // The checked ciphertext length plus the fixed-size tag stays
+            // bounded. Read both together: on an unbuffered TCP stream this
+            // avoids a separate read solely for the tag when all bytes are
+            // available. read_exact still handles fragmentation/Interrupted.
+            payload.resize(payload_len + TAG_LEN, 0);
             self.inner.read_exact(payload)?;
-
-            let mut tag = [0_u8; TAG_LEN];
-            self.inner.read_exact(&mut tag)?;
+            let tag: [u8; TAG_LEN] = payload[payload_len..]
+                .try_into()
+                .expect("record tag has a fixed length");
+            payload.truncate(payload_len);
             cipher(&self.key)
                 .decrypt_inout_detached(
                     &record_nonce(received_sequence),
@@ -454,7 +493,7 @@ impl<R: Read> SessionReader<R> {
 /// Authenticated writer for one direction of a remote session.
 pub struct SessionWriter<W> {
     inner: W,
-    key: [u8; MAC_LEN],
+    key: Zeroizing<[u8; MAC_LEN]>,
     next_sequence: u64,
     /// Reusable `header || ciphertext || tag` staging buffer.
     ///
@@ -470,7 +509,7 @@ impl<W> SessionWriter<W> {
     pub fn new(inner: W, key: [u8; MAC_LEN]) -> Self {
         Self {
             inner,
-            key,
+            key: Zeroizing::new(key),
             next_sequence: 0,
             record: Vec::new(),
             retention: PayloadBufferRetention::default(),
@@ -562,112 +601,27 @@ impl<W: Write> SessionWriter<W> {
     }
 }
 
-/// Authenticate as the connecting client and return directional session keys.
-///
-/// `client_nonce` must be newly generated with a cryptographically secure RNG
-/// for each connection. The same full-duplex stream is used for both reads and
-/// writes during the handshake.
+#[path = "protocol_handshake.rs"]
+mod handshake;
+
+/// Authenticate with Noise and both Finished confirmations. `client_nonce` is
+/// public context only; fresh ephemeral secrets come from Snow's OS RNG.
+/// The caller must retain one absolute deadline over the complete operation.
 pub fn client_handshake<S: Read + Write>(
     stream: &mut S,
     psk: &[u8],
     client_nonce: [u8; NONCE_LEN],
 ) -> Result<SessionKeys, ProtocolError> {
-    validate_psk(psk)?;
-
-    let mut server_flight = [0_u8; SERVER_HANDSHAKE_LEN];
-    stream.read_exact(&mut server_flight)?;
-    check_transport_prefix(&server_flight[..TRANSPORT_PREFIX_LEN])?;
-
-    let mut client_flight = [0_u8; CLIENT_HANDSHAKE_LEN];
-    write_transport_prefix(&mut client_flight[..TRANSPORT_PREFIX_LEN]);
-    client_flight[TRANSPORT_PREFIX_LEN..TRANSPORT_PREFIX_LEN + NONCE_LEN]
-        .copy_from_slice(&client_nonce);
-
-    // Everything each side said before authenticating -- magic, version and
-    // nonce -- is what both proofs and both traffic keys are derived from.
-    let transcript = Transcript::new(&server_flight, &client_flight);
-    let client_proof = handshake_proof(psk, CLIENT_PROOF_DOMAIN, &transcript);
-    client_flight[TRANSPORT_PREFIX_LEN + NONCE_LEN..].copy_from_slice(&client_proof);
-    stream.write_all(&client_flight)?;
-    stream.flush()?;
-
-    let mut received_server_proof = [0_u8; MAC_LEN];
-    stream.read_exact(&mut received_server_proof)?;
-    let expected_server_proof = handshake_proof(psk, SERVER_PROOF_DOMAIN, &transcript);
-    if !constant_time_eq(&received_server_proof, &expected_server_proof) {
-        return Err(ProtocolError::AuthenticationFailed);
-    }
-
-    Ok(transcript.session_keys(psk))
+    handshake::client(stream, psk, client_nonce)
 }
-
-/// Authenticate as the accepting server and return directional session keys.
-///
-/// `server_nonce` must be newly generated with a cryptographically secure RNG
-/// for each connection. The same full-duplex stream is used for both reads and
-/// writes during the handshake.
+/// Server counterpart; no session keys escape before client Finished verifies
+/// and server Finished has been written and flushed. Caller owns the deadline.
 pub fn server_handshake<S: Read + Write>(
     stream: &mut S,
     psk: &[u8],
     server_nonce: [u8; NONCE_LEN],
 ) -> Result<SessionKeys, ProtocolError> {
-    validate_psk(psk)?;
-
-    let mut server_flight = [0_u8; SERVER_HANDSHAKE_LEN];
-    write_transport_prefix(&mut server_flight[..TRANSPORT_PREFIX_LEN]);
-    server_flight[TRANSPORT_PREFIX_LEN..].copy_from_slice(&server_nonce);
-    stream.write_all(&server_flight)?;
-    stream.flush()?;
-
-    let mut client_flight = [0_u8; CLIENT_HANDSHAKE_LEN];
-    stream.read_exact(&mut client_flight)?;
-    check_transport_prefix(&client_flight[..TRANSPORT_PREFIX_LEN])?;
-
-    let transcript = Transcript::new(&server_flight, &client_flight);
-    let expected_client_proof = handshake_proof(psk, CLIENT_PROOF_DOMAIN, &transcript);
-    if !constant_time_eq(
-        &client_flight[TRANSPORT_PREFIX_LEN + NONCE_LEN..],
-        &expected_client_proof,
-    ) {
-        return Err(ProtocolError::AuthenticationFailed);
-    }
-
-    let server_proof = handshake_proof(psk, SERVER_PROOF_DOMAIN, &transcript);
-    stream.write_all(&server_proof)?;
-    stream.flush()?;
-
-    Ok(transcript.session_keys(psk))
-}
-
-/// The bytes both peers exchanged before either had authenticated the other.
-///
-/// Binding these into every derived secret is what makes the version field
-/// meaningful: an attacker who rewrites it changes the proofs and the traffic
-/// keys, so the handshake fails instead of quietly settling on weaker terms.
-struct Transcript {
-    bytes: [u8; SERVER_HANDSHAKE_LEN + TRANSPORT_PREFIX_LEN + NONCE_LEN],
-}
-
-impl Transcript {
-    fn new(
-        server_flight: &[u8; SERVER_HANDSHAKE_LEN],
-        client_flight: &[u8; CLIENT_HANDSHAKE_LEN],
-    ) -> Self {
-        let mut bytes = [0_u8; SERVER_HANDSHAKE_LEN + TRANSPORT_PREFIX_LEN + NONCE_LEN];
-        bytes[..SERVER_HANDSHAKE_LEN].copy_from_slice(server_flight);
-        // The client's proof cannot cover itself, so the transcript stops at
-        // the end of its nonce.
-        bytes[SERVER_HANDSHAKE_LEN..]
-            .copy_from_slice(&client_flight[..TRANSPORT_PREFIX_LEN + NONCE_LEN]);
-        Self { bytes }
-    }
-
-    fn session_keys(&self, psk: &[u8]) -> SessionKeys {
-        SessionKeys {
-            c2s: derive_session_key(psk, Direction::ClientToServer, self),
-            s2c: derive_session_key(psk, Direction::ServerToClient, self),
-        }
-    }
+    handshake::server(stream, psk, server_nonce)
 }
 
 fn write_transport_prefix(prefix: &mut [u8]) {
@@ -701,14 +655,6 @@ fn validate_psk(psk: &[u8]) -> Result<(), ProtocolError> {
         });
     }
     Ok(())
-}
-
-fn handshake_proof(psk: &[u8], role_domain: &[u8], transcript: &Transcript) -> [u8; MAC_LEN] {
-    hmac_sha256(psk, &[role_domain, &transcript.bytes])
-}
-
-fn derive_session_key(psk: &[u8], direction: Direction, transcript: &Transcript) -> [u8; MAC_LEN] {
-    hmac_sha256(psk, &[direction.key_domain(), &transcript.bytes])
 }
 
 fn cipher(key: &[u8; MAC_LEN]) -> ChaCha20Poly1305 {
@@ -752,40 +698,6 @@ fn strip_padding(plaintext: &mut Vec<u8>) -> Result<(), ProtocolError> {
     Ok(())
 }
 
-/// RFC 2104 HMAC instantiated with SHA-256.
-fn hmac_sha256(key: &[u8], parts: &[&[u8]]) -> [u8; MAC_LEN] {
-    let mut key_block = [0_u8; SHA256_BLOCK_LEN];
-    if key.len() > SHA256_BLOCK_LEN {
-        let key_hash = Sha256::digest(key);
-        key_block[..MAC_LEN].copy_from_slice(&key_hash);
-    } else {
-        key_block[..key.len()].copy_from_slice(key);
-    }
-
-    let mut inner_pad = [0x36_u8; SHA256_BLOCK_LEN];
-    let mut outer_pad = [0x5c_u8; SHA256_BLOCK_LEN];
-    for ((inner, outer), key_byte) in inner_pad
-        .iter_mut()
-        .zip(outer_pad.iter_mut())
-        .zip(key_block)
-    {
-        *inner ^= key_byte;
-        *outer ^= key_byte;
-    }
-
-    let mut inner = Sha256::new();
-    inner.update(inner_pad);
-    for part in parts {
-        inner.update(part);
-    }
-    let inner_hash = inner.finalize();
-
-    let mut outer = Sha256::new();
-    outer.update(outer_pad);
-    outer.update(inner_hash);
-    outer.finalize().into()
-}
-
 fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
     if left.len() != right.len() {
         return false;
@@ -809,29 +721,6 @@ mod tests {
     const MAX_INPUT_BATCH_PROBE: usize = 641;
 
     const TEST_PSK: [u8; PSK_LEN] = [0x42; PSK_LEN];
-
-    fn decode_hex(hex: &str) -> Vec<u8> {
-        assert_eq!(hex.len() % 2, 0);
-        hex.as_bytes()
-            .chunks_exact(2)
-            .map(|pair| {
-                let high = (pair[0] as char).to_digit(16).unwrap();
-                let low = (pair[1] as char).to_digit(16).unwrap();
-                ((high << 4) | low) as u8
-            })
-            .collect()
-    }
-
-    fn test_transcript(server_nonce: [u8; NONCE_LEN], client_nonce: [u8; NONCE_LEN]) -> Transcript {
-        let mut server_flight = [0_u8; SERVER_HANDSHAKE_LEN];
-        write_transport_prefix(&mut server_flight[..TRANSPORT_PREFIX_LEN]);
-        server_flight[TRANSPORT_PREFIX_LEN..].copy_from_slice(&server_nonce);
-        let mut client_flight = [0_u8; CLIENT_HANDSHAKE_LEN];
-        write_transport_prefix(&mut client_flight[..TRANSPORT_PREFIX_LEN]);
-        client_flight[TRANSPORT_PREFIX_LEN..TRANSPORT_PREFIX_LEN + NONCE_LEN]
-            .copy_from_slice(&client_nonce);
-        Transcript::new(&server_flight, &client_flight)
-    }
 
     fn encoded_record(
         key: [u8; MAC_LEN],
@@ -870,11 +759,42 @@ mod tests {
             (20, MessageKind::SessionClose),
             (21, MessageKind::ClipboardRestrict),
             (22, MessageKind::ClipboardRestricted),
+            (23, MessageKind::WindowResizeRequest),
+            (24, MessageKind::WindowResizeResult),
+            (25, MessageKind::WaylandKeyboardRequest),
+            (26, MessageKind::WaylandKeyboardStatus),
+            (27, MessageKind::WaylandKeyboardKey),
+            (28, MessageKind::WaylandKeyboardRevoke),
+            (29, MessageKind::WaylandPointerRequest),
+            (30, MessageKind::WaylandPointerStatus),
+            (31, MessageKind::WaylandPointerAction),
+            (32, MessageKind::WaylandPointerRevoke),
+            (33, MessageKind::WaylandControlRequest),
+            (34, MessageKind::WaylandControlStatus),
+            (35, MessageKind::WaylandControlAction),
+            (36, MessageKind::WaylandControlRevoke),
+            (37, MessageKind::WaylandTextCommit),
+            (38, MessageKind::WaylandTextResult),
+            (39, MessageKind::WaylandPointerActionCompleted),
+            (40, MessageKind::WaylandPointerRepairOffer),
+            (41, MessageKind::WaylandPointerRepairRequest),
+            (42, MessageKind::WaylandPointerRepairDecline),
+            (43, MessageKind::WaylandPointerRepairStatus),
+            (44, MessageKind::WaylandControlActionCompleted),
+            (45, MessageKind::WaylandControlRepairOffer),
+            (46, MessageKind::WaylandControlRepairRequest),
+            (47, MessageKind::WaylandControlRepairDecline),
+            (48, MessageKind::WaylandControlRepairStatus),
+            (49, MessageKind::WaylandPopupStatus),
+            (50, MessageKind::WaylandPopupClick),
+            (51, MessageKind::WaylandPopupRevoke),
+            (52, MessageKind::WaylandPopupRevokeAck),
+            (53, MessageKind::WaylandResumableControl),
         ] {
             assert_eq!(MessageKind::try_from(tag).unwrap(), kind);
             assert_eq!(u8::from(kind), tag);
         }
-        for tag in (0..=u8::MAX).filter(|tag| !(1..=22).contains(tag)) {
+        for tag in (0..=u8::MAX).filter(|tag| !(1..=53).contains(tag)) {
             assert!(
                 matches!(MessageKind::try_from(tag), Err(ProtocolError::UnknownMessageKind(rejected)) if rejected == tag),
                 "unallocated application message kind {tag} must be rejected"
@@ -1009,33 +929,6 @@ mod tests {
     }
 
     #[test]
-    fn a_rewritten_transport_version_cannot_downgrade_the_session() {
-        let honest = test_transcript([0x20; NONCE_LEN], [0x30; NONCE_LEN]);
-
-        let mut downgraded_server = [0_u8; SERVER_HANDSHAKE_LEN];
-        write_transport_prefix(&mut downgraded_server[..TRANSPORT_PREFIX_LEN]);
-        downgraded_server[TRANSPORT_MAGIC.len()..TRANSPORT_PREFIX_LEN]
-            .copy_from_slice(&1_u16.to_be_bytes());
-        downgraded_server[TRANSPORT_PREFIX_LEN..].copy_from_slice(&[0x20; NONCE_LEN]);
-        let mut client_flight = [0_u8; CLIENT_HANDSHAKE_LEN];
-        write_transport_prefix(&mut client_flight[..TRANSPORT_PREFIX_LEN]);
-        client_flight[TRANSPORT_PREFIX_LEN..TRANSPORT_PREFIX_LEN + NONCE_LEN]
-            .copy_from_slice(&[0x30; NONCE_LEN]);
-        let tampered = Transcript::new(&downgraded_server, &client_flight);
-
-        // Same PSK, same nonces: only the advertised version differs, and that
-        // is enough to change every proof and every traffic key.
-        assert_ne!(
-            handshake_proof(&TEST_PSK, CLIENT_PROOF_DOMAIN, &honest),
-            handshake_proof(&TEST_PSK, CLIENT_PROOF_DOMAIN, &tampered)
-        );
-        assert_ne!(
-            derive_session_key(&TEST_PSK, Direction::ClientToServer, &honest),
-            derive_session_key(&TEST_PSK, Direction::ClientToServer, &tampered)
-        );
-    }
-
-    #[test]
     fn transport_prefix_rejects_a_stranger_and_a_wrong_version() {
         let mut prefix = [0_u8; TRANSPORT_PREFIX_LEN];
         write_transport_prefix(&mut prefix);
@@ -1060,33 +953,13 @@ mod tests {
     }
 
     #[test]
-    fn hmac_sha256_matches_rfc_4231_vectors() {
-        let case_one = hmac_sha256(&[0x0b; 20], &[b"Hi There"]);
-        assert_eq!(
-            case_one.as_slice(),
-            decode_hex("b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7")
-        );
-
-        let case_two = hmac_sha256(b"Jefe", &[b"what do ya want for nothing?"]);
-        assert_eq!(
-            case_two.as_slice(),
-            decode_hex("5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843")
-        );
-
-        let long_key = [0xaa; 131];
-        let case_six = hmac_sha256(
-            &long_key,
-            &[b"Test Using Larger Than Block-Size Key - Hash Key First"],
-        );
-        assert_eq!(
-            case_six.as_slice(),
-            decode_hex("60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54")
-        );
-    }
-
-    #[test]
     fn handshake_derives_matching_directional_sessions() {
         let (mut client_stream, mut server_stream) = UnixStream::pair().unwrap();
+        for stream in [&client_stream, &server_stream] {
+            let timeout = Some(std::time::Duration::from_secs(5));
+            stream.set_read_timeout(timeout).unwrap();
+            stream.set_write_timeout(timeout).unwrap();
+        }
 
         let server = thread::spawn(move || {
             let keys = server_handshake(&mut server_stream, &TEST_PSK, [0x51; NONCE_LEN]).unwrap();
@@ -1121,23 +994,32 @@ mod tests {
     #[test]
     fn handshake_rejects_wrong_key() {
         let (mut client_stream, mut server_stream) = UnixStream::pair().unwrap();
+        for stream in [&client_stream, &server_stream] {
+            let timeout = Some(std::time::Duration::from_secs(5));
+            stream.set_read_timeout(timeout).unwrap();
+            stream.set_write_timeout(timeout).unwrap();
+        }
         let wrong_psk = [0x24; PSK_LEN];
 
         let server = thread::spawn(move || {
             server_handshake(&mut server_stream, &TEST_PSK, [0x52; NONCE_LEN])
         });
         let client_result = client_handshake(&mut client_stream, &wrong_psk, [0x62; NONCE_LEN]);
-        let server_result = server.join().unwrap();
-
         assert!(matches!(
-            server_result,
+            client_result,
             Err(ProtocolError::AuthenticationFailed)
         ));
-        assert!(match client_result {
-            Err(ProtocolError::AuthenticationFailed) => true,
-            Err(ProtocolError::Io(error)) => error.kind() == ErrorKind::UnexpectedEof,
-            _ => false,
-        });
+        // NNpsk2 rejects the responder's authenticated second flight here.
+        // The responder is still awaiting client Finished: honor the public
+        // caller contract by closing before joining, rather than deadlocking.
+        drop(client_stream);
+        let server_result = server.join().unwrap();
+        assert!(matches!(
+            server_result,
+            Err(ProtocolError::Io(ref error))
+                if matches!(error.kind(), ErrorKind::UnexpectedEof
+                    | ErrorKind::ConnectionReset | ErrorKind::BrokenPipe)
+        ));
     }
 
     #[test]
@@ -1189,6 +1071,153 @@ mod tests {
         assert_eq!(payload.as_ptr(), allocation);
         assert_eq!(payload.capacity(), capacity);
         assert_eq!(reader.expected_sequence(), 3);
+    }
+
+    struct ObservedReader {
+        bytes: Cursor<Vec<u8>>,
+        requests: Vec<usize>,
+        chunk: usize,
+        interrupt_next: bool,
+        fragmented: bool,
+    }
+
+    impl Read for ObservedReader {
+        fn read(&mut self, destination: &mut [u8]) -> io::Result<usize> {
+            self.requests.push(destination.len());
+            if self.interrupt_next {
+                self.interrupt_next = false;
+                return Err(io::Error::from(ErrorKind::Interrupted));
+            }
+            let length = destination.len().min(self.chunk);
+            let read = self.bytes.read(&mut destination[..length]);
+            self.interrupt_next = self.fragmented;
+            read
+        }
+    }
+
+    fn observed_reader(bytes: Vec<u8>, chunk: usize, fragmented: bool) -> ObservedReader {
+        ObservedReader {
+            bytes: Cursor::new(bytes),
+            requests: Vec::new(),
+            chunk,
+            interrupt_next: fragmented,
+            fragmented,
+        }
+    }
+
+    #[test]
+    fn record_reader_combines_ciphertext_and_tag_without_reading_next_header() {
+        let key = [0x6a; MAC_LEN];
+        for length in [0, 1, 63, 64, 255, 704, 4096] {
+            let body = vec![0x5a; length];
+            let mut wire = encoded_record(key, 0, MessageKind::Frame, &body);
+            let boundary = wire.len();
+            wire.extend_from_slice(&encoded_record(key, 1, MessageKind::Heartbeat, &[]));
+            let mut reader = SessionReader::new(observed_reader(wire, usize::MAX, false), key);
+            let mut payload = Vec::new();
+            assert_eq!(
+                reader.read_message_into(&mut payload).unwrap(),
+                MessageKind::Frame
+            );
+            assert_eq!(payload, body);
+            assert_eq!(
+                reader.get_ref().requests,
+                [RECORD_HEADER_LEN, padded_len(length) + TAG_LEN]
+            );
+            assert_eq!(reader.get_ref().bytes.position() as usize, boundary);
+            assert_eq!(
+                reader.read_message_into(&mut payload).unwrap(),
+                MessageKind::Heartbeat
+            );
+            assert!(payload.is_empty());
+            assert_eq!(reader.expected_sequence(), 2);
+        }
+    }
+
+    #[test]
+    fn combined_record_read_tolerates_fragmentation_and_interrupted_reads() {
+        let key = [0x6b; MAC_LEN];
+        for chunk in [1, 7, 16, 65, 1024] {
+            let body = vec![0xa5; 513];
+            let mut wire = encoded_record(key, 0, MessageKind::Frame, &body);
+            wire.extend_from_slice(&encoded_record(key, 1, MessageKind::Close, b"done"));
+            let mut reader = SessionReader::new(observed_reader(wire, chunk, true), key);
+            let mut payload = Vec::with_capacity(2048);
+            let allocation = payload.as_ptr();
+            assert_eq!(
+                reader.read_message_into(&mut payload).unwrap(),
+                MessageKind::Frame
+            );
+            assert_eq!(payload, body);
+            assert_eq!(
+                reader.read_message_into(&mut payload).unwrap(),
+                MessageKind::Close
+            );
+            assert_eq!(payload, b"done");
+            assert_eq!(payload.as_ptr(), allocation);
+            assert_eq!(reader.expected_sequence(), 2);
+        }
+    }
+
+    #[test]
+    fn every_combined_body_truncation_clears_payload_without_advancing_sequence() {
+        let key = [0x6c; MAC_LEN];
+        let record = encoded_record(key, 0, MessageKind::Frame, b"body");
+        for end in 0..record.len() {
+            let mut reader = SessionReader::new(Cursor::new(record[..end].to_vec()), key);
+            let mut payload = b"previous authenticated bytes".to_vec();
+            assert!(
+                matches!(reader.read_message_into(&mut payload), Err(ProtocolError::Io(ref error)) if error.kind() == ErrorKind::UnexpectedEof)
+            );
+            assert!(payload.is_empty(), "truncated at {end}");
+            assert_eq!(reader.expected_sequence(), 0);
+        }
+    }
+
+    #[test]
+    fn combined_record_tag_is_authenticated_and_never_returned() {
+        let key = [0x6d; MAC_LEN];
+        let record = encoded_record(key, 0, MessageKind::Frame, b"body");
+        for offset in record.len() - TAG_LEN..record.len() {
+            let mut damaged = record.clone();
+            damaged[offset] ^= 1;
+            let mut reader = SessionReader::new(Cursor::new(damaged), key);
+            let mut payload = b"previous".to_vec();
+            assert!(matches!(
+                reader.read_message_into(&mut payload),
+                Err(ProtocolError::AuthenticationFailed)
+            ));
+            assert!(payload.is_empty());
+            assert_eq!(reader.expected_sequence(), 0);
+        }
+    }
+
+    #[test]
+    fn combined_body_read_keeps_payload_cap_separate_from_fixed_tag() {
+        let key = [0x6e; MAC_LEN];
+        let body = b"bounded";
+        let record = encoded_record(key, 0, MessageKind::Frame, body);
+        let cap = padded_len(body.len());
+        let mut reader =
+            SessionReader::new(observed_reader(record.clone(), usize::MAX, false), key);
+        reader.set_max_payload_len(cap);
+        assert_eq!(reader.read_message().unwrap().1, body);
+        assert_eq!(
+            reader.get_ref().requests,
+            [RECORD_HEADER_LEN, cap + TAG_LEN]
+        );
+
+        let mut reader = SessionReader::new(observed_reader(record, usize::MAX, false), key);
+        reader.set_max_payload_len(cap - 1);
+        let mut payload = Vec::with_capacity(32);
+        let capacity = payload.capacity();
+        assert!(matches!(
+            reader.read_message_into(&mut payload),
+            Err(ProtocolError::PayloadTooLarge { .. })
+        ));
+        assert!(payload.is_empty());
+        assert_eq!(payload.capacity(), capacity);
+        assert_eq!(reader.get_ref().requests, [RECORD_HEADER_LEN]);
     }
 
     #[test]
@@ -1374,9 +1403,10 @@ mod tests {
 
     #[test]
     fn directional_keys_are_distinct_and_not_interchangeable() {
-        let transcript = test_transcript([0x20; NONCE_LEN], [0x30; NONCE_LEN]);
-        let c2s = derive_session_key(&TEST_PSK, Direction::ClientToServer, &transcript);
-        let s2c = derive_session_key(&TEST_PSK, Direction::ServerToClient, &transcript);
+        // Distinct authenticated keys cannot open the opposite record direction.
+        // Real Noise envelope key agreement is covered by handshake tests.
+        let c2s = [0x20; MAC_LEN];
+        let s2c = [0x30; MAC_LEN];
         assert_ne!(c2s, s2c);
 
         let record = encoded_record(c2s, 0, MessageKind::Hello, b"probe");
@@ -1387,3 +1417,11 @@ mod tests {
         ));
     }
 }
+
+#[cfg(test)]
+#[path = "protocol_noise_tests.rs"]
+mod noise_tests;
+
+#[cfg(test)]
+#[path = "protocol_noise_tcp_tests.rs"]
+mod noise_tcp_tests;

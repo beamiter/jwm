@@ -39,9 +39,9 @@ no exit remains.
 
 ## Built-in JWM remote control
 
-`jwm-remote` shares one JWM X11 desktop with another JWM X11 session. It is
+The initial X11 compatibility target shares one JWM X11 desktop with another JWM X11 session. It is
 implemented once for the X Composite surface used by both the `x11rb` and
-`xcb` backends. Windows/macOS, Wayland sessions, and other Linux window
+`xcb` backends. Scoped native Wayland capture and viewing were added later (see below). Windows/macOS and other Linux window
 managers are outside this first compatibility target.
 
 The helper is a separate process: X11 readback, JPEG encoding, a slow peer,
@@ -61,9 +61,33 @@ export PATH="/usr/local/lib/jwm/current/bin:$PATH"
 
 ## Quickest: over SSH
 
+SSH diagnostic relay output is best-effort: it uses a supervised local `/bin/cat`
+(from coreutils) to keep a slow or undrained stderr sink from blocking host
+readiness. This helper is required for `jwm-remote ssh`; a missing helper reports
+a startup error before SSH is launched. Records are bounded to Linux `PIPE_BUF`,
+long records are visibly truncated, and a full relay pipe drops records rather
+than blocking control. When space returns, the next record reports the dropped
+count. Shutdown gives the helper 200 ms to drain, then kills and reaps it.
+No diagnostic output thread is detached, and the original stderr flags, shared
+file offset, and append mode are preserved. Concurrent SSH sessions share one
+helper; the last session releases it. While SSH is active, remote-module diagnostics
+(including the client and viewer) use this sink. Other CLI parsing/final error output and interactive source-selection
+prompts are not redirected. Lock contention may also drop messages; ordering is
+best-effort across threads. Forced helper termination may lose accepted records
+that have not reached stderr, so the pipe-drop count is not a delivery guarantee. Linux uninterruptible
+filesystem writes can still delay process reaping; this is not a hard kernel-I/O
+shutdown guarantee.
+
+
 If you can already SSH to the other machine as the user logged in to its JWM
 session, nothing needs to be set up there beyond installing the same
-`jwm-remote` version:
+`jwm-remote` version.
+
+Both helpers must also use the same application protocol. Builds can both print
+`jwm-remote 0.2.0` while speaking different protocols; compare the `Local protocol`
+line from `jwm-remote doctor` on each machine. An older host may report
+`client hello has an invalid length` for a newer viewer with a full keymap.
+Update both helpers together in that case.
 
 ```bash
 jwm-remote ssh user@desktop --grab-input
@@ -96,8 +120,8 @@ exits with it. Either way nothing stays running on the other machine.
 
 This grants nothing new: the SSH login can already run any program as that
 user, including a host with `--allow-input`. The session's traffic is
-encrypted twice, and SSH adds the forward secrecy the pre-shared-key
-transport lacks.
+encrypted twice. SSH also provides its independently authenticated channel;
+the native transport now has ephemeral forward secrecy of its own.
 
 ### One key for a machine you use often
 
@@ -123,6 +147,16 @@ the key of the monitor already shown brings its window to the front. Pressing
 another monitor's key **switches**: the open viewer is closed the way its close
 button does it, its host stops, and the new monitor opens — about 1.2 seconds
 on a LAN. A press while a session is still connecting does nothing.
+
+The session lock keeps its existing filename across upgrades. The runtime
+directory must be an absolute, non-symlink path owned by the current user,
+without group/other write access. If `XDG_RUNTIME_DIR` is unset, the same checks
+apply to the per-user `jwm-remote-UID` directory under the system temporary
+directory. New directories/files use private permissions; existing normal
+0755 directories and 0644 regular lock files remain compatible. Unsafe or
+inaccessible paths fail rather than silently selecting a different session
+slot. This protects against other local users, not root or another process
+running under the same UID.
 
 While the viewer has the keyboard grabbed, every key goes to the remote
 machine, these shortcuts included. Press Ctrl+Super+F12 to release it first, then
@@ -186,6 +220,9 @@ missing parent. `keygen` and `doctor` do not create parent directories or repair
 permissions.
 Do not generate two different keys for the same connection. Run `doctor` again
 after copying the key; its output never contains key bytes.
+A key path replaced by a FIFO between the initial check and opening is rejected
+without waiting for a FIFO writer. Ownership, private permissions and symlink
+rejection are unchanged; this is not a timeout for slow filesystem/device I/O.
 
 Start with viewing only:
 
@@ -205,10 +242,21 @@ address. A hostname is also accepted; the parser does not look it up, and the
 existing system bind operation resolves it when the host actually starts.
 A bare IPv6 address always uses the default port; bracket it to specify another
 port. Existing explicit ports and IPv6 scope-zone spelling are passed through
-to the system bind. For example, `--listen '[::1]:48221'` is explicit IPv6.
+to the system bind. Named zones are resolved on the **host** for `--listen`;
+the link-local address must already be configured on that interface. A zone
+does not bypass the `--allow-lan` requirement for non-loopback listeners. For example, `--listen '[::1]:48221'` is explicit IPv6.
 The host also preserves explicit port `0`: the OS chooses an available port,
 and the viewer must use the actual port printed by the host. `connect` still
 rejects port 0.
+
+For link-local IPv6, `connect` also accepts a viewer-local interface zone, for
+example `jwm-remote connect '[fe80::1234%enp3s0]:48221' --view-only` or
+`jwm-remote connect 'fe80::1234%enp3s0' --view-only` with the default port.
+Use the interface name (or numeric scope ID) on the **viewer**, not the host;
+interface names can differ between the machines. Quote the address in the shell.
+Parsing preserves the zone and leaves its lookup and routing to the operating
+system. It does not discover interfaces, change permissions or firewall rules,
+or guarantee link-local reachability across different network links.
 
 `host` still binds `127.0.0.1:48221` by default. A listener resolved to a
 non-loopback address still needs `--allow-lan`; omitted ports never grant that
@@ -319,7 +367,20 @@ local X11/clipboard errors, and any incomplete local cleanup never retry. Sender
 even when the underlying cause might be network loss. Closing the viewer never
 retries. Using Ctrl+Super+F12 (or the configured escape shortcut) still only
 releases the grab; it also disables reconnect for that session so a later drop
-cannot unexpectedly reopen a grabbed viewer. Explicitly reported layout/selection
+cannot unexpectedly reopen a grabbed viewer. X11 cleanup releases local keyboard
+and pointer grabs before waiting for network/clipboard workers, and the ending
+viewer cannot acquire input again. If a grab was still active when cleanup
+began, automatic retry is also disabled: subsequent Escape input goes back to
+local applications and can no longer be reliably observed by the viewer. This
+applies to both ordinary click-to-grab and seamless input. Sessions without an
+active grab retain the existing retry checks; any local release failure still
+prevents retry and does not skip other worker cleanup. Native Wayland seamless handoff is also terminated before these worker waits.
+Its destroy request uses a bounded 50 ms flush; failure shuts down only this
+viewer's private Wayland connection and is still reported as a cleanup error.
+The compositor, not the client, restores prior focus and quarantines physically
+held keys until their real release. Sending the request is not an acknowledgement
+that the compositor has already restored focus.
+Explicitly reported layout/selection
 rejections and identity/authentication failures do not silently retry or
 downgrade. Every replacement connection repeats normal permission negotiation.
 A bare EOF/reset is ambiguous: it can also result from a host failure whose
@@ -363,10 +424,11 @@ Remote control is disabled until `jwm-remote host` is started. The host listens
 only on `127.0.0.1` by default. A non-loopback listener requires the explicit
 `--allow-lan` flag, and input requires the separate `--allow-input` flag.
 
-Every session uses a 256-bit pre-shared key, fresh client/server nonces,
-role-separated HMAC-SHA256 proofs, independent traffic keys, strictly
-increasing record sequence numbers, and ChaCha20-Poly1305 on every
-frame/input message.
+Every session uses a 256-bit pre-shared key, a fresh ephemeral
+`Noise_NNpsk2_25519_ChaChaPoly_SHA256` handshake, independent traffic keys,
+strictly increasing record sequence numbers, and ChaCha20-Poly1305 on every
+frame/input message. Shared key possession authenticates a peer, not a distinct
+person or device identity.
 The key is never sent over the network. Key files must be owned by the current
 user, must not be symlinks, and must have no group/other permission bits.
 Both peers enforce a total negotiation deadline, so slowly dripping handshake
@@ -376,14 +438,18 @@ gives each complete authenticated video record, including its final flush, one
 budget; a partial or timed-out record closes the whole session so its wire
 sequence can never be retried out of sync.
 
-The current application protocol is version 14. Versions 2 to 13 are
+The released `02f` baseline uses application version 29 and passed all four
+mainline CI workflows. The next candidate uses version 30; its unified-control
+PNG path passed five of six new second-round scenarios and awaits third-round
+CI for a minimal no-held-key cleanup correction (see
+[the bounded validation summary](remote-pointer-lossless-preparation.md#unified-control-plus-png-v30-candidate)). For that candidate, earlier versions are
 deliberately incompatible, so update `jwm-remote` on both machines together;
 negotiation rejects an older peer before screen or input data is exchanged.
 Version 7 introduced initial viewport and explicit stream selectors. Version 8
 adds an independently negotiated cursor plane and a video geometry epoch;
 it does not silently reinterpret v7 video or cursor selector semantics.
 
-The v14 hello prefix is the existing 8-byte magic, big-endian `u16` version,
+Historically, the v19 hello prefix is the existing 8-byte magic, big-endian `u16` version,
 and capability flags. Both hellos append three one-byte selectors in order:
 codec `1` (JPEG tiles), cursor `1` (composited) or `2` (independent), input `1`
 (X11 keycodes). A viewer advertises independent cursor only after verifying local XRender
@@ -431,16 +497,41 @@ JPEG atlases still include bounded tile/last-row padding and decoder scratch.
 Atlas extent is checked against the canvas-derived dirty tile count and tile edge
 before JPEG pixel allocation; the existing independent hard bounds still apply.
 
+Version 15 appends one boolean byte for explicit native window resize after
+clipboard selectors. The host enables it only with `--window`, `--once` and
+`--allow-window-resize`; it remains independent of input and clipboard.
+Kind 23 is a 28-byte request: request ID, source epoch and geometry epoch
+(big-endian u64), then target width/height (big-endian u16). Kind 24 is a
+37-byte result: those three IDs, observed geometry epoch (u64), actual
+width/height (u16), and status byte Applied=1, Unchanged=2, Denied=3,
+Stale=4, Busy=5, Failed=6. All IDs/epochs are nonzero and dimensions bounded.
+See [window viewing](remote-window-view.md) for lease and confirmation semantics.
+
+Version 16 adds the independent Wayland keyboard lease selector and records
+25–28. Version 17 appends another boolean selector for the independent
+Wayland pointer lease. It is not the legacy pointer permission: it admits only
+single-surface, fresh-frame-gated absolute motion and atomic left clicks.
+Pointer request/status/action/revoke records (kinds 29–32) are respectively
+24/33/45/8 bytes. Keyboard and pointer lease modes are mutually exclusive.
+See [Wayland source safety](remote-wayland-source.md) for explicit opt-in,
+recipient restrictions, frame lifetime and unsupported mapping arrangements.
+
+Version 18 appends the independent Wayland scroll boolean. Version 19 appends
+one `scroll_copy` boolean for video-only copy deltas, independent of every input
+permission. The bounded stream capability block is now 30 bytes; the host may
+enable copy deltas only when the viewer advertises support and the operator
+explicitly passes `--scroll-copy`.
+
 The client then appends big-endian `u16` viewport width and height, followed
 by the existing bounded keymap table. `(0, 0)` means no initial size; exactly
-one zero dimension is invalid. The server hello is exactly 36 bytes. Unknown
+one zero dimension is invalid. The v19 server hello is exactly 41 bytes. Unknown
 selectors, trailing bytes and incomplete keymaps are rejected. Input and
 clipboard permission flags remain independent of the stream profile.
 
-Compatibility: v14 viewer/v14 host works; v6/v7/v8/v9/v10/v11/v12/v13 with v14 in either direction is
+Compatibility: v19 viewer/v19 host works; v6/v7/v8/v9/v10/v11/v12/v13/v14/v15/v16/v17/v18 with v19 in either direction is
 rejected during negotiation. There is no automatic legacy-version fallback.
 Keep both binaries on the same release; this change does not alter transport
-crypto. Within v14, unsupported independent-cursor capability falls back to
+crypto. Within v19, unsupported independent-cursor capability falls back to
 composited video explicitly in HelloAck.
 
 Version 14 adds viewer-to-host `ClipboardRestrict` (kind 21) and host-to-viewer
@@ -520,20 +611,28 @@ most for input: a key press is a three-byte record, so a passive listener could
 otherwise reconstruct a typed password, SSH passphrase or 2FA code byte for
 byte with no image analysis at all.
 
-The transport handshake is:
+Transport version **3** uses Snow's standard
+`Noise_NNpsk2_25519_ChaChaPoly_SHA256` handshake. Both public magic/version/nonce
+prefixes, in fixed server/client order, are bound into its prologue. Nonces are
+public context, not ephemeral private-key seeds. The library generates fresh
+ephemeral keys; handshake payloads are empty and there is no early application
+data.
 
-```text
-server -> client: "JWMRT" || version (u16) || server_nonce (32)
-client -> server: "JWMRT" || version (u16) || client_nonce (32) || proof (32)
-server -> client: server_proof (32)
-```
+After Noise completes, its standard encrypted transport carries a fixed,
+role-separated key envelope containing independently random C2S/S2C record
+keys and the handshake hash. Encrypted client and server Finished messages
+bind that exact envelope and handshake before either handshake function
+succeeds. The existing application record layer then uses those independent
+keys, never Noise's internal keys or nonce space. This is **Noise-protected
+application key delivery**, not a claim that the subsequent record format is
+standard Noise transport.
 
-Both proofs and both traffic keys are derived over the complete transcript,
-including each side's advertised version, so rewriting the version changes
-every derived secret and the handshake fails rather than quietly settling on
-weaker terms. The current transport version is 2; version 1 was the
-authenticated-but-unencrypted transport, and its key-derivation domains are
-separately versioned so the two can never collide even for an identical key.
+All handshake flights have fixed small bounds and share the existing absolute
+negotiation deadline. Wrong keys, versions, malformed flights or missing
+confirmation close the connection. There is no downgrade or v2 fallback.
+Upgrade both endpoints together. This transport update originally accompanied
+application v23; the released baseline is application v29 and the next candidate is v30 (unified-control repair rerun pending). Transport v3 and the
+native Wayland extension versions are separate version domains.
 
 Each record is `kind || sequence || ciphertext_len || ciphertext || tag(16)`.
 The plaintext is sealed with ChaCha20-Poly1305 under a nonce of four zero bytes
@@ -552,15 +651,22 @@ release-all. Larger records are not padded: a screen frame's size is dominated
 by its content and no bucket could hide that. **Inter-keystroke timing remains
 a side channel** — padding does not hide when you type, only what you type.
 
-Measured cost on a 3440x1440 native-resolution session, the largest payloads
-this carries: the telemetry `write` stage stayed at 0.0-0.1 ms, unchanged from
+Historical record-layer measurement, not a v3 handshake benchmark: on a
+3440x1440 native-resolution session, the largest payloads this carries, the telemetry `write` stage stayed at 0.0-0.1 ms, unchanged from
 the unencrypted transport. ChaCha20-Poly1305 is pure Rust here and adds no C
 toolchain or system dependency to the helper.
 
-What this does **not** provide is forward secrecy: the traffic keys are a
-function of the pre-shared key and both nonces, so anyone who later obtains the
-key file can decrypt a recorded session. Rotate the key file if that matters,
-and keep using SSH when you want an independently keyed channel:
+After ephemeral secrets and session keys have been destroyed, later disclosure
+of only the long-term PSK should not decrypt previously recorded v3 sessions.
+This does not protect sessions whose live endpoints or random source are
+compromised, prevent an attacker already holding the PSK from impersonating a
+peer, or retroactively protect recorded v2 sessions. Explicit zeroization
+reduces retained key material; Rust/runtime copies are not a guarantee of
+complete process-memory erasure. In particular, the selected Snow version does
+not explicitly zeroize every internal DH/PSK/cipher-state allocation; dropping
+its state must not be advertised as protection against later process-memory
+inspection. Rotate a compromised PSK and keep using SSH
+when you want an independently authenticated channel:
 
 ```bash
 # Host
@@ -920,7 +1026,11 @@ bandwidth-friendly host `--max-width` can still be viewed fullscreen without
 moving the corresponding upscale work through CPU memory. This changes only
 local presentation: it does not increase the encoded resolution or network
 traffic. One-to-one presentation and downscaling keep the existing CPU path;
-an unavailable or unusable XRender path falls back there as well.
+an unavailable or unusable XRender path falls back there as well. On NVIDIA's
+proprietary driver, XRender composite into backing pixmaps similarly suffers
+from asynchronous pipeline races with core CopyArea; under `--scaling auto`
+(the default), the viewer automatically upscales on the CPU to prevent blocky
+black-and-white noise jitter. `--scaling gpu` overrides this.
 When idle, the viewer blocks on its X11 connection, the video receiver's wake
 descriptor, and the nearest heartbeat, telemetry or deferred-key deadline; it
 also checks x11rb's internal and MIT-SHM-deferred event queues before sleeping.
@@ -1128,11 +1238,24 @@ jwm-remote ssh user@desktop --clipboard --clipboard-mode text-images --clipboard
 ```
 
 SSH session reuse includes clipboard consent, effective content/direction and
-file limit, input permission, source grants and frame limits. A different
+file limit, input permission, source grants and frame limits. Local input grabs,
+seamless handoff consent and the escape shortcut must also match: reopening an
+existing viewer cannot silently enable or disable handoff or change its shortcut.
+A different
 immutable policy is never applied to or used to focus a broader existing
 session. Close that session explicitly, then start the new one; a policy change
 does not silently close it. Switching monitors with identical policy retains
 the existing monitor-switch behavior. Local window size does not change identity.
+
+Connection identity also includes the exact destination, ordered `ssh -o`
+arguments and explicit remote helper path. Different arguments conservatively
+require closing the old session, even when they might resolve to the same host.
+The legacy lock filename remains unchanged: destinations whose names map to
+that same slot cannot run concurrently, but no longer reuse or close each
+other's viewer. Existing policy-aware clients reject the new versioned label;
+stop or upgrade older clients without policy checks before mixing versions.
+This identifies the supplied arguments, not the resolved machine: changes to
+SSH config, DNS, proxy state or a helper binary at the same path are not detected.
 
 Text-only does not request image/file payloads or read copied file contents.
 A file manager may still offer its paths as ordinary text, which text-only can
@@ -1207,12 +1330,31 @@ the terminal. The receiver rebuilds the tree inside a fresh private directory:
 every name component is checked, nothing is created through a symlink, and
 every file and folder must be new, so a peer cannot write outside it.
 
+Selected top-level items with the same name receive a numeric suffix, such as
+`name (2)`. For names near the 255-byte component limit, the duplicate name
+is shortened to make room for the suffix; valid UTF-8 is not split mid-character.
+The first name and all source files remain unchanged. Different shortened names
+are still checked for collisions before the transfer is sent.
+
+If a source changes into a FIFO or another non-regular object after the copy
+is measured, streaming refuses it instead of waiting for a FIFO writer. A
+source rejected during the initial walk is skipped; a change discovered while
+streaming fails that transfer because its contents were already announced.
+This is not a filesystem snapshot or a timeout for slow filesystem/device I/O.
+
 **Size.** `--clipboard-file-limit SIZE` (default `2G`, on `host`, `connect`
 and `ssh`) bounds one file copy; each end enforces its own limit, as sender
 and as receiver, and checks it before reading a byte. `0` shares text and
 images only. A receiver also refuses a copy that would leave less than
 256 MiB free on its disk. A copy over the limit is not shared and the title
 says `copy not shared: too large`.
+
+The sender scans at most 100,000 source entries per copy across all selected
+roots and their descendants. Skipped symlinks, unreadable entries and directory
+read errors count too. The bound applies while enumerating a directory, before
+sorting it, so a huge folder cannot first allocate an unbounded child list.
+Exceeding the scan limit rejects the whole copy rather than sharing a truncated
+tree. This bounds enumeration work and retained entries, not filesystem I/O time.
 
 **Flow control.** Images and files travel in 128 KiB chunks. The receiver
 acknowledges a chunk only once it is written, and the sender keeps at most
@@ -1448,7 +1590,7 @@ jwm-remote: capture mode now overlay/cpu-resize/shm/damage/cursor-events
 ```
 
 The healthy reading is `overlay/xrender/shm/damage/cursor-events`, or
-`overlay/cpu-resize/shm/damage/cursor-events` on NVIDIA's proprietary driver
+`overlay/cpu-resize/core-getimage/damage/cursor-events` on NVIDIA's proprietary driver
 (see [Half-drawn frames on NVIDIA](#half-drawn-frames-on-nvidia)). Each field
 names its fallback explicitly rather than disappearing, so a degraded session
 is obvious at a glance: `root`, `cpu-resize`, `core-getimage`, `no-damage`,
@@ -1458,6 +1600,10 @@ only when those caches have stopped following notifications. `cpu-resize` and
 once, by a line that had long since scrolled away.
 
 ### Machine-readable pipeline timings
+
+For repeatable terminal/browser/Isaac Sim workloads and physical latency
+measurement, see [the workload baseline protocol](remote-workload-benchmark.md).
+Offline telemetry analysis does not certify physical input-to-display latency.
 
 `jwm-remote host --stats-json` replaces the five-second human statistics line
 with a JSON object on stderr (`type: "jwm_remote_host_stats"`, schema version 1).
@@ -1483,7 +1629,8 @@ in the window (zero dimensions mean no captured frame in that window).
 - `jpeg_ms`: JPEG encoder creation and encoding into the bounded payload writer.
   These two stage samples include only frames carrying an atlas; keepalives
   perform neither stage and do not dilute their means or quantiles.
-- `writer_wait_ms`: waiting to acquire the shared authenticated-record writer.
+- `writer_wait_ms`: time before starting the record write, including waiting
+  for the shared authenticated-record writer and validating/reserving the frame.
 - `socket_write_ms`: record encryption, socket writes and flush after acquiring
   the writer; it is not pure kernel/network time.
 - `capture_start_to_ack_ms`: capture **start** through the matching drawn ACK.
@@ -1493,6 +1640,13 @@ in the window (zero dimensions mean no captured frame in that window).
 - `send_to_ack_ms`: publication to the credit ledger through drawn ACK,
   including writer contention, transport, viewer processing and presentation.
   This is application feedback latency, **not network RTT**.
+
+Completed-write counts, bytes and both write-stage samples are recorded atomically
+in one reporting window. The text `write` average is `writer_wait_ms` plus
+`socket_write_ms`, ending at successful flush; it excludes the telemetry update
+and subsequent writer-lock release. Older text `write` measurements included that
+small accounting/release overhead. Failed or partial writes contribute neither a
+completed-write count nor write-stage samples.
 
 The record includes package version and optional compile-time
 `JWM_BUILD_COMMIT` (null when not supplied). For reproducible benchmark builds,
@@ -1508,7 +1662,7 @@ or shows blocky black-and-white noise, most often across the top of the
 screen where the clock and status bar redraw every second. The host machine's
 own screen shows nothing of the kind.
 
-Cause: on NVIDIA's proprietary driver, XRender and CopyArea reads of the
+One previously measured cause: on NVIDIA's proprietary driver, XRender and CopyArea reads of the
 GL-composited screen can return a frame the compositor is still drawing —
 its blurred backdrop before any window, or a partial blur pass. The host
 reads right after every Damage notification, so it lands in that window far
@@ -1517,15 +1671,25 @@ more often than a periodic screen grab would. Measured on an RTX 4090 D
 XRender; 0 through a core `GetImage`, which the driver synchronizes with GL
 rendering; 0 in 2,700 frames of ffmpeg recording the host's screen directly.
 
-`--scaling auto`, the default, therefore reads the screen with `GetImage` and
-shrinks it on the CPU when the X server has the `NV-GLX` or `NV-CONTROL`
+`--scaling auto`, the default on `host`, `connect`, and `ssh`, selects compatibility
+paths for this previously measured failure. On the host, it reads the screen with core `GetImage`
+(not MIT-SHM `GetImage`)
+and shrinks it on the CPU when the X server has the `NV-GLX` or `NV-CONTROL`
 extension, and says so at session start. The CPU path averages each output
 pixel's source area across threads; it took the place of a generic filter
 that cost about 90 ms per 2560x1440 frame. On the same loaded desktop the
 corrected path captured at about 152 ms per frame against 117 ms through
-XRender, both dominated by waiting for the GPU. `--scaling gpu` restores
+XRender, both dominated by waiting for the GPU. On the viewer, `--scaling auto`
+disables XRender upscaling on NVIDIA systems, performing high-quality multi-threaded
+CPU upscaling instead. This does not disable viewer SHM uploads or the cursor renderer,
+and is not a guarantee against every source of top-edge noise. `--scaling gpu` restores
 XRender for anyone who prefers that speed and does not see the artifacts;
-`--scaling cpu` forces the direct path elsewhere.
+`--scaling cpu` forces the direct CPU path elsewhere. On the host, CPU mode and
+NVIDIA Auto also skip SHM segment creation, including after viewport or capture-area
+changes. Older implementations disabled XRender but still attempted MIT-SHM; that
+was not the same readback path as the core-GetImage measurement above. Software
+Xvfb regressions now check actual core/SHM requests and codec-to-display top-edge
+pixels. They do not reproduce or certify a physical NVIDIA driver.
 
 - A black/invalid Composite overlay can be bypassed with
   `--capture-source root`. Root capture is a compatibility fallback and may
@@ -1554,8 +1718,8 @@ XRender for anyone who prefers that speed and does not see the artifacts;
 - video uses cumulative display acknowledgements, at most two unacknowledged
   frames, and one latest queued frame; persistently slow viewers therefore
   reduce capture/encode/network work instead of accumulating stale video;
-- encrypted and authenticated direct-LAN transport, without forward secrecy:
-  a leaked key file decrypts previously recorded sessions;
+- encrypted PSK-authenticated direct-LAN transport with ephemeral forward secrecy
+  in v3; no independent per-device identity or automatic key rotation;
 - inter-keystroke timing is not hidden;
 - X11 `x11rb`/`xcb` JWM sessions only.
 
@@ -1747,3 +1911,132 @@ format for untrusted third parties. A crash before atomic rename can leave a
 temporary filename format are ignored under the directory lock, not deleted.
 Other unexpected or unsafe entries fail closed. `profile init` explicitly creates
 missing directories privately and never changes existing directory permissions.
+
+### Explicit discrete Wayland scroll (v18)
+
+Version 18 extended the stream profile to 29 bytes; v19 adds the video-only
+copy selector for a total of 30 bytes. Byte 28 remains a strict boolean scroll capability,
+independent of byte 27's pointer permission. It must be false unless pointer is
+also true. Both `host --allow-wayland-pointer --allow-wayland-scroll` and
+`connect --wayland-pointer --wayland-scroll` are required. A missing or unsolicited
+scroll grant terminates negotiation, with no fallback to older peers or a native
+v1 lease. Native manager v2 creates an explicitly scroll-enabled lease; the old
+lease request remains motion/click only. Action kinds 2 and 3 are one up/down
+notch respectively, keeping the 45-byte scoped action format. Each consumes a
+fresh presented frame; waiting/held-click wheel input is discarded, never queued.
+No horizontal/smooth scroll, drag, new input permission, or lease extension is added.
+
+### Experimental vertical scroll-copy codec (v19)
+
+`jwm-remote host --scroll-copy` explicitly enables a CPU tile-codec optimization.
+It is off by default and is not saved in profiles or implicitly enabled by SSH.
+The flag grants **no input permission**: `--allow-wayland-scroll` remains a
+separate, explicitly authorized single-notch input capability.
+
+Both endpoints must use application protocol v19. Earlier peers are rejected
+at negotiation, not silently upgraded. Codec support is negotiated separately
+from keyboard, pointer, clipboard and scroll permissions.
+
+A candidate copies a full-width vertical overlap by an integral displacement
+of ±1 through ±64 encoded-image pixels, strictly less than the encoded image
+height. This does not move the source window or change input coordinates. The encoder
+requires at least half the image to overlap and an exact match of every raw RGB
+pixel in that overlap. Newly exposed pixels are sent through the existing tile
+path. Partial-column scrolling, fixed toolbars, unrelated changes and unsafe
+size changes do not qualify for that copy; ordinary tile encoding remains the
+fallback. Copy records bind to the exact previous decoded sequence and current
+source/geometry scope; stale, missing or cross-scope bases must not be applied.
+
+Copied pixels are the existing decoded pixels, not re-quantized JPEG. This does
+not guarantee lower image error than a fresh JPEG update. The experiment is
+software-only; no GPU acceleration, physical presentation latency, network
+latency or general bandwidth improvement is promised. Bounded offline A/B
+measurements compare the same deterministic RGB frames and JPEG quality.
+
+### Explicit native Wayland viewer keyboard mode
+
+With a `remote-wayland` build, native viewing remains an explicit choice:
+`connect HOST --viewer-backend wayland --view-only`. The alternative
+`connect HOST --viewer-backend wayland --wayland-keyboard` requests only the
+existing scoped keyboard lease, and requires the host's separate
+`--wayland-select --once --allow-wayland-keyboard` consent. Use the same private
+session key at both endpoints. A third alternative, `connect HOST --viewer-backend wayland --wayland-pointer`,
+requests the existing motion/atomic-left-click lease with separate host
+`--allow-wayland-pointer` consent. Alongside these modes, explicit unified control and one-shot text are available. Exactly one of the five native viewer modes is
+required; they cannot be combined, and omitting all native modes is rejected; choosing Wayland never implicitly
+permits legacy input.
+
+Keyboard admission retains full keymap compatibility and the exact selected
+surface/receiver identity. It lasts at most 30 seconds without renewal and is
+revoked on the existing focus, local takeover, lock and lifecycle boundaries.
+The native viewer does not accept clipboard, grabs,
+source resize/follow, automatic reconnect or saved-profile authorization.
+`--viewer-wayland-display` names a native socket; there is no X11 fallback.
+See [native Wayland source safety](remote-wayland-source.md) for limits and
+commands. This does not change the network protocol or imply physical-display,
+two-computer or latency acceptance.
+
+While scoped keyboard authorization is waiting for the host grant, do not type
+into the viewer. Any actual key edge during that interval, even a balanced
+press/release pair, cancels the attempt and terminates the session rather than
+being silently dropped and later granting control. This safety rule applies to
+both the X11 and native Wayland scoped-keyboard viewers.
+
+In the native Wayland keyboard viewer, local keyboard focus loss is fail-closed:
+the session terminates rather than reusing the lease after focus returns. Start
+a new explicitly authorized session to regain control.
+
+Native pointer mode observes a new local left-button press followed by its release
+before emitting an atomic click. An unmatched release cancels the candidate; it
+never synthesizes a press. Wayland enter events do not report an initial held-button
+snapshot, so this is not proof that all buttons were initially released. Non-left
+buttons, unsupported axis events or leaving the viewer surface permanently revoke the pointer
+lease, while video may continue read-only. Returning does not automatically
+regrant input. Unlike native keyboard focus loss, this need not close the session. There is no
+drag or button chord support. Optional native scrolling requires both viewer
+`--wayland-scroll` and host `--allow-wayland-scroll` in addition to pointer consent.
+Only protocol-v5–7 Wheel-source vertical axis_discrete ±1, with a matching finite
+nonzero axis and a complete frame, is accepted. No v8 value120, smooth/finger or
+horizontal scrolling, multi-notch batches or mixed button/axis input is enabled.
+Waiting scroll is discarded, not queued for a later Ready. Every motion/click still needs the matching
+fresh, genuinely presented frame and host Ready ticket; the 30-second lease is
+not renewed. Default read-only viewing does not bind input devices.
+
+
+### Explicit native pointer-only plus static lossless (application v27)
+
+This combination was introduced in v27; both peers must now use the same current application version. A host may explicitly combine
+`--wayland-select --once --allow-wayland-pointer --allow-static-lossless`, and
+the viewer must separately request
+`connect HOST --viewer-backend wayland --wayland-pointer --static-lossless`.
+Do not add `--view-only`. This default-off combination permits only the existing
+motion/atomic-left-click lease, not keyboard, unified control, scroll, text,
+clipboard, grab, popup capture or resize-follow. It grants no new input actions.
+
+Repair cannot generate authorization: another actionable scope requires a new
+native proof and actual presentation acknowledgment. The original 30-second
+lease is not renewed. Candidate `9b3105` passed general, Wayland and X11 CI,
+including all seven new module tests; all four baseline mainline workflows
+subsequently passed. This does not validate the separate natural-expiry-to-read-only
+candidate, whose new tests have not yet run. The owned software-GL 800×600 test reached full-frame exactness
+in eight batches, then performed an actual click. This does not imply physical
+hardware acceptance or common-desktop full-frame convergence: 1080p needs at
+least 32 batches and 64 seconds in the ideal budget, longer than the lease.
+See [pointer plus lossless boundaries and evidence](remote-pointer-lossless-preparation.md)
+for observed times, permission restrictions and the unchanged cooldown limits.
+
+## Seamless input handoff
+
+For opt-in X11 mouse-enter/leave keyboard and pointer handoff, see
+[Seamless input](remote-seamless-input.md). Default click-to-grab behavior is unchanged.
+The same guide documents the separate experimental JWM udev Wayland mode,
+`--wayland-seamless-input`, with explicit host permission and a nonrenewable
+30-second default budget. The client may explicitly request 30..=300 seconds
+with `--wayland-control-duration`; the host independently sets its ceiling with
+`--max-wayland-control-duration`. Requests above the ceiling are refused, not
+silently shortened; pauses consume the original budget. Both helpers require
+application protocol v35. Default duration retains source control v4/local
+handoff v2 compatibility, while longer budgets require v5/v3 respectively.
+It is not support for arbitrary Wayland compositors or evidence of physical
+hardware acceptance. Read its escape, Super-key, cross-monitor, earlier-failure
+and validation limits before enabling it.

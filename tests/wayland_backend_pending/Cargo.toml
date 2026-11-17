@@ -1,0 +1,11 @@
+[package]
+name = "jwm-wayland-backend-pending-tests"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+scoped-tls = "1.0"
+
+[lib]
+path = "lib.rs"

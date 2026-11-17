@@ -112,9 +112,16 @@ pub fn load_key_file(path: &Path) -> RemoteResult<Vec<u8>> {
     if !path_metadata.is_file() {
         return Err(permission_denied("remote key path is not a regular file").into());
     }
+    read_key_file(path)
+}
+
+/// The path may change after the preliminary metadata check. Nonblocking open
+/// avoids waiting for a writer if it became a FIFO; the opened descriptor is
+/// still checked before reading. This does not bound ordinary filesystem I/O.
+fn read_key_file(path: &Path) -> RemoteResult<Vec<u8>> {
     let mut file = OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
         .open(path)?;
     let metadata = file.metadata()?;
     if !metadata.is_file() {
@@ -266,6 +273,74 @@ mod tests {
             assert!(read_key_line(&mut std::io::Cursor::new(bad)).is_err());
         }
         assert!(format!("{:?}", KeySource::Bytes(key)).contains("redacted"));
+    }
+
+    #[test]
+    fn a_key_replaced_with_a_fifo_after_metadata_does_not_block() {
+        use std::os::unix::ffi::OsStrExt;
+        use std::time::Duration;
+
+        let directory = temporary_directory();
+        let path = directory.join("remote.key");
+        generate_key_file(&path).unwrap();
+        // Model the race after load_key_file's preliminary path check, then
+        // exercise the exact open/validate/read stage used by that loader.
+        assert!(fs::symlink_metadata(&path).unwrap().is_file());
+        fs::remove_file(&path).unwrap();
+        let name = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+        // SAFETY: name is a live, NUL-terminated path in this test's directory.
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        let source = path.clone();
+        let (send, receive) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || send.send(read_key_file(&source)).unwrap());
+        let result = receive.recv_timeout(Duration::from_secs(2));
+        let blocked = result.is_err();
+        // Rescue a regressed blocking open before asserting, so a failure does
+        // not leave a detached test thread stuck on a FIFO with no writer.
+        let (result, rescue) = match result {
+            Ok(result) => (result, None),
+            Err(_) => {
+                let rescue = OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .custom_flags(libc::O_NONBLOCK)
+                    .open(&path)
+                    .unwrap();
+                (
+                    receive.recv_timeout(Duration::from_secs(2)).unwrap(),
+                    Some(rescue),
+                )
+            }
+        };
+        worker.join().unwrap();
+        drop(rescue);
+        fs::remove_dir_all(directory).unwrap();
+        assert!(
+            !blocked,
+            "opening the replaced key waited for a FIFO writer"
+        );
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("not a regular file")
+        );
+    }
+
+    #[test]
+    fn opened_key_validation_preserves_symlink_and_permission_rejection() {
+        let directory = temporary_directory();
+        let key = directory.join("remote.key");
+        let link = directory.join("link");
+        generate_key_file(&key).unwrap();
+        std::os::unix::fs::symlink(&key, &link).unwrap();
+        assert!(read_key_file(&link).is_err());
+        assert!(read_key_file(&directory).is_err());
+        let expected = load_key_file(&key).unwrap();
+        assert_eq!(read_key_file(&key).unwrap(), expected);
+        fs::set_permissions(&key, fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(read_key_file(&key).is_err());
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

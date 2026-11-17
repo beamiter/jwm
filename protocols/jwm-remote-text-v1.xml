@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<protocol name="jwm_remote_text_v1">
+<copyright>Copyright 2026 JWM contributors. MIT license.</copyright>
+<interface name="jwm_remote_text_manager_v1" version="1">
+<description summary="trusted local one-shot text permission">Explicitly targets an already enabled text-input-v3 context of the exact captured native surface. No global input method, clipboard or keyboard fallback.</description>
+<request name="destroy" type="destructor"/>
+<request name="create_lease"><arg name="id" type="new_id" interface="jwm_remote_text_lease_v1"/><arg name="source" type="object" interface="ext_image_capture_source_v1"/></request>
+</interface>
+<interface name="jwm_remote_text_lease_v1" version="1">
+<description summary="one attempt within thirty seconds">The source family is consumed for input even if denied. Commit requires a live completed same-source capture frame no older than one second and an unchanged exact enabled text context. The trusted host verifies the viewer presented that frame. Text is nonempty UTF-8, at most 4000 bytes, without NUL. No trimming or newline conversion. Any attempt ends the lease. Accepted means only that commit_string and done were sent to the exact resource, not that the application inserted or saved text. No retry or renewal.</description>
+<request name="destroy" type="destructor"/>
+<request name="commit"><arg name="epoch" type="uint"/><arg name="frame" type="object" interface="ext_image_copy_capture_frame_v1"/><arg name="text" type="array"/></request>
+<event name="granted"><arg name="id" type="uint"/><arg name="epoch" type="uint"/><arg name="ttl_ms" type="uint"/></event>
+<event name="accepted"><arg name="epoch" type="uint"/></event>
+<event name="revoked"><arg name="reason" type="uint"/></event>
+</interface>
+</protocol>

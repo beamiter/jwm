@@ -75,6 +75,10 @@ bitflags::bitflags! {
     pub struct CaptureMode: u32 {
         /// Capturing the Composite overlay rather than the bare root.
         const OVERLAY = 1 << 0;
+        /// Capturing only an explicitly authorized application pixmap.
+        const WINDOW = 1 << 7;
+        /// Native Wayland single-surface SHM capture (never an X drawable).
+        const WAYLAND = 1 << 8;
         /// Downscaling in the X server instead of on the CPU.
         const XRENDER = 1 << 1;
         /// Reading back through MIT-SHM rather than core `GetImage`.
@@ -96,7 +100,11 @@ impl CaptureMode {
     #[must_use]
     pub fn describe(self) -> String {
         let mut parts = Vec::with_capacity(5);
-        parts.push(if self.contains(Self::OVERLAY) {
+        parts.push(if self.contains(Self::WAYLAND) {
+            "wayland-surface"
+        } else if self.contains(Self::WINDOW) {
+            "window-pixmap"
+        } else if self.contains(Self::OVERLAY) {
             "overlay"
         } else {
             "root"
@@ -116,7 +124,9 @@ impl CaptureMode {
         } else {
             "no-damage"
         });
-        parts.push(if self.contains(Self::CURSOR_EVENTS) {
+        parts.push(if self.intersects(Self::WINDOW | Self::WAYLAND) {
+            "no-cursor"
+        } else if self.contains(Self::CURSOR_EVENTS) {
             "cursor-events"
         } else {
             "cursor-poll"
@@ -124,7 +134,7 @@ impl CaptureMode {
         if !self.contains(Self::GEOMETRY_EVENTS) {
             parts.push("geometry-poll");
         }
-        if !self.contains(Self::COMPOSITOR_EVENTS) {
+        if !self.intersects(Self::COMPOSITOR_EVENTS | Self::WAYLAND) {
             parts.push("compositor-poll");
         }
         parts.join("/")
@@ -132,7 +142,7 @@ impl CaptureMode {
 }
 
 /// Wait for `fd` to become readable, returning false on timeout.
-fn wait_readable(fd: BorrowedFd<'_>, timeout: Duration) -> RemoteResult<bool> {
+pub(crate) fn wait_readable(fd: BorrowedFd<'_>, timeout: Duration) -> RemoteResult<bool> {
     let mut fds = [PollFd::new(
         fd,
         PollFlags::POLLIN | PollFlags::POLLERR | PollFlags::POLLHUP,
@@ -202,43 +212,7 @@ impl EventAttribution {
 pub(crate) const DAMAGE_FORCE_REFRESH: Duration = Duration::from_secs(2);
 const ROOT_STAGING_MAX_BYTES: usize = 64 * 1024 * 1024;
 
-/// Where a frame is shrunk to the viewer's size.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum ScalingPolicy {
-    /// XRender in the X server, except on NVIDIA's proprietary driver.
-    #[default]
-    Auto,
-    /// Always XRender, which reads back only the encoded size.
-    Gpu,
-    /// Always a full-size readback, shrunk on the CPU.
-    Cpu,
-}
-
-impl ScalingPolicy {
-    /// Whether XRender may scale on this X server.
-    ///
-    /// On NVIDIA's proprietary driver, XRender and CopyArea reads of the
-    /// GL-composited screen can return a frame the compositor is still
-    /// drawing: measured over 45 s of a jwm session it showed only the
-    /// blurred wallpaper on 20 frames, and other partial passes appear as
-    /// blocky black-and-white noise. A core GetImage is synchronized with GL
-    /// rendering and showed none, so `Auto` takes that path there.
-    fn allows_gpu(self, nvidia_driver: bool) -> bool {
-        match self {
-            Self::Gpu => true,
-            Self::Cpu => false,
-            Self::Auto => !nvidia_driver,
-        }
-    }
-}
-
-/// Whether the X server runs NVIDIA's proprietary driver, by the extensions
-/// only that driver registers.
-fn nvidia_driver(conn: &RustConnection) -> bool {
-    ["NV-GLX", "NV-CONTROL"]
-        .iter()
-        .any(|name| conn.extension_information(name).ok().flatten().is_some())
-}
+pub use super::scaling::{ScalingPolicy, nvidia_driver};
 
 /// Which X drawable supplies the remote desktop image.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -280,21 +254,6 @@ impl std::str::FromStr for CaptureRegion {
     }
 }
 
-impl std::str::FromStr for ScalingPolicy {
-    type Err = String;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value.to_ascii_lowercase().as_str() {
-            "auto" => Ok(Self::Auto),
-            "gpu" | "xrender" => Ok(Self::Gpu),
-            "cpu" => Ok(Self::Cpu),
-            _ => Err(format!(
-                "unknown scaling {value:?}; expected auto, gpu, or cpu"
-            )),
-        }
-    }
-}
-
 impl std::str::FromStr for CaptureSource {
     type Err = String;
 
@@ -327,6 +286,9 @@ pub enum CaptureOutcome {
     Frame(CapturedFrame),
     /// The overlay, geometry and software-composited cursor are unchanged.
     NoChange,
+    /// Only a retained native proof was serviced; no readback was started.
+    /// Unlike NoChange this must not consume a new capture-start rate slot.
+    RetainedProofBlocked,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1063,6 +1025,26 @@ impl X11Capture {
         area: CaptureArea,
         scaling: ScalingPolicy,
     ) -> RemoteResult<Self> {
+        Self::connect_with_driver_probe(
+            display,
+            requested_source,
+            max_width,
+            area,
+            scaling,
+            nvidia_driver,
+        )
+    }
+
+    // The probe seam lets owned-X tests exercise the NVIDIA policy without
+    // claiming that software Xvfb reproduces proprietary driver behaviour.
+    fn connect_with_driver_probe(
+        display: Option<&str>,
+        requested_source: CaptureSource,
+        max_width: u16,
+        area: CaptureArea,
+        scaling: ScalingPolicy,
+        driver_probe: fn(&RustConnection) -> bool,
+    ) -> RemoteResult<Self> {
         let (conn, screen_num) = open_display(display)?;
         let screen = conn
             .setup()
@@ -1073,7 +1055,16 @@ impl X11Capture {
         // MIT-SHM requires QueryVersion to complete before any other request
         // from the extension. Segment allocation remains lazy until the first
         // frame establishes the exact native image size.
-        let shm_readback = ShmReadback::connect(&conn, screen.root_depth);
+        let nvidia = driver_probe(&conn);
+        let gpu_scaling = scaling.allows_gpu(nvidia);
+        let shm_readback = if scaling.requires_core_readback(nvidia) {
+            eprintln!(
+                "jwm-remote: compatibility readback: core GetImage + CPU scaling (MIT-SHM and XRender disabled)"
+            );
+            ShmReadback::Disabled
+        } else {
+            ShmReadback::connect(&conn, screen.root_depth)
+        };
 
         let xfixes_ready = match query_xfixes(&conn) {
             Ok(()) => true,
@@ -1148,7 +1139,6 @@ impl X11Capture {
                 return Err(error);
             }
         };
-        let gpu_scaling = scaling.allows_gpu(nvidia_driver(&conn));
         if !gpu_scaling && scaling == ScalingPolicy::Auto {
             eprintln!(
                 "jwm-remote: NVIDIA driver: scaling on the CPU, because XRender reads of the \
@@ -2795,6 +2785,12 @@ impl ReadbackLayout {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    // Counts attempted protocol requests on this capture thread, not mode labels.
+    static READBACK_REQUESTS: std::cell::Cell<(u64, u64, u64)> = const { std::cell::Cell::new((0, 0, 0)) };
+}
+
 enum ShmReadback {
     Disabled,
     Enabled(EnabledShmReadback),
@@ -2921,6 +2917,11 @@ impl EnabledShmReadback {
                 .segment
                 .as_ref()
                 .ok_or_else(|| invalid_data("MIT-SHM segment was not created"))?;
+            #[cfg(test)]
+            READBACK_REQUESTS.with(|c| {
+                let (core, shm, alloc) = c.get();
+                c.set((core, shm + 1, alloc));
+            });
             let reply = shm::get_image(
                 conn,
                 drawable,
@@ -3006,6 +3007,11 @@ impl ShmSegment {
         }
         let id = conn.generate_id()?;
         // `false` is required: the server writes captured pixels into the segment.
+        #[cfg(test)]
+        READBACK_REQUESTS.with(|c| {
+            let (core, shm, alloc) = c.get();
+            c.set((core, shm, alloc + 1));
+        });
         let cookie = shm::create_segment(conn, id, size, false)?;
         // Split waiting from parsing. An X11/raw transport error does not prove
         // that the server created the resource, so do not detach an uncreated
@@ -3176,6 +3182,11 @@ fn core_capture_rgb(
     layout: ReadbackLayout,
     buffers: &mut CaptureImageRecycler,
 ) -> RemoteResult<RgbImage> {
+    #[cfg(test)]
+    READBACK_REQUESTS.with(|c| {
+        let (core, shm, alloc) = c.get();
+        c.set((core + 1, shm, alloc));
+    });
     let reply = conn
         .get_image(
             ImageFormat::Z_PIXMAP,
@@ -4121,7 +4132,7 @@ fn decode_ximage_generic(
     )
 }
 
-fn decode_ximage_reusing(
+pub(crate) fn decode_ximage_reusing(
     ximage: &XImage<'_>,
     width: u16,
     height: u16,
@@ -4503,6 +4514,8 @@ pub enum CaptureArea {
     Monitor(String),
     /// A fixed rectangle in root coordinates.
     Region(CaptureRegion),
+    /// A host-authorized instance, captured only by WindowCapture.
+    Window(u32),
 }
 
 /// Resolve what the operator asked to share into a rectangle.
@@ -4518,6 +4531,11 @@ fn resolve_capture_area(
     root_height: u16,
 ) -> RemoteResult<Option<CaptureRegion>> {
     let region = match area {
+        CaptureArea::Window(_) => {
+            return Err(
+                invalid_data("window grants require the isolated window capture backend").into(),
+            );
+        }
         CaptureArea::Root => return Ok(None),
         CaptureArea::Region(region) => *region,
         CaptureArea::Monitor(name) => {
@@ -4692,7 +4710,7 @@ pub fn scaled_dimensions(width: u16, height: u16, max_width: u16, max_height: u1
 /// search the original aspect ratio's longer axis with integer arithmetic.
 /// This avoids floating-point rounding above the cap and double-rounding the
 /// aspect ratio after an initial dimension clamp.
-fn frame_dimensions(
+pub(crate) fn frame_dimensions(
     width: u16,
     height: u16,
     viewport_width: u16,
@@ -4769,6 +4787,113 @@ mod tests {
 
     use super::*;
     use std::cell::Cell;
+
+    #[cfg(any(
+        feature = "backend-x11rb",
+        feature = "backend-xcb",
+        feature = "wayland-backends"
+    ))]
+    #[test]
+    fn owned_x_core_compatibility_survives_viewport_limits_and_source_switch() {
+        let x11 = crate::backend::clipboard_offer::IsolatedXvfb::acquire();
+        for (policy, probe) in [
+            (
+                ScalingPolicy::Cpu,
+                (|_: &RustConnection| false) as fn(&RustConnection) -> bool,
+            ),
+            (
+                ScalingPolicy::Auto,
+                (|_: &RustConnection| true) as fn(&RustConnection) -> bool,
+            ),
+        ] {
+            for initial_width in [0, 32] {
+                READBACK_REQUESTS.with(|c| c.set((0, 0, 0)));
+                let region = CaptureRegion {
+                    x: 0,
+                    y: 0,
+                    width: 64,
+                    height: 48,
+                };
+                let mut capture = X11Capture::connect_with_driver_probe(
+                    Some(x11.name()),
+                    CaptureSource::Root,
+                    initial_width,
+                    CaptureArea::Region(region),
+                    policy,
+                    probe,
+                )
+                .unwrap();
+                capture.cursor.disable();
+                for step in 0..4 {
+                    match step {
+                        1 => {
+                            assert!(capture.set_encoded_bounds(24, 24));
+                        }
+                        2 => {
+                            assert!(capture.set_frame_limits(FrameLimits {
+                                max_width: 16,
+                                max_height: 16,
+                                max_pixels: 256
+                            }));
+                        }
+                        3 => {
+                            capture
+                                .switch_area(CaptureArea::Region(CaptureRegion { x: 80, ..region }))
+                                .unwrap();
+                        }
+                        _ => {}
+                    }
+                    assert!(!capture.gpu_scaling);
+                    assert!(capture.render_scaler.is_none());
+                    assert!(!capture.shm_readback.is_enabled());
+                    let before = READBACK_REQUESTS.with(Cell::get);
+                    let CaptureOutcome::Frame(frame) = capture.frame().unwrap() else {
+                        panic!("fresh frame required");
+                    };
+                    assert_eq!((frame.source_width, frame.source_height), (64, 48));
+                    let after = READBACK_REQUESTS.with(Cell::get);
+                    assert!(after.0 > before.0, "must issue core GetImage");
+                    assert_eq!(
+                        (after.1, after.2),
+                        (0, 0),
+                        "no SHM image or segment requests"
+                    );
+                }
+            }
+        }
+        // Positive control: software/non-NVIDIA Auto and explicit GPU keep
+        // their native-width SHM path. This fixture requires SHM 1.2 support.
+        for policy in [ScalingPolicy::Auto, ScalingPolicy::Gpu] {
+            READBACK_REQUESTS.with(|c| c.set((0, 0, 0)));
+            let mut capture = X11Capture::connect_with_driver_probe(
+                Some(x11.name()),
+                CaptureSource::Root,
+                0,
+                CaptureArea::Region(CaptureRegion {
+                    x: 0,
+                    y: 0,
+                    width: 64,
+                    height: 48,
+                }),
+                policy,
+                |_| false,
+            )
+            .unwrap();
+            capture.cursor.disable();
+            assert!(capture.gpu_scaling);
+            assert!(
+                capture.shm_readback.is_enabled(),
+                "owned Xvfb must offer SHM FD segments"
+            );
+            assert!(matches!(capture.frame().unwrap(), CaptureOutcome::Frame(_)));
+            let counts = READBACK_REQUESTS.with(Cell::get);
+            assert_eq!(counts.0, 0);
+            assert!(
+                counts.1 > 0 && counts.2 > 0,
+                "positive SHM request control: {counts:?}"
+            );
+        }
+    }
 
     #[test]
     fn auto_scaling_avoids_xrender_only_on_the_nvidia_driver() {

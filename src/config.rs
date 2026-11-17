@@ -4069,6 +4069,22 @@ impl Config {
             .collect()
     }
 
+    /// Policy-reserved lock shortcuts remain available during local viewer
+    /// handoff. Platform routing receives only neutral chords, not WM actions.
+    #[cfg(any(test, feature = "backend-wayland-udev"))]
+    pub(crate) fn reserved_lock_shortcuts(&self) -> Vec<(Mods, KeySym)> {
+        self.get_keys()
+            .into_iter()
+            .filter(|key| {
+                key.func_opt.is_some_and(|function| {
+                    std::ptr::fn_addr_eq(function, Jwm::lock_screen as WMFuncType)
+                        || std::ptr::fn_addr_eq(function, Jwm::lock_monitor as WMFuncType)
+                })
+            })
+            .map(|key| (key.mask, key.key_sym))
+            .collect()
+    }
+
     pub fn get_keys(&self) -> Vec<WMKey> {
         let mut keys = Vec::new();
 
@@ -6693,6 +6709,53 @@ mod tests {
         key_function_is_repeatable, migrate_legacy_terminal_argument, parse_terminal_override,
         resolve_cursor_size, scene_linear_render_path_requested, x11_compositor_override,
     };
+
+    #[test]
+    fn reserved_lock_shortcuts_follow_action_policy_not_similar_chords() {
+        let mut config = Config::default();
+        assert_eq!(config.reserved_lock_shortcuts().len(), 2);
+        // Remapping either lock action must preserve the security reservation;
+        // assigning an unrelated action to the old chord must not reserve it.
+        config.inner.keybindings.keys = vec![
+            KeyConfig {
+                modifier: vec!["Mod4".into()],
+                key: "F1".into(),
+                function: "lock_screen".into(),
+                argument: ArgumentConfig::Int(0),
+            },
+            KeyConfig {
+                modifier: vec!["Mod4".into()],
+                key: "F2".into(),
+                function: "lock_monitor".into(),
+                argument: ArgumentConfig::Int(0),
+            },
+            KeyConfig {
+                modifier: vec!["Control".into(), "Mod1".into()],
+                key: "Escape".into(),
+                function: "spawn".into(),
+                argument: ArgumentConfig::StringVec(vec!["true".into()]),
+            },
+        ];
+        assert_eq!(
+            config.reserved_lock_shortcuts(),
+            vec![
+                (Mods::SUPER, super::k::KEY_F1),
+                (Mods::SUPER, super::k::KEY_F2)
+            ]
+        );
+        for binding in &mut config.inner.keybindings.keys {
+            binding.function = "spawn".into();
+        }
+        // Occupy the legacy lock-monitor fallback too; get_keys deliberately
+        // inserts that action when an old configuration omits it.
+        config.inner.keybindings.keys.push(KeyConfig {
+            modifier: vec!["Control".into(), "Mod1".into(), "Shift".into()],
+            key: "Escape".into(),
+            function: "spawn".into(),
+            argument: ArgumentConfig::StringVec(vec!["true".into()]),
+        });
+        assert!(config.reserved_lock_shortcuts().is_empty());
+    }
 
     #[test]
     fn eva_coordinator_defaults_on_and_preserves_explicit_disable() {

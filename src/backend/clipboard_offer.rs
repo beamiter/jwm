@@ -964,7 +964,7 @@ pub(crate) fn parse_file_list(mime: &str, bytes: &[u8]) -> Option<Vec<std::path:
 #[cfg(feature = "remote-x11")]
 fn local_path_from_file_uri(uri: &str) -> Option<Vec<u8>> {
     let scheme_len = "file:".len();
-    if uri.len() < scheme_len || !uri[..scheme_len].eq_ignore_ascii_case("file:") {
+    if !uri.get(..scheme_len)?.eq_ignore_ascii_case("file:") {
         return None;
     }
     let rest = &uri[scheme_len..];
@@ -1495,6 +1495,33 @@ mod tests {
             .map(|index| format!("file:///tmp/{index}\r\n"))
             .collect::<String>();
         assert_eq!(parse_file_list(URI_LIST_MIME, too_many.as_bytes()), None);
+    }
+
+    #[cfg(feature = "remote-x11")]
+    #[test]
+    fn unicode_non_file_prefixes_fall_back_without_panicking() {
+        // Exercise every possible split of 2-, 3- and 4-byte scalars at the
+        // scheme boundary, including an otherwise valid entry preceding it.
+        for scalar in ['é', '中', '😀'] {
+            for padding in 0..5 {
+                let uri = format!("{}{scalar}://example", "a".repeat(padding));
+                for mime in [URI_LIST_MIME, GNOME_COPIED_FILES_MIME] {
+                    let operation = if mime == GNOME_COPIED_FILES_MIME {
+                        "copy\n"
+                    } else {
+                        ""
+                    };
+                    for prefix in ["", "file:///tmp/valid\n"] {
+                        let payload = format!("{operation}{prefix}{uri}\r\n");
+                        assert_eq!(parse_file_list(mime, payload.as_bytes()), None);
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            parse_file_list(URI_LIST_MIME, "FiLe:///tmp/中文😀".as_bytes()),
+            Some(vec![std::path::PathBuf::from("/tmp/中文😀")])
+        );
     }
 
     #[cfg(feature = "remote-x11")]

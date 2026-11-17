@@ -109,7 +109,7 @@ pub struct MemoryInfo {
 /// System monitor with efficient caching
 #[derive(Debug)]
 pub struct SystemMonitor {
-    system: System,
+    system: Option<System>,
     last_update: Instant,
     update_interval: Duration,
     cpu_history: RollingAverage,
@@ -120,7 +120,7 @@ pub struct SystemMonitor {
 impl SystemMonitor {
     /// Create a new system monitor
     pub fn new(history_length: usize) -> Self {
-        let system = System::new();
+        let system = System::new().ok();
 
         let mut monitor = Self {
             system,
@@ -150,11 +150,21 @@ impl SystemMonitor {
     /// Force refresh system information
     pub fn refresh(&mut self) {
         // Refresh only what we need to minimize overhead
-        self.system.refresh_cpu_all();
-        self.system.refresh_memory();
+        // Initialization can fail on restricted/unsupported hosts. Keep the bar
+        // alive, and retry on the next scheduled update rather than panicking.
+        if self.system.is_none() {
+            self.system = System::new().ok();
+        }
+        let Some(system) = self.system.as_mut() else {
+            return;
+        };
+        system.refresh_cpu_all();
+        system.refresh_memory();
 
         // Create new snapshot
-        let snapshot = self.create_snapshot();
+        let Some(snapshot) = self.create_snapshot() else {
+            return;
+        };
 
         // Update history
         self.cpu_history.add(snapshot.cpu_average as f64);
@@ -165,13 +175,9 @@ impl SystemMonitor {
     }
 
     /// Create system snapshot
-    fn create_snapshot(&self) -> SystemSnapshot {
-        let cpu_usage: Vec<f32> = self
-            .system
-            .cpus()
-            .iter()
-            .map(|cpu| cpu.cpu_usage())
-            .collect();
+    fn create_snapshot(&self) -> Option<SystemSnapshot> {
+        let system = self.system.as_ref()?;
+        let cpu_usage: Vec<f32> = system.cpus().iter().map(|cpu| cpu.usage()).collect();
 
         let cpu_average = if cpu_usage.is_empty() {
             0.0
@@ -179,23 +185,23 @@ impl SystemMonitor {
             cpu_usage.iter().sum::<f32>() / cpu_usage.len() as f32
         };
 
-        let memory_total = self.system.total_memory();
+        let memory_total = system.total_memory();
         let (memory_available, memory_used, memory_usage_percent) =
-            normalized_memory(memory_total, self.system.available_memory());
+            normalized_memory(memory_total, system.available_memory());
 
         let load_average = self.get_load_average();
 
-        SystemSnapshot {
+        Some(SystemSnapshot {
             cpu_usage,
             cpu_average,
             memory_total,
             memory_used,
             memory_available,
             memory_usage_percent,
-            uptime: sysinfo::System::uptime(),
+            uptime: sysinfo::System::uptime().ok()?,
             load_average,
             timestamp: Instant::now(),
-        }
+        })
     }
 
     /// Get system load average (Unix-like systems)
@@ -228,12 +234,15 @@ impl SystemMonitor {
 
     /// Get individual CPU information
     pub fn get_cpu_info(&self) -> Vec<CpuInfo> {
-        self.system
+        let Some(system) = &self.system else {
+            return Vec::new();
+        };
+        system
             .cpus()
             .iter()
             .map(|cpu| CpuInfo {
                 name: cpu.name().to_string(),
-                usage: cpu.cpu_usage(),
+                usage: cpu.usage(),
                 frequency: cpu.frequency(),
             })
             .collect()
@@ -241,10 +250,18 @@ impl SystemMonitor {
 
     /// Get memory information
     pub fn get_memory_info(&self) -> MemoryInfo {
-        let total = self.system.total_memory();
-        let (available, used, usage_percent) =
-            normalized_memory(total, self.system.available_memory());
-        let free = self.system.free_memory();
+        let Some(system) = &self.system else {
+            return MemoryInfo {
+                total: 0,
+                used: 0,
+                available: 0,
+                free: 0,
+                usage_percent: 0.0,
+            };
+        };
+        let total = system.total_memory();
+        let (available, used, usage_percent) = normalized_memory(total, system.available_memory());
+        let free = system.free_memory();
 
         MemoryInfo {
             total,
@@ -291,7 +308,10 @@ impl SystemMonitor {
         let uptime = if let Some(snapshot) = &self.last_snapshot {
             snapshot.uptime
         } else {
-            sysinfo::System::uptime()
+            let Ok(uptime) = sysinfo::System::uptime() else {
+                return "unavailable".to_string();
+            };
+            uptime
         };
 
         let days = uptime / 86400;
@@ -436,6 +456,29 @@ mod tests {
         average.add(30.0);
         assert_eq!(average.values().collect::<Vec<_>>(), vec![20.0, 30.0]);
         assert_eq!(average.average(), 25.0);
+    }
+
+    #[test]
+    fn unavailable_monitor_has_no_fabricated_samples_and_can_recover() {
+        let mut monitor = SystemMonitor {
+            system: None,
+            last_update: Instant::now(),
+            update_interval: Duration::ZERO,
+            cpu_history: RollingAverage::new(3),
+            memory_history: RollingAverage::new(3),
+            last_snapshot: None,
+        };
+        assert!(monitor.create_snapshot().is_none());
+        assert!(monitor.get_cpu_info().is_empty());
+        assert_eq!(monitor.get_memory_info().total, 0);
+        assert!(monitor.get_cpu_history().is_empty());
+        assert!(monitor.get_memory_history().is_empty());
+        // A later scheduled refresh retries initialization without rebuilding
+        // the frontend or requiring a window resize.
+        assert!(monitor.update_if_needed());
+        assert!(monitor.get_snapshot().is_some());
+        assert_eq!(monitor.get_cpu_history().len(), 1);
+        assert_eq!(monitor.get_memory_history().len(), 1);
     }
 
     #[test]

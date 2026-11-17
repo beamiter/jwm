@@ -1018,27 +1018,126 @@ mod tests {
 mod shm_mapping_tests {
     use super::*;
 
+    #[derive(Debug, PartialEq, Eq)]
+    struct MapEntry {
+        start: usize,
+        end: usize,
+        identity: (u64, u64, u64),
+    }
+
+    fn parse_maps(text: &str) -> Result<Vec<MapEntry>, String> {
+        if text.trim().is_empty() {
+            return Err("empty proc maps".into());
+        }
+        text.lines()
+            .map(|line| {
+                let mut fields = line.split_whitespace();
+                let range = fields.next().ok_or("missing range")?;
+                let permissions = fields.next().ok_or("missing permissions")?;
+                let offset = fields.next().ok_or("missing offset")?;
+                let device = fields.next().ok_or("missing device")?;
+                let inode = fields.next().ok_or("missing inode")?;
+                let (start, end) = range.split_once('-').ok_or("invalid range")?;
+                let start = usize::from_str_radix(start, 16).map_err(|e| e.to_string())?;
+                let end = usize::from_str_radix(end, 16).map_err(|e| e.to_string())?;
+                if start >= end || permissions.len() != 4 {
+                    return Err("invalid mapping range or permissions".into());
+                }
+                let p = permissions.as_bytes();
+                if !matches!(p[0], b'r' | b'-')
+                    || !matches!(p[1], b'w' | b'-')
+                    || !matches!(p[2], b'x' | b'-')
+                    || !matches!(p[3], b'p' | b's')
+                {
+                    return Err("invalid permissions".into());
+                }
+                u64::from_str_radix(offset, 16).map_err(|e| e.to_string())?;
+                let (major, minor) = device.split_once(':').ok_or("invalid device")?;
+                let major = u64::from_str_radix(major, 16).map_err(|e| e.to_string())?;
+                let minor = u64::from_str_radix(minor, 16).map_err(|e| e.to_string())?;
+                let inode = inode.parse::<u64>().map_err(|e| e.to_string())?;
+                Ok(MapEntry {
+                    start,
+                    end,
+                    identity: (major, minor, inode),
+                })
+            })
+            .collect()
+    }
+
+    fn read_maps() -> Vec<MapEntry> {
+        parse_maps(&std::fs::read_to_string("/proc/self/maps").expect("read proc maps"))
+            .expect("parse proc maps")
+    }
+
     #[test]
     fn startup_error_releases_the_synthetic_mapping() {
         let name = CString::new("jwm-portal-mapping-test").unwrap();
         let fd = memfd_create(name.as_c_str(), MFdFlags::MFD_CLOEXEC).unwrap();
-        let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as usize;
+        let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
         assert!(page_size > 0);
+        let page_size = page_size as usize;
         ftruncate(&fd, page_size as i64).unwrap();
-        let ptr;
+        let stat = nix::sys::stat::fstat(&fd).unwrap();
+        let identity = (
+            libc::major(stat.st_dev) as u64,
+            libc::minor(stat.st_dev) as u64,
+            stat.st_ino,
+        );
         {
             let mapping = ShmMapping::new(fd.as_fd(), page_size).unwrap();
-            ptr = mapping.ptr;
-            // Same unwinding path as failed init_tx.send: no frame and no reads.
+            let start = mapping.ptr.as_ptr() as usize;
+            let end = start.checked_add(page_size).unwrap();
+            assert!(
+                read_maps().iter().any(|entry| entry.start == start
+                    && entry.end == end
+                    && entry.identity == identity),
+                "original mapping identity and range must exist before drop"
+            );
+            // Exercise the RAII scope exit used by startup error paths. This
+            // does not itself exercise an init channel send failure.
             let _startup_failure: Result<(), &str> = Err("init receiver closed");
         }
-        let mut residency = 0u8;
-        let result = unsafe { libc::mincore(ptr.as_ptr(), page_size, &mut residency) };
-        assert_eq!(result, -1, "mapping survived owner drop");
-        assert_eq!(
-            std::io::Error::last_os_error().raw_os_error(),
-            Some(libc::ENOMEM)
+        // Keep fd alive so its inode cannot be recycled. Another test may map
+        // the released address immediately; mincore(address) cannot distinguish
+        // that unrelated allocation from a surviving mapping of this memfd.
+        assert!(
+            !read_maps().iter().any(|entry| entry.identity == identity),
+            "original memfd mapping survived owner drop"
         );
+        drop(fd);
+    }
+
+    #[test]
+    fn maps_identity_distinguishes_address_reuse_from_surviving_mapping() {
+        let original = (0, 1, 42);
+        let before =
+            parse_maps("1000-2000 r--s 00000000 00:01 42 /memfd:test (deleted)\n").unwrap();
+        assert_eq!(before[0].identity, original);
+        let reused = parse_maps("1000-2000 rw-p 00000000 00:02 42 /different\n").unwrap();
+        assert_eq!(reused[0].start, before[0].start);
+        assert!(!reused.iter().any(|entry| entry.identity == original));
+        let moved = parse_maps("3000-4000 r--s 00000000 00:01 42 /memfd:test (deleted)\n").unwrap();
+        assert!(moved.iter().any(|entry| entry.identity == original));
+    }
+
+    #[test]
+    fn malformed_maps_are_errors_not_absent_mappings() {
+        for text in [
+            "",
+            "\n",
+            "1000-2000",
+            "2000-1000 r--s 0 00:01 42",
+            "1000-2000 nope 0 00:01 42",
+            "1000-2000 r--s xyz 00:01 42",
+            "1000-2000 r--s 0 no-device 42",
+            "1000-2000 r--s 0 00:01 bad",
+        ] {
+            assert!(
+                parse_maps(text).is_err(),
+                "accepted malformed maps: {text:?}"
+            );
+        }
     }
 }
 

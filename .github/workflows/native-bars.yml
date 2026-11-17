@@ -11,6 +11,19 @@ on:
       - vendor/glib/**
       - tests/glib_backport/**
       - scripts/test-bar-startup.mjs
+      - scripts/test-frontend-diagnostics.mjs
+      - scripts/test-shared-shell-failure-evidence.py
+      - scripts/test-frame-feedback-probe.py
+      - scripts/fixtures/frame_feedback_probe.py
+      - scripts/test-sparse-header-evidence.py
+      - scripts/test-daemon-native-log-evidence.py
+      - scripts/test-leptos-daemon-workflow.py
+      - scripts/test-react-repeat-workflow.py
+      - .github/workflows/shared-shell.yml
+      - scripts/fixtures/daemon_native_log.py
+      - scripts/test-shared-sidebar-shell-daemon.py
+      - scripts/test-sparse-header.py
+      - scripts/test-shared-sidebar-shell-x11.py
       - scripts/test_bar_layout.mjs
       - scripts/test_bar_web_frontends.mjs
       - crates/xbar_core/**
@@ -28,6 +41,19 @@ on:
       - vendor/glib/**
       - tests/glib_backport/**
       - scripts/test-bar-startup.mjs
+      - scripts/test-frontend-diagnostics.mjs
+      - scripts/test-shared-shell-failure-evidence.py
+      - scripts/test-frame-feedback-probe.py
+      - scripts/fixtures/frame_feedback_probe.py
+      - scripts/test-sparse-header-evidence.py
+      - scripts/test-daemon-native-log-evidence.py
+      - scripts/test-leptos-daemon-workflow.py
+      - scripts/test-react-repeat-workflow.py
+      - .github/workflows/shared-shell.yml
+      - scripts/fixtures/daemon_native_log.py
+      - scripts/test-shared-sidebar-shell-daemon.py
+      - scripts/test-sparse-header.py
+      - scripts/test-shared-sidebar-shell-x11.py
       - scripts/test_bar_layout.mjs
       - scripts/test_bar_web_frontends.mjs
       - crates/xbar_core/**
@@ -147,7 +173,7 @@ jobs:
             libfreetype-dev \
             libudev-dev \
             libwayland-dev \
-            libxkbcommon-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev \
             libxkbcommon-x11-dev \
             libx11-dev \
             libx11-xcb-dev \
@@ -261,7 +287,7 @@ jobs:
             libfreetype-dev \
             libudev-dev \
             libwayland-dev \
-            libxkbcommon-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev \
             libxkbcommon-x11-dev \
             libx11-dev \
             libx11-xcb-dev \
@@ -383,7 +409,7 @@ jobs:
             libfreetype-dev \
             libudev-dev \
             libwayland-dev \
-            libxkbcommon-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev \
             libxkbcommon-x11-dev \
             libx11-dev \
             libx11-xcb-dev \
@@ -414,6 +440,12 @@ jobs:
       # registry-based GPUI bars are checked in desktop-toolkits above.
       - name: Check all targets at the selected upstream branch
         run: cargo check --manifest-path "${{ matrix.manifest }}" --all-targets
+
+      # Compile-time API adaptation must not replace the existing pure behavior
+      # regressions. Reuse the resolution selected by the check above.
+      - name: Run iced behavior regressions at the selected upstream branch
+        if: matrix.name == 'iced'
+        run: cargo test --locked --manifest-path "${{ matrix.manifest }}" --all-targets
 
   tauri-wasm-ui:
     name: Tauri Rust/WASM UI (${{ matrix.name }})
@@ -555,7 +587,15 @@ jobs:
           package-manager-cache: false
 
       - name: Test asynchronous frontend readiness without a browser
-        run: node scripts/test-bar-startup.mjs
+        run: |
+          node scripts/test-bar-startup.mjs
+          node --test scripts/test-frontend-diagnostics.mjs
+          python3 scripts/test-shared-shell-failure-evidence.py
+          python3 scripts/test-frame-feedback-probe.py
+          python3 scripts/test-sparse-header-evidence.py
+          python3 scripts/test-daemon-native-log-evidence.py
+          python3 scripts/test-leptos-daemon-workflow.py
+          python3 scripts/test-react-repeat-workflow.py
 
       - name: Assert generation-aware source contracts (not a frontend build)
         shell: bash
@@ -597,6 +637,39 @@ jobs:
             printf '%s\n' "- The six Tauri Rust hosts are format-checked and statically wired by \`tauri-host-contracts\`; that job explicitly documents why it does not claim compilation."
           } >> "$GITHUB_STEP_SUMMARY"
 
+  # Keep all seven real CSS skins and every geometry assertion, but avoid
+  # charging 84 serial layout cases to the React build job's time budget.
+  shared-web-layout:
+    name: Shared web layout (${{ matrix.frontend }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        frontend: [react, solid, svelte, vue, leptos, yew, dioxus]
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v6, verified 2026-10-09
+        with:
+          node-version: "24"
+          package-manager-cache: false
+
+      - name: Install the browser regression runner
+        run: |
+          npm install --prefix "$RUNNER_TEMP/xbar-browser" --ignore-scripts --no-package-lock playwright@1.62.1
+          "$RUNNER_TEMP/xbar-browser/node_modules/.bin/playwright" install --with-deps chromium
+
+      - name: Test shared four-edge layout and focus fixtures
+        env:
+          PLAYWRIGHT_MODULE: ${{ runner.temp }}/xbar-browser/node_modules/playwright
+          BAR_FRONTENDS: ${{ matrix.frontend }}
+        run: node scripts/test_bar_layout.mjs
+
   locked-web-frontends:
     name: Locked web frontend (${{ matrix.frontend }})
     runs-on: ubuntu-latest
@@ -637,12 +710,6 @@ jobs:
         run: |
           npm install --prefix "$RUNNER_TEMP/xbar-browser" --ignore-scripts --no-package-lock playwright@1.62.1
           "$RUNNER_TEMP/xbar-browser/node_modules/.bin/playwright" install --with-deps chromium
-
-      - name: Test all shared four-edge layout and focus fixtures
-        if: ${{ matrix.frontend == 'react' }}
-        env:
-          PLAYWRIGHT_MODULE: ${{ runner.temp }}/xbar-browser/node_modules/playwright
-        run: node scripts/test_bar_layout.mjs
 
       - name: Test the built frontend at all four edges
         env:

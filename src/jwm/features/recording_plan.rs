@@ -167,9 +167,24 @@ pub enum FinalizationPlan {
 
 /// 根据分段与输出路径决定收尾动作。纯函数，执行（ffprobe 轮询、
 /// ffmpeg 调用、文件搬移）由调用方在线程里完成。
-#[must_use]
-pub fn plan_finalization(segments: &[String], output_path: &str) -> FinalizationPlan {
-    match segments {
+///
+/// # Errors
+///
+/// Multi-segment paths containing line breaks or NUL cannot be represented
+/// faithfully in ffconcat's line-oriented manifest. Reject the whole plan
+/// before any file is created or any source segment can be removed.
+pub fn plan_finalization(
+    segments: &[String],
+    output_path: &str,
+) -> Result<FinalizationPlan, String> {
+    if segments.len() > 1
+        && segments
+            .iter()
+            .any(|segment| segment.contains(['\n', '\r', '\0']))
+    {
+        return Err("recording segment path contains a line break or NUL; cannot create a lossless ffconcat manifest".into());
+    }
+    Ok(match segments {
         [] => FinalizationPlan::Nothing,
         [segment] => FinalizationPlan::ValidateSingle {
             segment: segment.clone(),
@@ -184,7 +199,7 @@ pub fn plan_finalization(segments: &[String], output_path: &str) -> Finalization
                 .join("\n"),
             output_path: output_path.to_string(),
         },
-    }
+    })
 }
 
 #[cfg(test)]
@@ -296,11 +311,46 @@ mod tests {
     }
 
     #[test]
+    fn concat_rejects_line_breaks_and_nul_before_creating_a_manifest() {
+        for separator in ['\n', '\r', '\0'] {
+            // A newline followed by # can turn the rest of the real filename
+            // into a comment, making ffmpeg read a different existing file.
+            let path = format!("/v/other.mp4{separator}#actual.mp4");
+            for segments in [
+                vec![path.clone(), "/v/b.mp4".into()],
+                vec!["/v/b.mp4".into(), path],
+            ] {
+                assert!(plan_finalization(&segments, "/v/out.mp4").is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn direct_recording_does_not_use_ffconcat_and_keeps_line_break_paths() {
+        let path = "/v/actual\nname.mp4";
+        assert_eq!(
+            plan_finalization(&[path.into()], path).unwrap(),
+            FinalizationPlan::ValidateSingle {
+                segment: path.into(),
+                move_to: None
+            }
+        );
+        assert!(
+            plan_finalization(
+                &["/v/旅行 clip.mp4".into(), "/v/tab\tclip.mp4".into()],
+                "/v/out.mp4"
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
     fn concat_manifest_escapes_apostrophes_without_changing_backslashes() {
         let plan = plan_finalization(
             &["/v/user's clip.mp4".into(), "/v/back\\slash.mp4".into()],
             "/v/final.mp4",
-        );
+        )
+        .unwrap();
         let FinalizationPlan::ConcatSegments { list_content, .. } = plan else {
             panic!("concat expected")
         };
@@ -313,13 +363,13 @@ mod tests {
     #[test]
     fn finalization_plans_cover_direct_moved_and_concatenated_outputs() {
         assert_eq!(
-            plan_finalization(&[], "/v/out.mp4"),
+            plan_finalization(&[], "/v/out.mp4").unwrap(),
             FinalizationPlan::Nothing
         );
 
         // 新录制直接写在输出路径上：只校验，不搬移。
         assert_eq!(
-            plan_finalization(&["/v/out.mp4".to_string()], "/v/out.mp4"),
+            plan_finalization(&["/v/out.mp4".to_string()], "/v/out.mp4").unwrap(),
             FinalizationPlan::ValidateSingle {
                 segment: "/v/out.mp4".to_string(),
                 move_to: None,
@@ -328,7 +378,7 @@ mod tests {
 
         // 旧调用方使用独立分段路径：校验后搬移。
         assert_eq!(
-            plan_finalization(&["/v/seg.mp4".to_string()], "/v/out.mp4"),
+            plan_finalization(&["/v/seg.mp4".to_string()], "/v/out.mp4").unwrap(),
             FinalizationPlan::ValidateSingle {
                 segment: "/v/seg.mp4".to_string(),
                 move_to: Some("/v/out.mp4".to_string()),
@@ -339,7 +389,8 @@ mod tests {
         let plan = plan_finalization(
             &["/v/a.mp4".to_string(), "/v/b.mp4".to_string()],
             "/v/out.mp4",
-        );
+        )
+        .unwrap();
         assert_eq!(
             plan,
             FinalizationPlan::ConcatSegments {

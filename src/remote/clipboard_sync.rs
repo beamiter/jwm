@@ -3324,7 +3324,26 @@ mod tests {
             "旅行 notes"
         );
         assert_eq!(fs::read(&paths[1]).unwrap(), b"%PDF-1.7");
-        let (_, line) = pair.b.status.changed_since(0).unwrap();
+        // FulfilFiles is delivered inside serve(); the worker publishes the
+        // final activity only after that callback returns. Receiving the paths
+        // therefore does not synchronize with show_outcome(). Wait for the
+        // exact final value, not a guessed delay or merely any status change.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let line = loop {
+            let line = pair.b.status.changed_since(0).and_then(|(_, line)| line);
+            if line.as_deref() == Some("2 files clipboard update queued") {
+                break line;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "final clipboard activity was not published; last={line:?}"
+            );
+            assert!(
+                !pair.b.join.as_ref().unwrap().is_finished(),
+                "clipboard worker ended before publishing final activity; last={line:?}"
+            );
+            thread::yield_now();
+        };
         assert_eq!(line.as_deref(), Some("2 files clipboard update queued"));
 
         let image = png(40);

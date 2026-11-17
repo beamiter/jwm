@@ -9,6 +9,51 @@ pub const MAX_SOURCE_LABEL_LEN: usize = 256;
 pub const SOURCE_EPOCH_PREFIX_LEN: usize = 8;
 /// Maximum inner frame/cursor bytes, reserving source epoch and padding marker.
 pub const MAX_SOURCE_INNER_PAYLOAD_LEN: usize = MAX_PAYLOAD_LEN - SOURCE_EPOCH_PREFIX_LEN - 1;
+/// Application v26 frame records carry an authenticated, immutable purpose.
+pub const FRAME_PREFIX_LEN: usize = SOURCE_EPOCH_PREFIX_LEN + 1;
+pub const MAX_FRAME_INNER_PAYLOAD_LEN: usize = MAX_PAYLOAD_LEN - FRAME_PREFIX_LEN - 1;
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[repr(u8)]
+pub enum FramePurpose {
+    #[default]
+    Video = 0,
+    NativeProof = 1,
+    VisualRepair = 2,
+    PopupFamilyProof = 3,
+}
+
+pub fn encode_frame_payload(
+    epoch: u64,
+    purpose: FramePurpose,
+    inner: &[u8],
+) -> RemoteResult<Vec<u8>> {
+    if epoch == 0 || inner.is_empty() || inner.len() > MAX_FRAME_INNER_PAYLOAD_LEN {
+        return Err(invalid("invalid frame envelope epoch or length").into());
+    }
+    let mut bytes = Vec::with_capacity(FRAME_PREFIX_LEN + inner.len());
+    bytes.extend_from_slice(&epoch.to_be_bytes());
+    bytes.push(purpose as u8);
+    bytes.extend_from_slice(inner);
+    Ok(bytes)
+}
+pub fn decode_frame_payload(bytes: &[u8]) -> RemoteResult<(u64, FramePurpose, &[u8])> {
+    if bytes.len() <= FRAME_PREFIX_LEN || bytes.len() >= MAX_PAYLOAD_LEN {
+        return Err(invalid("invalid frame envelope length").into());
+    }
+    let epoch = u64::from_be_bytes(bytes[..8].try_into().unwrap());
+    if epoch == 0 {
+        return Err(invalid("zero frame source epoch").into());
+    }
+    let purpose = match bytes[8] {
+        0 => FramePurpose::Video,
+        1 => FramePurpose::NativeProof,
+        2 => FramePurpose::VisualRepair,
+        3 => FramePurpose::PopupFamilyProof,
+        _ => return Err(invalid("unknown frame purpose").into()),
+    };
+    Ok((epoch, purpose, &bytes[FRAME_PREFIX_LEN..]))
+}
+
 pub const MAX_SOURCE_CATALOG_LEN: usize = 13 + MAX_GRANTED_SOURCES * (6 + MAX_SOURCE_LABEL_LEN);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -138,7 +183,7 @@ pub fn decode_source_changed(payload: &[u8]) -> RemoteResult<SourceVersion> {
     Ok(version)
 }
 
-/// Envelope for Frame, CursorShape and CursorPosition. The transport also
+/// Envelope for CursorShape and CursorPosition; frames use encode_frame_payload. The transport also
 /// needs its padding marker, hence the one-byte reservation below the cap.
 pub fn encode_source_payload(epoch: u64, inner: &[u8]) -> RemoteResult<Vec<u8>> {
     if epoch == 0 || inner.is_empty() || inner.len() > MAX_SOURCE_INNER_PAYLOAD_LEN {
@@ -303,5 +348,101 @@ mod tests {
         }
         assert!(encode_source_payload(0, b"data").is_err());
         assert!(decode_source_payload(&[0; 9]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod frame_purpose_tests {
+    use super::*;
+    #[test]
+    fn authenticated_frame_purpose_is_explicit_and_strict() {
+        for purpose in [
+            FramePurpose::Video,
+            FramePurpose::NativeProof,
+            FramePurpose::VisualRepair,
+            FramePurpose::PopupFamilyProof,
+        ] {
+            let bytes = encode_frame_payload(7, purpose, b"pixels").unwrap();
+            assert_eq!(
+                decode_frame_payload(&bytes).unwrap(),
+                (7, purpose, &b"pixels"[..])
+            );
+            for n in 0..=FRAME_PREFIX_LEN {
+                assert!(decode_frame_payload(&bytes[..n]).is_err());
+            }
+            for bad in [4, 127, 255] {
+                let mut b = bytes.clone();
+                b[8] = bad;
+                assert!(decode_frame_payload(&b).is_err());
+            }
+        }
+        assert!(encode_frame_payload(0, FramePurpose::Video, b"x").is_err());
+        assert!(encode_frame_payload(1, FramePurpose::Video, b"").is_err());
+        assert!(decode_frame_payload(&[0; 10]).is_err());
+        assert!(decode_frame_payload(&vec![1; MAX_PAYLOAD_LEN]).is_err());
+        let max = vec![7; MAX_FRAME_INNER_PAYLOAD_LEN];
+        let encoded = encode_frame_payload(1, FramePurpose::Video, &max).unwrap();
+        assert_eq!(encoded.len() + 1, MAX_PAYLOAD_LEN); // authenticated padding marker
+        assert_eq!(decode_frame_payload(&encoded).unwrap().2.len(), max.len());
+        assert!(
+            encode_frame_payload(
+                1,
+                FramePurpose::Video,
+                &vec![7; MAX_FRAME_INNER_PAYLOAD_LEN + 1]
+            )
+            .is_err()
+        );
+        assert_eq!(
+            MAX_SOURCE_INNER_PAYLOAD_LEN,
+            MAX_FRAME_INNER_PAYLOAD_LEN + 1
+        );
+    }
+}
+
+#[cfg(test)]
+mod popup_envelope_boundary_tests {
+    use super::*;
+    #[test]
+    fn every_purpose_tag_and_exact_frame_budget_is_checked_before_slicing() {
+        let mut bytes =
+            encode_frame_payload(u64::MAX, FramePurpose::PopupFamilyProof, &[42]).unwrap();
+        for tag in 0..=u8::MAX {
+            bytes[8] = tag;
+            let decoded = decode_frame_payload(&bytes);
+            assert_eq!(decoded.is_ok(), tag <= 3, "purpose {tag}");
+            if let Ok((epoch, purpose, inner)) = decoded {
+                assert_eq!(epoch, u64::MAX);
+                assert_eq!(inner, [42]);
+                assert_eq!(encode_frame_payload(epoch, purpose, inner).unwrap(), bytes);
+            }
+        }
+        bytes[8] = 3;
+        for length in 0..=FRAME_PREFIX_LEN {
+            assert!(decode_frame_payload(&bytes[..length]).is_err());
+        }
+        bytes[..8].fill(0);
+        assert!(decode_frame_payload(&bytes).is_err());
+        let mut boundary = vec![0; MAX_PAYLOAD_LEN + 1];
+        boundary[..8].copy_from_slice(&1u64.to_be_bytes());
+        boundary[8] = 3;
+        assert_eq!(
+            decode_frame_payload(&boundary[..MAX_PAYLOAD_LEN - 1])
+                .unwrap()
+                .2
+                .len(),
+            MAX_FRAME_INNER_PAYLOAD_LEN
+        );
+        assert!(decode_frame_payload(&boundary[..MAX_PAYLOAD_LEN]).is_err());
+        assert!(decode_frame_payload(&boundary).is_err());
+        assert!(
+            encode_frame_payload(
+                1,
+                FramePurpose::PopupFamilyProof,
+                &boundary[..MAX_FRAME_INNER_PAYLOAD_LEN + 1]
+            )
+            .is_err()
+        );
+        // Unlike fixed metadata, the envelope intentionally owns a variable
+        // inner payload. Its trailing bytes are not a canonicality violation.
     }
 }

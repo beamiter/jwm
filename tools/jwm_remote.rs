@@ -9,11 +9,13 @@ use jwm::remote::host::{HostOptions, run_host};
 use jwm::remote::key::{KeySource, generate_key_file};
 use jwm::remote::messages::FrameLimits;
 use jwm::remote::profiles::{Connection, Profile, Store, Viewer};
+use jwm::remote::resumable_control::ControlDuration;
 use jwm::remote::session_env;
 use jwm::remote::ssh::{SshOptions, run_ssh};
 use jwm::remote::usability::{
     default_key_path, key_metadata, normalize_address, normalize_listen_address,
 };
+use jwm::remote::viewer_backend::ViewerBackend;
 use jwm::remote::window_position::WindowPosition;
 use jwm::remote::window_size::WindowSize;
 use jwm::remote::x11_capture::{CaptureArea, CaptureRegion, CaptureSource, ScalingPolicy};
@@ -141,6 +143,21 @@ enum Command {
         #[arg(long, default_value_t = 75, value_parser = clap::value_parser!(u8).range(1..=100))]
         quality: u8,
     },
+    /// Export exact offline replay RGB fixtures and tile baseline to a NEW directory.
+    ReplayFixture {
+        #[arg(long)]
+        output: PathBuf,
+        #[arg(long, default_value_t = 320, value_parser = clap::value_parser!(u16).range(1..=1920))]
+        width: u16,
+        #[arg(long, default_value_t = 180, value_parser = clap::value_parser!(u16).range(1..=1080))]
+        height: u16,
+        #[arg(long, default_value_t = 12, value_parser = clap::value_parser!(u32).range(1..=300))]
+        frames: u32,
+        #[arg(long, default_value_t = 1)]
+        seed: u64,
+        #[arg(long, default_value_t = 75, value_parser = clap::value_parser!(u8).range(1..=100))]
+        quality: u8,
+    },
     /// Save, inspect and explicitly run named connection settings (no credentials).
     Profile {
         /// Existing private directory. Default: JWM config directory/remote-profiles.
@@ -168,6 +185,7 @@ enum Command {
         display: Option<String>,
     },
     /// Share the current JWM X11 desktop.
+    #[command(group(clap::ArgGroup::new("host_scroll_lease").args(["allow_wayland_pointer", "allow_wayland_control"]).multiple(false)))]
     Host {
         /// Local host IP/name, optionally with port (default 48221).
         ///
@@ -249,6 +267,10 @@ enum Command {
         #[arg(long, value_name = "NAME", conflicts_with = "region", value_parser = parse_monitor)]
         monitor: Option<String>,
 
+        /// View one opaque X11 window instance; requires --once, without input or clipboard.
+        #[arg(long, value_name = "XID", value_parser = parse_window_id, conflicts_with_all = ["monitor", "region", "share_monitor", "share_region", "share_root", "allow_input", "allow_clipboard"], requires = "once")]
+        window: Option<u32>,
+
         #[command(flatten)]
         shares: ShareArgs,
 
@@ -258,14 +280,87 @@ enum Command {
 
         /// Permit binding beyond loopback.
         ///
-        /// Traffic is encrypted and authenticated, but without forward secrecy:
-        /// a leaked key file decrypts recorded sessions.
+        /// Traffic uses forward-secret encryption and pre-shared-key authentication.
+        /// A leaked key file permits future impersonation; protect both endpoints.
         #[arg(long)]
         allow_lan: bool,
 
         /// Permit the authenticated peer to inject keyboard and pointer input.
         #[arg(long)]
         allow_input: bool,
+
+        /// Permit one live window instance to resize through native JWM authority.
+        #[arg(long, requires_all = ["window", "once"])]
+        allow_window_resize: bool,
+
+        /// Select a live Wayland toplevel locally on one persistent connection.
+        /// Read-only source; requires a remote-wayland build and one session.
+        #[arg(long, requires = "once", conflicts_with_all = ["display", "window", "monitor", "region", "share_monitor", "share_region", "share_root", "allow_input", "allow_clipboard", "allow_window_resize", "key_stdin", "capture_source"])]
+        wayland_select: bool,
+
+        /// Keep a read-only selected Wayland source when the application changes size.
+        /// No remote resize command, input permission, reselection or reconnect.
+        #[arg(long, requires_all = ["wayland_select", "once"], conflicts_with_all = ["allow_input", "allow_clipboard", "allow_window_resize", "allow_wayland_keyboard", "allow_wayland_pointer", "allow_wayland_control", "allow_wayland_scroll", "allow_wayland_horizontal_scroll"])]
+        wayland_resize_follow: bool,
+
+        /// Include owned descendant xdg_popups inside the selected root canvas.
+        /// The canvas is fixed unless --wayland-resize-follow is explicitly enabled.
+        /// Explicit read-only capability; no output fallback or input.
+        /// With --wayland-resize-follow, requires native combined capability v2.
+        #[arg(long, requires_all = ["wayland_select", "once"], conflicts_with_all = ["allow_input", "allow_clipboard", "allow_window_resize", "allow_wayland_keyboard", "allow_wayland_pointer", "allow_wayland_control", "allow_wayland_scroll", "allow_wayland_horizontal_scroll"])]
+        wayland_popups: bool,
+
+        /// Permit a single explicitly requested, scoped Wayland keyboard lease.
+        #[arg(long, requires_all = ["wayland_select", "once"], conflicts_with_all = ["allow_input", "allow_clipboard", "allow_window_resize"])]
+        allow_wayland_keyboard: bool,
+
+        /// Permit one scoped Wayland pointer lease (motion or atomic left click).
+        #[arg(long, requires_all = ["wayland_select", "once"], conflicts_with_all = ["allow_wayland_keyboard", "allow_input", "allow_clipboard", "allow_window_resize"])]
+        allow_wayland_pointer: bool,
+
+        /// Permit one unified single-surface keyboard and pointer lease.
+        #[arg(long, requires_all = ["wayland_select", "once"], conflicts_with_all = ["allow_wayland_keyboard", "allow_wayland_pointer", "allow_input", "allow_clipboard", "allow_window_resize"])]
+        allow_wayland_control: bool,
+
+        /// Explicitly permit versioned pause/resume inside one fixed control lease.
+        /// Requires a mutually opted-in client; never renews or regrants control.
+        #[arg(long, requires_all = ["allow_wayland_control", "wayland_select", "once"], conflicts_with = "allow_static_lossless")]
+        allow_resumable_control: bool,
+
+        /// Explicit maximum control duration in seconds (30..=300; default 30).
+        /// A client must request its own exact duration; excess requests are denied.
+        #[arg(long, value_name = "SECONDS", value_parser = parse_control_duration, requires = "allow_resumable_control")]
+        max_wayland_control_duration: Option<ControlDuration>,
+
+        /// Permit one UTF-8 commit to the selected surface's existing clean IME context.
+        #[arg(long, requires_all=["wayland_select","once"], conflicts_with_all=["allow_input","allow_clipboard","allow_window_resize","allow_wayland_keyboard","allow_wayland_pointer","allow_wayland_control","allow_wayland_scroll","allow_wayland_horizontal_scroll","wayland_popups","wayland_resize_follow"])]
+        allow_wayland_text: bool,
+
+        /// Experimental 30s isolated-seat atomic left clicks in one root/direct popup.
+        /// Unlike --wayland-popups this permits input; GTK compatibility is not promised.
+        #[arg(long, requires_all=["wayland_select","once"], conflicts_with_all=["allow_input","allow_clipboard","allow_window_resize","allow_wayland_keyboard","allow_wayland_pointer","allow_wayland_control","allow_wayland_text","allow_wayland_scroll","allow_wayland_horizontal_scroll","allow_static_lossless","wayland_popups","wayland_resize_follow","scroll_copy"])]
+        allow_wayland_popup_pointer: bool,
+
+        /// Allow bounded lossless repairs in read-only or explicit native keyboard/pointer sessions.
+        #[arg(long, conflicts_with_all=["allow_input","allow_clipboard","allow_window_resize","allow_wayland_text"])]
+        allow_static_lossless: bool,
+
+        /// Experimentally encode exact bounded vertical screen shifts as copy plus changed pixels.
+        /// Codec optimization only; grants no input or scrolling permission.
+        #[arg(long)]
+        scroll_copy: bool,
+
+        /// Separately permit discrete vertical scroll on a pointer or unified lease.
+        #[arg(long, requires = "host_scroll_lease")]
+        allow_wayland_scroll: bool,
+
+        /// Separately permit one-notch horizontal scroll; vertical permission does not imply it.
+        #[arg(long, requires = "host_scroll_lease")]
+        allow_wayland_horizontal_scroll: bool,
+
+        /// Native Wayland socket for local selection (defaults to WAYLAND_DISPLAY).
+        #[arg(long, value_name = "SOCKET", requires = "wayland_select")]
+        wayland_display: Option<String>,
 
         /// Share the clipboard with the authenticated peer, both directions:
         /// text, images, and files copied in a file manager.
@@ -334,6 +429,11 @@ enum Command {
         #[arg(long, conflicts_with = "view_only")]
         grab_input: bool,
 
+        /// X11: enter the remote image to control; leave to restore local input.
+        /// Requires --grab-input and never changes host authorization.
+        #[arg(long, requires = "grab_input", conflicts_with = "view_only")]
+        seamless_input: bool,
+
         /// Base X keysym of the Ctrl+Super grab-release shortcut.
         #[arg(long, default_value = DEFAULT_ESCAPE_KEY, value_name = "KEYSYM")]
         escape_key: String,
@@ -380,10 +480,27 @@ enum Command {
         /// Extra ssh -o option, such as Port=2222; may be repeated.
         #[arg(long = "ssh-option", value_name = "OPTION")]
         ssh_options: Vec<String>,
+
+        /// auto uses GPU/XRender scaling except on NVIDIA's proprietary driver,
+        /// where XRender operations can return unfinished frames; there it scales
+        /// on the CPU. gpu forces XRender; cpu forces CPU scaling.
+        #[arg(long, default_value = "auto", value_parser = parse_scaling)]
+        scaling: ScalingPolicy,
     },
-    /// Open a remote JWM desktop in a window on this JWM X11 session.
+    /// Open a remote JWM desktop in an explicitly selected local viewer.
+    #[command(group(clap::ArgGroup::new("native_viewer_mode")
+        .args(["view_only", "wayland_keyboard", "wayland_pointer", "wayland_control", "wayland_text_stdin", "wayland_popup_pointer"]).multiple(false)))]
+    #[command(group(clap::ArgGroup::new("viewer_scroll_lease").args(["wayland_pointer", "wayland_control"]).multiple(false)))]
+    #[command(group(clap::ArgGroup::new("lossless_session_mode").args(["view_only", "wayland_keyboard", "wayland_pointer", "wayland_control"]).multiple(false)))]
     Connect {
-        /// Hostname/IP, optionally with port (default 48221). Use [IPv6]:PORT.
+        /// Local backend; Wayland requires an explicit read-only or scoped input mode.
+        #[arg(long, default_value_t=ViewerBackend::X11, requires_if("wayland", "native_viewer_mode"))]
+        viewer_backend: ViewerBackend,
+
+        /// Native viewer Wayland socket; never an X11 display.
+        #[arg(long, value_name = "SOCKET")]
+        viewer_wayland_display: Option<String>,
+        /// Hostname/IP, optionally with port (default 48221). Use [IPv6%ZONE]:PORT for scoped IPv6.
         #[arg(value_name = "HOST[:PORT]", value_parser = normalize_address)]
         address: String,
 
@@ -401,6 +518,66 @@ enum Command {
         #[arg(long, value_name = "WIDTHxHEIGHT")]
         window_size: Option<WindowSize>,
 
+        /// Explicitly resize the authorized source once, after first presentation.
+        #[arg(long, value_name = "WIDTHxHEIGHT", requires = "view_only", conflicts_with_all = ["reconnect_attempts", "clipboard", "grab_input"])]
+        resize_source: Option<WindowSize>,
+
+        /// Resize the real remote window to follow this X11 viewer's client size.
+        /// Explicit view-only mode, at most 4 requests/s; stops on refusal or timeout.
+        #[arg(long, requires = "view_only", conflicts_with_all = ["resize_source", "wayland_keyboard", "wayland_pointer", "clipboard", "grab_input", "reconnect_attempts", "viewer_wayland_display"])]
+        follow_source_size: bool,
+
+        /// Request keyboard-only control of the locally selected Wayland surface.
+        /// No pointer, clipboard, input grab, reconnect, or saved authorization.
+        #[arg(long, conflicts_with_all = ["view_only", "resize_source", "clipboard", "grab_input", "reconnect_attempts"])]
+        wayland_keyboard: bool,
+
+        /// Request a fresh-frame scoped pointer lease, not legacy pointer input.
+        #[arg(long, conflicts_with_all = ["wayland_keyboard", "view_only", "resize_source", "clipboard", "grab_input", "reconnect_attempts"])]
+        wayland_pointer: bool,
+
+        /// Request one native single-surface keyboard and pointer lease.
+        /// No drag, modifier-click, clipboard, reconnect or saved authorization.
+        #[arg(long, requires = "viewer_backend", conflicts_with_all = ["wayland_keyboard", "wayland_pointer", "view_only", "resize_source", "follow_source_size", "clipboard", "grab_input", "reconnect_attempts"])]
+        wayland_control: bool,
+
+        /// Experimental JWM udev-only pointer-entry focus and shortcut handoff.
+        /// Also opts into resumable-control; host must use --allow-resumable-control.
+        /// Default 30s lease; no drag/modifier-click or pointer confinement.
+        /// Leaving restores local control. After black-bar exit, fully leave/reenter.
+        /// Entry requires released keys/buttons and a clean modifier/lock state.
+        /// Unexpected focus changes (including compositor policy) end the session.
+        /// Ctrl+Super+F12 ends the session permanently; no automatic regrant.
+        #[arg(long, requires_all = ["wayland_control", "viewer_backend"], conflicts_with_all = ["static_lossless", "seamless_input", "view_only", "clipboard", "grab_input", "resize_source", "follow_source_size", "reconnect_attempts"])]
+        wayland_seamless_input: bool,
+
+        /// Explicit exact control duration in seconds (30..=300; default 30).
+        /// Requires independent host approval; never renews during pause/resume.
+        #[arg(long, value_name = "SECONDS", value_parser = parse_control_duration, requires = "wayland_seamless_input")]
+        wayland_control_duration: Option<ControlDuration>,
+
+        /// Read one exact UTF-8 text payload from stdin (1..=4000 bytes, no NUL).
+        /// Requires a native Wayland viewer; no keyboard or clipboard fallback.
+        #[arg(long, requires="viewer_backend", conflicts_with_all=["view_only","wayland_keyboard","wayland_pointer","wayland_control","wayland_scroll","wayland_horizontal_scroll","clipboard","grab_input","resize_source","follow_source_size","reconnect_attempts"])]
+        wayland_text_stdin: bool,
+
+        /// Experimental 30s root/direct-popup atomic left clicks, no input fallback.
+        /// This is not read-only popup capture; GTK compatibility is not promised.
+        #[arg(long, requires="viewer_backend", conflicts_with_all=["view_only","wayland_keyboard","wayland_pointer","wayland_control","wayland_text_stdin","wayland_scroll","wayland_horizontal_scroll","static_lossless","clipboard","grab_input","resize_source","follow_source_size","reconnect_attempts"])]
+        wayland_popup_pointer: bool,
+
+        /// Explicitly request bounded PNG repair of stable encoded RGB pixels.
+        #[arg(long, requires="lossless_session_mode", conflicts_with_all=["wayland_text_stdin","clipboard","grab_input","resize_source","follow_source_size"])]
+        static_lossless: bool,
+
+        /// Separately request single-notch vertical scroll; never smooth or horizontal.
+        #[arg(long, requires = "viewer_scroll_lease")]
+        wayland_scroll: bool,
+
+        /// Separately request one-notch horizontal scroll, without Shift translation.
+        #[arg(long, requires = "viewer_scroll_lease")]
+        wayland_horizontal_scroll: bool,
+
         /// Best-effort local client origin X,Y; off-screen positions fall back.
         #[arg(long, value_name = "X,Y", allow_hyphen_values = true)]
         window_position: Option<WindowPosition>,
@@ -416,6 +593,11 @@ enum Command {
         /// Click the viewer to grab local input; Ctrl+Super+F12 releases it.
         #[arg(long, conflicts_with = "view_only")]
         grab_input: bool,
+
+        /// X11: enter the remote image to control; leave to restore local input.
+        /// Requires --grab-input and never changes host authorization.
+        #[arg(long, requires = "grab_input", conflicts_with = "view_only")]
+        seamless_input: bool,
 
         /// Base X keysym of the Ctrl+Super grab-release shortcut.
         ///
@@ -445,6 +627,12 @@ enum Command {
 
         #[command(flatten)]
         frame_limits: FrameLimitArgs,
+
+        /// auto uses GPU/XRender upscaling except on NVIDIA's proprietary driver,
+        /// where XRender operations can return unfinished frames; there it scales
+        /// on the CPU. gpu forces XRender; cpu forces CPU scaling.
+        #[arg(long, default_value = "auto", value_parser = parse_scaling)]
+        scaling: ScalingPolicy,
     },
 }
 
@@ -520,6 +708,7 @@ fn diagnostic_command(command: &Command) -> &'static str {
         Command::Keygen { .. } => "keygen",
         Command::Doctor { .. } => "doctor",
         Command::ReplayBenchmark { .. } => "replay_benchmark",
+        Command::ReplayFixture { .. } => "replay_fixture",
         Command::ClipboardStaging { action } => match action {
             ClipboardStagingAction::Status => "clipboard_staging_status",
             ClipboardStagingAction::SetLimit { .. } => "clipboard_staging_set_limit",
@@ -581,21 +770,77 @@ fn profile_error(message: &str) -> std::io::Error {
 fn profile_from_command(command: Command) -> RemoteResult<Profile> {
     let (connection, viewer) = match command {
         Command::Connect {
+            viewer_backend,
+            viewer_wayland_display,
             reconnect_attempts,
             address,
             key_file,
             display,
             window_size,
+            resize_source,
+            follow_source_size,
+            wayland_keyboard,
+            wayland_pointer,
+            wayland_control,
+            wayland_seamless_input,
+            wayland_control_duration,
+            wayland_text_stdin,
+            wayland_popup_pointer,
+            static_lossless,
+            wayland_scroll,
+            wayland_horizontal_scroll,
             window_position,
             view_only,
             grab_input,
+            seamless_input,
             escape_key,
             clipboard,
             clipboard_mode,
             clipboard_direction,
             clipboard_file_limit,
             frame_limits,
+            scaling,
         } => {
+            if wayland_seamless_input || wayland_control_duration.is_some() {
+                return Err(profile_error("Wayland seamless input consent cannot be saved in a profile; use connect directly").into());
+            }
+            if seamless_input {
+                return Err(profile_error("seamless input consent cannot be saved in a profile; use connect or ssh directly").into());
+            }
+            if scaling != ScalingPolicy::Auto {
+                return Err(profile_error(
+                    "profiles do not store scaling overrides; use connect directly",
+                )
+                .into());
+            }
+            if viewer_backend == ViewerBackend::Wayland || viewer_wayland_display.is_some() {
+                return Err(profile_error(
+                    "native Wayland viewer selection cannot be saved in a profile",
+                )
+                .into());
+            }
+            if wayland_keyboard
+                || wayland_pointer
+                || wayland_scroll
+                || wayland_horizontal_scroll
+                || wayland_control
+                || wayland_text_stdin
+                || wayland_popup_pointer
+                || static_lossless
+            {
+                return Err(profile_error(
+                    "Wayland input authorization cannot be saved in a profile",
+                )
+                .into());
+            }
+            if follow_source_size {
+                return Err(profile_error("source-size following cannot be saved in a profile; consent is direct-connect only").into());
+            }
+            if resize_source.is_some() {
+                return Err(
+                    profile_error("explicit source resize cannot be saved in a profile").into(),
+                );
+            }
             if reconnect_attempts != 0 {
                 return Err(profile_error(
                     "reconnect consent cannot be saved in a profile; use connect directly",
@@ -639,6 +884,7 @@ fn profile_from_command(command: Command) -> RemoteResult<Profile> {
             window_position,
             view_only,
             grab_input,
+            seamless_input,
             escape_key,
             clipboard,
             clipboard_mode,
@@ -647,8 +893,18 @@ fn profile_from_command(command: Command) -> RemoteResult<Profile> {
             frame_limits,
             remote_command,
             ssh_options,
+            scaling,
         } => {
             jwm::remote::ssh::validate_destination(&destination)?;
+            if seamless_input {
+                return Err(profile_error("seamless input consent cannot be saved in a profile; use connect or ssh directly").into());
+            }
+            if scaling != ScalingPolicy::Auto {
+                return Err(profile_error(
+                    "profiles do not store scaling overrides; use ssh directly",
+                )
+                .into());
+            }
             if !shares.is_empty() {
                 return Err(profile_error("profiles do not store extra source grants; use ssh directly with --share-monitor/--share-region/--share-root").into());
             }
@@ -1015,6 +1271,21 @@ fn run_clipboard_staging(
     write_staging_status(writer, root, &status)
 }
 
+/// Conditional backend conflicts must be checked before key lookup or connect.
+fn validate_follow_source_cli(
+    follow: bool,
+    backend: ViewerBackend,
+    wayland_display: Option<&str>,
+) -> RemoteResult<()> {
+    if follow && (backend != ViewerBackend::X11 || wayland_display.is_some()) {
+        return Err(profile_error(
+            "--follow-source-size requires the direct X11 viewer, never the Wayland viewer",
+        )
+        .into());
+    }
+    Ok(())
+}
+
 fn run(command: Command) -> RemoteResult<()> {
     match command {
         Command::ClipboardStaging { action } => {
@@ -1040,6 +1311,28 @@ fn run(command: Command) -> RemoteResult<()> {
                 })?;
             serde_json::to_writer_pretty(std::io::stdout().lock(), &report)?;
             println!();
+            Ok(())
+        }
+        Command::ReplayFixture {
+            output,
+            width,
+            height,
+            frames,
+            seed,
+            quality,
+        } => {
+            jwm::remote::replay_benchmark::export_fixture(
+                jwm::remote::replay_benchmark::ReplayConfig {
+                    width,
+                    height,
+                    frames,
+                    warmup: 0,
+                    seed,
+                    quality,
+                },
+                &output,
+            )?;
+            println!("{}", output.join("manifest.json").display());
             Ok(())
         }
         Command::Profile { directory, action } => run_profile(directory, action),
@@ -1069,10 +1362,27 @@ fn run(command: Command) -> RemoteResult<()> {
             capture_source,
             scaling,
             monitor,
+            window,
             shares,
             region,
             allow_lan,
             allow_input,
+            allow_window_resize,
+            wayland_select,
+            wayland_resize_follow,
+            wayland_popups,
+            allow_wayland_keyboard,
+            allow_wayland_pointer,
+            allow_wayland_control,
+            allow_resumable_control,
+            max_wayland_control_duration,
+            allow_wayland_text,
+            allow_wayland_popup_pointer,
+            allow_static_lossless,
+            allow_wayland_scroll,
+            allow_wayland_horizontal_scroll,
+            scroll_copy,
+            wayland_display,
             allow_clipboard,
             clipboard_mode,
             clipboard_direction,
@@ -1081,20 +1391,32 @@ fn run(command: Command) -> RemoteResult<()> {
             once,
             stats_json,
         } => {
+            validate_control_lossless_cli(
+                allow_static_lossless,
+                allow_wayland_control,
+                allow_wayland_scroll,
+                allow_wayland_horizontal_scroll,
+            )?;
             let key = if key_stdin {
                 KeySource::Stdin
             } else {
                 KeySource::File(resolve_key_path(key_file)?)
             };
-            let display = resolve_host_display(display)?;
+            let display = if wayland_select {
+                None
+            } else {
+                resolve_host_display(display)?
+            };
             let jpeg_quality_floor = resolve_quality_floor(jpeg_quality, jpeg_quality_floor)?;
-            let capture_area = match (monitor, region) {
-                (Some(name), _) => CaptureArea::Monitor(name),
-                (None, Some(region)) => CaptureArea::Region(region),
-                (None, None) => CaptureArea::Root,
+            let capture_area = match (window, monitor, region) {
+                (Some(id), _, _) => CaptureArea::Window(id),
+                (None, Some(name), _) => CaptureArea::Monitor(name),
+                (None, None, Some(region)) => CaptureArea::Region(region),
+                (None, None, None) => CaptureArea::Root,
             };
             let shared_sources = shares.areas(&capture_area)?;
             run_host(HostOptions {
+                max_control_duration: max_wayland_control_duration.unwrap_or_default(),
                 listen,
                 key,
                 display,
@@ -1109,6 +1431,21 @@ fn run(command: Command) -> RemoteResult<()> {
                 scaling,
                 allow_lan,
                 allow_input,
+                allow_window_resize,
+                wayland_select,
+                wayland_resize_follow,
+                wayland_popups,
+                allow_wayland_keyboard,
+                allow_wayland_pointer,
+                allow_wayland_control,
+                allow_resumable_control,
+                allow_wayland_text,
+                allow_wayland_popup_pointer,
+                allow_static_lossless,
+                allow_wayland_scroll,
+                allow_wayland_horizontal_scroll,
+                scroll_copy,
+                wayland_display,
                 allow_clipboard,
                 clipboard_mode,
                 clipboard_direction,
@@ -1127,6 +1464,7 @@ fn run(command: Command) -> RemoteResult<()> {
             shares,
             view_only,
             grab_input,
+            seamless_input,
             escape_key,
             clipboard,
             clipboard_mode,
@@ -1138,6 +1476,7 @@ fn run(command: Command) -> RemoteResult<()> {
             window_position,
             remote_command,
             ssh_options,
+            scaling,
         } => {
             let initial = monitor
                 .clone()
@@ -1157,48 +1496,20 @@ fn run(command: Command) -> RemoteResult<()> {
                 window_position,
                 view_only,
                 grab_input,
+                seamless_input,
                 clipboard,
                 clipboard_mode,
                 clipboard_direction,
                 clipboard_file_limit,
                 frame_limits: frame_limits.limits(),
                 escape_key,
+                scaling,
             })
         }
-        Command::Connect {
-            reconnect_attempts,
-            address,
-            key_file,
-            display,
-            window_size,
-            window_position,
-            view_only,
-            grab_input,
-            clipboard,
-            clipboard_mode,
-            clipboard_direction,
-            clipboard_file_limit,
-            frame_limits,
-            escape_key,
-        } => run_client_reconnecting(
-            ClientOptions {
-                peer_label: address.clone(),
-                address,
-                key: KeySource::File(resolve_key_path(key_file)?),
-                display,
-                window_size,
-                window_position,
-                view_only,
-                grab_input,
-                clipboard,
-                clipboard_mode,
-                clipboard_direction,
-                clipboard_file_limit,
-                frame_limits: frame_limits.limits(),
-                escape_key,
-            },
-            reconnect_attempts,
-        ),
+        command @ Command::Connect { .. } => {
+            let (options, reconnect_attempts) = connect_options(command)?;
+            run_client_reconnecting(options, reconnect_attempts)
+        }
     }
 }
 
@@ -1352,8 +1663,513 @@ where
     Ok(parsed)
 }
 
+/// Accept xwininfo-style hexadecimal IDs or unsigned decimal IDs.
+fn parse_window_id(value: &str) -> Result<u32, String> {
+    let parsed = if let Some(hex) = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+    {
+        u32::from_str_radix(hex, 16)
+    } else {
+        value.parse::<u32>()
+    };
+    parsed
+        .ok()
+        .filter(|id| *id != 0)
+        .ok_or_else(|| "window XID must be a nonzero decimal or hexadecimal integer".into())
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn seamless_input_is_explicit_and_never_profile_saved() {
+        for command in ["connect", "ssh"] {
+            assert!(
+                Cli::try_parse_from(["jwm-remote", command, "desk", "--seamless-input"]).is_err()
+            );
+            assert!(
+                Cli::try_parse_from([
+                    "jwm-remote",
+                    command,
+                    "desk",
+                    "--grab-input",
+                    "--seamless-input",
+                    "--view-only"
+                ])
+                .is_err()
+            );
+            let parsed = Cli::try_parse_from([
+                "jwm-remote",
+                command,
+                "desk",
+                "--grab-input",
+                "--seamless-input",
+            ])
+            .unwrap()
+            .command;
+            assert!(
+                profile_from_command(parsed)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("seamless input consent")
+            );
+        }
+    }
+
+    #[test]
+    fn follow_source_size_is_explicit_narrow_and_never_profile_saved() {
+        let plain = Cli::try_parse_from(["jwm-remote", "connect", "desk", "--view-only"])
+            .unwrap()
+            .command;
+        assert!(matches!(
+            &plain,
+            Command::Connect {
+                follow_source_size: false,
+                ..
+            }
+        ));
+        let profile = profile_from_command(plain).unwrap();
+        assert!(matches!(
+            command_from_profile(&profile).unwrap(),
+            Command::Connect {
+                follow_source_size: false,
+                ..
+            }
+        ));
+        let mut encoded = serde_json::to_value(profile).unwrap();
+        encoded["viewer"]["follow_source_size"] = serde_json::json!(true);
+        assert!(Profile::decode(&serde_json::to_vec(&encoded).unwrap()).is_err());
+        let base = [
+            "jwm-remote",
+            "connect",
+            "desk",
+            "--view-only",
+            "--follow-source-size",
+        ];
+        let enabled = Cli::try_parse_from(base).unwrap().command;
+        assert!(matches!(
+            &enabled,
+            Command::Connect {
+                follow_source_size: true,
+                ..
+            }
+        ));
+        assert!(
+            profile_from_command(enabled)
+                .unwrap_err()
+                .to_string()
+                .contains("cannot be saved")
+        );
+        assert!(
+            Cli::try_parse_from(["jwm-remote", "connect", "desk", "--follow-source-size"]).is_err()
+        );
+        for extra in [
+            vec!["--resize-source", "640x480"],
+            vec!["--wayland-keyboard"],
+            vec!["--wayland-pointer"],
+            vec!["--clipboard"],
+            vec!["--grab-input"],
+            vec!["--reconnect-attempts", "0"],
+            vec!["--reconnect-attempts", "1"],
+            vec!["--viewer-wayland-display", "wayland-1"],
+        ] {
+            let mut args = base.to_vec();
+            args.extend(extra);
+            assert!(Cli::try_parse_from(args).is_err());
+        }
+        assert!(
+            Cli::try_parse_from([
+                "jwm-remote",
+                "ssh",
+                "desk",
+                "--view-only",
+                "--follow-source-size"
+            ])
+            .is_err()
+        );
+        assert!(Cli::try_parse_from(["jwm-remote", "host", "--follow-source-size"]).is_err());
+        assert!(
+            Cli::try_parse_from([
+                "jwm-remote",
+                "profile",
+                "run",
+                "desk",
+                "--follow-source-size"
+            ])
+            .is_err()
+        );
+        assert!(validate_follow_source_cli(true, ViewerBackend::X11, None).is_ok());
+        assert!(validate_follow_source_cli(true, ViewerBackend::Wayland, None).is_err());
+        assert!(validate_follow_source_cli(true, ViewerBackend::X11, Some("wayland-1")).is_err());
+        // Actual command dispatch rejects the backend before key-file access or
+        // any display/network work. No socket is opened by this negative test.
+        let invalid = Cli::try_parse_from([
+            "jwm-remote",
+            "connect",
+            "desk",
+            "--view-only",
+            "--follow-source-size",
+            "--viewer-backend",
+            "wayland",
+        ])
+        .unwrap()
+        .command;
+        assert!(
+            run(invalid)
+                .unwrap_err()
+                .to_string()
+                .contains("requires the direct X11 viewer")
+        );
+        assert!(
+            Cli::try_parse_from([
+                "jwm-remote",
+                "connect",
+                "desk",
+                "--view-only",
+                "--follow-source-size",
+                "--viewer-backend",
+                "x11"
+            ])
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn native_viewer_backend_requires_explicit_mode_and_is_not_profile_saved() {
+        let cli = Cli::try_parse_from(["jwm-remote", "connect", "host"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Connect {
+                viewer_backend: ViewerBackend::X11,
+                ..
+            }
+        ));
+        assert!(
+            Cli::try_parse_from([
+                "jwm-remote",
+                "connect",
+                "host",
+                "--viewer-backend",
+                "wayland"
+            ])
+            .is_err()
+        );
+        let cli = Cli::try_parse_from([
+            "jwm-remote",
+            "connect",
+            "host",
+            "--viewer-backend",
+            "wayland",
+            "--view-only",
+            "--viewer-wayland-display",
+            "wayland-owned",
+        ])
+        .unwrap();
+        assert!(profile_from_command(cli.command).is_err());
+        assert!(
+            Cli::try_parse_from([
+                "jwm-remote",
+                "connect",
+                "host",
+                "--viewer-backend",
+                "unknown"
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "jwm-remote",
+                "ssh",
+                "host",
+                "--viewer-backend",
+                "wayland",
+                "--view-only"
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn native_wayland_keyboard_is_explicit_narrow_and_never_profile_saved() {
+        let base = [
+            "jwm-remote",
+            "connect",
+            "host",
+            "--viewer-backend",
+            "wayland",
+            "--wayland-keyboard",
+        ];
+        let cli = Cli::try_parse_from(base).unwrap();
+        assert!(matches!(
+            &cli.command,
+            Command::Connect {
+                viewer_backend: ViewerBackend::Wayland,
+                wayland_keyboard: true,
+                view_only: false,
+                wayland_pointer: false,
+                wayland_scroll: false,
+                wayland_horizontal_scroll: false,
+                grab_input: false,
+                clipboard: false,
+                reconnect_attempts: 0,
+                ..
+            }
+        ));
+        assert!(profile_from_command(cli.command).is_err());
+        let explicit_socket = Cli::try_parse_from(
+            base.into_iter()
+                .chain(["--viewer-wayland-display", "owned-wayland"]),
+        )
+        .unwrap();
+        assert!(profile_from_command(explicit_socket.command).is_err());
+        for extra in [
+            vec!["--view-only"],
+            vec!["--wayland-pointer"],
+            vec!["--wayland-pointer", "--wayland-scroll"],
+            vec!["--clipboard"],
+            vec!["--grab-input"],
+            vec!["--resize-source", "640x480"],
+            vec!["--follow-source-size"],
+            vec!["--reconnect-attempts", "1"],
+        ] {
+            let args = base.into_iter().chain(extra).collect::<Vec<_>>();
+            assert!(
+                Cli::try_parse_from(&args).is_err(),
+                "unsafe native keyboard CLI accepted: {args:?}"
+            );
+        }
+        // Profile save captures trailing arguments before validation. Exercise
+        // its real construction boundary without writing a profile or dialing.
+        let outer = Cli::try_parse_from(
+            ["jwm-remote", "profile", "save", "native", "--"]
+                .into_iter()
+                .chain(base.into_iter().skip(1)),
+        )
+        .unwrap();
+        let Command::Profile {
+            action: ProfileAction::Save { connection, .. },
+            ..
+        } = outer.command
+        else {
+            panic!("profile save expected")
+        };
+        let command =
+            Cli::try_parse_from(std::iter::once("jwm-remote".to_owned()).chain(connection))
+                .unwrap()
+                .command;
+        assert!(profile_from_command(command).is_err());
+    }
+
+    #[test]
+    fn native_wayland_control_is_explicit_narrow_and_never_profile_saved() {
+        let base = [
+            "jwm-remote",
+            "connect",
+            "host",
+            "--viewer-backend",
+            "wayland",
+            "--wayland-control",
+        ];
+        let cli = Cli::try_parse_from(base).unwrap();
+        assert!(matches!(
+            &cli.command,
+            Command::Connect {
+                wayland_control: true,
+                wayland_keyboard: false,
+                wayland_pointer: false,
+                wayland_scroll: false,
+                wayland_horizontal_scroll: false,
+                ..
+            }
+        ));
+        assert!(profile_from_command(cli.command).is_err());
+        for extra in [
+            vec!["--view-only"],
+            vec!["--wayland-keyboard"],
+            vec!["--wayland-pointer"],
+            vec!["--clipboard"],
+            vec!["--grab-input"],
+            vec!["--resize-source", "640x480"],
+            vec!["--follow-source-size"],
+            vec!["--reconnect-attempts", "1"],
+        ] {
+            assert!(Cli::try_parse_from(base.into_iter().chain(extra)).is_err());
+        }
+        let host = [
+            "jwm-remote",
+            "host",
+            "--wayland-select",
+            "--once",
+            "--allow-wayland-control",
+        ];
+        assert!(Cli::try_parse_from(host).is_ok());
+        for extra in [
+            "--allow-wayland-keyboard",
+            "--allow-wayland-pointer",
+            "--allow-input",
+            "--allow-clipboard",
+            "--allow-window-resize",
+        ] {
+            assert!(Cli::try_parse_from(host.into_iter().chain([extra])).is_err());
+        }
+        assert!(Cli::try_parse_from(["jwm-remote", "host", "--allow-wayland-control"]).is_err());
+    }
+
+    #[test]
+    fn unified_scroll_requires_both_explicit_permissions_and_is_not_saved() {
+        let host = [
+            "jwm-remote",
+            "host",
+            "--wayland-select",
+            "--once",
+            "--allow-wayland-control",
+        ];
+        let plain = Cli::try_parse_from(host).unwrap();
+        assert!(matches!(
+            plain.command,
+            Command::Host {
+                allow_wayland_control: true,
+                allow_wayland_scroll: false,
+                allow_wayland_horizontal_scroll: false,
+                ..
+            }
+        ));
+        let with_scroll =
+            Cli::try_parse_from(host.into_iter().chain(["--allow-wayland-scroll"])).unwrap();
+        assert!(matches!(
+            with_scroll.command,
+            Command::Host {
+                allow_wayland_control: true,
+                allow_wayland_scroll: true,
+                ..
+            }
+        ));
+        let viewer = [
+            "jwm-remote",
+            "connect",
+            "host",
+            "--viewer-backend",
+            "wayland",
+            "--wayland-control",
+        ];
+        let plain = Cli::try_parse_from(viewer).unwrap();
+        assert!(matches!(
+            plain.command,
+            Command::Connect {
+                wayland_control: true,
+                wayland_scroll: false,
+                wayland_horizontal_scroll: false,
+                ..
+            }
+        ));
+        let with_scroll =
+            Cli::try_parse_from(viewer.into_iter().chain(["--wayland-scroll"])).unwrap();
+        assert!(matches!(
+            &with_scroll.command,
+            Command::Connect {
+                wayland_control: true,
+                wayland_scroll: true,
+                ..
+            }
+        ));
+        assert!(profile_from_command(with_scroll.command).is_err());
+        assert!(
+            Cli::try_parse_from([
+                "jwm-remote",
+                "connect",
+                "host",
+                "--viewer-backend",
+                "wayland",
+                "--wayland-keyboard",
+                "--wayland-scroll"
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "jwm-remote",
+                "host",
+                "--wayland-select",
+                "--once",
+                "--allow-wayland-keyboard",
+                "--allow-wayland-scroll"
+            ])
+            .is_err()
+        );
+        for unsafe_flag in [
+            "--wayland-pointer",
+            "--wayland-keyboard",
+            "--clipboard",
+            "--grab-input",
+        ] {
+            assert!(
+                Cli::try_parse_from(viewer.into_iter().chain(["--wayland-scroll", unsafe_flag]))
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn native_wayland_pointer_is_explicit_narrow_and_never_profile_saved() {
+        let base = [
+            "jwm-remote",
+            "connect",
+            "host",
+            "--viewer-backend",
+            "wayland",
+            "--wayland-pointer",
+        ];
+        let cli = Cli::try_parse_from(base).unwrap();
+        assert!(matches!(
+            &cli.command,
+            Command::Connect {
+                viewer_backend: ViewerBackend::Wayland,
+                wayland_pointer: true,
+                wayland_keyboard: false,
+                wayland_scroll: false,
+                wayland_horizontal_scroll: false,
+                view_only: false,
+                clipboard: false,
+                grab_input: false,
+                reconnect_attempts: 0,
+                ..
+            }
+        ));
+        assert!(profile_from_command(cli.command).is_err());
+        for extra in [
+            vec!["--view-only"],
+            vec!["--wayland-keyboard"],
+            vec!["--clipboard"],
+            vec!["--grab-input"],
+            vec!["--resize-source", "640x480"],
+            vec!["--follow-source-size"],
+            vec!["--reconnect-attempts", "1"],
+        ] {
+            assert!(Cli::try_parse_from(base.into_iter().chain(extra)).is_err());
+        }
+        let scroll = Cli::try_parse_from(base.into_iter().chain(["--wayland-scroll"])).unwrap();
+        assert!(matches!(
+            &scroll.command,
+            Command::Connect {
+                wayland_pointer: true,
+                wayland_scroll: true,
+                wayland_keyboard: false,
+                ..
+            }
+        ));
+        assert!(profile_from_command(scroll.command).is_err());
+        assert!(
+            Cli::try_parse_from([
+                "jwm-remote",
+                "connect",
+                "host",
+                "--viewer-backend",
+                "wayland",
+                "--wayland-scroll"
+            ])
+            .is_err()
+        );
+    }
     #[test]
     fn staging_limit_parser_is_exact_nonzero_and_checked() {
         for (text, expected) in [
@@ -1950,6 +2766,29 @@ mod tests {
     }
 
     #[test]
+    fn scaling_flags_are_parsed_and_rejected_in_profiles() {
+        for transport in ["connect host", "ssh host"] {
+            for mode in ["auto", "gpu", "cpu"] {
+                let mut args = vec!["jwm-remote"];
+                args.extend(transport.split_whitespace());
+                args.extend(["--scaling", mode]);
+                let cli = Cli::try_parse_from(args).unwrap();
+                let scaling = match cli.command {
+                    Command::Connect { scaling, .. } | Command::Ssh { scaling, .. } => scaling,
+                    _ => unreachable!(),
+                };
+                assert_eq!(scaling.to_string(), mode);
+                let profile_res = profile_from_command(cli.command);
+                if mode == "auto" {
+                    assert!(profile_res.is_ok());
+                } else {
+                    assert!(profile_res.is_err());
+                }
+            }
+        }
+    }
+
+    #[test]
     fn profile_cli_lifecycle_only_uses_an_explicit_temporary_store() {
         let directory =
             std::env::temp_dir().join(format!("jwm-profile-cli-{:032x}", rand::random::<u128>()));
@@ -2354,6 +3193,32 @@ mod tests {
     }
 
     #[test]
+    fn connect_accepts_scoped_ipv6_without_changing_permissions() {
+        for (input, expected) in [
+            ("fe80::1%eth0", "[fe80::1%eth0]:48221"),
+            ("[fe80::1%eth0]:1234", "[fe80::1%eth0]:1234"),
+        ] {
+            let Command::Connect {
+                address,
+                view_only,
+                grab_input,
+                ..
+            } = Cli::try_parse_from(["jwm-remote", "connect", input, "--view-only"])
+                .unwrap()
+                .command
+            else {
+                panic!("connect variant expected")
+            };
+            assert_eq!(address, expected);
+            assert!(view_only);
+            assert!(!grab_input);
+        }
+        for invalid in ["[fe80::1%eth0]:0", "[fe80::1%]:1234", "fe80::1%eth0:1234"] {
+            assert!(Cli::try_parse_from(["jwm-remote", "connect", invalid]).is_err());
+        }
+    }
+
+    #[test]
     fn host_listen_help_matches_parser_and_bad_addresses_fail_before_startup() {
         for invalid in ["", ":48221", "host:65536", "host:", "[::1]:", "host\x1b"] {
             let error =
@@ -2460,6 +3325,22 @@ mod tests {
             resolve_key_path(Some(PathBuf::from("explicit.key"))).unwrap(),
             PathBuf::from("explicit.key")
         );
+    }
+
+    #[test]
+    fn window_host_is_explicit_single_use_and_view_only() {
+        let base = ["jwm-remote", "host", "--window", "0x200001", "--once"];
+        assert!(Cli::try_parse_from(base).is_ok());
+        assert!(Cli::try_parse_from(["jwm-remote", "host", "--window", "1"]).is_err());
+        for flag in ["--allow-input", "--allow-clipboard", "--share-root"] {
+            let mut args = base.to_vec();
+            args.push(flag);
+            assert!(Cli::try_parse_from(args).is_err());
+        }
+        for id in ["0", "0x0", "-1", "4294967296", "window-name"] {
+            assert!(parse_window_id(id).is_err());
+        }
+        assert_eq!(parse_window_id("0x200001").unwrap(), 0x200001);
     }
 
     #[test]
@@ -2604,5 +3485,1686 @@ mod tests {
             .next()
             .unwrap();
         assert!(!run.contains("emit_diagnostic("));
+    }
+}
+
+#[cfg(test)]
+mod explicit_resize_tests {
+    use super::*;
+    #[test]
+    fn explicit_resize_flags_require_scope_and_cannot_be_saved() {
+        let args = [
+            "jwm-remote",
+            "connect",
+            "127.0.0.1:9876",
+            "--view-only",
+            "--resize-source",
+            "480x320",
+        ];
+        let parsed = Cli::try_parse_from(args).unwrap();
+        assert!(profile_from_command(parsed.command).is_err());
+        assert!(
+            Cli::try_parse_from([
+                "jwm-remote",
+                "connect",
+                "host",
+                "--resize-source",
+                "480x320"
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "jwm-remote",
+                "connect",
+                "host",
+                "--view-only",
+                "--resize-source",
+                "480x320",
+                "--reconnect-attempts",
+                "1"
+            ])
+            .is_err()
+        );
+        assert!(Cli::try_parse_from(["jwm-remote", "host", "--allow-window-resize"]).is_err());
+        assert!(
+            Cli::try_parse_from([
+                "jwm-remote",
+                "host",
+                "--window",
+                "0x200001",
+                "--once",
+                "--allow-window-resize"
+            ])
+            .is_ok()
+        );
+    }
+}
+
+#[cfg(test)]
+mod wayland_source_cli_tests {
+    use super::*;
+    #[test]
+    fn wayland_resize_follow_is_host_only_explicit_and_read_only() {
+        let cli =
+            Cli::try_parse_from(["jwm-remote", "host", "--wayland-select", "--once"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Host {
+                wayland_resize_follow: false,
+                ..
+            }
+        ));
+        let cli = Cli::try_parse_from([
+            "jwm-remote",
+            "host",
+            "--wayland-select",
+            "--once",
+            "--wayland-resize-follow",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Host {
+                wayland_resize_follow: true,
+                ..
+            }
+        ));
+        assert!(
+            Cli::try_parse_from(["jwm-remote", "host", "--once", "--wayland-resize-follow"])
+                .is_err()
+        );
+        assert!(Cli::try_parse_from(["jwm-remote", "connect", "--wayland-resize-follow"]).is_err());
+        for option in [
+            "--allow-input",
+            "--allow-clipboard",
+            "--allow-window-resize",
+            "--allow-wayland-keyboard",
+            "--allow-wayland-pointer",
+            "--allow-wayland-control",
+            "--allow-wayland-scroll",
+        ] {
+            assert!(
+                Cli::try_parse_from([
+                    "jwm-remote",
+                    "host",
+                    "--wayland-select",
+                    "--once",
+                    "--wayland-resize-follow",
+                    option
+                ])
+                .is_err(),
+                "{option}"
+            );
+        }
+    }
+    #[test]
+    fn wayland_selection_is_local_single_use_and_has_no_x11_permissions() {
+        assert!(Cli::try_parse_from(["jwm-remote", "host", "--wayland-select", "--once"]).is_ok());
+        assert!(Cli::try_parse_from(["jwm-remote", "host", "--wayland-select"]).is_err());
+        assert!(
+            Cli::try_parse_from(["jwm-remote", "host", "--wayland-display", "wayland-1"]).is_err()
+        );
+        for denied in [
+            "--allow-input",
+            "--allow-clipboard",
+            "--allow-window-resize",
+            "--key-stdin",
+            "--share-root",
+        ] {
+            assert!(
+                Cli::try_parse_from(["jwm-remote", "host", "--wayland-select", "--once", denied])
+                    .is_err(),
+                "{denied}"
+            );
+        }
+        for denied in [
+            "--display",
+            "--window",
+            "--monitor",
+            "--region",
+            "--capture-source",
+        ] {
+            assert!(
+                Cli::try_parse_from([
+                    "jwm-remote",
+                    "host",
+                    "--wayland-select",
+                    "--once",
+                    denied,
+                    "1"
+                ])
+                .is_err(),
+                "{denied}"
+            );
+        }
+        assert!(
+            Cli::try_parse_from([
+                "jwm-remote",
+                "host",
+                "--wayland-select",
+                "--once",
+                "--wayland-display",
+                "wayland-private"
+            ])
+            .is_ok()
+        );
+    }
+}
+
+#[cfg(test)]
+mod wayland_keyboard_cli_tests {
+    use super::*;
+
+    #[test]
+    fn keyboard_lease_requires_explicit_native_host_and_scoped_viewer() {
+        assert!(
+            Cli::try_parse_from([
+                "jwm-remote",
+                "host",
+                "--wayland-select",
+                "--once",
+                "--allow-wayland-keyboard"
+            ])
+            .is_ok()
+        );
+        assert!(
+            Cli::try_parse_from(["jwm-remote", "host", "--allow-wayland-keyboard", "--once"])
+                .is_err()
+        );
+        for denied in [
+            "--allow-input",
+            "--allow-clipboard",
+            "--allow-window-resize",
+        ] {
+            assert!(
+                Cli::try_parse_from([
+                    "jwm-remote",
+                    "host",
+                    "--wayland-select",
+                    "--once",
+                    "--allow-wayland-keyboard",
+                    denied
+                ])
+                .is_err()
+            );
+        }
+        assert!(
+            Cli::try_parse_from(["jwm-remote", "connect", "127.0.0.1", "--wayland-keyboard"])
+                .is_ok()
+        );
+        for denied in ["--view-only", "--clipboard", "--grab-input"] {
+            assert!(
+                Cli::try_parse_from([
+                    "jwm-remote",
+                    "connect",
+                    "127.0.0.1",
+                    "--wayland-keyboard",
+                    denied
+                ])
+                .is_err()
+            );
+        }
+        for (flag, value) in [
+            ("--resize-source", "800x600"),
+            ("--reconnect-attempts", "1"),
+        ] {
+            assert!(
+                Cli::try_parse_from([
+                    "jwm-remote",
+                    "connect",
+                    "127.0.0.1",
+                    "--wayland-keyboard",
+                    flag,
+                    value
+                ])
+                .is_err()
+            );
+        }
+        let command =
+            Cli::try_parse_from(["jwm-remote", "connect", "127.0.0.1", "--wayland-keyboard"])
+                .unwrap()
+                .command;
+        assert!(profile_from_command(command).is_err());
+    }
+}
+
+#[cfg(test)]
+mod wayland_pointer_cli_tests {
+    use super::*;
+    #[test]
+    fn pointer_permission_is_explicit_exclusive_and_not_persisted() {
+        assert!(
+            Cli::try_parse_from([
+                "jwm-remote",
+                "host",
+                "--wayland-select",
+                "--once",
+                "--allow-wayland-pointer"
+            ])
+            .is_ok()
+        );
+        assert!(
+            Cli::try_parse_from(["jwm-remote", "host", "--once", "--allow-wayland-pointer"])
+                .is_err()
+        );
+        for other in [
+            "--allow-wayland-keyboard",
+            "--allow-input",
+            "--allow-clipboard",
+            "--allow-window-resize",
+        ] {
+            assert!(
+                Cli::try_parse_from([
+                    "jwm-remote",
+                    "host",
+                    "--wayland-select",
+                    "--once",
+                    "--allow-wayland-pointer",
+                    other
+                ])
+                .is_err()
+            );
+        }
+        for other in [
+            "--wayland-keyboard",
+            "--view-only",
+            "--clipboard",
+            "--grab-input",
+        ] {
+            assert!(
+                Cli::try_parse_from([
+                    "jwm-remote",
+                    "connect",
+                    "127.0.0.1",
+                    "--wayland-pointer",
+                    other
+                ])
+                .is_err()
+            );
+        }
+        assert!(
+            Cli::try_parse_from([
+                "jwm-remote",
+                "connect",
+                "127.0.0.1",
+                "--wayland-pointer",
+                "--reconnect-attempts",
+                "1"
+            ])
+            .is_err()
+        );
+        let cli = Cli::try_parse_from(["jwm-remote", "connect", "127.0.0.1", "--wayland-pointer"])
+            .unwrap();
+        assert!(profile_from_command(cli.command).is_err());
+    }
+}
+
+#[cfg(test)]
+mod wayland_scroll_cli_tests {
+    use super::*;
+    #[test]
+    fn scroll_requires_explicit_pointer_and_cannot_be_saved() {
+        assert!(
+            Cli::try_parse_from([
+                "jwm-remote",
+                "host",
+                "--wayland-select",
+                "--once",
+                "--allow-wayland-scroll"
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "jwm-remote",
+                "host",
+                "--wayland-select",
+                "--once",
+                "--allow-wayland-pointer",
+                "--allow-wayland-scroll"
+            ])
+            .is_ok()
+        );
+        assert!(
+            Cli::try_parse_from(["jwm-remote", "connect", "127.0.0.1", "--wayland-scroll"])
+                .is_err()
+        );
+        let cli = Cli::try_parse_from([
+            "jwm-remote",
+            "connect",
+            "127.0.0.1",
+            "--wayland-pointer",
+            "--wayland-scroll",
+        ])
+        .unwrap();
+        assert!(profile_from_command(cli.command).is_err());
+        for restricted in [
+            "--view-only",
+            "--wayland-keyboard",
+            "--clipboard",
+            "--grab-input",
+        ] {
+            assert!(
+                Cli::try_parse_from([
+                    "jwm-remote",
+                    "connect",
+                    "127.0.0.1",
+                    "--wayland-pointer",
+                    "--wayland-scroll",
+                    restricted
+                ])
+                .is_err()
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod scroll_copy_cli_tests {
+    use super::*;
+    #[test]
+    fn scroll_copy_is_host_only_default_off_and_does_not_grant_input() {
+        for enabled in [false, true] {
+            let mut args = vec!["jwm-remote", "host"];
+            if enabled {
+                args.push("--scroll-copy");
+            }
+            let Command::Host {
+                scroll_copy,
+                allow_input,
+                allow_wayland_pointer,
+                allow_wayland_control,
+                allow_wayland_text,
+                allow_static_lossless,
+                allow_wayland_scroll,
+                allow_clipboard,
+                ..
+            } = Cli::try_parse_from(args).unwrap().command
+            else {
+                panic!("host expected")
+            };
+            assert_eq!(scroll_copy, enabled);
+            assert!(
+                !allow_input
+                    && !allow_wayland_pointer
+                    && !allow_wayland_control
+                    && !allow_wayland_text
+                    && !allow_static_lossless
+                    && !allow_wayland_scroll
+                    && !allow_clipboard
+            );
+        }
+        for args in [
+            vec!["jwm-remote", "connect", "127.0.0.1", "--scroll-copy"],
+            vec!["jwm-remote", "ssh", "example", "--scroll-copy"],
+        ] {
+            assert!(
+                Cli::try_parse_from(&args).is_err(),
+                "unexpectedly accepted {args:?}"
+            );
+        }
+        // Profile save deliberately captures raw connection arguments. Follow
+        // run_profile's nested parse/validation boundary, not the outer parser.
+        // Neither step opens a connection or writes a profile.
+        for connection in [
+            vec!["--scroll-copy"],
+            vec!["connect", "127.0.0.1", "--scroll-copy"],
+            vec!["ssh", "example", "--scroll-copy"],
+            vec!["host", "--scroll-copy"],
+        ] {
+            let args = ["jwm-remote", "profile", "save", "example", "--"]
+                .into_iter()
+                .chain(connection.iter().copied())
+                .collect::<Vec<_>>();
+            let Command::Profile {
+                action:
+                    ProfileAction::Save {
+                        connection: raw, ..
+                    },
+                ..
+            } = Cli::try_parse_from(&args).unwrap().command
+            else {
+                panic!("profile save expected for {args:?}")
+            };
+            let parsed = Cli::try_parse_from(std::iter::once("jwm-remote".to_owned()).chain(raw));
+            if connection[0] == "host" {
+                let error = profile_from_command(parsed.unwrap().command).unwrap_err();
+                assert_eq!(
+                    error.to_string(),
+                    "only connect and ssh commands can be saved"
+                );
+            } else {
+                assert!(
+                    parsed.is_err(),
+                    "nested profile connection accepted {args:?}"
+                );
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod horizontal_scroll_cli_tests {
+    use super::*;
+    #[test]
+    fn horizontal_scroll_is_separate_host_and_viewer_opt_in() {
+        for permission in ["--allow-wayland-pointer", "--allow-wayland-control"] {
+            let cli = Cli::try_parse_from([
+                "jwm-remote",
+                "host",
+                "--once",
+                "--wayland-select",
+                permission,
+                "--allow-wayland-horizontal-scroll",
+            ])
+            .unwrap();
+            assert!(matches!(
+                cli.command,
+                Command::Host {
+                    allow_wayland_horizontal_scroll: true,
+                    allow_wayland_scroll: false,
+                    ..
+                }
+            ));
+        }
+        for lease in ["--wayland-pointer", "--wayland-control"] {
+            let cli = Cli::try_parse_from([
+                "jwm-remote",
+                "connect",
+                "localhost:48221",
+                "--viewer-backend",
+                "wayland",
+                lease,
+                "--wayland-horizontal-scroll",
+            ])
+            .unwrap();
+            assert!(matches!(
+                &cli.command,
+                Command::Connect {
+                    wayland_horizontal_scroll: true,
+                    wayland_scroll: false,
+                    ..
+                }
+            ));
+            assert!(profile_from_command(cli.command).is_err());
+        }
+        assert!(
+            Cli::try_parse_from(["jwm-remote", "host", "--allow-wayland-horizontal-scroll"])
+                .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "jwm-remote",
+                "connect",
+                "localhost:48221",
+                "--wayland-horizontal-scroll"
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "jwm-remote",
+                "host",
+                "--once",
+                "--wayland-select",
+                "--wayland-resize-follow",
+                "--allow-wayland-horizontal-scroll"
+            ])
+            .is_err()
+        );
+    }
+}
+
+#[cfg(test)]
+mod popup_cli_tests {
+    use super::*;
+    #[test]
+    fn popup_capture_is_host_only_default_off_and_read_only() {
+        assert!(matches!(
+            Cli::try_parse_from(["jwm-remote", "host", "--once", "--wayland-select"])
+                .unwrap()
+                .command,
+            Command::Host {
+                wayland_popups: false,
+                ..
+            }
+        ));
+        assert!(matches!(
+            Cli::try_parse_from([
+                "jwm-remote",
+                "host",
+                "--once",
+                "--wayland-select",
+                "--wayland-popups"
+            ])
+            .unwrap()
+            .command,
+            Command::Host {
+                wayland_popups: true,
+                ..
+            }
+        ));
+        assert!(matches!(
+            Cli::try_parse_from([
+                "jwm-remote",
+                "host",
+                "--once",
+                "--wayland-select",
+                "--wayland-popups",
+                "--wayland-resize-follow"
+            ])
+            .unwrap()
+            .command,
+            Command::Host {
+                wayland_popups: true,
+                wayland_resize_follow: true,
+                ..
+            }
+        ));
+        for follow in [false, true] {
+            for option in [
+                "--allow-input",
+                "--allow-clipboard",
+                "--allow-window-resize",
+                "--allow-wayland-keyboard",
+                "--allow-wayland-pointer",
+                "--allow-wayland-control",
+                "--allow-wayland-scroll",
+                "--allow-wayland-horizontal-scroll",
+            ] {
+                let mut args = vec![
+                    "jwm-remote",
+                    "host",
+                    "--once",
+                    "--wayland-select",
+                    "--wayland-popups",
+                    option,
+                ];
+                if follow {
+                    args.push("--wayland-resize-follow");
+                }
+                assert!(
+                    Cli::try_parse_from(&args).is_err(),
+                    "follow={follow}, option={option}"
+                );
+            }
+        }
+        for args in [
+            vec!["jwm-remote", "host", "--once", "--wayland-popups"],
+            vec!["jwm-remote", "host", "--wayland-select", "--wayland-popups"],
+            vec!["jwm-remote", "connect", "--wayland-popups"],
+            vec!["jwm-remote", "ssh", "--wayland-popups"],
+        ] {
+            assert!(Cli::try_parse_from(&args).is_err(), "{args:?}");
+        }
+    }
+}
+
+fn read_explicit_text(
+    reader: impl std::io::Read,
+) -> RemoteResult<jwm::remote::wayland_text_wire::ExplicitText> {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    reader
+        .take((jwm::remote::wayland_text_wire::MAX_TEXT_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)?;
+    jwm::remote::wayland_text_wire::ExplicitText::new(bytes)
+}
+#[cfg(test)]
+mod explicit_text_cli_tests {
+    use super::*;
+    #[test]
+    fn exact_text_is_bounded_and_not_trimmed() {
+        let text = read_explicit_text("中文e\u{301}🙂\n".as_bytes()).unwrap();
+        assert_eq!(text.as_bytes(), "中文e\u{301}🙂\n".as_bytes());
+        assert!(read_explicit_text(&b""[..]).is_err());
+        assert!(read_explicit_text(&b"a\0b"[..]).is_err());
+        assert!(read_explicit_text(vec![b'a'; 4001].as_slice()).is_err());
+    }
+    #[test]
+    fn text_host_requires_explicit_exclusive_single_source() {
+        assert!(matches!(
+            Cli::try_parse_from(["jwm-remote", "host"]).unwrap().command,
+            Command::Host {
+                allow_wayland_text: false,
+                ..
+            }
+        ));
+        let base = [
+            "jwm-remote",
+            "host",
+            "--wayland-select",
+            "--once",
+            "--allow-wayland-text",
+        ];
+        assert!(matches!(
+            Cli::try_parse_from(base).unwrap().command,
+            Command::Host {
+                allow_wayland_text: true,
+                ..
+            }
+        ));
+        for flag in [
+            "--allow-input",
+            "--allow-clipboard",
+            "--allow-window-resize",
+            "--allow-wayland-keyboard",
+            "--allow-wayland-pointer",
+            "--allow-wayland-control",
+            "--wayland-popups",
+            "--wayland-resize-follow",
+        ] {
+            let mut args = base.to_vec();
+            args.push(flag);
+            assert!(Cli::try_parse_from(args).is_err(), "{flag}");
+        }
+        assert!(Cli::try_parse_from(["jwm-remote", "host", "--allow-wayland-text"]).is_err());
+    }
+    #[test]
+    fn text_mode_cannot_be_saved_or_mixed() {
+        let args = [
+            "jwm-remote",
+            "connect",
+            "127.0.0.1:7788",
+            "--viewer-backend",
+            "wayland",
+            "--wayland-text-stdin",
+        ];
+        let parsed = Cli::try_parse_from(args).unwrap();
+        assert!(profile_from_command(parsed.command).is_err());
+        for extra in [
+            "--wayland-keyboard",
+            "--wayland-pointer",
+            "--wayland-control",
+            "--view-only",
+            "--grab-input",
+        ] {
+            let mut a = args.to_vec();
+            a.push(extra);
+            assert!(Cli::try_parse_from(a).is_err(), "{extra}");
+        }
+    }
+}
+
+fn validate_native_lossless_cli(
+    lossless: bool,
+    native_input: bool,
+    backend: ViewerBackend,
+) -> RemoteResult<()> {
+    if lossless && native_input && backend != ViewerBackend::Wayland {
+        return Err("native input plus static lossless requires --viewer-backend wayland".into());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod static_lossless_cli_tests {
+    use super::*;
+    #[test]
+    fn unified_control_lossless_is_explicit_scoped_and_not_saved() {
+        let h = [
+            "jwm-remote",
+            "host",
+            "--once",
+            "--wayland-select",
+            "--allow-wayland-control",
+            "--allow-static-lossless",
+        ];
+        let c = [
+            "jwm-remote",
+            "connect",
+            "host",
+            "--viewer-backend",
+            "wayland",
+            "--wayland-control",
+            "--static-lossless",
+        ];
+        assert!(Cli::try_parse_from(h).is_ok());
+        assert!(Cli::try_parse_from(c).is_ok());
+        assert!(profile_from_command(Cli::try_parse_from(c).unwrap().command).is_err());
+        for (vertical, horizontal) in [(false, false), (true, false), (false, true), (true, true)] {
+            assert_eq!(
+                validate_control_lossless_cli(true, true, vertical, horizontal).is_ok(),
+                !vertical && !horizontal
+            );
+            assert!(validate_control_lossless_cli(false, true, vertical, horizontal).is_ok());
+            assert!(validate_control_lossless_cli(true, false, vertical, horizontal).is_ok());
+        }
+        for flag in [
+            "--wayland-keyboard",
+            "--wayland-pointer",
+            "--view-only",
+            "--wayland-text-stdin",
+            "--clipboard",
+            "--grab-input",
+            "--follow-source-size",
+        ] {
+            let mut args = c.to_vec();
+            args.push(flag);
+            assert!(Cli::try_parse_from(args).is_err(), "{flag}");
+        }
+        for flag in [
+            "--allow-wayland-keyboard",
+            "--allow-wayland-pointer",
+            "--allow-input",
+            "--allow-clipboard",
+            "--allow-window-resize",
+            "--wayland-popups",
+            "--wayland-resize-follow",
+        ] {
+            let mut args = h.to_vec();
+            args.push(flag);
+            assert!(Cli::try_parse_from(args).is_err(), "{flag}");
+        }
+        for flag in ["--wayland-control", "--static-lossless"] {
+            assert!(Cli::try_parse_from(["jwm-remote", "ssh", "host", flag]).is_err());
+        }
+    }
+
+    #[test]
+    fn keyboard_lossless_requires_explicit_native_viewer_and_native_host_selection() {
+        assert!(
+            Cli::try_parse_from([
+                "jwm-remote",
+                "host",
+                "--allow-static-lossless",
+                "--allow-wayland-keyboard",
+                "--wayland-select",
+                "--once"
+            ])
+            .is_ok()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "jwm-remote",
+                "host",
+                "--allow-static-lossless",
+                "--allow-wayland-keyboard"
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "jwm-remote",
+                "connect",
+                "host",
+                "--static-lossless",
+                "--wayland-keyboard",
+                "--viewer-backend",
+                "wayland"
+            ])
+            .is_ok()
+        );
+        assert!(validate_native_lossless_cli(true, true, ViewerBackend::X11).is_err());
+        assert!(validate_native_lossless_cli(true, true, ViewerBackend::Wayland).is_ok());
+        assert!(validate_native_lossless_cli(true, false, ViewerBackend::X11).is_ok());
+        assert!(validate_native_lossless_cli(false, true, ViewerBackend::X11).is_ok());
+    }
+    #[test]
+    fn pointer_lossless_is_explicit_native_and_rejects_other_combinations() {
+        let host = [
+            "jwm-remote",
+            "host",
+            "--once",
+            "--wayland-select",
+            "--allow-wayland-pointer",
+            "--allow-static-lossless",
+        ];
+        let client = [
+            "jwm-remote",
+            "connect",
+            "host",
+            "--viewer-backend",
+            "wayland",
+            "--wayland-pointer",
+            "--static-lossless",
+        ];
+        assert!(Cli::try_parse_from(host).is_ok());
+        assert!(Cli::try_parse_from(client).is_ok());
+        assert!(profile_from_command(Cli::try_parse_from(client).unwrap().command).is_err());
+        for flag in [
+            "--allow-wayland-keyboard",
+            "--allow-wayland-control",
+            "--wayland-popups",
+            "--wayland-resize-follow",
+            "--allow-clipboard",
+            "--allow-input",
+            "--allow-window-resize",
+        ] {
+            let mut args = host.to_vec();
+            args.push(flag);
+            assert!(Cli::try_parse_from(args).is_err(), "{flag}");
+        }
+        for flag in [
+            "--wayland-keyboard",
+            "--wayland-control",
+            "--view-only",
+            "--clipboard",
+            "--grab-input",
+            "--follow-source-size",
+        ] {
+            let mut args = client.to_vec();
+            args.push(flag);
+            assert!(Cli::try_parse_from(args).is_err(), "{flag}");
+        }
+    }
+    #[test]
+    fn pointer_lossless_vertical_scroll_requires_explicit_scoped_mode() {
+        let host = [
+            "jwm-remote",
+            "host",
+            "--once",
+            "--wayland-select",
+            "--allow-wayland-pointer",
+            "--allow-static-lossless",
+            "--allow-wayland-scroll",
+        ];
+        let client = [
+            "jwm-remote",
+            "connect",
+            "host",
+            "--viewer-backend",
+            "wayland",
+            "--wayland-pointer",
+            "--static-lossless",
+            "--wayland-scroll",
+        ];
+        assert!(matches!(
+            Cli::try_parse_from(host).unwrap().command,
+            Command::Host {
+                allow_static_lossless: true,
+                allow_wayland_pointer: true,
+                allow_wayland_scroll: true,
+                allow_wayland_horizontal_scroll: false,
+                ..
+            }
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(client).unwrap().command,
+            Command::Connect {
+                static_lossless: true,
+                wayland_pointer: true,
+                wayland_scroll: true,
+                wayland_horizontal_scroll: false,
+                ..
+            }
+        ));
+        assert!(profile_from_command(Cli::try_parse_from(client).unwrap().command).is_err());
+        for flag in ["--allow-wayland-pointer", "--wayland-select", "--once"] {
+            let args: Vec<_> = host.iter().copied().filter(|arg| *arg != flag).collect();
+            assert!(Cli::try_parse_from(args).is_err(), "missing {flag}");
+        }
+        for flag in [
+            "--allow-wayland-control",
+            "--allow-wayland-keyboard",
+            "--allow-wayland-text",
+            "--allow-input",
+            "--allow-clipboard",
+            "--allow-window-resize",
+            "--wayland-popups",
+            "--wayland-resize-follow",
+        ] {
+            let mut args = host.to_vec();
+            args.push(flag);
+            assert!(Cli::try_parse_from(args).is_err(), "{flag}");
+        }
+        for flag in [
+            "--wayland-control",
+            "--wayland-keyboard",
+            "--wayland-text-stdin",
+            "--view-only",
+            "--clipboard",
+            "--grab-input",
+            "--follow-source-size",
+        ] {
+            let mut args = client.to_vec();
+            args.push(flag);
+            assert!(Cli::try_parse_from(args).is_err(), "{flag}");
+        }
+        for replacement in ["--view-only", "--wayland-keyboard", "--wayland-control"] {
+            let args: Vec<_> = client
+                .iter()
+                .map(|arg| {
+                    if *arg == "--wayland-pointer" {
+                        replacement
+                    } else {
+                        *arg
+                    }
+                })
+                .collect();
+            if replacement == "--wayland-control" {
+                let parsed = Cli::try_parse_from(args).unwrap();
+                let Command::Connect {
+                    static_lossless,
+                    wayland_control,
+                    wayland_scroll,
+                    wayland_horizontal_scroll,
+                    ..
+                } = parsed.command
+                else {
+                    panic!("connect expected")
+                };
+                assert!(
+                    validate_control_lossless_cli(
+                        static_lossless,
+                        wayland_control,
+                        wayland_scroll,
+                        wayland_horizontal_scroll
+                    )
+                    .is_err()
+                );
+            } else {
+                assert!(Cli::try_parse_from(args).is_err(), "{replacement}");
+            }
+        }
+        let mut reconnect = client.to_vec();
+        reconnect.extend(["--reconnect-attempts", "1"]);
+        assert!(Cli::try_parse_from(reconnect).is_err());
+        // The backend requirement is checked at dispatch, not inferred from the flags.
+        assert!(validate_native_lossless_cli(true, true, ViewerBackend::X11).is_err());
+    }
+    #[test]
+    fn horizontal_pointer_lossless_is_independent_and_not_saved_or_ssh() {
+        for vertical in [false, true] {
+            let mut h = vec![
+                "jwm-remote",
+                "host",
+                "--wayland-select",
+                "--once",
+                "--allow-wayland-pointer",
+                "--allow-static-lossless",
+                "--allow-wayland-horizontal-scroll",
+            ];
+            let mut c = vec![
+                "jwm-remote",
+                "connect",
+                "host",
+                "--viewer-backend",
+                "wayland",
+                "--wayland-pointer",
+                "--static-lossless",
+                "--wayland-horizontal-scroll",
+            ];
+            if vertical {
+                h.push("--allow-wayland-scroll");
+                c.push("--wayland-scroll");
+            }
+            match Cli::try_parse_from(&h).unwrap().command {
+                Command::Host {
+                    allow_wayland_scroll,
+                    allow_wayland_horizontal_scroll,
+                    ..
+                } => {
+                    assert_eq!(allow_wayland_scroll, vertical);
+                    assert!(allow_wayland_horizontal_scroll);
+                }
+                _ => panic!("host"),
+            }
+            match Cli::try_parse_from(&c).unwrap().command {
+                Command::Connect {
+                    wayland_scroll,
+                    wayland_horizontal_scroll,
+                    ..
+                } => {
+                    assert_eq!(wayland_scroll, vertical);
+                    assert!(wayland_horizontal_scroll);
+                }
+                _ => panic!("client"),
+            }
+            assert!(profile_from_command(Cli::try_parse_from(&c).unwrap().command).is_err());
+            for flag in ["--allow-wayland-pointer", "--wayland-select", "--once"] {
+                assert!(Cli::try_parse_from(h.iter().copied().filter(|arg| *arg != flag)).is_err());
+            }
+            for flag in [
+                "--allow-wayland-keyboard",
+                "--allow-wayland-control",
+                "--allow-wayland-text",
+                "--allow-clipboard",
+                "--allow-window-resize",
+                "--wayland-popups",
+                "--wayland-resize-follow",
+            ] {
+                let mut mixed = h.clone();
+                mixed.push(flag);
+                assert!(Cli::try_parse_from(mixed).is_err());
+            }
+            for flag in [
+                "--wayland-keyboard",
+                "--wayland-control",
+                "--view-only",
+                "--wayland-text-stdin",
+                "--clipboard",
+                "--grab-input",
+                "--follow-source-size",
+            ] {
+                let mut mixed = c.clone();
+                mixed.push(flag);
+                assert!(Cli::try_parse_from(mixed).is_err());
+            }
+            let mut reconnect = c.clone();
+            reconnect.extend(["--reconnect-attempts", "1"]);
+            assert!(Cli::try_parse_from(reconnect).is_err());
+        }
+        for flag in [
+            "--wayland-horizontal-scroll",
+            "--static-lossless",
+            "--wayland-pointer",
+        ] {
+            assert!(Cli::try_parse_from(["jwm-remote", "ssh", "host", flag]).is_err());
+        }
+        assert!(
+            Cli::try_parse_from([
+                "jwm-remote",
+                "connect",
+                "host",
+                "--view-only",
+                "--static-lossless",
+                "--wayland-horizontal-scroll"
+            ])
+            .is_err()
+        );
+        assert!(validate_native_lossless_cli(true, true, ViewerBackend::X11).is_err());
+    }
+
+    #[test]
+    fn capability_requires_explicit_readonly_and_is_not_saved() {
+        assert!(matches!(
+            Cli::try_parse_from(["jwm-remote", "host"]).unwrap().command,
+            Command::Host {
+                allow_static_lossless: false,
+                ..
+            }
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["jwm-remote", "host", "--allow-static-lossless"])
+                .unwrap()
+                .command,
+            Command::Host {
+                allow_static_lossless: true,
+                ..
+            }
+        ));
+        let base = [
+            "jwm-remote",
+            "connect",
+            "host",
+            "--view-only",
+            "--static-lossless",
+        ];
+        assert!(profile_from_command(Cli::try_parse_from(base).unwrap().command).is_err());
+        assert!(
+            Cli::try_parse_from(["jwm-remote", "connect", "host", "--static-lossless"]).is_err()
+        );
+        for flag in [
+            "--wayland-keyboard",
+            "--wayland-pointer",
+            "--wayland-control",
+            "--wayland-text-stdin",
+            "--clipboard",
+            "--grab-input",
+            "--follow-source-size",
+        ] {
+            let mut args = base.to_vec();
+            args.push(flag);
+            assert!(Cli::try_parse_from(args).is_err(), "{flag}");
+        }
+        for flag in [
+            "--allow-input",
+            "--allow-clipboard",
+            "--allow-window-resize",
+            "--allow-wayland-pointer",
+            "--allow-wayland-control",
+            "--allow-wayland-text",
+        ] {
+            assert!(
+                Cli::try_parse_from(["jwm-remote", "host", "--allow-static-lossless", flag])
+                    .is_err(),
+                "{flag}"
+            );
+        }
+    }
+}
+
+fn validate_control_lossless_cli(
+    lossless: bool,
+    control: bool,
+    vertical: bool,
+    horizontal: bool,
+) -> RemoteResult<()> {
+    if lossless && control && (vertical || horizontal) {
+        return Err("unified control with static lossless repair does not support scroll".into());
+    }
+    Ok(())
+}
+
+fn validate_popup_viewer_cli(enabled: bool, backend: ViewerBackend) -> RemoteResult<()> {
+    if enabled && backend != ViewerBackend::Wayland {
+        return Err("popup pointer requires --viewer-backend wayland".into());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod popup_pointer_cli_tests {
+    use super::*;
+    #[test]
+    fn popup_is_explicit_native_exclusive_and_not_saved() {
+        let h = [
+            "jwm-remote",
+            "host",
+            "--wayland-select",
+            "--once",
+            "--allow-wayland-popup-pointer",
+        ];
+        let c = [
+            "jwm-remote",
+            "connect",
+            "host",
+            "--viewer-backend",
+            "wayland",
+            "--wayland-popup-pointer",
+        ];
+        assert!(matches!(
+            Cli::try_parse_from(h).unwrap().command,
+            Command::Host {
+                allow_wayland_popup_pointer: true,
+                ..
+            }
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(c).unwrap().command,
+            Command::Connect {
+                wayland_popup_pointer: true,
+                ..
+            }
+        ));
+        assert!(profile_from_command(Cli::try_parse_from(c).unwrap().command).is_err());
+        for flag in [
+            "--allow-input",
+            "--allow-clipboard",
+            "--allow-window-resize",
+            "--allow-wayland-keyboard",
+            "--allow-wayland-pointer",
+            "--allow-wayland-control",
+            "--allow-wayland-text",
+            "--allow-wayland-scroll",
+            "--allow-wayland-horizontal-scroll",
+            "--allow-static-lossless",
+            "--wayland-popups",
+            "--wayland-resize-follow",
+            "--scroll-copy",
+        ] {
+            let mut a = h.to_vec();
+            a.push(flag);
+            assert!(Cli::try_parse_from(a).is_err(), "{flag}");
+        }
+        for flag in [
+            "--view-only",
+            "--wayland-keyboard",
+            "--wayland-pointer",
+            "--wayland-control",
+            "--wayland-text-stdin",
+            "--wayland-scroll",
+            "--wayland-horizontal-scroll",
+            "--static-lossless",
+            "--clipboard",
+            "--grab-input",
+            "--follow-source-size",
+        ] {
+            let mut a = c.to_vec();
+            a.push(flag);
+            assert!(Cli::try_parse_from(a).is_err(), "{flag}");
+        }
+        for args in [
+            vec!["--reconnect-attempts", "1"],
+            vec!["--resize-source", "320x240"],
+        ] {
+            let mut a = c.to_vec();
+            a.extend(args);
+            assert!(Cli::try_parse_from(a).is_err());
+        }
+        for absent in ["--wayland-select", "--once"] {
+            assert!(Cli::try_parse_from(h.into_iter().filter(|a| *a != absent)).is_err());
+        }
+        for flag in ["--wayland-popup-pointer", "--allow-wayland-popup-pointer"] {
+            assert!(Cli::try_parse_from(["jwm-remote", "ssh", "host", flag]).is_err());
+        }
+        assert!(validate_popup_viewer_cli(true, ViewerBackend::X11).is_err());
+        assert!(validate_popup_viewer_cli(true, ViewerBackend::Wayland).is_ok());
+        assert!(matches!(
+            Cli::try_parse_from(["jwm-remote", "host"]).unwrap().command,
+            Command::Host {
+                allow_wayland_popup_pointer: false,
+                ..
+            }
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["jwm-remote", "connect", "host"])
+                .unwrap()
+                .command,
+            Command::Connect {
+                wayland_popup_pointer: false,
+                ..
+            }
+        ));
+    }
+}
+
+fn validate_wayland_seamless_cli(enabled: bool, backend: ViewerBackend) -> RemoteResult<()> {
+    if enabled && backend != ViewerBackend::Wayland {
+        return Err(profile_error(
+            "--wayland-seamless-input requires --viewer-backend wayland; no X11 fallback",
+        )
+        .into());
+    }
+    if enabled && !cfg!(feature = "remote-wayland") {
+        return Err(
+            profile_error("--wayland-seamless-input requires a remote-wayland build").into(),
+        );
+    }
+    Ok(())
+}
+
+/// Shared parser-to-runtime boundary, used by run and CLI regression tests.
+fn connect_options(command: Command) -> RemoteResult<(ClientOptions, u8)> {
+    let Command::Connect {
+        viewer_backend,
+        viewer_wayland_display,
+        reconnect_attempts,
+        address,
+        key_file,
+        display,
+        window_size,
+        resize_source,
+        follow_source_size,
+        wayland_keyboard,
+        wayland_pointer,
+        wayland_control,
+        wayland_seamless_input,
+        wayland_control_duration,
+        wayland_text_stdin,
+        wayland_popup_pointer,
+        static_lossless,
+        wayland_scroll,
+        wayland_horizontal_scroll,
+        window_position,
+        view_only,
+        grab_input,
+        seamless_input,
+        clipboard,
+        clipboard_mode,
+        clipboard_direction,
+        clipboard_file_limit,
+        frame_limits,
+        escape_key,
+        scaling,
+    } = command
+    else {
+        return Err(profile_error("connect command expected").into());
+    };
+    validate_control_lossless_cli(
+        static_lossless,
+        wayland_control,
+        wayland_scroll,
+        wayland_horizontal_scroll,
+    )?;
+    validate_wayland_seamless_cli(wayland_seamless_input, viewer_backend)?;
+    validate_popup_viewer_cli(wayland_popup_pointer, viewer_backend)?;
+    validate_native_lossless_cli(
+        static_lossless,
+        wayland_keyboard || wayland_pointer || wayland_control,
+        viewer_backend,
+    )?;
+    validate_follow_source_cli(
+        follow_source_size,
+        viewer_backend,
+        viewer_wayland_display.as_deref(),
+    )?;
+    Ok((
+        ClientOptions {
+            control_duration: wayland_control_duration.unwrap_or_default(),
+            viewer_backend,
+            viewer_wayland_display,
+            peer_label: address.clone(),
+            address,
+            key: KeySource::File(resolve_key_path(key_file)?),
+            display,
+            window_size,
+            resize_source,
+            follow_source_size,
+            wayland_keyboard,
+            wayland_pointer,
+            wayland_control,
+            resumable_control: wayland_seamless_input,
+            wayland_seamless_input,
+            wayland_popup_pointer,
+            static_lossless,
+            wayland_text: if wayland_text_stdin {
+                Some(read_explicit_text(std::io::stdin().lock())?)
+            } else {
+                None
+            },
+            wayland_scroll,
+            wayland_horizontal_scroll,
+            window_position,
+            view_only,
+            grab_input,
+            seamless_input,
+            clipboard,
+            clipboard_mode,
+            clipboard_direction,
+            clipboard_file_limit,
+            frame_limits: frame_limits.limits(),
+            escape_key,
+            scaling,
+        },
+        reconnect_attempts,
+    ))
+}
+
+#[cfg(test)]
+mod wayland_seamless_cli_tests {
+    use super::*;
+
+    const CLIENT: [&str; 9] = [
+        "jwm-remote",
+        "connect",
+        "host",
+        "--key-file",
+        "/unused-key",
+        "--viewer-backend",
+        "wayland",
+        "--wayland-control",
+        "--wayland-seamless-input",
+    ];
+    const HOST: [&str; 6] = [
+        "jwm-remote",
+        "host",
+        "--wayland-select",
+        "--once",
+        "--allow-wayland-control",
+        "--allow-resumable-control",
+    ];
+
+    #[test]
+    fn native_seamless_cli_forwards_real_options_and_defaults_off() {
+        for args in [
+            vec!["jwm-remote", "connect", "host", "--key-file", "/unused-key"],
+            CLIENT[..8].to_vec(),
+        ] {
+            let (options, attempts) =
+                connect_options(Cli::try_parse_from(args).unwrap().command).unwrap();
+            assert!(!options.resumable_control && !options.wayland_seamless_input);
+            assert_eq!(attempts, 0);
+        }
+        let parsed = Cli::try_parse_from(CLIENT).unwrap().command;
+        if cfg!(feature = "remote-wayland") {
+            let (options, attempts) = connect_options(parsed).unwrap();
+            assert!(
+                options.wayland_control
+                    && options.resumable_control
+                    && options.wayland_seamless_input
+            );
+            assert_eq!(options.viewer_backend, ViewerBackend::Wayland);
+            assert!(
+                !options.seamless_input
+                    && !options.grab_input
+                    && !options.clipboard
+                    && !options.static_lossless
+            );
+            assert_eq!(attempts, 0);
+        } else {
+            assert!(
+                connect_options(parsed)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("remote-wayland build")
+            );
+        }
+        assert!(matches!(
+            Cli::try_parse_from(["jwm-remote", "host"]).unwrap().command,
+            Command::Host {
+                allow_resumable_control: false,
+                ..
+            }
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(HOST).unwrap().command,
+            Command::Host {
+                allow_wayland_control: true,
+                allow_resumable_control: true,
+                once: true,
+                wayland_select: true,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn native_seamless_cli_rejects_incompatible_modes() {
+        for extra in [
+            vec!["--view-only"],
+            vec!["--wayland-keyboard"],
+            vec!["--wayland-pointer"],
+            vec!["--wayland-text-stdin"],
+            vec!["--wayland-popup-pointer"],
+            vec!["--clipboard"],
+            vec!["--grab-input"],
+            vec!["--seamless-input"],
+            vec!["--static-lossless"],
+            vec!["--resize-source", "640x480"],
+            vec!["--follow-source-size"],
+            vec!["--reconnect-attempts", "1"],
+        ] {
+            assert!(
+                Cli::try_parse_from(CLIENT.into_iter().chain(extra.clone())).is_err(),
+                "{extra:?}"
+            );
+        }
+        for extra in [
+            "--allow-static-lossless",
+            "--allow-input",
+            "--allow-clipboard",
+            "--wayland-popups",
+            "--wayland-resize-follow",
+        ] {
+            assert!(
+                Cli::try_parse_from(HOST.into_iter().chain([extra])).is_err(),
+                "{extra}"
+            );
+        }
+        for removed in ["--allow-wayland-control", "--wayland-select", "--once"] {
+            assert!(
+                Cli::try_parse_from(HOST.into_iter().filter(|arg| *arg != removed)).is_err(),
+                "{removed}"
+            );
+        }
+        assert!(
+            Cli::try_parse_from(CLIENT.into_iter().filter(|arg| *arg != "--wayland-control"))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn native_seamless_cli_wrong_backend_fails_before_key_or_network_io() {
+        let args = CLIENT.map(|arg| if arg == "wayland" { "x11" } else { arg });
+        let error = run(Cli::try_parse_from(args).unwrap().command)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("requires --viewer-backend wayland"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn native_seamless_cli_has_no_ssh_or_saved_authority() {
+        for flag in [
+            "--wayland-seamless-input",
+            "--allow-resumable-control",
+            "--resumable-control",
+        ] {
+            assert!(Cli::try_parse_from(["jwm-remote", "ssh", "host", flag]).is_err());
+        }
+        let error = profile_from_command(Cli::try_parse_from(CLIENT).unwrap().command)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("Wayland seamless input consent cannot be saved"));
+        assert!(profile_from_command(Cli::try_parse_from(HOST).unwrap().command).is_err());
+    }
+
+    #[test]
+    fn native_seamless_cli_help_discloses_both_peers_and_fixed_lifetime() {
+        let help = Cli::try_parse_from(["jwm-remote", "connect", "--help"])
+            .unwrap_err()
+            .to_string();
+        for text in [
+            "--wayland-seamless-input",
+            "--allow-resumable-control",
+            "30s",
+            "Ctrl+Super+F12",
+            "no automatic regrant",
+        ] {
+            assert!(help.contains(text), "missing {text}: {help}");
+        }
+    }
+}
+
+fn parse_control_duration(value: &str) -> Result<ControlDuration, String> {
+    let seconds = value.parse::<u16>().map_err(|_| {
+        "control duration must be an integer from 30 through 300 seconds".to_owned()
+    })?;
+    ControlDuration::from_secs(seconds).map_err(|error| error.to_string())
+}
+
+#[cfg(test)]
+mod control_duration_cli_tests {
+    use super::*;
+    const CLIENT: [&str; 9] = [
+        "jwm-remote",
+        "connect",
+        "host",
+        "--key-file",
+        "/unused-key",
+        "--viewer-backend",
+        "wayland",
+        "--wayland-control",
+        "--wayland-seamless-input",
+    ];
+    const HOST: [&str; 6] = [
+        "jwm-remote",
+        "host",
+        "--wayland-select",
+        "--once",
+        "--allow-wayland-control",
+        "--allow-resumable-control",
+    ];
+    #[test]
+    fn duration_cli_defaults_thirty_and_explicit_options_are_exact() {
+        for value in [None, Some("30"), Some("120"), Some("300")] {
+            let suffix: Vec<&str> = value
+                .map(|value| vec!["--wayland-control-duration", value])
+                .unwrap_or_default();
+            let command = Cli::try_parse_from(CLIENT.into_iter().chain(suffix))
+                .unwrap()
+                .command;
+            if cfg!(feature = "remote-wayland") {
+                let (options, attempts) = connect_options(command).unwrap();
+                assert_eq!(
+                    options.control_duration.as_secs(),
+                    value.unwrap_or("30").parse::<u16>().unwrap()
+                );
+                assert!(options.resumable_control && options.wayland_seamless_input);
+                assert_eq!(attempts, 0);
+            }
+            let suffix: Vec<&str> = value
+                .map(|value| vec!["--max-wayland-control-duration", value])
+                .unwrap_or_default();
+            let Command::Host {
+                max_wayland_control_duration,
+                ..
+            } = Cli::try_parse_from(HOST.into_iter().chain(suffix))
+                .unwrap()
+                .command
+            else {
+                panic!("host expected");
+            };
+            assert_eq!(
+                max_wayland_control_duration.unwrap_or_default().as_secs(),
+                value.unwrap_or("30").parse::<u16>().unwrap()
+            );
+        }
+        let (options, _) = connect_options(
+            Cli::try_parse_from(["jwm-remote", "connect", "host", "--key-file", "/unused-key"])
+                .unwrap()
+                .command,
+        )
+        .unwrap();
+        assert_eq!(options.control_duration.as_secs(), 30);
+        assert!(!options.resumable_control);
+    }
+    #[test]
+    fn duration_cli_rejects_unbounded_values_or_missing_explicit_mode() {
+        for value in ["0", "29", "301", "65536", "-1", "30.5", "forever"] {
+            assert!(
+                Cli::try_parse_from(
+                    CLIENT
+                        .into_iter()
+                        .chain(["--wayland-control-duration", value])
+                )
+                .is_err()
+            );
+            assert!(
+                Cli::try_parse_from(
+                    HOST.into_iter()
+                        .chain(["--max-wayland-control-duration", value])
+                )
+                .is_err()
+            );
+        }
+        for removed in ["--wayland-seamless-input", "--wayland-control"] {
+            assert!(
+                Cli::try_parse_from(
+                    CLIENT
+                        .into_iter()
+                        .filter(|arg| *arg != removed)
+                        .chain(["--wayland-control-duration", "120"])
+                )
+                .is_err()
+            );
+        }
+        assert!(
+            Cli::try_parse_from(
+                HOST.into_iter()
+                    .filter(|arg| *arg != "--allow-resumable-control")
+                    .chain(["--max-wayland-control-duration", "120"])
+            )
+            .is_err()
+        );
+        for flag in [
+            "--wayland-control-duration",
+            "--max-wayland-control-duration",
+        ] {
+            assert!(Cli::try_parse_from(["jwm-remote", "ssh", "host", flag, "120"]).is_err());
+        }
+    }
+    #[test]
+    fn explicit_duration_even_thirty_is_never_profile_saved() {
+        for value in ["30", "120", "300"] {
+            let command = Cli::try_parse_from(
+                CLIENT
+                    .into_iter()
+                    .chain(["--wayland-control-duration", value]),
+            )
+            .unwrap()
+            .command;
+            assert!(
+                profile_from_command(command)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("consent cannot be saved")
+            );
+        }
     }
 }

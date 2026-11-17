@@ -3096,17 +3096,88 @@ mod tests {
         subscription: Arc<Mutex<Option<UnixStream>>>,
     }
 
+    static FAKE_JWM_DIRECTORY_SEQUENCE: std::sync::atomic::AtomicU64 =
+        std::sync::atomic::AtomicU64::new(0);
+
+    fn reserve_fake_jwm_directory(
+        root: &std::path::Path,
+        sequence: &std::sync::atomic::AtomicU64,
+    ) -> std::io::Result<PathBuf> {
+        // Wall-clock readings are not unique between parallel tests. Exclusive
+        // directory creation also protects against leftovers from a reused PID:
+        // never attach to, unlink, or later clean up someone else's socket.
+        for _ in 0..1024 {
+            // The counter reduces collisions; create_dir is the ownership
+            // boundary even if the counter wraps or a PID is reused.
+            let serial = sequence.fetch_add(1, Ordering::Relaxed);
+            let dir = root.join(format!(
+                "jwm-bridge-pairing-test-{}-{serial}",
+                std::process::id(),
+            ));
+            match std::fs::create_dir(&dir) {
+                Ok(()) => return Ok(dir),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error),
+            }
+        }
+        Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "fake jwm directory allocation exhausted",
+        ))
+    }
+
+    #[test]
+    fn fake_jwm_directory_preserves_existing_paths_and_skips_collisions() {
+        let root = reserve_fake_jwm_directory(&std::env::temp_dir(), &FAKE_JWM_DIRECTORY_SEQUENCE)
+            .unwrap();
+        let occupied = root.join(format!("jwm-bridge-pairing-test-{}-0", std::process::id()));
+        std::fs::create_dir(&occupied).unwrap();
+        let sentinel = occupied.join("do-not-replace");
+        std::fs::write(&sentinel, "original owner").unwrap();
+        let sequence = std::sync::atomic::AtomicU64::new(0);
+        let reserved = reserve_fake_jwm_directory(&root, &sequence).unwrap();
+        assert_ne!(reserved, occupied);
+        assert!(reserved.is_dir());
+        assert_eq!(std::fs::read_to_string(sentinel).unwrap(), "original owner");
+        assert_eq!(sequence.load(Ordering::Relaxed), 2);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn fake_jwm_directory_parallel_allocations_have_distinct_socket_paths() {
+        let root = reserve_fake_jwm_directory(&std::env::temp_dir(), &FAKE_JWM_DIRECTORY_SEQUENCE)
+            .unwrap();
+        let sequence = std::sync::atomic::AtomicU64::new(0);
+        let barrier = std::sync::Barrier::new(8);
+        let paths = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..8)
+                .map(|_| {
+                    scope.spawn(|| {
+                        barrier.wait();
+                        (0..32)
+                            .map(|_| reserve_fake_jwm_directory(&root, &sequence).unwrap())
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .flat_map(|handle| handle.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        let sockets: std::collections::BTreeSet<_> =
+            paths.iter().map(|path| path.join("jwm-ipc.sock")).collect();
+        assert_eq!(paths.len(), 256);
+        assert_eq!(sockets.len(), paths.len());
+        assert!(paths.iter().all(|path| path.is_dir()));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     impl FakeJwm {
         fn start(session_json: Value) -> FakeJwm {
-            let dir = std::env::temp_dir().join(format!(
-                "jwm-bridge-pairing-test-{}-{}",
-                std::process::id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|since| since.as_nanos())
-                    .unwrap_or(0)
-            ));
-            std::fs::create_dir_all(&dir).expect("test directory");
+            let dir =
+                reserve_fake_jwm_directory(&std::env::temp_dir(), &FAKE_JWM_DIRECTORY_SEQUENCE)
+                    .expect("reserve exclusive test directory");
             let socket = dir.join("jwm-ipc.sock");
             let listener = UnixListener::bind(&socket).expect("bind fake jwm socket");
             let (tx, requests) = std::sync::mpsc::channel();

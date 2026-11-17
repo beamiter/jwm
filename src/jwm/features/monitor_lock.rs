@@ -328,6 +328,7 @@ impl Jwm {
         // and the lease guard keeps it exactly because a monitor is locked —
         // so the lock has to be on the books by then. It also puts the
         // focus refusals in force for the move that follows.
+        self.remote_resize_grants.retain_live(|_| false);
         self.features.monitor_lock.lock(target, rect);
 
         // Expose and the tag overview draw the windows they were entered

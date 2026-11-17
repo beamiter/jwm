@@ -413,6 +413,9 @@ impl WMController for Jwm {
     }
 
     fn on_unmap_notify(&mut self, backend: &mut dyn Backend, win: WindowId, from_configure: bool) {
+        if let Some(key) = self.wintoclient(win) {
+            self.remote_resize_grants.revoke_client(key);
+        }
         self.override_redirect_windows.remove(&win);
         self.or_window_geometries.remove(&win);
         if backend.capabilities().supports_client_list && self.wintoclient(win).is_none() {
@@ -424,6 +427,9 @@ impl WMController for Jwm {
     }
 
     fn on_destroy_notify(&mut self, backend: &mut dyn Backend, win: WindowId) {
+        if let Some(key) = self.wintoclient(win) {
+            self.remote_resize_grants.revoke_client(key);
+        }
         self.override_redirect_windows.remove(&win);
         self.or_window_geometries.remove(&win);
         if let Err(e) = self.destroynotify(backend, win) {
@@ -3452,6 +3458,7 @@ mod tests {
             running: AtomicBool::new(true),
             is_restarting: AtomicBool::new(false),
             restart_state: crate::jwm::restart_state::PendingRestartState::default(),
+            remote_resize_grants: Default::default(),
             eva: Default::default(),
             last_mouse_root: (0.0, 0.0),
             drag_ctl: None,

@@ -219,8 +219,25 @@ fn finalize_concat_segments(
     segments: &[String],
     run_concat: impl FnOnce(&std::path::Path) -> Result<(), String>,
 ) -> Result<(), String> {
-    std::fs::write(list_path, list_content)
-        .map_err(|error| format!("cannot write concat list {}: {error}", list_path.display()))?;
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    // The sidecar name is predictable. Never truncate an existing file or
+    // follow a symlink, and only clean up after our exclusive create succeeds.
+    let mut list = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(list_path)
+        .map_err(|error| format!("cannot create concat list {}: {error}", list_path.display()))?;
+    if let Err(error) = list.write_all(list_content.as_bytes()) {
+        let _ = std::fs::remove_file(list_path);
+        return Err(format!(
+            "cannot write concat list {}: {error}",
+            list_path.display()
+        ));
+    }
+    drop(list);
     let result = run_concat(list_path);
     if let Err(error) = std::fs::remove_file(list_path) {
         warn!(
@@ -1691,6 +1708,7 @@ impl Jwm {
                 // A lock is terminal, never a page the Hub can be backed out
                 // to, so the Escape target goes with the panel it belonged to.
                 self.features.system_ui_return_to_hub = false;
+                self.remote_resize_grants.retain_live(|_| false);
                 self.features.system_ui = crate::jwm::features::SystemUiState::lock();
                 self.features
                     .system_ui
@@ -3609,6 +3627,7 @@ impl Jwm {
         // On X11, never display a pretend lock if the exclusive keyboard grab
         // failed. Wayland-udev performs interception in its input pipeline.
         self.prepare_system_ui(backend, "lock screen", SystemUiPointerGrab::Buttons)?;
+        self.remote_resize_grants.retain_live(|_| false);
         self.features.system_ui = crate::jwm::features::SystemUiState::lock();
         self.features
             .system_ui
@@ -5575,7 +5594,16 @@ impl Jwm {
     fn finalize_recording(segments: Vec<String>, output_path: String) {
         use crate::jwm::features::recording_plan::{FinalizationPlan, plan_finalization};
 
-        let plan = plan_finalization(&segments, &output_path);
+        let plan = match plan_finalization(&segments, &output_path) {
+            Ok(plan) => plan,
+            Err(error) => {
+                log::error!(
+                    "[recording] {error}; preserving {} source segments",
+                    segments.len()
+                );
+                return;
+            }
+        };
         let worker = std::thread::Builder::new()
             .name("jwm-record-final".to_owned())
             .spawn(move || {
@@ -6129,6 +6157,47 @@ mod recording_finalization_tests {
     }
 
     #[test]
+    fn existing_concat_paths_are_never_overwritten_or_removed() {
+        use std::os::unix::fs::symlink;
+        for kind in ["file", "symlink", "dangling", "directory", "fifo"] {
+            let scratch = scratch_dir();
+            let list = scratch.join("output.concat.txt");
+            let target = scratch.join("unrelated.txt");
+            let segment = scratch.join("segment.mp4");
+            std::fs::write(&target, b"unrelated data").unwrap();
+            std::fs::write(&segment, b"recorded data").unwrap();
+            match kind {
+                "file" => std::fs::write(&list, b"existing data").unwrap(),
+                "symlink" => symlink(&target, &list).unwrap(),
+                "dangling" => symlink(scratch.join("missing"), &list).unwrap(),
+                "fifo" => {
+                    use std::os::unix::ffi::OsStrExt;
+                    let path = std::ffi::CString::new(list.as_os_str().as_bytes()).unwrap();
+                    // SAFETY: path is a live NUL-terminated test-only pathname.
+                    assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+                }
+                _ => std::fs::create_dir(&list).unwrap(),
+            }
+            let result = finalize_concat_segments(
+                &list,
+                "new concat data",
+                &scratch.join("output.mp4").to_string_lossy(),
+                &[segment.to_string_lossy().into_owned()],
+                |_| panic!("must not run concat when the list path already exists"),
+            );
+            assert!(result.is_err(), "{kind}");
+            assert!(std::fs::symlink_metadata(&list).is_ok(), "{kind}");
+            if kind == "file" {
+                assert_eq!(std::fs::read(&list).unwrap(), b"existing data");
+            }
+            assert_eq!(std::fs::read(&target).unwrap(), b"unrelated data");
+            assert_eq!(std::fs::read(&segment).unwrap(), b"recorded data");
+            assert!(!scratch.join("missing").exists());
+            std::fs::remove_dir_all(scratch).unwrap();
+        }
+    }
+
+    #[test]
     fn failed_concat_preserves_every_source_segment() {
         let scratch = scratch_dir();
         let first = scratch.join("first.mp4");
@@ -6175,7 +6244,16 @@ mod recording_finalization_tests {
             "file 'first.mp4'\nfile 'output.mp4'",
             &output.to_string_lossy(),
             &segments,
-            |_| {
+            |list_path| {
+                use std::os::unix::fs::PermissionsExt;
+                assert_eq!(
+                    std::fs::read_to_string(list_path).unwrap(),
+                    "file 'first.mp4'\nfile 'output.mp4'"
+                );
+                assert_eq!(
+                    std::fs::metadata(list_path).unwrap().permissions().mode() & 0o077,
+                    0
+                );
                 std::fs::write(&output, b"merged").unwrap();
                 Ok(())
             },
