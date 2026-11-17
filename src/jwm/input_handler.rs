@@ -4485,17 +4485,19 @@ impl Jwm {
                     client.geometry.x,
                     client.geometry.y
                 );
-                let changes = WindowChanges {
-                    x: Some(client.geometry.x),
-                    y: Some(client.geometry.y),
-                    width: Some(client.geometry.w as u32),
-                    height: Some(client.geometry.h as u32),
-                    border_width: Some(client.geometry.border_w.max(0) as u32),
-                    ..Default::default()
-                };
-                backend
-                    .window_ops()
-                    .apply_window_changes(client.win, changes)?;
+                // Dock geometry is WM-owned. Reapply the authoritative rectangle
+                // and acknowledge even a rejected/no-op request: the X server
+                // emits no real ConfigureNotify when geometry stays unchanged,
+                // leaving GTK's outstanding resize and frame clock frozen.
+                // `configure` sends one synthetic reply on both X11 backends.
+                backend.window_ops().configure(
+                    client.win,
+                    client.geometry.x,
+                    client.geometry.y,
+                    client.geometry.w as u32,
+                    client.geometry.h as u32,
+                    client.geometry.border_w.max(0) as u32,
+                )?;
             }
             return Ok(());
         }
@@ -5497,6 +5499,7 @@ mod tests {
         resize_geometry: Mutex<Option<Geometry>>,
         resize_unmapped: bool,
         resize_fail_configure: bool,
+        configure_attempts: std::sync::atomic::AtomicUsize,
         resize_race_position: bool,
         replies: Mutex<Vec<ConfigureReply>>,
         applied: Mutex<Vec<(WindowId, WindowChanges)>>,
@@ -5544,6 +5547,8 @@ mod tests {
             height: u32,
             border: u32,
         ) -> Result<(), BackendError> {
+            self.configure_attempts
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             if self.resize_fail_configure {
                 return Err(BackendError::Message("test configure failure".into()));
             }
@@ -7758,6 +7763,130 @@ mod tests {
         let client_key = jwm.insert_client(client);
         jwm.attach_to_monitor(client_key, monitor);
         client_key
+    }
+
+    #[test]
+    fn dock_configure_requests_acknowledge_authoritative_geometry_once() {
+        // Include border/stack-only and no-op requests, not just resize: none
+        // may silently leave a dock client waiting for its configure reply.
+        let masks = [
+            ConfigWindowBits::WIDTH | ConfigWindowBits::HEIGHT,
+            ConfigWindowBits::X | ConfigWindowBits::Y,
+            ConfigWindowBits::BORDER_WIDTH,
+            ConfigWindowBits::SIBLING | ConfigWindowBits::STACK_MODE,
+            ConfigWindowBits::all(),
+            ConfigWindowBits::empty(),
+        ];
+        for compositor in [false, true] {
+            for border in [-1, 0, 3] {
+                for mask in masks {
+                    for same in [false, true] {
+                        for fail in [false, true] {
+                            let mut backend = ConfigureReplyBackend::new();
+                            let mut jwm =
+                                Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+                            backend.compositor_enabled = compositor;
+                            let monitor = jwm.state.monitor_order[0];
+                            let window = WindowId::from_raw(0x7fd0);
+                            let key = add_floating_configure_client(
+                                &mut jwm, window, monitor, border, false,
+                            );
+                            let client = &mut jwm.state.clients[key];
+                            client.state.is_dock = true;
+                            client.geometry.x = 5;
+                            client.geometry.y = 5;
+                            client.geometry.w = 1270;
+                            client.geometry.h = 42;
+                            client.geometry.old_x = 11;
+                            client.geometry.old_y = 22;
+                            client.geometry.old_w = 33;
+                            client.geometry.old_h = 44;
+                            client.geometry.old_border_w = 7;
+                            let before = client.geometry.clone();
+                            backend.window_ops.replies.lock().unwrap().clear();
+                            backend.window_ops.applied.lock().unwrap().clear();
+                            backend
+                                .window_ops
+                                .configure_attempts
+                                .store(0, std::sync::atomic::Ordering::Relaxed);
+                            backend.window_ops.resize_fail_configure = fail;
+                            let request =
+                                WindowChanges {
+                                    x: mask.contains(ConfigWindowBits::X).then_some(if same {
+                                        5
+                                    } else {
+                                        0
+                                    }),
+                                    y: mask.contains(ConfigWindowBits::Y).then_some(if same {
+                                        5
+                                    } else {
+                                        0
+                                    }),
+                                    width: mask
+                                        .contains(ConfigWindowBits::WIDTH)
+                                        .then_some(if same { 1270 } else { 1280 }),
+                                    height: mask
+                                        .contains(ConfigWindowBits::HEIGHT)
+                                        .then_some(if same { 42 } else { 60 }),
+                                    border_width: mask
+                                        .contains(ConfigWindowBits::BORDER_WIDTH)
+                                        .then_some(if same { border.max(0) as u32 } else { 9 }),
+                                    sibling: mask
+                                        .contains(ConfigWindowBits::SIBLING)
+                                        .then_some(WindowId::from_raw(0x7fd1)),
+                                    stack_mode: mask
+                                        .contains(ConfigWindowBits::STACK_MODE)
+                                        .then_some(crate::backend::api::StackMode::Above),
+                                };
+                            let outcome = jwm.handle_regular_configure_request_params(
+                                &mut backend,
+                                key,
+                                mask.bits(),
+                                request,
+                            );
+                            if fail {
+                                assert!(
+                                    outcome
+                                        .unwrap_err()
+                                        .to_string()
+                                        .contains("test configure failure")
+                                );
+                            } else {
+                                outcome.unwrap();
+                            }
+                            assert_eq!(jwm.state.clients[key].geometry, before);
+                            assert_eq!(
+                                backend
+                                    .window_ops
+                                    .configure_attempts
+                                    .load(std::sync::atomic::Ordering::Relaxed),
+                                1
+                            );
+                            assert!(
+                                backend.window_ops.applied.lock().unwrap().is_empty(),
+                                "must not apply separately before configure"
+                            );
+                            let replies = backend.window_ops.replies.lock().unwrap();
+                            if fail {
+                                assert!(replies.is_empty());
+                            } else {
+                                assert_eq!(
+                                    *replies,
+                                    vec![ConfigureReply {
+                                        window,
+                                        x: 5,
+                                        y: 5,
+                                        width: 1270,
+                                        height: 42,
+                                        border: border.max(0) as u32,
+                                    }]
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     fn assert_fullscreen_configure_request_is_rejected(hidden: bool) {

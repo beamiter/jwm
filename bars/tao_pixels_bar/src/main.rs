@@ -479,17 +479,17 @@ impl App {
     }
 
     fn place_on_output(&mut self) {
-        if let Some(window) = self.window.as_ref() {
-            if let Some(monitor) = window.current_monitor() {
-                let origin = monitor.position();
-                let size = monitor.size();
-                self.default_monitor = MonitorGeometry {
-                    x: origin.x,
-                    y: origin.y,
-                    width: size.width,
-                    height: size.height,
-                };
-            }
+        if let Some(window) = self.window.as_ref()
+            && let Some(monitor) = window.current_monitor()
+        {
+            let origin = monitor.position();
+            let size = monitor.size();
+            self.default_monitor = MonitorGeometry {
+                x: origin.x,
+                y: origin.y,
+                width: size.width,
+                height: size.height,
+            };
         }
         let config = self.bar.config();
         match BarPlacement::at_edge(
@@ -712,9 +712,6 @@ fn window_size(conn: &RustConnection, xid: u32) -> Option<PhysicalSize<u32>> {
     ))
 }
 
-/// The X11 window id behind the tao window, if this is an X11 session with a
-/// realized window — tao's GTK backend has no id to give out before that.
-
 fn window_is_native_wayland(window: &impl raw_window_handle::HasWindowHandle) -> bool {
     matches!(
         window.window_handle().map(|handle| handle.as_raw()),
@@ -722,6 +719,8 @@ fn window_is_native_wayland(window: &impl raw_window_handle::HasWindowHandle) ->
     )
 }
 
+/// The X11 window id behind the tao window, if this is an X11 session with a
+/// realized window — tao's GTK backend has no id to give out before that.
 fn window_xid(window: &impl raw_window_handle::HasWindowHandle) -> Option<u32> {
     use raw_window_handle::RawWindowHandle;
     match window.window_handle().ok()?.as_raw() {

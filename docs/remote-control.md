@@ -220,6 +220,9 @@ missing parent. `keygen` and `doctor` do not create parent directories or repair
 permissions.
 Do not generate two different keys for the same connection. Run `doctor` again
 after copying the key; its output never contains key bytes.
+A key path replaced by a FIFO between the initial check and opening is rejected
+without waiting for a FIFO writer. Ownership, private permissions and symlink
+rejection are unchanged; this is not a timeout for slow filesystem/device I/O.
 
 Start with viewing only:
 
@@ -1327,12 +1330,31 @@ the terminal. The receiver rebuilds the tree inside a fresh private directory:
 every name component is checked, nothing is created through a symlink, and
 every file and folder must be new, so a peer cannot write outside it.
 
+Selected top-level items with the same name receive a numeric suffix, such as
+`name (2)`. For names near the 255-byte component limit, the duplicate name
+is shortened to make room for the suffix; valid UTF-8 is not split mid-character.
+The first name and all source files remain unchanged. Different shortened names
+are still checked for collisions before the transfer is sent.
+
+If a source changes into a FIFO or another non-regular object after the copy
+is measured, streaming refuses it instead of waiting for a FIFO writer. A
+source rejected during the initial walk is skipped; a change discovered while
+streaming fails that transfer because its contents were already announced.
+This is not a filesystem snapshot or a timeout for slow filesystem/device I/O.
+
 **Size.** `--clipboard-file-limit SIZE` (default `2G`, on `host`, `connect`
 and `ssh`) bounds one file copy; each end enforces its own limit, as sender
 and as receiver, and checks it before reading a byte. `0` shares text and
 images only. A receiver also refuses a copy that would leave less than
 256 MiB free on its disk. A copy over the limit is not shared and the title
 says `copy not shared: too large`.
+
+The sender scans at most 100,000 source entries per copy across all selected
+roots and their descendants. Skipped symlinks, unreadable entries and directory
+read errors count too. The bound applies while enumerating a directory, before
+sorting it, so a huge folder cannot first allocate an unbounded child list.
+Exceeding the scan limit rejects the whole copy rather than sharing a truncated
+tree. This bounds enumeration work and retained entries, not filesystem I/O time.
 
 **Flow control.** Images and files travel in 128 KiB chunks. The receiver
 acknowledges a chunk only once it is written, and the sender keeps at most
