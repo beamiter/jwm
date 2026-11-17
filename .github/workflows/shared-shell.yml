@@ -1,10 +1,15 @@
 name: Shared sidebar shell native matrix
 on:
-  # Only regressions in the two native adapters currently under investigation
-  # or their acceptance fixture should schedule this expensive full matrix.
+  # Keep push coverage focused, but include the lifecycle/animation paths
+  # exercised by the real daemon restart acceptance below.
   push:
     branches: [master]
     paths:
+      - 'src/jwm/restart_preflight.rs'
+      - 'src/jwm/window_state.rs'
+      - 'src/jwm/lifecycle.rs'
+      - 'src/core/animation.rs'
+      - 'scripts/test-leptos-daemon-workflow.py'
       - 'bars/xilem_bar/**'
       - 'bars/tao_glow_bar/**'
       - 'bridge/src/player/**'
@@ -28,6 +33,7 @@ on:
   workflow_dispatch:
   pull_request:
     paths:
+      - 'scripts/test-leptos-daemon-workflow.py'
       - 'bars/**'
       - 'bridge/src/player/**'
       - 'crates/jwm_shell/**'
@@ -70,6 +76,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
+      - name: Verify daemon acceptance trigger and failure contracts
+        run: python3 scripts/test-leptos-daemon-workflow.py
       - name: Test bounded passive frontend failure evidence
         run: python3 scripts/test_frontend_failure_evidence.py
       - id: inventory

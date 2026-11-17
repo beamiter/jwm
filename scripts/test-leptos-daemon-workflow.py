@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Static fail-closed contracts for the independent Leptos acceptance steps."""
 import itertools
+import fnmatch
 from pathlib import Path
 import re
 import unittest
@@ -33,6 +34,20 @@ def evaluate(expression, cancelled, bar, outcomes):
 
 
 class LeptosWorkflowTests(unittest.TestCase):
+    def test_master_push_covers_restart_paths_without_a_blanket_source_trigger(self):
+        push = SOURCE.split('  push:\n', 1)[1].split('  workflow_dispatch:', 1)[0]
+        paths = re.findall(r"^      - '([^']+)'$", push, re.M)
+        self.assertIn('branches: [master]', push)
+        for path in ['src/jwm/restart_preflight.rs', 'src/jwm/window_state.rs',
+                     'src/jwm/lifecycle.rs', 'src/core/animation.rs',
+                     'scripts/test-shared-sidebar-shell-daemon.py',
+                     'scripts/test-leptos-daemon-workflow.py']:
+            with self.subTest(path=path):
+                self.assertTrue(any(fnmatch.fnmatchcase(path, pattern) for pattern in paths))
+        for path in ['src/jwm/features/recording_plan.rs', 'README.md']:
+            self.assertFalse(any(fnmatch.fnmatchcase(path, pattern) for pattern in paths))
+        self.assertIn('run: python3 scripts/test-leptos-daemon-workflow.py', SOURCE)
+
     def test_build_requires_real_prerequisites_not_prior_runtime_success(self):
         self.assertIn('Build JWM and the independent host', STEPS['native_build'])
         self.assertIn('Install web frontend tools', STEPS['web_tools'])
