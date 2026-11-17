@@ -5594,7 +5594,16 @@ impl Jwm {
     fn finalize_recording(segments: Vec<String>, output_path: String) {
         use crate::jwm::features::recording_plan::{FinalizationPlan, plan_finalization};
 
-        let plan = plan_finalization(&segments, &output_path);
+        let plan = match plan_finalization(&segments, &output_path) {
+            Ok(plan) => plan,
+            Err(error) => {
+                log::error!(
+                    "[recording] {error}; preserving {} source segments",
+                    segments.len()
+                );
+                return;
+            }
+        };
         let worker = std::thread::Builder::new()
             .name("jwm-record-final".to_owned())
             .spawn(move || {

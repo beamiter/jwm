@@ -5,6 +5,13 @@ monorepo use independent Semantic Versions.
 
 ## [Unreleased]
 
+### Preserve recordings with unrepresentable concat paths
+
+- Multi-segment finalization rejects segment names containing line breaks or
+  NUL before creating a manifest. ffconcat cannot represent these names
+  faithfully and could otherwise open a different file. All source segments
+  are retained; single-segment recordings and quoted/Unicode paths are unchanged.
+
 ### Preserve existing recording concat sidecars
 
 - Multi-segment recording finalization exclusively creates its private concat
