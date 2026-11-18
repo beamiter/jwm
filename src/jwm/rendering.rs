@@ -384,6 +384,41 @@ impl Jwm {
         let _ = backend.compositor_render_frame(&scene, focused);
     }
 
+    /// Submit the first dismissal visual in the same action that releases input.
+    /// The ordinary immediate path skips active animations; waiting for the next
+    /// full update can otherwise leave the previous (occluded) scene presented.
+    pub(super) fn present_terminal_dismissal(&mut self, backend: &mut dyn Backend, key: ClientKey) {
+        if !backend.has_compositor()
+            || self.scratchpads.get("term") != Some(&key)
+            || !self
+                .animations
+                .active
+                .get(&key)
+                .is_some_and(|a| a.kind == AnimationKind::Hide)
+        {
+            return;
+        }
+        let now = Instant::now();
+        let overrides = self
+            .animations
+            .active
+            .iter()
+            .map(|(&key, animation)| (key, animation.sample(now).0))
+            .collect();
+        self.sync_window_groups(backend);
+        let scene = self.build_compositor_scene(backend, &overrides);
+        let focused = self
+            .get_selected_client_key()
+            .and_then(|key| self.state.clients.get(key))
+            .map(|client| client.win.raw());
+        // Keep the timer-owned trajectory and cleanup intact; do not run the
+        // hardware/background polling performed by tick_animations here.
+        match backend.compositor_render_frame(&scene, focused) {
+            Ok(rendered) => log::info!("terminal dismissal first frame: rendered={rendered}"),
+            Err(error) => log::warn!("terminal dismissal first frame failed: {error:?}"),
+        }
+    }
+
     pub(super) fn tick_animations(&mut self, backend: &mut dyn Backend) {
         let now = Instant::now();
         // --- Night Light: update color temperature once per minute ---

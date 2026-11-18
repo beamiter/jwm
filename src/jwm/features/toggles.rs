@@ -5960,6 +5960,7 @@ impl Jwm {
                 if let Some(mk) = mon_key {
                     self.arrange(backend, Some(mk));
                 }
+                self.present_terminal_dismissal(backend, sp_key);
                 self.broadcast_window_state_ipc(backend, sp_key);
                 if let Some(mk) = mon_key {
                     self.broadcast_monitor_bar_ipc(backend, mk);
