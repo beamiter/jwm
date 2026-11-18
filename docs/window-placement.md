@@ -93,6 +93,12 @@ For the `term` dropdown exit only, `ease-out`, `bounce` and `elastic` map to
 `ease-in-out`; explicit `linear`, `ease-in` and `ease-in-out` remain unchanged.
 The configured duration, speed/reduced-motion settings and remaining-distance
 shortening on reversal are retained. Reversal preserves position, not velocity.
+While the `term` dismissal is composited, its visual remains above managed
+application windows (including Above/fullscreen/PiP) until completion. This is
+only a temporary visual layer: focus and the input stack are released immediately,
+and the visual disappears on completion. Status bars, menus and lock-screen
+protection remain above it. The non-composited fallback has no independent visual
+layer and retains its native stacking behavior.
 This is the shortcut's hide/reveal animation, not a replacement for the generic
 animation when a terminal process actually exits. Other named scratchpads and ordinary window transitions are unchanged.
 

@@ -685,8 +685,8 @@ impl Jwm {
             // when restack() hasn't run yet for this monitor. Iterate borrowed
             // storage directly to avoid cloning/collecting a temporary Vec every frame.
             if !closing_scratchpads.is_empty() {
-                // Reuse the layer planner so a closing dropdown still stays
-                // below Above, focused fullscreen and PiP windows.
+                // Start with the normal layer policy. The dismissing terminal
+                // visual alone is promoted above apps after scene substitution.
                 for win_id in
                     self.monitor_stacking_order(mon_key, |key| closing_scratchpads.contains(&key))
                 {
@@ -764,6 +764,47 @@ impl Jwm {
         }
 
         self.apply_touchpad_preview_scene(&mut scene);
+        // Dismissal releases the real input stack immediately. Keep only the
+        // terminal's in-flight visual above applications, including a new focus,
+        // after workspace-preview substitution too. Security/system UI remains
+        // above this application-only layer; no native window is raised.
+        if let Some(&key) = self.scratchpads.get("term")
+            && closing_scratchpads.contains(&key)
+            && !self.features.system_ui.is_locked()
+            && !backend.compositor_session_locked()
+            && !self.client_is_on_locked_monitor(key)
+            && let Some(client) = self.state.clients.get(key)
+            && let Some(rect) = visual_overrides.get(&key)
+        {
+            scene.retain(|entry| entry.0 != client.win.raw());
+            let status_bar_name = CONFIG.load().status_bar_name().to_owned();
+            let mut system_windows = Vec::new();
+            scene.retain(|entry| {
+                let window = WindowId::from_raw(entry.0);
+                let protected = self.override_redirect_windows.contains(&window)
+                    || secondary_bar_wins.contains(&window)
+                    || self
+                        .state
+                        .win_to_client
+                        .get(&window)
+                        .and_then(|key| self.state.clients.get(*key))
+                        .is_some_and(|client| {
+                            client.state.is_dock || client.is_status_bar(&status_bar_name)
+                        });
+                if protected {
+                    system_windows.push(*entry);
+                }
+                !protected
+            });
+            scene.push((
+                client.win.raw(),
+                rect.x,
+                rect.y,
+                rect.w.max(1) as u32,
+                rect.h.max(1) as u32,
+            ));
+            scene.extend(system_windows);
+        }
         scene
     }
 

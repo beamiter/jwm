@@ -1951,6 +1951,124 @@ mod scratchpad_reveal_tests {
     }
 
     #[test]
+    fn dismissing_terminal_stays_above_overlapping_apps_but_below_system_ui() {
+        let (mut jwm, key, window, monitor) = jwm_with_cross_monitor_scratchpad(false);
+        let mut backend = ScratchpadBackend::new();
+        jwm.reveal_and_focus(&mut backend, window).unwrap();
+        jwm.animations.remove(key);
+        let top = jwm.state.monitors[monitor].geometry.m_y;
+        let (x, y, w, h) = jwm.state.clients[key].rect();
+        let mut fullscreen_key = None;
+        for (id, above, pip, fullscreen) in [
+            (0x710, true, false, false),
+            (0x713, false, false, true),
+            (0x711, false, true, false),
+        ] {
+            let mut covering = WMClient::new(WindowId::from_raw(id));
+            covering.mon = Some(monitor);
+            covering.state.tags = jwm.state.monitors[monitor].get_active_tags();
+            covering.state.is_floating = true;
+            covering.state.is_above = above;
+            covering.state.is_pip = pip;
+            covering.state.is_fullscreen = fullscreen;
+            covering.geometry.x = x;
+            covering.geometry.y = top;
+            covering.geometry.w = w;
+            covering.geometry.h = y + h - top;
+            let covering = jwm.insert_client(covering);
+            jwm.attach_to_monitor(covering, monitor);
+            if fullscreen {
+                fullscreen_key = Some(covering);
+            }
+        }
+        let dock_window = WindowId::from_raw(0x714);
+        let mut dock = WMClient::new(dock_window);
+        dock.mon = Some(monitor);
+        dock.state.tags = jwm.state.monitors[monitor].get_active_tags();
+        dock.state.is_dock = true;
+        dock.state.is_floating = true;
+        dock.geometry.x = x + 60;
+        dock.geometry.y = top + 20;
+        dock.geometry.w = 30;
+        dock.geometry.h = 30;
+        let dock = jwm.insert_client(dock);
+        jwm.attach_to_monitor(dock, monitor);
+        // System UI stays above the application-only transition layer.
+        let overlay = WindowId::from_raw(0x712);
+        jwm.override_redirect_windows.push(overlay);
+        jwm.or_window_geometries
+            .insert(overlay, (x + 20, top + 20, 30, 30));
+        jwm.togglescratchpad(&mut backend, &WMArgEnum::StringVec(vec!["term".into()]))
+            .unwrap();
+        jwm.state.monitors[monitor].set_selected_client_for_current_tag(fullscreen_key);
+        let animation = jwm.animations.active[&key].clone();
+        let input_stack = jwm.last_stacking[monitor].clone();
+        assert!(!input_stack.contains(&window));
+        // Raster a probe pixel from the actual bottom-to-top scene using solid
+        // synthetic client colors; this tests occlusion for every sampled frame,
+        // not merely the order of a separate model of the scene.
+        let pixel = |scene: &[(u64, i32, i32, u32, u32)], px: i32, py: i32| {
+            scene
+                .iter()
+                .filter(|entry| {
+                    px >= entry.1
+                        && py >= entry.2
+                        && i64::from(px) < i64::from(entry.1) + i64::from(entry.3)
+                        && i64::from(py) < i64::from(entry.2) + i64::from(entry.4)
+                })
+                .map(|entry| entry.0)
+                .next_back()
+        };
+        let mut visible_frames = 0;
+        for step in 0..=100 {
+            let (rect, _) = animation
+                .sample(animation.started_at + animation.duration.mul_f64(f64::from(step) / 100.));
+            let scene = jwm.build_compositor_scene(&backend, &HashMap::from([(key, rect)]));
+            assert_eq!(
+                scene.iter().filter(|entry| entry.0 == window.raw()).count(),
+                1
+            );
+            let probe_y = rect.y.max(top) + 2;
+            if probe_y < rect.y + rect.h {
+                visible_frames += 1;
+                assert_eq!(
+                    pixel(&scene, x + 2, probe_y),
+                    Some(window.raw()),
+                    "terminal occluded at frame {step}"
+                );
+            }
+            assert_eq!(pixel(&scene, x + 22, top + 22), Some(overlay.raw()));
+            assert_eq!(pixel(&scene, x + 62, top + 22), Some(dock_window.raw()));
+            assert_eq!(jwm.last_stacking[monitor], input_stack);
+            assert_ne!(jwm.get_selected_client_key(), Some(key));
+        }
+        assert!(visible_frames > 50);
+        // Do not introduce this application-layer privilege on a locked output.
+        let monitor_num = jwm.state.monitors[monitor].num;
+        jwm.features
+            .monitor_lock
+            .lock(monitor_num, (x, top, w, y + h - top));
+        let scene = jwm.build_compositor_scene(&backend, &HashMap::from([(key, animation.from)]));
+        assert_eq!(pixel(&scene, x + 2, y + 2), Some(0x711));
+        jwm.features.monitor_lock.unlock(monitor_num);
+        // The same visual must not acquire this privilege under another name.
+        jwm.scratchpads.remove("term");
+        jwm.scratchpads.insert("music".into(), key);
+        let scene = jwm.build_compositor_scene(&backend, &HashMap::from([(key, animation.from)]));
+        assert_eq!(pixel(&scene, x + 2, y + 2), Some(0x711));
+        jwm.scratchpads.remove("music");
+        jwm.scratchpads.insert("term".into(), key);
+        let animation = jwm.animations.active.get_mut(&key).unwrap();
+        animation.started_at = Instant::now() - animation.duration - Duration::from_secs(1);
+        jwm.last_battery_poll = Some(Instant::now());
+        jwm.last_idle_poll = Some(Instant::now());
+        jwm.tick_animations(&mut backend);
+        let scene = jwm.build_compositor_scene(&backend, &HashMap::new());
+        assert!(!scene.iter().any(|entry| entry.0 == window.raw()));
+        assert_eq!(pixel(&scene, x + 2, top + 2), Some(0x711));
+    }
+
+    #[test]
     fn dropdown_rapid_reversals_keep_position_focus_and_finish_cleanup() {
         let (mut jwm, key, window, monitor) = jwm_with_cross_monitor_scratchpad(false);
         let mut backend = ScratchpadBackend::new();
