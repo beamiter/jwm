@@ -257,6 +257,23 @@ jobs:
           cargo build --locked -p jwm --bin jwm --bin jwm-tool
           python3 scripts/test-restart-x11.py --jwm target/debug/jwm --compositor both --triggers hotkey,ipc --stale-published-owner foreign
 
+      - name: Terminal exit full-animation overlap pixels
+        timeout-minutes: 5
+        run: |
+          python3 scripts/test-terminal-exit-x11-harness.py -v
+          for backend in x11rb xcb; do
+            python3 scripts/test-terminal-exit-x11.py --jwm target/debug/jwm \
+              --backend "$backend" --output "artifacts/terminal-exit-$backend"
+          done
+
+      - name: Retain terminal exit overlap frames
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: terminal-exit-overlap
+          path: artifacts/terminal-exit-*
+          if-no-files-found: ignore
+
       - name: Recycled drawable and live remap pixel regressions
         run: |
           for backend in x11rb xcb; do
