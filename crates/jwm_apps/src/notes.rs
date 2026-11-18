@@ -209,6 +209,29 @@ impl Notes {
         };
         format!("{}{title}", if self.dirty { "• " } else { "" })
     }
+    pub fn editor_status(&mut self) -> String {
+        if self.managed {
+            return self.status.clone();
+        }
+        let (line, column) = self.editor.position();
+        let raw_endings = self.editor.line_endings();
+        let (bom, crlf) = self
+            .document
+            .as_ref()
+            .map(|d| (d.bom, d.crlf))
+            .unwrap_or_default();
+        let endings = match (crlf, raw_endings) {
+            (true, "LF") => "CRLF",
+            // The existing CRLF save mode prefixes every LF with CR.
+            (true, "CRLF") => "混合换行",
+            _ => raw_endings,
+        };
+        format!(
+            "行 {line} · 字素列 {column} · UTF-8{} · {endings} · {}",
+            if bom { " BOM" } else { "" },
+            self.status
+        )
+    }
     pub fn edited(&mut self) {
         if self.find.enabled {
             self.find.document_edited(&mut self.editor);

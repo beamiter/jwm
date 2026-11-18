@@ -43,6 +43,7 @@ enum Action {
     FindClose,
     Edit,
     TogglePreview,
+    ToggleCodeView,
     Preview,
     Note(PathBuf),
     Cancel,
@@ -82,7 +83,7 @@ struct Picker {
     offset: usize,
 }
 enum Dialog {
-    Picker(Picker),
+    Picker(Box<Picker>),
     Error(String),
     Unsaved,
     Trash,
@@ -382,6 +383,22 @@ impl App {
                 false,
             );
         }
+        if let Document::Notes(n) = &self.document
+            && !n.managed
+        {
+            let label = if n.editor.monospace {
+                "主题正文"
+            } else {
+                "等宽代码"
+            };
+            self.text_button(
+                cr,
+                Rect::new(488., ui::header() + 6., 110., ui::tools() - 12.),
+                label,
+                Action::ToggleCodeView,
+                false,
+            );
+        }
         if matches!(&self.document, Document::Notes(n) if n.find.enabled) {
             let y = ui::header() + ui::tools();
             let field_width = (width - 370.).max(80.);
@@ -596,16 +613,16 @@ impl App {
             Rect::new(0., height - ui::status(), width, 1.),
             ui::line(),
         );
-        let status = match &self.document {
-            Document::Notes(n) => n.status.as_str(),
-            Document::Image(v) => v.status.as_str(),
+        let status = match &mut self.document {
+            Document::Notes(n) => n.editor_status(),
+            Document::Image(v) => v.status.clone(),
         };
         let tooltip = self
             .hits
             .iter()
             .find(|h| h.rect.contains(self.pointer.0, self.pointer.1) && !h.label.is_empty())
             .map(|h| h.label.as_str())
-            .unwrap_or(status);
+            .unwrap_or(&status);
         ui::text(
             cr,
             tooltip,
@@ -823,7 +840,7 @@ impl App {
         };
         picker.path.select_all();
         picker.refresh();
-        self.dialog = Some(Dialog::Picker(picker));
+        self.dialog = Some(Dialog::Picker(Box::new(picker)));
     }
     fn accept_picker(&mut self) {
         let Some(Dialog::Picker(mut picker)) = self.dialog.take() else {
@@ -949,6 +966,10 @@ impl App {
                                 self.effects.push(Effect::Notebook);
                                 Ok(())
                             }
+                        }
+                        Action::ToggleCodeView if !n.managed => {
+                            n.editor.toggle_monospace();
+                            Ok(())
                         }
                         Action::TogglePreview => {
                             n.preview.enabled = !n.preview.enabled;
@@ -1433,6 +1454,52 @@ impl Picker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn code_view_status_preserves_external_file_bytes() {
+        let path = std::env::temp_dir().join(format!("jwm-code-{}.tsx", std::process::id()));
+        let source = "\u{feff}const value = <div>中</div>;\r\n";
+        std::fs::write(&path, source).unwrap();
+        let mut app = App::new(true, vec![path.clone()]).unwrap();
+        app.action(Action::ToggleCodeView);
+        if let Document::Notes(n) = &mut app.document {
+            assert!(n.editor.monospace);
+            n.editor.cursor = n.editor.text.len();
+            n.editor.anchor = n.editor.cursor;
+            let status = n.editor_status();
+            assert!(status.contains("行 2 · 字素列 1"));
+            assert!(status.contains("UTF-8 BOM · CRLF"));
+            assert!(!n.dirty);
+            assert_eq!(n.editor.revision, 0);
+            // Report the bytes the existing CRLF save mode would produce,
+            // including unusual separators inserted by IME.
+            let saved = n.editor.text.clone();
+            for (text, expected) in [
+                ("a\rb", "CR"),
+                ("a\r\nb", "混合换行"),
+                ("a\nb", "CRLF"),
+                ("a", "无换行"),
+            ] {
+                n.editor.select_all();
+                n.editor.insert(text);
+                assert!(n.editor_status().contains(&format!("BOM · {expected} ·")));
+            }
+            n.editor.select_all();
+            n.editor.insert(&saved);
+        }
+        app.action(Action::Save);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), source);
+        app.action(Action::ToggleCodeView);
+        if let Document::Notes(n) = &mut app.document {
+            assert!(!n.editor.monospace);
+            n.managed = true;
+        }
+        app.action(Action::ToggleCodeView);
+        if let Document::Notes(n) = &mut app.document {
+            assert!(!n.editor.monospace);
+        }
+        std::fs::remove_file(path).unwrap();
+    }
 
     #[test]
     fn document_find_keeps_source_clean_and_routes_ime_and_dialogs() {
