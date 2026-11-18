@@ -79,6 +79,10 @@ a row as its window closes, and the survivors keep their MRU order.
 | release `Alt` (or `Super`/`Ctrl`) | commit the highlighted window |
 | release `Shift` | nothing — letting Shift go first in `Alt+Shift+Tab` must not end the gesture early |
 
+Delete and BackSpace close at most one window per physical press. Holding either
+key cannot close successive rows through keyboard auto-repeat; release and press
+again to close the next window. Tab and arrow keys still repeat for browsing.
+
 Wrapping is deliberate here, and opposite to [expose's](expose.md) clamp:
 the gesture is a loop through recent windows, not a position on a grid.
 

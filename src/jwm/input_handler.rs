@@ -2759,6 +2759,12 @@ impl Jwm {
         // consumed until the gesture commits or cancels — even the screenshot
         // exception below has to wait.
         if self.features.system_ui.is_window_switcher() {
+            // Closing advances the highlight to another application. A held
+            // Delete/BackSpace must not turn one close into a cascade through
+            // the MRU list; navigation keys still repeat normally.
+            if repeat && matches!(keysym, keys::KEY_Delete | keys::KEY_BackSpace) {
+                return Ok(());
+            }
             self.handle_window_switcher_key(backend, keysym, clean_state)?;
             return Ok(());
         }
@@ -8773,6 +8779,77 @@ mod tests {
             })
             .collect();
         jwm.features.system_ui = SystemUiState::window_switcher(rows, selected);
+    }
+
+    #[test]
+    fn switcher_close_keys_ignore_repeat_but_navigation_keeps_repeating() {
+        for close_key in [keys::KEY_Delete, keys::KEY_BackSpace] {
+            let (mut jwm, mut backend, input) = repeat_dispatch_fixture();
+            let monitor = jwm.state.monitor_order[0];
+            let windows = [0x7f20, 0x7f21, 0x7f22];
+            for window in windows {
+                add_floating_configure_client(
+                    &mut jwm,
+                    WindowId::from_raw(window),
+                    monitor,
+                    0,
+                    false,
+                );
+            }
+            open_switcher(&mut jwm, &windows, 0);
+            for repeat in [false, true, true] {
+                dispatch_shell_test_key(
+                    &mut jwm,
+                    &mut backend,
+                    &input,
+                    close_key,
+                    Mods::ALT,
+                    repeat,
+                );
+            }
+            assert_eq!(
+                backend.window_ops.closed.lock().unwrap().as_slice(),
+                &[WindowId::from_raw(windows[0])]
+            );
+            assert_eq!(
+                jwm.features.system_ui.selected_switcher_window(),
+                Some(windows[1])
+            );
+            // Suppressing destructive repeat must not suppress browsing.
+            dispatch_shell_test_key(
+                &mut jwm,
+                &mut backend,
+                &input,
+                keys::KEY_Tab,
+                Mods::ALT,
+                true,
+            );
+            assert_eq!(
+                jwm.features.system_ui.selected_switcher_window(),
+                Some(windows[2])
+            );
+            // A fresh physical close press still targets the current highlight.
+            dispatch_shell_test_key(&mut jwm, &mut backend, &input, close_key, Mods::ALT, false);
+            assert_eq!(
+                backend.window_ops.closed.lock().unwrap().as_slice(),
+                &[
+                    WindowId::from_raw(windows[0]),
+                    WindowId::from_raw(windows[2]),
+                ]
+            );
+            assert_eq!(
+                jwm.features.system_ui.selected_switcher_window(),
+                Some(windows[1])
+            );
+            // A repeat first delivered after reopening is not a new close.
+            open_switcher(&mut jwm, &[windows[1]], 0);
+            dispatch_shell_test_key(&mut jwm, &mut backend, &input, close_key, Mods::ALT, true);
+            assert!(jwm.features.system_ui.is_window_switcher());
+            assert_eq!(backend.window_ops.closed.lock().unwrap().len(), 2);
+            dispatch_shell_test_key(&mut jwm, &mut backend, &input, close_key, Mods::ALT, false);
+            assert!(!jwm.features.system_ui.is_window_switcher());
+            assert_eq!(backend.window_ops.closed.lock().unwrap().len(), 3);
+        }
     }
 
     #[test]
