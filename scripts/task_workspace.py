@@ -236,6 +236,13 @@ def task_status(task, call=ipc):
                        'No reveal, resume, launch, SSH, retry or authorization change.']}
 
 
+def directory_present(path):
+    try:
+        return Path(path).is_dir()
+    except OSError:
+        return False
+
+
 def plan(task, state):
     validate(task)
     require(isinstance(state, dict) and type(state.get('version')) is int and state['version'] == 1,
@@ -248,7 +255,7 @@ def plan(task, state):
     matches = [w for w in workspaces if w.get('connector') == target['connector'] and w.get('tag_mask') == target['tag_mask']]
     active = [w for w in workspaces if w.get('focused') is True]
     blockers = []
-    if not Path(task['repository']).is_dir():
+    if not directory_present(task['repository']):
         blockers.append('repository_missing')
     if len(matches) != 1:
         blockers.append('workspace_missing_or_ambiguous')
@@ -280,6 +287,56 @@ def plan(task, state):
                          'Atomic preconditions protect selection; later desktop changes can still prevent confirmation.']}
     result['approval_digest'] = digest(result)
     return result
+
+
+def doctor(task, call=ipc):
+    """Explain recovery obstacles without producing an executable/approved plan."""
+    validate(task)
+    repository = {'path': task['repository'],
+                  'status': 'directory_present' if directory_present(task['repository']) else 'missing_or_inaccessible'}
+    workspace = {'target': task['workspace'], 'status': 'unknown',
+                 'blockers': ['workspace_ipc_unavailable_or_unsupported']}
+    try:
+        preview = plan(task, call('get_task_workspace_state'))
+        workspace.update(status='blocked' if preview['blockers'] else 'ready_for_fresh_plan',
+                         blockers=preview['blockers'])
+    except (ValueError, OSError, subprocess.SubprocessError):
+        pass
+    observations = task_status(task, call)
+    findings = []
+    if repository['status'] != 'directory_present':
+        findings.append({'scope': 'repository', 'reason': 'missing_or_inaccessible',
+                         'next_step': 'Check the local path or mount manually; no repository is cloned or created.'})
+    steps = {
+        'workspace_ipc_unavailable_or_unsupported': 'Check that JWM is running with the supported IPC API, then run doctor again.',
+        'repository_missing': 'Check the repository path or mount manually.',
+        'workspace_missing_or_ambiguous': 'Check the named output and tag; do not substitute a different monitor automatically.',
+        'focus_target_monitor_and_select_single_tag': 'Focus the intended monitor and select a single tag manually, then inspect a fresh plan.',
+        'monitor_identity_unavailable': 'Recheck the compositor IPC API before making a new plan.',
+        'monitor_identity_mismatch': 'Recheck the target monitor before making a new plan.',
+        'invalid_workspace_identity': 'Recheck the compositor IPC API before making a new plan.',
+    }
+    for blocker in workspace['blockers']:
+        findings.append({'scope': 'workspace', 'reason': blocker, 'next_step': steps[blocker]})
+    for index, resource in enumerate(observations['resources']):
+        state = resource['status']
+        if resource['kind'] == 'agent' and 'agent_identity' in resource:
+            if state in {'unknown', 'disconnected', 'failed'}:
+                findings.append({'scope': 'resource', 'resource_index': index,
+                                 'reason': resource.get('reason'), 'status': state,
+                                 'next_step': 'Inspect the provider manually. After a restart, verify all identity fields before explicitly importing a new binding; never infer a replacement from a title or path.'})
+        else:
+            findings.append({'scope': 'resource', 'resource_index': index, 'reason': state,
+                             'next_step': 'Inspect this reference manually; saved metadata does not prove a live session or restore an application.'})
+    return {'version': 1, 'task_id': task['id'], 'read_only': True,
+            'repository': repository, 'workspace': workspace,
+            'agent_snapshot_available': observations['agent_snapshot_available'],
+            'resources': observations['resources'], 'findings': findings,
+            'next_step': 'Resolve relevant findings, then request and review a fresh plan before explicitly approving resume.',
+            'limits': ['Separate point-in-time checks, not an atomic recovery transaction.',
+                       'Directory presence does not verify repository contents or Git state.',
+                       'This report contains no resume approval and performs no launch, rebind, SSH or retry.',
+                       'A ready workspace does not imply resources are live or the task can be restored.']}
 
 
 def resume(task, approval, call=ipc):
@@ -315,7 +372,7 @@ def main(argv=None):
     create = sub.add_parser('import', help='validate and save a new task; never overwrite')
     create.add_argument('manifest')
     sub.add_parser('list')
-    for name in ('plan', 'resume', 'status'):
+    for name in ('plan', 'resume', 'status', 'doctor'):
         cmd = sub.add_parser(name)
         cmd.add_argument('id')
         if name == 'resume':
@@ -336,7 +393,9 @@ def main(argv=None):
         require(re.fullmatch(r'[a-z0-9][a-z0-9_-]{0,63}', args.id), 'invalid task id')
         task = validate(load(private_store(args.store) / (args.id + '.json'), private=True))
         require(task['id'] == args.id, 'task file/id mismatch')
-        if args.command == 'status':
+        if args.command == 'doctor':
+            result = doctor(task)
+        elif args.command == 'status':
             result = task_status(task)
         else:
             result = plan(task, ipc('get_task_workspace_state')) if args.command == 'plan' else resume(task, args.approve_plan)
