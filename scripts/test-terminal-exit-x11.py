@@ -9,7 +9,6 @@ import argparse
 import ctypes as C
 import ctypes.util
 import importlib.util
-import io
 import hashlib
 import json
 import os
@@ -20,12 +19,115 @@ import subprocess
 import sys
 import tempfile
 import time
+import tomllib
 
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location("private_fixture", ROOT / "eva/tests/desktop-ipc.py")
 FIXTURE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(FIXTURE)
-REQUIRED = ("Xvfb", "Xephyr", "dbus-run-session", "xdotool", "import")
+REQUIRED = ("Xvfb", "Xephyr", "dbus-run-session", "xdotool")
+
+
+class XImage(C.Structure):
+    _fields_ = [("width", C.c_int), ("height", C.c_int), ("xoffset", C.c_int),
+                ("format", C.c_int), ("data", C.c_void_p), ("byte_order", C.c_int),
+                ("bitmap_unit", C.c_int), ("bitmap_bit_order", C.c_int), ("bitmap_pad", C.c_int),
+                ("depth", C.c_int), ("bytes_per_line", C.c_int), ("bits_per_pixel", C.c_int),
+                ("red_mask", C.c_ulong), ("green_mask", C.c_ulong), ("blue_mask", C.c_ulong),
+                ("obdata", C.c_void_p), ("functions", C.c_void_p * 6)]
+
+
+def ximage_format(metadata):
+    """Accept explicit byte-aligned truecolor formats; reject unknown layouts."""
+    width, height = metadata["width"], metadata["height"]
+    bpp, stride = metadata["bits_per_pixel"], metadata["bytes_per_line"]
+    order, pad = metadata["byte_order"], metadata["bitmap_pad"]
+    if not (0 < width <= 8192 and 0 < height <= 8192):
+        raise ValueError("invalid XImage dimensions")
+    if metadata["format"] != 2 or metadata["xoffset"] != 0:
+        raise ValueError("XImage must be unshifted ZPixmap")
+    if bpp not in (24, 32) or metadata["depth"] not in (24, 32) or metadata["depth"] > bpp:
+        raise ValueError("unsupported XImage depth/bits_per_pixel")
+    if order not in (0, 1) or metadata["bitmap_bit_order"] not in (0, 1):
+        raise ValueError("unknown XImage byte/bitmap order")
+    if pad not in (8, 16, 32) or metadata["bitmap_unit"] not in (8, 16, 32):
+        raise ValueError("unsupported XImage bitmap unit/pad")
+    minimum = width * (bpp // 8)
+    expected_stride = (minimum + pad // 8 - 1) // (pad // 8) * (pad // 8)
+    if stride != expected_stride or stride * height > 64 * 1024 * 1024:
+        raise ValueError("invalid XImage row stride/buffer size")
+    layout = ["X"] * (bpp // 8)
+    for channel, mask in (("R", metadata["red_mask"]), ("G", metadata["green_mask"]), ("B", metadata["blue_mask"])):
+        shifts = [shift for shift in range(0, bpp, 8) if mask == 0xff << shift]
+        if len(shifts) != 1:
+            raise ValueError("unsupported XImage channel mask")
+        position = shifts[0] // 8 if order == 0 else bpp // 8 - 1 - shifts[0] // 8
+        if layout[position] != "X":
+            raise ValueError("overlapping XImage channel masks")
+        layout[position] = channel
+    rawmode = "".join(layout)
+    if rawmode not in ("RGB", "BGR", "RGBX", "BGRX", "XRGB", "XBGR"):
+        raise ValueError("unsupported Pillow raw XImage channel ordering: " + rawmode)
+    return rawmode, stride * height
+
+
+def decode_ximage(data, metadata):
+    from PIL import Image
+    rawmode, size = ximage_format(metadata)
+    if len(data) != size:
+        raise ValueError("XImage buffer length does not match stride * height")
+    return Image.frombytes("RGB", (metadata["width"], metadata["height"]), data,
+                           "raw", rawmode, metadata["bytes_per_line"], 1)
+
+
+class RootCapture:
+    """One persistent X connection, XGetImage and Pillow's C raw decoder."""
+    def __init__(self, display_name):
+        self.lib = C.CDLL(C.util.find_library("X11"))
+        ptr, win = C.c_void_p, C.c_ulong
+        signatures = {
+            "XOpenDisplay": ([C.c_char_p], ptr),
+            "XDefaultRootWindow": ([ptr], win),
+            "XGetGeometry": ([ptr, win, C.POINTER(win), C.POINTER(C.c_int), C.POINTER(C.c_int),
+                              C.POINTER(C.c_uint), C.POINTER(C.c_uint), C.POINTER(C.c_uint), C.POINTER(C.c_uint)], C.c_int),
+            "XGetImage": ([ptr, win, C.c_int, C.c_int, C.c_uint, C.c_uint, win, C.c_int], C.POINTER(XImage)),
+            "XDestroyImage": ([C.POINTER(XImage)], C.c_int),
+            "XCloseDisplay": ([ptr], C.c_int),
+        }
+        for name, (args, result) in signatures.items():
+            function = getattr(self.lib, name)
+            function.argtypes, function.restype = args, result
+        self.display = self.lib.XOpenDisplay(display_name.encode())
+        if not self.display:
+            raise RuntimeError("cannot open owned X display for root capture")
+        self.root = self.lib.XDefaultRootWindow(self.display)
+        self.metadata = None
+
+    def grab(self):
+        root, x, y = C.c_ulong(), C.c_int(), C.c_int()
+        width, height, border, depth = (C.c_uint() for _ in range(4))
+        if not self.lib.XGetGeometry(self.display, self.root, C.byref(root), C.byref(x), C.byref(y),
+                                    C.byref(width), C.byref(height), C.byref(border), C.byref(depth)):
+            raise RuntimeError("cannot query owned root geometry")
+        image = self.lib.XGetImage(self.display, self.root, 0, 0, width.value, height.value, C.c_ulong(-1), 2)
+        if not image:
+            raise RuntimeError("XGetImage failed for owned root")
+        try:
+            metadata = {name: getattr(image.contents, name) for name, _type in XImage._fields_
+                        if name not in ("data", "obdata", "functions")}
+            _, size = ximage_format(metadata)
+            if (metadata["width"], metadata["height"]) != (width.value, height.value) or not image.contents.data:
+                raise ValueError("XImage geometry/data mismatch")
+            result = decode_ximage(C.string_at(image.contents.data, size), metadata)
+            self.metadata = metadata
+            return result
+        finally:
+            self.lib.XDestroyImage(image)
+
+    def close(self):
+        if self.display:
+            self.lib.XCloseDisplay(self.display)
+            self.display = None
 
 
 def producer(kind, record, alive):
@@ -151,10 +253,15 @@ def producer_row(windows, producer):
 
 
 def run_case(binary, backend, output):
-    from PIL import Image
     output.mkdir(parents=True, exist_ok=True)
     work = Path(tempfile.mkdtemp(prefix="jwm-terminal-exit-"))
     children = FIXTURE.Children()
+    capture = None
+    pending_images = {}
+    def flush_images():
+        for label, image in list(pending_images.items()):
+            image.save(output / (label + ".png"))
+            del pending_images[label]
     marker = work / "producer-alive"
     marker.touch()
     with binary.open("rb") as executable:
@@ -162,7 +269,7 @@ def run_case(binary, backend, output):
     report = {"status": "failed", "backend": backend, "work": str(work), "samples": [],
               "binary": str(binary), "binary_sha256": binary_sha,
               "fixture_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
-              "limits": ["private software-GL X11 only", "OR tested; password/session-lock not exercised"]}
+              "limits": ["private software-GL X11 only", "OR included in fixture; consult executed case records; password/session-lock not exercised"]}
     try:
         env = {key: value for key, value in os.environ.items()
                if not key.startswith(("JWM_", "OPENAI_", "PULSE_", "PIPEWIRE_"))
@@ -188,6 +295,12 @@ def run_case(binary, backend, output):
                 ("animation", "speed", '"normal"', True), ("animation", "easing", '"ease-out"', True)):
                 text = FIXTURE.edit_setting(text, section, key, literal, required)
             config.write_text(text)
+            generated = tomllib.loads(text)
+            report.setdefault("fixture_config", {})[config.name] = {
+                "animation": generated.get("animation"),
+                "compositor": generated.get("behavior", {}).get("compositor"),
+                "status_bar_enabled": generated.get("status_bar", {}).get("show_bar"),
+            }
         run(binary, "--backend", backend, "--check-config")
         env["DISPLAY"] = children.display("Xvfb", env, work)
         host_env = env.copy()
@@ -219,9 +332,15 @@ def run_case(binary, backend, output):
                             "is_floating", "is_above", "is_pip", "is_fullscreen", "is_scratchpad"}
                 assert required <= item.keys(), f"get_windows schema missing {required - item.keys()}"
             return item
-        def shot(label):
-            image = Image.open(io.BytesIO(run("import", "-window", "root", "png:-"))).convert("RGB")
-            image.save(output / (label + ".png"))
+        capture = RootCapture(env["DISPLAY"])
+        def shot(label, defer=False):
+            image = capture.grab()
+            report["capture_format"] = capture.metadata
+            report["capture_backend"] = "persistent Xlib XGetImage / Pillow raw decoder"
+            if defer:
+                pending_images[label] = image
+            else:
+                image.save(output / (label + ".png"))
             return image
         def hotkey():
             start = time.monotonic()
@@ -291,7 +410,7 @@ def run_case(binary, backend, output):
             # The frame cap and elapsed budget prevent an unbounded recorder.
             while time.monotonic() - started < 1.15 and index < 60:
                 capture_start = time.monotonic() - started
-                image = shot(f"{kind}-hide-{index}")
+                image = shot(f"{kind}-hide-{index}", defer=True)
                 elapsed = time.monotonic() - started
                 visible = overlap_during_capture(terminal, bg, capture_start, elapsed, onset_latest)
                 sample = {"start_seconds": capture_start, "seconds": elapsed, "conservative_overlap": visible,
@@ -306,6 +425,7 @@ def run_case(binary, backend, output):
                 index += 1
                 time.sleep(0.025)
             assert_full_coverage(samples, horizon, kind)
+            flush_images()
             time.sleep(max(0, 1.25 - (time.monotonic() - started)))
             end = shot(kind + "-complete")
             assert color_pixels(end, "term", rect) == 0, "terminal remained after hide completion"
@@ -332,7 +452,7 @@ def run_case(binary, backend, output):
         report["samples"].append({"case": "or", "frames": or_samples,
                                   "key_monotonic_start": started, "key_monotonic_finish": key_finished})
         while time.monotonic() - started < 1.15 and index < 60:
-            image = shot(f"or-hide-{index}")
+            image = shot(f"or-hide-{index}", defer=True)
             red, green = color_pixels(image, "term"), color_pixels(image, "or")
             or_samples.append({"seconds": time.monotonic() - started, "term_pixels": red, "or_pixels": green})
             assert red == 0, "hiding term escaped above OR safety surface"
@@ -340,13 +460,19 @@ def run_case(binary, backend, output):
             index += 1
             time.sleep(0.025)
         assert len(or_samples) >= 3 and or_samples[-1]["seconds"] >= 1.05, "OR capture missed hide completion"
+        flush_images()
         overlay.terminate(); overlay.wait(timeout=3)
         report["status"] = "passed"
     finally:
+        if capture:
+            capture.close()
         marker.unlink(missing_ok=True)
         time.sleep(0.08)
         children.close()
-        (output / "report.json").write_text(json.dumps(report, indent=2) + "\n")
+        report_json = json.dumps(report, indent=2)
+        (output / "report.json").write_text(report_json + "\n")
+        print(report_json, flush=True)  # Failed CI keeps timing/pixel diagnostics in its job log.
+        flush_images()
         for log in work.glob("*.log"):
             shutil.copyfile(log, output / log.name)
         for config in (work / "config/jwm").glob("config_*.toml"):
@@ -387,7 +513,7 @@ def main():
         raise SystemExit(128 + signum)
     for signum in (signal.SIGTERM, signal.SIGHUP):
         signal.signal(signum, interrupted)
-    print(json.dumps(run_case(args.jwm.resolve(), args.backend, args.output.resolve()), indent=2))
+    run_case(args.jwm.resolve(), args.backend, args.output.resolve())
 
 
 if __name__ == "__main__":

@@ -14,6 +14,40 @@ SPEC.loader.exec_module(FIXTURE)
 
 
 class ExitHarnessTests(unittest.TestCase):
+    @staticmethod
+    def ximage_metadata(**changes):
+        metadata = {"width": 2, "height": 2, "xoffset": 0, "format": 2,
+                    "byte_order": 0, "bitmap_unit": 32, "bitmap_bit_order": 0,
+                    "bitmap_pad": 32, "depth": 24, "bytes_per_line": 8,
+                    "bits_per_pixel": 32, "red_mask": 0xff0000,
+                    "green_mask": 0xff00, "blue_mask": 0xff}
+        return metadata | changes
+
+    def test_ximage_little_endian_bgrx_and_big_endian_xrgb(self):
+        expected = [(255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 255)]
+        little = bytes([0, 0, 255, 77, 0, 255, 0, 77, 255, 0, 0, 77, 255, 255, 255, 77])
+        big = bytes([77, 255, 0, 0, 77, 0, 255, 0, 77, 0, 0, 255, 77, 255, 255, 255])
+        self.assertEqual(FIXTURE.decode_ximage(little, self.ximage_metadata()).tobytes(), bytes(channel for rgb in expected for channel in rgb))
+        self.assertEqual(FIXTURE.decode_ximage(big, self.ximage_metadata(byte_order=1)).tobytes(), bytes(channel for rgb in expected for channel in rgb))
+
+    def test_ximage_24bit_row_padding_and_alternate_masks(self):
+        data = bytes([0, 0, 255, 0, 255, 0, 99, 99, 255, 0, 0, 255, 255, 255, 99, 99])
+        image = FIXTURE.decode_ximage(data, self.ximage_metadata(bits_per_pixel=24))
+        self.assertEqual(image.tobytes(), bytes([255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255]))
+        image = FIXTURE.decode_ximage(bytes([255, 0, 0, 9, 0, 0, 255, 9]),
+                                      self.ximage_metadata(height=1, red_mask=0xff, blue_mask=0xff0000))
+        self.assertEqual(image.tobytes(), bytes([255, 0, 0, 0, 0, 255]))
+
+    def test_ximage_rejects_unknown_formats_instead_of_guessing(self):
+        for changes in ({"bits_per_pixel": 16}, {"byte_order": 2}, {"bitmap_bit_order": 3},
+                        {"bytes_per_line": 7}, {"bytes_per_line": 100}, {"red_mask": 0xf800},
+                        {"red_mask": 0xff}, {"xoffset": 1}, {"format": 1}, {"depth": 30},
+                        {"bitmap_pad": 64}, {"width": 0}):
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                FIXTURE.decode_ximage(bytes(16), self.ximage_metadata(**changes))
+        with self.assertRaisesRegex(ValueError, "buffer length"):
+            FIXTURE.decode_ximage(bytes(15), self.ximage_metadata())
+
     def test_producer_resolution_separates_native_xid_from_managed_id(self):
         producer = {"pid": 123, "xid": 8388644}
         windows = [{"id": 8388644, "pid": 999}, {"id": 4, "pid": 123}]

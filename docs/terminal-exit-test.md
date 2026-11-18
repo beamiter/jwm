@@ -10,7 +10,7 @@ Native XIDs are used only for X11 tools/focus checks. IPC rows are resolved by
 producer PID and their distinct internal JWM IDs are retained for IPC focus and
 scratchpad-registry assertions; the two ID spaces must never be equated.
 
-Dependencies: Xvfb, Xephyr, xdotool, ImageMagick `import`, dbus-run-session,
+Dependencies: Xvfb, Xephyr, xdotool, dbus-run-session,
 libX11 and Pillow. Supply a newly built JWM binary with the terminal hide fix:
 
 ```sh
@@ -24,6 +24,18 @@ python3 scripts/test-terminal-exit-x11.py --jwm target/debug/jwm \
 `--preflight` checks dependencies without launching a desktop. CI integration
 can use the existing native restart-regression dependencies and binary build;
 retain the output directory with an always-run artifact step.
+
+Root screenshots use one persistent Xlib connection and `XGetImage`, followed
+by Pillow's C raw decoder. XImage dimensions, ZPixmap format, bit depth, pixel
+width, row stride/padding, byte order and RGB masks are validated explicitly.
+Supported byte-aligned RGB/BGR 24/32-bit layouts are decoded without Python
+per-pixel loops; unsupported layouts fail instead of assuming a channel order.
+PNG compression/disk writes for animation frames are deferred until the bounded
+sampling loop ends (and flushed on failure), while every frame is retained.
+Capture format metadata and the generated animation/compositor configuration
+are recorded in JSON. The report is also printed from cleanup on failure, so
+CI logs retain timing and pixel diagnostics without requiring an artifact download. An early failed case does not mean
+later OR coverage ran; consult the executed cases in the report.
 
 The fixture requests Above, PiP and fullscreen backgrounds, then verifies their
 actual managed state and reads back their geometry. It samples a conservative
