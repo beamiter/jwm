@@ -52,6 +52,23 @@ impl Editor {
             .map(|s| self.cursor + s.len())
             .unwrap_or(self.text.len())
     }
+    fn before_crlf(&self, index: usize) -> usize {
+        if index > 0
+            && self.text.as_bytes().get(index) == Some(&b'\n')
+            && self.text.as_bytes()[index - 1] == b'\r'
+        {
+            index - 1
+        } else {
+            index
+        }
+    }
+    fn line_end(&self) -> usize {
+        let index = self.text[self.cursor..]
+            .find('\n')
+            .map(|i| self.cursor + i)
+            .unwrap_or(self.text.len());
+        self.before_crlf(index)
+    }
     pub fn insert(&mut self, text: &str) {
         let range = self.selection();
         if text.is_empty() && range.is_empty() {
@@ -189,10 +206,7 @@ impl Editor {
             Key::Named(NamedKey::End) => Some(if ctrl {
                 self.text.len()
             } else {
-                self.text[self.cursor..]
-                    .find('\n')
-                    .map(|i| self.cursor + i)
-                    .unwrap_or(self.text.len())
+                self.line_end()
             }),
             Key::Named(
                 NamedKey::ArrowUp | NamedKey::ArrowDown | NamedKey::PageUp | NamedKey::PageDown,
@@ -275,7 +289,7 @@ impl Editor {
             .take(trailing.max(0) as usize)
             .map(char::len_utf8)
             .sum::<usize>();
-        index + count
+        self.before_crlf(index + count)
     }
     pub fn click(&mut self, x: f64, y: f64, extend: bool) {
         self.cursor = self.index_at(
@@ -397,6 +411,40 @@ impl Editor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn mixed_newlines_are_single_editing_boundaries_and_render_as_lines() {
+        let mut e = Editor::new("a\r\nb\nc".into());
+        assert_eq!(e.line_end(), 1);
+        e.cursor = e.line_end();
+        e.anchor = e.cursor;
+        e.insert("X");
+        assert_eq!(e.text, "aX\r\nb\nc");
+        // Enter at end of line inserts LF without splitting the existing CRLF.
+        e.insert("\n");
+        assert_eq!(e.text, "aX\n\r\nb\nc");
+        e.undo(false);
+        e.anchor = e.next();
+        e.insert(""); // Delete consumes both CR and LF.
+        assert_eq!(e.text, "aXb\nc");
+        e.undo(false);
+        e.cursor = 4; // beginning of b, after CRLF
+        e.anchor = e.previous();
+        e.insert(""); // Backspace also consumes the whole separator.
+        assert_eq!(e.text, "aXb\nc");
+        e.undo(false);
+        let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 300, 200).unwrap();
+        let cr = cairo::Context::new(&surface).unwrap();
+        e.draw(&cr, Rect::new(0., 0., 300., 200.), true, true, true);
+        let layout = e.layout.as_ref().unwrap();
+        assert_eq!(layout.line_count(), 3);
+        for y in 0..200 {
+            for x in [0, 10, 30, 200, 299] {
+                let index = e.index_at(x * pango::SCALE, y * pango::SCALE);
+                assert_ne!(index, 3, "cursor must not split CRLF");
+            }
+        }
+    }
+
     #[test]
     fn unicode_selection_and_undo_are_document_local() {
         let mut e = Editor::new("备忘 e\u{301}👩‍💻".into());
