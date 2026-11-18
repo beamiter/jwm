@@ -132,6 +132,7 @@ pub fn create_note(directory: &Path) -> Result<PathBuf, String> {
 pub(crate) struct Notes {
     pub document: Option<TextFile>,
     pub editor: Editor,
+    pub preview: crate::preview::Preview,
     pub search: Editor,
     pub directory: PathBuf,
     pub rows: Vec<(PathBuf, String)>,
@@ -147,6 +148,7 @@ impl Notes {
         let mut this = Self {
             document: None,
             editor: Editor::default(),
+            preview: crate::preview::Preview::default(),
             search: Editor::default(),
             directory: glib::user_data_dir().join("jwm/notes"),
             rows: vec![],
@@ -174,6 +176,7 @@ impl Notes {
         let (document, text) = TextFile::load(gio::File::for_path(path))?;
         self.document = Some(document);
         self.editor = Editor::new(text);
+        self.preview = crate::preview::Preview::default();
         self.dirty = false;
         self.due = None;
         self.status = if self.managed {

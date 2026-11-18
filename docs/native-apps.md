@@ -54,8 +54,28 @@ retain a previous version as a `~` backup beside the file.
 | Ctrl+S | Save |
 | Ctrl+Shift+S | Export note / save text file as |
 | Ctrl+F | Search the notebook |
+| Ctrl+Shift+P | Toggle Markdown split preview |
 | Ctrl+Z / Ctrl+Shift+Z | Undo / redo |
 | Ctrl+W | Close, checking unsaved changes |
+
+### Markdown preview
+
+Use **MD 预览** in the toolbar or Ctrl+Shift+P for a live, independently
+scrollable source/preview split. The preview follows unsaved edits and never
+changes the document. Click the source to resume typing; clicks and IME commits
+in the read-only preview do not edit the source. Opening another note resets
+preview state and scroll position.
+
+The native Pango renderer supports headings, emphasis, inline/fenced code,
+lists, task markers, quotes and basic table text (not a browser table layout).
+Raw HTML is displayed literally; links are underlined but not opened, and images
+show alt-text placeholders without reading local files or contacting the network.
+Preview parsing is cached by document revision and limited to 256 KiB. Larger
+sources remain editable/saveable up to the existing 8 MiB file limit.
+
+This is Markdown rendering, **not TSX execution**. React/TSX live preview needs a
+separate isolated runtime and remains planned; the editor does not run project
+scripts, install npm dependencies or execute embedded JavaScript.
 
 ## Image viewer
 

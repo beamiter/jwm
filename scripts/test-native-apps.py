@@ -218,6 +218,35 @@ def main():
                 wait(lambda: editor.poll() is not None, "Saved editor did not close")
                 print("Clipboard, undo, desktop activation, file picker and overwrite confirmation: PASS", flush=True)
 
+                # Real key/pointer events must not edit the Markdown preview.
+                markdown = work / "preview.md"
+                source = "# Preview heading\n\n**Bold content** and `code`\n\n- one\n- two\n"
+                markdown.write_text(source)
+                preview_app = launch("jwm-notes", markdown)
+                preview_window = window("preview.md.*JWM 备忘录")
+                focus(preview_window)
+                before = screenshot(preview_window)
+                key("ctrl+shift+p")
+                after = screenshot(preview_window)
+                region = (after.width // 2 + 24, 150, after.width - 24, after.height - 64)
+                old_pixels = list(before.crop(region).getdata())
+                new_pixels = list(after.crop(region).getdata())
+                assert sum(a != b for a, b in zip(old_pixels, new_pixels)) > 100, "Markdown content was not rendered"
+                command("xdotool", "mousemove", "--window", preview_window,
+                        after.width * 3 // 4, 200, "click", "1")
+                type_text("MUST NOT MODIFY SOURCE")
+                key("ctrl+s")
+                assert markdown.read_text() == source, "Preview accepted text input"
+                if args.evidence_dir:
+                    screenshot(preview_window).save(args.evidence_dir / "markdown-preview.png")
+                key("ctrl+shift+p", "ctrl+End")
+                type_text("Source edit")
+                key("ctrl+s")
+                wait(lambda: markdown.read_text() == source + "Source edit", "Closing preview did not restore editing")
+                key("ctrl+w")
+                wait(lambda: preview_app.poll() is not None, "Markdown editor did not close")
+                print("Native Markdown rendering, read-only preview and source focus: PASS", flush=True)
+
                 # Solid asymmetric images make fit, zoom and rotation measurable.
                 first, second = work / "01 red.png", work / "02 green.webp"
                 Image.new("RGB", (400, 200), (240, 20, 20)).save(first)
