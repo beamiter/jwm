@@ -2108,6 +2108,72 @@ mod scratchpad_reveal_tests {
     }
 
     #[test]
+    fn suppressed_layout_arrange_preserves_named_dropdown_exit() {
+        for name in ["term", "music"] {
+            let (mut jwm, key, window, monitor) = jwm_with_cross_monitor_scratchpad(false);
+            let mut backend = ScratchpadBackend::new();
+            jwm.reveal_and_focus(&mut backend, window).unwrap();
+            if name != "term" {
+                jwm.scratchpads.remove("term");
+                jwm.scratchpads.insert(name.into(), key);
+            }
+            jwm.togglescratchpad(&mut backend, &WMArgEnum::StringVec(vec![name.into()]))
+                .unwrap();
+            let animation = jwm.animations.active.get_mut(&key).unwrap();
+            animation.duration = Duration::from_secs(600);
+            animation.started_at = Instant::now() - Duration::from_secs(300);
+            let before = animation.clone();
+            // Same monitor-wide arrange used by live tiled resizing.
+            jwm.suppress_layout_animation = true;
+            jwm.arrange(&mut backend, Some(monitor));
+            jwm.suppress_layout_animation = false;
+            let after = &jwm.animations.active[&key];
+            assert_eq!(after.started_at, before.started_at);
+            assert_eq!(after.duration, before.duration);
+            assert_eq!(after.from, before.from);
+            assert_eq!(after.to, before.to);
+            assert_eq!(after.kind, AnimationKind::Hide);
+            assert_eq!(jwm.state.clients[key].state.tags, 0);
+            assert_ne!(jwm.get_selected_client_key(), Some(key));
+        }
+    }
+
+    #[test]
+    fn workspace_transition_does_not_leave_outgoing_hide_animations() {
+        let (mut jwm, outgoing, incoming) = jwm_with_two_tiled_windows();
+        let mut backend = ScratchpadBackend::new();
+        jwm.state.clients[incoming].state.tags = 2;
+        let monitor = jwm.state.sel_mon.unwrap();
+        jwm.arrange(&mut backend, Some(monitor));
+        jwm.animations.active.clear();
+        jwm.view(&mut backend, &WMArgEnum::UInt(2)).unwrap();
+        assert!(
+            !jwm.animations.has_active(),
+            "workspace snapshot owns all motion, including outgoing clients"
+        );
+        assert!(
+            !jwm.suppress_layout_animation,
+            "suppression must end with the transaction"
+        );
+        assert!(
+            jwm.state.clients[outgoing]
+                .geometry
+                .hidden_restore_rect
+                .is_some()
+        );
+        assert_eq!(jwm.get_selected_client_key(), Some(incoming));
+        jwm.view(&mut backend, &WMArgEnum::UInt(1)).unwrap();
+        assert!(!jwm.animations.has_active());
+        assert!(
+            jwm.state.clients[outgoing]
+                .geometry
+                .hidden_restore_rect
+                .is_none()
+        );
+        assert_eq!(jwm.get_selected_client_key(), Some(outgoing));
+    }
+
+    #[test]
     fn dismissal_first_frame_gates_and_preserves_animation_clock() {
         let (mut jwm, key, window, _) = jwm_with_cross_monitor_scratchpad(false);
         let mut backend = ScratchpadBackend::new();
