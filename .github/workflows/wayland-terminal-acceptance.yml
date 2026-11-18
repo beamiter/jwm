@@ -1,19 +1,53 @@
 name: Native Wayland terminal exit acceptance
 on:
+  workflow_dispatch:
   pull_request:
     paths:
       - '.github/workflows/wayland-terminal-acceptance.yml'
       - 'scripts/test-terminal-exit-wayland.py'
       - 'scripts/test-terminal-exit-wayland-harness.py'
-      - 'crates/jwm_shell/examples/native_shell_client.rs'
+      - 'scripts/test-terminal-exit-x11.py'
+      - 'scripts/ci-install-deps.sh'
       - 'src/**'
+      - 'tools/**'
+      - 'crates/**'
+      - 'eva/**'
+      - 'portal/**'
+      - 'bridge/**'
+      - 'vendor/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'build.rs'
+      - '.cargo/**'
+      - 'rust-toolchain*'
+      - 'docs/native-wayland-terminal-exit.md'
+  push:
+    branches: [master]
+    paths:
+      - '.github/workflows/wayland-terminal-acceptance.yml'
+      - 'scripts/test-terminal-exit-wayland.py'
+      - 'scripts/test-terminal-exit-wayland-harness.py'
+      - 'scripts/test-terminal-exit-x11.py'
+      - 'scripts/ci-install-deps.sh'
+      - 'src/**'
+      - 'tools/**'
+      - 'crates/**'
+      - 'eva/**'
+      - 'portal/**'
+      - 'bridge/**'
+      - 'vendor/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'build.rs'
+      - '.cargo/**'
+      - 'rust-toolchain*'
+      - 'docs/native-wayland-terminal-exit.md'
 permissions:
   contents: read
-# Isolated draft acceptance, not a new master requirement. A behavioral
-# failure remains a failed job with preserved artifacts, never a green skip.
+# Native winit regression on relevant PRs, master pushes, and manual runs.
+# Behavioral failures retain artifacts and remain failures, never green skips.
 jobs:
   acceptance:
-    if: github.head_ref == 'dot/wayland-terminal-visual'
     runs-on: ubuntu-latest
     timeout-minutes: 40
     strategy:

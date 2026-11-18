@@ -31,3 +31,25 @@ lock-screen test. A first-frame submission is requested synchronously after inpu
 host swap/presentation may be asynchronous; this does not promise zero-frame
 latency. All live acceptance remains pending until the exact draft
 head's CI artifacts have been reviewed.
+
+
+## Continuous regression coverage
+
+`wayland-terminal-acceptance.yml` runs on relevant pull requests (including
+forks and drafts), pushes to `master`, and manual `workflow_dispatch` runs.
+There is no branch-name gate. Both automatic events share path coverage for
+production Rust, workspace/path dependencies, lockfiles/build configuration,
+the native client, the sampler it imports, dependency installation, and this
+regression's workflow/documentation. Unrelated prose and frontend-only changes
+outside these paths do not start this job. Manual dispatch becomes available
+once the workflow exists on the default branch.
+
+Each matching event adds one Ubuntu runner job, bounded to 40 minutes, including
+native release compilation, four focused tests and the same strict native
+pixel/input test. The live test is bounded to five minutes; dependencies to ten.
+A PR update and its eventual master merge intentionally each incur one job so
+the merged tree is tested too. Rust caches reduce repeat build cost but are not
+a guarantee. Pixels and native receipts are retained as artifacts even when the
+behavior test fails; there is no continue-on-error or softened threshold. This
+adds CI compute/artifact cost, not a claim that repository branch protection has
+been changed. The unsupported wayland-x11 runtime remains excluded.
