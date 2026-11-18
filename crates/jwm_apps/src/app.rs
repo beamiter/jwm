@@ -38,6 +38,8 @@ enum Action {
     Close,
     Search,
     Edit,
+    TogglePreview,
+    Preview,
     Note(PathBuf),
     Cancel,
     Accept,
@@ -59,6 +61,7 @@ pub(crate) enum Effect {
 }
 #[derive(Clone, Copy, PartialEq)]
 enum Focus {
+    Preview,
     Editor,
     Search,
 }
@@ -346,6 +349,20 @@ impl App {
                 enabled,
             );
         }
+        if let Document::Notes(n) = &self.document {
+            let label = if n.preview.enabled {
+                "关闭 MD 预览"
+            } else {
+                "MD 预览"
+            };
+            self.text_button(
+                cr,
+                Rect::new(220., ui::header() + 6., 134., ui::tools() - 12.),
+                label,
+                Action::TogglePreview,
+                false,
+            );
+        }
         let body = self.body();
         let sidebar = self.sidebar();
         match &mut self.document {
@@ -412,10 +429,15 @@ impl App {
                     }
                     let _ = cr.restore();
                 }
+                let split = if n.preview.enabled {
+                    sidebar + (body.w - sidebar) / 2.
+                } else {
+                    body.w
+                };
                 let edit = Rect::new(
-                    sidebar + 32.,
+                    sidebar + 24.,
                     body.y + 24.,
-                    (body.w - sidebar - 64.).max(1.),
+                    (split - sidebar - 48.).max(1.),
                     (body.h - 48.).max(1.),
                 );
                 n.editor.draw(
@@ -426,10 +448,36 @@ impl App {
                     true,
                 );
                 self.hits.push(Hit {
-                    rect: Rect::new(sidebar, body.y, body.w - sidebar, body.h),
+                    rect: Rect::new(sidebar, body.y, split - sidebar, body.h),
                     action: Action::Edit,
                     label: String::new(),
                 });
+                if n.preview.enabled {
+                    ui::fill(cr, Rect::new(split, body.y, 1., body.h), ui::line());
+                    ui::text(
+                        cr,
+                        "Markdown · 只读 / 无网络",
+                        Rect::new(split + 20., body.y, (body.w - split - 40.).max(1.), 30.),
+                        12.,
+                        ui::muted(),
+                    );
+                    n.preview.draw(
+                        cr,
+                        Rect::new(
+                            split + 24.,
+                            body.y + 38.,
+                            (body.w - split - 48.).max(1.),
+                            (body.h - 54.).max(1.),
+                        ),
+                        &n.editor.text,
+                        n.editor.revision,
+                    );
+                    self.hits.push(Hit {
+                        rect: Rect::new(split, body.y, body.w - split, body.h),
+                        action: Action::Preview,
+                        label: String::new(),
+                    });
+                }
             }
             Document::Image(v) => {
                 if let Some(image) = &v.image {
@@ -836,10 +884,27 @@ impl App {
                                 Ok(())
                             }
                         }
+                        Action::TogglePreview => {
+                            n.preview.enabled = !n.preview.enabled;
+                            self.focus = Focus::Editor;
+                            n.editor.preedit.clear();
+                            n.search.preedit.clear();
+                            self.dragging = false;
+                            Ok(())
+                        }
+                        Action::Preview => {
+                            self.focus = Focus::Preview;
+                            n.editor.preedit.clear();
+                            n.search.preedit.clear();
+                            Ok(())
+                        }
                         Action::Save => n.save(),
                         Action::ConfirmTrash => {
                             self.dialog = None;
-                            n.trash()
+                            n.trash().map(|()| {
+                                self.focus = Focus::Editor;
+                                self.dragging = false;
+                            })
                         }
                         Action::Search => {
                             self.focus = Focus::Search;
@@ -926,6 +991,9 @@ impl App {
         y < ui::header()
     }
     fn editor_click(&mut self, x: f64, y: f64, extend: bool) {
+        if self.focus == Focus::Preview {
+            return;
+        }
         if let Document::Notes(n) = &mut self.document {
             if self.focus == Focus::Search {
                 n.search.click(x, y, extend);
@@ -967,6 +1035,8 @@ impl App {
                 if self.pointer.0 < sidebar {
                     n.list_scroll = (n.list_scroll - delta * 36.)
                         .clamp(0., (n.rows.len() as f64 * 48. - body.h + 60.).max(0.));
+                } else if n.preview.enabled && self.pointer.0 >= sidebar + (body.w - sidebar) / 2. {
+                    n.preview.scroll = (n.preview.scroll - delta * 36.).max(0.);
                 } else {
                     n.editor.scroll = (n.editor.scroll - delta * 36.).max(0.);
                 }
@@ -1035,6 +1105,9 @@ impl App {
         };
         let action = if mods.control_key() {
             match character.as_str() {
+                "p" if mods.shift_key() && matches!(self.document, Document::Notes(_)) => {
+                    Some(Action::TogglePreview)
+                }
                 "w" => Some(Action::Close),
                 "o" => Some(Action::Open),
                 "n" if matches!(self.document, Document::Notes(_)) => Some(Action::New),
@@ -1058,6 +1131,9 @@ impl App {
         if let Document::Notes(n) = &mut self.document {
             if event.logical_key == Key::Named(NamedKey::Escape) {
                 self.focus = Focus::Editor;
+                return;
+            }
+            if self.focus == Focus::Preview {
                 return;
             }
             let search = self.focus == Focus::Search;
@@ -1110,6 +1186,7 @@ impl App {
             None => (),
         }
         match &mut self.document {
+            Document::Notes(_) if self.focus == Focus::Preview => None,
             Document::Notes(n) => Some(if self.focus == Focus::Search {
                 &mut n.search
             } else {
@@ -1128,6 +1205,7 @@ impl App {
             }
         }
         if commit
+            && self.focus != Focus::Preview
             && self.dialog.is_none()
             && let Document::Notes(n) = &mut self.document
         {
@@ -1152,7 +1230,9 @@ impl App {
             Some(_) => 0,
             None => match &self.document {
                 Document::Notes(_) => {
-                    if self.focus == Focus::Editor {
+                    if self.focus == Focus::Preview {
+                        0
+                    } else if self.focus == Focus::Editor {
                         1
                     } else {
                         2
@@ -1224,6 +1304,99 @@ impl Picker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn trash_success_restores_editor_focus_when_preview_is_reset() {
+        // Exercise both replacement paths without touching the user's trash.
+        let dir = std::env::temp_dir().join(format!("jwm-preview-trash-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("note.txt");
+        std::fs::write(&path, "next note").unwrap();
+        let mut app = App::new(true, vec![path.clone()]).unwrap();
+        if let Document::Notes(n) = &mut app.document {
+            n.managed = true;
+            n.directory = dir.clone();
+            n.document = None;
+        }
+        for existing in [true, false] {
+            if !existing {
+                std::fs::remove_file(&path).unwrap();
+                if let Document::Notes(n) = &mut app.document {
+                    n.document = None;
+                }
+            }
+            app.action(Action::TogglePreview);
+            app.action(Action::Preview);
+            app.action(Action::ConfirmTrash);
+            assert!(app.dialog.is_none());
+            assert!(app.focus == Focus::Editor);
+            assert_eq!(app.ime_target(), 1);
+            let Document::Notes(n) = &app.document else {
+                panic!()
+            };
+            assert!(!n.preview.enabled);
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn preview_is_read_only_and_preserves_source_save_and_focus() {
+        let path = std::env::temp_dir().join(format!("jwm-preview-{}.md", std::process::id()));
+        let source = "# JWM 文本编辑器\n\n**实时 Markdown** · 原生预览\n\n- [x] 独立滚动\n- [ ] TSX 沙箱\n\n```rust\nfn main() { println!(\"Hello\"); }\n```";
+        std::fs::write(&path, source).unwrap();
+        let mut app = App::new(true, vec![path.clone()]).unwrap();
+        app.action(Action::TogglePreview);
+        let mut surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 960, 680).unwrap();
+        let cr = cairo::Context::new(&surface).unwrap();
+        app.draw(&cr, 960., 680., false);
+        drop(cr);
+        if let Ok(output) = std::env::var("JWM_PREVIEW_TEST_PNG") {
+            let stride = surface.stride() as usize;
+            let data = surface.data().unwrap();
+            let mut image = image::RgbImage::new(960, 680);
+            for (x, y, pixel) in image.enumerate_pixels_mut() {
+                let i = y as usize * stride + x as usize * 4;
+                let native = u32::from_ne_bytes(data[i..i + 4].try_into().unwrap());
+                *pixel = image::Rgb([(native >> 16) as u8, (native >> 8) as u8, native as u8]);
+            }
+            image.save(output).unwrap();
+        }
+        app.pointer = (750., 200.);
+        app.press(ModifiersState::empty());
+        assert!(app.focus == Focus::Preview);
+        assert_eq!(app.ime_target(), 0);
+        app.ime("must not insert".into(), true);
+        let Document::Notes(n) = &app.document else {
+            panic!()
+        };
+        assert_eq!(n.editor.text, source);
+        assert!(!n.dirty);
+        assert_eq!(n.editor.revision, 0);
+        app.action(Action::SaveAs(false));
+        assert_eq!(app.ime_target(), 3);
+        app.ime("-path".into(), true);
+        let Some(Dialog::Picker(picker)) = &app.dialog else {
+            panic!()
+        };
+        assert!(picker.path.text.contains("-path"));
+        app.action(Action::Cancel);
+        assert_eq!(app.ime_target(), 0);
+        let Document::Notes(n) = &app.document else {
+            panic!()
+        };
+        assert_eq!(n.editor.text, source);
+        assert!(!n.dirty);
+        app.action(Action::TogglePreview);
+        assert!(app.focus == Focus::Editor);
+        assert_eq!(app.ime_target(), 1);
+        app.ime("edited ".into(), true);
+        app.action(Action::Save);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            format!("edited {source}")
+        );
+        std::fs::remove_file(path).unwrap();
+    }
 
     #[test]
     fn composition_and_failed_save_keep_unsaved_text_in_the_window() {
