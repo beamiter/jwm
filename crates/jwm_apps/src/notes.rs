@@ -134,6 +134,7 @@ pub(crate) struct Notes {
     pub editor: Editor,
     pub preview: crate::preview::Preview,
     pub search: Editor,
+    pub find: crate::find::Find,
     pub directory: PathBuf,
     pub rows: Vec<(PathBuf, String)>,
     pub managed: bool,
@@ -150,6 +151,7 @@ impl Notes {
             editor: Editor::default(),
             preview: crate::preview::Preview::default(),
             search: Editor::default(),
+            find: crate::find::Find::default(),
             directory: glib::user_data_dir().join("jwm/notes"),
             rows: vec![],
             managed: path.is_none(),
@@ -177,6 +179,7 @@ impl Notes {
         self.document = Some(document);
         self.editor = Editor::new(text);
         self.preview = crate::preview::Preview::default();
+        self.find = crate::find::Find::default();
         self.dirty = false;
         self.due = None;
         self.status = if self.managed {
@@ -200,6 +203,9 @@ impl Notes {
         format!("{}{title}", if self.dirty { "• " } else { "" })
     }
     pub fn edited(&mut self) {
+        if self.find.enabled {
+            self.find.document_edited(&mut self.editor);
+        }
         self.dirty = true;
         self.status = if self.managed {
             "等待自动保存…"

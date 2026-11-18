@@ -37,6 +37,10 @@ enum Action {
     Maximize,
     Close,
     Search,
+    Find,
+    FindField,
+    FindNext(bool),
+    FindClose,
     Edit,
     TogglePreview,
     Preview,
@@ -64,6 +68,7 @@ enum Focus {
     Preview,
     Editor,
     Search,
+    Find,
 }
 enum PickerMode {
     Notes,
@@ -170,11 +175,16 @@ impl App {
         }
     }
     fn body(&self) -> Rect {
+        let find_height = if matches!(&self.document, Document::Notes(n) if n.find.enabled) {
+            48.
+        } else {
+            0.
+        };
         Rect::new(
             0.,
-            ui::header() + ui::tools(),
+            ui::header() + ui::tools() + find_height,
             self.size.0,
-            (self.size.1 - ui::header() - ui::tools() - ui::status()).max(1.),
+            (self.size.1 - ui::header() - ui::tools() - ui::status() - find_height).max(1.),
         )
     }
     fn button(
@@ -363,6 +373,60 @@ impl App {
                 false,
             );
         }
+        if matches!(&self.document, Document::Notes(n) if !n.managed) {
+            self.text_button(
+                cr,
+                Rect::new(366., ui::header() + 6., 110., ui::tools() - 12.),
+                "查找 Ctrl+F",
+                Action::Find,
+                false,
+            );
+        }
+        if matches!(&self.document, Document::Notes(n) if n.find.enabled) {
+            let y = ui::header() + ui::tools();
+            let field_width = (width - 370.).max(80.);
+            ui::rounded(cr, Rect::new(12., y + 6., field_width, 36.), ui::canvas());
+            if let Document::Notes(n) = &mut self.document {
+                n.find.query.draw(
+                    cr,
+                    Rect::new(20., y + 13., field_width - 16., 22.),
+                    self.dialog.is_none() && self.focus == Focus::Find,
+                    self.caret,
+                    false,
+                );
+                ui::text(
+                    cr,
+                    &n.find.label(),
+                    Rect::new(field_width + 24., y + 6., 146., 36.),
+                    12.,
+                    ui::muted(),
+                );
+            }
+            self.hits.push(Hit {
+                rect: Rect::new(12., y + 6., field_width, 36.),
+                action: Action::FindField,
+                label: "文内查找".into(),
+            });
+            for (offset, icon, action, label) in [
+                (
+                    132.,
+                    Icon::Previous,
+                    Action::FindNext(true),
+                    "上一处 (Shift+Enter)",
+                ),
+                (92., Icon::Next, Action::FindNext(false), "下一处 (Enter)"),
+                (52., Icon::Close, Action::FindClose, "关闭查找 (Esc)"),
+            ] {
+                self.button(
+                    cr,
+                    Rect::new(width - offset, y + 8., 32., 32.),
+                    icon,
+                    action,
+                    label,
+                    true,
+                );
+            }
+        }
         let body = self.body();
         let sidebar = self.sidebar();
         match &mut self.document {
@@ -440,6 +504,8 @@ impl App {
                     (split - sidebar - 48.).max(1.),
                     (body.h - 48.).max(1.),
                 );
+                n.editor.highlight_selection =
+                    n.find.enabled && n.find.total > 0 && self.focus == Focus::Find;
                 n.editor.draw(
                     cr,
                     edit,
@@ -889,6 +955,7 @@ impl App {
                             self.focus = Focus::Editor;
                             n.editor.preedit.clear();
                             n.search.preedit.clear();
+                            n.find.query.preedit.clear();
                             self.dragging = false;
                             Ok(())
                         }
@@ -896,6 +963,7 @@ impl App {
                             self.focus = Focus::Preview;
                             n.editor.preedit.clear();
                             n.search.preedit.clear();
+                            n.find.query.preedit.clear();
                             Ok(())
                         }
                         Action::Save => n.save(),
@@ -905,6 +973,28 @@ impl App {
                                 self.focus = Focus::Editor;
                                 self.dragging = false;
                             })
+                        }
+                        Action::Find | Action::FindField => {
+                            n.find.enabled = true;
+                            self.focus = Focus::Find;
+                            n.editor.preedit.clear();
+                            n.find.sync(&mut n.editor);
+                            if action == Action::Find {
+                                n.find.query.select_all();
+                            }
+                            self.dragging = false;
+                            Ok(())
+                        }
+                        Action::FindNext(backwards) => {
+                            n.find.navigate(&mut n.editor, backwards);
+                            Ok(())
+                        }
+                        Action::FindClose => {
+                            n.find.enabled = false;
+                            n.find.query.preedit.clear();
+                            self.focus = Focus::Editor;
+                            self.dragging = false;
+                            Ok(())
                         }
                         Action::Search => {
                             self.focus = Focus::Search;
@@ -970,7 +1060,7 @@ impl App {
             .find(|h| h.rect.contains(x, y))
             .map(|h| h.action.clone())
         {
-            let edit = matches!(action, Action::Edit | Action::Search);
+            let edit = matches!(action, Action::Edit | Action::Search | Action::FindField);
             self.action(action);
             if edit {
                 self.editor_click(x, y, mods.shift_key());
@@ -995,7 +1085,9 @@ impl App {
             return;
         }
         if let Document::Notes(n) = &mut self.document {
-            if self.focus == Focus::Search {
+            if self.focus == Focus::Find {
+                n.find.query.click(x, y, extend);
+            } else if self.focus == Focus::Search {
                 n.search.click(x, y, extend);
             } else {
                 n.editor.click(x, y, extend);
@@ -1116,9 +1208,13 @@ impl App {
                 } else {
                     Action::Save
                 }),
-                "f" if matches!(&self.document,Document::Notes(n) if n.managed) => {
-                    Some(Action::Search)
-                }
+                "f" if matches!(self.document, Document::Notes(_)) => Some(
+                    if matches!(&self.document,Document::Notes(n) if n.managed) {
+                        Action::Search
+                    } else {
+                        Action::Find
+                    },
+                ),
                 _ => None,
             }
         } else {
@@ -1128,6 +1224,18 @@ impl App {
             self.action(action);
             return;
         }
+        if matches!(&self.document, Document::Notes(n) if n.find.enabled) {
+            if event.logical_key == Key::Named(NamedKey::Escape) {
+                self.action(Action::FindClose);
+                return;
+            }
+            if event.logical_key == Key::Named(NamedKey::F3)
+                || (self.focus == Focus::Find && event.logical_key == Key::Named(NamedKey::Enter))
+            {
+                self.action(Action::FindNext(mods.shift_key()));
+                return;
+            }
+        }
         if let Document::Notes(n) = &mut self.document {
             if event.logical_key == Key::Named(NamedKey::Escape) {
                 self.focus = Focus::Editor;
@@ -1136,12 +1244,21 @@ impl App {
             if self.focus == Focus::Preview {
                 return;
             }
+            let find = self.focus == Focus::Find;
             let search = self.focus == Focus::Search;
-            let editor = if search { &mut n.search } else { &mut n.editor };
+            let editor = if find {
+                &mut n.find.query
+            } else if search {
+                &mut n.search
+            } else {
+                &mut n.editor
+            };
             let revision = editor.revision;
-            let result = editor.key(event, mods, clipboard, !search);
+            let result = editor.key(event, mods, clipboard, !search && !find);
             if editor.revision != revision {
-                if search {
+                if find {
+                    n.find.sync(&mut n.editor);
+                } else if search {
                     n.refresh();
                     n.list_scroll = 0.;
                 } else {
@@ -1187,7 +1304,9 @@ impl App {
         }
         match &mut self.document {
             Document::Notes(_) if self.focus == Focus::Preview => None,
-            Document::Notes(n) => Some(if self.focus == Focus::Search {
+            Document::Notes(n) => Some(if self.focus == Focus::Find {
+                &mut n.find.query
+            } else if self.focus == Focus::Search {
                 &mut n.search
             } else {
                 &mut n.editor
@@ -1196,6 +1315,11 @@ impl App {
         }
     }
     pub fn ime(&mut self, text: String, commit: bool) {
+        let text = if self.focus == Focus::Find && self.dialog.is_none() {
+            text.replace(['\r', '\n'], "")
+        } else {
+            text
+        };
         if let Some(editor) = self.active_editor() {
             if commit {
                 editor.preedit.clear();
@@ -1209,7 +1333,9 @@ impl App {
             && self.dialog.is_none()
             && let Document::Notes(n) = &mut self.document
         {
-            if self.focus == Focus::Search {
+            if self.focus == Focus::Find {
+                n.find.sync(&mut n.editor);
+            } else if self.focus == Focus::Search {
                 n.refresh();
             } else {
                 n.edited();
@@ -1232,6 +1358,8 @@ impl App {
                 Document::Notes(_) => {
                     if self.focus == Focus::Preview {
                         0
+                    } else if self.focus == Focus::Find {
+                        4
                     } else if self.focus == Focus::Editor {
                         1
                     } else {
@@ -1246,6 +1374,7 @@ impl App {
         if let Document::Notes(n) = &mut self.document {
             n.editor.preedit.clear();
             n.search.preedit.clear();
+            n.find.query.preedit.clear();
         }
         if let Some(Dialog::Picker(p)) = &mut self.dialog {
             p.path.preedit.clear();
@@ -1304,6 +1433,58 @@ impl Picker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn document_find_keeps_source_clean_and_routes_ime_and_dialogs() {
+        let path = std::env::temp_dir().join(format!("jwm-find-{}.txt", std::process::id()));
+        std::fs::write(&path, "前猫 后猫").unwrap();
+        let mut app = App::new(true, vec![path.clone()]).unwrap();
+        app.action(Action::Find);
+        assert!(app.focus == Focus::Find);
+        assert_eq!(app.ime_target(), 4);
+        app.ime("猫".into(), false);
+        app.ime("猫\n".into(), true);
+        if let Document::Notes(n) = &app.document {
+            assert_eq!(n.find.total, 2);
+            assert_eq!(n.find.query.text, "猫");
+            assert_eq!(n.editor.selection(), 3..6);
+            assert!(!n.dirty);
+            assert_eq!(n.editor.revision, 0);
+        }
+        let mut surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 960, 680).unwrap();
+        let cr = cairo::Context::new(&surface).unwrap();
+        app.draw(&cr, 960., 680., false);
+        drop(cr);
+        assert!(app.hits.iter().any(|hit| hit.action == Action::FindField));
+        if let Ok(output) = std::env::var("JWM_FIND_TEST_PNG") {
+            let stride = surface.stride() as usize;
+            let data = surface.data().unwrap();
+            let mut image = image::RgbImage::new(960, 680);
+            for (x, y, pixel) in image.enumerate_pixels_mut() {
+                let i = y as usize * stride + x as usize * 4;
+                let native = u32::from_ne_bytes(data[i..i + 4].try_into().unwrap());
+                *pixel = image::Rgb([(native >> 16) as u8, (native >> 8) as u8, native as u8]);
+            }
+            image.save(output).unwrap();
+        }
+        app.action(Action::FindNext(false));
+        app.action(Action::SaveAs(false));
+        assert_eq!(app.ime_target(), 3);
+        app.ime("/tmp/find-export".into(), true);
+        app.action(Action::Cancel);
+        assert_eq!(app.ime_target(), 4);
+        app.action(Action::Save);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "前猫 后猫");
+        app.action(Action::FindClose);
+        assert_eq!(app.ime_target(), 1);
+        app.ime("替换".into(), true);
+        if let Document::Notes(n) = &app.document {
+            assert_eq!(n.editor.text, "前猫 后替换");
+            assert!(n.dirty);
+            assert!(!n.find.enabled);
+        }
+        std::fs::remove_file(path).unwrap();
+    }
 
     #[test]
     fn trash_success_restores_editor_focus_when_preview_is_reset() {

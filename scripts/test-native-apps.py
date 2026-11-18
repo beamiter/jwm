@@ -247,6 +247,33 @@ def main():
                 wait(lambda: preview_app.poll() is not None, "Markdown editor did not close")
                 print("Native Markdown rendering, read-only preview and source focus: PASS", flush=True)
 
+                # Search input and match navigation must not dirty external text.
+                find_path = work / "find.txt"
+                find_source = "needle first\nneedle second\n"
+                find_path.write_text(find_source)
+                find_app = launch("jwm-notes", find_path)
+                find_window_id = window("find.txt.*JWM 备忘录")
+                focus(find_window_id)
+                key("ctrl+f")
+                type_text("needle")
+                key("Return", "ctrl+s")
+                assert find_path.read_text() == find_source, "Find input modified source"
+                key("Escape")
+                type_text("MATCH")
+                key("ctrl+s")
+                wait(lambda: find_path.read_text() == "needle first\nMATCH second\n",
+                     "Find next/Escape did not retain the second match")
+                key("ctrl+z", "ctrl+s", "ctrl+Home", "ctrl+f", "ctrl+a")
+                type_text("needle")
+                key("shift+Return", "Escape")
+                type_text("LAST")
+                key("ctrl+s")
+                wait(lambda: find_path.read_text() == "needle first\nLAST second\n",
+                     "Find previous did not wrap to the last match")
+                key("ctrl+w")
+                wait(lambda: find_app.poll() is not None, "Find editor did not close")
+                print("Native document find input, next/previous wrap and source focus: PASS", flush=True)
+
                 # Solid asymmetric images make fit, zoom and rotation measurable.
                 first, second = work / "01 red.png", work / "02 green.webp"
                 Image.new("RGB", (400, 200), (240, 20, 20)).save(first)

@@ -53,7 +53,9 @@ retain a previous version as a `~` backup beside the file.
 | Ctrl+O | Open text file in another window |
 | Ctrl+S | Save |
 | Ctrl+Shift+S | Export note / save text file as |
-| Ctrl+F | Search the notebook |
+| Ctrl+F | Search the notebook, or find text in an external document |
+| Enter / Shift+Enter in find, F3 / Shift+F3 | Next / previous document match (wraps) |
+| Escape | Close document find and return to the selected source match |
 | Ctrl+Shift+P | Toggle Markdown split preview |
 | Ctrl+Z / Ctrl+Shift+Z | Undo / redo |
 | Ctrl+W | Close, checking unsaved changes |
@@ -139,3 +141,13 @@ python3 scripts/test-native-apps-wayland.py --scale 2
 The X11 test needs Xvfb, xdotool, ImageMagick and Pillow; the Wayland test needs
 Sway, wtype, grim and Pillow. Each creates a private display, session bus and
 application-data directory, and never controls an existing desktop.
+
+### External-document find
+
+External UTF-8 documents have a **查找 Ctrl+F** toolbar button and a single-line
+find bar with match count, previous/next and close controls. Search is literal,
+case-sensitive and non-overlapping (not regular expressions). Unicode matches
+are selected and scrolled into view; query input, including IME, never dirties
+the source or enters its undo history. Escape retains the selected match so
+ordinary editing can continue. Empty and missing queries do not change source
+selection. Notebook Ctrl+F keeps its existing notebook-filter behavior.

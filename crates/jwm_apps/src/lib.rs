@@ -6,6 +6,7 @@ use std::{
 
 mod app;
 mod editor;
+mod find;
 mod host;
 pub mod notes;
 mod preview;
