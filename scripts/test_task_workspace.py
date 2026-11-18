@@ -238,5 +238,128 @@ class TaskTests(unittest.TestCase):
         self.assertFalse((self.root / 'tasks' / 'rpl.json').exists())
 
 
+class AgentStatusTests(unittest.TestCase):
+    def setUp(self):
+        TaskTests.setUp(self)
+        self.identity = dict(session_id='review-1', project_id='project-1', provider='ember',
+                             host_id='host-1', host_incarnation='boot-1', pane_id='pane-1',
+                             window_token='window-1', wm_instance_id='wm-1')
+        self.task['resources'] = [dict(kind='agent', label='Review', reference='review-1',
+                                      agent_identity=self.identity)]
+        session = {k: v for k, v in self.identity.items() if k != 'wm_instance_id'}
+        self.snapshot = dict(protocol_version=1, wm_instance_id='wm-1', revision=4,
+                             sessions=[dict(session, revision=2, status='running', can_reveal=True)])
+
+    state = TaskTests.state
+
+    def observed(self, snapshot=None):
+        calls = []
+        def call(command):
+            calls.append(command)
+            return self.snapshot if snapshot is None else snapshot
+        result = tw.task_status(self.task, call)
+        self.assertEqual(calls, ['get_agent_sessions'])
+        self.assertTrue(result['read_only'])
+        return result
+
+    def test_all_observed_registry_states(self):
+        # The compositor, not this client, resolves expired leases/missing windows.
+        for state in tw.AGENT_STATES:
+            self.snapshot['sessions'][0].update(status=state, can_reveal=False)
+            result = self.observed()
+            self.assertEqual(result['resources'][0]['status'], state)
+            self.assertEqual(result['agent_counts'][state], 1)
+            self.assertEqual(result['resources'][0]['evidence'], 'registry_observation')
+
+    def test_identity_conflict_every_component(self):
+        original = copy.deepcopy(self.snapshot)
+        for field in tw.AGENT_IDENTITY - {'session_id'}:
+            self.snapshot = copy.deepcopy(original)
+            if field == 'wm_instance_id':
+                self.snapshot[field] = 'other'
+                reason = 'compositor_identity_changed'
+            else:
+                self.snapshot['sessions'][0][field] = 'forge' if field == 'provider' else 'other'
+                reason = 'session_identity_conflict'
+            result = self.observed()['resources'][0]
+            self.assertEqual((result['status'], result['reason']), ('unknown', reason))
+
+    def test_missing_and_ambiguous_are_unknown_not_disconnected(self):
+        session = self.snapshot['sessions'][0]
+        for sessions, reason in [([], 'session_not_observed'), ([session, session], 'ambiguous_session')]:
+            self.snapshot['sessions'] = sessions
+            result = self.observed()['resources'][0]
+            self.assertEqual((result['status'], result['reason']), ('unknown', reason))
+
+    def test_ipc_interruptions_do_not_retry_or_mutate(self):
+        import subprocess
+        for error in (OSError('lost socket'), ValueError('unsupported'),
+                      subprocess.TimeoutExpired('jwm-tool', 5), subprocess.CalledProcessError(1, 'jwm-tool')):
+            with patch.object(tw, 'ipc', side_effect=AssertionError('unexpected IPC')):
+                call = unittest.mock.Mock(side_effect=error)
+                result = tw.task_status(self.task, call)
+                call.assert_called_once_with('get_agent_sessions')
+            self.assertFalse(result['agent_snapshot_available'])
+            self.assertEqual(result['resources'][0]['status'], 'unknown')
+            self.assertEqual(result['resources'][0]['evidence'], 'unavailable')
+
+    def test_malformed_snapshot_fails_closed(self):
+        for snapshot in ([], {}, dict(self.snapshot, protocol_version=True),
+                         dict(self.snapshot, sessions=[None]), dict(self.snapshot, revision=True)):
+            result = self.observed(snapshot)
+            self.assertFalse(result['agent_snapshot_available'])
+        for field, value in [('status', []), ('provider', 'unsupported'), ('can_reveal', 1), ('revision', 0)]:
+            snapshot = copy.deepcopy(self.snapshot)
+            snapshot['sessions'][0][field] = value
+            self.assertFalse(self.observed(snapshot)['agent_snapshot_available'])
+
+    def test_static_agent_never_guessed_or_queried(self):
+        del self.task['resources'][0]['agent_identity']
+        result = tw.task_status(self.task, unittest.mock.Mock(side_effect=AssertionError('must not query')))
+        self.assertEqual(result['resources'][0]['status'], 'reference_only')
+        self.assertIsNone(result['agent_snapshot_available'])
+        self.assertEqual(sum(result['agent_counts'].values()), 0)
+
+    def test_status_cli_queries_only_registry(self):
+        import subprocess
+        import sys
+        store = self.root / 'tasks'
+        tw.save_new(self.task, store)
+        tool = self.root / 'jwm-tool'
+        tool.write_text("#!/usr/bin/env python3\nimport json,sys\nassert sys.argv[1:]==['msg','get_agent_sessions','--raw'], sys.argv\nprint(" + repr(json.dumps(dict(success=True, data=self.snapshot))) + ")\n")
+        tool.chmod(0o700)
+        env = dict(os.environ, PATH=str(self.root) + os.pathsep + os.environ['PATH'])
+        output = subprocess.check_output([sys.executable, tw.__file__, '--store', str(store),
+                                          'status', self.task['id']], env=env)
+        self.assertEqual(json.loads(output)['resources'][0]['status'], 'running')
+        self.assertEqual(tw.load(store / (self.task['id'] + '.json')), self.task)
+
+    def test_bound_task_resume_keeps_original_ipc_sequence(self):
+        approved = tw.plan(self.task, self.state())['approval_digest']
+        calls = []
+        def call(command, args=None):
+            calls.append(command)
+            if command == 'get_task_workspace_state':
+                return self.state() if len(calls) == 1 else self.state([dict(self.ws[1], focused=True)])
+        self.assertEqual(tw.resume(self.task, approved, call)['status'], 'workspace_selected')
+        self.assertEqual(calls, ['get_task_workspace_state', 'task_workspace_view', 'get_task_workspace_state'])
+
+    def test_binding_validation_and_resume_digest_independent_of_live_status(self):
+        before = tw.plan(self.task, self.state())
+        self.observed()
+        self.snapshot['sessions'][0]['status'] = 'failed'
+        self.observed()
+        self.assertEqual(before, tw.plan(self.task, self.state()))
+        for field in tw.AGENT_IDENTITY:
+            invalid = copy.deepcopy(self.task)
+            del invalid['resources'][0]['agent_identity'][field]
+            with self.assertRaises(ValueError):
+                tw.validate(invalid)
+        invalid = copy.deepcopy(self.task)
+        invalid['resources'][0]['reference'] = 'other'
+        with self.assertRaises(ValueError):
+            tw.validate(invalid)
+
+
 if __name__ == '__main__':
     unittest.main()

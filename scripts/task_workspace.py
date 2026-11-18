@@ -13,6 +13,9 @@ import tempfile
 
 LIMIT = 1024 * 1024
 TERMINALS = {'anvil', 'forge', 'ember', 'frost'}
+AGENT_IDENTITY = {'session_id', 'project_id', 'provider', 'host_id',
+                  'host_incarnation', 'pane_id', 'window_token', 'wm_instance_id'}
+AGENT_STATES = {'running', 'waiting', 'succeeded', 'failed', 'unknown', 'disconnected'}
 
 
 def require(ok, message):
@@ -81,6 +84,15 @@ def validate(task):
         require(isinstance(resource, dict), 'resource must be object')
         kind = resource.get('kind')
         allowed = {'kind', 'label', 'reference'} | ({'terminal', 'snapshot'} if kind == 'terminal' else set())
+        if kind == 'agent' and 'agent_identity' in resource:
+            allowed.add('agent_identity')
+            identity = resource['agent_identity']
+            require(isinstance(identity, dict) and set(identity) == AGENT_IDENTITY, 'invalid agent identity fields')
+            for value in identity.values():
+                text(value, 'agent identity')
+                require(len(value) <= 256, 'agent identity too long')
+            require(identity['provider'] in TERMINALS, 'unsupported agent provider')
+            require(identity['session_id'] == resource.get('reference'), 'agent reference/identity mismatch')
         require(isinstance(kind, str) and kind in {'terminal', 'agent', 'browser', 'remote', 'artifact'} and set(resource) == allowed, 'unsupported resource fields')
         text(resource['label'], 'resource label')
         text(resource['reference'], 'resource reference')
@@ -162,6 +174,68 @@ def ipc(command, args=None):
     return response.get('data')
 
 
+def task_status(task, call=ipc):
+    """One read-only observation; never feed live status into resume approval."""
+    validate(task)
+    bound = [r for r in task['resources'] if 'agent_identity' in r]
+    snapshot = None
+    failure = None
+    if bound:
+        try:
+            snapshot = call('get_agent_sessions')
+            require(isinstance(snapshot, dict) and type(snapshot.get('protocol_version')) is int
+                    and snapshot['protocol_version'] == 1, 'unsupported snapshot')
+            text(snapshot.get('wm_instance_id'), 'compositor identity')
+            require(type(snapshot.get('revision')) is int and snapshot['revision'] >= 0, 'invalid revision')
+            sessions = snapshot.get('sessions')
+            require(isinstance(sessions, list) and len(sessions) <= 1000, 'invalid sessions')
+            for session in sessions:
+                require(isinstance(session, dict), 'invalid session')
+                for field in AGENT_IDENTITY - {'wm_instance_id'}:
+                    text(session.get(field), 'session identity')
+                    require(len(session[field]) <= 256, 'session identity too long')
+                require(session['provider'] in TERMINALS, 'unsupported provider')
+                require(isinstance(session.get('status'), str) and session['status'] in AGENT_STATES,
+                        'unsupported status')
+                require(type(session.get('can_reveal')) is bool, 'invalid reveal flag')
+                require(type(session.get('revision')) is int and session['revision'] > 0, 'invalid session revision')
+        except (ValueError, OSError, subprocess.SubprocessError):
+            snapshot = None
+            failure = 'ipc_unavailable_or_unsupported'
+    resources = []
+    counts = {state: 0 for state in sorted(AGENT_STATES)}
+    for resource in task['resources']:
+        result = resource_status(resource)
+        if 'agent_identity' in resource:
+            identity = resource['agent_identity']
+            result.update(status='unknown', evidence='unavailable', reason=failure)
+            if snapshot is not None:
+                result['evidence'] = 'registry_observation'
+                matches = [s for s in snapshot['sessions'] if s['session_id'] == identity['session_id']]
+                if snapshot['wm_instance_id'] != identity['wm_instance_id']:
+                    result['reason'] = 'compositor_identity_changed'
+                elif len(matches) > 1:
+                    result['reason'] = 'ambiguous_session'
+                elif not matches:
+                    result['reason'] = 'session_not_observed'
+                elif any(matches[0][key] != identity[key] for key in AGENT_IDENTITY - {'wm_instance_id'}):
+                    result['reason'] = 'session_identity_conflict'
+                else:
+                    session = matches[0]
+                    result.update(status=session['status'], reason='exact_identity_match',
+                                  observed_revision=session['revision'])
+            counts[result['status']] += 1
+        else:
+            result['evidence'] = 'static_reference'
+        resources.append(result)
+    return {'version': 1, 'task_id': task['id'], 'read_only': True,
+            'agent_snapshot_available': snapshot is not None if bound else None,
+            'agent_counts': counts, 'resources': resources,
+            'limits': ['Point-in-time registry observation, not verified task completion or remote health.',
+                       'Missing identities/sessions are not proof of disconnection.',
+                       'No reveal, resume, launch, SSH, retry or authorization change.']}
+
+
 def plan(task, state):
     validate(task)
     require(isinstance(state, dict) and type(state.get('version')) is int and state['version'] == 1,
@@ -241,7 +315,7 @@ def main(argv=None):
     create = sub.add_parser('import', help='validate and save a new task; never overwrite')
     create.add_argument('manifest')
     sub.add_parser('list')
-    for name in ('plan', 'resume'):
+    for name in ('plan', 'resume', 'status'):
         cmd = sub.add_parser(name)
         cmd.add_argument('id')
         if name == 'resume':
@@ -262,7 +336,10 @@ def main(argv=None):
         require(re.fullmatch(r'[a-z0-9][a-z0-9_-]{0,63}', args.id), 'invalid task id')
         task = validate(load(private_store(args.store) / (args.id + '.json'), private=True))
         require(task['id'] == args.id, 'task file/id mismatch')
-        result = plan(task, ipc('get_task_workspace_state')) if args.command == 'plan' else resume(task, args.approve_plan)
+        if args.command == 'status':
+            result = task_status(task)
+        else:
+            result = plan(task, ipc('get_task_workspace_state')) if args.command == 'plan' else resume(task, args.approve_plan)
     print(json.dumps(result, indent=2, ensure_ascii=True))
 
 

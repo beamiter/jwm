@@ -84,6 +84,51 @@ CLI queries the versioned state and monitor token to confirm the target tag; fai
 - Keep this an explicitly approved experimental workflow pending real desktop
   acceptance tests. A passing fake-tool test is not proof of hardware behavior.
 
+## Read-only Agent observations
+
+`python3 scripts/task_workspace.py status TASK_ID` queries `get_agent_sessions`
+once when the task contains an explicitly bound Agent. It never switches tags,
+reveals windows, attaches sessions, launches Agents, opens SSH, or changes resume
+approval. Without a binding, an Agent remains `reference_only`; labels, repository
+paths and titles are never used to guess associations. Existing manifests continue
+to work unchanged. `plan` and `resume` still use static references, not these live
+observations, so polling status does not invalidate approval digests.
+
+To opt in, add `agent_identity` to an Agent resource in a **new** manifest and
+import it under a new task ID (import does not overwrite). Copy these exact values
+from a reviewed `jwm-tool msg get_agent_sessions --raw` response: `wm_instance_id`
+comes from the snapshot, all other fields from the intended session. The reference
+must equal `session_id`. This operation does not automatically bind or update an
+existing task. For example, the following is illustrative, not a usable identity:
+
+```json
+{"kind":"agent", "label":"Review", "reference":"review-1",
+ "agent_identity":{
+   "session_id":"review-1", "project_id":"project-1", "provider":"ember",
+   "host_id":"host-1", "host_incarnation":"boot-1", "pane_id":"pane-1",
+   "window_token":"window-1", "wm_instance_id":"wm-1"
+ }}
+```
+
+All eight identity fields must match. A reused session ID, a restarted host or
+compositor, changed pane/window, absent session, or duplicate session ID yields
+`unknown` with a reason, never a guessed match. The CLI forwards `disconnected`
+only when the registry reports it for the exact identity. The compositor already
+maps expired leases and missing windows to `disconnected`; the CLI does not infer
+liveness from timestamps. Unsupported/malformed replies and IPC interruption
+return `unknown` with `evidence: unavailable`, without retries. Unbound resources
+retain `evidence: static_reference`; matched and unmatched valid registry queries
+use `evidence: registry_observation`.
+
+`agent_counts` counts only explicitly bound Agents, by observed state. The
+`agent_snapshot_available` field is null when no query was needed, false when the
+query failed validation or transport, and true for a usable snapshot (including
+an empty one). A successful registry query is not proof a referenced Agent exists.
+These are point-in-time provider reports, not verified task outcomes or GPU/remote
+health, and may change immediately after the query. A reported `succeeded` does
+not prove the whole task succeeded. No real remote continuity or restoration
+performance is claimed by the simulated tests.
+
 ## Validation
 
 ```sh
