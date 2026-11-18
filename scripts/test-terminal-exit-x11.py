@@ -138,6 +138,18 @@ def assert_full_coverage(samples, horizon, label):
     assert samples[-1]["seconds"] >= 1.05, f"{label}: capture ended before animation completion"
 
 
+def producer_row(windows, producer):
+    """Resolve one owned producer by PID; native XID is not JWM's WindowId."""
+    matches = [item for item in windows if item.get("pid") == producer["pid"]]
+    assert len(matches) <= 1, "fixture producer unexpectedly owns multiple managed windows"
+    if not matches:
+        return None
+    item = matches[0]
+    if "id" in producer:
+        assert item["id"] == producer["id"], "producer changed its managed window identity"
+    return item
+
+
 def run_case(binary, backend, output):
     from PIL import Image
     output.mkdir(parents=True, exist_ok=True)
@@ -200,8 +212,8 @@ def run_case(binary, backend, output):
         query = lambda name: FIXTURE.query(socket, name)
         command = lambda name, args={}: FIXTURE.command(socket, name, args)
         wait(lambda: socket.exists() and query("get_execution_context"), "private compositor IPC")
-        def row(xid):
-            item = next((item for item in query("get_windows") if item["id"] == xid), None)
+        def row(producer):
+            item = producer_row(query("get_windows"), producer)
             if item:
                 required = {"id", "pid", "x", "y", "w", "h", "border_w", "tags", "is_focused",
                             "is_floating", "is_above", "is_pip", "is_fullscreen", "is_scratchpad"}
@@ -220,11 +232,11 @@ def run_case(binary, backend, output):
                                              "--producer", "term", "--record", str(term_record), "--alive", str(marker)]})
         term = wait(lambda: json.loads(term_record.read_text()) if term_record.exists() else None, "spawned terminal PID")
         report["producer"] = term
-        wait(lambda: row(term["xid"]), "mapped terminal")
-        assert row(term["xid"])["pid"] == term["pid"], "scratchpad did not match actual producer PID"
-        assert row(term["xid"])["is_scratchpad"], "producer not registered as scratchpad"
-        assert row(term["xid"]).get("scratchpad") == "term", "wrong named scratchpad binding"
-        assert query("get_scratchpads").get("term") == term["xid"], "scratchpad registry identity mismatch"
+        term["id"] = wait(lambda: row(term), "mapped terminal")["id"]
+        assert row(term)["pid"] == term["pid"], "scratchpad did not match actual producer PID"
+        assert row(term)["is_scratchpad"], "producer not registered as scratchpad"
+        assert row(term).get("scratchpad") == "term", "wrong named scratchpad binding"
+        assert query("get_scratchpads").get("term") == term["id"], "scratchpad registry identity mismatch"
         command("reload_config")  # Reinstall hotkeys after Xephyr XKB initialization.
         time.sleep(1.2)
         for kind in ("above", "pip", "fullscreen"):
@@ -232,24 +244,24 @@ def run_case(binary, backend, output):
             background = children.spawn([sys.executable, str(Path(__file__).resolve()), "--producer", kind,
                                          "--record", str(record), "--alive", str(marker)], env, work / (kind + ".log"))
             data = wait(lambda: json.loads(record.read_text()) if record.exists() else None, "background producer")
-            wait(lambda: row(data["xid"]), "managed background")
-            command("focus_window", {"id": data["xid"]})
+            data["id"] = wait(lambda: row(data), "managed background")["id"]
+            command("focus_window", {"id": data["id"]})
             if kind == "pip":
                 command("togglepip")
-            elif kind == "above" and not row(data["xid"])["is_floating"]:
+            elif kind == "above" and not row(data)["is_floating"]:
                 command("togglefloating")
             if kind != "fullscreen":
                 run("xdotool", "windowsize", data["xid"], 1280, 800)
                 run("xdotool", "windowmove", data["xid"], 0, 0)
-            wait(lambda: row(data["xid"])["is_" + kind], "requested " + kind + " layer")
+            wait(lambda: row(data)["is_" + kind], "requested " + kind + " layer")
             # Hide if still shown, then reveal over the prepared overlap background.
-            if row(term["xid"])["tags"] != 0:
+            if row(term)["tags"] != 0:
                 hotkey(); time.sleep(1.2)
             hotkey()
-            wait(lambda: row(term["xid"])["is_focused"], "terminal reveal focus")
+            wait(lambda: row(term)["is_focused"], "terminal reveal focus")
             time.sleep(1.2)
-            bg = row(data["xid"])
-            terminal = row(term["xid"])
+            bg = row(data)
+            terminal = row(term)
             rect = (max(0, bg["x"], terminal["x"]), max(0, bg["y"], terminal["y"]),
                     min(1280, bg["x"] + bg["w"], terminal["x"] + terminal["w"]),
                     min(800, bg["y"] + bg["h"], terminal["y"] + terminal["h"]))
@@ -265,7 +277,7 @@ def run_case(binary, backend, output):
                            "dispatch_seconds": dispatch_seconds,
                            "pre_key_capture_relative": [before_start - started, before_end - started]}
             report["samples"].append(case_report)
-            wait(lambda: not row(term["xid"])["is_focused"], "focus released at hide start", timeout=0.2)
+            wait(lambda: not row(term)["is_focused"], "focus released at hide start", timeout=0.2)
             focus_released = time.monotonic()
             case_report["focus_released_seconds"] = focus_released - started
             assert focus_released - started <= .2, "focus-release observation exceeded 200ms from key-command start"
@@ -301,10 +313,10 @@ def run_case(binary, backend, output):
             # Reverse while still exiting; identity must be retained and input restored.
             hotkey(); time.sleep(1.2)
             hotkey(); time.sleep(0.12); hotkey()
-            wait(lambda: row(term["xid"])["is_focused"], "reversal restores focus")
+            wait(lambda: row(term)["is_focused"], "reversal restores focus")
             time.sleep(1.2)
-            assert row(term["xid"])["pid"] == term["pid"], "reversal respawned producer"
-            assert row(term["xid"])["tags"] != 0, "reversal left terminal parked"
+            assert row(term)["pid"] == term["pid"], "reversal respawned producer"
+            assert row(term)["tags"] != 0, "reversal left terminal parked"
             shot(kind + "-reversed")  # Resting term returns to normal layer policy.
             background.terminate(); background.wait(timeout=3)
         # Override-redirect safety surfaces must stay above the transient term layer.

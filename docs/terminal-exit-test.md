@@ -6,6 +6,9 @@ terminal, session lock or password. Pure-color Python/Xlib producers publish
 `_NET_WM_PID` and remain alive only while the private fixture marker exists.
 The terminal is spawned by the actual `togglescratchpad` command and matched to
 its real PID; hide/reverse input uses actual Alt+Shift+N through Xephyr's host.
+Native XIDs are used only for X11 tools/focus checks. IPC rows are resolved by
+producer PID and their distinct internal JWM IDs are retained for IPC focus and
+scratchpad-registry assertions; the two ID spaces must never be equated.
 
 Dependencies: Xvfb, Xephyr, xdotool, ImageMagick `import`, dbus-run-session,
 libX11 and Pillow. Supply a newly built JWM binary with the terminal hide fix:

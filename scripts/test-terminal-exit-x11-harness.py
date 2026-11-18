@@ -14,6 +14,18 @@ SPEC.loader.exec_module(FIXTURE)
 
 
 class ExitHarnessTests(unittest.TestCase):
+    def test_producer_resolution_separates_native_xid_from_managed_id(self):
+        producer = {"pid": 123, "xid": 8388644}
+        windows = [{"id": 8388644, "pid": 999}, {"id": 4, "pid": 123}]
+        self.assertEqual(FIXTURE.producer_row(windows, producer)["id"], 4)
+        producer["id"] = 4
+        self.assertEqual(FIXTURE.producer_row(windows, producer)["pid"], 123)
+        self.assertIsNone(FIXTURE.producer_row([], producer))
+        with self.assertRaisesRegex(AssertionError, "changed its managed"):
+            FIXTURE.producer_row([{"id": 5, "pid": 123}], producer)
+        with self.assertRaisesRegex(AssertionError, "multiple managed"):
+            FIXTURE.producer_row([{"id": 4, "pid": 123}, {"id": 5, "pid": 123}], producer)
+
     def test_color_masks_distinguish_foreground_background_and_or(self):
         image = Image.new("RGB", (30, 10), (0, 0, 0))
         image.paste((224, 32, 32), (0, 0, 10, 10))
