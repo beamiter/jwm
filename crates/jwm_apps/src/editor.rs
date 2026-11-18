@@ -21,6 +21,7 @@ pub(crate) struct Editor {
     pub scroll: f64,
     horizontal: f64,
     pub preedit: String,
+    pub highlight_selection: bool,
     undo: Vec<Edit>,
     redo: Vec<Edit>,
     layout: Option<pango::Layout>,
@@ -94,6 +95,11 @@ impl Editor {
         self.anchor = self.cursor;
         self.revision += 1;
         self.layout = None;
+        self.reveal = true;
+    }
+    pub fn select(&mut self, range: Range<usize>) {
+        self.anchor = range.start;
+        self.cursor = range.end;
         self.reveal = true;
     }
     pub fn select_all(&mut self) {
@@ -347,7 +353,7 @@ impl Editor {
         cr.clip();
         cr.translate(area.x - self.horizontal, area.y - self.scroll);
         let range = self.selection();
-        if focused && !range.is_empty() {
+        if (focused || self.highlight_selection) && !range.is_empty() {
             ui::color(cr, ui::select());
             for line in layout.lines_readonly() {
                 let start = (line.start_index() as usize).max(range.start);
@@ -411,6 +417,23 @@ impl Editor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn separately_typed_characters_are_separate_undo_edits() {
+        let source = "needle first\nneedle second\n";
+        let mut editor = Editor::new(source.into());
+        editor.select(13..19);
+        for character in ["M", "A", "T", "C", "H"] {
+            editor.insert(character);
+        }
+        assert_eq!(editor.text, "needle first\nMATCH second\n");
+        editor.undo(false);
+        assert_eq!(editor.text, "needle first\nMATC second\n");
+        for _ in 0..4 {
+            editor.undo(false);
+        }
+        assert_eq!(editor.text, source);
+    }
+
     #[test]
     fn mixed_newlines_are_single_editing_boundaries_and_render_as_lines() {
         let mut e = Editor::new("a\r\nb\nc".into());
