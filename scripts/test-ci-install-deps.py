@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline CI dependency contract: never invokes sudo, apt, or networking."""
+"""Offline CI dependency contract: no privileged commands, network, or installs."""
 import json
 import os
 from pathlib import Path
@@ -16,10 +16,13 @@ WORKFLOWS = ("ci.yml", "remote-wayland-safety.yml", "remote-window-safety.yml",
 
 
 class DependencyInstallTests(unittest.TestCase):
-    def invoke(self, packages=("libx11-dev", "pkg-config"), update=0, install=0):
+    def invoke(self, packages=("libx11-dev", "pkg-config"), update=0, install=0, source="valid"):
         with tempfile.TemporaryDirectory() as directory:
             folder = Path(directory)
             log = folder / "calls.jsonl"
+            sources = folder / "ubuntu.sources"
+            if source != "missing":
+                sources.write_text("Types: deb\nURIs: https://archive.ubuntu.com/ubuntu\nSuites: noble\nComponents: main\n" if source == "valid" else "")
             fake = folder / "sudo"
             fake.write_text(
                 "#!/usr/bin/python3\n"
@@ -33,17 +36,20 @@ class DependencyInstallTests(unittest.TestCase):
             )
             fake.chmod(0o755)
             env = dict(os.environ, PATH=str(folder), FAKE_APT_LOG=str(log),
-                       FAKE_UPDATE_STATUS=str(update), FAKE_INSTALL_STATUS=str(install))
+                       JWM_CI_APT_SOURCES=str(sources), FAKE_UPDATE_STATUS=str(update), FAKE_INSTALL_STATUS=str(install))
             result = subprocess.run(["/bin/bash", str(HELPER), *packages], env=env,
                                     text=True, capture_output=True, timeout=5, check=False)
             calls = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+            # Normalize only the temporary fixture path in recorded argv.
+            calls = [[arg.replace(str(sources), "<ubuntu.sources>") for arg in call] for call in calls]
             return result, calls
 
     def test_success_uses_strict_update_and_bounded_official_source_commands(self):
         result, calls = self.invoke()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(len(calls), 2)
-        options = ["apt-get", "-o", "Acquire::http::Timeout=30", "-o",
+        options = ["apt-get", "-o", "Dir::Etc::sourcelist=<ubuntu.sources>",
+                   "-o", "Dir::Etc::sourceparts=-", "-o", "Acquire::http::Timeout=30", "-o",
                    "Acquire::https::Timeout=30", "-o", "Acquire::Retries=2",
                    "-o", "DPkg::Lock::Timeout=60"]
         self.assertEqual(calls[0], options + ["-o", "APT::Update::Error-Mode=any", "update"])
@@ -66,6 +72,14 @@ class DependencyInstallTests(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertEqual(calls, [])
 
+    def test_missing_or_empty_sources_fail_before_any_privileged_command(self):
+        for source in ("missing", "empty"):
+            with self.subTest(source=source):
+                result, calls = self.invoke(source=source)
+                self.assertEqual(result.returncode, 2)
+                self.assertEqual(calls, [])
+                self.assertIn("missing or empty Ubuntu source file", result.stderr)
+
     def test_all_workflow_installs_have_step_deadlines_and_no_bypass(self):
         count = 0
         for name in WORKFLOWS:
@@ -81,6 +95,75 @@ class DependencyInstallTests(unittest.TestCase):
                 self.assertNotIn("cargo test", step)  # install timeout must not truncate tests
                 count += 1
         self.assertEqual(count, 14)
+
+
+class AptSourceSelectionTests(unittest.TestCase):
+    """Exercise real apt parsing with synthetic indexes, no network or install."""
+
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.folder = Path(self.directory.name)
+        self.lists = self.folder / "lists"
+        self.parts = self.folder / "sources.list.d"
+        self.lists.mkdir()
+        self.parts.mkdir()
+        self.sources = self.folder / "ubuntu.sources"
+        self.sources.write_text(
+            "Types: deb\nURIs: http://official.invalid/ubuntu\n"
+            "Suites: noble\nComponents: main\nArchitectures: amd64\n"
+        )
+        (self.parts / "vendor.list").write_text(
+            "deb [arch=amd64] http://vendor.invalid/ubuntu noble main\n"
+        )
+        (self.folder / "status").write_text("")
+        # Do not read machine-specific APT configuration or its installed state.
+        config = self.folder / "apt.conf"
+        config.write_text('Dir::Etc::parts "-";\nDir::Etc::main "-";\n')
+        self.env = dict(os.environ, APT_CONFIG=str(config), LC_ALL="C")
+        self.options = [
+            "-o", f"Dir::Etc::sourcelist={self.sources}",
+            "-o", "Dir::Etc::sourceparts=-",
+            "-o", f"Dir::State::lists={self.lists}",
+            "-o", f"Dir::State::status={self.folder / 'status'}",
+            "-o", "Dir::Cache::pkgcache=", "-o", "Dir::Cache::srcpkgcache=",
+            "-o", "APT::Architecture=amd64",
+        ]
+
+    def run_apt(self, program, *args, vendor=False):
+        options = self.options.copy()
+        if vendor:
+            options += ["-o", f"Dir::Etc::sourceparts={self.parts}"]
+        result = subprocess.run([program, *options, *args], env=self.env,
+                                capture_output=True, text=True, timeout=10, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout
+
+    def test_print_uris_excludes_vendor_without_changing_source_files(self):
+        before = {path: path.read_bytes() for path in (self.sources, self.parts / "vendor.list")}
+        all_sources = self.run_apt("apt-get", "--print-uris", "update", vendor=True)
+        self.assertIn("http://official.invalid/ubuntu/", all_sources)
+        self.assertIn("http://vendor.invalid/ubuntu/", all_sources)
+        selected = self.run_apt("apt-get", "--print-uris", "update")
+        self.assertIn("http://official.invalid/ubuntu/", selected)
+        self.assertNotIn("vendor.invalid", selected)
+        for path, content in before.items():
+            self.assertEqual(path.read_bytes(), content)
+
+    def test_cached_vendor_index_is_not_an_install_candidate(self):
+        for host, version in (("official", "1"), ("vendor", "2")):
+            index = self.lists / f"{host}.invalid_ubuntu_dists_noble_main_binary-amd64_Packages"
+            index.write_text(
+                f"Package: jwm-ci-source-probe\nVersion: {version}\n"
+                "Architecture: amd64\nDescription: offline fixture\n\n"
+            )
+        all_sources = self.run_apt("apt-cache", "policy", "jwm-ci-source-probe", vendor=True)
+        self.assertIn("Candidate: 2", all_sources)
+        self.assertIn("vendor.invalid", all_sources)
+        selected = self.run_apt("apt-cache", "policy", "jwm-ci-source-probe")
+        self.assertIn("Candidate: 1", selected)
+        self.assertNotIn("vendor.invalid", selected)
+        self.assertIn("official.invalid", selected)
 
 
 class QtProbeContractTests(unittest.TestCase):
