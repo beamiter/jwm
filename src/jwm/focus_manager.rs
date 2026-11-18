@@ -1995,7 +1995,7 @@ mod scratchpad_reveal_tests {
         jwm.attach_to_monitor(dock, monitor);
         // System UI stays above the application-only transition layer.
         let overlay = WindowId::from_raw(0x712);
-        jwm.override_redirect_windows.push(overlay);
+        jwm.override_redirect_windows.insert(overlay);
         jwm.or_window_geometries
             .insert(overlay, (x + 20, top + 20, 30, 30));
         jwm.togglescratchpad(&mut backend, &WMArgEnum::StringVec(vec!["term".into()]))
