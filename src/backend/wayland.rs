@@ -21,3 +21,7 @@ pub(crate) mod preview;
 #[cfg(feature = "backend-wayland-nested")]
 #[path = "wayland_eva.rs"]
 pub(crate) mod eva;
+
+#[cfg(feature = "backend-wayland-nested")]
+#[path = "wayland_terminal_visual.rs"]
+pub(crate) mod terminal_visual;
