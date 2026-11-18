@@ -83,8 +83,18 @@ resizing, and flushed on hide, close and exit; a failed save raises a toast.
 
 Opening and closing share a vertical slide above the output's top edge.
 Toggling again during the slide reverses from the current position and takes
-only the remaining fraction of the animation time. A closing terminal stops
+only the remaining fraction of the animation time. A hiding terminal stops
 accepting focus immediately while its visual finishes sliding upward.
+
+The default dismissal uses a monotonic ease-in-out curve: it starts gently
+instead of jumping through nearly a fifth of the path in its first 60 Hz frame,
+and slows before settling off-screen. Opening still uses the configured curve.
+For the `term` dropdown exit only, `ease-out`, `bounce` and `elastic` map to
+`ease-in-out`; explicit `linear`, `ease-in` and `ease-in-out` remain unchanged.
+The configured duration, speed/reduced-motion settings and remaining-distance
+shortening on reversal are retained. Reversal preserves position, not velocity.
+This is the shortcut's hide/reveal animation, not a replacement for the generic
+animation when a terminal process actually exits. Other named scratchpads and ordinary window transitions are unchanged.
 
 ## Dragging between outputs
 

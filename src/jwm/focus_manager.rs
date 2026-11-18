@@ -1951,6 +1951,58 @@ mod scratchpad_reveal_tests {
     }
 
     #[test]
+    fn dropdown_rapid_reversals_keep_position_focus_and_finish_cleanup() {
+        let (mut jwm, key, window, monitor) = jwm_with_cross_monitor_scratchpad(false);
+        let mut backend = ScratchpadBackend::new();
+        jwm.reveal_and_focus(&mut backend, window).unwrap();
+        jwm.animations.remove(key);
+        let arg = WMArgEnum::StringVec(vec!["term".into()]);
+        for toggle in 0..9 {
+            let before = jwm.animations.active.get_mut(&key).map(|animation| {
+                // Stable half-way sample without sleeps or a load-sensitive clock.
+                animation.duration = Duration::from_secs(600);
+                animation.started_at = Instant::now() - Duration::from_secs(300);
+                animation.sample(Instant::now()).0
+            });
+            jwm.togglescratchpad(&mut backend, &arg).unwrap();
+            let animation = jwm.animations.active[&key].clone();
+            if let Some(before) = before {
+                assert!((animation.from.y - before.y).abs() <= 1);
+                assert_eq!(animation.from.x, before.x);
+            }
+            let hiding = toggle % 2 == 0;
+            assert_eq!(animation.kind == AnimationKind::Hide, hiding);
+            if hiding {
+                assert_eq!(jwm.state.clients[key].state.tags, 0);
+                assert_ne!(
+                    jwm.get_selected_client_key(),
+                    Some(key),
+                    "focus leaves before first visual frame"
+                );
+                assert!(!jwm.last_stacking[monitor].contains(&window));
+            } else {
+                assert_eq!(jwm.get_selected_client_key(), Some(key));
+            }
+            jwm.arrange(&mut backend, Some(monitor));
+            assert_eq!(jwm.animations.active[&key].started_at, animation.started_at);
+        }
+        let animation = jwm.animations.active.get_mut(&key).unwrap();
+        animation.started_at = Instant::now() - animation.duration - Duration::from_secs(1);
+        // Keep this completion regression independent of host hardware/idle probes.
+        jwm.last_battery_poll = Some(Instant::now());
+        jwm.last_idle_poll = Some(Instant::now());
+        jwm.tick_animations(&mut backend);
+        assert!(!jwm.animations.active.contains_key(&key));
+        assert_eq!(jwm.state.clients[key].state.tags, 0);
+        assert_ne!(jwm.get_selected_client_key(), Some(key));
+        assert!(
+            !jwm.build_compositor_scene(&backend, &HashMap::new())
+                .iter()
+                .any(|entry| entry.0 == window.raw())
+        );
+    }
+
+    #[test]
     fn vstack_focus_resize_retargets_from_the_current_visual() {
         let (mut jwm, first, second) = jwm_with_two_tiled_windows();
         let mut backend = ScratchpadBackend::new();
