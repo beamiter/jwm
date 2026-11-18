@@ -75,7 +75,12 @@ lists, task markers, quotes and basic table text (not a browser table layout).
 Raw HTML is displayed literally; links are underlined but not opened, and images
 show alt-text placeholders without reading local files or contacting the network.
 Preview parsing is cached by document revision and limited to 256 KiB. Larger
-sources remain editable/saveable up to the existing 8 MiB file limit.
+sources remain editable. Opening, saving and Save As enforce an 8 MiB limit on
+actual encoded file bytes, including UTF-8 BOM and CRLF expansion. Reads are
+bounded even if the file grows after the initial metadata check; changes during
+reading are rejected. If edits exceed the save limit, saving reports an error
+without modifying the original/destination file or discarding the unsaved buffer.
+Shorten the content before retrying; oversized input is never silently truncated.
 
 This is Markdown rendering, **not TSX execution**. React/TSX live preview needs a
 separate isolated runtime and remains planned; the editor does not run project

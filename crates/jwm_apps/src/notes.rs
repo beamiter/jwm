@@ -1,10 +1,25 @@
 use crate::{editor::Editor, note_title};
 use gio::{self, glib, prelude::*};
+use std::io::Read;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 const MAX_TEXT_BYTES: u64 = 8 * 1024 * 1024;
+const SIZE_ERROR: &str =
+    "编码后的文件超过 8 MiB（含 BOM 和换行）。未写入文件，编辑内容仍保留，请缩短内容后重试。";
+
+fn read_limited(reader: impl Read) -> Result<Vec<u8>, String> {
+    let mut bytes = Vec::new();
+    reader
+        .take(MAX_TEXT_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| error.to_string())?;
+    if bytes.len() as u64 > MAX_TEXT_BYTES {
+        return Err("文件实际内容超过 8 MiB，未打开或修改原文件。".into());
+    }
+    Ok(bytes)
+}
 
 // GIO's local etag can collide when two files have the same timestamp. Keep
 // inode/change metadata too, so atomic replacements are still detected.
@@ -41,14 +56,31 @@ pub struct TextFile {
 
 impl TextFile {
     pub fn load(file: gio::File) -> Result<(Self, String), String> {
+        Self::load_with_reader(file, |stream| read_limited(stream.into_read()))
+    }
+
+    fn load_with_reader(
+        file: gio::File,
+        read: impl FnOnce(gio::FileInputStream) -> Result<Vec<u8>, String>,
+    ) -> Result<(Self, String), String> {
         let path = file.path().ok_or("请选择本地文件。")?;
         let metadata = path.metadata().map_err(|error| error.to_string())?;
         if !metadata.is_file() || metadata.len() > MAX_TEXT_BYTES {
             return Err("请选择不超过 8 MiB 的 UTF-8 文本文件。".into());
         }
-        let (bytes, etag) = file
-            .load_contents(gio::Cancellable::NONE)
+        let stamp = FileStamp::from(&metadata);
+        let stream = file
+            .read(gio::Cancellable::NONE)
             .map_err(|error| error.to_string())?;
+        let etag = stream
+            .query_info("etag::value", gio::Cancellable::NONE)
+            .map_err(|error| error.to_string())?
+            .etag();
+        // A stale metadata size must never permit an unbounded allocation.
+        let bytes = read(stream)?;
+        if FileStamp::read(&file)? != stamp {
+            return Err("读取期间文件已被其他程序修改，请重新打开。".into());
+        }
         let text =
             std::str::from_utf8(&bytes).map_err(|_| "文件不是 UTF-8 文本，未修改原文件。")?;
         let bom = text.starts_with('\u{feff}');
@@ -68,7 +100,7 @@ impl TextFile {
                 etag,
                 bom,
                 crlf,
-                stamp: FileStamp::from(&metadata),
+                stamp,
             },
             text,
         ))
@@ -78,7 +110,7 @@ impl TextFile {
         if FileStamp::read(&self.file)? != self.stamp {
             return Err("文件已被其他程序修改，请另存为以保留当前内容。".into());
         }
-        let text = encode_text(text, self.bom, self.crlf);
+        let text = encode_text(text, self.bom, self.crlf)?;
         self.etag = self
             .file
             .replace_contents(
@@ -96,13 +128,26 @@ impl TextFile {
     }
 }
 
-fn encode_text(text: &str, bom: bool, crlf: bool) -> String {
+fn encode_text(text: &str, bom: bool, crlf: bool) -> Result<String, String> {
+    // Check final bytes before allocating another copy or touching the target.
+    let extra_newlines = if crlf {
+        text.bytes().filter(|byte| *byte == b'\n').count()
+    } else {
+        0
+    };
+    let size = text
+        .len()
+        .checked_add(extra_newlines)
+        .and_then(|size| size.checked_add(if bom { 3 } else { 0 }));
+    if size.is_none_or(|size| size as u64 > MAX_TEXT_BYTES) {
+        return Err(SIZE_ERROR.into());
+    }
     let text = if crlf {
         text.replace('\n', "\r\n")
     } else {
         text.to_owned()
     };
-    if bom { format!("\u{feff}{text}") } else { text }
+    Ok(if bom { format!("\u{feff}{text}") } else { text })
 }
 
 pub fn create_note(directory: &Path) -> Result<PathBuf, String> {
@@ -250,9 +295,10 @@ impl Notes {
             .as_ref()
             .map(|d| (d.bom, d.crlf))
             .unwrap_or_default();
+        let encoded = encode_text(&self.editor.text, bom, crlf)?;
         let etag = file
             .replace_contents(
-                encode_text(&self.editor.text, bom, crlf).as_bytes(),
+                encoded.as_bytes(),
                 None,
                 false,
                 gio::FileCreateFlags::PRIVATE,
@@ -284,10 +330,11 @@ impl Notes {
                 if !meta.is_file() || meta.len() > MAX_TEXT_BYTES {
                     return None;
                 }
-                let text = std::fs::read_to_string(e.path()).ok()?;
+                let bytes = read_limited(std::fs::File::open(e.path()).ok()?).ok()?;
+                let text = std::str::from_utf8(&bytes).ok()?;
                 text.to_lowercase()
                     .contains(&query)
-                    .then(|| (e.path(), note_title(&text), meta.modified().ok()))
+                    .then(|| (e.path(), note_title(text), meta.modified().ok()))
             })
             .collect();
         entries.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.0.cmp(&b.0)));
@@ -326,6 +373,111 @@ impl Notes {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn file_size_boundary_counts_bom_and_encoded_newlines() {
+        let dir = std::env::temp_dir().join(format!("jwm-size-limit-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let limit = MAX_TEXT_BYTES as usize;
+        for bom in [false, true] {
+            let path = dir.join(format!("boundary-{bom}.txt"));
+            let body = "a".repeat(limit - if bom { 3 } else { 0 });
+            let original = if bom {
+                format!("\u{feff}{body}")
+            } else {
+                body.clone()
+            };
+            std::fs::write(&path, &original).unwrap();
+            let (mut file, loaded) = TextFile::load(gio::File::for_path(&path)).unwrap();
+            assert!(
+                file.etag.is_some(),
+                "local GIO stream must retain etag protection"
+            );
+            assert_eq!(loaded, body);
+            file.save(&loaded).unwrap();
+            assert_eq!(std::fs::read(&path).unwrap(), original.as_bytes());
+            assert!(
+                file.save(&format!("{loaded}x"))
+                    .unwrap_err()
+                    .contains("8 MiB")
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), original.as_bytes());
+            std::fs::write(&path, format!("{original}x")).unwrap();
+            assert!(TextFile::load(gio::File::for_path(&path)).is_err());
+        }
+        // The editor holds LF but saving a uniform-CRLF document expands it.
+        let path = dir.join("crlf.txt");
+        std::fs::write(&path, "\u{feff}a\r\n").unwrap();
+        let mut notes = Notes::new(Some(path.clone())).unwrap();
+        notes.editor.select_all();
+        let boundary = format!("{}\n", "a".repeat(limit - 5));
+        notes.editor.insert(&boundary);
+        notes.edited();
+        notes.save().unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), MAX_TEXT_BYTES);
+        assert_eq!(
+            TextFile::load(gio::File::for_path(&path)).unwrap().1,
+            boundary
+        );
+        let before = std::fs::read(&path).unwrap();
+        notes.editor.insert("x");
+        notes.edited();
+        let text = notes.editor.text.clone();
+        let revision = notes.editor.revision;
+        assert!(notes.save().unwrap_err().contains("8 MiB"));
+        let existing = dir.join("existing.txt");
+        std::fs::write(&existing, "do not overwrite").unwrap();
+        assert!(notes.save_as(&existing).is_err());
+        assert_eq!(
+            std::fs::read_to_string(&existing).unwrap(),
+            "do not overwrite"
+        );
+        let absent = dir.join("absent.txt");
+        assert!(notes.save_as(&absent).is_err());
+        assert!(!absent.exists());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert_eq!(notes.editor.text, text);
+        assert_eq!(notes.editor.revision, revision);
+        assert!(notes.dirty);
+        // Recovery is possible without closing or discarding the document.
+        notes.editor.select_all();
+        notes.editor.insert("short\n");
+        notes.edited();
+        notes.save().unwrap();
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "\u{feff}short\r\n");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn stale_metadata_cannot_bypass_read_limit_or_read_consistency() {
+        let path = std::env::temp_dir().join(format!("jwm-read-race-{}.txt", std::process::id()));
+        std::fs::write(&path, "old").unwrap();
+        let result = TextFile::load_with_reader(gio::File::for_path(&path), |stream| {
+            // Deterministically grow the same file after metadata/open/etag.
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_len(MAX_TEXT_BYTES + 1)
+                .unwrap();
+            read_limited(stream.into_read())
+        });
+        assert!(result.err().unwrap().contains("实际内容超过"));
+        std::fs::write(&path, "old").unwrap();
+        let result = TextFile::load_with_reader(gio::File::for_path(&path), |stream| {
+            let replacement = path.with_extension("replacement");
+            std::fs::write(&replacement, "new").unwrap();
+            std::fs::rename(replacement, &path).unwrap();
+            read_limited(stream.into_read())
+        });
+        assert!(result.err().unwrap().contains("读取期间"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
+        // Even a reader with no trustworthy metadata consumes only limit + 1.
+        let mut reader = std::io::Cursor::new(vec![b'a'; MAX_TEXT_BYTES as usize + 2]);
+        assert!(read_limited(&mut reader).is_err());
+        assert_eq!(reader.position(), MAX_TEXT_BYTES + 1);
+        std::fs::remove_file(path).unwrap();
+    }
 
     #[test]
     fn load_save_preserves_mixed_line_endings_and_bom() {
@@ -374,7 +526,7 @@ mod tests {
     #[test]
     fn preserves_bom_and_windows_line_endings() {
         assert_eq!(
-            encode_text("备忘\n第二行\n", true, true),
+            encode_text("备忘\n第二行\n", true, true).unwrap(),
             "\u{feff}备忘\r\n第二行\r\n"
         );
     }
