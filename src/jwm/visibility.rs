@@ -238,8 +238,18 @@ impl Jwm {
     /// - 使用滑出动画（如果启用）
     pub(crate) fn hide_client(&mut self, backend: &mut dyn Backend, client_key: ClientKey) {
         let cfg = CONFIG.load();
-        let animation = cfg
-            .motion_enabled()
+        // Workspace transitions and modal-shell commits own (or suppress) the
+        // whole view change, including outgoing windows. A leftover Hide would
+        // keep the ordinary immediate compositor path waiting on a timer.
+        // Live tiled resizing also suppresses layout interpolation. Do not
+        // let that unrelated arrange cut short a named dropdown's own exit.
+        let named_exit = self.scratchpads.values().any(|&key| key == client_key)
+            && self
+                .animations
+                .active
+                .get(&client_key)
+                .is_some_and(|animation| animation.kind == AnimationKind::Hide);
+        let animation = (cfg.motion_enabled() && (!self.suppress_layout_animation || named_exit))
             .then(|| (cfg.animation_duration(), cfg.animation_easing()));
         self.hide_client_with_animation(backend, client_key, animation);
     }
@@ -427,6 +437,69 @@ mod tests {
                 Some(Rect::new(100, 200, 300, 400))
             );
         }
+    }
+
+    #[test]
+    fn suppressed_hide_cancels_old_motion_and_preserves_restore() {
+        use crate::backend::common_define::WindowId;
+        use crate::core::animation::{AnimationKind, Easing};
+        use crate::core::models::WMClient;
+        use crate::jwm::Jwm;
+        use crate::jwm::monitor::test_support::{DisplaySpyBackend, output};
+        use std::time::Duration;
+
+        let mut backend = DisplaySpyBackend::new(vec![output(1, 0, 0, 1920, 1080)]);
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        for kind in [
+            AnimationKind::Layout,
+            AnimationKind::Appear,
+            AnimationKind::Hide,
+        ] {
+            let mut client = WMClient::new(WindowId::from_raw(42));
+            client.geometry.x = 100;
+            client.geometry.y = 200;
+            client.geometry.w = 300;
+            client.geometry.h = 400;
+            let key = jwm.state.clients.insert(client);
+            jwm.animations.start(
+                key,
+                Rect::new(0, 0, 300, 400),
+                Rect::new(100, 200, 300, 400),
+                Duration::from_secs(1),
+                Easing::Linear,
+                kind,
+            );
+            jwm.suppress_layout_animation = true;
+            jwm.hide_client(&mut backend, key);
+            assert!(!jwm.animations.active.contains_key(&key), "{kind:?}");
+            let client = &jwm.state.clients[key];
+            assert!(client.geometry.x < 0, "{kind:?}");
+            assert_eq!(
+                client.geometry.hidden_restore_rect,
+                Some(Rect::new(100, 200, 300, 400))
+            );
+        }
+    }
+
+    #[test]
+    fn ordinary_hide_still_animates_when_not_suppressed() {
+        use crate::backend::common_define::WindowId;
+        use crate::core::models::WMClient;
+        use crate::jwm::Jwm;
+        use crate::jwm::monitor::test_support::{DisplaySpyBackend, output};
+        let mut backend = DisplaySpyBackend::new(vec![output(1, 0, 0, 1920, 1080)]);
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let mut client = WMClient::new(WindowId::from_raw(43));
+        client.geometry.x = 100;
+        client.geometry.y = 200;
+        client.geometry.w = 300;
+        client.geometry.h = 400;
+        let key = jwm.state.clients.insert(client);
+        jwm.hide_client(&mut backend, key);
+        assert_eq!(
+            jwm.animations.active[&key].kind,
+            crate::core::animation::AnimationKind::Hide
+        );
     }
 
     #[test]
