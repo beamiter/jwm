@@ -404,6 +404,23 @@ impl Editor {
 mod tests {
     use super::*;
     #[test]
+    fn separately_typed_characters_are_separate_undo_edits() {
+        let source = "needle first\nneedle second\n";
+        let mut editor = Editor::new(source.into());
+        editor.select(13..19);
+        for character in ["M", "A", "T", "C", "H"] {
+            editor.insert(character);
+        }
+        assert_eq!(editor.text, "needle first\nMATCH second\n");
+        editor.undo(false);
+        assert_eq!(editor.text, "needle first\nMATC second\n");
+        for _ in 0..4 {
+            editor.undo(false);
+        }
+        assert_eq!(editor.text, source);
+    }
+
+    #[test]
     fn unicode_selection_and_undo_are_document_local() {
         let mut e = Editor::new("备忘 e\u{301}👩‍💻".into());
         e.cursor = e.text.len();

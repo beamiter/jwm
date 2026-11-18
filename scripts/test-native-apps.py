@@ -263,7 +263,15 @@ def main():
                 key("ctrl+s")
                 wait(lambda: find_path.read_text() == "needle first\nMATCH second\n",
                      "Find next/Escape did not retain the second match")
-                key("ctrl+z", "ctrl+s", "ctrl+Home", "ctrl+f", "ctrl+a")
+                # Typed characters are separate undo edits, not a single word.
+                # Restart from an exact fixture instead of relying on undo grouping.
+                key("ctrl+w")
+                wait(lambda: find_app.poll() is not None, "Forward-find editor did not close")
+                find_path.write_text(find_source)
+                find_app = launch("jwm-notes", find_path)
+                find_window_id = window("find.txt.*JWM 备忘录")
+                focus(find_window_id)
+                key("ctrl+Home", "ctrl+f")
                 type_text("needle")
                 key("shift+Return", "Escape")
                 type_text("LAST")
