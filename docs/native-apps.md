@@ -43,7 +43,9 @@ full text. Delete moves a note to the system trash after confirmation.
 Externally opened files use explicit save and prompt before closing unsaved
 changes. Saving checks the file's etag to detect external modifications;
 conflicts keep the editor open so the user can save a separate copy. UTF-8 BOM
-and Windows CRLF line endings are preserved. Invalid UTF-8, directories and
+and Windows CRLF line endings are preserved. Mixed LF/CRLF files retain their
+existing separators instead of silently normalizing unrelated lines; newly
+inserted line breaks use LF in mixed files. Invalid UTF-8, directories and
 files over 8 MiB are rejected. Automatic note saves use atomic replacement and
 retain a previous version as a `~` backup beside the file.
 

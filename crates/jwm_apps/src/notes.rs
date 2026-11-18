@@ -54,7 +54,14 @@ impl TextFile {
         let bom = text.starts_with('\u{feff}');
         let text = text.strip_prefix('\u{feff}').unwrap_or(text);
         let crlf = text.contains("\r\n") && !text.replace("\r\n", "").contains('\n');
-        let text = text.replace("\r\n", "\n");
+        // Only normalize uniform CRLF documents. Mixed files keep their exact
+        // separators in the editor; a global replacement would silently change
+        // unrelated lines on the next save (including Save As).
+        let text = if crlf {
+            text.replace("\r\n", "\n")
+        } else {
+            text.to_owned()
+        };
         Ok((
             Self {
                 file,
@@ -313,6 +320,50 @@ impl Notes {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn load_save_preserves_mixed_line_endings_and_bom() {
+        let dir = std::env::temp_dir().join(format!("jwm-mixed-eol-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for (i, original) in [
+            "a\r\nb\nc",
+            "a\r\nb\nc\n",
+            "a\r\nb\nc\r\n",
+            "\u{feff}a\r\nb\nc",
+            "\u{feff}a\r\nb\nc\n",
+            "\u{feff}a\r\nb\nc\r\n",
+            "a\r\nb\r\n",
+            "a\nb\n",
+        ]
+        .iter()
+        .enumerate()
+        {
+            let path = dir.join(format!("{i}.txt"));
+            std::fs::write(&path, original).unwrap();
+            let (mut file, text) = TextFile::load(gio::File::for_path(&path)).unwrap();
+            file.save(&text).unwrap();
+            assert_eq!(
+                std::fs::read_to_string(&path).unwrap(),
+                *original,
+                "case {i}"
+            );
+            file.save(&format!("edit {text}")).unwrap();
+            let (bom, body) = if let Some(body) = original.strip_prefix('\u{feff}') {
+                ("\u{feff}", body)
+            } else {
+                ("", *original)
+            };
+            assert_eq!(
+                std::fs::read_to_string(&path).unwrap(),
+                format!("{bom}edit {body}")
+            );
+            let mut notes = Notes::new(Some(path.clone())).unwrap();
+            let copy = dir.join(format!("{i}-copy.txt"));
+            notes.save_as(&copy).unwrap();
+            assert_eq!(std::fs::read(copy).unwrap(), std::fs::read(path).unwrap());
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn preserves_bom_and_windows_line_endings() {

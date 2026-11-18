@@ -170,6 +170,26 @@ def main():
                 wait(lambda: notebook.poll() is not None, "Reopened notebook did not close")
                 print("Notebook autosave, independent notes and restart persistence: PASS", flush=True)
 
+                # Mixed CRLF/LF must survive real End/Delete/Backspace/Enter events.
+                mixed = work / "mixed-newlines.txt"
+                mixed.write_bytes(b"\xef\xbb\xbfa\r\nb\nc")
+                mixed_app = launch("jwm-notes", mixed)
+                mixed_window = window("mixed-newlines.txt.*JWM 备忘录")
+                focus(mixed_window)
+                key("End")
+                type_text("X")
+                key("ctrl+s")
+                assert mixed.read_bytes() == b"\xef\xbb\xbfaX\r\nb\nc", "End split or save normalized CRLF"
+                key("Delete", "ctrl+s")
+                assert mixed.read_bytes() == b"\xef\xbb\xbfaXb\nc", "Delete did not consume the whole CRLF"
+                key("ctrl+z", "BackSpace", "ctrl+s")
+                assert mixed.read_bytes() == b"\xef\xbb\xbfaXb\nc", "Backspace did not consume the whole CRLF"
+                key("ctrl+z", "Return", "ctrl+s")
+                assert mixed.read_bytes() == b"\xef\xbb\xbfaX\r\n\nb\nc", "Enter changed existing separators"
+                key("ctrl+w")
+                wait(lambda: mixed_app.poll() is not None, "Mixed-newline editor did not close")
+                print("Mixed newline native editing and BOM preservation: PASS", flush=True)
+
                 external = work / 'file with spaces.txt'
                 external.write_bytes(b"\xef\xbb\xbfOriginal\r\n")
                 editor = launch("jwm-notes", external)
