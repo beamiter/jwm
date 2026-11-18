@@ -153,3 +153,23 @@ are selected and scrolled into view; query input, including IME, never dirties
 the source or enters its undo history. Escape retains the selected match so
 ordinary editing can continue. Empty and missing queries do not change source
 selection. Notebook Ctrl+F keeps its existing notebook-filter behavior.
+
+### Code-text view and document status
+
+External documents have an **等宽代码** button to switch the source pane to
+Pango's `monospace` font family. The **主题正文** button restores the theme font.
+Theme font size, soft wrapping, selection and UTF-8 editing remain unchanged;
+notebook prose keeps its theme font. This is a presentation toggle, not syntax
+highlighting or TSX execution. No project scripts, packages or network requests
+are run.
+
+The external-document status bar reports one-based logical line and Unicode
+extended-grapheme column (字素列), UTF-8/BOM and saved newline convention. CRLF
+is one line break; CR and LF also delimit logical lines. Soft wraps do not add
+logical lines, and a tab counts as one grapheme, not its visual screen width.
+Mixed newline text is identified without conversion. Statistics are cached by
+document revision and cursor location. Moving the cursor recalculates its logical
+position from the text prefix, so very large files can incur extra work per move.
+Bare CR is counted as a line break for status reporting; Home/End retain the
+existing LF-based editor behavior. Changing views does not dirty the file.
+Line-number gutters and an unwrapped horizontal-scroll mode are not included.

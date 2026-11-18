@@ -13,6 +13,11 @@ struct Edit {
     inserted: String,
 }
 #[derive(Default)]
+struct Metrics {
+    position: Option<(u64, usize, (usize, usize))>,
+    newlines: Option<(u64, &'static str)>,
+}
+#[derive(Default)]
 pub(crate) struct Editor {
     pub text: String,
     pub cursor: usize,
@@ -22,6 +27,8 @@ pub(crate) struct Editor {
     horizontal: f64,
     pub preedit: String,
     pub highlight_selection: bool,
+    pub monospace: bool,
+    metrics: Box<Metrics>,
     undo: Vec<Edit>,
     redo: Vec<Edit>,
     layout: Option<pango::Layout>,
@@ -35,6 +42,61 @@ impl Editor {
             reveal: true,
             ..Self::default()
         }
+    }
+    pub fn toggle_monospace(&mut self) {
+        self.monospace = !self.monospace;
+        self.layout = None;
+        self.horizontal = 0.;
+        self.reveal = true;
+    }
+    /// Logical lines, not visual wraps; one-based extended grapheme columns.
+    /// Tabs count as one column. CRLF is a single line break.
+    pub fn position(&mut self) -> (usize, usize) {
+        if let Some((revision, cursor, position)) = self.metrics.position
+            && revision == self.revision
+            && cursor == self.cursor
+        {
+            return position;
+        }
+        let mut position = (1, 1);
+        for grapheme in self.text[..self.before_crlf(self.cursor)].graphemes(true) {
+            if matches!(grapheme, "\n" | "\r\n" | "\r") {
+                position = (position.0 + 1, 1);
+            } else {
+                position.1 += 1;
+            }
+        }
+        self.metrics.position = Some((self.revision, self.cursor, position));
+        position
+    }
+    pub fn line_endings(&mut self) -> &'static str {
+        if let Some((revision, label)) = self.metrics.newlines
+            && revision == self.revision
+        {
+            return label;
+        }
+        let mut kinds = 0;
+        let mut bytes = self.text.bytes().peekable();
+        while let Some(byte) = bytes.next() {
+            match byte {
+                b'\r' if bytes.peek() == Some(&b'\n') => {
+                    bytes.next();
+                    kinds |= 2;
+                }
+                b'\r' => kinds |= 4,
+                b'\n' => kinds |= 1,
+                _ => (),
+            }
+        }
+        let label = match kinds {
+            0 => "无换行",
+            1 => "LF",
+            2 => "CRLF",
+            4 => "CR",
+            _ => "混合换行",
+        };
+        self.metrics.newlines = Some((self.revision, label));
+        label
     }
     pub fn selection(&self) -> Range<usize> {
         self.cursor.min(self.anchor)..self.cursor.max(self.anchor)
@@ -322,6 +384,11 @@ impl Editor {
             area.w,
             multiline,
         );
+        if multiline && self.monospace {
+            let mut font = layout.font_description().unwrap_or_default();
+            font.set_family("monospace");
+            layout.set_font_description(Some(&font));
+        }
         if !multiline {
             layout.set_width(-1);
             layout.set_ellipsize(pango::EllipsizeMode::None);
@@ -381,6 +448,9 @@ impl Editor {
         }
         if focused && !self.preedit.is_empty() {
             let preedit = ui::layout(cr, &self.preedit, 15., area.w - cx, false);
+            if multiline && self.monospace {
+                preedit.set_font_description(layout.font_description().as_ref());
+            }
             ui::fill(
                 cr,
                 Rect::new(cx, cy, (preedit.pixel_size().0 as f64).max(8.), ch),
@@ -432,6 +502,72 @@ mod tests {
             editor.undo(false);
         }
         assert_eq!(editor.text, source);
+    }
+
+    #[test]
+    fn logical_position_and_newlines_are_unicode_safe_and_revision_cached() {
+        let mut e = Editor::new("中e\u{301}👩‍💻\t\r\nnext\nlast".into());
+        e.cursor = "中e\u{301}👩‍💻\t".len();
+        assert_eq!(e.position(), (1, 5));
+        assert_eq!(e.line_endings(), "混合换行");
+        e.cursor += 1; // Defensive CRLF interior maps before the pair.
+        assert_eq!(e.position(), (1, 5));
+        e.cursor += 1;
+        assert_eq!(e.position(), (2, 1));
+        e.cursor = e.text.len();
+        assert_eq!(e.position(), (3, 5));
+        e.select_all();
+        e.insert("a\r\nb");
+        assert_eq!(e.position(), (2, 2));
+        assert_eq!(e.line_endings(), "CRLF");
+        e.select_all();
+        e.insert("a\rb");
+        assert_eq!(e.position(), (2, 2));
+        assert_eq!(e.line_endings(), "CR");
+        e.select_all();
+        e.insert("");
+        assert_eq!(e.position(), (1, 1));
+        assert_eq!(e.line_endings(), "无换行");
+    }
+
+    #[test]
+    fn monospace_view_preserves_selection_and_logical_lines_across_wraps() {
+        let mut e = Editor::new("WiWiWiWiWiWiWiWiWiWiWiWiWiWiWiWi\r\n中e\u{301}".into());
+        e.select(0..2);
+        let source = e.text.clone();
+        let selection = e.selection();
+        let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 120, 400).unwrap();
+        let cr = cairo::Context::new(&surface).unwrap();
+        e.toggle_monospace();
+        e.draw(&cr, Rect::new(0., 0., 100., 400.), true, true, true);
+        let layout = e.layout.as_ref().unwrap();
+        assert_eq!(
+            layout.font_description().unwrap().family().as_deref(),
+            Some("monospace")
+        );
+        assert_eq!(
+            layout.index_to_pos(0).width(),
+            layout.index_to_pos(1).width()
+        );
+        assert!(layout.line_count() > 2, "soft wrapping remains active");
+        assert_eq!(e.position(), (1, 3));
+        for y in 0..200 {
+            for x in [0, 10, 50, 99] {
+                let index = e.index_at(x * pango::SCALE, y * pango::SCALE);
+                assert!(source.is_char_boundary(index));
+                assert_ne!(
+                    index,
+                    source.find("\r\n").unwrap() + 1,
+                    "hit testing must not split CRLF"
+                );
+            }
+        }
+        e.toggle_monospace();
+        e.draw(&cr, Rect::new(0., 0., 100., 400.), true, true, true);
+        assert_eq!(e.text, source);
+        assert_eq!(e.selection(), selection);
+        assert_eq!(e.revision, 0);
+        assert!(e.undo.is_empty());
     }
 
     #[test]

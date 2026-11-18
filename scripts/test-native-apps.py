@@ -302,6 +302,31 @@ def main():
                 wait(lambda: find_app.poll() is not None, "Find editor did not close")
                 print("Native document find input, next/previous wrap and source focus: PASS", flush=True)
 
+                # Code view changes presentation, not source bytes or keyboard routing.
+                code_path = work / "component.tsx"
+                code_source = b"\xef\xbb\xbfconst view = <div>iiii WWWW</div>;\r\n"
+                code_path.write_bytes(code_source)
+                code_app = launch("jwm-notes", code_path)
+                code_window = window("component.tsx.*JWM 备忘录")
+                focus(code_window)
+                before = screenshot(code_window)
+                command("xdotool", "mousemove", "--window", code_window, 540, 86, "click", "1")
+                after = screenshot(code_window)
+                region = (16, 120, after.width - 16, 190)
+                assert before.crop(region).tobytes() != after.crop(region).tobytes(), "Code view did not change source rendering"
+                key("ctrl+s")
+                assert code_path.read_bytes() == code_source, "Code view modified source bytes"
+                key("ctrl+End")
+                type_text("// appended")
+                key("ctrl+s")
+                wait(lambda: code_path.read_bytes() == code_source + b"// appended",
+                     "Code view lost source focus or changed encoding")
+                command("xdotool", "mousemove", "--window", code_window, 540, 86, "click", "1")
+                key("ctrl+s", "ctrl+w")
+                wait(lambda: code_app.poll() is not None, "Code-view editor did not close")
+                assert code_path.read_bytes() == code_source + b"// appended"
+                print("Native code-view toggle, source editing and BOM/CRLF preservation: PASS", flush=True)
+
                 # Solid asymmetric images make fit, zoom and rotation measurable.
                 first, second = work / "01 red.png", work / "02 green.webp"
                 Image.new("RGB", (400, 200), (240, 20, 20)).save(first)
