@@ -1,0 +1,25 @@
+name: TSX preview
+on:
+  push:
+    branches: [master]
+    paths: ['scripts/*tsx-preview*', 'tests/tsx-preview/**', 'docs/tsx-preview.md', '.github/workflows/tsx-preview.yml']
+  pull_request:
+    paths: ['scripts/*tsx-preview*', 'tests/tsx-preview/**', 'docs/tsx-preview.md', '.github/workflows/tsx-preview.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  preview:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: tests/tsx-preview/package-lock.json
+      - run: node --test scripts/test-tsx-preview.mjs
+      - run: npm ci --ignore-scripts --prefix tests/tsx-preview --no-audit --no-fund
+      - run: npx --prefix tests/tsx-preview playwright install --with-deps chromium
+      - run: node scripts/test-tsx-preview-e2e.mjs

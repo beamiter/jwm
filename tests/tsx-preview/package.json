@@ -1,0 +1,11 @@
+{
+  "name": "jwm-tsx-preview-verification",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "vite": "8.3.8",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
+    "playwright": "1.65.1"
+  }
+}
