@@ -1076,6 +1076,8 @@ mod scratchpad_reveal_tests {
         }
     }
 
+    type CapturedScene = Vec<(u64, i32, i32, u32, u32)>;
+
     struct ScratchpadBackend {
         window_ops: DummyWindowOps,
         input_ops: DummyInputOps,
@@ -1088,6 +1090,9 @@ mod scratchpad_reveal_tests {
         minimized: Vec<(WindowId, bool)>,
         dock_targets: Vec<(WindowId, Option<crate::backend::api::CompositorRect>)>,
         fail_focus_for: Option<WindowId>,
+        rendered_scenes: Vec<CapturedScene>,
+        focus_at_render: Vec<Option<WindowId>>,
+        composited: bool,
     }
 
     impl ScratchpadBackend {
@@ -1104,6 +1109,9 @@ mod scratchpad_reveal_tests {
                 minimized: Vec::new(),
                 dock_targets: Vec::new(),
                 fail_focus_for: None,
+                rendered_scenes: Vec::new(),
+                focus_at_render: Vec::new(),
+                composited: true,
             }
         }
     }
@@ -1130,11 +1138,22 @@ mod scratchpad_reveal_tests {
     impl DisplayControl for ScratchpadBackend {}
     impl RenderScheduler for ScratchpadBackend {
         fn has_compositor(&self) -> bool {
-            true
+            self.composited
         }
     }
 
     impl Backend for ScratchpadBackend {
+        fn compositor_render_frame(
+            &mut self,
+            scene: &[(u64, i32, i32, u32, u32)],
+            _focused_window: Option<u64>,
+        ) -> Result<bool, BackendError> {
+            self.rendered_scenes.push(scene.to_vec());
+            self.focus_at_render
+                .push(self.focused.last().copied().flatten());
+            Ok(true)
+        }
+
         fn capabilities(&self) -> Capabilities {
             Capabilities::default()
         }
@@ -2001,6 +2020,26 @@ mod scratchpad_reveal_tests {
         jwm.togglescratchpad(&mut backend, &WMArgEnum::StringVec(vec!["term".into()]))
             .unwrap();
         jwm.state.monitors[monitor].set_selected_client_for_current_tag(fullscreen_key);
+        assert_eq!(
+            backend.rendered_scenes.len(),
+            1,
+            "hide submits before returning, without a timer tick"
+        );
+        let first_scene = &backend.rendered_scenes[0];
+        let term_index = first_scene
+            .iter()
+            .position(|entry| entry.0 == window.raw())
+            .unwrap();
+        let pip_index = first_scene
+            .iter()
+            .position(|entry| entry.0 == 0x711)
+            .unwrap();
+        assert!(term_index > pip_index);
+        assert_ne!(
+            backend.focus_at_render[0],
+            Some(window),
+            "input focus is released before submission"
+        );
         let animation = jwm.animations.active[&key].clone();
         let input_stack = jwm.last_stacking[monitor].clone();
         assert!(!input_stack.contains(&window));
@@ -2066,6 +2105,38 @@ mod scratchpad_reveal_tests {
         let scene = jwm.build_compositor_scene(&backend, &HashMap::new());
         assert!(!scene.iter().any(|entry| entry.0 == window.raw()));
         assert_eq!(pixel(&scene, x + 2, top + 2), Some(0x711));
+    }
+
+    #[test]
+    fn dismissal_first_frame_gates_and_preserves_animation_clock() {
+        let (mut jwm, key, window, _) = jwm_with_cross_monitor_scratchpad(false);
+        let mut backend = ScratchpadBackend::new();
+        jwm.reveal_and_focus(&mut backend, window).unwrap();
+        jwm.present_terminal_dismissal(&mut backend, key); // Appear, not Hide.
+        assert!(backend.rendered_scenes.is_empty());
+        jwm.animations.remove(key);
+        jwm.present_terminal_dismissal(&mut backend, key);
+        assert!(backend.rendered_scenes.is_empty());
+        jwm.togglescratchpad(&mut backend, &WMArgEnum::StringVec(vec!["term".into()]))
+            .unwrap();
+        assert_eq!(backend.rendered_scenes.len(), 1);
+        let before = jwm.animations.active[&key].clone();
+        backend.composited = false;
+        jwm.present_terminal_dismissal(&mut backend, key);
+        backend.composited = true;
+        jwm.scratchpads.remove("term");
+        jwm.scratchpads.insert("music".into(), key);
+        jwm.present_terminal_dismissal(&mut backend, key);
+        assert_eq!(backend.rendered_scenes.len(), 1);
+        jwm.scratchpads.remove("music");
+        jwm.scratchpads.insert("term".into(), key);
+        jwm.present_terminal_dismissal(&mut backend, key);
+        assert_eq!(backend.rendered_scenes.len(), 2);
+        let after = &jwm.animations.active[&key];
+        assert_eq!(after.started_at, before.started_at);
+        assert_eq!(after.duration, before.duration);
+        assert_eq!(after.from, before.from);
+        assert_eq!(after.to, before.to);
     }
 
     #[test]
