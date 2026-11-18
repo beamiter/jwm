@@ -20,6 +20,10 @@ use std::collections::VecDeque;
 
 /// Entries kept before the oldest is dropped.
 pub const MAX_ENTRIES: usize = 50;
+/// Total retained payload bytes. A count-only cap would retain up to 200 MiB
+/// of encoded screenshots; keep recent copies without growing that footprint.
+/// This excludes backend offers, decoded thumbnails and allocation metadata.
+pub const MAX_HISTORY_BYTES: usize = 32 * 1024 * 1024;
 /// Longest preview drawn in the picker.
 const MAX_PREVIEW_CHARS: usize = 72;
 /// What may be recorded and which type to ask for are judged from MIME names
@@ -46,6 +50,13 @@ pub enum ClipboardEntry {
 }
 
 impl ClipboardEntry {
+    fn payload_bytes(&self) -> usize {
+        match self {
+            Self::Text { text, .. } => text.len(),
+            Self::Png { bytes, .. } => bytes.len(),
+        }
+    }
+
     #[must_use]
     pub fn captured_unix_ms(&self) -> u64 {
         match self {
@@ -97,11 +108,11 @@ impl ClipboardHistory {
         }) {
             return self.reorder_existing(index, now_unix_ms);
         }
+        self.make_room_for(text.len());
         self.entries.push_front(ClipboardEntry::Text {
             text: text.to_string(),
             captured_unix_ms: now_unix_ms,
         });
-        self.trim_to_capacity();
         true
     }
 
@@ -123,6 +134,7 @@ impl ClipboardHistory {
         }) {
             return self.reorder_existing(index, now_unix_ms);
         }
+        self.make_room_for(bytes.len());
         let (width, height) = png_dimensions(bytes);
         self.entries.push_front(ClipboardEntry::Png {
             bytes: bytes.to_vec(),
@@ -130,7 +142,6 @@ impl ClipboardHistory {
             height,
             captured_unix_ms: now_unix_ms,
         });
-        self.trim_to_capacity();
         true
     }
 
@@ -150,9 +161,20 @@ impl ClipboardHistory {
         true
     }
 
-    fn trim_to_capacity(&mut self) {
-        while self.entries.len() > MAX_ENTRIES {
-            self.entries.pop_back();
+    fn make_room_for(&mut self, incoming_bytes: usize) {
+        // Scan at most 50 lengths, not payload contents. Computing this avoids
+        // a second accounting state that remove/clear/recopy could desynchronize.
+        let mut retained_bytes: usize =
+            self.entries.iter().map(ClipboardEntry::payload_bytes).sum();
+        // Evict before cloning the new payload, bounding transient history
+        // allocation too. Per-entry limits are smaller than the total budget.
+        while self.entries.len() >= MAX_ENTRIES
+            || retained_bytes + incoming_bytes > MAX_HISTORY_BYTES
+        {
+            let Some(oldest) = self.entries.pop_back() else {
+                break;
+            };
+            retained_bytes -= oldest.payload_bytes();
         }
     }
 
@@ -525,6 +547,90 @@ mod tests {
         bytes.extend_from_slice(&(!crc).to_be_bytes());
         bytes.resize(33 + pad, 0);
         bytes
+    }
+
+    #[test]
+    fn screenshot_history_evicts_oldest_at_total_byte_budget() {
+        let mut history = ClipboardHistory::new();
+        let count = 32 * 1024 * 1024 / MAX_IMAGE_HISTORY_BYTES;
+        for index in 0..count {
+            let png = sample_png(index as u32 + 1, 1, MAX_IMAGE_HISTORY_BYTES - 33);
+            assert!(history.record_png(&png, index as u64));
+        }
+        assert_eq!(history.len(), count);
+        // Recopying an old image promotes it without consuming budget twice.
+        let first = sample_png(1, 1, MAX_IMAGE_HISTORY_BYTES - 33);
+        assert!(history.record_png(&first, 100));
+        assert_eq!(history.len(), count);
+        // Even one text byte above the exact budget evicts the least recent image.
+        assert!(history.record("x", 101));
+        let retained: usize = history
+            .entries()
+            .map(|entry| match entry {
+                ClipboardEntry::Text { text, .. } => text.len(),
+                ClipboardEntry::Png { bytes, .. } => bytes.len(),
+            })
+            .sum();
+        assert!(retained <= 32 * 1024 * 1024, "retained {retained} bytes");
+        assert_eq!(history.len(), count);
+        assert_eq!(history.get(1).unwrap().captured_unix_ms(), 100);
+        assert!(!history.entries().any(|entry| entry.captured_unix_ms() == 1));
+    }
+
+    #[test]
+    fn image_insertion_evicts_multiple_old_texts_until_it_fits() {
+        let mut history = ClipboardHistory::new();
+        for index in 0..16 {
+            let text = format!("{index:02}{}", "x".repeat(MAX_TEXT_BYTES - 2));
+            assert!(history.record(&text, index));
+        }
+        for index in 0..7 {
+            assert!(history.record_png(
+                &sample_png(index + 1, 1, MAX_IMAGE_HISTORY_BYTES - 33),
+                100 + index as u64,
+            ));
+        }
+        assert_eq!(history.len(), 23);
+        assert!(history.record_png(&sample_png(8, 1, MAX_IMAGE_HISTORY_BYTES - 33), 200));
+        assert_eq!(history.len(), 8);
+        assert!(
+            history
+                .entries()
+                .all(|entry| matches!(entry, ClipboardEntry::Png { .. }))
+        );
+        assert_eq!(history.get(0).unwrap().captured_unix_ms(), 200);
+        assert_eq!(history.get(7).unwrap().captured_unix_ms(), 100);
+    }
+
+    #[test]
+    fn mixed_history_reclaims_budget_after_remove_and_clear() {
+        let mut history = ClipboardHistory::new();
+        for index in 0..8 {
+            assert!(history.record_png(
+                &sample_png(index + 1, 1, MAX_IMAGE_HISTORY_BYTES - 33),
+                index as u64
+            ));
+        }
+        assert!(history.remove(3));
+        assert!(!history.remove(99));
+        let text = "界".repeat(MAX_TEXT_BYTES / 3);
+        assert!(history.record(&text, 20));
+        assert!(!history.record(&text, 21));
+        assert_eq!(history.len(), 8);
+        // Three copies of the same UTF-8 payload are still one entry.
+        assert!(history.record("separator", 22));
+        assert!(history.record(&text, 23));
+        assert_eq!(history.len(), 9);
+        assert_eq!(history.clear(), 9);
+        for index in 0..8 {
+            assert!(history.record_png(
+                &sample_png(index + 1, 1, MAX_IMAGE_HISTORY_BYTES - 33),
+                index as u64
+            ));
+        }
+        assert_eq!(history.len(), 8, "clearing restores the entire byte budget");
+        assert!(!history.record_png(&vec![0; MAX_IMAGE_HISTORY_BYTES + 1], 40));
+        assert_eq!(history.len(), 8, "rejected payloads must not evict history");
     }
 
     #[test]
