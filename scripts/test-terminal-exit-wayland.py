@@ -200,7 +200,7 @@ def main():
                     # Input probe during exit, without forcibly changing compositor focus.
                     run('xdotool', 'key', 'c')
                     deadline = started + 1.15
-                    for index in range(80):
+                    for index in range(240):
                         begin = time.monotonic()
                         image = capture.grab()
                         end = time.monotonic()
@@ -208,7 +208,7 @@ def main():
                         pending[name] = image
                         rect = X11.overlap_during_capture(term, bg, begin-started, end-started, dispatch_bound)
                         sample = {'seconds': end-started, 'capture_start': begin-started, 'png': name+'.png',
-                                  'rect': rect, 'checked': False}
+                                  'rect': rect, 'checked': False, 'total_term_pixels': X11.color_pixels(image, 'term')}
                         if rect and (rect[2]-rect[0])*(rect[3]-rect[1]) >= 400:
                             area = (rect[2]-rect[0])*(rect[3]-rect[1])
                             sample.update(checked=True, red_fraction=X11.color_pixels(image, 'term', rect)/area)
