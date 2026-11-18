@@ -196,6 +196,83 @@ impl Editor {
             self.redo.push(edit);
         }
     }
+    fn indent_lines(&mut self, backwards: bool) {
+        let selection = self.selection();
+        if selection.is_empty() && !backwards {
+            self.insert("\t");
+            return;
+        }
+        let start = self.text[..selection.start]
+            .rfind('\n')
+            .map_or(0, |i| i + 1);
+        let end = if !selection.is_empty() && self.text[..selection.end].ends_with('\n') {
+            selection.end
+        } else {
+            self.text[selection.end..]
+                .find('\n')
+                .map_or(self.text.len(), |i| selection.end + i + 1)
+        };
+        let original = &self.text[start..end];
+        let mut replacement = String::with_capacity(original.len());
+        let mut removed_first = 0;
+        for (index, line) in original.split_inclusive('\n').enumerate() {
+            if backwards {
+                let remove = if line.starts_with('\t') {
+                    1
+                } else {
+                    line.bytes()
+                        .take(4)
+                        .take_while(|byte| *byte == b' ')
+                        .count()
+                };
+                if index == 0 {
+                    removed_first = remove;
+                }
+                replacement.push_str(&line[remove..]);
+            } else {
+                replacement.push('\t');
+                replacement.push_str(line);
+            }
+        }
+        if replacement == original {
+            return;
+        }
+        let reverse = self.cursor < self.anchor;
+        let old_cursor = self.cursor;
+        let length = replacement.len();
+        self.select(start..end);
+        self.insert(&replacement); // One transaction, including all selected lines.
+        if selection.is_empty() {
+            self.cursor = old_cursor.saturating_sub(removed_first).max(start);
+            self.anchor = self.cursor;
+        } else if reverse {
+            self.anchor = start + length;
+            self.cursor = start;
+        } else {
+            self.anchor = start;
+            self.cursor = start + length;
+        }
+    }
+    fn code_key(&mut self, key: &Key, mods: ModifiersState, multiline: bool) -> bool {
+        if !multiline || !self.monospace || mods.control_key() || mods.alt_key() || mods.super_key()
+        {
+            return false;
+        }
+        match key {
+            Key::Named(NamedKey::Tab) => self.indent_lines(mods.shift_key()),
+            Key::Named(NamedKey::Enter) => {
+                let insertion = self.selection().start;
+                let start = self.text[..insertion].rfind('\n').map_or(0, |i| i + 1);
+                let indentation: String = self.text[start..insertion]
+                    .chars()
+                    .take_while(|ch| matches!(ch, ' ' | '\t'))
+                    .collect();
+                self.insert(&format!("\n{indentation}"));
+            }
+            _ => return false,
+        }
+        true
+    }
     pub fn key(
         &mut self,
         event: &KeyEvent,
@@ -237,6 +314,9 @@ impl Editor {
                 "y" => self.undo(true),
                 _ => (),
             }
+            return Ok(());
+        }
+        if self.code_key(&event.logical_key, mods, multiline) {
             return Ok(());
         }
         let destination = match &event.logical_key {
@@ -487,6 +567,85 @@ impl Editor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn code_indent_selected_lines_preserves_unicode_crlf_and_single_undo() {
+        let source = "中e\u{301}\r\n    二\nthird";
+        let mut e = Editor::new(source.into());
+        e.monospace = true;
+        let end = source.find("third").unwrap();
+        // Reverse selection ends precisely at the next line's start.
+        e.anchor = end;
+        e.cursor = 0;
+        assert!(e.code_key(&Key::Named(NamedKey::Tab), ModifiersState::empty(), true));
+        assert_eq!(e.text, "\t中e\u{301}\r\n\t    二\nthird");
+        assert_eq!(e.selection(), 0..end + 2);
+        assert!(e.cursor < e.anchor);
+        assert_eq!(e.undo.len(), 1);
+        e.undo(false);
+        assert_eq!(e.text, source);
+        e.undo(true);
+        assert_eq!(e.text, "\t中e\u{301}\r\n\t    二\nthird");
+        e.select(0..end + 2);
+        e.code_key(&Key::Named(NamedKey::Tab), ModifiersState::SHIFT, true);
+        assert_eq!(e.text, source);
+        e.undo(false);
+        assert_eq!(e.text, "\t中e\u{301}\r\n\t    二\nthird");
+    }
+
+    #[test]
+    fn code_outdent_clamps_caret_and_does_not_record_noops() {
+        let mut e = Editor::new("  中\r\n\t二\nthird".into());
+        e.monospace = true;
+        e.cursor = 1;
+        e.anchor = 1;
+        e.code_key(&Key::Named(NamedKey::Tab), ModifiersState::SHIFT, true);
+        assert_eq!(e.text, "中\r\n\t二\nthird");
+        assert_eq!(e.cursor, 0);
+        let revision = e.revision;
+        e.code_key(&Key::Named(NamedKey::Tab), ModifiersState::SHIFT, true);
+        assert_eq!(e.revision, revision);
+        e.select_all();
+        e.code_key(&Key::Named(NamedKey::Tab), ModifiersState::SHIFT, true);
+        assert_eq!(e.text, "中\r\n二\nthird");
+        e.undo(false);
+        assert_eq!(e.text, "中\r\n\t二\nthird");
+        let mut e = Editor::new("      x".into());
+        e.monospace = true;
+        e.cursor = 7;
+        e.anchor = 7;
+        e.code_key(&Key::Named(NamedKey::Tab), ModifiersState::SHIFT, true);
+        assert_eq!(e.text, "  x");
+        assert_eq!(e.cursor, 3);
+    }
+
+    #[test]
+    fn auto_indent_is_code_only_and_copies_only_prefix_before_insertion() {
+        let mut e = Editor::new("\t  中\r\nnext".into());
+        let enter = Key::Named(NamedKey::Enter);
+        assert!(!e.code_key(&enter, ModifiersState::empty(), true));
+        e.monospace = true;
+        assert!(!e.code_key(&enter, ModifiersState::empty(), false));
+        assert!(!e.code_key(&enter, ModifiersState::CONTROL, true));
+        e.cursor = "\t  中".len();
+        e.anchor = e.cursor;
+        e.code_key(&enter, ModifiersState::empty(), true);
+        assert_eq!(e.text, "\t  中\n\t  \r\nnext");
+        assert_eq!(e.undo.len(), 1);
+        e.undo(false);
+        assert_eq!(e.text, "\t  中\r\nnext");
+        e.cursor = 1;
+        e.anchor = 1;
+        e.code_key(&enter, ModifiersState::empty(), true);
+        assert_eq!(e.text, "\t\n\t  中\r\nnext");
+        let mut e = Editor::new("    first\nsecond".into());
+        e.monospace = true;
+        e.select(4..e.text.len());
+        e.code_key(&enter, ModifiersState::empty(), true);
+        assert_eq!(e.text, "    \n    ");
+        e.undo(false);
+        assert_eq!(e.text, "    first\nsecond");
+    }
+
     #[test]
     fn separately_typed_characters_are_separate_undo_edits() {
         let source = "needle first\nneedle second\n";

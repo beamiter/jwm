@@ -178,3 +178,20 @@ position from the text prefix, so very large files can incur extra work per move
 Bare CR is counted as a line break for status reporting; Home/End retain the
 existing LF-based editor behavior. Changing views does not dirty the file.
 Line-number gutters and an unwrapped horizontal-scroll mode are not included.
+
+### Code-view indentation
+
+Only in the external document's **等宽代码** view, Tab with a selection prefixes
+each touched logical line with one tab. A selection ending exactly at the next
+line's start excludes that line. The selection expands to the affected whole
+lines and keeps its direction. Shift+Tab removes one leading tab or up to four
+leading ASCII spaces per selected line, or just the current line without a
+selection. Tab without a selection inserts a tab at the caret. Each multiline
+indent/outdent is one undo transaction; existing LF/CRLF bytes are retained.
+
+Enter replaces any selection with LF plus the current line's leading spaces and
+tabs up to the insertion point. It does not copy indentation after the caret,
+add bracket-dependent indentation, or reformat the document. LF insertion uses
+the existing file encoding policy (uniform CRLF files are saved as CRLF; mixed
+files keep existing separators and insert LF). Notebook/theme text behavior is
+unchanged. None of these operations execute source code.

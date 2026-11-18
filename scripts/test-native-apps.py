@@ -327,6 +327,32 @@ def main():
                 assert code_path.read_bytes() == code_source + b"// appended"
                 print("Native code-view toggle, source editing and BOM/CRLF preservation: PASS", flush=True)
 
+                # Code indentation is one undo transaction across selected lines.
+                indent_path = work / "indent.tsx"
+                indent_source = b"\xef\xbb\xbf    first\r\nsecond\r\n"
+                indent_path.write_bytes(indent_source)
+                indent_app = launch("jwm-notes", indent_path)
+                indent_window = window("indent.tsx.*JWM 备忘录")
+                focus(indent_window)
+                command("xdotool", "mousemove", "--window", indent_window, 540, 86, "click", "1")
+                key("ctrl+a", "Tab", "ctrl+s")
+                indented = b"\xef\xbb\xbf\t    first\r\n\tsecond\r\n"
+                wait(lambda: indent_path.read_bytes() == indented, "Selected lines were not indented")
+                key("shift+Tab", "ctrl+s")
+                wait(lambda: indent_path.read_bytes() == indent_source, "Selected lines were not outdented")
+                key("ctrl+z", "ctrl+s")
+                wait(lambda: indent_path.read_bytes() == indented, "Outdent was not one undo transaction")
+                key("ctrl+z", "ctrl+s")
+                wait(lambda: indent_path.read_bytes() == indent_source, "Indent was not one undo transaction")
+                key("ctrl+Home", "End", "Return")
+                type_text("next")
+                key("ctrl+s")
+                wait(lambda: indent_path.read_bytes() == b"\xef\xbb\xbf    first\r\n    next\r\nsecond\r\n",
+                     "Enter did not preserve current code indentation")
+                key("ctrl+w")
+                wait(lambda: indent_app.poll() is not None, "Indent editor did not close")
+                print("Native code indentation, outdent, grouped undo and Enter prefix: PASS", flush=True)
+
                 # Solid asymmetric images make fit, zoom and rotation measurable.
                 first, second = work / "01 red.png", work / "02 green.webp"
                 Image.new("RGB", (400, 200), (240, 20, 20)).save(first)
