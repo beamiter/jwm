@@ -3,6 +3,8 @@
 This first version is an **external-browser development tool**, not an embedded
 Notes panel and not a sandbox. Edit and save in JWM Notes, then view the saved
 project in your browser. Nothing starts just because a TSX file is opened.
+See the [Notes saved-file walkthrough](native-apps.md#tsx-preview-in-an-external-browser)
+for the manual editor-to-browser workflow; there is no Notes preview button yet.
 
 ## Start and stop
 
