@@ -4369,6 +4369,12 @@ pub trait Backend:
         false
     }
 
+    /// Submit the first nested terminal dismissal frame synchronously, after
+    /// input focus and native geometry have been released. Not a per-tick hook.
+    fn present_terminal_exit_visual(&mut self) -> Result<(), BackendError> {
+        Ok(())
+    }
+
     fn compositor_render_frame(
         &mut self,
         _scene: &[(u64, i32, i32, u32, u32)],

@@ -2378,6 +2378,13 @@ impl Backend for WaylandWinitBackend {
         true
     }
 
+    fn present_terminal_exit_visual(&mut self) -> Result<(), BackendError> {
+        if self.state.terminal_exit_visual.is_some() {
+            self.render_if_needed()?;
+        }
+        Ok(())
+    }
+
     fn child_environment(&self) -> crate::child_environment::ChildEnvironment {
         self.child_environment.clone()
     }

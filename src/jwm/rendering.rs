@@ -419,14 +419,24 @@ impl Jwm {
     /// The ordinary immediate path skips active animations; waiting for the next
     /// full update can otherwise leave the previous (occluded) scene presented.
     pub(super) fn present_terminal_dismissal(&mut self, backend: &mut dyn Backend, key: ClientKey) {
-        if !backend.has_compositor()
-            || self.scratchpads.get("term") != Some(&key)
+        if self.scratchpads.get("term") != Some(&key)
             || !self
                 .animations
                 .active
                 .get(&key)
                 .is_some_and(|a| a.kind == AnimationKind::Hide)
         {
+            return;
+        }
+        if !backend.has_compositor() {
+            if self.sync_terminal_exit_visual(backend) == Some(key) {
+                match backend.present_terminal_exit_visual() {
+                    Ok(()) => log::info!("nested terminal dismissal first frame submitted"),
+                    Err(error) => {
+                        log::warn!("nested terminal dismissal first frame failed: {error:?}");
+                    }
+                }
+            }
             return;
         }
         let now = Instant::now();

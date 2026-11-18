@@ -1094,6 +1094,7 @@ mod scratchpad_reveal_tests {
         focus_at_render: Vec<Option<WindowId>>,
         composited: bool,
         nested_visual_supported: bool,
+        nested_present_focus: Vec<Option<WindowId>>,
         terminal_visual: Option<(WindowId, crate::backend::api::Geometry)>,
     }
 
@@ -1115,6 +1116,7 @@ mod scratchpad_reveal_tests {
                 focus_at_render: Vec::new(),
                 composited: true,
                 nested_visual_supported: false,
+                nested_present_focus: Vec::new(),
                 terminal_visual: None,
             }
         }
@@ -1156,6 +1158,14 @@ mod scratchpad_reveal_tests {
             }
             self.terminal_visual = visual;
             true
+        }
+
+        fn present_terminal_exit_visual(&mut self) -> Result<(), BackendError> {
+            assert!(self.nested_visual_supported);
+            assert!(self.terminal_visual.is_some());
+            self.nested_present_focus
+                .push(self.focused.last().copied().flatten());
+            Ok(())
         }
 
         fn compositor_render_frame(
@@ -2164,6 +2174,9 @@ mod scratchpad_reveal_tests {
         let visible = jwm.state.clients[key].rect();
         let arg = WMArgEnum::StringVec(vec!["term".into()]);
         jwm.togglescratchpad(&mut backend, &arg).unwrap();
+        assert_eq!(backend.nested_present_focus.len(), 1);
+        assert_ne!(backend.nested_present_focus[0], Some(window));
+        assert!(backend.rendered_scenes.is_empty());
         let (id, visual) = backend.terminal_visual.unwrap();
         assert_eq!(id, window);
         assert!(visual.x >= visible.0);
@@ -2176,6 +2189,11 @@ mod scratchpad_reveal_tests {
         jwm.last_battery_poll = Some(Instant::now());
         jwm.last_idle_poll = Some(Instant::now());
         jwm.tick_animations(&mut backend);
+        assert_eq!(
+            backend.nested_present_focus.len(),
+            1,
+            "ticks must not force-submit"
+        );
         assert!(backend.terminal_visual.unwrap().1.y < visual.y);
         assert!(jwm.state.clients[key].geometry.x < 0);
         jwm.togglescratchpad(&mut backend, &arg).unwrap();
@@ -2201,6 +2219,7 @@ mod scratchpad_reveal_tests {
         jwm.scratchpads.insert("music".into(), key);
         jwm.togglescratchpad(&mut backend, &WMArgEnum::StringVec(vec!["music".into()]))
             .unwrap();
+        assert!(backend.nested_present_focus.is_empty());
         assert!(backend.terminal_visual.is_none());
     }
 
