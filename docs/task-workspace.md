@@ -129,6 +129,42 @@ health, and may change immediately after the query. A reported `succeeded` does
 not prove the whole task succeeded. No real remote continuity or restoration
 performance is claimed by the simulated tests.
 
+## Restart/recovery checklist
+
+When returning to a saved task, run:
+
+```sh
+python3 scripts/task_workspace.py doctor rpl-stairs
+```
+
+This read-only report checks the saved repository directory, target workspace,
+and explicitly bound Agents. Unlike `plan`, it still returns saved context and
+manual next steps when the compositor is absent, the API is incompatible, or IPC
+fails. Workspace and Agent queries are independent, so one failed endpoint does
+not conceal useful observations from the other. Each is queried at most once;
+the existing five-second IPC timeout applies separately to each query.
+
+Examples of findings include an unavailable repository mount, missing output/tag,
+the need to focus the intended monitor, an Agent identity invalidated by a restart,
+and a disconnected or failed Agent. Unbound browser/remote/artifact references and
+terminal snapshots remain static references requiring manual inspection, not
+proof of restored applications. No repository is cloned, mount repaired, Agent
+rebound, remote task run, or application launched.
+
+`workspace.status: ready_for_fresh_plan` means only that the workspace checks
+passed at observation time. It does not promise that Agents, repositories, or
+remote resources are usable. Directory presence is not Git validation. The two
+IPC reads and filesystem checks are separate observations, not a transaction.
+The report contains neither an `action` nor an `approval_digest` and cannot be
+used as a resume approval. After resolving findings, inspect a fresh `plan` and
+explicitly approve it through the existing `resume` workflow. A new compositor or
+Agent identity must be reviewed and explicitly bound through a new manifest;
+`doctor` never updates saved identities or makes title/path guesses.
+
+Tests simulate reboot identity changes, missing paths/outputs, endpoint failure,
+static resources and a real CLI subprocess with a failing fake IPC tool. They do
+not establish real-machine restart recovery or a task-restoration time guarantee.
+
 ## Validation
 
 ```sh

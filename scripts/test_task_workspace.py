@@ -361,5 +361,107 @@ class AgentStatusTests(unittest.TestCase):
             tw.validate(invalid)
 
 
+class DoctorTests(unittest.TestCase):
+    setUp = AgentStatusTests.setUp
+    state = TaskTests.state
+
+    def report(self, state=None, snapshot=None):
+        calls = []
+        def call(command):
+            calls.append(command)
+            if command == 'get_task_workspace_state':
+                return self.state() if state is None else state
+            if command == 'get_agent_sessions':
+                return self.snapshot if snapshot is None else snapshot
+            raise AssertionError('mutation forbidden')
+        result = tw.doctor(self.task, call)
+        self.assertEqual(calls, ['get_task_workspace_state', 'get_agent_sessions'])
+        self.assertNotIn('approval_digest', result)
+        self.assertNotIn('action', result)
+        self.assertTrue(result['read_only'])
+        return result
+
+    def test_ready_is_only_workspace_not_recovery_authorization(self):
+        before = copy.deepcopy(self.task)
+        result = self.report()
+        self.assertEqual(result['workspace']['status'], 'ready_for_fresh_plan')
+        self.assertEqual(result['repository']['status'], 'directory_present')
+        self.assertEqual(result['resources'][0]['status'], 'running')
+        self.assertEqual(self.task, before)
+        with self.assertRaisesRegex(ValueError, 'approval digest mismatch'):
+            tw.resume(self.task, tw.digest(result), lambda command: self.state())
+
+    def test_compositor_restart_never_rebinds(self):
+        snapshot = dict(self.snapshot, wm_instance_id='restarted')
+        result = self.report(snapshot=snapshot)
+        self.assertEqual(result['resources'][0]['status'], 'unknown')
+        self.assertEqual(result['findings'][0]['reason'], 'compositor_identity_changed')
+        self.assertEqual(self.identity['wm_instance_id'], 'wm-1')
+
+    def test_missing_repository_output_and_focus_have_guidance(self):
+        self.task['repository'] += '/absent'
+        result = self.report(state=self.state([]))
+        self.assertEqual(result['repository']['status'], 'missing_or_inaccessible')
+        self.assertEqual(result['workspace']['status'], 'blocked')
+        reasons = [f['reason'] for f in result['findings']]
+        for reason in ['repository_missing', 'workspace_missing_or_ambiguous',
+                       'focus_target_monitor_and_select_single_tag']:
+            self.assertIn(reason, reasons)
+        self.assertTrue(all(f['next_step'] for f in result['findings']))
+
+    def test_both_ipc_endpoints_down_still_reports_saved_context(self):
+        import subprocess
+        calls = []
+        def call(command):
+            calls.append(command)
+            raise subprocess.TimeoutExpired(command, 5)
+        result = tw.doctor(self.task, call)
+        self.assertEqual(calls, ['get_task_workspace_state', 'get_agent_sessions'])
+        self.assertEqual(result['repository']['status'], 'directory_present')
+        self.assertEqual(result['workspace']['status'], 'unknown')
+        self.assertEqual(result['resources'][0]['status'], 'unknown')
+        self.assertFalse(result['agent_snapshot_available'])
+
+    def test_repository_permission_error_is_a_report_not_a_crash(self):
+        with patch.object(tw.Path, 'is_dir', side_effect=PermissionError('denied')):
+            result = self.report()
+        self.assertEqual(result['repository']['status'], 'missing_or_inaccessible')
+        self.assertIn('repository_missing', result['workspace']['blockers'])
+        self.assertEqual(result['resources'][0]['status'], 'running')
+
+    def test_one_invalid_endpoint_does_not_hide_other_checks(self):
+        result = self.report(state={'version': 2})
+        self.assertEqual(result['workspace']['status'], 'unknown')
+        self.assertEqual(result['resources'][0]['status'], 'running')
+        result = self.report(snapshot={'protocol_version': 2})
+        self.assertEqual(result['workspace']['status'], 'ready_for_fresh_plan')
+        self.assertEqual(result['resources'][0]['status'], 'unknown')
+
+    def test_static_references_do_not_gain_liveness(self):
+        self.task['resources'] = [dict(kind='remote', label='GPU', reference='gpu-host')]
+        call = unittest.mock.Mock(return_value=self.state())
+        result = tw.doctor(self.task, call)
+        call.assert_called_once_with('get_task_workspace_state')
+        self.assertEqual(result['resources'][0]['status'], 'reference_only')
+        self.assertEqual(result['findings'][0]['reason'], 'reference_only')
+
+    def test_doctor_cli_with_missing_compositor_preserves_store(self):
+        import subprocess
+        import sys
+        store = self.root / 'tasks'
+        path = tw.save_new(self.task, store)
+        before = path.read_bytes()
+        tool = self.root / 'jwm-tool'
+        log = self.root / 'calls'
+        tool.write_text("#!/usr/bin/env python3\nimport sys\np=" + repr(str(log)) + "\nwith open(p,'a') as f: f.write(sys.argv[2]+'\\n')\nraise SystemExit(1)\n")
+        tool.chmod(0o700)
+        env = dict(os.environ, PATH=str(self.root) + os.pathsep + os.environ['PATH'])
+        output = subprocess.check_output([sys.executable, tw.__file__, '--store', str(store),
+                                          'doctor', self.task['id']], env=env)
+        self.assertEqual(json.loads(output)['workspace']['status'], 'unknown')
+        self.assertEqual(log.read_text().splitlines(), ['get_task_workspace_state', 'get_agent_sessions'])
+        self.assertEqual(path.read_bytes(), before)
+
+
 if __name__ == '__main__':
     unittest.main()
