@@ -51,7 +51,11 @@ existing thumbnail worker.
 Copying something already in the history moves it back to the top instead of
 adding a duplicate — the list is "what I might paste next", so recency is the
 useful order. Text and PNG share one newest-first list; identical PNG bytes
-are reordered the same way.
+are reordered the same way. The history retains at most 50 entries and 32 MiB
+of combined text/encoded PNG payloads, evicting the oldest copies first when
+either limit would be exceeded. Recopying an existing entry moves it to the
+front without charging its bytes twice. This is a history payload budget, not
+a limit on separate backend clipboard offers or decoded thumbnail memory.
 
 ## Privacy
 
