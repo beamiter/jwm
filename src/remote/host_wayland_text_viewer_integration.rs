@@ -292,7 +292,7 @@ fn exercise(
             // not an invalid zero-mode client rejected before TCP connect.
             view_only: !client_permission,
             grab_input: false,
-            seamless_input: false,
+            seamless_input: None,
             clipboard: false,
             clipboard_mode: Default::default(),
             clipboard_direction: Default::default(),

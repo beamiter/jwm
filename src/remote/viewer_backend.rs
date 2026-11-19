@@ -22,17 +22,25 @@ pub enum ViewerBackend {
     X11,
     Wayland,
 }
+
+/// How an X11 viewer that releases input at the image edge acquires it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum SeamlessInput {
+    Hover,
+    Click,
+}
+
 impl ViewerBackend {
     /// Keep the native one-shot lease fail-closed at both public-client and
     /// concrete-viewer boundaries. A native viewer must never silently ignore
     /// an X11-only input policy, even when a caller skips client preflight.
     pub(super) fn validate_seamless_input(
         self,
-        seamless: bool,
+        seamless: Option<SeamlessInput>,
         grab: bool,
         view_only: bool,
     ) -> RemoteResult<()> {
-        if seamless && (!grab || view_only || self != Self::X11) {
+        if seamless.is_some() && (!grab || view_only || self != Self::X11) {
             return Err(std::io::Error::other(
                 "seamless input requires X11, --grab-input and input control",
             )
@@ -78,8 +86,17 @@ impl Viewer {
             options.grab_input,
             options.view_only,
         )?;
-        if options.seamless_input && !(pointer && keyboard) {
-            return Err(std::io::Error::other("seamless input requires negotiated pointer and keyboard control; check host input permission and keymap compatibility").into());
+        match options.seamless_input {
+            Some(SeamlessInput::Hover) if !(pointer && keyboard) => {
+                return Err(std::io::Error::other("seamless input requires negotiated pointer and keyboard control; check host input permission and keymap compatibility").into());
+            }
+            Some(SeamlessInput::Click) if !pointer => {
+                return Err(std::io::Error::other(
+                    "click-to-grab with edge release requires negotiated pointer control",
+                )
+                .into());
+            }
+            _ => {}
         }
         match options.viewer_backend {
             ViewerBackend::X11 => {
@@ -677,15 +694,16 @@ mod tests {
     #[test]
     fn seamless_input_requires_explicit_x11_control_at_every_entry_point() {
         for backend in [ViewerBackend::X11, ViewerBackend::Wayland] {
-            for seamless in [false, true] {
+            for seamless in [None, Some(SeamlessInput::Hover), Some(SeamlessInput::Click)] {
                 for grab in [false, true] {
                     for view_only in [false, true] {
                         assert_eq!(
                             backend
                                 .validate_seamless_input(seamless, grab, view_only)
                                 .is_ok(),
-                            !seamless || (backend == ViewerBackend::X11 && grab && !view_only),
-                            "{backend:?}, seamless={seamless}, grab={grab}, view_only={view_only}",
+                            seamless.is_none()
+                                || (backend == ViewerBackend::X11 && grab && !view_only),
+                            "{backend:?}, seamless={seamless:?}, grab={grab}, view_only={view_only}",
                         );
                     }
                 }

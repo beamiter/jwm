@@ -92,8 +92,17 @@ fn open_directory(path: &Path, uid: u32) -> io::Result<File> {
 }
 
 fn check_file(mode: u32, owner: u32, links: u64, uid: u32) -> io::Result<()> {
-    if mode & libc::S_IFMT != libc::S_IFREG || owner != uid || mode & 0o022 != 0 || links != 1 {
+    if mode & libc::S_IFMT != libc::S_IFREG || owner != uid || links != 1 {
         return Err(rejected());
+    }
+    if mode & 0o022 != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "Mode {:04o} allows group or other users to write. Set this lock file to mode 0600 and try again.",
+                mode & 0o7777,
+            ),
+        ));
     }
     Ok(())
 }
@@ -290,12 +299,15 @@ mod tests {
             assert!(!sandbox.lock().exists());
             assert_eq!(fs::metadata(directory).unwrap().mode() & 0o7777, mode);
         }
-        for mode in [0o660, 0o666] {
+        for mode in [0o660, 0o664, 0o666] {
             let sandbox = Sandbox::new();
             sandbox.directory();
             fs::write(sandbox.lock(), b"unchanged").unwrap();
             fs::set_permissions(sandbox.lock(), fs::Permissions::from_mode(mode)).unwrap();
-            assert!(open(&sandbox.lock()).is_err());
+            let error = open(&sandbox.lock()).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+            assert!(error.to_string().contains(&format!("Mode {mode:04o}")));
+            assert!(error.to_string().contains("mode 0600"));
             assert_eq!(fs::read(sandbox.lock()).unwrap(), b"unchanged");
             assert_eq!(fs::metadata(sandbox.lock()).unwrap().mode() & 0o777, mode);
         }

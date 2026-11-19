@@ -15,7 +15,7 @@ use jwm::remote::ssh::{SshOptions, run_ssh};
 use jwm::remote::usability::{
     default_key_path, key_metadata, normalize_address, normalize_listen_address,
 };
-use jwm::remote::viewer_backend::ViewerBackend;
+use jwm::remote::viewer_backend::{SeamlessInput, ViewerBackend};
 use jwm::remote::window_position::WindowPosition;
 use jwm::remote::window_size::WindowSize;
 use jwm::remote::x11_capture::{CaptureArea, CaptureRegion, CaptureSource, ScalingPolicy};
@@ -429,10 +429,9 @@ enum Command {
         #[arg(long, conflicts_with = "view_only")]
         grab_input: bool,
 
-        /// X11: enter the remote image to control; leave to restore local input.
-        /// Requires --grab-input and never changes host authorization.
-        #[arg(long, requires = "grab_input", conflicts_with = "view_only")]
-        seamless_input: bool,
+        /// X11: leave the remote image to release input. Choose whether hovering or clicking acquires it.
+        #[arg(long, value_enum, num_args = 0..=1, require_equals = true, default_missing_value = "hover", requires = "grab_input", conflicts_with = "view_only")]
+        seamless_input: Option<SeamlessInput>,
 
         /// Base X keysym of the Ctrl+Super grab-release shortcut.
         #[arg(long, default_value = DEFAULT_ESCAPE_KEY, value_name = "KEYSYM")]
@@ -594,10 +593,9 @@ enum Command {
         #[arg(long, conflicts_with = "view_only")]
         grab_input: bool,
 
-        /// X11: enter the remote image to control; leave to restore local input.
-        /// Requires --grab-input and never changes host authorization.
-        #[arg(long, requires = "grab_input", conflicts_with = "view_only")]
-        seamless_input: bool,
+        /// X11: leave the remote image to release input. Choose whether hovering or clicking acquires it.
+        #[arg(long, value_enum, num_args = 0..=1, require_equals = true, default_missing_value = "hover", requires = "grab_input", conflicts_with = "view_only")]
+        seamless_input: Option<SeamlessInput>,
 
         /// Base X keysym of the Ctrl+Super grab-release shortcut.
         ///
@@ -804,7 +802,7 @@ fn profile_from_command(command: Command) -> RemoteResult<Profile> {
             if wayland_seamless_input || wayland_control_duration.is_some() {
                 return Err(profile_error("Wayland seamless input consent cannot be saved in a profile; use connect directly").into());
             }
-            if seamless_input {
+            if seamless_input.is_some() {
                 return Err(profile_error("seamless input consent cannot be saved in a profile; use connect or ssh directly").into());
             }
             if scaling != ScalingPolicy::Auto {
@@ -896,7 +894,7 @@ fn profile_from_command(command: Command) -> RemoteResult<Profile> {
             scaling,
         } => {
             jwm::remote::ssh::validate_destination(&destination)?;
-            if seamless_input {
+            if seamless_input.is_some() {
                 return Err(profile_error("seamless input consent cannot be saved in a profile; use connect or ssh directly").into());
             }
             if scaling != ScalingPolicy::Auto {
@@ -1698,21 +1696,29 @@ mod tests {
                 ])
                 .is_err()
             );
-            let parsed = Cli::try_parse_from([
-                "jwm-remote",
-                command,
-                "desk",
-                "--grab-input",
-                "--seamless-input",
-            ])
-            .unwrap()
-            .command;
-            assert!(
-                profile_from_command(parsed)
-                    .unwrap_err()
-                    .to_string()
-                    .contains("seamless input consent")
-            );
+            for (flag, expected) in [
+                ("--seamless-input", SeamlessInput::Hover),
+                ("--seamless-input=click", SeamlessInput::Click),
+            ] {
+                assert!(Cli::try_parse_from(["jwm-remote", command, flag, "desk"]).is_err());
+                let parsed =
+                    Cli::try_parse_from(["jwm-remote", command, "--grab-input", flag, "desk"])
+                        .unwrap()
+                        .command;
+                match &parsed {
+                    Command::Connect { seamless_input, .. }
+                    | Command::Ssh { seamless_input, .. } => {
+                        assert_eq!(*seamless_input, Some(expected));
+                    }
+                    _ => unreachable!(),
+                }
+                assert!(
+                    profile_from_command(parsed)
+                        .unwrap_err()
+                        .to_string()
+                        .contains("seamless input consent")
+                );
+            }
         }
     }
 
@@ -4908,7 +4914,7 @@ mod wayland_seamless_cli_tests {
             );
             assert_eq!(options.viewer_backend, ViewerBackend::Wayland);
             assert!(
-                !options.seamless_input
+                options.seamless_input.is_none()
                     && !options.grab_input
                     && !options.clipboard
                     && !options.static_lossless

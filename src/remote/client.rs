@@ -50,7 +50,7 @@ use super::source_wire::{
 };
 use super::tile::TileDecoder;
 use super::usability::{ClientStage, failure_hint, session_mode};
-use super::viewer_backend::{Viewer, ViewerBackend};
+use super::viewer_backend::{SeamlessInput, Viewer, ViewerBackend};
 use super::x11_input::InputEvent;
 use super::x11_keymap::{KeymapTable, read_display};
 use super::x11_viewer::{ViewerEvent, validate_escape_key};
@@ -218,7 +218,7 @@ pub struct ClientOptions {
     pub display: Option<String>,
     pub view_only: bool,
     pub grab_input: bool,
-    pub seamless_input: bool,
+    pub seamless_input: Option<SeamlessInput>,
     pub clipboard: bool,
     pub clipboard_mode: ClipboardMode,
     pub clipboard_direction: ClipboardDirection,
@@ -1179,9 +1179,14 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
             "jwm-remote: experimental JWM Wayland handoff: enter the remote image with all keys/buttons released to control; leave to release. After a black-bar exit, leave the whole surface before re-entering. Ctrl+Super+F12 ends control permanently; configured lock shortcuts stay local. The original approved budget is at most {} seconds, never renewed. Focus/geometry changes end control; Super is not forwarded and ends control. No drag or modifier-click.",
             options.control_duration.as_secs()
         );
-    } else if options.seamless_input {
+    } else if options.seamless_input == Some(SeamlessInput::Hover) {
         eprintln!(
             "jwm-remote: seamless input: enter remote image to control, leave to release; Ctrl+Super+{} releases until you leave and enter again",
+            options.escape_key
+        );
+    } else if options.seamless_input == Some(SeamlessInput::Click) {
+        eprintln!(
+            "jwm-remote: click the remote image to control. Move out of the image or press Ctrl+Super+{} to release input",
             options.escape_key
         );
     } else if options.grab_input && (hello.pointer_enabled || hello.keyboard_enabled) {
@@ -6319,7 +6324,7 @@ pub(super) mod tests {
             display: Some("invalid display".into()),
             view_only: true,
             grab_input: false,
-            seamless_input: false,
+            seamless_input: None,
             clipboard: false,
             clipboard_mode: Default::default(),
             clipboard_direction: Default::default(),
@@ -9269,7 +9274,7 @@ mod native_viewer_permission_tests {
             display: None,
             view_only: true,
             grab_input: false,
-            seamless_input: false,
+            seamless_input: None,
             clipboard: false,
             clipboard_mode: Default::default(),
             clipboard_direction: Default::default(),
@@ -9292,7 +9297,7 @@ mod native_viewer_permission_tests {
             seamless.viewer_backend = backend;
             seamless.grab_input = grab;
             seamless.view_only = view_only;
-            seamless.seamless_input = true;
+            seamless.seamless_input = Some(SeamlessInput::Hover);
             let expected = "seamless input requires X11, --grab-input and input control";
             assert_eq!(
                 validate_viewer_backend(&seamless).unwrap_err().to_string(),

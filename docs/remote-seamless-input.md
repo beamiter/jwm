@@ -5,31 +5,36 @@
 ```
 jwm-remote connect HOST --grab-input --seamless-input
 jwm-remote ssh USER@HOST --grab-input --seamless-input
+jwm-remote ssh USER@HOST --grab-input --seamless-input=click
 ```
 
-The host must authorize input and negotiate both pointer and compatible keyboard
-control. This option grants no new remote permission and is never saved in a
-connection profile. Ordinary click-to-grab and view-only behavior are unchanged.
+The host must authorize pointer control. Hover mode also requires compatible
+keyboard control. This option grants no new remote permission and is never
+saved in a connection profile.
 
 Move into the displayed remote image to acquire input without a click. Move out
 of that image, including into letterboxing, to release the local grab and all
 forwarded remote keys/buttons. The pointer is never confined. The pre-existing
 local focus is not rewritten. The title indicates the current input mode.
 
-Entry checks the X server's hit path before acquisition and again while input
-is synchronously grabbed. This rejects queued entry events when another local
+Use `--seamless-input=click` with `ssh` or `connect` to acquire input with a
+click. Moving out of the image releases it, and re-entering requires another
+click to resume control. Ctrl+Super+F12 also releases the grab.
+
+In hover mode, the viewer checks the X server's hit path before acquisition
+and again while input is synchronously grabbed. This rejects queued entry events when another local
 window already covers the viewer, while allowing WM frames and viewer child
 windows. These separate queries are not an atomic server transaction; the
 post-grab checks observe frozen logical input state, not a continuously sampled
 physical state. They do not eliminate every race with later window or pointer
 changes.
 
-Entry waits until physical keys and core mouse buttons are released, so a local
-chord or drag is not transferred halfway through. Ctrl+Super+F12 (or the configured
-escape key) releases input and suspends re-entry until the pointer leaves the
-image. Focus loss, unmapping and resizing release input; leave and enter again
-to resume. Source switching also suspends automatic acquisition. Closing or
-losing the connection retains the existing release-all teardown path.
+Hover entry waits until physical keys and core mouse buttons are released, so a
+local chord or drag is not transferred halfway through. Ctrl+Super+F12 (or the
+configured escape key) releases input. In hover mode, leave and re-enter the
+image to resume after manual release, focus loss, unmapping or resizing. In
+click mode, click inside the image to resume. Closing or losing the connection
+releases all forwarded input.
 
 On X11, session cleanup now returns any local keyboard/pointer grab before
 waiting for network and clipboard workers. The ending viewer cannot grab again;

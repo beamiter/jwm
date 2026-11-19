@@ -38,6 +38,7 @@ use super::pacing::EventPollBudget;
 use super::scaling::{ScalingPolicy, nvidia_driver};
 use super::triangle_patch::TrianglePatch;
 use super::usability::viewer_title;
+use super::viewer_backend::SeamlessInput;
 use super::{RemoteError, RemoteResult};
 
 const WM_CLASS: &[u8] = b"jwm-remote\0JwmRemote\0";
@@ -653,7 +654,7 @@ pub struct Viewer {
     /// upload overwrote.
     backing_letterbox: Option<Letterbox>,
     grab_input: bool,
-    seamless_input: bool,
+    seamless_input: Option<SeamlessInput>,
     seamless_suspended: bool,
     cleanup_started: bool,
     cleanup_had_grab: bool,
@@ -1249,7 +1250,7 @@ impl Viewer {
             #[cfg(feature = "remote-wayland")]
             wayland_keymap: None,
             grabbed: false,
-            seamless_input: false,
+            seamless_input: None,
             seamless_suspended: false,
             cleanup_started: false,
             cleanup_had_grab: false,
@@ -1637,7 +1638,7 @@ impl Viewer {
                         &mut result,
                     );
                     if (new_width, new_height) != (self.width, self.height) {
-                        if self.seamless_input {
+                        if self.seamless_input.is_some() {
                             self.release_local_grab()?;
                             self.release_all_input(&mut result);
                             self.seamless_suspended = true;
@@ -1696,14 +1697,14 @@ impl Viewer {
                 }
                 Event::EnterNotify(event)
                     if event.event == self.window
-                        && self.seamless_input
+                        && self.seamless_input == Some(SeamlessInput::Hover)
                         && event.mode == NotifyMode::NORMAL =>
                 {
                     self.update_seamless_input(event.event_x, event.event_y, &mut result)?;
                 }
                 Event::LeaveNotify(event)
                     if event.event == self.window
-                        && self.seamless_input
+                        && self.seamless_input.is_some()
                         && event.mode == NotifyMode::NORMAL
                         && event.detail != x11rb::protocol::xproto::NotifyDetail::INFERIOR =>
                 {
@@ -1711,7 +1712,9 @@ impl Viewer {
                     self.release_all_input(&mut result);
                     self.seamless_suspended = false;
                 }
-                Event::MotionNotify(event) if event.event == self.window && self.seamless_input => {
+                Event::MotionNotify(event)
+                    if event.event == self.window && self.seamless_input.is_some() =>
+                {
                     self.update_seamless_input(event.event_x, event.event_y, &mut result)?;
                     if self.forwarding_input() {
                         if let Some((x, y)) = self.map_pointer(event.event_x, event.event_y) {
@@ -1775,7 +1778,7 @@ impl Viewer {
                         continue;
                     }
                     if self.source_switching
-                        || (self.seamless_input && !self.grabbed)
+                        || (self.seamless_input == Some(SeamlessInput::Hover) && !self.grabbed)
                         || (self.grab_input && !self.grabbed && !self.acquire_local_grab()?)
                     {
                         continue;
@@ -2542,13 +2545,19 @@ impl Viewer {
             self.clipboard_activity.as_deref(),
             &self.escape_name,
         );
-        if self.seamless_input {
-            title = title.replace("; input released - click to control", "");
-            title.push_str(if self.grabbed {
-                "; seamless: leave image to release"
-            } else {
-                "; seamless: enter image to control (after release, leave first)"
-            });
+        match self.seamless_input {
+            Some(SeamlessInput::Hover) => {
+                title = title.replace("; input released - click to control", "");
+                title.push_str(if self.grabbed {
+                    "; seamless: leave image to release"
+                } else {
+                    "; seamless: enter image to control (after release, leave first)"
+                });
+            }
+            Some(SeamlessInput::Click) if self.grabbed => {
+                title.push_str("; leave image to release");
+            }
+            _ => {}
         }
         if let Some(status) = self.pointer_status {
             title.push_str("; ");
@@ -2592,9 +2601,12 @@ impl Viewer {
     }
 
     /// Explicit per-session local policy; does not grant remote input permission.
-    pub(super) fn set_seamless_input(&mut self, enabled: bool) {
-        self.seamless_input =
-            enabled && self.grab_input && self.pointer_enabled && self.forward_keyboard;
+    pub(super) fn set_seamless_input(&mut self, mode: Option<SeamlessInput>) {
+        self.seamless_input = mode.filter(|mode| {
+            self.grab_input
+                && self.pointer_enabled
+                && (*mode == SeamlessInput::Click || self.forward_keyboard)
+        });
         self.update_title();
     }
 
@@ -2615,7 +2627,8 @@ impl Viewer {
             self.seamless_suspended = false;
             return Ok(());
         }
-        if self.grabbed
+        if self.seamless_input != Some(SeamlessInput::Hover)
+            || self.grabbed
             || self.seamless_suspended
             || self.source_switching
             || !self
@@ -2708,7 +2721,7 @@ impl Viewer {
             return Ok(true);
         }
 
-        let mode = if self.seamless_input {
+        let mode = if self.seamless_input == Some(SeamlessInput::Hover) {
             GrabMode::SYNC
         } else {
             GrabMode::ASYNC
@@ -2734,7 +2747,7 @@ impl Viewer {
                     EventMask::POINTER_MOTION
                         | EventMask::BUTTON_PRESS
                         | EventMask::BUTTON_RELEASE
-                        | if self.seamless_input {
+                        | if self.seamless_input.is_some() {
                             EventMask::ENTER_WINDOW | EventMask::LEAVE_WINDOW
                         } else {
                             EventMask::NO_EVENT
@@ -6837,7 +6850,7 @@ mod tests {
                 "terminal input regression",
             )
             .unwrap();
-            viewer.set_seamless_input(case != "click_held");
+            viewer.set_seamless_input((case != "click_held").then_some(SeamlessInput::Hover));
             viewer.enable_clipboard_narrowing(true);
             viewer.enable_source_cycle(true);
             viewer
@@ -7087,7 +7100,7 @@ mod tests {
             "reparented seamless regression",
         )
         .unwrap();
-        viewer.set_seamless_input(true);
+        viewer.set_seamless_input(Some(SeamlessInput::Hover));
         let frame = driver.generate_id().unwrap();
         driver
             .create_window(
@@ -7340,7 +7353,7 @@ mod tests {
                 "stale seamless entry regression",
             )
             .unwrap();
-            viewer.set_seamless_input(true);
+            viewer.set_seamless_input(Some(SeamlessInput::Hover));
             viewer
                 .draw(DecodedFrame {
                     sequence: 1,
@@ -7407,6 +7420,84 @@ mod tests {
 
     #[test]
     #[ignore = "requires a dedicated owned JWM_TEST_X11_DISPLAY Xvfb server"]
+    fn click_input_requires_a_click_after_each_edge_release_on_x11() {
+        use x11rb::protocol::{xproto, xtest::ConnectionExt as _};
+        assert_eq!(
+            std::env::var("JWM_REMOTE_TEST_VIEWER_OWNED").as_deref(),
+            Ok("1")
+        );
+        let display = std::env::var("JWM_TEST_X11_DISPLAY").unwrap();
+        let (driver, screen) = x11rb::connect(Some(&display)).unwrap();
+        let root = driver.setup().roots[screen].root;
+        let keymap = super::super::x11_keymap::KeymapTable::read(&driver).unwrap();
+        let mut viewer = Viewer::connect(
+            Some(&display),
+            320,
+            240,
+            true,
+            true,
+            Some(keymap),
+            true,
+            "F12",
+            "click edge release regression",
+        )
+        .unwrap();
+        viewer.set_seamless_input(Some(SeamlessInput::Click));
+        viewer
+            .draw(DecodedFrame {
+                sequence: 1,
+                source_width: 320,
+                source_height: 180,
+                image: RgbImage::from_pixel(320, 180, image::Rgb([20, 40, 60])),
+            })
+            .unwrap();
+        viewer.source_presented(viewer.last_frame.as_ref().unwrap().geometry_epoch);
+        let window = viewer.window;
+        let move_pointer = |target, x, y| {
+            driver
+                .warp_pointer(x11rb::NONE, target, 0, 0, 0, 0, x, y)
+                .unwrap()
+                .check()
+                .unwrap();
+        };
+        let button = |event| {
+            driver
+                .xtest_fake_input(event, 1, CURRENT_TIME, root, 0, 0, 0)
+                .unwrap()
+                .check()
+                .unwrap();
+        };
+
+        move_pointer(root, 0, 0);
+        for (target, x, y) in [(root, 0, 0), (window, 20, 2)] {
+            move_pointer(window, 20, 70);
+            viewer.poll_events().unwrap();
+            assert!(!viewer.grabbed, "hovering must leave input local");
+
+            button(xproto::BUTTON_PRESS_EVENT);
+            let events = viewer.poll_events().unwrap();
+            assert!(viewer.grabbed);
+            assert!(events.contains(&ViewerEvent::Button {
+                button: 1,
+                pressed: true,
+            }));
+
+            move_pointer(target, x, y);
+            let events = viewer.poll_events().unwrap();
+            assert!(!viewer.grabbed);
+            assert!(events.contains(&ViewerEvent::ReleaseAll));
+            button(xproto::BUTTON_RELEASE_EVENT);
+            let events = viewer.poll_events().unwrap();
+            assert!(
+                !events
+                    .iter()
+                    .any(|event| matches!(event, ViewerEvent::Button { .. }))
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a dedicated owned JWM_TEST_X11_DISPLAY Xvfb server"]
     fn seamless_input_crossing_releases_and_escape_requires_exit_on_x11() {
         use x11rb::protocol::{xproto, xtest::ConnectionExt as _};
         assert_eq!(
@@ -7435,7 +7526,7 @@ mod tests {
             "seamless regression",
         )
         .unwrap();
-        viewer.set_seamless_input(true);
+        viewer.set_seamless_input(Some(SeamlessInput::Hover));
         viewer
             .draw(DecodedFrame {
                 sequence: 1,

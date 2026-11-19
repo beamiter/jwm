@@ -24,6 +24,7 @@ use super::key::{KeySource, generate_session_key};
 use super::messages::FrameLimits;
 use super::scaling::ScalingPolicy;
 use super::ssh_diagnostics::DiagnosticPump;
+use super::viewer_backend::SeamlessInput;
 use super::x11_capture::CaptureArea;
 use super::x11_viewer::{close_existing_viewer, focus_existing_viewer};
 use std::fs::File;
@@ -72,7 +73,7 @@ pub struct SshOptions {
     pub display: Option<String>,
     pub view_only: bool,
     pub grab_input: bool,
-    pub seamless_input: bool,
+    pub seamless_input: Option<SeamlessInput>,
     pub clipboard: bool,
     pub clipboard_mode: ClipboardMode,
     pub clipboard_direction: ClipboardDirection,
@@ -556,7 +557,13 @@ struct SessionLock {
 impl SessionLock {
     /// The lock, or the label of the session that holds it.
     fn acquire(destination: &str) -> io::Result<Result<Self, String>> {
-        let mut file = super::ssh_session_file::open(&session_lock_path(destination))?;
+        let path = session_lock_path(destination);
+        let mut file = super::ssh_session_file::open(&path).map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!("Could not open SSH session lock {path:?}. {error}"),
+            )
+        })?;
         // SAFETY: flock only reads the descriptor, which `file` keeps open.
         if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
             return Ok(Ok(Self { file }));
@@ -641,14 +648,20 @@ fn peer_label(options: &SshOptions) -> String {
         0
     };
     use sha2::{Digest, Sha256};
+    // Preserve the existing identity for plain grabs and hover-to-grab.
+    let edge_release = if options.seamless_input == Some(SeamlessInput::Click) {
+        ";edge_release=click"
+    } else {
+        ""
+    };
     let digest = Sha256::digest(
         format!(
-            "session-v2;connection={:?};{:?};clipboard={content},{direction},{file_limit};view_only={};frames={:?};local_input={:?}",
+            "session-v2;connection={:?};{:?};clipboard={content},{direction},{file_limit};view_only={};frames={:?};local_input={:?}{edge_release}",
             (&options.destination, &options.ssh_options, &options.remote_command),
             options.shared_sources,
             options.view_only,
             options.frame_limits,
-            (options.grab_input, options.seamless_input, &options.escape_key)
+            (options.grab_input, options.seamless_input == Some(SeamlessInput::Hover), &options.escape_key)
         )
         .as_bytes(),
     );
@@ -835,7 +848,7 @@ mod tests {
             display: None,
             view_only: false,
             grab_input: true,
-            seamless_input: false,
+            seamless_input: None,
             clipboard: false,
             clipboard_mode: ClipboardMode::All,
             clipboard_direction: ClipboardDirection::Both,
@@ -856,17 +869,17 @@ mod tests {
                     "unknown escape key"
                 }
                 "seamless_without_grab" => {
-                    opts.seamless_input = true;
+                    opts.seamless_input = Some(SeamlessInput::Hover);
                     opts.grab_input = false;
                     "seamless input requires"
                 }
                 "seamless_view_only" => {
-                    opts.seamless_input = true;
+                    opts.seamless_input = Some(SeamlessInput::Hover);
                     opts.view_only = true;
                     "seamless input requires"
                 }
                 "valid" => {
-                    opts.seamless_input = true;
+                    opts.seamless_input = Some(SeamlessInput::Hover);
                     "ssh"
                 }
                 _ => panic!("unexpected preflight case"),
@@ -1192,12 +1205,18 @@ mod tests {
     fn changed_local_input_contract_never_reuses_or_closes_a_session() {
         let base = options();
         let mut seamless = base.clone();
-        seamless.seamless_input = true;
+        seamless.seamless_input = Some(SeamlessInput::Hover);
+        let mut click = base.clone();
+        click.seamless_input = Some(SeamlessInput::Click);
+        assert!(!same_session_policy(
+            &peer_label(&seamless),
+            &peer_label(&click)
+        ));
         let mut ungrabbed = base.clone();
         ungrabbed.grab_input = false;
         let mut escape = base.clone();
         escape.escape_key = "F11".into();
-        for changed in [seamless, ungrabbed, escape] {
+        for changed in [seamless, click, ungrabbed, escape] {
             // Both requesting new behavior and withdrawing old behavior must
             // fail explicitly, even if a monitor change would otherwise close
             // the old viewer. Never silently retain an old escape shortcut.

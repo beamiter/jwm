@@ -158,6 +158,11 @@ inaccessible paths fail rather than silently selecting a different session
 slot. This protects against other local users, not root or another process
 running under the same UID.
 
+Older versions could create a group-writable lock with `umask 0002`. If the
+error reports mode 0664, verify that the reported path is a regular file owned
+by you, then use `chmod 600` on that file. Changing its mode in place preserves
+the lock inode used by an existing session.
+
 While the viewer has the keyboard grabbed, every key goes to the remote
 machine, these shortcuts included. Press Ctrl+Super+F12 to release it first, then
 press the other monitor's key. `--notify` reports a failure

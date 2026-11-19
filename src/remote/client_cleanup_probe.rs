@@ -213,7 +213,7 @@ fn transport_cleanup_returns_local_input_before_waiting_for_receiver() {
             display: Some(display.clone()),
             view_only: false,
             grab_input: true,
-            seamless_input: true,
+            seamless_input: Some(super::SeamlessInput::Hover),
             clipboard: false,
             clipboard_mode: Default::default(),
             clipboard_direction: Default::default(),
