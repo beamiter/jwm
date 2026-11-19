@@ -27,7 +27,9 @@ ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location("desktop_ipc", ROOT / "eva/tests/desktop-ipc.py")
 DESKTOP = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(DESKTOP)
-APP_IDS = {"A": "org.jwm.PlacementFixtureA", "B": "org.jwm.PlacementFixtureB"}
+# X11 normalizes WM_CLASS to lowercase; native Wayland preserves app_id.
+# Use identical canonical identifiers on both protocols, not a loose assertion.
+APP_IDS = {"A": "org.jwm.placementfixturea", "B": "org.jwm.placementfixtureb"}
 TAG1, TAG2 = 1, 2  # tag masks, not indices
 
 
