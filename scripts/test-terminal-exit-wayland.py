@@ -49,6 +49,45 @@ def first_capture_then_focus(grab, read_focus, clock=time.monotonic):
     return (begin, image, end), focus_row, focus_observed
 
 
+def annotate_clock_evidence(report, trace_path):
+    """Diagnostics only: never removes a failure or excludes a sampled frame."""
+    try:
+        rows = [(int(ns), event) for ns, event in
+                (line.split() for line in trace_path.read_text().splitlines())]
+        if not rows or any(a[0] >= b[0] for a, b in zip(rows, rows[1:])):
+            raise ValueError('missing or non-monotonic trace')
+        if not report['cases']:
+            raise ValueError('no captured cases')
+        report['clock_trace'] = rows
+        expected = ['hide_handler', 'input_released_visual_ready',
+                    'render_begin', 'submit_begin', 'submit_return_ok', 'render_return_ok']
+        for case in report['cases']:
+            start = round(case['key_start'] * 1e9)
+            end = max(frame['capture_end_monotonic_ns'] for frame in case['frames'])
+            markers = [(ns, event) for ns, event in rows if start <= ns <= end][:6]
+            if [event for _, event in markers] != expected:
+                raise ValueError(case['case'] + ': missing/out-of-order/failed submit markers')
+            case['clock_markers'] = markers
+            hide, ready, render, submit, returned, render_return = (ns for ns, _ in markers)
+            for frame in case['frames']:
+                begin, end = frame['capture_begin_monotonic_ns'], frame['capture_end_monotonic_ns']
+                if end < hide:
+                    phase = 'pre-hide-handler'
+                elif begin <= hide:
+                    phase = 'intersects-hide-handler-uncertain'
+                elif end < submit:
+                    phase = 'post-hide-before-submit'
+                elif begin > returned:
+                    phase = 'post-submit-return-not-presentation-proof'
+                else:
+                    phase = 'intersects-submit-uncertain'
+                frame['clock_phase'] = phase
+        report['clock_trace_status'] = 'valid'
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        report['clock_trace_status'] = 'invalid'
+        report['failures'].append('clock diagnostic invalid: ' + str(error))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--backend', choices=['wayland-winit', 'wayland-x11'], default='wayland-winit')
@@ -57,6 +96,7 @@ def main():
     parser.add_argument('--evidence-dir', type=Path, default=ROOT / 'artifacts/terminal-exit-wayland')
     parser.add_argument('--diagnose', action='store_true', help='Collect later cases after a failed invariant; never converts failure to success')
     parser.add_argument('--self-test', action='store_true')
+    parser.add_argument('--trace-clock', action='store_true', help='opt-in diagnostic only; does not alter gates')
     args = parser.parse_args()
     if args.self_test:
         suite = unittest.defaultTestLoader.loadTestsFromTestCase(Offline)
@@ -81,6 +121,13 @@ def main():
             env[key] = str(work / leaf)
         env.update(LIBGL_ALWAYS_SOFTWARE='1', WINIT_X11_SCALE_FACTOR='1',
                    DBUS_SYSTEM_BUS_ADDRESS='unix:path=' + str(work / 'absent-system-bus'))
+        trace_path = output / 'terminal-clock.trace'
+        if args.trace_clock:
+            if time.get_clock_info('monotonic').implementation != 'clock_gettime(CLOCK_MONOTONIC)':
+                raise RuntimeError('clock trace requires Python CLOCK_MONOTONIC')
+            env['JWM_TERMINAL_EXIT_TRACE'] = str(trace_path)
+            report['limits'].append('CLOCK_MONOTONIC trace adds clock/lock/buffer cost and post-submit file writes; submit return is not presentation feedback. Missing/damaged trace invalidates diagnosis; not every IO failure is observable. Capture float timestamps rounded to nanoseconds, not nanosecond measurement precision.')
+            report['clock_implementation'] = time.get_clock_info('monotonic').implementation
         log = (output / 'session.log').open('w')
         def run(*argv):
             return subprocess.check_output(list(map(str, argv)), env=env, stderr=log, text=True, timeout=15)
@@ -220,6 +267,8 @@ def main():
                         pending[name] = image
                         rect = X11.overlap_during_capture(term, bg, begin-started, end-started, dispatch_bound)
                         sample = {'seconds': end-started, 'capture_start': begin-started, 'png': name+'.png',
+                                  'capture_begin_monotonic_ns': round(begin * 1e9),
+                                  'capture_end_monotonic_ns': round(end * 1e9),
                                   'rect': rect, 'checked': False, 'total_term_pixels': X11.color_pixels(image, 'term')}
                         if rect and (rect[2]-rect[0])*(rect[3]-rect[1]) >= 400:
                             area = (rect[2]-rect[0])*(rect[3]-rect[1])
@@ -326,6 +375,8 @@ def main():
                         os.killpg(child.pid, signal.SIGKILL)
                         child.wait(timeout=4)
             log.close()
+            if args.trace_clock:
+                annotate_clock_evidence(report, trace_path)
             report['status'] = 'failure' if report['failures'] else 'success'
             (output / 'report.json').write_text(json.dumps(report, indent=2)+'\n')
             print(json.dumps(report, indent=2))
@@ -373,6 +424,37 @@ class Offline(unittest.TestCase):
             lambda: object(), lambda: {'is_focused': False}, lambda: next(ticks))
         # The caller still measures from key start, not from capture completion.
         self.assertGreater(observed_at - 20., .2)
+    def test_clock_diagnostic_never_relaxes_failed_frames(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'trace'
+            path.write_text('100 hide_handler\n120 input_released_visual_ready\n125 render_begin\n140 submit_begin\n160 submit_return_ok\n165 render_return_ok\n')
+            frames = [{'capture_begin_monotonic_ns': a, 'capture_end_monotonic_ns': b,
+                       'checked': True, 'red_fraction': 0.0}
+                      for a, b in [(50, 90), (90, 110), (110, 130), (130, 150), (170, 180)]]
+            report = {'cases': [{'case': 'pip', 'key_start': 0, 'frames': frames}],
+                      'failures': ['original occlusion failure']}
+            annotate_clock_evidence(report, path)
+            self.assertEqual(report['clock_trace_status'], 'valid')
+            self.assertEqual(report['failures'], ['original occlusion failure'])
+            self.assertTrue(all(frame['checked'] for frame in frames))
+            self.assertEqual([frame['clock_phase'] for frame in frames], [
+                'pre-hide-handler', 'intersects-hide-handler-uncertain',
+                'post-hide-before-submit', 'intersects-submit-uncertain',
+                'post-submit-return-not-presentation-proof'])
+
+    def test_clock_missing_out_of_order_and_submit_error_fail_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'trace'
+            for text in ['', '100 hide_handler\n90 submit_return_ok\n',
+                         '100 hide_handler\n120 input_released_visual_ready\n125 render_begin\n140 submit_begin\n160 submit_return_error\n165 render_return_ok\n',
+                         '100 hide_handler\n120 input_released_visual_ready\n125 render_begin\n165 render_return_ok\n']:
+                path.write_text(text)
+                report = {'cases': [{'case': 'pip', 'key_start': 0, 'frames': [
+                    {'capture_begin_monotonic_ns': 170, 'capture_end_monotonic_ns': 180}]}], 'failures': []}
+                annotate_clock_evidence(report, path)
+                self.assertEqual(report['clock_trace_status'], 'invalid')
+                self.assertEqual(len(report['failures']), 1)
+
     def test_event_log(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory)/'events'
