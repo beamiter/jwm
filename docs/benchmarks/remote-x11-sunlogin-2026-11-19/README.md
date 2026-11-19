@@ -54,6 +54,31 @@ covers a different endpoint and starts later in the pipeline. A timed host
 input receipt and an exact frame marker would be needed for a per-key
 stage breakdown.
 
+### NVIDIA BGRX capture fix
+
+The NVIDIA overlay reported 11-bit color intensity precision and the
+standard 8-bit RGB masks for a depth-24 image stored as 32-bit little-endian
+pixels. The intensity precision field had kept the overlay on the generic
+per-pixel decoder. The fix selects the packed BGRX decoder from the visual
+class, channel masks and image format. The regression test compares both
+decoders byte for byte.
+
+A follow-up held DP-0 awake and used the same moving bands, capture mode and
+SSH viewer build for both host binaries. The source was 2560×1440 and the
+encoded image was 1392×783. Each build retained three telemetry windows
+after warmup, totaling 15.22 seconds before and 15.09 seconds after the fix.
+
+| Host or viewer metric | Before | After |
+| --- | ---: | ---: |
+| Mean pixel conversion | 98.80 ms | 5.77 ms |
+| Mean full capture | 126.54 ms | 39.30 ms |
+| Mean capture start to drawn ACK | 188.11 ms | 87.27 ms |
+| Viewer drawn ACKs per second | 7.75 | 20.15 |
+
+The viewer acknowledged 118 drawings before the fix and 304 afterward.
+These figures use JWM telemetry. The earlier visible-FPS and input-to-pixel
+rows use the independent X11 viewer probe.
+
 ## JWM with display power saving
 
 Three host motion windows had **385 scheduled capture attempts, 15 captured

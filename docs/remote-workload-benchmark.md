@@ -101,6 +101,10 @@ Report interpretation:
 - Weighted means are computed only when the schema exposes the matching
   observation count: capture/captured, writer and socket/sent, ACK/drawn ACKs.
   Other whole-run means remain null instead of inventing denominators.
+- When skip counters are present, `totals` sums the recorded values and
+  `counter_windows` identifies how many windows carried each counter. For
+  X11 desktop timing, `x11_capture` covers only windows with the corresponding
+  object and weights each stage by its explicit `observations` count.
 - Stage quantiles cover the **most recent 128 observations per stage per window**.
   `max_reported_window_recent_p95_ms` is the largest such window p95, not a
   whole-run p95. Whole-run percentiles remain null. Archive raw observations if
@@ -108,8 +112,9 @@ Report interpretation:
 - Stages overlap and have different denominators. Do not sum their means.
   Capture-start-to-ACK includes capture and viewer drawing; send-to-ACK also
   includes viewer work. Neither is network RTT or physical input-to-display.
-- GPU fences, GPU-to-CPU readback and encoder-copy costs are not independently
-  exposed by this schema. Use separate platform traces for those subdivisions.
+- The X11 software path exposes the combined `GetImage` request and reply
+  time. Separate platform traces can distinguish GPU synchronization from
+  data transfer inside that span and identify encoder copies.
 
 ## Physical latency and acceptance
 

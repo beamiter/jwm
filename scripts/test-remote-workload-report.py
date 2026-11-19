@@ -31,6 +31,17 @@ def window(count=10, mean=4):
                 **{field: count for field in m.COUNTERS})
 
 
+def x11_capture(observations=0, mean=0):
+    def stage(count, ms):
+        percentile = ms if count else None
+        return {'observations': count, 'mean': ms,
+                'quantiles': {'samples': min(count, 128), 'p50_ms': percentile,
+                              'p95_ms': percentile, 'p99_ms': percentile}}
+    capture = {name: stage(0, 0) for name in m.X11_CAPTURE_STAGES}
+    capture['core_readback_ms'] = stage(observations, mean)
+    return {'damage_notifications': 0, 'forced_refreshes': 0, 'stages': capture}
+
+
 class ReportTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -53,7 +64,55 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(report['reported_seconds'], 5.25)
         self.assertEqual(report['totals']['sent'], 1001)
         self.assertIsNone(report['physical_input_to_display'])
+        self.assertNotIn('counter_windows', report)
+        self.assertNotIn('x11_capture', report)
         self.assertNotIn('PRIVATE_HOST', json.dumps(report))
+
+    def test_x11_capture_uses_all_observations_and_reports_coverage(self):
+        older, a, b = window(), window(), window()
+        a.update(backpressure_skipped=0, damage_skipped=30, x11_capture=x11_capture(1000, 4))
+        a['x11_capture'].update(damage_notifications=43, forced_refreshes=1, secret='PRIVATE')
+        b.update(damage_skipped=2, x11_capture=x11_capture(1, 100))
+        b['window_seconds'] = .25
+        report = m.summarize(*self.read([older, a, b]), 'terminal', 'x11')
+        self.assertEqual(report['totals']['backpressure_skipped'], 0)
+        self.assertEqual(report['totals']['damage_skipped'], 32)
+        self.assertEqual(report['counter_windows'], {'backpressure_skipped': 1, 'damage_skipped': 2})
+        capture = report['x11_capture']
+        self.assertEqual(capture['windows'], 2)
+        self.assertEqual(capture['reported_seconds'], 5.25)
+        self.assertEqual(capture['totals'], {'damage_notifications': 43, 'forced_refreshes': 1})
+        readback = capture['stages']['core_readback_ms']
+        self.assertEqual(readback['observations'], 1001)
+        self.assertAlmostEqual(readback['whole_run_weighted_mean_ms'], 4100 / 1001)
+        self.assertEqual(readback['window_means_range_ms'], [4, 100])
+        self.assertEqual(readback['max_reported_window_recent_p95_ms'], 100)
+        self.assertIsNone(readback['whole_run_percentiles'])
+        resize = capture['stages']['cpu_resize_ms']
+        self.assertEqual(resize['observations'], 0)
+        self.assertIsNone(resize['whole_run_weighted_mean_ms'])
+        self.assertIsNone(resize['max_reported_window_recent_p95_ms'])
+        self.assertNotIn('PRIVATE', json.dumps(report))
+
+    def test_invalid_x11_capture_observations_and_skip_counts_are_rejected(self):
+        mutations = [
+            lambda x: x.update(backpressure_skipped=-1),
+            lambda x: x.update(damage_skipped=True),
+            lambda x: x.update(x11_capture=None),
+            lambda x: x['x11_capture'].update(damage_notifications=float('inf')),
+            lambda x: x['x11_capture'].update(forced_refreshes=.5),
+            lambda x: x['x11_capture']['stages'].pop('cpu_resize_ms'),
+            lambda x: x['x11_capture']['stages']['core_readback_ms'].update(observations=129),
+            lambda x: x['x11_capture']['stages']['core_readback_ms'].update(observations=2**64),
+            lambda x: x['x11_capture']['stages']['cpu_resize_ms'].update(mean=1),
+        ]
+        for mutate in mutations:
+            with self.subTest(mutate=mutate):
+                record = window()
+                record['x11_capture'] = x11_capture(1, 4)
+                mutate(record)
+                with self.assertRaises(ValueError):
+                    self.read([record])
 
     def test_malformed_nested_types_rejected(self):
         for field, bad in [('stages', []), ('version', []), ('commit', {}), ('schema_version', True)]:

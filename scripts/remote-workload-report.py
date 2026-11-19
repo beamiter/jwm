@@ -25,6 +25,10 @@ COUNTS = {'capture_ms': 'captured', 'writer_wait_ms': 'sent',
 COUNTERS = ('scheduled', 'captured', 'sent', 'bytes', 'replaced',
             'unchanged_suppressed', 'dirty_tiles', 'total_tiles',
             'drawn_acks', 'viewer_superseded')
+OPTIONAL_COUNTERS = ('backpressure_skipped', 'damage_skipped')
+X11_CAPTURE_COUNTERS = ('damage_notifications', 'forced_refreshes')
+X11_CAPTURE_STAGES = ('monitor_geometry_ms', 'core_readback_ms',
+                      'pixel_conversion_ms', 'cpu_resize_ms')
 POLICY = 'nearest-rank, most recent 128 observations per stage per window'
 
 
@@ -58,6 +62,43 @@ def bounded_lines(path):
             yield raw.decode('utf-8', errors='strict')
 
 
+def stage_quantile_count(item, stage):
+    if not isinstance(item, dict):
+        raise ValueError('invalid stage object')
+    number(item.get('mean'), stage)
+    quantiles = item.get('quantiles')
+    if not isinstance(quantiles, dict):
+        raise ValueError('invalid quantiles object')
+    count = number(quantiles.get('samples'), stage + '.samples', integer=True)
+    if count > 128:
+        raise ValueError('quantile sample limit exceeded')
+    values = [quantiles.get(k) for k in ('p50_ms', 'p95_ms', 'p99_ms')]
+    if count == 0:
+        if values != [None, None, None]:
+            raise ValueError('empty quantiles must be null')
+    else:
+        for value in values:
+            number(value, stage + '.quantile')
+        if values != sorted(values):
+            raise ValueError('quantiles out of order')
+    return count
+
+
+def validate_x11_capture(capture):
+    if not isinstance(capture, dict) or not isinstance(capture.get('stages'), dict):
+        raise ValueError('invalid X11 capture object')
+    for field in X11_CAPTURE_COUNTERS:
+        number(capture.get(field), 'x11_capture.' + field, integer=True)
+    for stage in X11_CAPTURE_STAGES:
+        item = capture['stages'].get(stage)
+        count = stage_quantile_count(item, 'x11_capture.' + stage)
+        observations = number(item.get('observations'), stage + '.observations', integer=True)
+        if observations > 2**64 - 1 or count != min(observations, 128):
+            raise ValueError('inconsistent X11 capture observation counts')
+        if observations == 0 and item['mean'] != 0:
+            raise ValueError('nonzero X11 capture mean without observations')
+
+
 def read_windows(path):
     windows = []
     ignored = 0
@@ -85,6 +126,11 @@ def read_windows(path):
             raise ValueError('invalid stages object')
         for field in COUNTERS:
             number(value.get(field), field, integer=True)
+        for field in OPTIONAL_COUNTERS:
+            if field in value:
+                number(value[field], field, integer=True)
+        if 'x11_capture' in value:
+            validate_x11_capture(value['x11_capture'])
         if number(value.get('window_seconds'), 'window_seconds') <= 0:
             raise ValueError('window_seconds must be positive')
         for field in ('source_dimensions', 'encoded_dimensions'):
@@ -95,25 +141,7 @@ def read_windows(path):
                 if number(dim, field, integer=True) > 65535:
                     raise ValueError('invalid dimensions')
         for stage in STAGES:
-            item = value.get('stages', {}).get(stage, {})
-            if not isinstance(item, dict):
-                raise ValueError('invalid stage object')
-            number(item.get('mean'), stage)
-            q = item.get('quantiles', {})
-            if not isinstance(q, dict):
-                raise ValueError('invalid quantiles object')
-            count = number(q.get('samples'), stage + '.samples', integer=True)
-            if count > 128:
-                raise ValueError('quantile sample limit exceeded')
-            qs = [q.get(k) for k in ('p50_ms', 'p95_ms', 'p99_ms')]
-            if count == 0:
-                if qs != [None, None, None]:
-                    raise ValueError('empty quantiles must be null')
-            else:
-                for v in qs:
-                    number(v, stage + '.quantile')
-                if qs != sorted(qs):
-                    raise ValueError('quantiles out of order')
+            stage_quantile_count(value['stages'].get(stage), stage)
         windows.append(value)
         if len(windows) > MAX_WINDOWS:
             raise ValueError('too many telemetry windows')
@@ -158,6 +186,36 @@ def physical_samples(path):
             'measurement_method_verified': False}
 
 
+def summarize_x11_capture(windows):
+    capture_windows = [window for window in windows if 'x11_capture' in window]
+    if not capture_windows:
+        return None
+    captures = [window['x11_capture'] for window in capture_windows]
+    stages = {}
+    for stage in X11_CAPTURE_STAGES:
+        observed = [capture['stages'][stage] for capture in captures
+                    if capture['stages'][stage]['observations'] > 0]
+        count = sum(item['observations'] for item in observed)
+        means = [item['mean'] for item in observed]
+        stages[stage] = {
+            'observations': count,
+            'whole_run_weighted_mean_ms': (sum(item['mean'] * (item['observations'] / count)
+                                               for item in observed) if count else None),
+            'mean_denominator': 'observations',
+            'window_means_range_ms': [min(means), max(means)] if means else None,
+            'max_reported_window_recent_p95_ms': max(
+                (item['quantiles']['p95_ms'] for item in observed), default=None),
+            'whole_run_percentiles': None,
+        }
+    return {
+        'windows': len(capture_windows),
+        'reported_seconds': sum(window['window_seconds'] for window in capture_windows),
+        'totals': {field: sum(capture[field] for capture in captures)
+                   for field in X11_CAPTURE_COUNTERS},
+        'stages': stages,
+    }
+
+
 def summarize(windows, ignored, workload, run_id):
     # Mixing different builds in one run can make a regression look better.
     versions = {(w.get('version'), w.get('commit')) for w in windows}
@@ -170,6 +228,12 @@ def summarize(windows, ignored, workload, run_id):
         raise ValueError('invalid build commit')
     seconds = sum(w['window_seconds'] for w in windows)
     totals = {field: sum(w[field] for w in windows) for field in COUNTERS}
+    counter_windows = {}
+    for field in OPTIONAL_COUNTERS:
+        values = [w[field] for w in windows if field in w]
+        if values:
+            counter_windows[field] = len(values)
+            totals[field] = sum(values)
     stages = {}
     for stage in STAGES:
         means = [w['stages'][stage]['mean'] for w in windows
@@ -186,7 +250,7 @@ def summarize(windows, ignored, workload, run_id):
             'max_reported_window_recent_p95_ms': max(q95) if q95 else None,
             'whole_run_percentiles': None,
         }
-    return {
+    report = {
         'schema_version': 1, 'kind': 'jwm_remote_workload_report',
         'run_id': run_id, 'workload': workload, 'version': version, 'commit': commit,
         'windows': len(windows), 'ignored_diagnostic_lines': ignored,
@@ -205,6 +269,11 @@ def summarize(windows, ignored, workload, run_id):
             'No competitor ranking, hardware target or end-to-end acceptance is inferred.',
         ],
     }
+    if counter_windows:
+        report['counter_windows'] = counter_windows
+    if (x11_capture := summarize_x11_capture(windows)) is not None:
+        report['x11_capture'] = x11_capture
+    return report
 
 
 def main(argv=None):

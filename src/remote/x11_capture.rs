@@ -420,12 +420,14 @@ enum CursorSnapshot {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DamageGateDecision {
     Capture,
+    ForcedRefresh,
     NoChange,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DamageGatePrecheck {
     Capture,
+    ForcedRefresh,
     ProbeCursor,
 }
 
@@ -457,17 +459,18 @@ impl DamageGateState {
         geometry: (u16, u16),
         cursor_shape_dirty: bool,
     ) -> DamageGatePrecheck {
-        let force_due = self.last_capture.is_some_and(|captured| {
-            now.saturating_duration_since(captured) >= DAMAGE_FORCE_REFRESH
-        });
         if self.dirty
             || self.last_capture.is_none()
             || self.last_geometry != Some(geometry)
             || self.last_cursor.is_none()
             || cursor_shape_dirty
-            || force_due
         {
             DamageGatePrecheck::Capture
+        } else if self
+            .last_capture
+            .is_some_and(|captured| now.saturating_duration_since(captured) >= DAMAGE_FORCE_REFRESH)
+        {
+            DamageGatePrecheck::ForcedRefresh
         } else {
             DamageGatePrecheck::ProbeCursor
         }
@@ -488,12 +491,14 @@ impl DamageGateState {
         cursor_shape_dirty: bool,
         probe: impl FnOnce() -> Result<Option<CursorSnapshot>, E>,
     ) -> Result<DamageGateDecision, E> {
-        if self.precheck(now, geometry, cursor_shape_dirty) == DamageGatePrecheck::Capture {
-            return Ok(DamageGateDecision::Capture);
+        match self.precheck(now, geometry, cursor_shape_dirty) {
+            DamageGatePrecheck::Capture => Ok(DamageGateDecision::Capture),
+            DamageGatePrecheck::ForcedRefresh => Ok(DamageGateDecision::ForcedRefresh),
+            DamageGatePrecheck::ProbeCursor => Ok(probe()?
+                .map_or(DamageGateDecision::Capture, |cursor| {
+                    self.decide_cursor(cursor)
+                })),
         }
-        Ok(probe()?.map_or(DamageGateDecision::Capture, |cursor| {
-            self.decide_cursor(cursor)
-        }))
     }
 
     #[cfg(test)]
@@ -646,10 +651,12 @@ impl DamageTracker {
             .is_some_and(|active| event.damage == active.id && event.drawable == active.drawable)
     }
 
-    fn observe_notification(&mut self, event: &damage::NotifyEvent) {
+    fn observe_notification(&mut self, event: &damage::NotifyEvent) -> bool {
         if self.notification_matches(event) {
             self.gate.invalidate();
+            return true;
         }
+        false
     }
 
     fn decide_with_cursor_probe<E>(
@@ -977,6 +984,28 @@ pub struct CursorSample {
     pub visible: bool,
 }
 
+/// Stage timings sum work since the last drain, with no observation for a
+/// stage that did not run. Only the desktop capture path collects these.
+#[derive(Default)]
+pub(super) struct X11CaptureMetrics {
+    pub(super) monitor_geometry: Option<Duration>,
+    pub(super) core_readback: Option<Duration>,
+    pub(super) pixel_conversion: Option<Duration>,
+    pub(super) cpu_resize: Option<Duration>,
+    pub(super) damage_notifications: u64,
+    pub(super) forced_refreshes: u64,
+}
+
+fn measure_stage<T>(stage: Option<&mut Option<Duration>>, measure: impl FnOnce() -> T) -> T {
+    let Some(stage) = stage else {
+        return measure();
+    };
+    let started = Instant::now();
+    let result = measure();
+    *stage = Some(stage.unwrap_or_default().saturating_add(started.elapsed()));
+    result
+}
+
 pub struct X11Capture {
     conn: RustConnection,
     screen_num: usize,
@@ -1015,6 +1044,7 @@ pub struct X11Capture {
     shm_readback: ShmReadback,
     cpu_scaler: super::downscale::CpuScaler,
     rgb_buffers: CaptureImageRecycler,
+    capture_metrics: Option<X11CaptureMetrics>,
 }
 
 impl X11Capture {
@@ -1199,6 +1229,7 @@ impl X11Capture {
             shm_readback,
             cpu_scaler: super::downscale::CpuScaler::default(),
             rgb_buffers: CaptureImageRecycler::default(),
+            capture_metrics: None,
         };
         // Fail fast on an unusable area: a typo in --monitor should be an
         // error at startup, not a black rectangle discovered later.
@@ -1210,6 +1241,14 @@ impl X11Capture {
         let damage_target = capture.damage_target();
         capture.damage.sync_target(&capture.conn, damage_target)?;
         Ok(capture)
+    }
+
+    pub(super) fn enable_capture_metrics(&mut self) {
+        self.capture_metrics.get_or_insert_default();
+    }
+
+    pub(super) fn take_capture_metrics(&mut self) -> Option<X11CaptureMetrics> {
+        self.capture_metrics.as_mut().map(std::mem::take)
     }
 
     /// Enable only after the peer negotiates the independent cursor capability.
@@ -1322,7 +1361,7 @@ impl X11Capture {
         // fits: a monitor can move or disappear without resizing the root.
         // Changed scoped geometry requires reconnecting because input and
         // already queued frames still use the original coordinate space.
-        self.refresh_region()?;
+        self.refresh_capture_region()?;
         let mut root_dimensions = (root_width, root_height);
         let (mut source_width, mut source_height) = scoped_dimensions(self.region, root_dimensions);
         validate_root_geometry(source_width, source_height)?;
@@ -1352,8 +1391,14 @@ impl X11Capture {
                     CursorProbeFailureAction::Fatal => return Err(failure.error),
                 },
             };
-            if decision == DamageGateDecision::NoChange {
-                return Ok(CaptureOutcome::NoChange);
+            match decision {
+                DamageGateDecision::NoChange => return Ok(CaptureOutcome::NoChange),
+                DamageGateDecision::ForcedRefresh => {
+                    if let Some(metrics) = &mut self.capture_metrics {
+                        metrics.forced_refreshes = metrics.forced_refreshes.saturating_add(1);
+                    }
+                }
+                DamageGateDecision::Capture => {}
             }
         }
 
@@ -1377,7 +1422,7 @@ impl X11Capture {
                 Ok(CaptureDrawableOutcome::Frame(captured)) => {
                     // Do not publish a frame if scoped metadata changed while
                     // readback was in flight. No pixel inspection is needed.
-                    self.refresh_region()?;
+                    self.refresh_capture_region()?;
                     self.damage.capture_succeeded(
                         Instant::now(),
                         (source_width, source_height),
@@ -1393,7 +1438,7 @@ impl X11Capture {
                         .root_geometry
                         .refresh_authoritative(&self.conn, self.root)?;
                     validate_root_geometry(width, height)?;
-                    self.refresh_region()?;
+                    self.refresh_capture_region()?;
                     drawable = self.drawable;
                     root_dimensions = (width, height);
                     (source_width, source_height) = scoped_dimensions(self.region, root_dimensions);
@@ -1589,13 +1634,13 @@ impl X11Capture {
             &self.conn,
             drawable,
             origin,
-            source_width,
-            source_height,
+            (source_width, source_height),
             ReadbackLayout::ReplyVisual {
                 screen_num: self.screen_num,
                 expected_depth: root_depth,
             },
             &mut self.rgb_buffers,
+            self.capture_metrics.as_mut(),
         );
         let mut image = match image_result {
             Ok(image) => image,
@@ -1617,20 +1662,30 @@ impl X11Capture {
                 .rgb_buffers
                 .take(output_width, output_height)
                 .map_err(CaptureFailure::fatal)?;
-            let scaled = self.cpu_scaler.scale_into(
-                &image,
-                u32::from(output_width),
-                u32::from(output_height),
-                storage,
+            let scaled = measure_stage(
+                self.capture_metrics.as_mut().map(|m| &mut m.cpu_resize),
+                || {
+                    self.cpu_scaler.scale_into(
+                        &image,
+                        u32::from(output_width),
+                        u32::from(output_height),
+                        storage,
+                    )
+                },
             );
             self.rgb_buffers.recycle_image(image);
             scaled
         } else {
-            image::imageops::resize(
-                &image,
-                u32::from(output_width),
-                u32::from(output_height),
-                FilterType::Triangle,
+            measure_stage(
+                self.capture_metrics.as_mut().map(|m| &mut m.cpu_resize),
+                || {
+                    image::imageops::resize(
+                        &image,
+                        u32::from(output_width),
+                        u32::from(output_height),
+                        FilterType::Triangle,
+                    )
+                },
             )
         };
 
@@ -1745,7 +1800,7 @@ impl X11Capture {
         let (width, height) = self
             .root_geometry
             .refresh_authoritative(&self.conn, self.root)?;
-        self.refresh_region()?;
+        self.refresh_capture_region()?;
         let root_dimensions = (width, height);
         let (width, height) = scoped_dimensions(self.region, root_dimensions);
         let changed = source_transition
@@ -1788,7 +1843,14 @@ impl X11Capture {
                         self.compositor.invalidate();
                     }
                 }
-                Event::DamageNotify(event) => self.damage.observe_notification(&event),
+                Event::DamageNotify(event) => {
+                    if self.damage.observe_notification(&event)
+                        && let Some(metrics) = &mut self.capture_metrics
+                    {
+                        metrics.damage_notifications =
+                            metrics.damage_notifications.saturating_add(1);
+                    }
+                }
                 Event::Error(error) => {
                     match async_x11_error_action(error.extension_name.as_deref()) {
                         AsyncX11ErrorAction::DisableDamage => {
@@ -1982,6 +2044,21 @@ impl X11Capture {
         }
         self.region = region;
         Ok(())
+    }
+
+    /// Time authoritative named-monitor validation on the frame path only.
+    /// The independent cursor plane can also refresh the region on its own
+    /// cadence, outside the capture stage of a scheduled frame.
+    fn refresh_capture_region(&mut self) -> RemoteResult<()> {
+        let started = (self.capture_metrics.is_some()
+            && matches!(self.area, CaptureArea::Monitor(_)))
+        .then(Instant::now);
+        let result = self.refresh_region();
+        if let (Some(started), Some(metrics)) = (started, &mut self.capture_metrics) {
+            let accumulated = metrics.monitor_geometry.unwrap_or_default();
+            metrics.monitor_geometry = Some(accumulated.saturating_add(started.elapsed()));
+        }
+        result
     }
 
     /// Origin of the shared area in root coordinates.
@@ -2855,11 +2932,12 @@ impl ShmReadback {
         conn: &RustConnection,
         drawable: u32,
         origin: (i16, i16),
-        width: u16,
-        height: u16,
+        size: (u16, u16),
         layout: ReadbackLayout,
         buffers: &mut CaptureImageRecycler,
+        metrics: Option<&mut X11CaptureMetrics>,
     ) -> RemoteResult<RgbImage> {
+        let (width, height) = size;
         let shm_result = match self {
             Self::Disabled => None,
             Self::Enabled(readback) => {
@@ -2867,7 +2945,7 @@ impl ShmReadback {
             }
         };
         match resolve_readback(shm_result, || {
-            core_capture_rgb(conn, drawable, origin, width, height, layout, buffers)
+            core_capture_rgb(conn, drawable, origin, size, layout, buffers, metrics)
         }) {
             ReadbackOutcome::Image(image) => Ok(image),
             ReadbackOutcome::CoreFallback { image, shm_error } => {
@@ -3177,30 +3255,42 @@ fn core_capture_rgb(
     conn: &RustConnection,
     drawable: u32,
     origin: (i16, i16),
-    width: u16,
-    height: u16,
+    size: (u16, u16),
     layout: ReadbackLayout,
     buffers: &mut CaptureImageRecycler,
+    metrics: Option<&mut X11CaptureMetrics>,
 ) -> RemoteResult<RgbImage> {
     #[cfg(test)]
     READBACK_REQUESTS.with(|c| {
         let (core, shm, alloc) = c.get();
         c.set((core + 1, shm, alloc));
     });
-    let reply = conn
-        .get_image(
-            ImageFormat::Z_PIXMAP,
-            drawable,
-            origin.0,
-            origin.1,
-            width,
-            height,
-            u32::MAX,
-        )?
-        .reply()?;
-    let visual = reply.visual;
-    let image = XImage::get_from_reply(conn.setup(), width, height, reply)?;
-    decode_readback_image(conn, &image, width, height, visual, layout, buffers)
+    let (width, height) = size;
+    let (readback, conversion) = match metrics {
+        Some(metrics) => (
+            Some(&mut metrics.core_readback),
+            Some(&mut metrics.pixel_conversion),
+        ),
+        None => (None, None),
+    };
+    let reply = measure_stage(readback, || -> RemoteResult<_> {
+        Ok(conn
+            .get_image(
+                ImageFormat::Z_PIXMAP,
+                drawable,
+                origin.0,
+                origin.1,
+                width,
+                height,
+                u32::MAX,
+            )?
+            .reply()?)
+    })?;
+    measure_stage(conversion, || {
+        let visual = reply.visual;
+        let image = XImage::get_from_reply(conn.setup(), width, height, reply)?;
+        decode_readback_image(conn, &image, width, height, visual, layout, buffers)
+    })
 }
 
 fn decode_readback_image(
@@ -3603,14 +3693,14 @@ impl RenderScaler {
             conn,
             target.pixmap,
             (0, 0),
-            output_width,
-            output_height,
+            (output_width, output_height),
             ReadbackLayout::Known {
                 expected_depth: self.root_depth,
                 layout: self.root_layout,
                 standard_bgrx_visual: self.root_standard_bgrx_visual,
             },
             buffers,
+            None,
         );
         // The small ShmGetImage/core GetImage reply is an ordering barrier for
         // both queued requests. Consume both VoidCookies afterwards: precise
@@ -4012,8 +4102,8 @@ enum ReadbackDecoder {
 }
 
 fn is_standard_bgrx_visual(visual: Visualtype) -> bool {
+    // The masks define packed pixel channels. bits_per_rgb_value describes intensity precision.
     visual.class == VisualClass::TRUE_COLOR
-        && visual.bits_per_rgb_value == 8
         && visual.red_mask == 0x00ff_0000
         && visual.green_mask == 0x0000_ff00
         && visual.blue_mask == 0x0000_00ff
@@ -4824,6 +4914,8 @@ mod tests {
                 )
                 .unwrap();
                 capture.cursor.disable();
+                assert!(capture.take_capture_metrics().is_none());
+                capture.enable_capture_metrics();
                 for step in 0..4 {
                     match step {
                         1 => {
@@ -4851,6 +4943,21 @@ mod tests {
                         panic!("fresh frame required");
                     };
                     assert_eq!((frame.source_width, frame.source_height), (64, 48));
+                    let metrics = capture.take_capture_metrics().unwrap();
+                    assert!(metrics.monitor_geometry.is_none());
+                    assert!(metrics.core_readback.is_some());
+                    assert!(metrics.pixel_conversion.is_some());
+                    assert_eq!(
+                        metrics.cpu_resize.is_some(),
+                        frame.image.dimensions() != (64, 48)
+                    );
+                    assert!(
+                        capture
+                            .take_capture_metrics()
+                            .unwrap()
+                            .core_readback
+                            .is_none()
+                    );
                     let after = READBACK_REQUESTS.with(Cell::get);
                     assert!(after.0 > before.0, "must issue core GetImage");
                     assert_eq!(
@@ -4880,12 +4987,17 @@ mod tests {
             )
             .unwrap();
             capture.cursor.disable();
+            capture.enable_capture_metrics();
             assert!(capture.gpu_scaling);
             assert!(
                 capture.shm_readback.is_enabled(),
                 "owned Xvfb must offer SHM FD segments"
             );
             assert!(matches!(capture.frame().unwrap(), CaptureOutcome::Frame(_)));
+            let metrics = capture.take_capture_metrics().unwrap();
+            assert!(metrics.core_readback.is_none());
+            assert!(metrics.pixel_conversion.is_none());
+            assert!(metrics.cpu_resize.is_none());
             let counts = READBACK_REQUESTS.with(Cell::get);
             assert_eq!(counts.0, 0);
             assert!(
@@ -5264,7 +5376,7 @@ mod tests {
                 CursorSnapshot::Disabled,
                 false
             ),
-            DamageGateDecision::Capture
+            DamageGateDecision::ForcedRefresh
         );
     }
 
@@ -5806,11 +5918,16 @@ mod tests {
             ImageOrder::LsbFirst,
             4,
         );
-        assert!(is_standard_bgrx_visual(standard_bgrx_visual()));
-        assert_eq!(
-            select_readback_decoder(&native, true),
-            ReadbackDecoder::Bgrx32
-        );
+        for bits_per_rgb_value in [8, 11] {
+            let visual = Visualtype {
+                bits_per_rgb_value,
+                ..standard_bgrx_visual()
+            };
+            assert_eq!(
+                select_readback_decoder(&native, is_standard_bgrx_visual(visual)),
+                ReadbackDecoder::Bgrx32
+            );
+        }
         assert_eq!(
             select_readback_decoder(&native, false),
             ReadbackDecoder::Generic
@@ -5927,7 +6044,11 @@ mod tests {
 
     #[test]
     fn bgrx_readback_matches_generic_decoder_for_random_odd_sized_images() {
-        let layout = PixelLayout::from_visual_type(standard_bgrx_visual()).unwrap();
+        let visual = Visualtype {
+            bits_per_rgb_value: 11,
+            ..standard_bgrx_visual()
+        };
+        let layout = PixelLayout::from_visual_type(visual).unwrap();
         let mut state = 0x8bad_f00du32;
         for (width, height) in [(1, 1), (3, 5), (17, 4)] {
             let stride = usize::from(width) * 4;
@@ -5948,7 +6069,14 @@ mod tests {
                 Cow::Owned(bytes),
             )
             .unwrap();
-            let fast = decode_ximage(&image, width, height, layout, true).unwrap();
+            let fast = decode_ximage(
+                &image,
+                width,
+                height,
+                layout,
+                is_standard_bgrx_visual(visual),
+            )
+            .unwrap();
             let generic = decode_ximage_generic(&image, width, height, layout).unwrap();
             assert_eq!(fast, generic, "{width}x{height}");
         }
@@ -6046,10 +6174,17 @@ mod tests {
         assert_eq!(gate.last_capture, Some(base));
         assert_eq!(
             gate.decide(base + DAMAGE_FORCE_REFRESH, geometry, cursor, false),
-            DamageGateDecision::Capture
+            DamageGateDecision::ForcedRefresh
         );
         // Merely deciding to capture (or a later mailbox/session failure) does
         // not postpone the forced-refresh deadline.
+        assert_eq!(
+            gate.decide(base + Duration::from_secs(3), geometry, cursor, false),
+            DamageGateDecision::ForcedRefresh
+        );
+        // Dirty invalidation still accounts for the next read when both
+        // normal damage and the deadline require a frame.
+        gate.invalidate();
         assert_eq!(
             gate.decide(base + Duration::from_secs(3), geometry, cursor, false),
             DamageGateDecision::Capture
@@ -6207,10 +6342,15 @@ mod tests {
         assert_eq!(stable, DamageGateDecision::NoChange);
         assert_eq!(probes.get(), 1);
 
-        for (now, candidate_geometry, shape_dirty) in [
-            (base, (640, 480), false),
-            (base, geometry, true),
-            (base + DAMAGE_FORCE_REFRESH, geometry, false),
+        for (now, candidate_geometry, shape_dirty, expected) in [
+            (base, (640, 480), false, DamageGateDecision::Capture),
+            (base, geometry, true, DamageGateDecision::Capture),
+            (
+                base + DAMAGE_FORCE_REFRESH,
+                geometry,
+                false,
+                DamageGateDecision::ForcedRefresh,
+            ),
         ] {
             let decision = gate
                 .decide_with_cursor_probe(now, candidate_geometry, shape_dirty, || {
@@ -6218,7 +6358,7 @@ mod tests {
                     Ok::<_, ()>(Some(cursor))
                 })
                 .unwrap();
-            assert_eq!(decision, DamageGateDecision::Capture);
+            assert_eq!(decision, expected);
         }
         assert_eq!(probes.get(), 1, "mandatory captures must not probe again");
     }
@@ -6401,14 +6541,14 @@ mod tests {
             ..Default::default()
         };
 
-        tracker.observe_notification(&notify(40, active.drawable));
-        tracker.observe_notification(&notify(active.id, 43));
+        assert!(!tracker.observe_notification(&notify(40, active.drawable)));
+        assert!(!tracker.observe_notification(&notify(active.id, 43)));
         assert!(
             !tracker.gate.dirty,
             "stale and unrelated events are ignored"
         );
-        tracker.observe_notification(&notify(active.id, active.drawable));
-        tracker.observe_notification(&notify(active.id, active.drawable));
+        assert!(tracker.observe_notification(&notify(active.id, active.drawable)));
+        assert!(tracker.observe_notification(&notify(active.id, active.drawable)));
         assert!(
             tracker.gate.dirty,
             "duplicate matching events are idempotent"

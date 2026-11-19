@@ -2,6 +2,7 @@
 use super::resumable_control::{LeaseBudget, Negotiated};
 use super::x11_capture::{
     CaptureArea, CaptureImageRecycler, CaptureMode, CaptureOutcome, CursorSample, X11Capture,
+    X11CaptureMetrics,
 };
 use super::{
     RemoteResult, messages::FrameLimits, window_capture::WindowCapture, x11_input::InputArea,
@@ -298,6 +299,19 @@ impl HostCapture {
             Self::Wayland(c) => c.frame(),
         }
     }
+    pub(super) fn enable_capture_metrics(&mut self) {
+        if let Self::Desktop(capture) = self {
+            capture.enable_capture_metrics();
+        }
+    }
+
+    pub(super) fn take_x11_capture_metrics(&mut self) -> Option<X11CaptureMetrics> {
+        match self {
+            Self::Desktop(capture) => capture.take_capture_metrics(),
+            _ => None,
+        }
+    }
+
     pub(super) fn frame_with_control_visual(&mut self) -> RemoteResult<CaptureOutcome> {
         match self {
             #[cfg(feature = "remote-wayland")]

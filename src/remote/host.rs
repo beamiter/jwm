@@ -51,7 +51,7 @@ use super::wayland_pointer_wire::{
 use super::window_resize::{HostResizeState, ResizeRequest, ResizeResult};
 use super::x11_capture::{
     CaptureArea, CaptureImageRecycler, CaptureMode, CaptureOutcome, CaptureSource, CapturedFrame,
-    ScalingPolicy, X11Capture, validate_capture_area,
+    ScalingPolicy, X11Capture, X11CaptureMetrics, validate_capture_area,
 };
 use super::x11_input::{InputArea, InputError, InputInjector};
 use super::x11_keymap::{KeymapMatch, KeymapTable};
@@ -894,6 +894,69 @@ impl StageSamples {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct CaptureStageStats {
+    elapsed: Duration,
+    observations: u64,
+    samples: StageSamples,
+}
+
+impl CaptureStageStats {
+    fn record(&mut self, elapsed: Option<Duration>) {
+        if let Some(elapsed) = elapsed {
+            self.elapsed = self.elapsed.saturating_add(elapsed);
+            self.observations = self.observations.saturating_add(1);
+            self.samples.record(elapsed);
+        }
+    }
+
+    fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "mean": average_millis(self.elapsed, self.observations),
+            "observations": self.observations,
+            "quantiles": self.samples.json(),
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct X11CaptureStats {
+    monitor_geometry: CaptureStageStats,
+    core_readback: CaptureStageStats,
+    pixel_conversion: CaptureStageStats,
+    cpu_resize: CaptureStageStats,
+    damage_notifications: u64,
+    forced_refreshes: u64,
+}
+
+impl X11CaptureStats {
+    fn record(&mut self, metrics: X11CaptureMetrics) {
+        self.monitor_geometry.record(metrics.monitor_geometry);
+        self.core_readback.record(metrics.core_readback);
+        self.pixel_conversion.record(metrics.pixel_conversion);
+        self.cpu_resize.record(metrics.cpu_resize);
+        self.damage_notifications = self
+            .damage_notifications
+            .saturating_add(metrics.damage_notifications);
+        self.forced_refreshes = self
+            .forced_refreshes
+            .saturating_add(metrics.forced_refreshes);
+    }
+
+    fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "damage_notifications": self.damage_notifications,
+            "forced_refreshes": self.forced_refreshes,
+            "stages": {
+                "monitor_geometry_ms": self.monitor_geometry.json(),
+                "core_readback_ms": self.core_readback.json(),
+                "pixel_conversion_ms": self.pixel_conversion.json(),
+                "cpu_resize_ms": self.cpu_resize.json(),
+            },
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct HostTelemetryWindow {
     scheduled: u64,
     captured: u64,
@@ -915,6 +978,7 @@ struct HostTelemetryWindow {
     retired: u64,
     viewer_superseded: u64,
     capture_mode: CaptureMode,
+    x11_capture: Option<X11CaptureStats>,
     capture_elapsed: Duration,
     dirty_scan_elapsed: Duration,
     dirty_scans: u64,
@@ -1038,6 +1102,12 @@ impl HostTelemetry {
             window.capture_samples.record(elapsed);
             window.capture_elapsed = window.capture_elapsed.saturating_add(elapsed);
         });
+    }
+
+    fn collect_x11_capture_metrics(&self, capture: &mut HostCapture) {
+        if let Some(metrics) = capture.take_x11_capture_metrics() {
+            self.update(|window| window.x11_capture.get_or_insert_default().record(metrics));
+        }
     }
 
     fn record_published(&self, replaced: bool) {
@@ -3584,6 +3654,9 @@ fn serve_authenticated(
         let credits = Arc::new(FrameCredits::new());
         let mut telemetry = HostTelemetry::new();
         telemetry.stats_json = options.stats_json;
+        if options.stats_json {
+            capture.enable_capture_metrics();
+        }
         let telemetry = Arc::new(telemetry);
         let jpeg_quality = Arc::new(JpegQualityController::new_at(
             options.jpeg_quality,
@@ -4566,6 +4639,7 @@ fn stream_frames(
                 }
                 reported_mode = Some(mode);
             }
+            telemetry.collect_x11_capture_metrics(capture);
             report_host_if_due(telemetry, credits, now);
             // Cursor movement has its own bounded cadence, independent of the
             // configured video FPS and video-credit backpressure.
@@ -4798,6 +4872,7 @@ fn stream_frames(
         }
         Ok(())
     })();
+    telemetry.collect_x11_capture_metrics(capture);
 
     let close = capture_stop_notice(
         &capture_result,
@@ -5734,13 +5809,14 @@ fn report_host_final(telemetry: &HostTelemetry, credits: &FrameCredits, now: Ins
 
 fn host_telemetry_json(snapshot: HostTelemetrySnapshot, outstanding: u64) -> serde_json::Value {
     let w = snapshot.window;
-    serde_json::json!({
+    let mut report = serde_json::json!({
         "type": "jwm_remote_host_stats", "schema_version": 1,
         "version": env!("CARGO_PKG_VERSION"),
         "commit": option_env!("JWM_BUILD_COMMIT"),
         "window_seconds": snapshot.elapsed.as_secs_f64(), "mode": w.capture_mode.describe(),
         "source_dimensions": w.source_dimensions, "encoded_dimensions": w.encoded_dimensions,
         "scheduled": w.scheduled, "captured": w.captured, "sent": w.sent, "bytes": w.bytes,
+        "backpressure_skipped": w.skipped, "damage_skipped": w.damage_skipped,
         "replaced": w.replaced, "unchanged_suppressed": w.unchanged_suppressed,
         "dirty_tiles": w.dirty_tiles, "total_tiles": w.total_tiles,
         "jpeg_atlases": w.jpeg_encoded, "png_atlases": w.png_encoded,
@@ -5764,7 +5840,11 @@ fn host_telemetry_json(snapshot: HostTelemetrySnapshot, outstanding: u64) -> ser
             "capture_start_to_ack_ms": {"mean": average_millis(w.capture_to_ack, w.drawn_acks), "quantiles": w.capture_to_ack_samples.json()},
             "send_to_ack_ms": {"mean": average_millis(w.send_to_ack, w.drawn_acks), "quantiles": w.send_to_ack_samples.json()}
         }
-    })
+    });
+    if let Some(x11_capture) = &w.x11_capture {
+        report["x11_capture"] = x11_capture.json();
+    }
+    report
 }
 
 fn print_host_telemetry(snapshot: HostTelemetrySnapshot, outstanding: u64, stats_json: bool) {
@@ -12434,6 +12514,8 @@ mod tests {
         let telemetry = HostTelemetry::new_at(base);
         telemetry.record_dimensions(&test_captured_frame(0));
         telemetry.record_captured(Duration::from_millis(30));
+        telemetry.record_skipped();
+        telemetry.record_damage_skipped();
         telemetry.record_dequeued(Duration::from_millis(5), Duration::from_millis(7));
         telemetry.record_dirty_scan(Duration::from_millis(4));
         telemetry.record_encoded(Duration::from_millis(6), test_tile_plan(1, 4));
@@ -12447,6 +12529,9 @@ mod tests {
         let json = host_telemetry_json(snapshot, 1);
         let parsed: serde_json::Value = serde_json::from_str(&json.to_string()).unwrap();
         assert_eq!(parsed["type"], "jwm_remote_host_stats");
+        assert_eq!(parsed["backpressure_skipped"], 1);
+        assert_eq!(parsed["damage_skipped"], 1);
+        assert!(parsed.get("x11_capture").is_none());
         assert_eq!(parsed["source_dimensions"], serde_json::json!([2, 2]));
         assert_eq!(parsed["stages"]["capture_ms"]["mean"], 30.0);
         assert_eq!(parsed["stages"]["mailbox_age_ms"]["mean"], 5.0);
@@ -12462,6 +12547,56 @@ mod tests {
         assert_eq!(reset.window.dirty_scans, 0);
         assert_eq!(reset.window.atlas_encoded, 0);
         assert_eq!(reset.window.jpeg_samples.count, 0);
+    }
+
+    #[test]
+    fn telemetry_json_counts_x11_observations_separately_from_recent_samples() {
+        let base = Instant::now();
+        let telemetry = HostTelemetry::new_at(base);
+        telemetry.update(|window| {
+            let stats = window.x11_capture.get_or_insert_default();
+            stats.record(X11CaptureMetrics {
+                monitor_geometry: Some(Duration::from_millis(4)),
+                damage_notifications: 3,
+                ..X11CaptureMetrics::default()
+            });
+            for _ in 0..130 {
+                stats.record(X11CaptureMetrics {
+                    core_readback: Some(Duration::from_millis(12)),
+                    pixel_conversion: Some(Duration::from_millis(2)),
+                    ..X11CaptureMetrics::default()
+                });
+            }
+            stats.record(X11CaptureMetrics {
+                monitor_geometry: Some(Duration::ZERO),
+                damage_notifications: 2,
+                forced_refreshes: 1,
+                ..X11CaptureMetrics::default()
+            });
+        });
+        telemetry.record_scheduled();
+        let snapshot = telemetry.take_due_at(base + TELEMETRY_INTERVAL).unwrap();
+        let report = host_telemetry_json(snapshot, 0);
+        let capture = &report["x11_capture"];
+        assert_eq!(capture["damage_notifications"], 5);
+        assert_eq!(capture["forced_refreshes"], 1);
+        let stages = &capture["stages"];
+        assert_eq!(stages["monitor_geometry_ms"]["observations"], 2);
+        assert_eq!(stages["monitor_geometry_ms"]["mean"], 2.0);
+        assert_eq!(stages["core_readback_ms"]["observations"], 130);
+        assert_eq!(stages["core_readback_ms"]["quantiles"]["samples"], 128);
+        assert_eq!(stages["core_readback_ms"]["quantiles"]["p95_ms"], 12.0);
+        assert_eq!(stages["pixel_conversion_ms"]["mean"], 2.0);
+        assert_eq!(stages["cpu_resize_ms"]["observations"], 0);
+        assert_eq!(
+            stages["cpu_resize_ms"]["quantiles"]["p95_ms"],
+            serde_json::Value::Null
+        );
+        telemetry.record_scheduled();
+        let next = telemetry
+            .take_due_at(base + TELEMETRY_INTERVAL * 2)
+            .unwrap();
+        assert!(next.window.x11_capture.is_none());
     }
 
     #[test]

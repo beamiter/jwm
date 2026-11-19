@@ -1617,6 +1617,13 @@ rather than treating every stderr line as JSON. The final partial window is
 also emitted on shutdown. Statistics contain no screen pixels, clipboard
 content, keys or input events.
 
+The JSON counters `backpressure_skipped` and `damage_skipped` record the
+capture attempts skipped under mailbox backpressure and the attempts that
+ran the capture path without producing a frame, respectively.
+`damage_skipped` includes outcomes from all capture backends, such as a
+retained Wayland proof that deferred a readback. Older records may omit
+both counters.
+
 Each stage reports its mean and nearest-rank p50/p95/p99 over the **most recent
 128 observations per stage in that reporting window**. Means include all
 observations; the quantiles are bounded recent samples, not full-session or
@@ -1645,6 +1652,28 @@ in the window (zero dimensions mean no captured frame in that window).
 - `send_to_ack_ms`: publication to the credit ledger through drawn ACK,
   including writer contention, transport, viewer processing and presentation.
   This is application feedback latency, **not network RTT**.
+
+X11 desktop capture adds an `x11_capture` object. Its
+`damage_notifications` counter counts received events that match the active
+XDamage object and drawable. `forced_refreshes` counts capture attempts
+triggered by the XDamage refresh deadline. The `stages` object breaks down
+part of the capture call:
+
+- `monitor_geometry_ms` covers the named-monitor RandR validation calls,
+  including repeated validation within an attempt.
+- `core_readback_ms` starts at the core X11 `GetImage` request and ends at
+  its synchronous reply. It covers both X server wait and data transfer.
+- `pixel_conversion_ms` covers layout validation and conversion of the
+  core readback reply to RGB. Both readback and conversion timings apply
+  to the direct software capture path.
+- `cpu_resize_ms` covers CPU resizing when a frame uses that path.
+
+Each stage sums its measured spans into one observation per capture
+attempt. Completed spans can contribute even when the attempt produces
+no frame or later fails. `observations` counts all stage observations in
+the window. The quantiles still use at most 128 recent observations.
+Use separately sampled DPMS power state and compositor frame cadence to
+interpret the XDamage counts during display power saving.
 
 Completed-write counts, bytes and both write-stage samples are recorded atomically
 in one reporting window. The text `write` average is `writer_wait_ms` plus
