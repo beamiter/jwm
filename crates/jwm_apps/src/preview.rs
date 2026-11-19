@@ -1,5 +1,6 @@
 //! Inert, bounded Markdown rendering: no HTML, script, file or network execution.
 use crate::ui::{self, Rect};
+use pango::prelude::*;
 use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 
 const MAX_PREVIEW_BYTES: usize = 256 * 1024;
@@ -78,23 +79,81 @@ pub(crate) fn markup(source: &str) -> String {
     output
 }
 
+#[derive(PartialEq)]
+struct LayoutKey {
+    matrix: cairo::Matrix,
+    format: Option<cairo::Format>,
+    fallback_resolution: (f64, f64),
+    device_scale: (f64, f64),
+    device_offset: (f64, f64),
+    options: cairo::FontOptions,
+    font: Option<pango::FontDescription>,
+    width: i32,
+    font_map: Option<pango::FontMap>,
+    font_map_serial: Option<u32>,
+    resolution: f64,
+    language: Option<pango::Language>,
+    direction: pango::Direction,
+    gravity: pango::Gravity,
+    gravity_hint: pango::GravityHint,
+}
+
 #[derive(Default)]
 pub(crate) struct Preview {
     pub enabled: bool,
     pub scroll: f64,
     revision: Option<u64>,
     markup: String,
+    source: Option<String>,
+    layout: Option<pango::Layout>,
+    key: Option<LayoutKey>,
 }
 impl Preview {
     pub fn draw(&mut self, cr: &cairo::Context, area: Rect, source: &str, revision: u64) {
-        if self.revision != Some(revision) {
+        // Compare bounded source bytes as well as revision: callers can replace
+        // a document with the same revision. Oversized sources share one warning
+        // and must never be retained by this cache.
+        let bounded = (source.len() <= MAX_PREVIEW_BYTES).then_some(source);
+        let changed = self.revision != Some(revision) || self.source.as_deref() != bounded;
+        if changed {
             self.markup = markup(source);
+            self.source = bounded.map(str::to_owned);
             self.revision = Some(revision);
         }
-        // Layout inherits current font/scale on every draw; Markdown parsing is
-        // cached across caret redraws and invalidated only by source revisions.
-        let layout = ui::layout(cr, "", 15., area.w, true);
-        layout.set_markup(&self.markup);
+        // Reuse only the native host's image canvas. Other surface backends
+        // remain uncached rather than guessing their font-option dependencies.
+        let descriptor = ui::layout(cr, "", 15., area.w, true);
+        let context = descriptor.context();
+        let target = cr.target();
+        let key = cr
+            .font_options()
+            .ok()
+            .filter(|_| target.type_() == cairo::SurfaceType::Image)
+            .map(|options| LayoutKey {
+                matrix: cr.matrix(),
+                format: cairo::ImageSurface::try_from(target.clone())
+                    .ok()
+                    .map(|s| s.format()),
+                fallback_resolution: target.fallback_resolution(),
+                device_scale: target.device_scale(),
+                device_offset: target.device_offset(),
+                options,
+                font: descriptor.font_description(),
+                width: descriptor.width(),
+                font_map: context.font_map(),
+                font_map_serial: context.font_map().map(|m| m.serial()),
+                resolution: pangocairo::functions::context_get_resolution(&context),
+                language: context.language(),
+                direction: context.base_dir(),
+                gravity: context.gravity(),
+                gravity_hint: context.gravity_hint(),
+            });
+        if changed || key.is_none() || self.key != key || self.layout.is_none() {
+            descriptor.set_markup(&self.markup);
+            self.layout = Some(descriptor);
+            self.key = key;
+        }
+        let layout = self.layout.as_ref().unwrap();
         self.scroll = self
             .scroll
             .clamp(0., (f64::from(layout.pixel_size().1) - area.h).max(0.));
@@ -103,7 +162,7 @@ impl Preview {
         cr.clip();
         cr.move_to(area.x, area.y - self.scroll);
         ui::color(cr, ui::text_color());
-        pangocairo::functions::show_layout(cr, &layout);
+        pangocairo::functions::show_layout(cr, layout);
         let _ = cr.restore();
     }
 }
@@ -111,6 +170,139 @@ impl Preview {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn cached_layout_matches_fresh_context_content_and_geometry() {
+        fn render(
+            p: &mut Preview,
+            source: &str,
+            revision: u64,
+            width: f64,
+            scale: f64,
+            scroll: f64,
+            translate: f64,
+        ) -> Vec<u8> {
+            let mut surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 800, 600).unwrap();
+            surface.set_device_scale(scale, scale);
+            let cr = cairo::Context::new(&surface).unwrap();
+            cr.translate(translate, 0.);
+            let mut options = cairo::FontOptions::new().unwrap();
+            options.set_antialias(if translate == 0. {
+                cairo::Antialias::Gray
+            } else {
+                cairo::Antialias::None
+            });
+            cr.set_font_options(&options);
+            p.scroll = scroll;
+            p.draw(&cr, Rect::new(10., 10., width, 240.), source, revision);
+            drop(cr);
+            surface.data().unwrap().to_vec()
+        }
+        let mut cached = Preview::default();
+        let source = "# 标题 École\n\n**内容** 中文 ABC\n\n".repeat(30);
+        let changed = source.replace("内容", "替换");
+        let too_large = "x".repeat(MAX_PREVIEW_BYTES + 1);
+        for (text, rev, width, scale, scroll, translate) in [
+            (&source, 1, 360., 1., 0., 0.),
+            (&source, 1, 360., 1., 0., 0.),
+            (&changed, 1, 360., 1., 0., 0.),
+            (&source, 2, 180., 1., 70., 0.),
+            (&source, 2, 180., 2., 70., 0.),
+            (&source, 2, 290., 1., 30., 0.5),
+            (&too_large, 2, 290., 1., 0., 0.),
+            (&source, 2, 290., 1., 0., 0.),
+        ] {
+            let expected = render(
+                &mut Preview::default(),
+                text,
+                rev,
+                width,
+                scale,
+                scroll,
+                translate,
+            );
+            assert_eq!(
+                render(&mut cached, text, rev, width, scale, scroll, translate),
+                expected
+            );
+            assert!(
+                cached
+                    .source
+                    .as_ref()
+                    .is_none_or(|s| s.len() <= MAX_PREVIEW_BYTES)
+            );
+        }
+        let theme = crate::theme::NativeTheme {
+            font: "Serif 18".into(),
+            ..Default::default()
+        };
+        ui::apply_theme(theme);
+        assert_eq!(
+            render(&mut cached, &source, 2, 290., 1., 0., 0.),
+            render(&mut Preview::default(), &source, 2, 290., 1., 0., 0.)
+        );
+        ui::apply_theme(crate::theme::NativeTheme::default());
+    }
+
+    #[test]
+    fn cache_release_and_oversized_source_are_bounded() {
+        let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 80, 80).unwrap();
+        let cr = cairo::Context::new(&surface).unwrap();
+        let mut preview = Preview::default();
+        let area = Rect::new(0., 0., 70., 70.);
+        preview.draw(&cr, area, "owned source", 1);
+        let old_layout = preview.layout.as_ref().unwrap().downgrade();
+        preview.draw(&cr, area, &"x".repeat(MAX_PREVIEW_BYTES + 1), 1);
+        assert!(old_layout.upgrade().is_none());
+        assert!(preview.source.is_none());
+        let last_layout = preview.layout.as_ref().unwrap().downgrade();
+        drop(preview);
+        assert!(last_layout.upgrade().is_none());
+        drop(cr);
+        // Native host must still have exclusive access for its pixel upload.
+        let mut surface = surface;
+        assert!(surface.data().is_ok());
+    }
+
+    #[test]
+    #[ignore = "local bounded layout benchmark"]
+    fn preview_layout_cost() {
+        for bytes in [16 * 1024, 128 * 1024] {
+            let line = "## 标题 École Αθήνα\n\n正文 **Unicode** TARGET 目标 example text.\n\n- item `code` 中文\n\n";
+            let source = line.repeat(bytes / line.len());
+            let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 960, 680).unwrap();
+            let area = Rect::new(0., 0., 432., 500.);
+            let mut cached = Preview::default();
+            let cold_start = std::time::Instant::now();
+            cached.draw(&cairo::Context::new(&surface).unwrap(), area, &source, 1);
+            let cold = cold_start.elapsed().as_micros();
+            let mut samples = vec![];
+            for _ in 0..8 {
+                let mut pair = vec![];
+                for reuse in [false, true] {
+                    if !reuse {
+                        cached.layout = None;
+                    }
+                    // The native host makes a new Cairo context on the same
+                    // image canvas each frame. Do exactly that here.
+                    let cr = cairo::Context::new(&surface).unwrap();
+                    let previous = cached.layout.clone();
+                    let start = std::time::Instant::now();
+                    cached.draw(&cr, area, &source, 1);
+                    surface.flush();
+                    pair.push(start.elapsed().as_micros());
+                    if reuse {
+                        assert_eq!(previous.as_ref(), cached.layout.as_ref());
+                    }
+                }
+                samples.push(pair);
+            }
+            eprintln!(
+                "PREVIEW_PAIRED bytes={} cold_us={cold} samples_rebuild_reuse_us={samples:?}",
+                source.len()
+            );
+        }
+    }
+
     #[test]
     fn markdown_styles_and_unicode_are_preserved() {
         let rendered = markup("# 标题\n\n**粗体** *斜体* `a < b`\n\n- [x] 完成");
