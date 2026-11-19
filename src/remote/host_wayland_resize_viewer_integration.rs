@@ -174,6 +174,8 @@ impl Harness {
                         &options(),
                         &stopping,
                         &Mutex::new(Some(host::GrantedCapture::Wayland(Box::new(capture)))),
+                        false, // No hardware encoder in this JPEG/source-permission fixture.
+                        false,
                     )
                 },
             )
