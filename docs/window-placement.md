@@ -551,3 +551,26 @@ reserve space. Padding extends the overlap test only perpendicular to the
 chosen edge. If all four observed dock reservations are zero, the configured
 bar offset is used only for the part not already reserved above the work
 area by a strut. Observed stacked docks retain their reservation.
+
+### Real desktop acceptance fixture
+
+`scripts/test-app-placement-native.py` runs two distinct application identities
+against a private JWM process and owned Xvfb display. It seeds both histories,
+checks `current` versus `remember` with global memory disabled, swaps the rules
+without relocating an existing window, and checks omitted/default and inherited
+launch-origin behavior. Assertions cover exact tag masks, visibility, focus, and
+saved history. Each backend writes `result.json`, generated configs, and logs;
+a missing dependency or failed invariant exits nonzero, not a green skip.
+
+```sh
+python3 scripts/test-app-placement-native.py --self-test
+python3 scripts/test-app-placement-native.py --backend x11rb --jwm target/release/jwm
+python3 scripts/test-app-placement-native.py --backend wayland-winit --jwm target/release/jwm \
+  --client-bin crates/jwm_shell/target/debug/examples/native_shell_client
+```
+
+The native Wayland acceptance workflow reuses its compositor/client build and
+runs both backends. The self-test verifies harness contracts only; enabling the
+workflow is not evidence of desktop success. Consult the exact commit's run
+and `app-placement-native` artifacts. This fixture does not certify physical
+multi-monitor/DRM behavior, pixel output, or compositor restart restoration.
