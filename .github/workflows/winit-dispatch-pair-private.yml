@@ -86,7 +86,7 @@ jobs:
             cp "$CARGO_TARGET_DIR/release/jwm" "$CARGO_TARGET_DIR/release/jwm-tool" "$dest/"
             git -C "$source" rev-parse HEAD | tee "$dest/REVISION" > "artifacts/winit-dispatch-pair/build/$side.REVISION"
             sha256sum "$dest/jwm" "$dest/jwm-tool" > "artifacts/winit-dispatch-pair/build/$side.sha256"
-            cargo test --manifest-path "$source/Cargo.toml" --locked --release --no-default-features --features backend-wayland-nested --lib nested_input_tests 2>&1 | tee "artifacts/winit-dispatch-pair/build/$side-tests.log"
+            cargo test --manifest-path "$source/Cargo.toml" --locked --release --no-default-features --features backend-wayland-nested --lib backend::wayland_winit::backend::nested_input_tests:: 2>&1 | tee "artifacts/winit-dispatch-pair/build/$side-tests.log"
             if [ "$side" = baseline ]; then count=5; else count=8; fi
             grep -F "test result: ok. $count passed; 0 failed" "artifacts/winit-dispatch-pair/build/$side-tests.log"
             for filter in nested_exit_geometry nested_terminal_visual native_visual_hook promotion_is_visual_only; do
