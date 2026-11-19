@@ -1,0 +1,211 @@
+{
+  "source": "Same physical X11 DP-0, 2560x1440, temporary synthetic fixture",
+  "motion": "Unique rendered 16-bit source frame markers, target 30 source FPS",
+  "input": "XTEST F8 injection to unique matching X11 drawable pixel; 4 warmups excluded",
+  "comparison_conditions": "Sequential sessions using the same machines and synthetic source. Sunlogin motion and input were measured around 14:29\u201314:30, with JWM display-power reruns around 17:00\u201317:03 (UTC+08). The apps used their available session settings.",
+  "sunlogin_version": "16.6.0.32198",
+  "sunlogin_connection_ui": "P2P",
+  "sunlogin": {
+    "projected_source_pixels": [
+      1398,
+      787
+    ],
+    "static_visible_updates": 0,
+    "motion": {
+      "warmup_seconds": 5.003459,
+      "measured_seconds": 15.002708,
+      "visible_updates": 226,
+      "visible_fps": 15.06394712207956,
+      "five_second_window_fps": [
+        15.18774652610274,
+        15.176503736914508,
+        14.826887077025479
+      ]
+    },
+    "input_to_matching_viewer_pixel": {
+      "attempted": 36,
+      "planned": 36,
+      "samples": 36,
+      "timeouts": 0,
+      "threshold_ms": 2200,
+      "p50_ms": 124.70949999999999,
+      "p95_ms": 168.521,
+      "max_ms": 212.296
+    }
+  },
+  "jwm": {
+    "projected_source_pixels": [
+      1393,
+      783
+    ],
+    "static_visible_updates": 0,
+    "motion": {
+      "warmup_seconds": 5.001484,
+      "measured_seconds": 15.017808,
+      "visible_updates": 108,
+      "visible_fps": 7.191462295962233,
+      "five_second_window_fps": [
+        8.165112108980747,
+        6.812992376461913,
+        6.5921171463164345
+      ]
+    },
+    "input_to_matching_viewer_pixel": {
+      "attempted": 36,
+      "planned": 36,
+      "samples": 36,
+      "timeouts": 0,
+      "threshold_ms": 2200,
+      "p50_ms": 263.399,
+      "p95_ms": 382.87,
+      "max_ms": 460.736
+    }
+  },
+  "jwm_prior_live_motion": [
+    {
+      "warmup_seconds": 5.00727,
+      "measured_seconds": 14.992857999999998,
+      "visible_updates": 188,
+      "visible_fps": 12.53930371380827,
+      "five_second_window_fps": [
+        0.0,
+        20.770580549709393,
+        16.82942119413158
+      ]
+    },
+    {
+      "warmup_seconds": 5.008078,
+      "measured_seconds": 14.999053,
+      "visible_updates": 153,
+      "visible_fps": 10.200644000657908,
+      "five_second_window_fps": [
+        10.990135254595474,
+        9.595695371056545,
+        10.015379616939773
+      ]
+    }
+  ],
+  "jwm_display_power_save_trial": {
+    "monitor_state_observed_at_end": "Off",
+    "result": {
+      "projected_source_pixels": [
+        1393,
+        783
+      ],
+      "static_visible_updates": 0,
+      "motion": {
+        "warmup_seconds": 5.031393,
+        "measured_seconds": 14.977176,
+        "visible_updates": 12,
+        "visible_fps": 0.8012191350358706,
+        "five_second_window_fps": [
+          0.8008152299040423,
+          0.6001302282595323,
+          1.003340924610769
+        ]
+      },
+      "input_to_matching_viewer_pixel": {
+        "attempted": 36,
+        "planned": 36,
+        "samples": 36,
+        "timeouts": 0,
+        "threshold_ms": 2200,
+        "p50_ms": 271.93100000000004,
+        "p95_ms": 386.614,
+        "max_ms": 386.845
+      }
+    },
+    "host_motion_diagnostics": {
+      "one_based_window_indices": [
+        4,
+        5,
+        6
+      ],
+      "seconds": 15.037660782,
+      "mode": [
+        "overlay/cpu-resize/core-getimage/damage/cursor-events"
+      ],
+      "totals": {
+        "scheduled": 385,
+        "captured": 15,
+        "sent": 10,
+        "drawn_acks": 11,
+        "unchanged_suppressed": 5,
+        "bytes": 761556
+      },
+      "capture_weighted_mean_ms": 165.30986913333336,
+      "capture_start_to_drawn_ack_weighted_mean_ms": 291.36654563636364,
+      "send_to_drawn_ack_weighted_mean_ms": 80.9222739090909,
+      "capture_ms_window_mean_range": [
+        160.21908000000002,
+        173.78021560000002
+      ],
+      "jpeg_ms_window_mean_range": [
+        40.258386333333334,
+        47.340872749999996
+      ],
+      "credit_wait_ms_window_mean_range": [
+        0.0001996,
+        0.00025079999999999997
+      ],
+      "socket_write_ms_window_mean_range": [
+        0.3219013333333333,
+        0.396212
+      ],
+      "max_outstanding_frames": 1
+    }
+  },
+  "jwm_display_awake_trial": {
+    "monitor_state_before": "On",
+    "monitor_state_after": "On",
+    "host_motion_diagnostics": {
+      "one_based_window_indices": [
+        4,
+        5,
+        6
+      ],
+      "seconds": 15.176058004,
+      "mode": [
+        "overlay/cpu-resize/core-getimage/damage/cursor-events"
+      ],
+      "totals": {
+        "scheduled": 129,
+        "captured": 118,
+        "sent": 118,
+        "drawn_acks": 118,
+        "unchanged_suppressed": 0,
+        "bytes": 14095336
+      },
+      "capture_weighted_mean_ms": 125.10541999152542,
+      "capture_start_to_drawn_ack_weighted_mean_ms": 221.78296602542375,
+      "send_to_drawn_ack_weighted_mean_ms": 56.56062630508475,
+      "capture_ms_window_mean_range": [
+        116.40106234146342,
+        137.08162594594594
+      ],
+      "jpeg_ms_window_mean_range": [
+        33.903611463414634,
+        43.40779762162162
+      ],
+      "credit_wait_ms_window_mean_range": [
+        2.070354780487805,
+        3.257719972972973
+      ],
+      "socket_write_ms_window_mean_range": [
+        0.3955018292682927,
+        0.4536675945945946
+      ],
+      "max_outstanding_frames": 2
+    }
+  },
+  "schema_version": 1,
+  "analysis_checkout": "04e76ac4e971efce03a1fe61ae1f4083585c2e22",
+  "notes": [
+    "Visible motion rates exclude the first 5-second viewer window. The host diagnostic windows use an independent clock.",
+    "Each complete input run excludes four warmups. P95 is nearest-rank, computed over successful responses.",
+    "The initial JWM motion runs were retained for context. The first input probe stopped at the viewer focus check. The second ended after a response timeout.",
+    "The dedicated input-only attempt that ended near fixture shutdown is outside the complete trials.",
+    "The monitoring status was sampled after the dimmed-display trial, and before and after the awake trial.",
+    "JWM captures are timed end to end including X11 readback and CPU scaling. Per-stage timings overlap and use different denominators."
+  ]
+}

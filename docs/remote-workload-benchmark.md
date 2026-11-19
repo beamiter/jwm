@@ -165,3 +165,8 @@ rows remain pending until their evidence is collected on the target machines.
 The [2026-11-19 X11 SSH benchmark](benchmarks/remote-x11-ssh-2026-11-19/README.md)
 records live desktop streaming, two runs of isolated X11 workloads on the same
 machines, and software-observed input and edge release latencies.
+
+The [X11 comparison with Sunlogin](benchmarks/remote-x11-sunlogin-2026-11-19/README.md)
+uses one physical monitor and one synthetic workload across the two products.
+It records the additional JWM display-power trials and the host pipeline
+timings behind the observed gap.
