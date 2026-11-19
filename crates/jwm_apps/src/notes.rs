@@ -355,8 +355,7 @@ impl Notes {
                 }
                 let bytes = read_limited(std::fs::File::open(e.path()).ok()?).ok()?;
                 let text = std::str::from_utf8(&bytes).ok()?;
-                text.to_lowercase()
-                    .contains(&query)
+                (query.is_empty() || text.to_lowercase().contains(&query))
                     .then(|| (e.path(), note_title(text), meta.modified().ok()))
             })
             .collect();
@@ -572,5 +571,88 @@ mod tests {
         assert!(document.save("would overwrite").is_err());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "changed elsewhere");
         std::fs::remove_dir_all(directory).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod refresh_semantics_tests {
+    use super::*;
+    #[test]
+    fn empty_query_preserves_validation_unicode_order_and_external_changes() {
+        use std::{
+            fs::{File, FileTimes},
+            time::{Duration, SystemTime},
+        };
+        let dir =
+            std::env::temp_dir().join(format!("jwm-refresh-semantics-{}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        struct Clean(PathBuf);
+        impl Drop for Clean {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _cleanup = Clean(dir.clone());
+        let a = dir.join("a.txt");
+        let b = dir.join("b.txt");
+        let hidden = dir.join(".hidden.txt");
+        std::fs::write(&a, "École Αθήνα 中文 ASCII\nbody").unwrap();
+        std::fs::write(&b, "Other").unwrap();
+        std::fs::write(&hidden, "Hidden title").unwrap();
+        std::fs::write(dir.join("invalid.txt"), b"Valid title\ninvalid later: \xff").unwrap();
+        std::fs::write(dir.join("ignored.md"), "Not a managed note").unwrap();
+        std::fs::create_dir(dir.join("directory.txt")).unwrap();
+        File::create(dir.join("oversize.txt"))
+            .unwrap()
+            .set_len(MAX_TEXT_BYTES + 1)
+            .unwrap();
+        let old = SystemTime::UNIX_EPOCH + Duration::from_secs(100);
+        for path in [&a, &b] {
+            File::open(path)
+                .unwrap()
+                .set_times(FileTimes::new().set_modified(old))
+                .unwrap();
+        }
+        File::open(&hidden)
+            .unwrap()
+            .set_times(FileTimes::new().set_modified(old + Duration::from_secs(1)))
+            .unwrap();
+        let mut notes = Notes::new(Some(a.clone())).unwrap();
+        notes.managed = true;
+        notes.directory = dir.clone();
+        notes.refresh();
+        assert_eq!(
+            notes.rows.iter().map(|v| v.0.clone()).collect::<Vec<_>>(),
+            vec![hidden.clone(), a.clone(), b.clone()]
+        );
+        for query in ["ascii", "éCOLE", "ΑΘΉΝΑ", "中文"] {
+            notes.search.text = query.into();
+            notes.refresh();
+            assert_eq!(notes.rows.len(), 1, "{query}");
+            assert_eq!(notes.rows[0].0, a);
+        }
+        std::fs::write(&a, "External replacement").unwrap();
+        notes.search.text = "école".into();
+        notes.refresh();
+        assert!(notes.rows.is_empty());
+        let renamed = dir.join("renamed.txt");
+        std::fs::rename(&hidden, &renamed).unwrap();
+        std::fs::remove_file(&b).unwrap();
+        notes.search.text.clear();
+        notes.refresh();
+        assert_eq!(notes.rows.len(), 2);
+        assert!(
+            notes
+                .rows
+                .iter()
+                .any(|v| v.0 == renamed && v.1 == "Hidden title")
+        );
+        assert!(
+            notes
+                .rows
+                .iter()
+                .any(|v| v.0 == a && v.1 == "External replacement")
+        );
+        assert!(!notes.rows.iter().any(|v| v.0 == hidden || v.0 == b));
     }
 }
