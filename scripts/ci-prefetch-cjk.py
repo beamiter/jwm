@@ -58,8 +58,11 @@ def archive_record(output):
 
 
 def prefetch(options):
+    # APT prefers SHA512 when both exist. Request the strong SHA256 field
+    # explicitly; absent SHA256 still fails closed in archive_record.
     selected = subprocess.run(
-        ["apt-get", *options, "--print-uris", "download", "fonts-noto-cjk"],
+        ["apt-get", *options, "-o", "Acquire::ForceHash=SHA256",
+         "--print-uris", "download", "fonts-noto-cjk"],
         check=True, text=True, capture_output=True, timeout=30,
     )
     filename, size, digest, primary, fallback = archive_record(selected.stdout)

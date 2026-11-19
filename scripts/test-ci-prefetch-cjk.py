@@ -45,21 +45,38 @@ class PrefetchTests(unittest.TestCase):
                 "Package: fonts-noto-cjk\nVersion: 1:20230817+repack1-3\n"
                 "Architecture: all\nDescription: offline test fixture\n"
                 "Filename: pool/main/f/fonts-noto-cjk/fonts-noto-cjk_20230817+repack1-3_all.deb\n"
-                f"Size: {len(DATA)}\nSHA256: {HASH.removeprefix('SHA256:')}\n\n"
+                f"Size: {len(DATA)}\nSHA256: {HASH.removeprefix('SHA256:')}\n"
+                f"SHA512: {hashlib.sha512(DATA).hexdigest()}\n\n"
             )
-            result = subprocess.run([
+            command = [
                 "apt-get", "-o", f"Dir::Etc::sourcelist={source}",
                 "-o", "Dir::Etc::sourceparts=-", "-o", f"Dir::State::lists={lists}",
                 "-o", f"Dir::State::status={folder / 'status'}",
                 "-o", "Dir::Cache::pkgcache=", "-o", "Dir::Cache::srcpkgcache=",
                 "-o", "APT::Architecture=amd64", "--print-uris", "download", "fonts-noto-cjk",
-            ], cwd=folder, env=dict(os.environ, APT_CONFIG=str(config), LC_ALL="C"),
-                capture_output=True, text=True, timeout=5, check=True)
+            ]
+            run_options = dict(cwd=folder, env=dict(os.environ, APT_CONFIG=str(config), LC_ALL="C"),
+                               capture_output=True, text=True, timeout=5, check=True)
+            default = subprocess.run(command, **run_options)
+            self.assertIn("SHA512:", default.stdout)
+            with self.assertRaises(ValueError):
+                prefetch.archive_record(default.stdout)
+            result = subprocess.run(command + ["-o", "Acquire::ForceHash=SHA256"], **run_options)
             name, size, digest, primary, fallback = prefetch.archive_record(result.stdout)
             self.assertEqual(name, NAME)
             self.assertEqual((size, digest), (len(DATA), HASH))
             self.assertTrue(primary.endswith("fonts-noto-cjk_20230817%2brepack1-3_all.deb"))
             self.assertEqual(fallback, primary.replace("http://official.invalid", "https://archive.ubuntu.com"))
+            # Forcing SHA256 must not silently fall back to SHA512 or MD5 when
+            # the authenticated record lacks the requested strong digest.
+            index.write_text("\n".join(line for line in index.read_text().splitlines()
+                                       if not line.startswith("SHA256:")) + "\n")
+            missing = subprocess.run(command + ["-o", "Acquire::ForceHash=SHA256"],
+                                     **dict(run_options, check=False))
+            if missing.returncode == 0:
+                with self.assertRaises(ValueError):
+                    prefetch.archive_record(missing.stdout)
+
 
     def test_malformed_or_weak_metadata_fails_closed(self):
         for bad in ("", RECORD + RECORD, RECORD.replace("SHA256:", "MD5Sum:"),
@@ -90,6 +107,7 @@ class PrefetchTests(unittest.TestCase):
                     prefetch.prefetch(["-o", "Dir::Etc::sourceparts=-"])
                     self.assertEqual((cache / NAME).read_bytes(), DATA)
                 self.assertEqual(select.call_count, 1)  # no second index/version selection
+                self.assertIn("Acquire::ForceHash=SHA256", select.call_args.args[0])
             return calls
 
     def test_primary_success_does_not_use_fallback(self):
