@@ -1,0 +1,108 @@
+name: Private winit dispatch A-B comparison
+on:
+  pull_request:
+    branches: [dot/winit-dispatch-pair-base]
+    paths:
+      - '.github/workflows/winit-dispatch-pair-private.yml'
+permissions:
+  contents: read
+# Isolated one-shot comparison, not a product PR or release.
+# Product anchor has the exact independently reviewed tree fc4d198c29bd074299cd78cfa8c58dbc30f37e3b.
+# The local reviewed commit fc4e7d87 and remote 23fca55b differ only in commit metadata.
+jobs:
+  comparison:
+    if: github.head_ref == 'dot/winit-dispatch-pair-evidence'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      CARGO_TERM_COLOR: always
+      LIBGL_ALWAYS_SOFTWARE: '1'
+      LP_NUM_THREADS: '2'
+      BASELINE_SHA: 04e76ac4e971efce03a1fe61ae1f4083585c2e22
+      PRODUCT_SHA: 23fca55be3f57a9795c1e25dd99cc226b17128e9
+      PRODUCT_TREE: fc4d198c29bd074299cd78cfa8c58dbc30f37e3b
+      CARGO_TARGET_DIR: ${{ github.workspace }}/.pair-target
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Check out immutable baseline
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 04e76ac4e971efce03a1fe61ae1f4083585c2e22
+          path: .pair-source/baseline
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Check out independent immutable product source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 23fca55be3f57a9795c1e25dd99cc226b17128e9
+          path: .pair-source/product
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Verify exact source provenance before building
+        run: |
+          mkdir -p artifacts/winit-dispatch-pair/build
+          test "$(git -C .pair-source/baseline rev-parse HEAD)" = "$BASELINE_SHA"
+          test "$(git -C .pair-source/product rev-parse HEAD)" = "$PRODUCT_SHA"
+          test "$(git -C .pair-source/product rev-parse HEAD^)" = "$BASELINE_SHA"
+          test "$(git -C .pair-source/product rev-parse HEAD^{tree})" = "$PRODUCT_TREE"
+          test "$(git -C .pair-source/product diff --name-only HEAD^ HEAD)" = src/backend/wayland_winit/backend.rs
+          git rev-parse HEAD > artifacts/winit-dispatch-pair/build/harness-revision.txt
+          sha256sum scripts/winit_dispatch_ab.py scripts/test-terminal-exit-wayland.py > artifacts/winit-dispatch-pair/build/harness.sha256
+          git -C .pair-source/product show --format=fuller --stat HEAD > artifacts/winit-dispatch-pair/build/product-source.txt
+          git -C .pair-source/product diff HEAD^ HEAD > artifacts/winit-dispatch-pair/build/product.patch
+      - name: Install bounded native build and private display dependencies
+        timeout-minutes: 10
+        run: |
+          bash scripts/ci-install-deps.sh build-essential pkg-config libglib2.0-dev libcairo2-dev libpango1.0-dev \
+            libasound2-dev libdbus-1-dev libudev-dev libinput-dev libseat-dev libdrm-dev libgbm-dev \
+            libegl1-mesa-dev libgl1-mesa-dev libgl1-mesa-dri libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libx11-dev libx11-xcb-dev libxext-dev libxxf86vm-dev libxcb1-dev libxcb-composite0-dev \
+            libxcb-damage0-dev libxcb-present-dev libxcb-randr0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libxcursor-dev libxfixes-dev libxi-dev libxrandr-dev libxrender-dev \
+            xvfb xwayland xauth xdotool x11-utils dbus-daemon python3-pil
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          components: rustfmt
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
+        with:
+          shared-key: native-wayland-terminal-diagnostic
+          workspaces: |
+            . -> .pair-target
+      - name: Offline comparison contracts
+        run: |
+          python3 scripts/winit_dispatch_ab.py --self-test
+          python3 scripts/test-terminal-exit-wayland.py --self-test
+      - name: Build and retain each version separately
+        run: |
+          set -o pipefail
+          for side in baseline product; do
+            source="$GITHUB_WORKSPACE/.pair-source/$side"
+            dest="$GITHUB_WORKSPACE/.pair-binaries/$side"
+            mkdir -p "$dest"
+            cargo build --manifest-path "$source/Cargo.toml" --locked --release --no-default-features --features backend-wayland-nested --bin jwm --bin jwm-tool 2>&1 | tee "artifacts/winit-dispatch-pair/build/$side.log"
+            cp "$CARGO_TARGET_DIR/release/jwm" "$CARGO_TARGET_DIR/release/jwm-tool" "$dest/"
+            git -C "$source" rev-parse HEAD | tee "$dest/REVISION" > "artifacts/winit-dispatch-pair/build/$side.REVISION"
+            sha256sum "$dest/jwm" "$dest/jwm-tool" > "artifacts/winit-dispatch-pair/build/$side.sha256"
+            cargo test --manifest-path "$source/Cargo.toml" --locked --release --no-default-features --features backend-wayland-nested --lib nested_input_tests 2>&1 | tee "artifacts/winit-dispatch-pair/build/$side-tests.log"
+            if [ "$side" = baseline ]; then count=5; else count=8; fi
+            grep -F "test result: ok. $count passed; 0 failed" "artifacts/winit-dispatch-pair/build/$side-tests.log"
+            for filter in nested_exit_geometry nested_terminal_visual native_visual_hook promotion_is_visual_only; do
+              cargo test --manifest-path "$source/Cargo.toml" --locked --release --no-default-features --features backend-wayland-nested --lib "$filter" 2>&1 | tee "artifacts/winit-dispatch-pair/build/$side-$filter.log"
+              grep -F 'test result: ok. 1 passed; 0 failed' "artifacts/winit-dispatch-pair/build/$side-$filter.log"
+            done
+          done
+          cargo build --locked --manifest-path .pair-source/baseline/crates/jwm_shell/Cargo.toml --example native_shell_client 2>&1 | tee artifacts/winit-dispatch-pair/build/client.log
+      - name: One baseline then one product observation; no retry
+        timeout-minutes: 6
+        run: |
+          python3 scripts/winit_dispatch_ab.py --baseline-bin .pair-binaries/baseline --product-bin .pair-binaries/product --client-bin .pair-target/debug/examples/native_shell_client --output artifacts/winit-dispatch-pair/live
+      - name: Always retain build failures, raw pixels, input, idle and close evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: winit-dispatch-pair
+          path: artifacts/winit-dispatch-pair
+          if-no-files-found: warn
