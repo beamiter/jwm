@@ -39,6 +39,16 @@ def native_row(rows, pid):
     return X11.producer_row(rows, {'pid': pid})
 
 
+def first_capture_then_focus(grab, read_focus, clock=time.monotonic):
+    """Keep IPC off the first capture path; timestamps bound the whole grab."""
+    begin = clock()
+    image = grab()
+    end = clock()
+    focus_row = read_focus()
+    focus_observed = clock()
+    return (begin, image, end), focus_row, focus_observed
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--backend', choices=['wayland-winit', 'wayland-x11'], default='wayland-winit')
@@ -191,8 +201,8 @@ def main():
                     term_offset, bg_offset = len(events(term_log)), len(events(bg_log))
                     started, finished = hotkey()
                     case.update(key_start=started, key_finish=finished)
-                    focus_row = native_row(msg('get_windows'), term_pid)
-                    focus_observed = time.monotonic()
+                    first_frame, focus_row, focus_observed = first_capture_then_focus(
+                        capture.grab, lambda: native_row(msg('get_windows'), term_pid))
                     case['focus_observation_seconds'] = focus_observed-started
                     dispatch_bound = max(finished, focus_observed)-started
                     check(not focus_row['is_focused'], kind+': terminal focus remains after hide')
@@ -200,9 +210,12 @@ def main():
                     # Input probe during exit, without forcibly changing compositor focus.
                     deadline = started + 1.15
                     for index in range(240):
-                        begin = time.monotonic()
-                        image = capture.grab()
-                        end = time.monotonic()
+                        if index == 0:
+                            begin, image, end = first_frame
+                        else:
+                            begin = time.monotonic()
+                            image = capture.grab()
+                            end = time.monotonic()
                         name = f'{kind}-{index:03}'
                         pending[name] = image
                         rect = X11.overlap_during_capture(term, bg, begin-started, end-started, dispatch_bound)
@@ -331,6 +344,35 @@ class Offline(unittest.TestCase):
     def test_coverage_is_strict(self):
         with self.assertRaises(AssertionError):
             X11.assert_full_coverage([{'checked': True, 'seconds': .2}], .8, 'offline')
+    def test_first_capture_precedes_focus_without_extra_grab(self):
+        calls = []
+        ticks = iter([10.049, 10.085, 10.097])
+        image, focus = object(), {'is_focused': False}
+        def grab():
+            calls.append('grab')
+            return image
+        def read_focus():
+            calls.append('focus')
+            return focus
+        first, observed_focus, observed_at = first_capture_then_focus(
+            grab, read_focus, lambda: next(ticks))
+        self.assertEqual(calls, ['grab', 'focus'])
+        self.assertEqual(first, (10.049, image, 10.085))
+        self.assertIs(observed_focus, focus)
+        self.assertEqual(observed_at, 10.097)
+        # A grab beginning early but finishing late is NOT early evidence.
+        with self.assertRaisesRegex(AssertionError, 'missing early'):
+            X11.assert_full_coverage([
+                {'checked': True, 'seconds': .085},
+                {'checked': True, 'seconds': .15},
+                {'checked': True, 'seconds': .23},
+                {'checked': False, 'seconds': 1.15}], .248, 'offline')
+    def test_slow_first_capture_counts_against_focus_deadline(self):
+        ticks = iter([20.04, 20.201, 20.21])
+        _, _, observed_at = first_capture_then_focus(
+            lambda: object(), lambda: {'is_focused': False}, lambda: next(ticks))
+        # The caller still measures from key start, not from capture completion.
+        self.assertGreater(observed_at - 20., .2)
     def test_event_log(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory)/'events'
