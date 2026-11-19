@@ -53,6 +53,17 @@ jobs:
           sha256sum scripts/winit_dispatch_ab.py scripts/test-terminal-exit-wayland.py > artifacts/winit-dispatch-pair/build/harness.sha256
           git -C .pair-source/product show --format=fuller --stat HEAD > artifacts/winit-dispatch-pair/build/product-source.txt
           git -C .pair-source/product diff HEAD^ HEAD > artifacts/winit-dispatch-pair/build/product.patch
+      - name: Isolate complete pinned sources from the harness Cargo workspace
+        run: |
+          root="$(mktemp -d "$RUNNER_TEMP/jwm-winit-dispatch-sources.XXXXXX")"
+          for side in baseline product; do
+            git clone --shared --no-checkout "$GITHUB_WORKSPACE/.pair-source/$side" "$root/$side"
+            if [ "$side" = baseline ]; then revision="$BASELINE_SHA"; else revision="$PRODUCT_SHA"; fi
+            git -C "$root/$side" checkout --detach "$revision"
+            test "$(git -C "$root/$side" rev-parse HEAD)" = "$revision"
+            test "$(git -C "$root/$side" rev-parse HEAD^{tree})" = "$(git -C "$GITHUB_WORKSPACE/.pair-source/$side" rev-parse HEAD^{tree})"
+          done
+          printf 'ISOLATED_SOURCE_ROOT=%s\n' "$root" >> "$GITHUB_ENV"
       - name: Install bounded native build and private display dependencies
         timeout-minutes: 10
         run: |
@@ -71,30 +82,43 @@ jobs:
           shared-key: native-wayland-terminal-diagnostic
           workspaces: |
             . -> .pair-target
+      - name: Verify real Cargo workspace and target boundaries
+        run: |
+          for side in baseline product; do
+            source="$ISOLATED_SOURCE_ROOT/$side"
+            evidence="$GITHUB_WORKSPACE/artifacts/winit-dispatch-pair/build"
+            (cd "$source" && cargo metadata --locked --no-deps --format-version 1) > "$evidence/$side-root-metadata.json"
+            (cd "$source" && cargo metadata --locked --no-deps --format-version 1 --manifest-path crates/jwm_shell/Cargo.toml) > "$evidence/$side-client-metadata.json"
+            python3 -c 'import json,sys,pathlib; source,target,evidence,side=sys.argv[1:]; root=json.load(open(evidence+"/"+side+"-root-metadata.json")); client=json.load(open(evidence+"/"+side+"-client-metadata.json")); assert root["workspace_root"]==source; assert client["workspace_root"]==source+"/crates/jwm_shell"; assert root["target_directory"]==client["target_directory"]==target' "$source" "$CARGO_TARGET_DIR" "$evidence" "$side"
+          done
       - name: Offline comparison contracts
         run: |
           python3 scripts/winit_dispatch_ab.py --self-test
           python3 scripts/test-terminal-exit-wayland.py --self-test
+      - name: Build the real native client before compositor builds
+        run: |
+          set -o pipefail
+          (cd "$ISOLATED_SOURCE_ROOT/baseline" && cargo build --locked --manifest-path crates/jwm_shell/Cargo.toml --example native_shell_client) 2>&1 | tee artifacts/winit-dispatch-pair/build/client.log
+          test -x "$CARGO_TARGET_DIR/debug/examples/native_shell_client"
       - name: Build and retain each version separately
         run: |
           set -o pipefail
           for side in baseline product; do
-            source="$GITHUB_WORKSPACE/.pair-source/$side"
+            source="$ISOLATED_SOURCE_ROOT/$side"
             dest="$GITHUB_WORKSPACE/.pair-binaries/$side"
             mkdir -p "$dest"
-            cargo build --manifest-path "$source/Cargo.toml" --locked --release --no-default-features --features backend-wayland-nested --bin jwm --bin jwm-tool 2>&1 | tee "artifacts/winit-dispatch-pair/build/$side.log"
+            (cd "$source" && cargo build --locked --release --no-default-features --features backend-wayland-nested --bin jwm --bin jwm-tool) 2>&1 | tee "artifacts/winit-dispatch-pair/build/$side.log"
             cp "$CARGO_TARGET_DIR/release/jwm" "$CARGO_TARGET_DIR/release/jwm-tool" "$dest/"
             git -C "$source" rev-parse HEAD | tee "$dest/REVISION" > "artifacts/winit-dispatch-pair/build/$side.REVISION"
             sha256sum "$dest/jwm" "$dest/jwm-tool" > "artifacts/winit-dispatch-pair/build/$side.sha256"
-            cargo test --manifest-path "$source/Cargo.toml" --locked --release --no-default-features --features backend-wayland-nested --lib backend::wayland_winit::backend::nested_input_tests:: 2>&1 | tee "artifacts/winit-dispatch-pair/build/$side-tests.log"
+            (cd "$source" && cargo test --locked --release --no-default-features --features backend-wayland-nested --lib backend::wayland_winit::backend::nested_input_tests::) 2>&1 | tee "artifacts/winit-dispatch-pair/build/$side-tests.log"
             if [ "$side" = baseline ]; then count=5; else count=8; fi
             grep -F "test result: ok. $count passed; 0 failed" "artifacts/winit-dispatch-pair/build/$side-tests.log"
             for filter in nested_exit_geometry nested_terminal_visual native_visual_hook promotion_is_visual_only; do
-              cargo test --manifest-path "$source/Cargo.toml" --locked --release --no-default-features --features backend-wayland-nested --lib "$filter" 2>&1 | tee "artifacts/winit-dispatch-pair/build/$side-$filter.log"
+              (cd "$source" && cargo test --locked --release --no-default-features --features backend-wayland-nested --lib "$filter") 2>&1 | tee "artifacts/winit-dispatch-pair/build/$side-$filter.log"
               grep -F 'test result: ok. 1 passed; 0 failed' "artifacts/winit-dispatch-pair/build/$side-$filter.log"
             done
           done
-          cargo build --locked --manifest-path .pair-source/baseline/crates/jwm_shell/Cargo.toml --example native_shell_client 2>&1 | tee artifacts/winit-dispatch-pair/build/client.log
       - name: One baseline then one product observation; no retry
         timeout-minutes: 6
         run: |
