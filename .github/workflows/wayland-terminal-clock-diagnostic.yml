@@ -57,10 +57,10 @@ jobs:
           for filter in nested_exit_geometry nested_terminal_visual native_visual_hook promotion_is_visual_only; do
             cargo test --locked --release --no-default-features --features backend-wayland-nested --lib "$filter"
           done
-      - name: Bounded OFF ON ON OFF control (any failure fails aggregate)
-        timeout-minutes: 13
+      - name: Single phase-v2 evidence run (legacy failures remain authoritative)
+        timeout-minutes: 5
         run: |
-          python3 scripts/diagnose-terminal-clock-control.py
+          python3 scripts/test-terminal-exit-wayland.py --backend wayland-winit --bin-dir target/release --client-bin crates/jwm_shell/target/debug/examples/native_shell_client --evidence-dir artifacts/native-wayland-terminal --diagnose --trace-clock --phase-candidate
       - name: Retain acceptance pixels, native input receipts and logs
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
