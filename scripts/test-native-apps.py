@@ -116,8 +116,8 @@ def main():
                         key("Return")
                     command("xdotool", "type", "--clearmodifiers", "--delay", "1", line)
 
-            def screenshot(identifier):
-                result = subprocess.check_output(["import", "-window", str(identifier), "png:-"], env=env)
+            def screenshot(identifier, timeout=None):
+                result = subprocess.check_output(["import", "-window", str(identifier), "png:-"], env=env, timeout=timeout)
                 return Image.open(io.BytesIO(result)).convert("RGB")
 
             def close_button(identifier):
@@ -370,7 +370,21 @@ def main():
                     assert tsx_app.poll() is None, "Preflight killed Notes"
                     assert not sentinel.exists(), "Preflight executed project code"
                     if args.evidence_dir:
-                        screenshot(tsx_window).save(args.evidence_dir / "tsx-preflight-no-execution.png")
+                        # The title is published before the next Cairo paint.
+                        # Keep the success assertion above; separately wait for
+                        # stable pixels so evidence does not retain the old frame.
+                        frame_state = [None, time.monotonic()]
+
+                        def settled_success_frame():
+                            frame = screenshot(tsx_window, timeout=2)
+                            pixels = frame.tobytes()
+                            if pixels != frame_state[0]:
+                                frame_state[:] = [pixels, time.monotonic()]
+                                return None
+                            return frame if time.monotonic() - frame_state[1] >= .5 else None
+
+                        wait(settled_success_frame, "TSX success pixels did not settle").save(
+                            args.evidence_dir / "tsx-preflight-no-execution.png")
                     key("Escape")
                 # A real read barrier, not a timing guess: hold package.json's
                 # FIFO writer open so Node cannot complete metadata inspection.
