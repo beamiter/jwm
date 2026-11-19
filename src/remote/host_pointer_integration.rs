@@ -562,6 +562,8 @@ fn actual_tcp_pointer_host_requires_new_drawn_frame_for_every_action() {
                         &options,
                         &shutdown,
                         &Mutex::new(Some(GrantedCapture::Wayland(Box::new(capture)))),
+                        false, // No hardware encoder in this JPEG/source-permission fixture.
+                        false,
                     )
                 }));
             let result = match result {

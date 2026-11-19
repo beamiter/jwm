@@ -374,6 +374,8 @@ fn actual_viewer_tcp_keyboard_presented_scope_and_revocation() {
                         &options(),
                         &shutdown,
                         &Mutex::new(Some(GrantedCapture::Wayland(Box::new(capture)))),
+                        false, // No hardware encoder in this JPEG/source-permission fixture.
+                        false,
                     )
                 }));
             let result = match result {
