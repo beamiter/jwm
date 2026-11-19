@@ -114,6 +114,19 @@ class ReportTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     self.read([record])
 
+    def test_optional_h264_timing_uses_encoded_frames(self):
+        a, b = window(1000, 4), window(1, 100)
+        for record in (a, b):
+            record['h264_frames'] = record['captured']
+            record['stages']['h264_ms'] = record['stages']['capture_ms']
+        report = m.summarize(*self.read([window(), a, b]), 'terminal', 'h264')
+        self.assertEqual(report['totals']['h264_frames'], 1001)
+        self.assertEqual(report['counter_windows']['h264_frames'], 2)
+        self.assertAlmostEqual(report['stages']['h264_ms']['whole_run_weighted_mean_ms'], 4100 / 1001)
+        b['h264_frames'] = 0
+        with self.assertRaisesRegex(ValueError, 'h264_ms and h264_frames disagree'):
+            self.read([b])
+
     def test_malformed_nested_types_rejected(self):
         for field, bad in [('stages', []), ('version', []), ('commit', {}), ('schema_version', True)]:
             value = window()

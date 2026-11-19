@@ -123,6 +123,33 @@ user, including a host with `--allow-input`. The session's traffic is
 encrypted twice. SSH also provides its independently authenticated channel;
 the native transport now has ephemeral forward secrecy of its own.
 
+### Automatic hardware video over SSH
+
+Build the helper on both machines with `remote-h264`. This feature uses the
+system FFmpeg development libraries (`libavcodec`, `libavformat`, `libavutil`
+and `libswscale`), `pkg-config`, and `libclang`. The built helper needs
+compatible FFmpeg shared libraries and working video drivers at runtime.
+
+```sh
+cargo build --locked --release --bin jwm-remote --features remote-h264
+jwm-remote ssh user@desktop --monitor DP-0 --grab-input
+```
+
+Ordinary SSH sessions probe both peers. When available, HEVC 4:4:4 keeps
+full chroma resolution for colored text and thin lines. Its NVENC target is
+10 Mbit/s and the viewer prefers NVIDIA hardware decoding. H.264 4:2:0 uses
+a 6 Mbit/s target and tries VA-API first. Negotiation falls back from HEVC
+to H.264 and then to JPEG as needed. Pass `--jpeg` to select JPEG for one
+session. An explicit `--jpeg-quality` setting also selects JPEG. Custom
+helpers selected by `--remote-command` should support a read-only `host --help`.
+
+Both hardware modes retain the X11 capture, cursor, source selection and draw
+acknowledgement paths. The viewer decodes frames in wire order and can skip
+presentation of older decoded frames. A new source or geometry starts with a
+fresh keyframe. An odd visible size uses even padding inside the codec and is
+cropped back before display. The viewer area sets the requested resolution,
+so enlarging the window can preserve more source detail.
+
 ### One key for a machine you use often
 
 Bind the command in `config_x11.toml`, one key per monitor if you like:
@@ -501,6 +528,11 @@ This is a decoded-canvas budget, not a total-memory or source-readback budget.
 JPEG atlases still include bounded tile/last-row padding and decoder scratch.
 Atlas extent is checked against the canvas-derived dirty tile count and tile edge
 before JPEG pixel allocation; the existing independent hard bounds still apply.
+The host encodes atlases as baseline JPEG with full-resolution chroma (4:4:4).
+The optional `remote-fast-jpeg` feature enables the experimental AVX2 encoder
+and its portable implementation for comparisons.
+This software is based in part on the work of the Independent JPEG Group.
+[jpeg-encoder licenses](third-party/jpeg-encoder/)
 
 Version 15 appends one boolean byte for explicit native window resize after
 clipboard selectors. The host enables it only with `--window`, `--once` and
@@ -808,9 +840,9 @@ jwm-remote connect 192.168.1.50:48221 \
 
 ## Tuning and troubleshooting
 
-The interactive LAN defaults are a 30 FPS upper limit, adaptive JPEG quality
-40–85, and `--max-width 0`: fit the actual viewer window up to the source's
-native dimensions, with no default 1280-pixel ceiling. A 2560-pixel desktop
+Interactive sessions default to a 30 FPS upper limit and `--max-width 0`,
+which fits the viewer window up to the source's native dimensions. JPEG uses
+an adaptive quality of 40–85. A 2560-pixel desktop
 previously became 1280 pixels even when the viewer could show more; enlarging
 that viewer only magnified the lost detail. Explicit width limits still win,
 source dimensions are never upscaled for encoding, and all existing dimension,
@@ -1624,6 +1656,12 @@ ran the capture path without producing a frame, respectively.
 retained Wayland proof that deferred a readback. Older records may omit
 both counters.
 
+`h264_frames` and `hevc444_frames` count successful hardware encodes.
+`h264_ms` and `hevc444_ms` cover padding, pixel conversion and encoding on the
+video worker. The report weights each stage by the corresponding frame count.
+This timing ends before transport and includes packets encoded just before a
+source change caused them to be dropped.
+
 Each stage reports its mean and nearest-rank p50/p95/p99 over the **most recent
 128 observations per stage in that reporting window**. Means include all
 observations; the quantiles are bounded recent samples, not full-session or
@@ -1747,8 +1785,8 @@ pixels. They do not reproduce or certify a physical NVIDIA driver.
   shown through the negotiated independent plane or composited-video fallback; the viewer cursor is transparent during ordinary input
   forwarding and an active grab, while view-only and released-grab windows keep
   a visible local cursor; the rest of the client desktop is never affected;
-- JPEG tile video plus clipboard text, images and files: no audio, drag and
-  drop, lazy (paste-time) file transfer, or inter-frame codec yet;
+- video uses JPEG tiles or automatic hardware video over SSH. Clipboard
+  sharing covers text, images and files;
 - video uses cumulative display acknowledgements, at most two unacknowledged
   frames, and one latest queued frame; persistently slow viewers therefore
   reduce capture/encode/network work instead of accumulating stale video;
@@ -1756,10 +1794,6 @@ pixels. They do not reproduce or certify a physical NVIDIA driver.
   in v3; no independent per-device identity or automatic key rotation;
 - inter-keystroke timing is not hidden;
 - X11 `x11rb`/`xcb` JWM sessions only.
-
-These boundaries keep the first end-to-end path small and observable. A future
-version can replace JPEG/TCP with a hardware video path and encrypted transport
-without exposing JWM's local IPC or moving network waits into the compositor.
 
 `jwm-tool health` prints compact `session_lock` for remote control operators.
 

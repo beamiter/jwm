@@ -41,8 +41,10 @@ use super::frame::{
 };
 use super::source_wire::MAX_FRAME_INNER_PAYLOAD_LEN;
 use super::x11_capture::CapturedFrame;
-use image::codecs::jpeg::{JpegDecoder, JpegEncoder};
-use image::{ColorType, DynamicImage, ExtendedColorType, ImageDecoder, Limits, RgbImage};
+use image::codecs::jpeg::JpegDecoder;
+use image::{ColorType, DynamicImage, ImageDecoder, Limits, RgbImage};
+#[cfg(feature = "remote-fast-jpeg")]
+use jpeg_encoder::{ColorType as JpegColorType, Encoder as JpegEncoder, SamplingFactor};
 // Existing offline benchmark children use the crate hash dependency.
 #[cfg(test)]
 use sha2::{Digest, Sha256};
@@ -835,15 +837,21 @@ impl TileEncoder {
                     }
                 }
             } else {
-                JpegEncoder::new_with_quality(
-                    BoundedPayloadWriter::new(payload, payload_limit),
-                    quality.clamp(1, 100),
-                )
-                .encode(
+                let writer = BoundedPayloadWriter::new(payload, payload_limit);
+                let quality = quality.clamp(1, 100);
+                #[cfg(feature = "remote-fast-jpeg")]
+                {
+                    let mut encoder = JpegEncoder::new(writer, quality);
+                    // Keep full chroma resolution for colored text and tile edges.
+                    encoder.set_sampling_factor(SamplingFactor::F_1_1);
+                    encoder.encode(&self.atlas, atlas_width, atlas_height, JpegColorType::Rgb)?;
+                }
+                #[cfg(not(feature = "remote-fast-jpeg"))]
+                image::codecs::jpeg::JpegEncoder::new_with_quality(writer, quality).encode(
                     &self.atlas,
                     u32::from(atlas_width),
                     u32::from(atlas_height),
-                    ExtendedColorType::Rgb8,
+                    image::ExtendedColorType::Rgb8,
                 )?;
             }
             let codec_elapsed = now().saturating_duration_since(jpeg_started);
@@ -3551,21 +3559,33 @@ mod atlas_envelope_tests {
     use super::*;
     #[test]
     fn complete_production_jpeg_rejects_truncation_and_trailing_payload() {
-        let mut jpeg = Vec::new();
-        JpegEncoder::new_with_quality(&mut jpeg, 75)
-            .encode(&[127; 16 * 16 * 3], 16, 16, ExtendedColorType::Rgb8)
+        let frame = CapturedFrame {
+            geometry_epoch: 0,
+            image: RgbImage::from_pixel(16, 16, image::Rgb([92, 127, 181])),
+            source_width: 16,
+            source_height: 16,
+        };
+        let mut encoder = TileEncoder::new();
+        let mut payload = Vec::new();
+        encoder.plan(&frame, TileEncodeRequest::Keyframe).unwrap();
+        encoder.encode_into(&mut payload, 1, &frame, 75).unwrap();
+        let jpeg = &payload[TILE_HEADER_LEN + bitmap_len(1)..];
+        assert!(validate_atlas_jpeg_envelope(jpeg).is_ok());
+        let sof = jpeg
+            .windows(2)
+            .position(|bytes| bytes == [0xff, 0xc0])
             .unwrap();
-        assert!(validate_atlas_jpeg_envelope(&jpeg).is_ok());
+        assert_eq!([jpeg[sof + 11], jpeg[sof + 14], jpeg[sof + 17]], [0x11; 3]);
         for cut in [0, 1, jpeg.len() / 2, jpeg.len() - 2, jpeg.len() - 1] {
             assert!(validate_atlas_jpeg_envelope(&jpeg[..cut]).is_err());
         }
-        for suffix in [vec![0], vec![0xff, 0xd9], jpeg.clone()] {
-            let mut trailing = jpeg.clone();
+        for suffix in [vec![0], vec![0xff, 0xd9], jpeg.to_vec()] {
+            let mut trailing = jpeg.to_vec();
             trailing.extend(suffix);
             assert!(validate_atlas_jpeg_envelope(&trailing).is_err());
         }
         let mut atlas = Vec::new();
-        decode_atlas(&mut atlas, &jpeg, 16, 16, jpeg.len()).unwrap();
+        decode_atlas(&mut atlas, jpeg, 16, 16, jpeg.len()).unwrap();
         assert_eq!(atlas.len(), 16 * 16 * 3);
     }
 }

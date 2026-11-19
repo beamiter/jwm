@@ -110,6 +110,10 @@ backend-x11rb = ["x11-backends", "dep:x11rb"]
 # independent x11rb connection, so it works while JWM itself uses either the
 # x11rb or xcb backend.
 remote-x11 = ["dep:rayon", "dep:x11rb", "x11rb/image", "dep:sha2", "dep:chacha20poly1305", "dep:snow", "dep:zeroize", "xbar_core/x11-connection"]
+# Opt-in NVENC encoding and hardware decoding linked to the system FFmpeg.
+remote-h264 = ["remote-x11", "dep:ffmpeg-next"]
+# Alternate JPEG encoder for controlled performance comparisons.
+remote-fast-jpeg = ["remote-x11", "dep:jpeg-encoder"]
 # Native Wayland single-surface source; the shared viewer remains X11.
 remote-wayland = ["remote-x11", "dep:wayland-client", "dep:wayland-protocols", "dep:wayland-scanner", "xkbcommon/x11", "dep:xcb"]
 # XCB transport + shared X11 compositor.
@@ -220,6 +224,8 @@ glow = "0.18"
 winit = { version = "0.30.13", optional = true }
 png = "0.18"
 image = "0.25"
+ffmpeg-next = { version = "8.1.0", default-features = false, features = ["format", "software-scaling"], optional = true }
+jpeg-encoder = { version = "0.7.1", features = ["simd"], optional = true }
 rayon = { version = "1.12", optional = true }
 xcursor = "0.3.10"
 tracing = "0.1.44"

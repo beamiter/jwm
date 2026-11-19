@@ -34,9 +34,11 @@ use super::clipboard_wire::{ClipboardRestriction, RestrictionState};
 use super::close_wire::{SessionClose, SessionCloseCode};
 use super::deadline::TcpStreamDeadline;
 use super::frame::{RecyclableDecodedFrame, SharedDecodeBufferPool, new_decode_buffer_pool};
+#[cfg(feature = "remote-h264")]
+use super::h264_wire::{self, HardwareFrameHeader, VideoPayload};
 use super::key::KeySource;
 use super::messages::{
-    ClientHello, MAX_INPUT_BATCH_EVENTS, ServerHello, encode_input_batch_into,
+    ClientHello, FrameCodec, MAX_INPUT_BATCH_EVENTS, ServerHello, encode_input_batch_into,
     encode_source_frame_ack, encode_viewport,
 };
 use super::protocol::{
@@ -287,6 +289,48 @@ impl std::error::Error for ClientFailure {
     }
 }
 
+#[derive(Debug)]
+pub(super) struct HardwareDecodeFailure(io::Error);
+
+impl std::fmt::Display for HardwareDecodeFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "H.264 hardware decoder failed: {}", self.0)
+    }
+}
+
+impl std::error::Error for HardwareDecodeFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.0)
+    }
+}
+
+/// Only a direct decoder failure after cleanup permits a fresh JPEG session.
+/// Nested failures inside SessionCleanupError cannot authorize another attempt.
+pub(super) fn hardware_decode_failure_clean(error: &(dyn std::error::Error + 'static)) -> bool {
+    error
+        .downcast_ref::<ClientFailure>()
+        .is_some_and(|failure| failure.cause.is::<HardwareDecodeFailure>())
+}
+
+#[cfg(feature = "remote-h264")]
+fn hardware_decoder_error(error: io::Error) -> RemoteError {
+    if matches!(
+        error.kind(),
+        io::ErrorKind::InvalidData | io::ErrorKind::InvalidInput
+    ) {
+        Box::new(error)
+    } else {
+        Box::new(HardwareDecodeFailure(error))
+    }
+}
+
+fn strip_hardware_retry(error: RemoteError) -> RemoteError {
+    match error.downcast::<HardwareDecodeFailure>() {
+        Ok(decoder) => Box::new(decoder.0),
+        Err(error) => error,
+    }
+}
+
 /// Only the direct authenticated terminal cause qualifies. Cleanup wrappers,
 /// formatted messages and nested arbitrary sources are deliberately excluded.
 #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
@@ -452,8 +496,24 @@ fn diagnostic_io_kind(kind: io::ErrorKind) -> &'static str {
 }
 
 pub fn run_client(options: ClientOptions) -> RemoteResult<()> {
+    run_client_with_hardware(options, false)
+}
+
+pub fn run_client_with_hardware(options: ClientOptions, hardware_h264: bool) -> RemoteResult<()> {
+    let preferred = if hardware_h264 {
+        FrameCodec::H264
+    } else {
+        FrameCodec::JpegTiles
+    };
+    run_client_with_video_codec(options, preferred)
+}
+
+pub(super) fn run_client_with_video_codec(
+    options: ClientOptions,
+    preferred: FrameCodec,
+) -> RemoteResult<()> {
     let mut stage = ClientStage::Setup;
-    let result = run_client_session(options, &mut stage);
+    let result = run_client_session(options, preferred, &mut stage);
     match result {
         Ok(()) => {
             eprintln!("jwm-remote: session ended");
@@ -468,6 +528,14 @@ pub fn run_client(options: ClientOptions) -> RemoteResult<()> {
 /// single-session entry point. The budget counts additional sessions and never
 /// resets, even when a replacement session runs successfully for a long time.
 pub fn run_client_reconnecting(options: ClientOptions, attempts: u8) -> RemoteResult<()> {
+    run_client_reconnecting_with_hardware(options, attempts, false)
+}
+
+pub fn run_client_reconnecting_with_hardware(
+    options: ClientOptions,
+    attempts: u8,
+    hardware_h264: bool,
+) -> RemoteResult<()> {
     if (options.follow_source_size
         || options.resize_source.is_some()
         || options.wayland_keyboard
@@ -490,7 +558,7 @@ pub fn run_client_reconnecting(options: ClientOptions, attempts: u8) -> RemoteRe
     }
     reconnect_with(
         attempts,
-        || run_client(options.clone()),
+        || run_client_with_hardware(options.clone(), hardware_h264),
         |attempt, delay| {
             eprintln!(
                 "jwm-remote: transport lost; reconnect attempt {attempt}/{attempts} in {} seconds (Ctrl+C to stop)",
@@ -566,7 +634,7 @@ fn suppress_reconnect(result: RemoteResult<()>, suppress: bool) -> RemoteResult<
         if suppress {
             match error.downcast::<ReceiverTransportLoss>() {
                 Ok(transport) => Box::new(transport.0) as RemoteError,
-                Err(error) => error,
+                Err(error) => strip_hardware_retry(error),
             }
         } else {
             error
@@ -769,7 +837,47 @@ impl ViewportPolicy {
     }
 }
 
-fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> RemoteResult<()> {
+fn requested_video_codec(options: &ClientOptions, preferred: FrameCodec) -> FrameCodec {
+    if !preferred.is_hardware() {
+        return FrameCodec::JpegTiles;
+    }
+    if options.viewer_backend != ViewerBackend::X11
+        || options.static_lossless
+        || options.wayland_keyboard
+        || options.wayland_pointer
+        || options.wayland_control
+        || options.wayland_scroll
+        || options.wayland_horizontal_scroll
+        || options.wayland_popup_pointer
+        || options.wayland_text.is_some()
+    {
+        eprintln!("jwm-remote: using JPEG for the requested viewer or proof mode");
+        return FrameCodec::JpegTiles;
+    }
+    #[cfg(feature = "remote-h264")]
+    match super::h264::probe_decode(FrameCodec::H264) {
+        Ok(()) => {
+            if preferred == FrameCodec::Hevc444
+                && super::h264::probe_decode(FrameCodec::Hevc444).is_ok()
+            {
+                return FrameCodec::Hevc444;
+            }
+            return FrameCodec::H264;
+        }
+        Err(error) => {
+            eprintln!("jwm-remote: H.264 hardware decoder unavailable, using JPEG: {error}")
+        }
+    }
+    #[cfg(not(feature = "remote-h264"))]
+    eprintln!("jwm-remote: this build uses JPEG; H.264 hardware support was disabled");
+    FrameCodec::JpegTiles
+}
+
+fn run_client_session(
+    options: ClientOptions,
+    preferred: FrameCodec,
+    stage: &mut ClientStage,
+) -> RemoteResult<()> {
     if let Some(size) = options.window_size {
         size.validate()?;
     }
@@ -829,6 +937,7 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
             false,
         ),
     };
+    let requested_codec = requested_video_codec(&options, preferred);
     *stage = ClientStage::Connect;
     eprintln!("jwm-remote: connecting to {}", options.peer_label);
     let stream = connect_with_timeout(&options.address, CONNECT_TIMEOUT)?;
@@ -860,8 +969,15 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
         ViewportPolicy::for_follow(options.follow_source_size).initial(initial_viewport),
         request_cursor_plane,
         options.frame_limits,
+        requested_codec,
         HANDSHAKE_TIMEOUT,
     )?;
+    if requested_codec.is_hardware() && hello.stream.codec != requested_codec {
+        eprintln!(
+            "jwm-remote: host selected {} video",
+            hello.stream.codec.name()
+        );
+    }
     if (options.resize_source.is_some() || options.follow_source_size)
         && !hello.stream.window_resize
     {
@@ -948,6 +1064,7 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
     initial_state.frame_limits = hello.stream.frame_limits;
     initial_state.scroll_copy = hello.stream.scroll_copy;
     initial_state.static_lossless = hello.stream.static_lossless;
+    initial_state.frame_codec = hello.stream.codec;
     initial_state.resize.get_mut().unwrap().requested = options.resize_source;
     if options.follow_source_size {
         initial_state.resize.get_mut().unwrap().follow =
@@ -987,23 +1104,34 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
     state.telemetry.record_received();
     // SessionReader exposes this payload only after its record MAC succeeds;
     // no decoded-image allocation is checked out before authentication.
-    let mut tile_decoder = state.new_tile_decoder()?;
+    let mut video_decoder = state.new_video_decoder()?;
     let (initial_epoch, initial_purpose, initial_payload) = decode_frame_payload(&payload)?;
     if initial_epoch != 1 || state.catalog.lock().unwrap().is_none() {
         return Err(invalid_data("initial frame missing source catalog or initial epoch").into());
     }
-    let mut first_frame = decode_popup_queued_frame(
+    let mut first_frame = match decode_popup_queued_frame(
         &state,
-        &mut tile_decoder,
+        &mut video_decoder,
         initial_payload,
         initial_purpose,
         initial_epoch,
-    )?;
+    ) {
+        Ok(frame) => frame,
+        Err(error) if error.is::<HardwareDecodeFailure>() => {
+            // The first picture precedes worker/session cleanup. Explicitly
+            // retire any clipboard worker before SSH can reuse this grant.
+            let clipboard_cleanup = clipboard_sync
+                .as_mut()
+                .map_or(Ok(()), |sync| sync.shutdown_timeout(RECEIVER_JOIN_TIMEOUT));
+            return include_local_cleanup(Err(error), clipboard_cleanup);
+        }
+        Err(error) => return Err(error),
+    };
     #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
     if let Some(observer) = &state.lossless_observer {
         observer.lock().unwrap().push((
             first_frame.frame.sequence(),
-            tile_decoder.last_frame_was_lossless(),
+            video_decoder.jpeg.last_frame_was_lossless(),
         ));
     }
     #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
@@ -1014,13 +1142,15 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
             .push((first_frame.frame.sequence(), first_frame.purpose));
     }
     #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
-    observe_decoded_scroll(
-        &state.scroll_decode_observer,
-        initial_payload,
-        initial_epoch,
-        &first_frame.frame,
-        tile_decoder.last_frame_was_lossless(),
-    );
+    if state.frame_codec == FrameCodec::JpegTiles {
+        observe_decoded_scroll(
+            &state.scroll_decode_observer,
+            initial_payload,
+            initial_epoch,
+            &first_frame.frame,
+            video_decoder.jpeg.last_frame_was_lossless(),
+        );
+    }
     first_frame.frame = first_frame.frame.with_source_epoch(initial_epoch);
     reader
         .get_ref()
@@ -1210,7 +1340,7 @@ fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> Remote
             last_sequence,
             payload,
             wake_sender,
-            tile_decoder,
+            video_decoder,
             clipboard_inbox,
         );
         #[cfg(test)]
@@ -1293,20 +1423,24 @@ fn finalize_retry_intent(
     check: impl FnOnce() -> RemoteResult<bool>,
 ) -> RemoteResult<()> {
     match result {
-        Err(error) => match error.downcast::<CleanTransportDisconnect>() {
-            Ok(transport) => match check() {
-                Ok(true) => Err(transport),
-                Ok(false) => Err(Box::new(transport.0)),
-                Err(error) => Err(Box::new(SessionCleanupError {
+        Err(error)
+            if error.is::<CleanTransportDisconnect>() || error.is::<HardwareDecodeFailure>() =>
+        {
+            match check() {
+                Ok(true) => Err(error),
+                Ok(false) => Err(match error.downcast::<CleanTransportDisconnect>() {
+                    Ok(transport) => Box::new(transport.0),
+                    Err(error) => strip_hardware_retry(error),
+                }),
+                Err(cleanup) => Err(Box::new(SessionCleanupError {
                     #[cfg(test)]
                     sender_transport_only: false,
-                    primary: Some(transport),
-                    failures: vec![error],
+                    primary: Some(error),
+                    failures: vec![cleanup],
                 })),
-            },
-            Err(error) => Err(error),
-        },
-        Ok(()) => Ok(()),
+            }
+        }
+        result => result,
     }
 }
 
@@ -1518,14 +1652,14 @@ fn validate_scroll_negotiation(
     Ok(())
 }
 
-// Popup-family frames have their own fixed-canvas proof envelope. They do
-// not negotiate the ordinary scroll-copy codec extension.
 fn requested_frame_stream(
     popup_pointer: bool,
     frame_limits: super::messages::FrameLimits,
+    codec: FrameCodec,
 ) -> super::messages::StreamCapabilities {
     super::messages::StreamCapabilities {
-        scroll_copy: !popup_pointer,
+        codec,
+        scroll_copy: codec == FrameCodec::JpegTiles && !popup_pointer,
         frame_limits,
         ..Default::default()
     }
@@ -1554,6 +1688,7 @@ fn negotiate_session(
     initial_viewport: Option<(u16, u16)>,
     request_cursor_plane: bool,
     frame_limits: super::messages::FrameLimits,
+    requested_codec: FrameCodec,
     negotiation_timeout: Duration,
 ) -> RemoteResult<(
     SessionReader<TcpStream>,
@@ -1610,7 +1745,11 @@ fn negotiate_session(
                 } else {
                     super::messages::CursorMode::Composited
                 },
-                ..requested_frame_stream(request_wayland_popup_pointer, frame_limits)
+                ..requested_frame_stream(
+                    request_wayland_popup_pointer,
+                    frame_limits,
+                    requested_codec,
+                )
             },
             initial_viewport,
             request_input,
@@ -1622,6 +1761,7 @@ fn negotiate_session(
     )?;
     writer.flush()?;
     let hello = read_server_hello(&mut reader)?;
+    requested_codec.confirm(hello.stream.codec)?;
     validate_server_frame_limits(&hello, frame_limits)?;
     if hello.stream.static_lossless != request_static_lossless
         || (request_static_lossless
@@ -4405,6 +4545,7 @@ struct ReceiveState {
     catalog: Mutex<Option<SourceCatalog>>,
     source_epoch: AtomicU64,
     frame_limits: super::messages::FrameLimits,
+    frame_codec: FrameCodec,
     scroll_copy: bool,
     static_lossless: bool,
     cursor_enabled: AtomicBool,
@@ -4425,6 +4566,10 @@ impl ReceiveState {
         decoder.set_scroll_copy_enabled(self.scroll_copy);
         decoder.set_lossless_enabled(self.static_lossless);
         Ok(decoder)
+    }
+
+    fn new_video_decoder(&self) -> RemoteResult<SessionVideoDecoder> {
+        Ok(self.new_tile_decoder()?.into())
     }
 
     fn new() -> Self {
@@ -4450,6 +4595,7 @@ impl ReceiveState {
             catalog: Mutex::new(None),
             source_epoch: AtomicU64::new(1),
             frame_limits: super::messages::FrameLimits::default(),
+            frame_codec: FrameCodec::JpegTiles,
             scroll_copy: false,
             static_lossless: false,
             cursor_enabled: AtomicBool::new(false),
@@ -4555,9 +4701,182 @@ fn replace_latest<T>(latest: &Mutex<Option<T>>, next: T) -> Option<T> {
     latest.replace(next)
 }
 
+struct SessionVideoDecoder {
+    jpeg: TileDecoder,
+    #[cfg(feature = "remote-h264")]
+    hardware: Option<(HardwareFrameHeader, super::h264::Decoder)>,
+    #[cfg(feature = "remote-h264")]
+    geometry_epoch: u64,
+}
+
+impl From<TileDecoder> for SessionVideoDecoder {
+    fn from(jpeg: TileDecoder) -> Self {
+        Self {
+            jpeg,
+            #[cfg(feature = "remote-h264")]
+            hardware: None,
+            #[cfg(feature = "remote-h264")]
+            geometry_epoch: 0,
+        }
+    }
+}
+
+impl SessionVideoDecoder {
+    #[cfg(not(feature = "remote-h264"))]
+    fn decode_hardware_session(
+        &mut self,
+        _state: &ReceiveState,
+        _payload: &[u8],
+    ) -> RemoteResult<QueuedFrame> {
+        Err(invalid_data("hardware video was not compiled in").into())
+    }
+
+    #[cfg(feature = "remote-h264")]
+    fn decode_hardware_session(
+        &mut self,
+        state: &ReceiveState,
+        payload: &[u8],
+    ) -> RemoteResult<QueuedFrame> {
+        let frame = match h264_wire::decode_video_payload(payload, state.frame_limits)? {
+            VideoPayload::Jpeg(payload) => {
+                if self.hardware.take().is_some() {
+                    // Only a full JPEG keyframe can establish the canvas after
+                    // a temporal stream. No earlier JPEG reference survives.
+                    self.jpeg = state.new_tile_decoder()?;
+                    eprintln!("jwm-remote: host switched to JPEG video");
+                }
+                decode_queued_frame(
+                    &mut self.jpeg,
+                    payload,
+                    FramePurpose::Video,
+                    &state.telemetry,
+                    &state.decode_pool,
+                )?
+            }
+            VideoPayload::Hardware {
+                codec,
+                header,
+                annex_b,
+            } => {
+                if codec != state.frame_codec {
+                    return Err(invalid_data(
+                        "frame codec differs from the negotiated video profile",
+                    )
+                    .into());
+                }
+                self.decode_hardware(state, header, annex_b)?
+            }
+        };
+        if frame.frame.geometry_epoch() < self.geometry_epoch {
+            return Err(invalid_data("video geometry epoch moved backwards").into());
+        }
+        self.geometry_epoch = frame.frame.geometry_epoch();
+        Ok(frame)
+    }
+
+    #[cfg(feature = "remote-h264")]
+    fn decode_hardware(
+        &mut self,
+        state: &ReceiveState,
+        header: HardwareFrameHeader,
+        annex_b: &[u8],
+    ) -> RemoteResult<QueuedFrame> {
+        if header.geometry_epoch < self.geometry_epoch {
+            return Err(invalid_data("video geometry epoch moved backwards").into());
+        }
+        let decode_started = Instant::now();
+        let dimensions = (
+            u32::from(header.encoded_width),
+            u32::from(header.encoded_height),
+        );
+        let (padded_w, padded_h) =
+            h264_wire::h264_padded_dimensions(header.encoded_width, header.encoded_height)?;
+        let padded = (u32::from(padded_w), u32::from(padded_h));
+        let reset = self.hardware.as_ref().is_none_or(|(previous, _)| {
+            previous.geometry_epoch != header.geometry_epoch
+                || previous.source_width != header.source_width
+                || previous.source_height != header.source_height
+                || previous.encoded_width != header.encoded_width
+                || previous.encoded_height != header.encoded_height
+        });
+        if reset {
+            if !h264_wire::hardware_has_idr(state.frame_codec, annex_b) {
+                return Err(
+                    invalid_data("new video frame geometry requires an IDR picture").into(),
+                );
+            }
+            self.hardware = None;
+            let decoder = super::h264::Decoder::new(state.frame_codec, padded.0, padded.1)
+                .map_err(hardware_decoder_error)?;
+            self.hardware = Some((header, decoder));
+        }
+        let (_, decoder) = self
+            .hardware
+            .as_mut()
+            .expect("hardware decoder initialized");
+        // Feed all authenticated access units in arrival order. The viewer
+        // may skip presentation after decoding, so pictures used as future
+        // H.264 references must not be skipped at this boundary.
+        let rgb = decoder.decode(annex_b).map_err(hardware_decoder_error)?;
+        if rgb.dimensions() != padded {
+            return Err(invalid_data(
+                "hardware output dimensions differ from the authenticated frame",
+            )
+            .into());
+        }
+        let rgb = crop_h264_padding(rgb, dimensions)?;
+        if reset {
+            eprintln!(
+                "jwm-remote: hardware {} decoding active ({}x{})",
+                state.frame_codec.name(),
+                dimensions.0,
+                dimensions.1
+            );
+        }
+        let ready_at = Instant::now();
+        state.telemetry.record_decoded_at(decode_started, ready_at);
+        Ok(QueuedFrame {
+            frame: RecyclableDecodedFrame::new(
+                header.sequence,
+                header.source_width,
+                header.source_height,
+                rgb,
+                Arc::clone(&state.decode_pool),
+            )
+            .with_geometry_epoch(header.geometry_epoch),
+            ready_at,
+            purpose: FramePurpose::Video,
+        })
+    }
+}
+
+#[cfg(feature = "remote-h264")]
+fn crop_h264_padding(
+    rgb: image::RgbImage,
+    (width, height): (u32, u32),
+) -> RemoteResult<image::RgbImage> {
+    if rgb.dimensions() == (width, height) {
+        return Ok(rgb);
+    }
+    let padded_stride = rgb.width() as usize * 3;
+    let stride = width as usize * 3;
+    let rows = height as usize;
+    let mut pixels = rgb.into_raw();
+    if padded_stride != stride {
+        for row in 1..rows {
+            let padded_offset = row * padded_stride;
+            pixels.copy_within(padded_offset..padded_offset + stride, row * stride);
+        }
+    }
+    pixels.truncate(stride * rows);
+    image::RgbImage::from_raw(width, height, pixels).ok_or_else(|| {
+        invalid_data("cropped H.264 RGB buffer does not match frame dimensions").into()
+    })
+}
+
 fn decode_popup_queued_frame(
     state: &ReceiveState,
-    decoder: &mut TileDecoder,
+    decoder: &mut SessionVideoDecoder,
     payload: &[u8],
     purpose: FramePurpose,
     epoch: u64,
@@ -4565,6 +4884,12 @@ fn decode_popup_queued_frame(
     let enabled = state.wayland_popup.lock().unwrap().enabled;
     if enabled != (purpose == FramePurpose::PopupFamilyProof) {
         return Err(invalid_data("popup frame purpose was not negotiated").into());
+    }
+    if state.frame_codec.is_hardware() {
+        if purpose != FramePurpose::Video {
+            return Err(invalid_data("hardware session requires the video frame purpose").into());
+        }
+        return decoder.decode_hardware_session(state, payload);
     }
     let (metadata, payload) = if enabled {
         let prefix = super::wayland_popup_wire::METADATA_LEN;
@@ -4581,7 +4906,7 @@ fn decode_popup_queued_frame(
         (None, payload)
     };
     let queued = decode_queued_frame(
-        decoder,
+        &mut decoder.jpeg,
         payload,
         purpose,
         &state.telemetry,
@@ -4685,7 +5010,7 @@ fn receive_frames(
     last_sequence: u64,
     payload: Vec<u8>,
     wake: WakeSender,
-    tile_decoder: TileDecoder,
+    video_decoder: SessionVideoDecoder,
     clipboard: Option<ClipboardInbox>,
 ) {
     receive_frame_records(
@@ -4699,7 +5024,7 @@ fn receive_frames(
         last_sequence,
         payload,
         wake,
-        tile_decoder,
+        video_decoder,
         clipboard,
     );
 }
@@ -4711,9 +5036,10 @@ fn receive_frame_records(
     mut last_sequence: u64,
     mut payload: Vec<u8>,
     wake: WakeSender,
-    mut tile_decoder: TileDecoder,
+    video_decoder: impl Into<SessionVideoDecoder>,
     clipboard: Option<ClipboardInbox>,
 ) {
+    let mut video_decoder = video_decoder.into();
     let mut completion = ReceiveCompletion::new(Arc::clone(&state), wake);
     let mut payload_retention = PayloadBufferRetention::default();
     let mut last_video_at = Instant::now();
@@ -4897,7 +5223,7 @@ fn receive_frame_records(
                     }
                     catalog.current = changed;
                 }
-                tile_decoder = state.new_tile_decoder()?;
+                video_decoder = state.new_video_decoder()?;
                 *state.latest.lock().unwrap() = None;
                 *state.cursor.lock().unwrap() = super::cursor::CursorInbox::default();
                 if state.wayland_popup.lock().unwrap().enabled {
@@ -4915,10 +5241,10 @@ fn receive_frame_records(
                 }
                 // read_message_into authenticated the complete record before
                 // returning Frame, so pool checkout starts only on trusted
-                // header/JPEG bytes.
+                // video header and codec payload.
                 state.telemetry.record_received();
                 let mut queued =
-                    decode_popup_queued_frame(&state, &mut tile_decoder, inner, purpose, epoch)?;
+                    decode_popup_queued_frame(&state, &mut video_decoder, inner, purpose, epoch)?;
                 // Serialize the final publication with local revoke. Decode
                 // can run outside this lock, but a close during decode must
                 // never publish a new frame or mutate input proof state.
@@ -4935,7 +5261,7 @@ fn receive_frame_records(
                 if let Some(observer) = &state.lossless_observer {
                     observer.lock().unwrap().push((
                         queued.frame.sequence(),
-                        tile_decoder.last_frame_was_lossless(),
+                        video_decoder.jpeg.last_frame_was_lossless(),
                     ));
                 }
                 #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
@@ -4956,13 +5282,15 @@ fn receive_frame_records(
                     .into());
                 }
                 #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
-                observe_decoded_scroll(
-                    &state.scroll_decode_observer,
-                    inner,
-                    epoch,
-                    &queued.frame,
-                    tile_decoder.last_frame_was_lossless(),
-                );
+                if state.frame_codec == FrameCodec::JpegTiles {
+                    observe_decoded_scroll(
+                        &state.scroll_decode_observer,
+                        inner,
+                        epoch,
+                        &queued.frame,
+                        video_decoder.jpeg.last_frame_was_lossless(),
+                    );
+                }
                 last_sequence = queued.frame.sequence();
                 last_video_at = Instant::now();
                 {
@@ -5224,6 +5552,134 @@ pub(super) mod tests {
             )
             .is_err()
         );
+    }
+
+    #[cfg(feature = "remote-h264")]
+    #[test]
+    fn h264_session_accepts_tagged_jpeg_and_rejects_stale_or_unscoped_video() {
+        use super::*;
+        use crate::remote::{
+            tile::{TileEncodeRequest, TileEncoder},
+            x11_capture::CapturedFrame,
+        };
+
+        let state = ReceiveState {
+            frame_codec: FrameCodec::H264,
+            ..ReceiveState::new()
+        };
+        let mut decoder = state.new_video_decoder().unwrap();
+        let captured = CapturedFrame {
+            geometry_epoch: 8,
+            source_width: 32,
+            source_height: 31,
+            image: image::RgbImage::from_pixel(32, 31, image::Rgb([40, 90, 140])),
+        };
+        let mut jpeg_encoder = TileEncoder::new();
+        jpeg_encoder
+            .plan_at(&captured, TileEncodeRequest::Keyframe, Instant::now())
+            .unwrap();
+        let mut payload = Vec::new();
+        jpeg_encoder
+            .encode_into(&mut payload, 3, &captured, 85)
+            .unwrap();
+        h264_wire::tag_jpeg_frame(&mut payload).unwrap();
+        let queued =
+            decode_popup_queued_frame(&state, &mut decoder, &payload, FramePurpose::Video, 1)
+                .unwrap();
+        assert_eq!(queued.frame.sequence(), 3);
+        assert_eq!(queued.frame.geometry_epoch(), 8);
+        assert_eq!(queued.frame.dimensions(), (32, 31));
+        assert!(
+            decode_popup_queued_frame(&state, &mut decoder, &payload, FramePurpose::NativeProof, 1)
+                .is_err()
+        );
+
+        let mut header = HardwareFrameHeader {
+            sequence: 4,
+            source_width: 32,
+            source_height: 31,
+            encoded_width: 32,
+            encoded_height: 31,
+            geometry_epoch: 7,
+        };
+        let idr = [0, 0, 1, 0x65, 0x80];
+        h264_wire::encode_hardware_frame(
+            &mut payload,
+            FrameCodec::H264,
+            header,
+            &idr,
+            state.frame_limits,
+        )
+        .unwrap();
+        let result = decoder.decode_hardware_session(&state, &payload);
+        assert_eq!(
+            result.err().unwrap().to_string(),
+            "video geometry epoch moved backwards"
+        );
+
+        header.geometry_epoch = 8;
+        let inter = [0, 0, 1, 0x41, 0x80];
+        h264_wire::encode_hardware_frame(
+            &mut payload,
+            FrameCodec::H264,
+            header,
+            &inter,
+            state.frame_limits,
+        )
+        .unwrap();
+        let result = decoder.decode_hardware_session(&state, &payload);
+        assert!(
+            result
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("requires an IDR")
+        );
+        assert!(decoder.hardware.is_none());
+    }
+
+    #[cfg(feature = "remote-h264")]
+    #[test]
+    fn h264_crop_preserves_logical_rows_and_discards_only_right_bottom_padding() {
+        use super::*;
+        let padded = image::RgbImage::from_fn(6, 8, |x, y| image::Rgb([x as u8, y as u8, 57]));
+        for dimensions in [(5, 7), (6, 7), (5, 8), (6, 8)] {
+            let cropped = crop_h264_padding(padded.clone(), dimensions).unwrap();
+            assert_eq!(cropped.dimensions(), dimensions);
+            assert_eq!(
+                cropped.as_raw().len(),
+                (dimensions.0 * dimensions.1 * 3) as usize
+            );
+            for (x, y, rgb) in cropped.enumerate_pixels() {
+                assert_eq!(rgb, padded.get_pixel(x, y));
+            }
+        }
+    }
+
+    #[test]
+    fn h264_retry_requires_direct_failure_complete_cleanup_and_no_local_close() {
+        use super::*;
+        let hardware =
+            || Box::new(HardwareDecodeFailure(io::Error::other("decode"))) as RemoteError;
+        let is_retry = |cause| {
+            hardware_decode_failure_clean(&ClientFailure {
+                stage: ClientStage::Session,
+                cause,
+            })
+        };
+        assert!(is_retry(
+            finalize_retry_intent(Err(hardware()), || Ok(true)).unwrap_err()
+        ));
+        assert!(!is_retry(
+            finalize_retry_intent(Err(hardware()), || Ok(false)).unwrap_err()
+        ));
+        assert!(!is_retry(
+            suppress_reconnect(Err(hardware()), true).unwrap_err()
+        ));
+        assert!(!is_retry(
+            include_local_cleanup(Err(hardware()), Err(io::Error::other("join").into()))
+                .unwrap_err()
+        ));
     }
 
     fn pointer_fixture(now: std::time::Instant) -> super::ClientPointer {
@@ -7770,7 +8226,7 @@ pub(super) mod tests {
             0,
             Vec::new(),
             wake_sender,
-            TileDecoder::new(),
+            TileDecoder::new().into(),
             None,
         );
 
@@ -7821,7 +8277,7 @@ pub(super) mod tests {
             0,
             Vec::new(),
             wake_sender,
-            TileDecoder::new(),
+            TileDecoder::new().into(),
             None,
         );
 
@@ -8591,6 +9047,7 @@ pub(super) mod tests {
             None,
             false,
             Default::default(),
+            FrameCodec::JpegTiles,
             Duration::from_millis(80),
         );
         let error = match result {
@@ -8688,6 +9145,7 @@ pub(super) mod tests {
             None,
             false,
             Default::default(),
+            FrameCodec::JpegTiles,
             BUDGET,
         );
         let elapsed = started.elapsed();
@@ -8761,6 +9219,7 @@ pub(super) mod tests {
             None,
             false,
             Default::default(),
+            FrameCodec::JpegTiles,
             Duration::from_secs(5),
         );
         server.join().unwrap();
@@ -8827,6 +9286,7 @@ pub(super) mod tests {
             None,
             false,
             Default::default(),
+            FrameCodec::JpegTiles,
             Duration::from_secs(5),
         );
         server.join().unwrap();
@@ -8901,6 +9361,7 @@ pub(super) mod tests {
                 None,
                 false,
                 Default::default(),
+                FrameCodec::JpegTiles,
                 Duration::from_secs(5),
             );
             server.join().unwrap();
@@ -9008,6 +9469,7 @@ pub(super) mod tests {
             Some((1280, 720)),
             true,
             offered,
+            FrameCodec::JpegTiles,
             BUDGET,
         )
         .unwrap();
@@ -9688,7 +10150,7 @@ mod popup_hello_policy_tests {
             let mut hello = ClientHello {
                 stream: super::super::messages::StreamCapabilities {
                     wayland_popup_pointer: popup,
-                    ..requested_frame_stream(popup, Default::default())
+                    ..requested_frame_stream(popup, Default::default(), FrameCodec::JpegTiles)
                 },
                 initial_viewport: Some((320, 240)),
                 request_input: false,
