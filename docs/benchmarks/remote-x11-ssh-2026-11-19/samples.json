@@ -1,0 +1,3249 @@
+{
+  "schema_version": 1,
+  "live_desktop": {
+    "excluded_startup_window_count": 1,
+    "host_windows": [
+      {
+        "bytes": 1539599,
+        "captured": 105,
+        "commit": null,
+        "dirty_tiles": 26772,
+        "drawn_acks": 80,
+        "encoded_dimensions": [
+          1393,
+          783
+        ],
+        "jpeg_atlases": 80,
+        "legacy_stage_aliases": {
+          "atlas_pack_and_jpeg_ms": "atlas_pack_and_codec_ms; historical name includes all codecs and empty-frame encode work"
+        },
+        "max_outstanding": 2,
+        "mode": "overlay/cpu-resize/core-getimage/damage/cursor-events",
+        "outstanding": 0,
+        "png_atlases": 0,
+        "quantile_policy": "nearest-rank, most recent 128 observations per stage per window",
+        "replaced": 2,
+        "scheduled": 125,
+        "schema_version": 1,
+        "sent": 80,
+        "source_dimensions": [
+          2560,
+          1440
+        ],
+        "stages": {
+          "atlas_pack_and_codec_ms": {
+            "mean": 1.415222,
+            "quantiles": {
+              "p50_ms": 0.103,
+              "p95_ms": 1.63,
+              "p99_ms": 53.111,
+              "samples": 80
+            }
+          },
+          "atlas_pack_and_jpeg_ms": {
+            "mean": 1.415222,
+            "quantiles": {
+              "p50_ms": 0.103,
+              "p95_ms": 1.63,
+              "p99_ms": 53.111,
+              "samples": 80
+            }
+          },
+          "atlas_pack_ms": {
+            "mean": 0.0901586125,
+            "quantiles": {
+              "p50_ms": 0.003,
+              "p95_ms": 0.06,
+              "p99_ms": 5.212,
+              "samples": 80
+            }
+          },
+          "capture_ms": {
+            "mean": 41.19405800952381,
+            "quantiles": {
+              "p50_ms": 39.318,
+              "p95_ms": 55.149,
+              "p99_ms": 59.996,
+              "samples": 105
+            }
+          },
+          "capture_start_to_ack_ms": {
+            "mean": 63.93438705,
+            "quantiles": {
+              "p50_ms": 44.667,
+              "p95_ms": 81.309,
+              "p99_ms": 574.345,
+              "samples": 80
+            }
+          },
+          "codec_ms": {
+            "mean": 1.324359475,
+            "quantiles": {
+              "p50_ms": 0.098,
+              "p95_ms": 1.579,
+              "p99_ms": 47.895,
+              "samples": 80
+            }
+          },
+          "credit_wait_ms": {
+            "mean": 0.7851694411764706,
+            "quantiles": {
+              "p50_ms": 0.0,
+              "p95_ms": 0.0,
+              "p99_ms": 10.463,
+              "samples": 102
+            }
+          },
+          "dirty_scan_ms": {
+            "mean": 0.3072197745098039,
+            "quantiles": {
+              "p50_ms": 0.287,
+              "p95_ms": 0.468,
+              "p99_ms": 1.011,
+              "samples": 102
+            }
+          },
+          "jpeg_ms": {
+            "mean": 1.324359475,
+            "quantiles": {
+              "p50_ms": 0.098,
+              "p95_ms": 1.579,
+              "p99_ms": 47.895,
+              "samples": 80
+            }
+          },
+          "mailbox_age_ms": {
+            "mean": 1.8158543823529414,
+            "quantiles": {
+              "p50_ms": 0.006,
+              "p95_ms": 0.159,
+              "p99_ms": 17.459,
+              "samples": 102
+            }
+          },
+          "png_ms": {
+            "mean": 0.0,
+            "quantiles": {
+              "p50_ms": null,
+              "p95_ms": null,
+              "p99_ms": null,
+              "samples": 0
+            }
+          },
+          "send_to_ack_ms": {
+            "mean": 12.648848562500001,
+            "quantiles": {
+              "p50_ms": 3.799,
+              "p95_ms": 16.573,
+              "p99_ms": 480.694,
+              "samples": 80
+            }
+          },
+          "socket_write_ms": {
+            "mean": 0.049724725000000004,
+            "quantiles": {
+              "p50_ms": 0.039,
+              "p95_ms": 0.077,
+              "p99_ms": 0.468,
+              "samples": 80
+            }
+          },
+          "writer_wait_ms": {
+            "mean": 0.0004217375,
+            "quantiles": {
+              "p50_ms": 0.0,
+              "p95_ms": 0.0,
+              "p99_ms": 0.001,
+              "samples": 80
+            }
+          }
+        },
+        "total_tiles": 375224,
+        "type": "jwm_remote_host_stats",
+        "unchanged_suppressed": 22,
+        "version": "0.2.0",
+        "viewer_superseded": 0,
+        "window_seconds": 5.023467983
+      },
+      {
+        "bytes": 967563,
+        "captured": 110,
+        "commit": null,
+        "dirty_tiles": 14368,
+        "drawn_acks": 87,
+        "encoded_dimensions": [
+          1393,
+          783
+        ],
+        "jpeg_atlases": 87,
+        "legacy_stage_aliases": {
+          "atlas_pack_and_jpeg_ms": "atlas_pack_and_codec_ms; historical name includes all codecs and empty-frame encode work"
+        },
+        "max_outstanding": 1,
+        "mode": "overlay/cpu-resize/core-getimage/damage/cursor-events",
+        "outstanding": 0,
+        "png_atlases": 0,
+        "quantile_policy": "nearest-rank, most recent 128 observations per stage per window",
+        "replaced": 0,
+        "scheduled": 113,
+        "schema_version": 1,
+        "sent": 87,
+        "source_dimensions": [
+          2560,
+          1440
+        ],
+        "stages": {
+          "atlas_pack_and_codec_ms": {
+            "mean": 1.13108608045977,
+            "quantiles": {
+              "p50_ms": 0.277,
+              "p95_ms": 3.576,
+              "p99_ms": 13.506,
+              "samples": 87
+            }
+          },
+          "atlas_pack_and_jpeg_ms": {
+            "mean": 1.13108608045977,
+            "quantiles": {
+              "p50_ms": 0.277,
+              "p95_ms": 3.576,
+              "p99_ms": 13.506,
+              "samples": 87
+            }
+          },
+          "atlas_pack_ms": {
+            "mean": 0.04164601149425288,
+            "quantiles": {
+              "p50_ms": 0.008,
+              "p95_ms": 0.114,
+              "p99_ms": 0.561,
+              "samples": 87
+            }
+          },
+          "capture_ms": {
+            "mean": 44.51596586363636,
+            "quantiles": {
+              "p50_ms": 40.342,
+              "p95_ms": 62.858,
+              "p99_ms": 64.713,
+              "samples": 110
+            }
+          },
+          "capture_start_to_ack_ms": {
+            "mean": 51.48515474712644,
+            "quantiles": {
+              "p50_ms": 47.543,
+              "p95_ms": 74.057,
+              "p99_ms": 87.679,
+              "samples": 87
+            }
+          },
+          "codec_ms": {
+            "mean": 1.0885281149425285,
+            "quantiles": {
+              "p50_ms": 0.268,
+              "p95_ms": 3.464,
+              "p99_ms": 12.959,
+              "samples": 87
+            }
+          },
+          "credit_wait_ms": {
+            "mean": 0.0001483181818181818,
+            "quantiles": {
+              "p50_ms": 0.0,
+              "p95_ms": 0.0,
+              "p99_ms": 0.0,
+              "samples": 110
+            }
+          },
+          "dirty_scan_ms": {
+            "mean": 0.7348724363636363,
+            "quantiles": {
+              "p50_ms": 0.764,
+              "p95_ms": 1.273,
+              "p99_ms": 1.649,
+              "samples": 110
+            }
+          },
+          "jpeg_ms": {
+            "mean": 1.0885281149425285,
+            "quantiles": {
+              "p50_ms": 0.268,
+              "p95_ms": 3.464,
+              "p99_ms": 12.959,
+              "samples": 87
+            }
+          },
+          "mailbox_age_ms": {
+            "mean": 0.01534028181818182,
+            "quantiles": {
+              "p50_ms": 0.009,
+              "p95_ms": 0.031,
+              "p99_ms": 0.159,
+              "samples": 110
+            }
+          },
+          "png_ms": {
+            "mean": 0.0,
+            "quantiles": {
+              "p50_ms": null,
+              "p95_ms": null,
+              "p99_ms": null,
+              "samples": 0
+            }
+          },
+          "send_to_ack_ms": {
+            "mean": 5.926662632183908,
+            "quantiles": {
+              "p50_ms": 3.982,
+              "p95_ms": 20.828,
+              "p99_ms": 31.189,
+              "samples": 87
+            }
+          },
+          "socket_write_ms": {
+            "mean": 0.054155413793103443,
+            "quantiles": {
+              "p50_ms": 0.05,
+              "p95_ms": 0.085,
+              "p99_ms": 0.168,
+              "samples": 87
+            }
+          },
+          "writer_wait_ms": {
+            "mean": 0.0006525057471264368,
+            "quantiles": {
+              "p50_ms": 0.0,
+              "p95_ms": 0.001,
+              "p99_ms": 0.001,
+              "samples": 87
+            }
+          }
+        },
+        "total_tiles": 375144,
+        "type": "jwm_remote_host_stats",
+        "unchanged_suppressed": 23,
+        "version": "0.2.0",
+        "viewer_superseded": 0,
+        "window_seconds": 5.033344729
+      },
+      {
+        "bytes": 874957,
+        "captured": 114,
+        "commit": null,
+        "dirty_tiles": 12024,
+        "drawn_acks": 49,
+        "encoded_dimensions": [
+          1393,
+          783
+        ],
+        "jpeg_atlases": 49,
+        "legacy_stage_aliases": {
+          "atlas_pack_and_jpeg_ms": "atlas_pack_and_codec_ms; historical name includes all codecs and empty-frame encode work"
+        },
+        "max_outstanding": 2,
+        "mode": "overlay/cpu-resize/core-getimage/damage/cursor-events",
+        "outstanding": 0,
+        "png_atlases": 0,
+        "quantile_policy": "nearest-rank, most recent 128 observations per stage per window",
+        "replaced": 0,
+        "scheduled": 127,
+        "schema_version": 1,
+        "sent": 49,
+        "source_dimensions": [
+          2560,
+          1440
+        ],
+        "stages": {
+          "atlas_pack_and_codec_ms": {
+            "mean": 1.1272253469387754,
+            "quantiles": {
+              "p50_ms": 0.929,
+              "p95_ms": 2.305,
+              "p99_ms": 14.787,
+              "samples": 49
+            }
+          },
+          "atlas_pack_and_jpeg_ms": {
+            "mean": 1.1272253469387754,
+            "quantiles": {
+              "p50_ms": 0.929,
+              "p95_ms": 2.305,
+              "p99_ms": 14.787,
+              "samples": 49
+            }
+          },
+          "atlas_pack_ms": {
+            "mean": 0.03289773469387755,
+            "quantiles": {
+              "p50_ms": 0.022,
+              "p95_ms": 0.074,
+              "p99_ms": 0.402,
+              "samples": 49
+            }
+          },
+          "capture_ms": {
+            "mean": 40.035314824561404,
+            "quantiles": {
+              "p50_ms": 37.375,
+              "p95_ms": 56.525,
+              "p99_ms": 65.041,
+              "samples": 114
+            }
+          },
+          "capture_start_to_ack_ms": {
+            "mean": 47.5663942244898,
+            "quantiles": {
+              "p50_ms": 44.248,
+              "p95_ms": 69.239,
+              "p99_ms": 82.041,
+              "samples": 49
+            }
+          },
+          "codec_ms": {
+            "mean": 1.093494857142857,
+            "quantiles": {
+              "p50_ms": 0.902,
+              "p95_ms": 2.23,
+              "p99_ms": 14.383,
+              "samples": 49
+            }
+          },
+          "credit_wait_ms": {
+            "mean": 0.004795121739130435,
+            "quantiles": {
+              "p50_ms": 0.0,
+              "p95_ms": 0.0,
+              "p99_ms": 0.0,
+              "samples": 115
+            }
+          },
+          "dirty_scan_ms": {
+            "mean": 0.5350735565217392,
+            "quantiles": {
+              "p50_ms": 0.345,
+              "p95_ms": 1.05,
+              "p99_ms": 1.34,
+              "samples": 115
+            }
+          },
+          "jpeg_ms": {
+            "mean": 1.093494857142857,
+            "quantiles": {
+              "p50_ms": 0.902,
+              "p95_ms": 2.23,
+              "p99_ms": 14.383,
+              "samples": 49
+            }
+          },
+          "mailbox_age_ms": {
+            "mean": 0.024040295652173912,
+            "quantiles": {
+              "p50_ms": 0.008,
+              "p95_ms": 0.122,
+              "p99_ms": 0.192,
+              "samples": 115
+            }
+          },
+          "png_ms": {
+            "mean": 0.0,
+            "quantiles": {
+              "p50_ms": null,
+              "p95_ms": null,
+              "p99_ms": null,
+              "samples": 0
+            }
+          },
+          "send_to_ack_ms": {
+            "mean": 5.615254428571428,
+            "quantiles": {
+              "p50_ms": 4.295,
+              "p95_ms": 9.989,
+              "p99_ms": 46.291,
+              "samples": 49
+            }
+          },
+          "socket_write_ms": {
+            "mean": 0.054794020408163266,
+            "quantiles": {
+              "p50_ms": 0.053,
+              "p95_ms": 0.086,
+              "p99_ms": 0.207,
+              "samples": 49
+            }
+          },
+          "writer_wait_ms": {
+            "mean": 0.000489469387755102,
+            "quantiles": {
+              "p50_ms": 0.0,
+              "p95_ms": 0.0,
+              "p99_ms": 0.0,
+              "samples": 49
+            }
+          }
+        },
+        "total_tiles": 211288,
+        "type": "jwm_remote_host_stats",
+        "unchanged_suppressed": 66,
+        "version": "0.2.0",
+        "viewer_superseded": 0,
+        "window_seconds": 5.002963927
+      },
+      {
+        "bytes": 450782,
+        "captured": 96,
+        "commit": null,
+        "dirty_tiles": 4786,
+        "drawn_acks": 24,
+        "encoded_dimensions": [
+          1393,
+          783
+        ],
+        "jpeg_atlases": 24,
+        "legacy_stage_aliases": {
+          "atlas_pack_and_jpeg_ms": "atlas_pack_and_codec_ms; historical name includes all codecs and empty-frame encode work"
+        },
+        "max_outstanding": 1,
+        "mode": "overlay/cpu-resize/core-getimage/damage/cursor-events",
+        "outstanding": 0,
+        "png_atlases": 0,
+        "quantile_policy": "nearest-rank, most recent 128 observations per stage per window",
+        "replaced": 0,
+        "scheduled": 98,
+        "schema_version": 1,
+        "sent": 24,
+        "source_dimensions": [
+          2560,
+          1440
+        ],
+        "stages": {
+          "atlas_pack_and_codec_ms": {
+            "mean": 1.5553111666666668,
+            "quantiles": {
+              "p50_ms": 1.118,
+              "p95_ms": 4.384,
+              "p99_ms": 7.466,
+              "samples": 24
+            }
+          },
+          "atlas_pack_and_jpeg_ms": {
+            "mean": 1.5553111666666668,
+            "quantiles": {
+              "p50_ms": 1.118,
+              "p95_ms": 4.384,
+              "p99_ms": 7.466,
+              "samples": 24
+            }
+          },
+          "atlas_pack_ms": {
+            "mean": 0.042514375,
+            "quantiles": {
+              "p50_ms": 0.027,
+              "p95_ms": 0.103,
+              "p99_ms": 0.197,
+              "samples": 24
+            }
+          },
+          "capture_ms": {
+            "mean": 51.387669895833334,
+            "quantiles": {
+              "p50_ms": 38.928,
+              "p95_ms": 122.707,
+              "p99_ms": 137.218,
+              "samples": 96
+            }
+          },
+          "capture_start_to_ack_ms": {
+            "mean": 63.55698841666666,
+            "quantiles": {
+              "p50_ms": 47.173,
+              "p95_ms": 121.708,
+              "p99_ms": 151.681,
+              "samples": 24
+            }
+          },
+          "codec_ms": {
+            "mean": 1.5118639999999999,
+            "quantiles": {
+              "p50_ms": 1.079,
+              "p95_ms": 4.28,
+              "p99_ms": 7.266,
+              "samples": 24
+            }
+          },
+          "credit_wait_ms": {
+            "mean": 0.0001828,
+            "quantiles": {
+              "p50_ms": 0.0,
+              "p95_ms": 0.0,
+              "p99_ms": 0.001,
+              "samples": 95
+            }
+          },
+          "dirty_scan_ms": {
+            "mean": 0.6386996526315789,
+            "quantiles": {
+              "p50_ms": 0.484,
+              "p95_ms": 1.487,
+              "p99_ms": 2.495,
+              "samples": 95
+            }
+          },
+          "jpeg_ms": {
+            "mean": 1.5118639999999999,
+            "quantiles": {
+              "p50_ms": 1.079,
+              "p95_ms": 4.28,
+              "p99_ms": 7.266,
+              "samples": 24
+            }
+          },
+          "mailbox_age_ms": {
+            "mean": 0.014055084210526314,
+            "quantiles": {
+              "p50_ms": 0.008,
+              "p95_ms": 0.045,
+              "p99_ms": 0.14,
+              "samples": 95
+            }
+          },
+          "png_ms": {
+            "mean": 0.0,
+            "quantiles": {
+              "p50_ms": null,
+              "p95_ms": null,
+              "p99_ms": null,
+              "samples": 0
+            }
+          },
+          "send_to_ack_ms": {
+            "mean": 4.794426333333333,
+            "quantiles": {
+              "p50_ms": 4.759,
+              "p95_ms": 6.793,
+              "p99_ms": 7.264,
+              "samples": 24
+            }
+          },
+          "socket_write_ms": {
+            "mean": 0.073564375,
+            "quantiles": {
+              "p50_ms": 0.061,
+              "p95_ms": 0.137,
+              "p99_ms": 0.138,
+              "samples": 24
+            }
+          },
+          "writer_wait_ms": {
+            "mean": 0.00059575,
+            "quantiles": {
+              "p50_ms": 0.0,
+              "p95_ms": 0.0,
+              "p99_ms": 0.001,
+              "samples": 24
+            }
+          }
+        },
+        "total_tiles": 103488,
+        "type": "jwm_remote_host_stats",
+        "unchanged_suppressed": 71,
+        "version": "0.2.0",
+        "viewer_superseded": 0,
+        "window_seconds": 5.035067372
+      },
+      {
+        "bytes": 482170,
+        "captured": 106,
+        "commit": null,
+        "dirty_tiles": 5231,
+        "drawn_acks": 28,
+        "encoded_dimensions": [
+          1393,
+          783
+        ],
+        "jpeg_atlases": 28,
+        "legacy_stage_aliases": {
+          "atlas_pack_and_jpeg_ms": "atlas_pack_and_codec_ms; historical name includes all codecs and empty-frame encode work"
+        },
+        "max_outstanding": 1,
+        "mode": "overlay/cpu-resize/core-getimage/damage/cursor-events",
+        "outstanding": 0,
+        "png_atlases": 0,
+        "quantile_policy": "nearest-rank, most recent 128 observations per stage per window",
+        "replaced": 0,
+        "scheduled": 114,
+        "schema_version": 1,
+        "sent": 28,
+        "source_dimensions": [
+          2560,
+          1440
+        ],
+        "stages": {
+          "atlas_pack_and_codec_ms": {
+            "mean": 1.1293102142857143,
+            "quantiles": {
+              "p50_ms": 1.007,
+              "p95_ms": 2.193,
+              "p99_ms": 4.339,
+              "samples": 28
+            }
+          },
+          "atlas_pack_and_jpeg_ms": {
+            "mean": 1.1293102142857143,
+            "quantiles": {
+              "p50_ms": 1.007,
+              "p95_ms": 2.193,
+              "p99_ms": 4.339,
+              "samples": 28
+            }
+          },
+          "atlas_pack_ms": {
+            "mean": 0.030224214285714285,
+            "quantiles": {
+              "p50_ms": 0.024,
+              "p95_ms": 0.099,
+              "p99_ms": 0.109,
+              "samples": 28
+            }
+          },
+          "capture_ms": {
+            "mean": 44.68164849056603,
+            "quantiles": {
+              "p50_ms": 38.064,
+              "p95_ms": 74.096,
+              "p99_ms": 118.535,
+              "samples": 106
+            }
+          },
+          "capture_start_to_ack_ms": {
+            "mean": 62.50183289285714,
+            "quantiles": {
+              "p50_ms": 47.382,
+              "p95_ms": 131.591,
+              "p99_ms": 159.776,
+              "samples": 28
+            }
+          },
+          "codec_ms": {
+            "mean": 1.0982544285714286,
+            "quantiles": {
+              "p50_ms": 0.98,
+              "p95_ms": 2.091,
+              "p99_ms": 4.228,
+              "samples": 28
+            }
+          },
+          "credit_wait_ms": {
+            "mean": 0.00016112264150943396,
+            "quantiles": {
+              "p50_ms": 0.0,
+              "p95_ms": 0.0,
+              "p99_ms": 0.0,
+              "samples": 106
+            }
+          },
+          "dirty_scan_ms": {
+            "mean": 0.45263538679245285,
+            "quantiles": {
+              "p50_ms": 0.277,
+              "p95_ms": 1.267,
+              "p99_ms": 2.091,
+              "samples": 106
+            }
+          },
+          "jpeg_ms": {
+            "mean": 1.0982544285714286,
+            "quantiles": {
+              "p50_ms": 0.98,
+              "p95_ms": 2.091,
+              "p99_ms": 4.228,
+              "samples": 28
+            }
+          },
+          "mailbox_age_ms": {
+            "mean": 0.016099716981132075,
+            "quantiles": {
+              "p50_ms": 0.006,
+              "p95_ms": 0.101,
+              "p99_ms": 0.145,
+              "samples": 106
+            }
+          },
+          "png_ms": {
+            "mean": 0.0,
+            "quantiles": {
+              "p50_ms": null,
+              "p95_ms": null,
+              "p99_ms": null,
+              "samples": 0
+            }
+          },
+          "send_to_ack_ms": {
+            "mean": 6.613264607142858,
+            "quantiles": {
+              "p50_ms": 5.165,
+              "p95_ms": 12.893,
+              "p99_ms": 28.006,
+              "samples": 28
+            }
+          },
+          "socket_write_ms": {
+            "mean": 0.056804571428571426,
+            "quantiles": {
+              "p50_ms": 0.05,
+              "p95_ms": 0.098,
+              "p99_ms": 0.15,
+              "samples": 28
+            }
+          },
+          "writer_wait_ms": {
+            "mean": 0.0005977142857142857,
+            "quantiles": {
+              "p50_ms": 0.0,
+              "p95_ms": 0.001,
+              "p99_ms": 0.001,
+              "samples": 28
+            }
+          }
+        },
+        "total_tiles": 120736,
+        "type": "jwm_remote_host_stats",
+        "unchanged_suppressed": 78,
+        "version": "0.2.0",
+        "viewer_superseded": 0,
+        "window_seconds": 5.030416781
+      }
+    ]
+  },
+  "controlled_runs": [
+    {
+      "label": "initial",
+      "static_host_windows": [
+        {
+          "bytes": 491,
+          "captured": 139,
+          "commit": null,
+          "dirty_tiles": 0,
+          "drawn_acks": 1,
+          "encoded_dimensions": [
+            1280,
+            720
+          ],
+          "jpeg_atlases": 0,
+          "legacy_stage_aliases": {
+            "atlas_pack_and_jpeg_ms": "atlas_pack_and_codec_ms; historical name includes all codecs and empty-frame encode work"
+          },
+          "max_outstanding": 1,
+          "mode": "root/cpu-resize/core-getimage/no-damage/cursor-events",
+          "outstanding": 0,
+          "png_atlases": 0,
+          "quantile_policy": "nearest-rank, most recent 128 observations per stage per window",
+          "replaced": 0,
+          "scheduled": 139,
+          "schema_version": 1,
+          "sent": 1,
+          "source_dimensions": [
+            2560,
+            1440
+          ],
+          "stages": {
+            "atlas_pack_and_codec_ms": {
+              "mean": 0.000651,
+              "quantiles": {
+                "p50_ms": 0.0,
+                "p95_ms": 0.0,
+                "p99_ms": 0.0,
+                "samples": 1
+              }
+            },
+            "atlas_pack_and_jpeg_ms": {
+              "mean": 0.000651,
+              "quantiles": {
+                "p50_ms": 0.0,
+                "p95_ms": 0.0,
+                "p99_ms": 0.0,
+                "samples": 1
+              }
+            },
+            "atlas_pack_ms": {
+              "mean": 0.0,
+              "quantiles": {
+                "p50_ms": null,
+                "p95_ms": null,
+                "p99_ms": null,
+                "samples": 0
+              }
+            },
+            "capture_ms": {
+              "mean": 26.541835474820143,
+              "quantiles": {
+                "p50_ms": 26.397,
+                "p95_ms": 46.689,
+                "p99_ms": 50.919,
+                "samples": 128
+              }
+            },
+            "capture_start_to_ack_ms": {
+              "mean": 35.139829999999996,
+              "quantiles": {
+                "p50_ms": 35.139,
+                "p95_ms": 35.139,
+                "p99_ms": 35.139,
+                "samples": 1
+              }
+            },
+            "codec_ms": {
+              "mean": 0.0,
+              "quantiles": {
+                "p50_ms": null,
+                "p95_ms": null,
+                "p99_ms": null,
+                "samples": 0
+              }
+            },
+            "credit_wait_ms": {
+              "mean": 0.00031246762589928057,
+              "quantiles": {
+                "p50_ms": 0.0,
+                "p95_ms": 0.0,
+                "p99_ms": 0.0,
+                "samples": 128
+              }
+            },
+            "dirty_scan_ms": {
+              "mean": 0.9146398920863309,
+              "quantiles": {
+                "p50_ms": 0.656,
+                "p95_ms": 1.976,
+                "p99_ms": 2.42,
+                "samples": 128
+              }
+            },
+            "jpeg_ms": {
+              "mean": 0.0,
+              "quantiles": {
+                "p50_ms": null,
+                "p95_ms": null,
+                "p99_ms": null,
+                "samples": 0
+              }
+            },
+            "mailbox_age_ms": {
+              "mean": 0.027469618705035972,
+              "quantiles": {
+                "p50_ms": 0.023,
+                "p95_ms": 0.052,
+                "p99_ms": 0.115,
+                "samples": 128
+              }
+            },
+            "png_ms": {
+              "mean": 0.0,
+              "quantiles": {
+                "p50_ms": null,
+                "p95_ms": null,
+                "p99_ms": null,
+                "samples": 0
+              }
+            },
+            "send_to_ack_ms": {
+              "mean": 24.142670000000003,
+              "quantiles": {
+                "p50_ms": 24.142,
+                "p95_ms": 24.142,
+                "p99_ms": 24.142,
+                "samples": 1
+              }
+            },
+            "socket_write_ms": {
+              "mean": 0.04638,
+              "quantiles": {
+                "p50_ms": 0.046,
+                "p95_ms": 0.046,
+                "p99_ms": 0.046,
+                "samples": 1
+              }
+            },
+            "writer_wait_ms": {
+              "mean": 0.000486,
+              "quantiles": {
+                "p50_ms": 0.0,
+                "p95_ms": 0.0,
+                "p99_ms": 0.0,
+                "samples": 1
+              }
+            }
+          },
+          "total_tiles": 3600,
+          "type": "jwm_remote_host_stats",
+          "unchanged_suppressed": 138,
+          "version": "0.2.0",
+          "viewer_superseded": 0,
+          "window_seconds": 5.01107867
+        },
+        {
+          "bytes": 491,
+          "captured": 132,
+          "commit": null,
+          "dirty_tiles": 0,
+          "drawn_acks": 1,
+          "encoded_dimensions": [
+            1280,
+            720
+          ],
+          "jpeg_atlases": 0,
+          "legacy_stage_aliases": {
+            "atlas_pack_and_jpeg_ms": "atlas_pack_and_codec_ms; historical name includes all codecs and empty-frame encode work"
+          },
+          "max_outstanding": 1,
+          "mode": "root/cpu-resize/core-getimage/no-damage/cursor-events",
+          "outstanding": 0,
+          "png_atlases": 0,
+          "quantile_policy": "nearest-rank, most recent 128 observations per stage per window",
+          "replaced": 0,
+          "scheduled": 132,
+          "schema_version": 1,
+          "sent": 1,
+          "source_dimensions": [
+            2560,
+            1440
+          ],
+          "stages": {
+            "atlas_pack_and_codec_ms": {
+              "mean": 0.002091,
+              "quantiles": {
+                "p50_ms": 0.002,
+                "p95_ms": 0.002,
+                "p99_ms": 0.002,
+                "samples": 1
+              }
+            },
+            "atlas_pack_and_jpeg_ms": {
+              "mean": 0.002091,
+              "quantiles": {
+                "p50_ms": 0.002,
+                "p95_ms": 0.002,
+                "p99_ms": 0.002,
+                "samples": 1
+              }
+            },
+            "atlas_pack_ms": {
+              "mean": 0.0,
+              "quantiles": {
+                "p50_ms": null,
+                "p95_ms": null,
+                "p99_ms": null,
+                "samples": 0
+              }
+            },
+            "capture_ms": {
+              "mean": 30.88846234848485,
+              "quantiles": {
+                "p50_ms": 31.548,
+                "p95_ms": 49.918,
+                "p99_ms": 55.368,
+                "samples": 128
+              }
+            },
+            "capture_start_to_ack_ms": {
+              "mean": 46.003878,
+              "quantiles": {
+                "p50_ms": 46.003,
+                "p95_ms": 46.003,
+                "p99_ms": 46.003,
+                "samples": 1
+              }
+            },
+            "codec_ms": {
+              "mean": 0.0,
+              "quantiles": {
+                "p50_ms": null,
+                "p95_ms": null,
+                "p99_ms": null,
+                "samples": 0
+              }
+            },
+            "credit_wait_ms": {
+              "mean": 0.00036999242424242426,
+              "quantiles": {
+                "p50_ms": 0.0,
+                "p95_ms": 0.0,
+                "p99_ms": 0.0,
+                "samples": 128
+              }
+            },
+            "dirty_scan_ms": {
+              "mean": 1.1527771363636363,
+              "quantiles": {
+                "p50_ms": 1.142,
+                "p95_ms": 2.062,
+                "p99_ms": 2.489,
+                "samples": 128
+              }
+            },
+            "jpeg_ms": {
+              "mean": 0.0,
+              "quantiles": {
+                "p50_ms": null,
+                "p95_ms": null,
+                "p99_ms": null,
+                "samples": 0
+              }
+            },
+            "mailbox_age_ms": {
+              "mean": 0.033041856060606056,
+              "quantiles": {
+                "p50_ms": 0.031,
+                "p95_ms": 0.083,
+                "p99_ms": 0.106,
+                "samples": 128
+              }
+            },
+            "png_ms": {
+              "mean": 0.0,
+              "quantiles": {
+                "p50_ms": null,
+                "p95_ms": null,
+                "p99_ms": null,
+                "samples": 0
+              }
+            },
+            "send_to_ack_ms": {
+              "mean": 2.959546,
+              "quantiles": {
+                "p50_ms": 2.959,
+                "p95_ms": 2.959,
+                "p99_ms": 2.959,
+                "samples": 1
+              }
+            },
+            "socket_write_ms": {
+              "mean": 0.155837,
+              "quantiles": {
+                "p50_ms": 0.155,
+                "p95_ms": 0.155,
+                "p99_ms": 0.155,
+                "samples": 1
+              }
+            },
+            "writer_wait_ms": {
+              "mean": 0.0019290000000000002,
+              "quantiles": {
+                "p50_ms": 0.001,
+                "p95_ms": 0.001,
+                "p99_ms": 0.001,
+                "samples": 1
+              }
+            }
+          },
+          "total_tiles": 3600,
+          "type": "jwm_remote_host_stats",
+          "unchanged_suppressed": 131,
+          "version": "0.2.0",
+          "viewer_superseded": 0,
+          "window_seconds": 5.011781831
+        },
+        {
+          "bytes": 491,
+          "captured": 136,
+          "commit": null,
+          "dirty_tiles": 0,
+          "drawn_acks": 1,
+          "encoded_dimensions": [
+            1280,
+            720
+          ],
+          "jpeg_atlases": 0,
+          "legacy_stage_aliases": {
+            "atlas_pack_and_jpeg_ms": "atlas_pack_and_codec_ms; historical name includes all codecs and empty-frame encode work"
+          },
+          "max_outstanding": 1,
+          "mode": "root/cpu-resize/core-getimage/no-damage/cursor-events",
+          "outstanding": 0,
+          "png_atlases": 0,
+          "quantile_policy": "nearest-rank, most recent 128 observations per stage per window",
+          "replaced": 0,
+          "scheduled": 136,
+          "schema_version": 1,
+          "sent": 1,
+          "source_dimensions": [
+            2560,
+            1440
+          ],
+          "stages": {
+            "atlas_pack_and_codec_ms": {
+              "mean": 0.000767,
+              "quantiles": {
+                "p50_ms": 0.0,
+                "p95_ms": 0.0,
+                "p99_ms": 0.0,
+                "samples": 1
+              }
+            },
+            "atlas_pack_and_jpeg_ms": {
+              "mean": 0.000767,
+              "quantiles": {
+                "p50_ms": 0.0,
+                "p95_ms": 0.0,
+                "p99_ms": 0.0,
+                "samples": 1
+              }
+            },
+            "atlas_pack_ms": {
+              "mean": 0.0,
+              "quantiles": {
+                "p50_ms": null,
+                "p95_ms": null,
+                "p99_ms": null,
+                "samples": 0
+              }
+            },
+            "capture_ms": {
+              "mean": 24.30002991176471,
+              "quantiles": {
+                "p50_ms": 18.08,
+                "p95_ms": 47.937,
+                "p99_ms": 55.929,
+                "samples": 128
+              }
+            },
+            "capture_start_to_ack_ms": {
+              "mean": 16.172947,
+              "quantiles": {
+                "p50_ms": 16.172,
+                "p95_ms": 16.172,
+                "p99_ms": 16.172,
+                "samples": 1
+              }
+            },
+            "codec_ms": {
+              "mean": 0.0,
+              "quantiles": {
+                "p50_ms": null,
+                "p95_ms": null,
+                "p99_ms": null,
+                "samples": 0
+              }
+            },
+            "credit_wait_ms": {
+              "mean": 0.00028760294117647056,
+              "quantiles": {
+                "p50_ms": 0.0,
+                "p95_ms": 0.0,
+                "p99_ms": 0.0,
+                "samples": 128
+              }
+            },
+            "dirty_scan_ms": {
+              "mean": 0.7674875661764706,
+              "quantiles": {
+                "p50_ms": 0.474,
+                "p95_ms": 1.883,
+                "p99_ms": 2.325,
+                "samples": 128
+              }
+            },
+            "jpeg_ms": {
+              "mean": 0.0,
+              "quantiles": {
+                "p50_ms": null,
+                "p95_ms": null,
+                "p99_ms": null,
+                "samples": 0
+              }
+            },
+            "mailbox_age_ms": {
+              "mean": 0.022217124999999997,
+              "quantiles": {
+                "p50_ms": 0.013,
+                "p95_ms": 0.046,
+                "p99_ms": 0.088,
+                "samples": 128
+              }
+            },
+            "png_ms": {
+              "mean": 0.0,
+              "quantiles": {
+                "p50_ms": null,
+                "p95_ms": null,
+                "p99_ms": null,
+                "samples": 0
+              }
+            },
+            "send_to_ack_ms": {
+              "mean": 3.9322150000000002,
+              "quantiles": {
+                "p50_ms": 3.932,
+                "p95_ms": 3.932,
+                "p99_ms": 3.932,
+                "samples": 1
+              }
+            },
+            "socket_write_ms": {
+              "mean": 0.03595,
+              "quantiles": {
+                "p50_ms": 0.035,
+                "p95_ms": 0.035,
+                "p99_ms": 0.035,
+                "samples": 1
+              }
+            },
+            "writer_wait_ms": {
+              "mean": 0.000587,
+              "quantiles": {
+                "p50_ms": 0.0,
+                "p95_ms": 0.0,
+                "p99_ms": 0.0,
+                "samples": 1
+              }
+            }
+          },
+          "total_tiles": 3600,
+          "type": "jwm_remote_host_stats",
+          "unchanged_suppressed": 135,
+          "version": "0.2.0",
+          "viewer_superseded": 0,
+          "window_seconds": 5.021287742
+        }
+      ],
+      "motion_host_windows": [
+        {
+          "bytes": 11217755,
+          "captured": 107,
+          "commit": null,
+          "dirty_tiles": 250796,
+          "drawn_acks": 105,
+          "encoded_dimensions": [
+            1280,
+            720
+          ],
+          "jpeg_atlases": 106,
+          "legacy_stage_aliases": {
+            "atlas_pack_and_jpeg_ms": "atlas_pack_and_codec_ms; historical name includes all codecs and empty-frame encode work"
+          },
+          "max_outstanding": 2,
+          "mode": "root/cpu-resize/core-getimage/no-damage/cursor-events",
+          "outstanding": 2,
+          "png_atlases": 0,
+          "quantile_policy": "nearest-rank, most recent 128 observations per stage per window",
+          "replaced": 0,
+          "scheduled": 136,
+          "schema_version": 1,
+          "sent": 106,
+          "source_dimensions": [
+            2560,
+            1440
+          ],
+          "stages": {
+            "atlas_pack_and_codec_ms": {
+              "mean": 29.499034113207546,
+              "quantiles": {
+                "p50_ms": 26.268,
+                "p95_ms": 73.928,
+                "p99_ms": 89.417,
+                "samples": 106
+              }
+            },
+            "atlas_pack_and_jpeg_ms": {
+              "mean": 29.499034113207546,
+              "quantiles": {
+                "p50_ms": 26.268,
+                "p95_ms": 73.928,
+                "p99_ms": 89.417,
+                "samples": 106
+              }
+            },
+            "atlas_pack_ms": {
+              "mean": 0.7024952169811322,
+              "quantiles": {
+                "p50_ms": 0.624,
+                "p95_ms": 1.799,
+                "p99_ms": 2.012,
+                "samples": 106
+              }
+            },
+            "capture_ms": {
+              "mean": 27.528455598130837,
+              "quantiles": {
+                "p50_ms": 26.342,
+                "p95_ms": 49.712,
+                "p99_ms": 54.24,
+                "samples": 107
+              }
+            },
+            "capture_start_to_ack_ms": {
+              "mean": 82.23938020952382,
+              "quantiles": {
+                "p50_ms": 79.652,
+                "p95_ms": 186.039,
+                "p99_ms": 227.703,
+                "samples": 105
+              }
+            },
+            "codec_ms": {
+              "mean": 28.794998603773585,
+              "quantiles": {
+                "p50_ms": 25.309,
+                "p95_ms": 72.067,
+                "p99_ms": 87.38,
+                "samples": 106
+              }
+            },
+            "credit_wait_ms": {
+              "mean": 2.091791971962617,
+              "quantiles": {
+                "p50_ms": 0.0,
+                "p95_ms": 3.687,
+                "p99_ms": 77.783,
+                "samples": 107
+              }
+            },
+            "dirty_scan_ms": {
+              "mean": 0.4688055887850467,
+              "quantiles": {
+                "p50_ms": 0.418,
+                "p95_ms": 1.119,
+                "p99_ms": 1.191,
+                "samples": 107
+              }
+            },
+            "jpeg_ms": {
+              "mean": 28.794998603773585,
+              "quantiles": {
+                "p50_ms": 25.309,
+                "p95_ms": 72.067,
+                "p99_ms": 87.38,
+                "samples": 106
+              }
+            },
+            "mailbox_age_ms": {
+              "mean": 5.658098093457944,
+              "quantiles": {
+                "p50_ms": 0.03,
+                "p95_ms": 44.056,
+                "p99_ms": 62.043,
+                "samples": 107
+              }
+            },
+            "png_ms": {
+              "mean": 0.0,
+              "quantiles": {
+                "p50_ms": null,
+                "p95_ms": null,
+                "p99_ms": null,
+                "samples": 0
+              }
+            },
+            "send_to_ack_ms": {
+              "mean": 19.793878028571427,
+              "quantiles": {
+                "p50_ms": 14.878,
+                "p95_ms": 51.569,
+                "p99_ms": 112.293,
+                "samples": 105
+              }
+            },
+            "socket_write_ms": {
+              "mean": 0.3271399339622641,
+              "quantiles": {
+                "p50_ms": 0.293,
+                "p95_ms": 0.713,
+                "p99_ms": 0.988,
+                "samples": 106
+              }
+            },
+            "writer_wait_ms": {
+              "mean": 0.0010373301886792453,
+              "quantiles": {
+                "p50_ms": 0.0,
+                "p95_ms": 0.001,
+                "p99_ms": 0.002,
+                "samples": 106
+              }
+            }
+          },
+          "total_tiles": 381600,
+          "type": "jwm_remote_host_stats",
+          "unchanged_suppressed": 1,
+          "version": "0.2.0",
+          "viewer_superseded": 0,
+          "window_seconds": 5.005199567
+        },
+        {
+          "bytes": 495647,
+          "captured": 36,
+          "commit": null,
+          "dirty_tiles": 13380,
+          "drawn_acks": 5,
+          "encoded_dimensions": [
+            1280,
+            720
+          ],
+          "jpeg_atlases": 5,
+          "legacy_stage_aliases": {
+            "atlas_pack_and_jpeg_ms": "atlas_pack_and_codec_ms; historical name includes all codecs and empty-frame encode work"
+          },
+          "max_outstanding": 2,
+          "mode": "root/cpu-resize/core-getimage/no-damage/cursor-events",
+          "outstanding": 2,
+          "png_atlases": 0,
+          "quantile_policy": "nearest-rank, most recent 128 observations per stage per window",
+          "replaced": 31,
+          "scheduled": 141,
+          "schema_version": 1,
+          "sent": 5,
+          "source_dimensions": [
+            2560,
+            1440
+          ],
+          "stages": {
+            "atlas_pack_and_codec_ms": {
+              "mean": 82.2561526,
+              "quantiles": {
+                "p50_ms": 89.935,
+                "p95_ms": 92.343,
+                "p99_ms": 92.343,
+                "samples": 5
+              }
+            },
+            "atlas_pack_and_jpeg_ms": {
+              "mean": 82.2561526,
+              "quantiles": {
+                "p50_ms": 89.935,
+                "p95_ms": 92.343,
+                "p99_ms": 92.343,
+                "samples": 5
+              }
+            },
+            "atlas_pack_ms": {
+              "mean": 1.8272165999999999,
+              "quantiles": {
+                "p50_ms": 2.032,
+                "p95_ms": 2.16,
+                "p99_ms": 2.16,
+                "samples": 5
+              }
+            },
+            "capture_ms": {
+              "mean": 29.26529447222222,
+              "quantiles": {
+                "p50_ms": 21.799,
+                "p95_ms": 53.399,
+                "p99_ms": 70.096,
+                "samples": 36
+              }
+            },
+            "capture_start_to_ack_ms": {
+              "mean": 473.68092800000005,
+              "quantiles": {
+                "p50_ms": 510.925,
+                "p95_ms": 602.803,
+                "p99_ms": 602.803,
+                "samples": 5
+              }
+            },
+            "codec_ms": {
+              "mean": 80.426414,
+              "quantiles": {
+                "p50_ms": 87.9,
+                "p95_ms": 90.393,
+                "p99_ms": 90.393,
+                "samples": 5
+              }
+            },
+            "credit_wait_ms": {
+              "mean": 126.574083,
+              "quantiles": {
+                "p50_ms": 114.906,
+                "p95_ms": 239.834,
+                "p99_ms": 239.834,
+                "samples": 5
+              }
+            },
+            "dirty_scan_ms": {
+              "mean": 0.7758212,
+              "quantiles": {
+                "p50_ms": 0.843,
+                "p95_ms": 0.945,
+                "p99_ms": 0.945,
+                "samples": 5
+              }
+            },
+            "jpeg_ms": {
+              "mean": 80.426414,
+              "quantiles": {
+                "p50_ms": 87.9,
+                "p95_ms": 90.393,
+                "p99_ms": 90.393,
+                "samples": 5
+              }
+            },
+            "mailbox_age_ms": {
+              "mean": 73.35118779999999,
+              "quantiles": {
+                "p50_ms": 78.616,
+                "p95_ms": 129.805,
+                "p99_ms": 129.805,
+                "samples": 5
+              }
+            },
+            "png_ms": {
+              "mean": 0.0,
+              "quantiles": {
+                "p50_ms": null,
+                "p95_ms": null,
+                "p99_ms": null,
+                "samples": 0
+              }
+            },
+            "send_to_ack_ms": {
+              "mean": 303.9111128,
+              "quantiles": {
+                "p50_ms": 297.084,
+                "p95_ms": 409.736,
+                "p99_ms": 409.736,
+                "samples": 5
+              }
+            },
+            "socket_write_ms": {
+              "mean": 0.7110508,
+              "quantiles": {
+                "p50_ms": 0.817,
+                "p95_ms": 1.008,
+                "p99_ms": 1.008,
+                "samples": 5
+              }
+            },
+            "writer_wait_ms": {
+              "mean": 0.001996,
+              "quantiles": {
+                "p50_ms": 0.002,
+                "p95_ms": 0.002,
+                "p99_ms": 0.002,
+                "samples": 5
+              }
+            }
+          },
+          "total_tiles": 18000,
+          "type": "jwm_remote_host_stats",
+          "unchanged_suppressed": 0,
+          "version": "0.2.0",
+          "viewer_superseded": 0,
+          "window_seconds": 5.00198854
+        },
+        {
+          "bytes": 4788072,
+          "captured": 70,
+          "commit": null,
+          "dirty_tiles": 136154,
+          "drawn_acks": 57,
+          "encoded_dimensions": [
+            1280,
+            720
+          ],
+          "jpeg_atlases": 56,
+          "legacy_stage_aliases": {
+            "atlas_pack_and_jpeg_ms": "atlas_pack_and_codec_ms; historical name includes all codecs and empty-frame encode work"
+          },
+          "max_outstanding": 2,
+          "mode": "root/cpu-resize/core-getimage/no-damage/cursor-events",
+          "outstanding": 1,
+          "png_atlases": 0,
+          "quantile_policy": "nearest-rank, most recent 128 observations per stage per window",
+          "replaced": 13,
+          "scheduled": 135,
+          "schema_version": 1,
+          "sent": 56,
+          "source_dimensions": [
+            2560,
+            1440
+          ],
+          "stages": {
+            "atlas_pack_and_codec_ms": {
+              "mean": 37.41549867857143,
+              "quantiles": {
+                "p50_ms": 36.084,
+                "p95_ms": 77.581,
+                "p99_ms": 89.533,
+                "samples": 56
+              }
+            },
+            "atlas_pack_and_jpeg_ms": {
+              "mean": 37.41549867857143,
+              "quantiles": {
+                "p50_ms": 36.084,
+                "p95_ms": 77.581,
+                "p99_ms": 89.533,
+                "samples": 56
+              }
+            },
+            "atlas_pack_ms": {
+              "mean": 0.90833625,
+              "quantiles": {
+                "p50_ms": 0.765,
+                "p95_ms": 1.914,
+                "p99_ms": 2.044,
+                "samples": 56
+              }
+            },
+            "capture_ms": {
+              "mean": 32.51724337142858,
+              "quantiles": {
+                "p50_ms": 33.243,
+                "p95_ms": 52.621,
+                "p99_ms": 72.93,
+                "samples": 70
+              }
+            },
+            "capture_start_to_ack_ms": {
+              "mean": 328.2918052807018,
+              "quantiles": {
+                "p50_ms": 101.942,
+                "p95_ms": 292.592,
+                "p99_ms": 6487.225,
+                "samples": 57
+              }
+            },
+            "codec_ms": {
+              "mean": 36.50540228571428,
+              "quantiles": {
+                "p50_ms": 35.397,
+                "p95_ms": 76.221,
+                "p99_ms": 87.616,
+                "samples": 56
+              }
+            },
+            "credit_wait_ms": {
+              "mean": 107.45638615517241,
+              "quantiles": {
+                "p50_ms": 0.0,
+                "p95_ms": 70.825,
+                "p99_ms": 5944.305,
+                "samples": 58
+              }
+            },
+            "dirty_scan_ms": {
+              "mean": 0.5467782241379311,
+              "quantiles": {
+                "p50_ms": 0.472,
+                "p95_ms": 1.094,
+                "p99_ms": 1.349,
+                "samples": 58
+              }
+            },
+            "jpeg_ms": {
+              "mean": 36.50540228571428,
+              "quantiles": {
+                "p50_ms": 35.397,
+                "p95_ms": 76.221,
+                "p99_ms": 87.616,
+                "samples": 56
+              }
+            },
+            "mailbox_age_ms": {
+              "mean": 12.274824810344828,
+              "quantiles": {
+                "p50_ms": 0.049,
+                "p95_ms": 50.253,
+                "p99_ms": 141.414,
+                "samples": 58
+              }
+            },
+            "png_ms": {
+              "mean": 0.0,
+              "quantiles": {
+                "p50_ms": null,
+                "p95_ms": null,
+                "p99_ms": null,
+                "samples": 0
+              }
+            },
+            "send_to_ack_ms": {
+              "mean": 241.51535370175438,
+              "quantiles": {
+                "p50_ms": 15.157,
+                "p95_ms": 125.119,
+                "p99_ms": 6236.765,
+                "samples": 57
+              }
+            },
+            "socket_write_ms": {
+              "mean": 0.3249507142857143,
+              "quantiles": {
+                "p50_ms": 0.295,
+                "p95_ms": 0.656,
+                "p99_ms": 0.699,
+                "samples": 56
+              }
+            },
+            "writer_wait_ms": {
+              "mean": 0.001247,
+              "quantiles": {
+                "p50_ms": 0.001,
+                "p95_ms": 0.002,
+                "p99_ms": 0.002,
+                "samples": 56
+              }
+            }
+          },
+          "total_tiles": 201600,
+          "type": "jwm_remote_host_stats",
+          "unchanged_suppressed": 1,
+          "version": "0.2.0",
+          "viewer_superseded": 0,
+          "window_seconds": 5.003673824
+        }
+      ],
+      "input_samples": [
+        {
+          "sample": 1,
+          "warmup": true,
+          "input_to_viewer_x11_pixel_ms": 37.732
+        },
+        {
+          "sample": 2,
+          "warmup": true,
+          "input_to_viewer_x11_pixel_ms": 29.346
+        },
+        {
+          "sample": 3,
+          "warmup": true,
+          "input_to_viewer_x11_pixel_ms": 38.994
+        },
+        {
+          "sample": 4,
+          "warmup": true,
+          "input_to_viewer_x11_pixel_ms": 27.556
+        },
+        {
+          "sample": 5,
+          "warmup": false,
+          "input_to_viewer_x11_pixel_ms": 37.276
+        },
+        {
+          "sample": 6,
+          "warmup": false,
+          "input_to_viewer_x11_pixel_ms": 62.747
+        },
+        {
+          "sample": 7,
+          "warmup": false,
+          "input_to_viewer_x11_pixel_ms": 70.365
+        },
+        {
+          "sample": 8,
+          "warmup": false,
+          "input_to_viewer_x11_pixel_ms": 68.729
+        },
+        {
+          "sample": 9,
+          "warmup": false,
+          "input_to_viewer_x11_pixel_ms": 45.082
+        },
+        {
+          "sample": 10,
+          "warmup": false,
+          "input_to_viewer_x11_pixel_ms": 54.277
+        },
+        {
+          "sample": 11,
+          "warmup": false,
+          "input_to_viewer_x11_pixel_ms": 65.716
+        },
+        {
+          "sample": 12,
+          "warmup": false,
+          "input_to_viewer_x11_pixel_ms": 60.409
+        },
+        {
+          "sample": 13,
+          "warmup": false,
+          "input_to_viewer_x11_pixel_ms": 79.731
+        },
+        {
+          "sample": 14,
+          "warmup": false,
+          "input_to_viewer_x11_pixel_ms": 53.325
+        },
+        {
+          "sample": 15,
+          "warmup": false,
+          "input_to_viewer_x11_pixel_ms": 72.551
+        },
+        {
+          "sample": 16,
+          "warmup": false,
+          "input_to_viewer_x11_pixel_ms": 44.211
+        },
+        {
+          "sample": 17,
+          "warmup": false,
+          "input_to_viewer_x11_pixel_ms": 66.716
+        },
+        {
+          "sample": 18,
+          "warmup": false,
+          "input_to_viewer_x11_pixel_ms": 73.513
+        },
+        {
+          "sample": 19,
+          "warmup": false,
+          "input_to_viewer_x11_pixel_ms": 15.888
+        },
+        {
+          "sample": 20,
+          "warmup": false,
+          "input_to_viewer_x11_pixel_ms": 35.589
+        },
+        {
+          "sample": 21,
+          "warmup": false,
+          "input_to_viewer_x11_pixel_ms": 32.667
+        },
+        {
+          "sample": 22,
+          "warmup": false,
+          "input_to_viewer_x11_pixel_ms": 153.464
+        },
+        {
+          "sample": 23,
+          "warmup": false,
+          "input_to_viewer_x11_pixel_ms": 70.93
+        },
+        {
+          "sample": 24,
+          "warmup": false,
+          "input_to_viewer_x11_pixel_ms": 175.943
+        },
+        {
+          "sample": 25,
+          "warmup": false,
+          "input_to_viewer_x11_pixel_ms": 79.407
+        },
+        {
+          "sample": 26,
+          "warmup": false,
+          "input_to_viewer_x11_pixel_ms": 157.637
+        },
+        {
+          "sample": 27,
+          "warmup": false,
+          "input_to_viewer_x11_pixel_ms": 229.029
+        },
+        {
+          "sample": 28,
+          "warmup": false,
+          "input_to_viewer_x11_pixel_ms": 44.604
+        },
+        {
+          "sample": 29,
+          "warmup": false,
+          "input_to_viewer_x11_pixel_ms": 53.656
+        },
+        {
+          "sample": 30,
+          "warmup": false,
+          "input_to_viewer_x11_pixel_ms": 24.337
+        },
+        {
+          "sample": 31,
+          "warmup": false,
+          "input_to_viewer_x11_pixel_ms": 62.613
+        },
+        {
+          "sample": 32,
+          "warmup": false,
+          "input_to_viewer_x11_pixel_ms": 70.155
+        },
+        {
+          "sample": 33,
+          "warmup": false,
+          "input_to_viewer_x11_pixel_ms": 52.574
+        },
+        {
+          "sample": 34,
+          "warmup": false,
+          "input_to_viewer_x11_pixel_ms": 50.865
+        },
+        {
+          "sample": 35,
+          "warmup": false,
+          "input_to_viewer_x11_pixel_ms": 58.883
+        },
+        {
+          "sample": 36,
+          "warmup": false,
+          "input_to_viewer_x11_pixel_ms": 84.394
+        },
+        {
+          "sample": 37,
+          "warmup": false,
+          "input_to_viewer_x11_pixel_ms": 51.881
+        },
+        {
+          "sample": 38,
+          "warmup": false,
+          "input_to_viewer_x11_pixel_ms": 52.321
+        },
+        {
+          "sample": 39,
+          "warmup": false,
+          "input_to_viewer_x11_pixel_ms": 52.241
+        },
+        {
+          "sample": 40,
+          "warmup": false,
+          "input_to_viewer_x11_pixel_ms": 41.156
+        }
+      ],
+      "edge_release_title_ms": [
+        2.359
+      ]
+    },
+    {
+      "label": "repeat",
+      "static_host_windows": [
+        {
+          "bytes": 491,
+          "captured": 142,
+          "commit": null,
+          "dirty_tiles": 0,
+          "drawn_acks": 1,
+          "encoded_dimensions": [
+            1280,
+            720
+          ],
+          "jpeg_atlases": 0,
+          "legacy_stage_aliases": {
+            "atlas_pack_and_jpeg_ms": "atlas_pack_and_codec_ms; historical name includes all codecs and empty-frame encode work"
+          },
+          "max_outstanding": 1,
+          "mode": "root/cpu-resize/core-getimage/no-damage/cursor-events",
+          "outstanding": 0,
+          "png_atlases": 0,
+          "quantile_policy": "nearest-rank, most recent 128 observations per stage per window",
+          "replaced": 0,
+          "scheduled": 142,
+          "schema_version": 1,
+          "sent": 1,
+          "source_dimensions": [
+            2560,
+            1440
+          ],
+          "stages": {
+            "atlas_pack_and_codec_ms": {
+              "mean": 0.001841,
+              "quantiles": {
+                "p50_ms": 0.001,
+                "p95_ms": 0.001,
+                "p99_ms": 0.001,
+                "samples": 1
+              }
+            },
+            "atlas_pack_and_jpeg_ms": {
+              "mean": 0.001841,
+              "quantiles": {
+                "p50_ms": 0.001,
+                "p95_ms": 0.001,
+                "p99_ms": 0.001,
+                "samples": 1
+              }
+            },
+            "atlas_pack_ms": {
+              "mean": 0.0,
+              "quantiles": {
+                "p50_ms": null,
+                "p95_ms": null,
+                "p99_ms": null,
+                "samples": 0
+              }
+            },
+            "capture_ms": {
+              "mean": 20.740705176056338,
+              "quantiles": {
+                "p50_ms": 12.836,
+                "p95_ms": 45.695,
+                "p99_ms": 48.046,
+                "samples": 128
+              }
+            },
+            "capture_start_to_ack_ms": {
+              "mean": 33.043394,
+              "quantiles": {
+                "p50_ms": 33.043,
+                "p95_ms": 33.043,
+                "p99_ms": 33.043,
+                "samples": 1
+              }
+            },
+            "codec_ms": {
+              "mean": 0.0,
+              "quantiles": {
+                "p50_ms": null,
+                "p95_ms": null,
+                "p99_ms": null,
+                "samples": 0
+              }
+            },
+            "credit_wait_ms": {
+              "mean": 0.00024489510489510494,
+              "quantiles": {
+                "p50_ms": 0.0,
+                "p95_ms": 0.0,
+                "p99_ms": 0.0,
+                "samples": 128
+              }
+            },
+            "dirty_scan_ms": {
+              "mean": 0.6015328671328671,
+              "quantiles": {
+                "p50_ms": 0.53,
+                "p95_ms": 1.468,
+                "p99_ms": 1.726,
+                "samples": 128
+              }
+            },
+            "jpeg_ms": {
+              "mean": 0.0,
+              "quantiles": {
+                "p50_ms": null,
+                "p95_ms": null,
+                "p99_ms": null,
+                "samples": 0
+              }
+            },
+            "mailbox_age_ms": {
+              "mean": 0.02271493006993007,
+              "quantiles": {
+                "p50_ms": 0.015,
+                "p95_ms": 0.043,
+                "p99_ms": 0.139,
+                "samples": 128
+              }
+            },
+            "png_ms": {
+              "mean": 0.0,
+              "quantiles": {
+                "p50_ms": null,
+                "p95_ms": null,
+                "p99_ms": null,
+                "samples": 0
+              }
+            },
+            "send_to_ack_ms": {
+              "mean": 3.368803,
+              "quantiles": {
+                "p50_ms": 3.368,
+                "p95_ms": 3.368,
+                "p99_ms": 3.368,
+                "samples": 1
+              }
+            },
+            "socket_write_ms": {
+              "mean": 0.137388,
+              "quantiles": {
+                "p50_ms": 0.137,
+                "p95_ms": 0.137,
+                "p99_ms": 0.137,
+                "samples": 1
+              }
+            },
+            "writer_wait_ms": {
+              "mean": 0.0015919999999999999,
+              "quantiles": {
+                "p50_ms": 0.001,
+                "p95_ms": 0.001,
+                "p99_ms": 0.001,
+                "samples": 1
+              }
+            }
+          },
+          "total_tiles": 3600,
+          "type": "jwm_remote_host_stats",
+          "unchanged_suppressed": 142,
+          "version": "0.2.0",
+          "viewer_superseded": 0,
+          "window_seconds": 5.002216055
+        },
+        {
+          "bytes": 491,
+          "captured": 143,
+          "commit": null,
+          "dirty_tiles": 0,
+          "drawn_acks": 1,
+          "encoded_dimensions": [
+            1280,
+            720
+          ],
+          "jpeg_atlases": 0,
+          "legacy_stage_aliases": {
+            "atlas_pack_and_jpeg_ms": "atlas_pack_and_codec_ms; historical name includes all codecs and empty-frame encode work"
+          },
+          "max_outstanding": 1,
+          "mode": "root/cpu-resize/core-getimage/no-damage/cursor-events",
+          "outstanding": 0,
+          "png_atlases": 0,
+          "quantile_policy": "nearest-rank, most recent 128 observations per stage per window",
+          "replaced": 0,
+          "scheduled": 143,
+          "schema_version": 1,
+          "sent": 1,
+          "source_dimensions": [
+            2560,
+            1440
+          ],
+          "stages": {
+            "atlas_pack_and_codec_ms": {
+              "mean": 0.00161,
+              "quantiles": {
+                "p50_ms": 0.001,
+                "p95_ms": 0.001,
+                "p99_ms": 0.001,
+                "samples": 1
+              }
+            },
+            "atlas_pack_and_jpeg_ms": {
+              "mean": 0.00161,
+              "quantiles": {
+                "p50_ms": 0.001,
+                "p95_ms": 0.001,
+                "p99_ms": 0.001,
+                "samples": 1
+              }
+            },
+            "atlas_pack_ms": {
+              "mean": 0.0,
+              "quantiles": {
+                "p50_ms": null,
+                "p95_ms": null,
+                "p99_ms": null,
+                "samples": 0
+              }
+            },
+            "capture_ms": {
+              "mean": 16.059009755244755,
+              "quantiles": {
+                "p50_ms": 9.409,
+                "p95_ms": 47.168,
+                "p99_ms": 51.214,
+                "samples": 128
+              }
+            },
+            "capture_start_to_ack_ms": {
+              "mean": 37.89292,
+              "quantiles": {
+                "p50_ms": 37.892,
+                "p95_ms": 37.892,
+                "p99_ms": 37.892,
+                "samples": 1
+              }
+            },
+            "codec_ms": {
+              "mean": 0.0,
+              "quantiles": {
+                "p50_ms": null,
+                "p95_ms": null,
+                "p99_ms": null,
+                "samples": 0
+              }
+            },
+            "credit_wait_ms": {
+              "mean": 0.00021758450704225353,
+              "quantiles": {
+                "p50_ms": 0.0,
+                "p95_ms": 0.0,
+                "p99_ms": 0.0,
+                "samples": 128
+              }
+            },
+            "dirty_scan_ms": {
+              "mean": 0.541973838028169,
+              "quantiles": {
+                "p50_ms": 0.289,
+                "p95_ms": 1.798,
+                "p99_ms": 2.317,
+                "samples": 128
+              }
+            },
+            "jpeg_ms": {
+              "mean": 0.0,
+              "quantiles": {
+                "p50_ms": null,
+                "p95_ms": null,
+                "p99_ms": null,
+                "samples": 0
+              }
+            },
+            "mailbox_age_ms": {
+              "mean": 0.0189353661971831,
+              "quantiles": {
+                "p50_ms": 0.011,
+                "p95_ms": 0.044,
+                "p99_ms": 0.089,
+                "samples": 128
+              }
+            },
+            "png_ms": {
+              "mean": 0.0,
+              "quantiles": {
+                "p50_ms": null,
+                "p95_ms": null,
+                "p99_ms": null,
+                "samples": 0
+              }
+            },
+            "send_to_ack_ms": {
+              "mean": 5.275452,
+              "quantiles": {
+                "p50_ms": 5.275,
+                "p95_ms": 5.275,
+                "p99_ms": 5.275,
+                "samples": 1
+              }
+            },
+            "socket_write_ms": {
+              "mean": 0.120892,
+              "quantiles": {
+                "p50_ms": 0.12,
+                "p95_ms": 0.12,
+                "p99_ms": 0.12,
+                "samples": 1
+              }
+            },
+            "writer_wait_ms": {
+              "mean": 0.001012,
+              "quantiles": {
+                "p50_ms": 0.001,
+                "p95_ms": 0.001,
+                "p99_ms": 0.001,
+                "samples": 1
+              }
+            }
+          },
+          "total_tiles": 3600,
+          "type": "jwm_remote_host_stats",
+          "unchanged_suppressed": 141,
+          "version": "0.2.0",
+          "viewer_superseded": 0,
+          "window_seconds": 5.002502835
+        },
+        {
+          "bytes": 491,
+          "captured": 139,
+          "commit": null,
+          "dirty_tiles": 0,
+          "drawn_acks": 1,
+          "encoded_dimensions": [
+            1280,
+            720
+          ],
+          "jpeg_atlases": 0,
+          "legacy_stage_aliases": {
+            "atlas_pack_and_jpeg_ms": "atlas_pack_and_codec_ms; historical name includes all codecs and empty-frame encode work"
+          },
+          "max_outstanding": 1,
+          "mode": "root/cpu-resize/core-getimage/no-damage/cursor-events",
+          "outstanding": 0,
+          "png_atlases": 0,
+          "quantile_policy": "nearest-rank, most recent 128 observations per stage per window",
+          "replaced": 0,
+          "scheduled": 139,
+          "schema_version": 1,
+          "sent": 1,
+          "source_dimensions": [
+            2560,
+            1440
+          ],
+          "stages": {
+            "atlas_pack_and_codec_ms": {
+              "mean": 0.000817,
+              "quantiles": {
+                "p50_ms": 0.0,
+                "p95_ms": 0.0,
+                "p99_ms": 0.0,
+                "samples": 1
+              }
+            },
+            "atlas_pack_and_jpeg_ms": {
+              "mean": 0.000817,
+              "quantiles": {
+                "p50_ms": 0.0,
+                "p95_ms": 0.0,
+                "p99_ms": 0.0,
+                "samples": 1
+              }
+            },
+            "atlas_pack_ms": {
+              "mean": 0.0,
+              "quantiles": {
+                "p50_ms": null,
+                "p95_ms": null,
+                "p99_ms": null,
+                "samples": 0
+              }
+            },
+            "capture_ms": {
+              "mean": 24.785726992805756,
+              "quantiles": {
+                "p50_ms": 30.097,
+                "p95_ms": 48.249,
+                "p99_ms": 57.119,
+                "samples": 128
+              }
+            },
+            "capture_start_to_ack_ms": {
+              "mean": 407.43494200000004,
+              "quantiles": {
+                "p50_ms": 407.434,
+                "p95_ms": 407.434,
+                "p99_ms": 407.434,
+                "samples": 1
+              }
+            },
+            "codec_ms": {
+              "mean": 0.0,
+              "quantiles": {
+                "p50_ms": null,
+                "p95_ms": null,
+                "p99_ms": null,
+                "samples": 0
+              }
+            },
+            "credit_wait_ms": {
+              "mean": 0.0002653021582733813,
+              "quantiles": {
+                "p50_ms": 0.0,
+                "p95_ms": 0.0,
+                "p99_ms": 0.0,
+                "samples": 128
+              }
+            },
+            "dirty_scan_ms": {
+              "mean": 0.6683094460431654,
+              "quantiles": {
+                "p50_ms": 0.635,
+                "p95_ms": 1.719,
+                "p99_ms": 2.422,
+                "samples": 128
+              }
+            },
+            "jpeg_ms": {
+              "mean": 0.0,
+              "quantiles": {
+                "p50_ms": null,
+                "p95_ms": null,
+                "p99_ms": null,
+                "samples": 0
+              }
+            },
+            "mailbox_age_ms": {
+              "mean": 0.025859424460431654,
+              "quantiles": {
+                "p50_ms": 0.021,
+                "p95_ms": 0.087,
+                "p99_ms": 0.122,
+                "samples": 128
+              }
+            },
+            "png_ms": {
+              "mean": 0.0,
+              "quantiles": {
+                "p50_ms": null,
+                "p95_ms": null,
+                "p99_ms": null,
+                "samples": 0
+              }
+            },
+            "send_to_ack_ms": {
+              "mean": 385.19066200000003,
+              "quantiles": {
+                "p50_ms": 385.19,
+                "p95_ms": 385.19,
+                "p99_ms": 385.19,
+                "samples": 1
+              }
+            },
+            "socket_write_ms": {
+              "mean": 0.069614,
+              "quantiles": {
+                "p50_ms": 0.069,
+                "p95_ms": 0.069,
+                "p99_ms": 0.069,
+                "samples": 1
+              }
+            },
+            "writer_wait_ms": {
+              "mean": 0.00061,
+              "quantiles": {
+                "p50_ms": 0.0,
+                "p95_ms": 0.0,
+                "p99_ms": 0.0,
+                "samples": 1
+              }
+            }
+          },
+          "total_tiles": 3600,
+          "type": "jwm_remote_host_stats",
+          "unchanged_suppressed": 138,
+          "version": "0.2.0",
+          "viewer_superseded": 0,
+          "window_seconds": 5.027083843
+        }
+      ],
+      "motion_host_windows": [
+        {
+          "bytes": 12262421,
+          "captured": 118,
+          "commit": null,
+          "dirty_tiles": 271420,
+          "drawn_acks": 115,
+          "encoded_dimensions": [
+            1280,
+            720
+          ],
+          "jpeg_atlases": 115,
+          "legacy_stage_aliases": {
+            "atlas_pack_and_jpeg_ms": "atlas_pack_and_codec_ms; historical name includes all codecs and empty-frame encode work"
+          },
+          "max_outstanding": 2,
+          "mode": "root/cpu-resize/core-getimage/no-damage/cursor-events",
+          "outstanding": 1,
+          "png_atlases": 0,
+          "quantile_policy": "nearest-rank, most recent 128 observations per stage per window",
+          "replaced": 0,
+          "scheduled": 136,
+          "schema_version": 1,
+          "sent": 115,
+          "source_dimensions": [
+            2560,
+            1440
+          ],
+          "stages": {
+            "atlas_pack_and_codec_ms": {
+              "mean": 24.262057104347825,
+              "quantiles": {
+                "p50_ms": 25.673,
+                "p95_ms": 48.12,
+                "p99_ms": 72.535,
+                "samples": 115
+              }
+            },
+            "atlas_pack_and_jpeg_ms": {
+              "mean": 24.262057104347825,
+              "quantiles": {
+                "p50_ms": 25.673,
+                "p95_ms": 48.12,
+                "p99_ms": 72.535,
+                "samples": 115
+              }
+            },
+            "atlas_pack_ms": {
+              "mean": 0.5318162434782608,
+              "quantiles": {
+                "p50_ms": 0.579,
+                "p95_ms": 1.103,
+                "p99_ms": 1.982,
+                "samples": 115
+              }
+            },
+            "capture_ms": {
+              "mean": 25.21967370338983,
+              "quantiles": {
+                "p50_ms": 27.018,
+                "p95_ms": 48.248,
+                "p99_ms": 54.442,
+                "samples": 118
+              }
+            },
+            "capture_start_to_ack_ms": {
+              "mean": 67.17358555652174,
+              "quantiles": {
+                "p50_ms": 75.59,
+                "p95_ms": 121.42,
+                "p99_ms": 143.779,
+                "samples": 115
+              }
+            },
+            "codec_ms": {
+              "mean": 23.728753573913043,
+              "quantiles": {
+                "p50_ms": 25.042,
+                "p95_ms": 47.241,
+                "p99_ms": 70.216,
+                "samples": 115
+              }
+            },
+            "credit_wait_ms": {
+              "mean": 0.07343594067796609,
+              "quantiles": {
+                "p50_ms": 0.0,
+                "p95_ms": 0.0,
+                "p99_ms": 0.0,
+                "samples": 118
+              }
+            },
+            "dirty_scan_ms": {
+              "mean": 0.34864912711864404,
+              "quantiles": {
+                "p50_ms": 0.34,
+                "p95_ms": 0.62,
+                "p99_ms": 1.168,
+                "samples": 118
+              }
+            },
+            "jpeg_ms": {
+              "mean": 23.728753573913043,
+              "quantiles": {
+                "p50_ms": 25.042,
+                "p95_ms": 47.241,
+                "p99_ms": 70.216,
+                "samples": 115
+              }
+            },
+            "mailbox_age_ms": {
+              "mean": 1.7990054237288133,
+              "quantiles": {
+                "p50_ms": 0.027,
+                "p95_ms": 11.892,
+                "p99_ms": 35.793,
+                "samples": 118
+              }
+            },
+            "png_ms": {
+              "mean": 0.0,
+              "quantiles": {
+                "p50_ms": null,
+                "p95_ms": null,
+                "p99_ms": null,
+                "samples": 0
+              }
+            },
+            "send_to_ack_ms": {
+              "mean": 15.21846512173913,
+              "quantiles": {
+                "p50_ms": 13.681,
+                "p95_ms": 24.67,
+                "p99_ms": 34.571,
+                "samples": 115
+              }
+            },
+            "socket_write_ms": {
+              "mean": 0.3121292347826087,
+              "quantiles": {
+                "p50_ms": 0.285,
+                "p95_ms": 0.545,
+                "p99_ms": 0.872,
+                "samples": 115
+              }
+            },
+            "writer_wait_ms": {
+              "mean": 0.000936408695652174,
+              "quantiles": {
+                "p50_ms": 0.0,
+                "p95_ms": 0.001,
+                "p99_ms": 0.002,
+                "samples": 115
+              }
+            }
+          },
+          "total_tiles": 414000,
+          "type": "jwm_remote_host_stats",
+          "unchanged_suppressed": 3,
+          "version": "0.2.0",
+          "viewer_superseded": 0,
+          "window_seconds": 5.003233778
+        },
+        {
+          "bytes": 12283187,
+          "captured": 115,
+          "commit": null,
+          "dirty_tiles": 271360,
+          "drawn_acks": 114,
+          "encoded_dimensions": [
+            1280,
+            720
+          ],
+          "jpeg_atlases": 115,
+          "legacy_stage_aliases": {
+            "atlas_pack_and_jpeg_ms": "atlas_pack_and_codec_ms; historical name includes all codecs and empty-frame encode work"
+          },
+          "max_outstanding": 2,
+          "mode": "root/cpu-resize/core-getimage/no-damage/cursor-events",
+          "outstanding": 2,
+          "png_atlases": 0,
+          "quantile_policy": "nearest-rank, most recent 128 observations per stage per window",
+          "replaced": 0,
+          "scheduled": 138,
+          "schema_version": 1,
+          "sent": 115,
+          "source_dimensions": [
+            2560,
+            1440
+          ],
+          "stages": {
+            "atlas_pack_and_codec_ms": {
+              "mean": 26.86828171304348,
+              "quantiles": {
+                "p50_ms": 29.234,
+                "p95_ms": 43.977,
+                "p99_ms": 67.091,
+                "samples": 115
+              }
+            },
+            "atlas_pack_and_jpeg_ms": {
+              "mean": 26.86828171304348,
+              "quantiles": {
+                "p50_ms": 29.234,
+                "p95_ms": 43.977,
+                "p99_ms": 67.091,
+                "samples": 115
+              }
+            },
+            "atlas_pack_ms": {
+              "mean": 0.6236436695652173,
+              "quantiles": {
+                "p50_ms": 0.651,
+                "p95_ms": 1.555,
+                "p99_ms": 1.944,
+                "samples": 115
+              }
+            },
+            "capture_ms": {
+              "mean": 27.305456260869565,
+              "quantiles": {
+                "p50_ms": 29.981,
+                "p95_ms": 49.308,
+                "p99_ms": 50.926,
+                "samples": 115
+              }
+            },
+            "capture_start_to_ack_ms": {
+              "mean": 77.31975732456141,
+              "quantiles": {
+                "p50_ms": 81.986,
+                "p95_ms": 123.064,
+                "p99_ms": 147.382,
+                "samples": 114
+              }
+            },
+            "codec_ms": {
+              "mean": 26.2430582173913,
+              "quantiles": {
+                "p50_ms": 28.52,
+                "p95_ms": 42.029,
+                "p99_ms": 64.736,
+                "samples": 115
+              }
+            },
+            "credit_wait_ms": {
+              "mean": 1.0483962782608696,
+              "quantiles": {
+                "p50_ms": 0.0,
+                "p95_ms": 7.539,
+                "p99_ms": 17.958,
+                "samples": 115
+              }
+            },
+            "dirty_scan_ms": {
+              "mean": 0.4100465217391304,
+              "quantiles": {
+                "p50_ms": 0.435,
+                "p95_ms": 0.861,
+                "p99_ms": 1.113,
+                "samples": 115
+              }
+            },
+            "jpeg_ms": {
+              "mean": 26.2430582173913,
+              "quantiles": {
+                "p50_ms": 28.52,
+                "p95_ms": 42.029,
+                "p99_ms": 64.736,
+                "samples": 115
+              }
+            },
+            "mailbox_age_ms": {
+              "mean": 2.2799264260869565,
+              "quantiles": {
+                "p50_ms": 0.044,
+                "p95_ms": 9.713,
+                "p99_ms": 29.846,
+                "samples": 115
+              }
+            },
+            "png_ms": {
+              "mean": 0.0,
+              "quantiles": {
+                "p50_ms": null,
+                "p95_ms": null,
+                "p99_ms": null,
+                "samples": 0
+              }
+            },
+            "send_to_ack_ms": {
+              "mean": 19.506441578947367,
+              "quantiles": {
+                "p50_ms": 13.795,
+                "p95_ms": 48.214,
+                "p99_ms": 73.87,
+                "samples": 114
+              }
+            },
+            "socket_write_ms": {
+              "mean": 0.32257364347826084,
+              "quantiles": {
+                "p50_ms": 0.331,
+                "p95_ms": 0.552,
+                "p99_ms": 1.052,
+                "samples": 115
+              }
+            },
+            "writer_wait_ms": {
+              "mean": 0.0009736434782608695,
+              "quantiles": {
+                "p50_ms": 0.0,
+                "p95_ms": 0.001,
+                "p99_ms": 0.001,
+                "samples": 115
+              }
+            }
+          },
+          "total_tiles": 414000,
+          "type": "jwm_remote_host_stats",
+          "unchanged_suppressed": 1,
+          "version": "0.2.0",
+          "viewer_superseded": 0,
+          "window_seconds": 5.004842703
+        },
+        {
+          "bytes": 12840161,
+          "captured": 126,
+          "commit": null,
+          "dirty_tiles": 282916,
+          "drawn_acks": 123,
+          "encoded_dimensions": [
+            1280,
+            720
+          ],
+          "jpeg_atlases": 121,
+          "legacy_stage_aliases": {
+            "atlas_pack_and_jpeg_ms": "atlas_pack_and_codec_ms; historical name includes all codecs and empty-frame encode work"
+          },
+          "max_outstanding": 2,
+          "mode": "root/cpu-resize/core-getimage/no-damage/cursor-events",
+          "outstanding": 0,
+          "png_atlases": 0,
+          "quantile_policy": "nearest-rank, most recent 128 observations per stage per window",
+          "replaced": 0,
+          "scheduled": 139,
+          "schema_version": 1,
+          "sent": 121,
+          "source_dimensions": [
+            2560,
+            1440
+          ],
+          "stages": {
+            "atlas_pack_and_codec_ms": {
+              "mean": 19.78597197520661,
+              "quantiles": {
+                "p50_ms": 12.827,
+                "p95_ms": 42.108,
+                "p99_ms": 65.876,
+                "samples": 121
+              }
+            },
+            "atlas_pack_and_jpeg_ms": {
+              "mean": 19.78597197520661,
+              "quantiles": {
+                "p50_ms": 12.827,
+                "p95_ms": 42.108,
+                "p99_ms": 65.876,
+                "samples": 121
+              }
+            },
+            "atlas_pack_ms": {
+              "mean": 0.4544670991735537,
+              "quantiles": {
+                "p50_ms": 0.385,
+                "p95_ms": 0.805,
+                "p99_ms": 1.739,
+                "samples": 121
+              }
+            },
+            "capture_ms": {
+              "mean": 21.474455531746035,
+              "quantiles": {
+                "p50_ms": 12.906,
+                "p95_ms": 48.306,
+                "p99_ms": 50.948,
+                "samples": 126
+              }
+            },
+            "capture_start_to_ack_ms": {
+              "mean": 64.49706651219512,
+              "quantiles": {
+                "p50_ms": 61.817,
+                "p95_ms": 112.288,
+                "p99_ms": 131.579,
+                "samples": 123
+              }
+            },
+            "codec_ms": {
+              "mean": 19.330224413223142,
+              "quantiles": {
+                "p50_ms": 12.493,
+                "p95_ms": 41.309,
+                "p99_ms": 63.875,
+                "samples": 121
+              }
+            },
+            "credit_wait_ms": {
+              "mean": 2.092638096,
+              "quantiles": {
+                "p50_ms": 0.0,
+                "p95_ms": 15.013,
+                "p99_ms": 34.624,
+                "samples": 125
+              }
+            },
+            "dirty_scan_ms": {
+              "mean": 0.3310988,
+              "quantiles": {
+                "p50_ms": 0.263,
+                "p95_ms": 0.594,
+                "p99_ms": 1.171,
+                "samples": 125
+              }
+            },
+            "jpeg_ms": {
+              "mean": 19.330224413223142,
+              "quantiles": {
+                "p50_ms": 12.493,
+                "p95_ms": 41.309,
+                "p99_ms": 63.875,
+                "samples": 121
+              }
+            },
+            "mailbox_age_ms": {
+              "mean": 1.822277376,
+              "quantiles": {
+                "p50_ms": 0.025,
+                "p95_ms": 11.092,
+                "p99_ms": 23.666,
+                "samples": 125
+              }
+            },
+            "png_ms": {
+              "mean": 0.0,
+              "quantiles": {
+                "p50_ms": null,
+                "p95_ms": null,
+                "p99_ms": null,
+                "samples": 0
+              }
+            },
+            "send_to_ack_ms": {
+              "mean": 21.400295902439026,
+              "quantiles": {
+                "p50_ms": 15.717,
+                "p95_ms": 44.592,
+                "p99_ms": 70.294,
+                "samples": 123
+              }
+            },
+            "socket_write_ms": {
+              "mean": 0.2528876694214876,
+              "quantiles": {
+                "p50_ms": 0.185,
+                "p95_ms": 0.532,
+                "p99_ms": 0.562,
+                "samples": 121
+              }
+            },
+            "writer_wait_ms": {
+              "mean": 0.0008130495867768595,
+              "quantiles": {
+                "p50_ms": 0.0,
+                "p95_ms": 0.001,
+                "p99_ms": 0.001,
+                "samples": 121
+              }
+            }
+          },
+          "total_tiles": 435600,
+          "type": "jwm_remote_host_stats",
+          "unchanged_suppressed": 4,
+          "version": "0.2.0",
+          "viewer_superseded": 0,
+          "window_seconds": 5.034377842
+        }
+      ],
+      "input_samples": [
+        {
+          "sample": 1,
+          "warmup": true,
+          "input_to_viewer_x11_pixel_ms": 72.647
+        },
+        {
+          "sample": 2,
+          "warmup": true,
+          "input_to_viewer_x11_pixel_ms": 65.252
+        },
+        {
+          "sample": 3,
+          "warmup": true,
+          "input_to_viewer_x11_pixel_ms": 31.907
+        },
+        {
+          "sample": 4,
+          "warmup": true,
+          "input_to_viewer_x11_pixel_ms": 61.346
+        },
+        {
+          "sample": 5,
+          "warmup": false,
+          "input_to_viewer_x11_pixel_ms": 86.729
+        },
+        {
+          "sample": 6,
+          "warmup": false,
+          "input_to_viewer_x11_pixel_ms": 49.851
+        },
+        {
+          "sample": 7,
+          "warmup": false,
+          "input_to_viewer_x11_pixel_ms": 56.695
+        },
+        {
+          "sample": 8,
+          "warmup": false,
+          "input_to_viewer_x11_pixel_ms": 92.82
+        },
+        {
+          "sample": 9,
+          "warmup": false,
+          "input_to_viewer_x11_pixel_ms": 99.399
+        },
+        {
+          "sample": 10,
+          "warmup": false,
+          "input_to_viewer_x11_pixel_ms": 76.883
+        },
+        {
+          "sample": 11,
+          "warmup": false,
+          "input_to_viewer_x11_pixel_ms": 69.272
+        },
+        {
+          "sample": 12,
+          "warmup": false,
+          "input_to_viewer_x11_pixel_ms": 92.592
+        },
+        {
+          "sample": 13,
+          "warmup": false,
+          "input_to_viewer_x11_pixel_ms": 58.431
+        },
+        {
+          "sample": 14,
+          "warmup": false,
+          "input_to_viewer_x11_pixel_ms": 85.103
+        },
+        {
+          "sample": 15,
+          "warmup": false,
+          "input_to_viewer_x11_pixel_ms": 59.68
+        },
+        {
+          "sample": 16,
+          "warmup": false,
+          "input_to_viewer_x11_pixel_ms": 66.135
+        },
+        {
+          "sample": 17,
+          "warmup": false,
+          "input_to_viewer_x11_pixel_ms": 67.236
+        },
+        {
+          "sample": 18,
+          "warmup": false,
+          "input_to_viewer_x11_pixel_ms": 63.127
+        },
+        {
+          "sample": 19,
+          "warmup": false,
+          "input_to_viewer_x11_pixel_ms": 15.702
+        },
+        {
+          "sample": 20,
+          "warmup": false,
+          "input_to_viewer_x11_pixel_ms": 58.36
+        },
+        {
+          "sample": 21,
+          "warmup": false,
+          "input_to_viewer_x11_pixel_ms": 71.135
+        },
+        {
+          "sample": 22,
+          "warmup": false,
+          "input_to_viewer_x11_pixel_ms": 77.723
+        },
+        {
+          "sample": 23,
+          "warmup": false,
+          "input_to_viewer_x11_pixel_ms": 60.794
+        },
+        {
+          "sample": 24,
+          "warmup": false,
+          "input_to_viewer_x11_pixel_ms": 79.124
+        },
+        {
+          "sample": 25,
+          "warmup": false,
+          "input_to_viewer_x11_pixel_ms": 57.253
+        },
+        {
+          "sample": 26,
+          "warmup": false,
+          "input_to_viewer_x11_pixel_ms": 67.207
+        },
+        {
+          "sample": 27,
+          "warmup": false,
+          "input_to_viewer_x11_pixel_ms": 64.106
+        },
+        {
+          "sample": 28,
+          "warmup": false,
+          "input_to_viewer_x11_pixel_ms": 80.684
+        },
+        {
+          "sample": 29,
+          "warmup": false,
+          "input_to_viewer_x11_pixel_ms": 83.394
+        },
+        {
+          "sample": 30,
+          "warmup": false,
+          "input_to_viewer_x11_pixel_ms": 67.851
+        },
+        {
+          "sample": 31,
+          "warmup": false,
+          "input_to_viewer_x11_pixel_ms": 71.691
+        },
+        {
+          "sample": 32,
+          "warmup": false,
+          "input_to_viewer_x11_pixel_ms": 61.347
+        },
+        {
+          "sample": 33,
+          "warmup": false,
+          "input_to_viewer_x11_pixel_ms": 42.976
+        },
+        {
+          "sample": 34,
+          "warmup": false,
+          "input_to_viewer_x11_pixel_ms": 40.872
+        },
+        {
+          "sample": 35,
+          "warmup": false,
+          "input_to_viewer_x11_pixel_ms": 63.799
+        },
+        {
+          "sample": 36,
+          "warmup": false,
+          "input_to_viewer_x11_pixel_ms": 95.652
+        },
+        {
+          "sample": 37,
+          "warmup": false,
+          "input_to_viewer_x11_pixel_ms": 68.312
+        },
+        {
+          "sample": 38,
+          "warmup": false,
+          "input_to_viewer_x11_pixel_ms": 50.702
+        },
+        {
+          "sample": 39,
+          "warmup": false,
+          "input_to_viewer_x11_pixel_ms": 74.632
+        },
+        {
+          "sample": 40,
+          "warmup": false,
+          "input_to_viewer_x11_pixel_ms": 62.233
+        }
+      ],
+      "edge_release_title_ms": [
+        2.453,
+        2.289,
+        2.33,
+        2.297,
+        2.295,
+        2.359,
+        2.421,
+        2.419,
+        2.388,
+        2.302,
+        2.419,
+        2.146,
+        2.358,
+        2.236,
+        2.205,
+        2.195,
+        2.316,
+        2.146,
+        2.159,
+        2.204
+      ]
+    }
+  ],
+  "icmp_rtt_samples_ms": [
+    105.0,
+    55.6,
+    70.9,
+    74.9,
+    80.6,
+    111.0,
+    106.0,
+    120.0,
+    3.49,
+    2.71,
+    4.02,
+    2.02,
+    3.64,
+    1.49,
+    3.4,
+    2.79,
+    4.04,
+    7.04,
+    13.2,
+    2.24,
+    2.91,
+    92.6,
+    99.2,
+    124.0,
+    4.18,
+    3.55,
+    3.15,
+    1.17,
+    3.1,
+    3.29,
+    2.98,
+    1.25,
+    3.43,
+    2.94,
+    3.23,
+    7.26,
+    4.91,
+    1.39,
+    2.98,
+    2.96
+  ]
+}

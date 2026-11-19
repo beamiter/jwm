@@ -159,3 +159,9 @@ These checks cover fixture generation, bounded parsing, aggregation, missing
 sample handling and physical-CSV bookkeeping. They do not run real two-machine
 capture, a browser renderer, Isaac Sim, or a high-speed camera. Physical baseline
 rows remain pending until their evidence is collected on the target machines.
+
+## Versioned observations
+
+The [2026-11-19 X11 SSH benchmark](benchmarks/remote-x11-ssh-2026-11-19/README.md)
+records live desktop streaming, two runs of isolated X11 workloads on the same
+machines, and software-observed input and edge release latencies.

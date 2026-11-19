@@ -1,0 +1,893 @@
+{
+  "repository_revision": "c994017ba60687c7209e2fc6d451be8745cfdea2",
+  "viewer_binary_sha256": "dd1dfe4332024b29aca3d9aedbfd41de181dddfb03d1e543aa5bcb0a142b4bc8",
+  "host_binary_sha256": "ed1d5eaf27d74703355acf53ef02239d444033fbb5094ca1bd14b90e2ebe0dde",
+  "transport_version": 3,
+  "application_version": 35,
+  "viewer_hardware": "Intel i7-13650HX, NVIDIA RTX 5060 Laptop, driver 580.178.04",
+  "host_hardware": "Intel i9-14900K, NVIDIA RTX 4090 D, driver 570.153.02",
+  "viewer_session": "JWM x11rb, 2560x1600 @ 180 Hz",
+  "host_session": "JWM xcb, DP-0 2560x1440 @ 200 Hz",
+  "network": "SSH loopback forwarding over routed LAN, viewer connected via Wi-Fi",
+  "live_viewer_startup_ms": 836.6825480479747,
+  "controlled_viewer_startup_ms": 768.1918430607766,
+  "live": {
+    "schema_version": 1,
+    "kind": "jwm_remote_workload_report",
+    "run_id": "x11-ssh-initial-20261119",
+    "workload": "live-desktop-natural-updates-view-only",
+    "version": "0.2.0",
+    "commit": null,
+    "windows": 4,
+    "ignored_diagnostic_lines": 0,
+    "reported_seconds": 20.101792809,
+    "totals": {
+      "scheduled": 452,
+      "captured": 426,
+      "sent": 188,
+      "bytes": 2775472,
+      "replaced": 0,
+      "unchanged_suppressed": 238,
+      "dirty_tiles": 36409,
+      "total_tiles": 810656,
+      "drawn_acks": 188,
+      "viewer_superseded": 0
+    },
+    "sent_frames_per_reported_second": 9.35239964844471,
+    "payload_mbit_per_reported_second": 1.1045669513646015,
+    "stages": {
+      "capture_ms": {
+        "whole_run_weighted_mean_ms": 44.90669761737089,
+        "mean_denominator": "captured",
+        "window_means_range_ms": [
+          40.035314824561404,
+          51.387669895833334
+        ],
+        "max_reported_window_recent_p95_ms": 122.707,
+        "whole_run_percentiles": null
+      },
+      "mailbox_age_ms": {
+        "whole_run_weighted_mean_ms": null,
+        "mean_denominator": null,
+        "window_means_range_ms": [
+          0.014055084210526314,
+          0.024040295652173912
+        ],
+        "max_reported_window_recent_p95_ms": 0.122,
+        "whole_run_percentiles": null
+      },
+      "credit_wait_ms": {
+        "whole_run_weighted_mean_ms": null,
+        "mean_denominator": null,
+        "window_means_range_ms": [
+          0.0001483181818181818,
+          0.004795121739130435
+        ],
+        "max_reported_window_recent_p95_ms": 0.0,
+        "whole_run_percentiles": null
+      },
+      "dirty_scan_ms": {
+        "whole_run_weighted_mean_ms": null,
+        "mean_denominator": null,
+        "window_means_range_ms": [
+          0.45263538679245285,
+          0.7348724363636363
+        ],
+        "max_reported_window_recent_p95_ms": 1.487,
+        "whole_run_percentiles": null
+      },
+      "atlas_pack_ms": {
+        "whole_run_weighted_mean_ms": null,
+        "mean_denominator": null,
+        "window_means_range_ms": [
+          0.030224214285714285,
+          0.042514375
+        ],
+        "max_reported_window_recent_p95_ms": 0.114,
+        "whole_run_percentiles": null
+      },
+      "jpeg_ms": {
+        "whole_run_weighted_mean_ms": null,
+        "mean_denominator": null,
+        "window_means_range_ms": [
+          1.0885281149425285,
+          1.5118639999999999
+        ],
+        "max_reported_window_recent_p95_ms": 4.28,
+        "whole_run_percentiles": null
+      },
+      "atlas_pack_and_jpeg_ms": {
+        "whole_run_weighted_mean_ms": null,
+        "mean_denominator": null,
+        "window_means_range_ms": [
+          1.1272253469387754,
+          1.5553111666666668
+        ],
+        "max_reported_window_recent_p95_ms": 4.384,
+        "whole_run_percentiles": null
+      },
+      "writer_wait_ms": {
+        "whole_run_weighted_mean_ms": 0.0005946063829787234,
+        "mean_denominator": "sent",
+        "window_means_range_ms": [
+          0.000489469387755102,
+          0.0006525057471264368
+        ],
+        "max_reported_window_recent_p95_ms": 0.001,
+        "whole_run_percentiles": null
+      },
+      "socket_write_ms": {
+        "whole_run_weighted_mean_ms": 0.057194154255319145,
+        "mean_denominator": "sent",
+        "window_means_range_ms": [
+          0.054155413793103443,
+          0.073564375
+        ],
+        "max_reported_window_recent_p95_ms": 0.137,
+        "whole_run_percentiles": null
+      },
+      "capture_start_to_ack_ms": {
+        "whole_run_weighted_mean_ms": 53.64564267553191,
+        "mean_denominator": "drawn_acks",
+        "window_means_range_ms": [
+          47.5663942244898,
+          63.55698841666666
+        ],
+        "max_reported_window_recent_p95_ms": 131.591,
+        "whole_run_percentiles": null
+      },
+      "send_to_ack_ms": {
+        "whole_run_weighted_mean_ms": 5.803216792553191,
+        "mean_denominator": "drawn_acks",
+        "window_means_range_ms": [
+          4.794426333333333,
+          6.613264607142858
+        ],
+        "max_reported_window_recent_p95_ms": 20.828,
+        "whole_run_percentiles": null
+      }
+    },
+    "dimensions_seen": {
+      "source_dimensions": [
+        [
+          2560,
+          1440
+        ]
+      ],
+      "encoded_dimensions": [
+        [
+          1393,
+          783
+        ]
+      ]
+    },
+    "physical_input_to_display": null,
+    "limitations": [
+      "ACK timing is not physical key-to-photon latency or network RTT.",
+      "Recent per-window quantiles cannot reconstruct whole-run percentiles.",
+      "Stages overlap and have different denominators; do not add their means.",
+      "Mode, GPU synchronization and readback subdivision require separate capture traces.",
+      "No competitor ranking, hardware target or end-to-end acceptance is inferred."
+    ],
+    "discarded_startup_windows": 1,
+    "modes": [
+      "overlay/cpu-resize/core-getimage/damage/cursor-events"
+    ],
+    "window_sent_fps_range": [
+      4.766569784838223,
+      17.284729078607086
+    ],
+    "drawn_frames_per_second": 9.35239964844471
+  },
+  "static": {
+    "schema_version": 1,
+    "kind": "jwm_remote_workload_report",
+    "run_id": "x11-ssh-initial-20261119",
+    "workload": "isolated-x11-static",
+    "version": "0.2.0",
+    "commit": null,
+    "windows": 3,
+    "ignored_diagnostic_lines": 0,
+    "reported_seconds": 15.044148243,
+    "totals": {
+      "scheduled": 407,
+      "captured": 407,
+      "sent": 3,
+      "bytes": 1473,
+      "replaced": 0,
+      "unchanged_suppressed": 404,
+      "dirty_tiles": 0,
+      "total_tiles": 10800,
+      "drawn_acks": 3,
+      "viewer_superseded": 0
+    },
+    "sent_frames_per_reported_second": 0.19941308418014903,
+    "payload_mbit_per_reported_second": 0.0007832945946596253,
+    "stages": {
+      "capture_ms": {
+        "whole_run_weighted_mean_ms": 27.20244773710074,
+        "mean_denominator": "captured",
+        "window_means_range_ms": [
+          24.30002991176471,
+          30.88846234848485
+        ],
+        "max_reported_window_recent_p95_ms": 49.918,
+        "whole_run_percentiles": null
+      },
+      "mailbox_age_ms": {
+        "whole_run_weighted_mean_ms": null,
+        "mean_denominator": null,
+        "window_means_range_ms": [
+          0.022217124999999997,
+          0.033041856060606056
+        ],
+        "max_reported_window_recent_p95_ms": 0.083,
+        "whole_run_percentiles": null
+      },
+      "credit_wait_ms": {
+        "whole_run_weighted_mean_ms": null,
+        "mean_denominator": null,
+        "window_means_range_ms": [
+          0.00028760294117647056,
+          0.00036999242424242426
+        ],
+        "max_reported_window_recent_p95_ms": 0.0,
+        "whole_run_percentiles": null
+      },
+      "dirty_scan_ms": {
+        "whole_run_weighted_mean_ms": null,
+        "mean_denominator": null,
+        "window_means_range_ms": [
+          0.7674875661764706,
+          1.1527771363636363
+        ],
+        "max_reported_window_recent_p95_ms": 2.062,
+        "whole_run_percentiles": null
+      },
+      "atlas_pack_ms": {
+        "whole_run_weighted_mean_ms": null,
+        "mean_denominator": null,
+        "window_means_range_ms": null,
+        "max_reported_window_recent_p95_ms": null,
+        "whole_run_percentiles": null
+      },
+      "jpeg_ms": {
+        "whole_run_weighted_mean_ms": null,
+        "mean_denominator": null,
+        "window_means_range_ms": null,
+        "max_reported_window_recent_p95_ms": null,
+        "whole_run_percentiles": null
+      },
+      "atlas_pack_and_jpeg_ms": {
+        "whole_run_weighted_mean_ms": null,
+        "mean_denominator": null,
+        "window_means_range_ms": [
+          0.000651,
+          0.002091
+        ],
+        "max_reported_window_recent_p95_ms": 0.002,
+        "whole_run_percentiles": null
+      },
+      "writer_wait_ms": {
+        "whole_run_weighted_mean_ms": 0.0010006666666666666,
+        "mean_denominator": "sent",
+        "window_means_range_ms": [
+          0.000486,
+          0.0019290000000000002
+        ],
+        "max_reported_window_recent_p95_ms": 0.001,
+        "whole_run_percentiles": null
+      },
+      "socket_write_ms": {
+        "whole_run_weighted_mean_ms": 0.079389,
+        "mean_denominator": "sent",
+        "window_means_range_ms": [
+          0.03595,
+          0.155837
+        ],
+        "max_reported_window_recent_p95_ms": 0.155,
+        "whole_run_percentiles": null
+      },
+      "capture_start_to_ack_ms": {
+        "whole_run_weighted_mean_ms": 32.438885,
+        "mean_denominator": "drawn_acks",
+        "window_means_range_ms": [
+          16.172947,
+          46.003878
+        ],
+        "max_reported_window_recent_p95_ms": 46.003,
+        "whole_run_percentiles": null
+      },
+      "send_to_ack_ms": {
+        "whole_run_weighted_mean_ms": 10.344810333333333,
+        "mean_denominator": "drawn_acks",
+        "window_means_range_ms": [
+          2.959546,
+          24.142670000000003
+        ],
+        "max_reported_window_recent_p95_ms": 24.142,
+        "whole_run_percentiles": null
+      }
+    },
+    "dimensions_seen": {
+      "source_dimensions": [
+        [
+          2560,
+          1440
+        ]
+      ],
+      "encoded_dimensions": [
+        [
+          1280,
+          720
+        ]
+      ]
+    },
+    "physical_input_to_display": null,
+    "limitations": [
+      "ACK timing is not physical key-to-photon latency or network RTT.",
+      "Recent per-window quantiles cannot reconstruct whole-run percentiles.",
+      "Stages overlap and have different denominators; do not add their means.",
+      "Mode, GPU synchronization and readback subdivision require separate capture traces.",
+      "No competitor ranking, hardware target or end-to-end acceptance is inferred."
+    ],
+    "discarded_startup_windows": 0,
+    "modes": [
+      "root/cpu-resize/core-getimage/no-damage/cursor-events"
+    ],
+    "window_sent_fps_range": [
+      0.1991521002940365,
+      0.1995578329246226
+    ],
+    "drawn_frames_per_second": 0.19941308418014903
+  },
+  "motion": {
+    "schema_version": 1,
+    "kind": "jwm_remote_workload_report",
+    "run_id": "x11-ssh-initial-20261119",
+    "workload": "isolated-x11-moving-bands-30fps",
+    "version": "0.2.0",
+    "commit": null,
+    "windows": 3,
+    "ignored_diagnostic_lines": 0,
+    "reported_seconds": 15.010861931,
+    "totals": {
+      "scheduled": 412,
+      "captured": 213,
+      "sent": 167,
+      "bytes": 16501474,
+      "replaced": 44,
+      "unchanged_suppressed": 2,
+      "dirty_tiles": 400330,
+      "total_tiles": 601200,
+      "drawn_acks": 167,
+      "viewer_superseded": 0
+    },
+    "sent_frames_per_reported_second": 11.125277200446192,
+    "payload_mbit_per_reported_second": 8.794417842680508,
+    "stages": {
+      "capture_ms": {
+        "whole_run_weighted_mean_ms": 29.461513549295773,
+        "mean_denominator": "captured",
+        "window_means_range_ms": [
+          27.528455598130837,
+          32.51724337142858
+        ],
+        "max_reported_window_recent_p95_ms": 53.399,
+        "whole_run_percentiles": null
+      },
+      "mailbox_age_ms": {
+        "whole_run_weighted_mean_ms": null,
+        "mean_denominator": null,
+        "window_means_range_ms": [
+          5.658098093457944,
+          73.35118779999999
+        ],
+        "max_reported_window_recent_p95_ms": 129.805,
+        "whole_run_percentiles": null
+      },
+      "credit_wait_ms": {
+        "whole_run_weighted_mean_ms": null,
+        "mean_denominator": null,
+        "window_means_range_ms": [
+          2.091791971962617,
+          126.574083
+        ],
+        "max_reported_window_recent_p95_ms": 239.834,
+        "whole_run_percentiles": null
+      },
+      "dirty_scan_ms": {
+        "whole_run_weighted_mean_ms": null,
+        "mean_denominator": null,
+        "window_means_range_ms": [
+          0.4688055887850467,
+          0.7758212
+        ],
+        "max_reported_window_recent_p95_ms": 1.119,
+        "whole_run_percentiles": null
+      },
+      "atlas_pack_ms": {
+        "whole_run_weighted_mean_ms": null,
+        "mean_denominator": null,
+        "window_means_range_ms": [
+          0.7024952169811322,
+          1.8272165999999999
+        ],
+        "max_reported_window_recent_p95_ms": 2.16,
+        "whole_run_percentiles": null
+      },
+      "jpeg_ms": {
+        "whole_run_weighted_mean_ms": null,
+        "mean_denominator": null,
+        "window_means_range_ms": [
+          28.794998603773585,
+          80.426414
+        ],
+        "max_reported_window_recent_p95_ms": 90.393,
+        "whole_run_percentiles": null
+      },
+      "atlas_pack_and_jpeg_ms": {
+        "whole_run_weighted_mean_ms": null,
+        "mean_denominator": null,
+        "window_means_range_ms": [
+          29.499034113207546,
+          82.2561526
+        ],
+        "max_reported_window_recent_p95_ms": 92.343,
+        "whole_run_percentiles": null
+      },
+      "writer_wait_ms": {
+        "whole_run_weighted_mean_ms": 0.0011363413173652696,
+        "mean_denominator": "sent",
+        "window_means_range_ms": [
+          0.0010373301886792453,
+          0.001996
+        ],
+        "max_reported_window_recent_p95_ms": 0.002,
+        "whole_run_percentiles": null
+      },
+      "socket_write_ms": {
+        "whole_run_weighted_mean_ms": 0.33790016167664666,
+        "mean_denominator": "sent",
+        "window_means_range_ms": [
+          0.3249507142857143,
+          0.7110508
+        ],
+        "max_reported_window_recent_p95_ms": 1.008,
+        "whole_run_percentiles": null
+      },
+      "capture_start_to_ack_ms": {
+        "whole_run_weighted_mean_ms": 177.9411524730539,
+        "mean_denominator": "drawn_acks",
+        "window_means_range_ms": [
+          82.23938020952382,
+          473.68092800000005
+        ],
+        "max_reported_window_recent_p95_ms": 602.803,
+        "whole_run_percentiles": null
+      },
+      "send_to_ack_ms": {
+        "whole_run_weighted_mean_ms": 103.97777196407186,
+        "mean_denominator": "drawn_acks",
+        "window_means_range_ms": [
+          19.793878028571427,
+          303.9111128
+        ],
+        "max_reported_window_recent_p95_ms": 409.736,
+        "whole_run_percentiles": null
+      }
+    },
+    "dimensions_seen": {
+      "source_dimensions": [
+        [
+          2560,
+          1440
+        ]
+      ],
+      "encoded_dimensions": [
+        [
+          1280,
+          720
+        ]
+      ]
+    },
+    "physical_input_to_display": null,
+    "limitations": [
+      "ACK timing is not physical key-to-photon latency or network RTT.",
+      "Recent per-window quantiles cannot reconstruct whole-run percentiles.",
+      "Stages overlap and have different denominators; do not add their means.",
+      "Mode, GPU synchronization and readback subdivision require separate capture traces.",
+      "No competitor ranking, hardware target or end-to-end acceptance is inferred."
+    ],
+    "discarded_startup_windows": 0,
+    "modes": [
+      "root/cpu-resize/core-getimage/no-damage/cursor-events"
+    ],
+    "window_sent_fps_range": [
+      0.9996024501087721,
+      21.177976738205054
+    ],
+    "drawn_frames_per_second": 11.125277200446192
+  },
+  "notes": [
+    "Clipboard was disabled for all phases.",
+    "Startup is launch through first frame submission and a connected log record, one sample per phase.",
+    "The live desktop draws at its natural activity rate. The controlled phases use owned Xvfb displays on both machines.",
+    "The controlled viewer requests a 1280x720 window and CPU scaling. The source fixture draws moving bands at about 30 fps.",
+    "Four warmup input markers are excluded. Measured latency starts at XTEST injection and ends at unique viewer X11 pixel observation.",
+    "Input samples do not measure physical input-to-photon, panel scanout, or live desktop control latency.",
+    "Payload data rates exclude encrypted transport overhead.",
+    "The 20 edge handoff samples measure a synthetic pointer warp to observing the released status on the isolated viewer. Polling resolution is about 2 ms.",
+    "Ambient system load was not controlled. A separate benchmark process was observed on the source machine after the first controlled run."
+  ],
+  "controlled_x11_input_to_pixel": {
+    "samples": 36,
+    "min_ms": 15.888,
+    "mean_ms": 69.58005555555556,
+    "p50_ms": 59.646,
+    "p95_ms": 175.943,
+    "max_ms": 229.029,
+    "warmup_samples": 4,
+    "failed_samples": 0
+  },
+  "controlled_x11_edge_release_title_ms_single_sample": 2.359,
+  "repeat": {
+    "startup_ms": 1059.032495948486,
+    "static": {
+      "schema_version": 1,
+      "kind": "jwm_remote_workload_report",
+      "run_id": "x11-ssh-initial-20261119",
+      "workload": "isolated-x11-static-repeat",
+      "version": "0.2.0",
+      "commit": null,
+      "windows": 3,
+      "ignored_diagnostic_lines": 0,
+      "reported_seconds": 15.031802733,
+      "totals": {
+        "scheduled": 424,
+        "captured": 424,
+        "sent": 3,
+        "bytes": 1473,
+        "replaced": 0,
+        "unchanged_suppressed": 421,
+        "dirty_tiles": 0,
+        "total_tiles": 10800,
+        "drawn_acks": 3,
+        "viewer_superseded": 0
+      },
+      "sent_frames_per_reported_second": 0.19957686069242805,
+      "payload_mbit_per_reported_second": 0.0007839379087998574,
+      "stages": {
+        "capture_ms": {
+          "whole_run_weighted_mean_ms": 20.487817410377357,
+          "mean_denominator": "captured",
+          "window_means_range_ms": [
+            16.059009755244755,
+            24.785726992805756
+          ],
+          "max_reported_window_recent_p95_ms": 48.249,
+          "whole_run_percentiles": null
+        },
+        "mailbox_age_ms": {
+          "whole_run_weighted_mean_ms": null,
+          "mean_denominator": null,
+          "window_means_range_ms": [
+            0.0189353661971831,
+            0.025859424460431654
+          ],
+          "max_reported_window_recent_p95_ms": 0.087,
+          "whole_run_percentiles": null
+        },
+        "credit_wait_ms": {
+          "whole_run_weighted_mean_ms": null,
+          "mean_denominator": null,
+          "window_means_range_ms": [
+            0.00021758450704225353,
+            0.0002653021582733813
+          ],
+          "max_reported_window_recent_p95_ms": 0.0,
+          "whole_run_percentiles": null
+        },
+        "dirty_scan_ms": {
+          "whole_run_weighted_mean_ms": null,
+          "mean_denominator": null,
+          "window_means_range_ms": [
+            0.541973838028169,
+            0.6683094460431654
+          ],
+          "max_reported_window_recent_p95_ms": 1.798,
+          "whole_run_percentiles": null
+        },
+        "atlas_pack_ms": {
+          "whole_run_weighted_mean_ms": null,
+          "mean_denominator": null,
+          "window_means_range_ms": null,
+          "max_reported_window_recent_p95_ms": null,
+          "whole_run_percentiles": null
+        },
+        "jpeg_ms": {
+          "whole_run_weighted_mean_ms": null,
+          "mean_denominator": null,
+          "window_means_range_ms": null,
+          "max_reported_window_recent_p95_ms": null,
+          "whole_run_percentiles": null
+        },
+        "atlas_pack_and_jpeg_ms": {
+          "whole_run_weighted_mean_ms": null,
+          "mean_denominator": null,
+          "window_means_range_ms": [
+            0.000817,
+            0.001841
+          ],
+          "max_reported_window_recent_p95_ms": 0.001,
+          "whole_run_percentiles": null
+        },
+        "writer_wait_ms": {
+          "whole_run_weighted_mean_ms": 0.0010713333333333332,
+          "mean_denominator": "sent",
+          "window_means_range_ms": [
+            0.00061,
+            0.0015919999999999999
+          ],
+          "max_reported_window_recent_p95_ms": 0.001,
+          "whole_run_percentiles": null
+        },
+        "socket_write_ms": {
+          "whole_run_weighted_mean_ms": 0.109298,
+          "mean_denominator": "sent",
+          "window_means_range_ms": [
+            0.069614,
+            0.137388
+          ],
+          "max_reported_window_recent_p95_ms": 0.137,
+          "whole_run_percentiles": null
+        },
+        "capture_start_to_ack_ms": {
+          "whole_run_weighted_mean_ms": 159.45708533333334,
+          "mean_denominator": "drawn_acks",
+          "window_means_range_ms": [
+            33.043394,
+            407.43494200000004
+          ],
+          "max_reported_window_recent_p95_ms": 407.434,
+          "whole_run_percentiles": null
+        },
+        "send_to_ack_ms": {
+          "whole_run_weighted_mean_ms": 131.27830566666668,
+          "mean_denominator": "drawn_acks",
+          "window_means_range_ms": [
+            3.368803,
+            385.19066200000003
+          ],
+          "max_reported_window_recent_p95_ms": 385.19,
+          "whole_run_percentiles": null
+        }
+      },
+      "dimensions_seen": {
+        "source_dimensions": [
+          [
+            2560,
+            1440
+          ]
+        ],
+        "encoded_dimensions": [
+          [
+            1280,
+            720
+          ]
+        ]
+      },
+      "physical_input_to_display": null,
+      "limitations": [
+        "ACK timing is not physical key-to-photon latency or network RTT.",
+        "Recent per-window quantiles cannot reconstruct whole-run percentiles.",
+        "Stages overlap and have different denominators; do not add their means.",
+        "Mode, GPU synchronization and readback subdivision require separate capture traces.",
+        "No competitor ranking, hardware target or end-to-end acceptance is inferred."
+      ],
+      "discarded_startup_windows": 0,
+      "modes": [
+        "root/cpu-resize/core-getimage/no-damage/cursor-events"
+      ],
+      "window_sent_fps_range": [
+        0.19892248294057346,
+        0.1999113970697933
+      ],
+      "drawn_frames_per_second": 0.19957686069242805
+    },
+    "motion": {
+      "schema_version": 1,
+      "kind": "jwm_remote_workload_report",
+      "run_id": "x11-ssh-initial-20261119",
+      "workload": "isolated-x11-moving-bands-30fps-repeat",
+      "version": "0.2.0",
+      "commit": null,
+      "windows": 3,
+      "ignored_diagnostic_lines": 0,
+      "reported_seconds": 15.042454323,
+      "totals": {
+        "scheduled": 413,
+        "captured": 359,
+        "sent": 351,
+        "bytes": 37385769,
+        "replaced": 0,
+        "unchanged_suppressed": 8,
+        "dirty_tiles": 825696,
+        "total_tiles": 1263600,
+        "drawn_acks": 352,
+        "viewer_superseded": 0
+      },
+      "sent_frames_per_reported_second": 23.333958173522188,
+      "payload_mbit_per_reported_second": 19.88280273802763,
+      "stages": {
+        "capture_ms": {
+          "whole_run_weighted_mean_ms": 24.573343632311975,
+          "mean_denominator": "captured",
+          "window_means_range_ms": [
+            21.474455531746035,
+            27.305456260869565
+          ],
+          "max_reported_window_recent_p95_ms": 49.308,
+          "whole_run_percentiles": null
+        },
+        "mailbox_age_ms": {
+          "whole_run_weighted_mean_ms": null,
+          "mean_denominator": null,
+          "window_means_range_ms": [
+            1.7990054237288133,
+            2.2799264260869565
+          ],
+          "max_reported_window_recent_p95_ms": 11.892,
+          "whole_run_percentiles": null
+        },
+        "credit_wait_ms": {
+          "whole_run_weighted_mean_ms": null,
+          "mean_denominator": null,
+          "window_means_range_ms": [
+            0.07343594067796609,
+            2.092638096
+          ],
+          "max_reported_window_recent_p95_ms": 15.013,
+          "whole_run_percentiles": null
+        },
+        "dirty_scan_ms": {
+          "whole_run_weighted_mean_ms": null,
+          "mean_denominator": null,
+          "window_means_range_ms": [
+            0.3310988,
+            0.4100465217391304
+          ],
+          "max_reported_window_recent_p95_ms": 0.861,
+          "whole_run_percentiles": null
+        },
+        "atlas_pack_ms": {
+          "whole_run_weighted_mean_ms": null,
+          "mean_denominator": null,
+          "window_means_range_ms": [
+            0.4544670991735537,
+            0.6236436695652173
+          ],
+          "max_reported_window_recent_p95_ms": 1.555,
+          "whole_run_percentiles": null
+        },
+        "jpeg_ms": {
+          "whole_run_weighted_mean_ms": null,
+          "mean_denominator": null,
+          "window_means_range_ms": [
+            19.330224413223142,
+            26.2430582173913
+          ],
+          "max_reported_window_recent_p95_ms": 47.241,
+          "whole_run_percentiles": null
+        },
+        "atlas_pack_and_jpeg_ms": {
+          "whole_run_weighted_mean_ms": null,
+          "mean_denominator": null,
+          "window_means_range_ms": [
+            19.78597197520661,
+            26.86828171304348
+          ],
+          "max_reported_window_recent_p95_ms": 48.12,
+          "whole_run_percentiles": null
+        },
+        "writer_wait_ms": {
+          "whole_run_weighted_mean_ms": 0.0009060826210826211,
+          "mean_denominator": "sent",
+          "window_means_range_ms": [
+            0.0008130495867768595,
+            0.0009736434782608695
+          ],
+          "max_reported_window_recent_p95_ms": 0.001,
+          "whole_run_percentiles": null
+        },
+        "socket_write_ms": {
+          "whole_run_weighted_mean_ms": 0.295128886039886,
+          "mean_denominator": "sent",
+          "window_means_range_ms": [
+            0.2528876694214876,
+            0.32257364347826084
+          ],
+          "max_reported_window_recent_p95_ms": 0.552,
+          "whole_run_percentiles": null
+        },
+        "capture_start_to_ack_ms": {
+          "whole_run_weighted_mean_ms": 69.52430072443181,
+          "mean_denominator": "drawn_acks",
+          "window_means_range_ms": [
+            64.49706651219512,
+            77.31975732456141
+          ],
+          "max_reported_window_recent_p95_ms": 123.064,
+          "whole_run_percentiles": null
+        },
+        "send_to_ack_ms": {
+          "whole_run_weighted_mean_ms": 18.767313139204546,
+          "mean_denominator": "drawn_acks",
+          "window_means_range_ms": [
+            15.21846512173913,
+            21.400295902439026
+          ],
+          "max_reported_window_recent_p95_ms": 48.214,
+          "whole_run_percentiles": null
+        }
+      },
+      "dimensions_seen": {
+        "source_dimensions": [
+          [
+            2560,
+            1440
+          ]
+        ],
+        "encoded_dimensions": [
+          [
+            1280,
+            720
+          ]
+        ]
+      },
+      "physical_input_to_display": null,
+      "limitations": [
+        "ACK timing is not physical key-to-photon latency or network RTT.",
+        "Recent per-window quantiles cannot reconstruct whole-run percentiles.",
+        "Stages overlap and have different denominators; do not add their means.",
+        "Mode, GPU synchronization and readback subdivision require separate capture traces.",
+        "No competitor ranking, hardware target or end-to-end acceptance is inferred."
+      ],
+      "discarded_startup_windows": 0,
+      "modes": [
+        "root/cpu-resize/core-getimage/no-damage/cursor-events"
+      ],
+      "window_sent_fps_range": [
+        22.977745120953905,
+        24.034747449931274
+      ],
+      "drawn_frames_per_second": 23.400436686837065
+    },
+    "controlled_x11_input_to_pixel": {
+      "samples": 36,
+      "min_ms": 15.702,
+      "mean_ms": 67.76394444444445,
+      "p50_ms": 67.22149999999999,
+      "p95_ms": 95.652,
+      "max_ms": 99.399,
+      "warmup_samples": 4,
+      "failed_samples": 0
+    },
+    "edge_release_title": {
+      "samples": 20,
+      "min_ms": 2.146,
+      "mean_ms": 2.29685,
+      "p50_ms": 2.2995,
+      "p95_ms": 2.421,
+      "max_ms": 2.453
+    }
+  },
+  "icmp_rtt": {
+    "samples": 40,
+    "min_ms": 1.17,
+    "mean_ms": 28.614,
+    "p50_ms": 3.52,
+    "p95_ms": 111.0,
+    "max_ms": 124.0
+  }
+}
