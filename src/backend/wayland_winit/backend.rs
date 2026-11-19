@@ -2119,15 +2119,14 @@ fn process_input_event_windowed<B: InputBackend>(
                     let keycode_u32 = u32::from(keycode);
                     let keycode_u8 = u8::try_from(keycode_u32).unwrap_or(0);
                     let mods_state = shared.lock_safe().mods_state;
-                    pending_events
-                        .lock()
-                        .unwrap()
-                        .push_back(BackendEvent::KeyPress {
-                            keycode: keycode_u8,
-                            state: mods_state,
-                            time: time.millis(),
-                            repeat: false,
-                        });
+                    let mut queue = pending_events.lock().unwrap();
+                    crate::backend::winit_queue_trace::enqueue(queue.len(), keycode_u8);
+                    queue.push_back(BackendEvent::KeyPress {
+                        keycode: keycode_u8,
+                        state: mods_state,
+                        time: time.millis(),
+                        repeat: false,
+                    });
                 }
 
                 // ...except the Alt+Tab switcher, which ends when the modifier
@@ -2316,9 +2315,9 @@ impl CompositorWorkspaceEffects for WaylandWinitBackend {
         // Same rule the udev backend applies: a press queued before the lock
         // card went up must not be handled as a shortcut behind it.
         if overlay.as_ref().is_some_and(|overlay| overlay.locked) {
-            self.pending_events
-                .lock_safe()
-                .retain(|event| !matches!(event, BackendEvent::KeyPress { .. }));
+            let mut queue = self.pending_events.lock_safe();
+            crate::backend::winit_queue_trace::discarded();
+            queue.retain(|event| !matches!(event, BackendEvent::KeyPress { .. }));
         }
         let mut shared = self.shared.lock_safe();
         shared.system_ui_grab_active = overlay.is_some();
@@ -2499,6 +2498,7 @@ impl Backend for WaylandWinitBackend {
 
     fn run(&mut self, handler: &mut dyn EventHandler) -> Result<(), BackendError> {
         crate::backend::terminal_exit_trace::init();
+        crate::backend::winit_queue_trace::init();
         // The winit host connection is registered as a calloop source, and its fd
         // can stay perpetually readable with host protocol traffic we don't forward
         // (frame/sync events on queues winit drains but surfaces nothing for). That
@@ -2516,9 +2516,23 @@ impl Backend for WaylandWinitBackend {
 
         loop {
             let frame_start = std::time::Instant::now();
+            crate::backend::winit_queue_trace::cycle();
 
-            while let Some(ev) = { self.pending_events.lock_safe().pop_front() } {
-                handler.handle_event(self, ev)?;
+            while let Some(ev) = {
+                let mut queue = self.pending_events.lock_safe();
+                let event = queue.pop_front();
+                if let Some(event) = &event {
+                    let keycode = match event {
+                        BackendEvent::KeyPress { keycode, .. } => Some(*keycode),
+                        _ => None,
+                    };
+                    crate::backend::winit_queue_trace::pop(keycode);
+                }
+                event
+            } {
+                let result = handler.handle_event(self, ev);
+                crate::backend::winit_queue_trace::finish_handler();
+                result?;
             }
             // Policy has now seen every queued set/unset_maximized; answer the
             // ones it dropped so no xdg client waits on a missing configure.
@@ -2543,9 +2557,14 @@ impl Backend for WaylandWinitBackend {
 
             let elapsed = frame_start.elapsed();
             if elapsed < frame_budget {
+                crate::backend::winit_queue_trace::sleep("sleep_begin");
                 std::thread::sleep(frame_budget - elapsed);
+                crate::backend::winit_queue_trace::sleep("sleep_end");
+            } else {
+                crate::backend::winit_queue_trace::sleep("no_sleep");
             }
         }
+        crate::backend::winit_queue_trace::finish_run();
         Ok(())
     }
 }

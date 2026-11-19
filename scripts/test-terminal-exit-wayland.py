@@ -148,6 +148,52 @@ def annotate_clock_evidence(report, trace_path):
         report['failures'].append('clock diagnostic invalid: ' + str(error))
 
 
+def annotate_queue_trace(report, path):
+    """Independent diagnostic validity; never alters legacy/phase verdicts."""
+    diagnostic = {'status': 'invalid', 'failures': [], 'targets': []}
+    report['queue_diagnostic'] = diagnostic
+    try:
+        rows = []
+        for line in path.read_text().splitlines():
+            ns, seq, key, cycle, event = line.split()
+            assert not event.startswith('INVALID'), 'invalid queue binding'
+            rows.append({'ns': int(ns), 'seq': int(seq), 'keycode': int(key),
+                         'cycle': int(cycle), 'event': event})
+        assert rows, 'missing queue trace'
+        assert all(a['ns'] <= b['ns'] for a, b in zip(rows, rows[1:])), 'non-monotonic trace'
+        for case in report['cases']:
+            start = round(case['key_start'] * 1e9)
+            end = start + round(case['frames'][-1]['seconds'] * 1e9)
+            hides = [r for r in rows if r['event'] == 'hide_handler' and start <= r['ns'] <= end]
+            assert len(hides) == 1, 'missing or ambiguous hide sequence'
+            target = [r for r in rows if r['seq'] == hides[0]['seq']]
+            assert all(r['keycode'] == 57 for r in target), 'wrong key binding'
+            names = [r['event'] for r in target]
+            required = ['enqueue', 'dequeue', 'hide_handler', 'input_released_visual_ready',
+                        'render_begin', 'submit_begin', 'submit_return_ok', 'render_return_ok', 'handler_return']
+            assert [name for name in names if name not in ('sleep_begin', 'sleep_end', 'no_sleep')] == required, 'missing/duplicate/out-of-order target stage'
+            enqueue, dequeue = target[0], next(r for r in target if r['event'] == 'dequeue')
+            assert enqueue['ns'] >= start, 'target enqueued before current hotkey'
+            assert dequeue['cycle'] == enqueue['cycle'] + 1, 'enqueue/dequeue loop identity invalid'
+            assert all(r['cycle'] == dequeue['cycle'] for r in target if r['ns'] >= dequeue['ns']), 'handler/submit crossed loop identity'
+            sleeps = [r for r in target if r['event'].startswith('sleep_')]
+            no_sleeps = [r for r in target if r['event'] == 'no_sleep']
+            assert (len(sleeps) == 2 and not no_sleeps) or (not sleeps and len(no_sleeps) == 1), 'missing/ambiguous sleep decision'
+            for marker in no_sleeps:
+                assert marker['cycle'] == enqueue['cycle'] and enqueue['ns'] <= marker['ns'] <= dequeue['ns'], 'wrong no-sleep loop'
+            assert len(sleeps) % 2 == 0, 'unpaired sleep'
+            for begin, finish in zip(sleeps[::2], sleeps[1::2]):
+                assert (begin['event'], finish['event']) == ('sleep_begin', 'sleep_end'), 'wrong sleep order'
+                assert begin['cycle'] == finish['cycle'] == enqueue['cycle'], 'wrong sleep loop'
+                assert enqueue['ns'] <= begin['ns'] <= finish['ns'] <= dequeue['ns'], 'sleep not between enqueue and dequeue'
+            diagnostic['targets'].append({'case': case['case'], 'seq': hides[0]['seq'], 'records': target,
+                                          'enqueue_to_dequeue_ns': dequeue['ns'] - enqueue['ns']})
+        assert diagnostic['targets'], 'no case targets'
+        diagnostic['status'] = 'valid'
+    except (OSError, ValueError, KeyError, AssertionError, IndexError) as error:
+        diagnostic['failures'].append(str(error))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--backend', choices=['wayland-winit', 'wayland-x11'], default='wayland-winit')
@@ -156,6 +202,7 @@ def main():
     parser.add_argument('--evidence-dir', type=Path, default=ROOT / 'artifacts/terminal-exit-wayland')
     parser.add_argument('--diagnose', action='store_true', help='Collect later cases after a failed invariant; never converts failure to success')
     parser.add_argument('--self-test', action='store_true')
+    parser.add_argument('--queue-trace', action='store_true', help='independent opt-in winit queue/sleep measurement, no scheduling change')
     parser.add_argument('--phase-candidate', action='store_true', help='local proposed visual verdict plus bounded burst; legacy verdict remains authoritative')
     parser.add_argument('--trace-clock', action='store_true', help='opt-in diagnostic only; does not alter gates')
     args = parser.parse_args()
@@ -164,6 +211,8 @@ def main():
         return 0 if unittest.TextTestRunner(verbosity=2).run(suite).wasSuccessful() else 1
     if args.phase_candidate and not args.trace_clock:
         parser.error('--phase-candidate requires --trace-clock')
+    if args.queue_trace and args.backend != 'wayland-winit':
+        parser.error('--queue-trace supports winit only')
     output = args.evidence_dir.resolve()
     output.mkdir(parents=True, exist_ok=True)
     report = {'status': 'running', 'backend': args.backend, 'transport': 'native wl_shm/xdg-shell',
@@ -191,6 +240,12 @@ def main():
             env['JWM_TERMINAL_EXIT_TRACE'] = str(trace_path)
             report['limits'].append('CLOCK_MONOTONIC trace adds clock/lock/buffer cost and post-submit file writes; submit return is not presentation feedback. Missing/damaged trace invalidates diagnosis; not every IO failure is observable. Capture float timestamps rounded to nanoseconds, not nanosecond measurement precision.')
             report['clock_implementation'] = time.get_clock_info('monotonic').implementation
+        queue_trace_path = output / 'winit-queue.trace'
+        if args.queue_trace:
+            if time.get_clock_info('monotonic').implementation != 'clock_gettime(CLOCK_MONOTONIC)':
+                raise RuntimeError('queue trace requires Python CLOCK_MONOTONIC')
+            env['JWM_WINIT_QUEUE_TRACE'] = str(queue_trace_path)
+            report['limits'].append('Queue trace records all XKB57 presses, selects exact hide_handler seq per case. 4096 memory records/128 pending targets bounded; sleep marker work occurs after elapsed calculation and adds diagnostic delay; handler-return writes perturb subsequent scheduling. Submit return is not presentation. No budget/phase changes.')
         log = (output / 'session.log').open('w')
         def run(*argv):
             return subprocess.check_output(list(map(str, argv)), env=env, stderr=log, text=True, timeout=15)
@@ -229,17 +284,36 @@ def main():
                 assert shutil.which(tool), f'missing {tool}'
             for executable in (args.bin_dir / 'jwm', args.bin_dir / 'jwm-tool', args.client_bin):
                 assert executable.is_file() and os.access(executable, os.X_OK), f'missing executable {executable}'
-            read, write = os.pipe()
-            try:
-                spawn(['Xvfb', '-displayfd', write, '-screen', '0', '1280x800x24', '-nolisten', 'tcp', '-noreset'], pass_fds=(write,))
-                os.close(write)
-                write = None
-                assert select.select([read], [], [], 10)[0], 'Xvfb readiness timeout'
-                env['DISPLAY'] = ':' + os.read(read, 32).decode().strip()
-            finally:
-                os.close(read)
-                if write is not None:
+            if args.queue_trace:
+                # Normal private X server owns its display lock; nested Xwayland
+                # must not mistake this host's socket for an unlocked stale one.
+                display_number = next((number for number in range(180, 200)
+                    if not Path(f'/tmp/.X{number}-lock').exists()
+                    and not Path(f'/tmp/.X11-unix/X{number}').exists()), None)
+                assert display_number is not None, 'no private X display slot'
+                env['DISPLAY'] = f':{display_number}'
+                host = spawn(['Xvfb', env['DISPLAY'], '-screen', '0', '1280x800x24',
+                              '-nolisten', 'tcp', '-noreset'])
+                host_lock = Path(f'/tmp/.X{display_number}-lock')
+                host_socket = Path(f'/tmp/.X11-unix/X{display_number}')
+                wait(lambda: host.poll() is None and host_lock.exists()
+                     and int(host_lock.read_text().strip()) == host.pid and host_socket.is_socket(),
+                     'owned Xvfb display lock/socket', timeout=10)
+                run('xdotool', 'getdisplaygeometry')
+                report['host_display'] = {'display': env['DISPLAY'], 'pid': host.pid,
+                                          'lock_pid': int(host_lock.read_text().strip())}
+            else:
+                read, write = os.pipe()
+                try:
+                    spawn(['Xvfb', '-displayfd', write, '-screen', '0', '1280x800x24', '-nolisten', 'tcp', '-noreset'], pass_fds=(write,))
                     os.close(write)
+                    write = None
+                    assert select.select([read], [], [], 10)[0], 'Xvfb readiness timeout'
+                    env['DISPLAY'] = ':' + os.read(read, 32).decode().strip()
+                finally:
+                    os.close(read)
+                    if write is not None:
+                        os.close(write)
             binary = args.bin_dir.resolve() / 'jwm'
             run(binary, '--backend', args.backend, '--gen-config')
             config = work / 'config/jwm/config_wayland.toml'
@@ -257,6 +331,8 @@ def main():
             run('xdotool', 'windowsize', outer, 1280, 800)
             run('xdotool', 'windowfocus', outer)
             wait(lambda: any(row['w'] == 1280 and row['h'] == 800 for row in msg('get_monitors')), 'physical nested output')
+            if args.queue_trace:
+                assert host.poll() is None and int(host_lock.read_text().strip()) == host.pid, 'host display ownership changed after nested Xwayland startup'
             wayland = wait(lambda: next((p.name for p in (work / 'runtime').glob('wayland-*') if p.is_socket()), None), 'owned native socket')
             capture = X11.RootCapture(env['DISPLAY'])
             capture.root = outer  # Capture output drawable, independent of host position/borders.
@@ -457,6 +533,10 @@ def main():
                 annotate_clock_evidence(report, trace_path)
             if args.phase_candidate:
                 clock_aware_candidate(report)
+            if args.queue_trace:
+                annotate_queue_trace(report, queue_trace_path)
+                if report['queue_diagnostic']['status'] != 'valid':
+                    report['failures'].append('queue diagnostic invalid; see independent queue_diagnostic failures')
             report['status'] = 'failure' if report['failures'] else 'success'
             (output / 'report.json').write_text(json.dumps(report, indent=2)+'\n')
             print(json.dumps(report, indent=2))
@@ -599,6 +679,54 @@ class Offline(unittest.TestCase):
         self.assertEqual(len(frames), 2)
         self.assertEqual(frames[-1][2], .09)
         self.assertGreater(frames[-1][2], .082666)
+
+    def queue_report(self):
+        return {'cases': [{'case': 'pip', 'key_start': 0., 'frames': [{'seconds': 1.15}]}], 'failures': ['legacy occlusion']}
+
+    def queue_lines(self):
+        names = ['enqueue', 'sleep_begin', 'sleep_end', 'dequeue', 'hide_handler',
+                 'input_released_visual_ready', 'render_begin', 'submit_begin',
+                 'submit_return_ok', 'render_return_ok', 'handler_return']
+        return [f'{index+1} 1 57 {1 if index<3 else 2} {event}' for index, event in enumerate(names)]
+
+    def test_queue_diagnostic_preserves_legacy_and_requires_exact_binding(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)/'queue'
+            variants = [self.queue_lines(), self.queue_lines()[1:],
+                        [line.replace('1 57 2 dequeue', '2 57 2 dequeue') for line in self.queue_lines()],
+                        self.queue_lines()+['INVALID overflow-or-clock-failure']]
+            for index, lines in enumerate(variants):
+                path.write_text('\n'.join(lines)+'\n')
+                report = self.queue_report()
+                annotate_queue_trace(report, path)
+                self.assertEqual(report['queue_diagnostic']['status'], 'valid' if index==0 else 'invalid')
+                self.assertEqual(report['failures'], ['legacy occlusion'])
+
+    def test_queue_old_enqueue_and_cross_cycle_handler_fail(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)/'queue'
+            path.write_text('\n'.join(self.queue_lines())+'\n')
+            report = self.queue_report()
+            report['cases'][0]['key_start'] = 2e-9
+            annotate_queue_trace(report, path)
+            self.assertEqual(report['queue_diagnostic']['status'], 'invalid')
+            path.write_text('\n'.join(line.replace('57 2 submit_begin', '57 3 submit_begin') for line in self.queue_lines())+'\n')
+            report = self.queue_report()
+            annotate_queue_trace(report, path)
+            self.assertEqual(report['queue_diagnostic']['status'], 'invalid')
+
+    def test_queue_no_sleep_explicit_and_wrong_loop_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)/'queue'
+            lines = [line for line in self.queue_lines() if 'sleep_' not in line]
+            lines.insert(1, '2 1 57 1 no_sleep')
+            path.write_text('\n'.join(lines)+'\n')
+            report = self.queue_report()
+            annotate_queue_trace(report, path)
+            self.assertEqual(report['queue_diagnostic']['status'], 'valid')
+            path.write_text('\n'.join(line.replace('57 1 no_sleep', '57 9 no_sleep') for line in lines)+'\n')
+            annotate_queue_trace(report, path)
+            self.assertEqual(report['queue_diagnostic']['status'], 'invalid')
 
     def test_event_log(self):
         with tempfile.TemporaryDirectory() as directory:

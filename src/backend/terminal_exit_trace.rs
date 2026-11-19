@@ -37,6 +37,7 @@ pub(crate) fn init() {
 }
 
 pub(crate) fn mark(event: &'static str) {
+    crate::backend::winit_queue_trace::mark(event);
     let Some(Some(file)) = TRACE.get() else {
         return;
     };
