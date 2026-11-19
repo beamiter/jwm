@@ -170,6 +170,9 @@ impl Jwm {
         // the window off-screen.  Preserve Layout / Appear animations so
         // that repeated arrange() calls don't kill in-flight transitions.
         self.animations.remove_if_hide(client_key);
+        if self.scratchpads.get("term") == Some(&client_key) {
+            backend.set_terminal_exit_visual(None);
+        }
 
         // Prefer the semantic restore slot. The geometric fallback adopts
         // clients hidden by an older JWM that only left `old_x` plus an
@@ -327,7 +330,9 @@ impl Jwm {
             // slide-out via the scene, but the X server delivers input events
             // based on the real window geometry — without this the hidden
             // window still receives hover/click events at its old position.
-            if backend.has_compositor() {
+            let nested_terminal = self.scratchpads.get("term") == Some(&client_key)
+                && self.sync_terminal_exit_visual(backend) == Some(client_key);
+            if backend.has_compositor() || nested_terminal {
                 if let Err(e) = self.move_window(backend, win, hidden_x, y) {
                     warn!(
                         "[hide_client] Failed to move window off-screen {:?}: {:?}",
@@ -339,6 +344,9 @@ impl Jwm {
             // A previous layout/appear animation must not move this hidden
             // client back on screen on the next non-composited render tick.
             self.animations.remove(client_key);
+            if self.scratchpads.get("term") == Some(&client_key) {
+                backend.set_terminal_exit_visual(None);
+            }
             if let Err(e) = self.move_window(backend, win, hidden_x, y) {
                 warn!("[hide_client] Failed to hide window {:?}: {:?}", win, e);
             }

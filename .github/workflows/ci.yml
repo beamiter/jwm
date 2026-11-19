@@ -42,8 +42,13 @@ jobs:
           persist-credentials: false
       - name: Test native-window harness without a display
         run: /usr/bin/python3 scripts/test-native-apps-harness.py -v
+      - name: Verify APT acquisition sandbox without networking
+        timeout-minutes: 1
+        run: sudo /usr/bin/python3 scripts/test-ci-prefetch-cjk.py --root-sandbox PrefetchTests.test_root_runner_apt_helper_keeps_sandbox_for_local_verification -v
       - name: Install Cairo/Pango and isolated UI test dependencies
         timeout-minutes: 10
+        env:
+          JWM_CI_PREFETCH_CJK: "1"
         run: |
           bash scripts/ci-install-deps.sh nodejs libcairo2-dev libpango1.0-dev libglib2.0-dev libxkbcommon-dev libxkbcommon-x11-dev libxkbcommon-x11-0 pkg-config \
             xvfb xdotool x11-utils imagemagick python3-pil dbus-x11 fonts-noto-cjk sway wtype grim
@@ -108,7 +113,9 @@ jobs:
           components: rustfmt
 
       - name: Test bounded dependency installation without network
-        run: /usr/bin/python3 scripts/test-ci-install-deps.py -v
+        run: |
+          /usr/bin/python3 scripts/test-ci-install-deps.py -v
+          /usr/bin/python3 scripts/test-ci-prefetch-cjk.py -v
 
       - name: Install shell test dependencies
         timeout-minutes: 10

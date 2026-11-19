@@ -569,6 +569,8 @@ pub struct JwmWaylandState {
     pub output_rects: Vec<Rectangle<i32, Logical>>,
 
     pub window_geometry: HashMap<WindowId, Geometry>,
+    /// Nested-only drawable copy. Never consulted for input coordinates.
+    pub(crate) terminal_exit_visual: Option<(WindowId, Geometry)>,
     pub window_stack: Vec<WindowId>,
 
     pub mapped_windows: HashSet<WindowId>,
@@ -863,6 +865,9 @@ impl JwmWaylandState {
     /// X11 one) goes through here, so a new one cannot forget the sessions.
     fn retire_window_geometry(&mut self, win: WindowId) {
         self.window_geometry.remove(&win);
+        if self.terminal_exit_visual.is_some_and(|(id, _)| id == win) {
+            self.terminal_exit_visual = None;
+        }
         if crate::backend::wayland_udev::image_copy_capture::stop_toplevel_capture_sessions(
             self, win,
         ) {
@@ -1125,6 +1130,97 @@ impl JwmWaylandState {
             }
         }
         sent
+    }
+
+    #[cfg(feature = "backend-wayland-nested")]
+    pub(crate) fn set_nested_terminal_exit(
+        &mut self,
+        visual: Option<(WindowId, Geometry)>,
+    ) -> bool {
+        if visual.is_none() && self.terminal_exit_visual.is_none() {
+            return false;
+        }
+        let newly_hidden = visual
+            .map(|(win, _)| win)
+            .filter(|win| self.terminal_exit_visual.is_none_or(|(old, _)| old != *win));
+        self.terminal_exit_visual = visual;
+        self.needs_redraw = true;
+        if let Some(win) = newly_hidden {
+            self.dismiss_popups_for_toplevel(win);
+        }
+        if let Some(win) = newly_hidden
+            && let Some(pointer) = self.seat.get_pointer()
+            && pointer.current_focus().is_some_and(|surface| {
+                self.committed_surface_window(&surface) == Some(win)
+                    || self.popups.values().any(|popup| {
+                        popup.wl_surface() == &surface
+                            && self.popup_root_toplevel(popup, 0) == Some(win)
+                    })
+            })
+        {
+            let serial = SCOUNTER.next_serial();
+            let time = smithay::backend::input::InputTime::from_millis(0);
+            if let Some(surface) = pointer.current_focus() {
+                with_pointer_constraint(&surface, &pointer, |constraint| {
+                    if let Some(constraint) = constraint {
+                        constraint.deactivate();
+                    }
+                });
+            }
+            pointer.unset_grab(self, serial, time);
+            let location = self.pointer_location;
+            let focus = self
+                .surface_under(location)
+                .map(|(_, surface, origin)| (surface, origin));
+            crate::backend::wayland_scroll::motion(
+                &pointer,
+                self,
+                focus,
+                &smithay::input::pointer::MotionEvent {
+                    location,
+                    serial,
+                    time,
+                },
+            );
+            pointer.frame(self);
+        }
+        true
+    }
+
+    #[cfg(feature = "backend-wayland-nested")]
+    pub(crate) fn nested_drawing_order(&self) -> Vec<WindowId> {
+        let terminal = self
+            .terminal_exit_visual
+            .filter(|(win, _)| self.mapped_windows.contains(win))
+            .filter(|_| !self.session_locked && self.monitor_shades.is_empty())
+            .map(|(win, _)| win);
+        crate::backend::wayland::terminal_visual::drawing_order(
+            &self.window_stack,
+            terminal,
+            |win| {
+                self.layer_surfaces.contains_key(&win)
+                    || self
+                        .x11_surfaces
+                        .get(&win)
+                        .is_some_and(|surface| surface.is_override_redirect())
+                    || self
+                        .window_type_overrides
+                        .get(&win)
+                        .is_some_and(|types| types.contains(&WindowType::Dock))
+            },
+        )
+    }
+
+    #[cfg(feature = "backend-wayland-nested")]
+    pub(crate) fn nested_drawing_geometry(&self, win: WindowId) -> Option<Geometry> {
+        if !self.session_locked
+            && self.monitor_shades.is_empty()
+            && let Some((id, geometry)) = self.terminal_exit_visual
+            && id == win
+        {
+            return Some(geometry);
+        }
+        self.window_geometry.get(&win).copied()
     }
 
     pub(crate) fn raise_window(&mut self, win: WindowId) -> Result<(), BackendError> {
@@ -3706,6 +3802,7 @@ impl JwmWaylandState {
                 output_rects: Vec::new(),
 
                 window_geometry: HashMap::new(),
+                terminal_exit_visual: None,
                 window_stack: Vec::new(),
 
                 mapped_windows: HashSet::new(),
@@ -4061,7 +4158,9 @@ impl JwmWaylandState {
         }
 
         for win in self.window_stack.iter().rev() {
-            if !self.mapped_windows.contains(win) {
+            if !self.mapped_windows.contains(win)
+                || self.terminal_exit_visual.is_some_and(|(id, _)| id == *win)
+            {
                 continue;
             }
             let geo = self.window_geometry.get(win)?;
@@ -4121,7 +4220,9 @@ impl JwmWaylandState {
         }
         // Popups are always above their parent toplevel. Prefer them for hit-testing.
         for win in self.window_stack.iter().rev() {
-            if !self.mapped_windows.contains(win) {
+            if !self.mapped_windows.contains(win)
+                || self.terminal_exit_visual.is_some_and(|(id, _)| id == *win)
+            {
                 continue;
             }
 

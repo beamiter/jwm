@@ -29,4 +29,8 @@ apt_options=(
 # A partial update (including an unreachable repository) must not quietly
 # succeed with stale indexes and allow the build to continue.
 sudo apt-get "${apt_options[@]}" -o APT::Update::Error-Mode=any update
+# Only the native UI job opts in; all other callers keep the original path.
+if [[ ${JWM_CI_PREFETCH_CJK:-0} == 1 ]]; then
+    sudo /usr/bin/python3 "$(dirname "$0")/ci-prefetch-cjk.py" "${apt_options[@]}"
+fi
 sudo apt-get "${apt_options[@]}" install -y --no-install-recommends "$@"
