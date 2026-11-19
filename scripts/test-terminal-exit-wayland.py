@@ -57,10 +57,17 @@ def main():
     parser.add_argument('--evidence-dir', type=Path, default=ROOT / 'artifacts/terminal-exit-wayland')
     parser.add_argument('--diagnose', action='store_true', help='Collect later cases after a failed invariant; never converts failure to success')
     parser.add_argument('--self-test', action='store_true')
+    parser.add_argument('--dispatch-lifecycle', action='store_true', help='private AB harness idle/host-close probes; animated strict gates unchanged')
     args = parser.parse_args()
     if args.self_test:
         suite = unittest.defaultTestLoader.loadTestsFromTestCase(Offline)
         return 0 if unittest.TextTestRunner(verbosity=2).run(suite).wasSuccessful() else 1
+    if args.dispatch_lifecycle:
+        def interrupted(_signal, _frame):
+            raise TimeoutError('AB driver interrupted fixture; cleanup required')
+        signal.signal(signal.SIGTERM, interrupted)
+    if args.dispatch_lifecycle and args.backend != 'wayland-winit':
+        parser.error('dispatch lifecycle is winit-only')
     output = args.evidence_dir.resolve()
     output.mkdir(parents=True, exist_ok=True)
     report = {'status': 'running', 'backend': args.backend, 'transport': 'native wl_shm/xdg-shell',
@@ -70,6 +77,7 @@ def main():
                 'Host XGetImage captures presented native composition, not XWayland clients']}
     children, pending, capture = [], {}, None
     term_pid = None
+    failure_class = 'preflight'
     with tempfile.TemporaryDirectory(prefix='jwm-native-exit-') as directory:
         work = Path(directory)
         env = {k: v for k, v in os.environ.items() if not k.startswith(('JWM_', 'OPENAI_', 'PULSE_', 'PIPEWIRE_', 'WATCHDOG')) and k not in
@@ -119,17 +127,36 @@ def main():
                 assert shutil.which(tool), f'missing {tool}'
             for executable in (args.bin_dir / 'jwm', args.bin_dir / 'jwm-tool', args.client_bin):
                 assert executable.is_file() and os.access(executable, os.X_OK), f'missing executable {executable}'
-            read, write = os.pipe()
-            try:
-                spawn(['Xvfb', '-displayfd', write, '-screen', '0', '1280x800x24', '-nolisten', 'tcp', '-noreset'], pass_fds=(write,))
-                os.close(write)
-                write = None
-                assert select.select([read], [], [], 10)[0], 'Xvfb readiness timeout'
-                env['DISPLAY'] = ':' + os.read(read, 32).decode().strip()
-            finally:
-                os.close(read)
-                if write is not None:
+            if args.dispatch_lifecycle:
+                # Normal private X server owns its display lock; nested Xwayland
+                # must not mistake this host's socket for an unlocked stale one.
+                display_number = next((number for number in range(180, 200)
+                    if not Path(f'/tmp/.X{number}-lock').exists()
+                    and not Path(f'/tmp/.X11-unix/X{number}').exists()), None)
+                assert display_number is not None, 'no private X display slot'
+                env['DISPLAY'] = f':{display_number}'
+                host = spawn(['Xvfb', env['DISPLAY'], '-screen', '0', '1280x800x24',
+                              '-nolisten', 'tcp', '-noreset'])
+                host_lock = Path(f'/tmp/.X{display_number}-lock')
+                host_socket = Path(f'/tmp/.X11-unix/X{display_number}')
+                wait(lambda: host.poll() is None and host_lock.exists()
+                     and int(host_lock.read_text().strip()) == host.pid and host_socket.is_socket(),
+                     'owned Xvfb display lock/socket', timeout=10)
+                run('xdotool', 'getdisplaygeometry')
+                report['host_display'] = {'display': env['DISPLAY'], 'pid': host.pid,
+                                          'lock_pid': int(host_lock.read_text().strip())}
+            else:
+                read, write = os.pipe()
+                try:
+                    spawn(['Xvfb', '-displayfd', write, '-screen', '0', '1280x800x24', '-nolisten', 'tcp', '-noreset'], pass_fds=(write,))
                     os.close(write)
+                    write = None
+                    assert select.select([read], [], [], 10)[0], 'Xvfb readiness timeout'
+                    env['DISPLAY'] = ':' + os.read(read, 32).decode().strip()
+                finally:
+                    os.close(read)
+                    if write is not None:
+                        os.close(write)
             binary = args.bin_dir.resolve() / 'jwm'
             run(binary, '--backend', args.backend, '--gen-config')
             config = work / 'config/jwm/config_wayland.toml'
@@ -142,7 +169,8 @@ def main():
             config.write_text(text)
             (output / 'config_wayland.toml').write_text(text)
             run(binary, '--backend', args.backend, '--check-config')
-            spawn(['dbus-run-session', '--', binary, '--backend', args.backend])
+            failure_class = 'fixture'
+            session = spawn(['dbus-run-session', '--', binary, '--backend', args.backend])
             outer = int(wait(lambda: run('xdotool', 'search', '--name', 'JWM ').splitlines()[0], 'outer output'))
             run('xdotool', 'windowsize', outer, 1280, 800)
             run('xdotool', 'windowfocus', outer)
@@ -153,6 +181,27 @@ def main():
             report['outer_xid'] = outer
             report['wayland_socket'] = wayland
             report['client_environment'] = {'DISPLAY': None, 'WAYLAND_DISPLAY': wayland, 'XDG_RUNTIME_DIR': str(work / 'runtime')}
+            if args.dispatch_lifecycle:
+                from winit_dispatch_ab import find_owned_jwm, sample_idle, send_wm_delete
+                assert host.poll() is None and int(host_lock.read_text().strip()) == host.pid, 'host display ownership changed'
+                jwm_pid = find_owned_jwm(session, binary)
+                assert int(run('xdotool', 'getwindowpid', outer)) == jwm_pid, 'host window PID is not owned JWM'
+                import hashlib
+                actual_hash = hashlib.sha256(Path(f'/proc/{jwm_pid}/exe').read_bytes()).hexdigest()
+                assert actual_hash == hashlib.sha256(binary.read_bytes()).hexdigest(), 'running binary identity mismatch'
+                process_env = Path(f'/proc/{jwm_pid}/environ').read_bytes().split(b'\0')
+                assert ('XDG_RUNTIME_DIR='+env['XDG_RUNTIME_DIR']).encode() in process_env, 'JWM runtime is not the owned session'
+                report['lifecycle'] = {'pid': jwm_pid, 'binary_sha256': actual_hash, 'cadence': 'unmeasured'}
+                idle = report['lifecycle']
+                time.sleep(1)
+                idle['windows_before'] = msg('get_windows')
+                idle['system_ui_before'] = msg('get_system_ui')
+                assert idle['windows_before'] == [] and idle['system_ui_before'].get('active') is False, 'idle precondition has clients/system UI'
+                idle['idle'] = {}
+                sample_idle(jwm_pid, idle['idle'])
+                idle['windows_after'] = msg('get_windows')
+                idle['system_ui_after'] = msg('get_system_ui')
+                assert idle['windows_after'] == [] and idle['system_ui_after'].get('active') is False, 'idle state changed'
             term_log = output / 'term.events'
             term_log.write_text('')
             # env exec preserves PID; DISPLAY is absent in the real native client.
@@ -289,6 +338,7 @@ def main():
                     case['reversal_key_received'] = True
                 except Exception as error:
                     case['error'] = str(error)
+                    report['fixture_exception'] = True
                     report['failures'].append(kind+': '+str(error))
                     if not args.diagnose:
                         raise
@@ -301,7 +351,20 @@ def main():
                     pending.clear()
                 if report['failures'] and not args.diagnose:
                     break
+            if args.dispatch_lifecycle:
+                failure_class = 'lifecycle'
+                assert int(run('xdotool', 'getwindowpid', outer)) == jwm_pid, 'host ownership lost before close'
+                close = {'protocol': 'WM_PROTOCOLS/WM_DELETE_WINDOW', 'timeout_seconds': 2}
+                report['lifecycle']['close'] = close
+                close['start'] = send_wm_delete(env['DISPLAY'], outer)
+                close['exit_code'] = session.wait(timeout=2)
+                close['end'] = time.monotonic()
+                close['seconds'] = close['end']-close['start']
+                assert close['exit_code'] == 0 and close['seconds'] <= 2, 'host-close not clean/in deadline'
+                assert not Path(f'/proc/{jwm_pid}').exists(), 'JWM still alive after host-close'
+            failure_class = 'fixture' if report.get('fixture_exception') else 'behavior'
         except Exception as error:
+            report['failure_class'] = failure_class
             report['failures'].append(str(error))
             report['traceback'] = traceback.format_exc()
         finally:
@@ -326,6 +389,7 @@ def main():
                         os.killpg(child.pid, signal.SIGKILL)
                         child.wait(timeout=4)
             log.close()
+            report.setdefault('failure_class', failure_class)
             report['status'] = 'failure' if report['failures'] else 'success'
             (output / 'report.json').write_text(json.dumps(report, indent=2)+'\n')
             print(json.dumps(report, indent=2))
