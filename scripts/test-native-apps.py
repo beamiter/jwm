@@ -6,6 +6,7 @@ uses the user's display, session bus, notes, or application defaults. Build the
 apps before running.
 """
 import argparse
+import errno
 import io
 import os
 import re
@@ -71,8 +72,8 @@ def main():
             def command(*argv):
                 return subprocess.check_output(list(map(str, argv)), env=env, stderr=subprocess.PIPE).decode().strip()
 
-            def wait(predicate, message):
-                deadline = time.monotonic() + 8
+            def wait(predicate, message, timeout=8):
+                deadline = time.monotonic() + timeout
                 last_probe_error = None
                 while time.monotonic() < deadline:
                     try:
@@ -371,6 +372,81 @@ def main():
                     if args.evidence_dir:
                         screenshot(tsx_window).save(args.evidence_dir / "tsx-preflight-no-execution.png")
                     key("Escape")
+                # A real read barrier, not a timing guess: hold package.json's
+                # FIFO writer open so Node cannot complete metadata inspection.
+                # Notes opens another file in a NEW window in the same host.
+                manifest = fixture / "package.json"
+                manifest.unlink()
+                os.mkfifo(manifest)
+                barrier = None
+                try:
+                    command("xdotool", "mousemove", "--window", tsx_window, 680, 86, "click", "1")
+                    type_text(str(fixture))
+                    check_started = time.monotonic()
+                    key("Return")
+
+                    def connect_reader():
+                        try:
+                            return os.open(manifest, os.O_WRONLY | os.O_NONBLOCK)
+                        except OSError as error:
+                            if error.errno == errno.ENXIO:
+                                return None
+                            raise
+
+                    barrier = wait(connect_reader, "Old preflight never reached the FIFO read barrier")
+                    os.write(barrier, b'{"scripts":{"dev":"exit 42"}}')
+
+                    def blocked_child():
+                        for children in Path(f"/proc/{tsx_app.pid}/task").glob("*/children"):
+                            for pid in children.read_text().split():
+                                for descriptor in Path(f"/proc/{pid}/fd").glob("*"):
+                                    try:
+                                        if descriptor.resolve() == manifest:
+                                            return int(pid)
+                                    except FileNotFoundError:
+                                        pass
+                        return None
+
+                    old_pid = wait(blocked_child, "No owned metadata child held the FIFO")
+                    second_path = work / "second-preflight.tsx"
+                    second_source = "export default () => <div>second document</div>;"
+                    second_path.write_text(second_source)
+                    # Escape dismisses the modal; Open cancels the old request.
+                    key("Escape")
+                    assert Path(f"/proc/{old_pid}").exists(), "Old check was not pending before Open"
+                    key("ctrl+o")
+                    type_text(str(second_path))
+                    key("Return")
+                    second_window = window("second-preflight.tsx.*JWM 备忘录")
+                    assert second_window != tsx_window, "Open unexpectedly reused the old window"
+                    # Keep the writer open: EOF cannot complete the check.
+                    # Also finish before its five-second production timeout.
+                    wait(lambda: not Path(f"/proc/{old_pid}").exists(), "Open did not reap the blocked preflight child",
+                         timeout=max(0, 4.5 - (time.monotonic() - check_started)))
+                    os.close(barrier)
+                    barrier = None
+                    focus(second_window)
+                    key("ctrl+End")
+                    type_text("// new window remains editable")
+                    key("ctrl+s")
+                    wait(lambda: second_path.read_text() == second_source + "// new window remains editable",
+                         "Old preflight completion intercepted input in the new window")
+                    assert "TSX 预检通过" not in command("xprop", "-id", second_window, "_NET_WM_NAME")
+                    assert "TSX 预检通过" not in command("xprop", "-id", tsx_window, "_NET_WM_NAME")
+                    assert tsx_path.read_text() == tsx_source + "// saved later"
+                    assert not sentinel.exists()
+                    if args.evidence_dir:
+                        screenshot(second_window).save(args.evidence_dir / "tsx-preflight-file-switch.png")
+                    key("ctrl+w")
+                    focus(tsx_window)
+                    key("Escape")
+                finally:
+                    if barrier is not None:
+                        os.close(barrier)
+                    manifest.unlink()
+                    manifest.write_text('{"scripts":{"dev":"exit 42"}}')
+                print("Native TSX FIFO barrier: opening another file cancels/reaps old check without stale UI: PASS", flush=True)
+
                 # Close during a newly submitted check; no preview server exists.
                 command("xdotool", "mousemove", "--window", tsx_window, 680, 86, "click", "1")
                 type_text(str(fixture))
