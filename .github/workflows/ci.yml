@@ -42,6 +42,9 @@ jobs:
           persist-credentials: false
       - name: Test native-window harness without a display
         run: /usr/bin/python3 scripts/test-native-apps-harness.py -v
+      - name: Verify APT acquisition sandbox without networking
+        timeout-minutes: 1
+        run: sudo /usr/bin/python3 scripts/test-ci-prefetch-cjk.py --root-sandbox PrefetchTests.test_root_runner_apt_helper_keeps_sandbox_for_local_verification -v
       - name: Install Cairo/Pango and isolated UI test dependencies
         timeout-minutes: 10
         env:

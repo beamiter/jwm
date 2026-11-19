@@ -6,12 +6,14 @@ strict apt update. The fallback changes only the official Ubuntu mirror, not the
 archive or digest. Normal apt install still performs its own authentication and
 cache checks. Never run dpkg inside the timed process group.
 """
+import hashlib
 import os
 from pathlib import Path
+import pwd
 import re
 import shlex
-import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -57,6 +59,15 @@ def archive_record(output):
     return filename, int(size), digest, uri, "https://archive.ubuntu.com/ubuntu" + match.group(1)
 
 
+def prepare_download_directory(folder):
+    # Only this newly-created private directory changes owner. APT methods must
+    # be able to create both the archive and local hash-verification output.
+    # Keep _apt sandboxing enabled; missing account/permissions are fatal.
+    account = pwd.getpwnam("_apt")
+    os.chown(folder, account.pw_uid, account.pw_gid)
+    folder.chmod(0o700)
+
+
 def prefetch(options):
     # APT prefers SHA512 when both exist. Request the strong SHA256 field
     # explicitly; absent SHA256 still fails closed in archive_record.
@@ -67,10 +78,9 @@ def prefetch(options):
     )
     filename, size, digest, primary, fallback = archive_record(selected.stdout)
     # Same filename + digest for both attempts, with no second index refresh.
-    with tempfile.TemporaryDirectory(prefix="jwm-cjk-") as directory:
+    with tempfile.TemporaryDirectory(prefix="jwm-cjk-", dir="/tmp") as directory:
         folder = Path(directory)
-        # Permit APT methods to traverse the private acquisition directory.
-        folder.chmod(0o755)
+        prepare_download_directory(folder)
         archive = folder / filename
         status = bounded([APT_HELPER, *options, "download-file", primary,
                           str(archive), digest], cwd=folder)
@@ -81,26 +91,45 @@ def prefetch(options):
                               str(archive), digest], cwd=folder)
         if status:
             raise RuntimeError(f"CJK download failed ({status}); refusing installation")
-        # Reuse apt's native hash verifier even for a successful primary download.
-        verified = folder / "verified.deb"
-        status = bounded([APT_HELPER, "download-file", archive.as_uri(), str(verified), digest], cwd=folder)
-        if status or verified.stat().st_size != size:
-            raise RuntimeError("CJK archive verification failed")
-        # Cache only a completely verified archive; the subsequent normal apt
-        # install retains all original package names and authentication checks.
-        with tempfile.NamedTemporaryFile(prefix="jwm-cjk-", dir=CACHE, delete=False) as staged:
-            staging = Path(staged.name)
+        cache_verified_archive(archive, size, digest)
+
+
+def cache_verified_archive(archive, size, digest):
+    # _apt owns the acquisition directory. Never assume a path still refers to
+    # the bytes apt-helper checked (file methods may also return symlinks).
+    # Copy a bounded amount into root's private 0600 staging inode, then verify
+    # THAT inode before exposing exactly those bytes through atomic replace.
+    with tempfile.NamedTemporaryFile(prefix="jwm-cjk-", dir=CACHE, delete=False) as staged:
+        staging = Path(staged.name)
         try:
-            shutil.copyfile(verified, staging)
+            # A replaced FIFO/device must not block the root cache-copy phase.
+            # Symlinks to regular files are acceptable: staging bytes are hashed.
+            fd = os.open(archive, os.O_RDONLY | os.O_NONBLOCK)
+            with os.fdopen(fd, "rb") as source:
+                if not stat.S_ISREG(os.fstat(source.fileno()).st_mode):
+                    raise RuntimeError("CJK archive must be a regular file")
+                remaining = size + 1
+                while remaining:
+                    chunk = source.read(min(1024 * 1024, remaining))
+                    if not chunk:
+                        break
+                    staged.write(chunk)
+                    remaining -= len(chunk)
+            staged.flush()
+            with staging.open("rb") as copied:
+                actual = hashlib.file_digest(copied, "sha256").hexdigest()
+            if staging.stat().st_size != size or actual.lower() != digest.removeprefix("SHA256:").lower():
+                raise RuntimeError("CJK staging archive verification failed")
             staging.chmod(0o644)
-            os.replace(staging, CACHE / filename)
+            os.replace(staging, CACHE / archive.name)
         finally:
             staging.unlink(missing_ok=True)
+
 
 
 if __name__ == "__main__":
     try:
         prefetch(sys.argv[1:])
-    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
+    except (KeyError, OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
         print(f"ci-prefetch-cjk: {error}", file=sys.stderr)
         sys.exit(1)

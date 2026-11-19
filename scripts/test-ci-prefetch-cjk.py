@@ -10,7 +10,7 @@ import sys
 import tempfile
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch, Mock
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("prefetch", ROOT / "scripts/ci-prefetch-cjk.py")
@@ -85,7 +85,7 @@ class PrefetchTests(unittest.TestCase):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 prefetch.archive_record(bad)
 
-    def exercise(self, statuses):
+    def exercise(self, statuses, data=DATA):
         with tempfile.TemporaryDirectory() as directory:
             cache = Path(directory)
             calls = []
@@ -94,12 +94,13 @@ class PrefetchTests(unittest.TestCase):
                 status = statuses[len(calls) - 1]
                 if not status:
                     target = Path(command[-2])
-                    target.write_bytes(DATA)
+                    target.write_bytes(data)
                 return status
             selected = subprocess.CompletedProcess([], 0, RECORD, "")
             with patch.object(prefetch, "CACHE", cache), patch.object(prefetch, "bounded", acquire), \
+                 patch.object(prefetch, "prepare_download_directory"), \
                  patch.object(prefetch.subprocess, "run", return_value=selected) as select:
-                if statuses[-1]:
+                if statuses[-1] or data != DATA:
                     with self.assertRaises(RuntimeError):
                         prefetch.prefetch(["-o", "Dir::Etc::sourceparts=-"])
                     self.assertFalse((cache / NAME).exists())
@@ -111,15 +112,14 @@ class PrefetchTests(unittest.TestCase):
             return calls
 
     def test_primary_success_does_not_use_fallback(self):
-        calls = self.exercise([0, 0])
-        self.assertEqual(len(calls), 2)
+        calls = self.exercise([0])
+        self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0][-3], URL)
         self.assertEqual(calls[0][-1], HASH)
-        self.assertTrue(calls[1][-3].startswith("file:"))
 
     def test_timeout_or_failure_uses_exact_fallback_and_digest(self):
         for status in (124, 100):
-            calls = self.exercise([status, 0, 0])
+            calls = self.exercise([status, 0])
             self.assertEqual(calls[1][-3], prefetch.archive_record(RECORD)[4])
             self.assertEqual(calls[1][-1], HASH)
             self.assertTrue(all("install" not in call for call in calls))
@@ -128,7 +128,49 @@ class PrefetchTests(unittest.TestCase):
         self.exercise([124, 100])
 
     def test_hash_verification_failure_never_populates_cache(self):
-        self.exercise([0, 100])
+        self.exercise([0], data=b"corrupt after apt verification")
+
+    def test_symlink_and_changed_bytes_cannot_replace_existing_cache(self):
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            cache = folder / "cache"
+            cache.mkdir()
+            existing = cache / NAME
+            existing.write_bytes(b"previous verified cache")
+            payload = folder / "payload"
+            archive = folder / NAME
+            archive.symlink_to(payload)
+            with patch.object(prefetch, "CACHE", cache):
+                for data in (b"x" * len(DATA), DATA + b"extra", DATA[:-1]):
+                    payload.write_bytes(data)
+                    with self.assertRaises(RuntimeError):
+                        prefetch.cache_verified_archive(archive, len(DATA), HASH)
+                    self.assertEqual(existing.read_bytes(), b"previous verified cache")
+                    self.assertEqual(list(cache.iterdir()), [existing])
+                payload.write_bytes(DATA)
+                prefetch.cache_verified_archive(archive, len(DATA), HASH)
+                payload.write_bytes(b"changed after copy")
+                self.assertEqual(existing.read_bytes(), DATA)
+                self.assertFalse(existing.is_symlink())
+
+    def test_fifo_without_writer_is_rejected_without_blocking(self):
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            cache = folder / "cache"
+            cache.mkdir()
+            fifo = folder / NAME
+            os.mkfifo(fifo)
+            # Run out of process so a regression cannot hang the test suite.
+            code = (
+                "import importlib.util; from pathlib import Path; "
+                f"s=importlib.util.spec_from_file_location('p', {str(ROOT / 'scripts/ci-prefetch-cjk.py')!r}); "
+                "p=importlib.util.module_from_spec(s); s.loader.exec_module(p); "
+                f"p.CACHE=Path({str(cache)!r}); p.cache_verified_archive(Path({str(fifo)!r}), {len(DATA)}, {HASH!r})"
+            )
+            result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=2)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("archive must be a regular file", result.stderr)
+            self.assertEqual(list(cache.iterdir()), [])
 
     def test_wall_clock_limit_interrupts_continuous_output(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -177,6 +219,47 @@ class PrefetchTests(unittest.TestCase):
                 if not prefetch_status:
                     self.assertEqual(calls[2][-5:], ["install", "-y", "--no-install-recommends", "fonts-noto-cjk", "grim"])
 
+    def test_download_directory_has_only_apt_owner_and_private_mode(self):
+        folder = Mock()
+        account = Mock(pw_uid=42, pw_gid=65534)
+        with patch.object(prefetch.pwd, "getpwnam", return_value=account) as lookup, \
+             patch.object(prefetch.os, "chown") as chown:
+            prefetch.prepare_download_directory(folder)
+        lookup.assert_called_once_with("_apt")
+        chown.assert_called_once_with(folder, 42, 65534)
+        folder.chmod.assert_called_once_with(0o700)
+
+    def test_sandbox_setup_failure_stops_before_any_acquisition(self):
+        for error in (KeyError("_apt"), PermissionError("chown")):
+            selected = subprocess.CompletedProcess([], 0, RECORD, "")
+            with patch.object(prefetch.subprocess, "run", return_value=selected), \
+                 patch.object(prefetch, "prepare_download_directory", side_effect=error), \
+                 patch.object(prefetch, "bounded") as acquire:
+                with self.assertRaises(type(error)):
+                    prefetch.prefetch([])
+                acquire.assert_not_called()
+
+    def test_root_runner_apt_helper_keeps_sandbox_for_local_verification(self):
+        # CI invokes this test file as root as well as unprivileged. The normal
+        # local suite cannot chown; the explicit runner mode below cannot skip.
+        if "--root-sandbox" not in sys.argv:
+            self.skipTest("requires explicit root-sandbox runner validation")
+        self.assertEqual(os.geteuid(), 0, "root-sandbox validation requires root")
+        with tempfile.TemporaryDirectory(prefix="jwm-cjk-test-", dir="/tmp") as directory:
+            folder = Path(directory)
+            prefetch.prepare_download_directory(folder)
+            source = folder / "source"
+            source.write_bytes(DATA)
+            source.chmod(0o644)
+            for digest, success in ((HASH, True), ("SHA256:" + "0" * 64, False)):
+                target = folder / "target"
+                target.unlink(missing_ok=True)
+                result = subprocess.run([prefetch.APT_HELPER, "download-file", source.as_uri(), str(target), digest],
+                                        capture_output=True, text=True, timeout=5)
+                self.assertEqual(result.returncode == 0, success, result.stderr)
+                self.assertNotIn("unsandboxed", result.stderr)
+                self.assertNotIn("can not drop privileges", result.stderr)
+
     def test_only_native_job_opts_in_with_original_step_deadline(self):
         workflow = (ROOT / ".github/workflows/ci.yml").read_text()
         self.assertEqual(workflow.count('JWM_CI_PREFETCH_CJK: "1"'), 1)
@@ -185,4 +268,4 @@ class PrefetchTests(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    unittest.main()
+    unittest.main(argv=[arg for arg in sys.argv if arg != "--root-sandbox"])
