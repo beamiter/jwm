@@ -1256,6 +1256,7 @@ impl Jwm {
         backend: &mut dyn Backend,
         info: crate::backend::api::OutputInfo,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        self.state.output_ids_are_authoritative = false;
         // Jwm::new() already calls add_monitor for every output returned by
         // enumerate_outputs().  The udev backend then fires OutputAdded for
         // the same outputs when the event loop starts.  Skip the duplicate.
@@ -1346,6 +1347,7 @@ impl Jwm {
         backend: &mut dyn Backend,
         id: OutputId,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        self.state.output_ids_are_authoritative = false;
         info!("[handle_output_removed] Removing output {:?}", id);
 
         // 查找对应的 MonitorKey
@@ -1407,6 +1409,7 @@ impl Jwm {
         backend: &mut dyn Backend,
         info: crate::backend::api::OutputInfo,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        self.state.output_ids_are_authoritative = false;
         let mon_key_opt = self
             .state
             .output_map
@@ -1502,7 +1505,7 @@ impl Jwm {
 
     pub(crate) fn updategeom(&mut self, backend: &mut dyn Backend) -> bool {
         info!("[updategeom]");
-        let outputs = backend.output_ops().enumerate_outputs();
+        let (outputs, authoritative) = backend.output_ops().enumerate_outputs_with_provenance();
         let output_ids: HashSet<OutputId> = outputs.iter().map(|output| output.id).collect();
         let mapped_ids: HashSet<OutputId> = self
             .state
@@ -1515,7 +1518,83 @@ impl Jwm {
             && output_ids.len() == outputs.len()
             && mapped_ids == output_ids;
 
-        let dirty = if outputs.len() <= 1 {
+        // Only reconcile an unambiguous, fully mapped X11 topology by id.
+        // Pure removal/addition and a refresh of the same outputs preserve
+        // each survivor's workspace and protocol monitor number. A mixed
+        // replacement, duplicate/unknown mapping or empty enumeration retains
+        // the legacy path: it is not enough evidence to claim a survivor.
+        let identity_refresh = get_backend_family() == BackendFamily::X11
+            && authoritative
+            && self.state.output_ids_are_authoritative
+            && !outputs.is_empty()
+            && output_ids.len() == outputs.len()
+            && mapped_ids.len() == self.state.monitor_order.len()
+            && !mapped_ids.is_empty()
+            && self.state.monitor_order.iter().all(|key| {
+                self.state.monitors.contains_key(*key) && self.state.output_map.contains_key(*key)
+            })
+            && (output_ids.is_subset(&mapped_ids) || mapped_ids.is_subset(&output_ids));
+        let dirty = if identity_refresh {
+            let selected_monitor = self.state.sel_mon;
+            let selected_client = self.get_selected_client_key();
+            let mut changed = false;
+            let removed: Vec<_> = self
+                .state
+                .monitor_order
+                .iter()
+                .filter_map(|key| self.state.output_map.get(*key).copied())
+                .filter(|id| !output_ids.contains(id))
+                .collect();
+            for id in removed {
+                if let Err(error) = self.handle_output_removed(backend, id) {
+                    warn!("[updategeom] output removal reconciliation: {error}");
+                }
+                changed = true;
+            }
+            for output in &outputs {
+                if !mapped_ids.contains(&output.id) {
+                    if let Err(error) = self.handle_output_added(backend, output.clone()) {
+                        warn!("[updategeom] output addition reconciliation: {error}");
+                    }
+                    changed = true;
+                } else {
+                    let geometry_changed = self
+                        .state
+                        .output_map
+                        .iter()
+                        .find(|(_, id)| **id == output.id)
+                        .and_then(|(key, _)| self.state.monitors.get(key))
+                        .is_some_and(|monitor| {
+                            monitor_rect(monitor)
+                                != Rect::new(output.x, output.y, output.width, output.height)
+                        });
+                    if geometry_changed {
+                        if let Err(error) = self.handle_output_changed(backend, output.clone()) {
+                            warn!("[updategeom] output geometry reconciliation: {error}");
+                        }
+                        changed = true;
+                    }
+                }
+            }
+            // Migrated clients prepend the destination MRU. Preserve an
+            // eligible surviving selection before the outer event's focus(None).
+            if changed && self.state.sel_mon == selected_monitor {
+                if let Some(key) = selected_client.filter(|key| {
+                    self.state
+                        .clients
+                        .get(*key)
+                        .is_some_and(|c| c.mon == selected_monitor)
+                        && self.is_application_focus_eligible(*key)
+                        && self.is_client_visible_by_key(*key)
+                        && !self.client_is_on_locked_monitor(*key)
+                }) {
+                    if let Err(error) = self.focus(backend, Some(key)) {
+                        warn!("[updategeom] survivor focus reconciliation: {error}");
+                    }
+                }
+            }
+            changed
+        } else if outputs.len() <= 1 {
             let output = outputs
                 .first()
                 .map(|output| Rect::new(output.x, output.y, output.width, output.height));
@@ -1529,8 +1608,8 @@ impl Jwm {
                     // A refresh of the same X11 outputs can change RandR's
                     // enumeration order without changing the user's monitors.
                     // Keep their tags/layouts attached to the known output ids.
-                    // X11 add/remove still uses the existing positional path:
-                    // this planner alone cannot preserve a non-tail survivor.
+                    // Untrusted/mixed X11 changes keep the legacy positional path;
+                    // only the authoritative branch above claims survivors.
                     let monitor_outputs: Vec<Option<OutputId>> = self
                         .state
                         .monitor_order
@@ -1570,9 +1649,11 @@ impl Jwm {
         // Before anything resolves a point to a monitor, the selection
         // re-pick below included.
         self.reconcile_output_map(&outputs);
+        // Never retain stale trust after degraded/empty enumeration.
+        self.state.output_ids_are_authoritative = authoritative;
 
         if dirty
-            && !(same_outputs
+            && !((same_outputs || identity_refresh)
                 && self
                     .state
                     .sel_mon
@@ -2006,9 +2087,13 @@ pub(crate) mod test_support {
     /// display layout.
     pub(crate) struct SpyOutputOps {
         pub(crate) outputs: Vec<OutputInfo>,
+        pub(crate) authoritative: bool,
     }
 
     impl OutputOps for SpyOutputOps {
+        fn enumerate_outputs_with_provenance(&self) -> (Vec<OutputInfo>, bool) {
+            (self.outputs.clone(), self.authoritative)
+        }
         fn enumerate_outputs(&self) -> Vec<OutputInfo> {
             self.outputs.clone()
         }
@@ -2058,6 +2143,7 @@ pub(crate) mod test_support {
         color_allocator: DummyColorAllocator,
         /// Every lock-shade payload pushed, newest last.
         pub(crate) shade_pushes: Vec<Vec<MonitorShade>>,
+        pub(crate) focus_requests: Vec<Option<WindowId>>,
     }
 
     impl DisplaySpyBackend {
@@ -2069,11 +2155,15 @@ pub(crate) mod test_support {
                 window_ops: Box::new(DummyWindowOps),
                 input_ops: DummyInputOps,
                 property_ops: DummyPropertyOps,
-                output_ops: SpyOutputOps { outputs },
+                output_ops: SpyOutputOps {
+                    outputs,
+                    authoritative: true,
+                },
                 key_ops: DummyKeyOps,
                 cursor_provider: DummyCursorProvider,
                 color_allocator: DummyColorAllocator,
                 shade_pushes: Vec::new(),
+                focus_requests: Vec::new(),
             }
         }
     }
@@ -2117,6 +2207,10 @@ pub(crate) mod test_support {
     }
 
     impl Backend for DisplaySpyBackend {
+        fn on_focused_client_changed(&mut self, win: Option<WindowId>) -> Result<(), BackendError> {
+            self.focus_requests.push(win);
+            Ok(())
+        }
         fn capabilities(&self) -> Capabilities {
             Capabilities::default()
         }
@@ -3022,6 +3116,168 @@ mod tests {
         assert_eq!(client.mon, Some(right));
         assert_eq!(live_of(client), expected);
         assert_eq!(floating_of(client), expected);
+    }
+
+    #[test]
+    fn x11_ambiguous_or_replaced_topology_retains_legacy_path() {
+        for case in ["duplicate", "mixed", "unmapped"] {
+            let mut backend = DisplaySpyBackend::new(vec![
+                output(1, 0, 0, 1920, 1080),
+                output(2, 1920, 0, 1920, 1080),
+            ]);
+            let mut jwm = jwm_on(&mut backend);
+            let a = jwm.state.monitor_order[0];
+            let b = jwm.state.monitor_order[1];
+            backend.output_ops.outputs = match case {
+                "duplicate" => vec![output(2, 0, 0, 1920, 1080), output(2, 1920, 0, 1920, 1080)],
+                "mixed" => vec![output(2, 0, 0, 1920, 1080), output(3, 1920, 0, 1920, 1080)],
+                _ => {
+                    jwm.state.output_map.remove(b);
+                    vec![output(2, 0, 0, 1920, 1080)]
+                }
+            };
+            jwm.updategeom(&mut backend);
+            assert_eq!(
+                jwm.state.monitor_order.first(),
+                Some(&a),
+                "{case} must not claim an identity survivor"
+            );
+        }
+    }
+
+    #[test]
+    fn x11_untrusted_batches_never_enter_identity_removal_path() {
+        for (old_trusted, new_trusted) in [(false, false), (false, true), (true, false)] {
+            let mut backend = DisplaySpyBackend::new(vec![
+                output(1, 0, 0, 1920, 1080),
+                output(2, 1920, 0, 1920, 1080),
+            ]);
+            backend.output_ops.authoritative = old_trusted;
+            let mut jwm = jwm_on(&mut backend);
+            let legacy_first = jwm.state.monitor_order[0];
+            backend.output_ops.outputs = vec![output(2, 0, 0, 1920, 1080)];
+            backend.output_ops.authoritative = new_trusted;
+            jwm.updategeom(&mut backend);
+            assert_eq!(
+                jwm.state.monitor_order,
+                vec![legacy_first],
+                "synthetic/unknown IDs must retain legacy placement, not claim identity"
+            );
+            assert_eq!(jwm.state.output_ids_are_authoritative, new_trusted);
+            backend.output_ops.outputs.clear();
+            backend.output_ops.authoritative = false;
+            jwm.updategeom(&mut backend);
+            assert!(!jwm.state.output_ids_are_authoritative);
+        }
+    }
+
+    #[test]
+    fn x11_unplug_event_keeps_survivor_focus_over_migrated_same_tag_client() {
+        use crate::backend::api::{BackendEvent, EventHandler};
+        let mut backend = DisplaySpyBackend::new(vec![
+            output(1, 0, 0, 1920, 1080),
+            output(2, 1920, 0, 1920, 1080),
+        ]);
+        let mut jwm = jwm_on(&mut backend);
+        let a = jwm.state.monitor_order[0];
+        let b = jwm.state.monitor_order[1];
+        let ca = floating_client_on(&mut jwm, 0x3e2, a, Rect::new(100, 100, 800, 600));
+        let cb = floating_client_on(&mut jwm, 0x3e3, b, Rect::new(2000, 100, 800, 600));
+        jwm.focus(&mut backend, Some(cb)).unwrap();
+        backend.focus_requests.clear();
+        backend.output_ops.outputs = vec![output(2, 0, 0, 1920, 1080)];
+        jwm.handle_event(&mut backend, BackendEvent::ScreenLayoutChanged)
+            .unwrap();
+        assert_eq!(jwm.state.clients[ca].mon, Some(b));
+        assert_eq!(jwm.state.sel_mon, Some(b));
+        assert_eq!(
+            jwm.state.monitors[b].sel,
+            Some(cb),
+            "full event must not focus a newly migrated same-tag client"
+        );
+        assert!(!backend.focus_requests.is_empty());
+        assert!(
+            backend
+                .focus_requests
+                .iter()
+                .all(|request| *request == Some(jwm.state.clients[cb].win)),
+            "no intermediate focus request may target the migrated window: {:?}",
+            backend.focus_requests
+        );
+    }
+
+    #[test]
+    fn x11_unplug_first_preserves_survivor_workspace_and_clients() {
+        for select_survivor in [false, true] {
+            let mut backend = DisplaySpyBackend::new(vec![
+                output(1, 0, 0, 1920, 1080),
+                output(2, 1920, 0, 1920, 1080),
+            ]);
+            let mut jwm = jwm_on(&mut backend);
+            let a = jwm.state.monitor_order[0];
+            let b = jwm.state.monitor_order[1];
+            jwm.state.monitors[a].view_tag(1 << 2, false);
+            jwm.state.monitors[b].view_tag(1 << 6, false);
+            jwm.state.monitors[a].pertag.as_mut().unwrap().n_masters[3] = 2;
+            jwm.state.monitors[b].pertag.as_mut().unwrap().n_masters[7] = 4;
+            jwm.state.monitors[a].pertag.as_mut().unwrap().lts[3] =
+                std::rc::Rc::new(crate::core::layout::LayoutEnum::TILE);
+            jwm.state.monitors[b].pertag.as_mut().unwrap().lts[7] =
+                std::rc::Rc::new(crate::core::layout::LayoutEnum::FLOAT);
+            let b_num = jwm.state.monitors[b].num;
+            let ca = floating_client_on(&mut jwm, 0x3e0, a, Rect::new(100, 100, 800, 600));
+            let cb = floating_client_on(&mut jwm, 0x3e1, b, Rect::new(2000, 100, 800, 600));
+            jwm.state.monitors[a].sel = Some(ca);
+            jwm.state.monitors[b].sel = Some(cb);
+            jwm.state.sel_mon = Some(if select_survivor { b } else { a });
+
+            backend.output_ops.outputs = vec![output(2, 0, 0, 1920, 1080)];
+            assert!(jwm.updategeom(&mut backend));
+            assert_eq!(
+                jwm.state.monitor_order,
+                vec![b],
+                "keep the surviving panel's monitor key"
+            );
+            assert_eq!(jwm.state.output_map.get(b), Some(&OutputId(2)));
+            assert_eq!(jwm.state.monitors[b].get_active_tags(), 1 << 6);
+            assert_eq!(
+                jwm.state.monitors[b].pertag.as_ref().unwrap().n_masters[7],
+                4
+            );
+            assert_eq!(jwm.state.sel_mon, Some(b));
+            assert_eq!(jwm.state.monitors[b].sel, Some(cb));
+            for key in [ca, cb] {
+                assert_eq!(jwm.state.clients[key].mon, Some(b));
+                assert_eq!(
+                    jwm.state.monitor_clients[b]
+                        .iter()
+                        .filter(|&&k| k == key)
+                        .count(),
+                    1
+                );
+            }
+            assert_eq!(jwm.state.clients[ca].state.tags, 1 << 2);
+            assert_eq!(jwm.state.clients[cb].state.tags, 1 << 6);
+            assert_eq!(jwm.state.monitors[b].num, b_num);
+            assert_eq!(
+                *jwm.state.monitors[b].pertag.as_ref().unwrap().lts[7],
+                crate::core::layout::LayoutEnum::FLOAT
+            );
+
+            // A subsequent addition must not reuse the survivor's number.
+            backend.output_ops.outputs =
+                vec![output(3, 1920, 0, 1920, 1080), output(2, 0, 0, 1920, 1080)];
+            assert!(jwm.updategeom(&mut backend));
+            assert_eq!(jwm.state.monitors[b].num, b_num);
+            assert_eq!(jwm.state.monitors[b].get_active_tags(), 1 << 6);
+            assert_eq!(jwm.state.sel_mon, Some(b));
+            assert_eq!(jwm.state.monitors[b].sel, Some(cb));
+            assert_eq!(jwm.state.output_map.get(b), Some(&OutputId(2)));
+            let numbers: HashSet<_> = jwm.state.monitors.values().map(|m| m.num).collect();
+            assert_eq!(numbers.len(), 2);
+            assert_eq!(jwm.state.clients[ca].mon, Some(b));
+            assert_eq!(jwm.state.clients[cb].mon, Some(b));
+        }
     }
 
     #[test]
