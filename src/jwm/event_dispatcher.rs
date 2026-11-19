@@ -2601,6 +2601,7 @@ mod tests {
         fail_decoration_once: AtomicBool,
         compositor_disable_trace: Mutex<Vec<&'static str>>,
         restacks: Mutex<Vec<Vec<WindowId>>>,
+        input_focus_calls: AtomicUsize,
         fail_next_restack: AtomicBool,
         /// Every window `close_window` was asked to close, in order.
         closed: Mutex<Vec<WindowId>>,
@@ -2632,6 +2633,7 @@ mod tests {
                 fail_decoration_once: AtomicBool::new(false),
                 compositor_disable_trace: Mutex::new(Vec::new()),
                 restacks: Mutex::new(Vec::new()),
+                input_focus_calls: AtomicUsize::new(0),
                 fail_next_restack: AtomicBool::new(false),
                 closed: Mutex::new(Vec::new()),
                 button_grabs: Mutex::new(Vec::new()),
@@ -2748,10 +2750,12 @@ mod tests {
         }
 
         fn set_input_focus(&self, _win: WindowId) -> Result<(), BackendError> {
+            self.input_focus_calls.fetch_add(1, AtomicOrdering::Relaxed);
             Ok(())
         }
 
         fn set_input_focus_root(&self) -> Result<(), BackendError> {
+            self.input_focus_calls.fetch_add(1, AtomicOrdering::Relaxed);
             Ok(())
         }
 
@@ -2971,6 +2975,7 @@ mod tests {
         needs_render: bool,
         compositor_enabled: bool,
         compositor_supported: bool,
+        switcher_unavailable_reason: Option<&'static str>,
         compositor_transitions: Vec<bool>,
         compositor_config_applies: usize,
         compositor_monitor_updates: usize,
@@ -3042,6 +3047,7 @@ mod tests {
                 needs_render: true,
                 compositor_enabled: true,
                 compositor_supported: true,
+                switcher_unavailable_reason: None,
                 compositor_transitions: Vec::new(),
                 compositor_config_applies: 0,
                 compositor_monitor_updates: 0,
@@ -3327,6 +3333,10 @@ mod tests {
     impl DisplayControl for RenderSpyBackend {}
 
     impl RenderScheduler for RenderSpyBackend {
+        fn window_switcher_unavailable_reason(&self) -> Option<&'static str> {
+            self.switcher_unavailable_reason
+        }
+
         fn has_compositor(&self) -> bool {
             self.compositor_enabled
         }
@@ -12891,6 +12901,135 @@ mod tests {
                 .expect("the drag survives the motion")
                 .activated,
             "root coords past i16::MAX must keep the true pixel delta"
+        );
+    }
+
+    #[test]
+    fn window_switcher_capability_default_preserves_the_existing_path() {
+        struct DefaultScheduler;
+        impl RenderScheduler for DefaultScheduler {}
+        assert_eq!(DefaultScheduler.window_switcher_unavailable_reason(), None);
+    }
+
+    #[test]
+    fn window_switcher_capability_refusal_preserves_focus_and_never_grabs() {
+        use crate::jwm::features::system_ui::{ListRow, RowData, SystemUiState};
+
+        let (mut jwm, monitor, first, second) = jwm_with_tab_group();
+        jwm.state.monitors[monitor].sel = Some(first);
+        let mut backend = RenderSpyBackend::new();
+        backend.compositor_enabled = false;
+        let reason =
+            "wayland-winit does not yet support a visible Alt-Tab panel; no window was switched";
+        backend.switcher_unavailable_reason = Some(reason);
+        jwm.features.window_switcher_mods = Mods::ALT;
+
+        for already_open in [false, true] {
+            if already_open {
+                let rows = [first, second]
+                    .into_iter()
+                    .map(|key| {
+                        let window = jwm.state.clients[key].win.raw();
+                        ListRow {
+                            key: window.to_string(),
+                            text: window.to_string(),
+                            data: RowData::WindowSwitcher { window },
+                        }
+                    })
+                    .collect();
+                jwm.features.system_ui = SystemUiState::window_switcher(rows, 0);
+            }
+            let selection = jwm.features.system_ui.selected_switcher_window();
+            let error = jwm
+                .window_switcher(&mut backend, &WMArgEnum::Int(1))
+                .unwrap_err();
+            assert_eq!(error.to_string(), reason);
+            assert_eq!(jwm.state.sel_mon, Some(monitor));
+            assert_eq!(jwm.state.monitors[monitor].sel, Some(first));
+            assert_eq!(jwm.features.system_ui.is_active(), already_open);
+            assert_eq!(jwm.features.system_ui.selected_switcher_window(), selection);
+            assert_eq!(jwm.features.window_switcher_mods, Mods::ALT);
+            assert!(!jwm.features.system_ui_temporary_compositor);
+            assert!(jwm.features.deferred_grab.is_none());
+        }
+
+        assert_eq!(
+            backend
+                .window_ops
+                .input_focus_calls
+                .load(AtomicOrdering::Relaxed),
+            0
+        );
+        assert!(backend.compositor_transitions.is_empty());
+        assert!(backend.system_ui_updates.is_empty());
+        assert_eq!(
+            backend.key_ops.keyboard_grabs.load(AtomicOrdering::Relaxed),
+            0
+        );
+        assert_eq!(
+            backend
+                .key_ops
+                .keyboard_ungrabs
+                .load(AtomicOrdering::Relaxed),
+            0
+        );
+        assert_eq!(
+            backend
+                .input_ops
+                .pointer_grabs
+                .load(AtomicOrdering::Relaxed),
+            0
+        );
+        assert_eq!(
+            backend
+                .input_ops
+                .pointer_ungrabs
+                .load(AtomicOrdering::Relaxed),
+            0
+        );
+    }
+
+    #[test]
+    fn window_switcher_capability_supported_still_opens_via_the_compositor_and_grabs() {
+        let (mut jwm, monitor, first, second) = jwm_with_tab_group();
+        jwm.detachstack(first);
+        jwm.attachstack(first);
+        jwm.state.monitors[monitor].sel = Some(first);
+        let mut backend = RenderSpyBackend::new();
+        backend.compositor_enabled = false;
+        backend
+            .key_ops
+            .solar_modifiers
+            .store(u32::from(Mods::ALT.bits()), AtomicOrdering::Relaxed);
+
+        jwm.window_switcher(&mut backend, &WMArgEnum::Int(1))
+            .unwrap();
+
+        assert!(jwm.features.system_ui.is_window_switcher());
+        assert_eq!(
+            jwm.features.system_ui.selected_switcher_window(),
+            Some(jwm.state.clients[second].win.raw())
+        );
+        assert_eq!(jwm.state.monitors[monitor].sel, Some(first));
+        assert_eq!(jwm.features.window_switcher_mods, Mods::ALT);
+        assert!(jwm.features.system_ui_temporary_compositor);
+        assert_eq!(backend.compositor_transitions, vec![true]);
+        assert!(
+            backend
+                .system_ui_updates
+                .last()
+                .is_some_and(Option::is_some)
+        );
+        assert_eq!(
+            backend.key_ops.keyboard_grabs.load(AtomicOrdering::Relaxed),
+            1
+        );
+        assert_eq!(
+            backend
+                .input_ops
+                .pointer_grabs
+                .load(AtomicOrdering::Relaxed),
+            1
         );
     }
 
