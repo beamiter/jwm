@@ -1,0 +1,20 @@
+{
+  "source_run": 44459654293,
+  "artifact_sha256": "8d8c49e54a326d05b80847af605423d93d3d1a7816fe4ef313d5ecb460f28f08",
+  "ipc_window": {
+    "id": 4,
+    "name": "org.jwm.randrfixturea",
+    "class": "org.jwm.randrfixturea",
+    "instance": "org.jwm.randrfixturea",
+    "pid": 11686,
+    "monitor": 0,
+    "tags": 4,
+    "layout": "LayoutEnum(\"tile\")"
+  },
+  "native_xid_from_jwm_log": 8388609,
+  "log_mapping": "[grab_button_any_anymod] WindowId=Win(0x4) -> X11 window=0x800001",
+  "initial_monitor_layouts": [
+    "LayoutEnum(\"fibonacci\")",
+    "LayoutEnum(\"fibonacci\")"
+  ]
+}

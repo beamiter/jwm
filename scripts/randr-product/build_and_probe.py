@@ -20,7 +20,7 @@ REPO='https://github.com/beamiter/jwm.git'
 SOURCES={'baseline':'687cebf36585c7baeeb6850d851a1b8fef017865',
          'fixed':'3dbca462cadf37c005261b04195a50b409210084'}
 # Generated from the precise local review candidate, never from checkout input.
-FIXTURE_HASHES = {'product_probe.py': '7247ad86708fc586fde7e8dbdfc993bb1703e651e5076902f898547400b549fe', 'owned_xorg.py': '1273e3df52b02a8c8144303a785629e1be1b2213a811a5a7aa7dded56a134828', 'preflight.py': '447e1f5ec400f36fbf42406f9a403b12ca34fd33c6155f7e77e81636e50d73b7', 'xorg.conf': '86148c94e78b382ab32e6fe00e672faa68ab813daae1b42da3b774221e23a404', 'key_client.c': '06d5b07c8071b0e843f3281db97b1b3884722cd4392ee18bbeb4a868b9bb0a4d'}
+FIXTURE_HASHES = {'product_probe.py': '6fff81ffb23d3bd4040a0ca40043ca575d25b8f22604f0cbf62a7b8a68ef4ac1', 'owned_xorg.py': '1273e3df52b02a8c8144303a785629e1be1b2213a811a5a7aa7dded56a134828', 'preflight.py': '447e1f5ec400f36fbf42406f9a403b12ca34fd33c6155f7e77e81636e50d73b7', 'xorg.conf': '86148c94e78b382ab32e6fe00e672faa68ab813daae1b42da3b774221e23a404', 'key_client.c': '334097c84dbe8e2496e614e588312b31b2c8b0f4b2c405f6154cdc20a0202d61'}
 
 
 def require(value,message):

@@ -25,7 +25,13 @@ int main(int argc, char **argv) {
         if (event.type == DestroyNotify) break;
         if (event.type == KeyPress) {
             char buf[64]; KeySym sym; int n = XLookupString(&event.xkey,buf,sizeof(buf),&sym,NULL);
-            if (n > 0 && write(fd,buf,(size_t)n) != n) return 7;
+            if (event.xkey.window != w || event.xkey.send_event) return 7;
+            if (n > 0) {
+                char hex[129], record[256];
+                for (int i=0;i<n;i++) snprintf(hex+2*i,3,"%02x",(unsigned char)buf[i]);
+                int len=snprintf(record,sizeof(record),"{\"window\":%lu,\"send_event\":0,\"text_hex\":\"%s\"}\n",w,hex);
+                if (len < 0 || (size_t)len >= sizeof(record) || write(fd,record,(size_t)len) != len) return 8;
+            }
         }
     }
     close(fd); XCloseDisplay(d); return 0;

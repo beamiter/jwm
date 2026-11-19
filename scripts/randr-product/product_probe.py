@@ -15,6 +15,7 @@ import socket
 import subprocess
 import tempfile
 import time
+import tomllib
 import owned_xorg
 
 BASE = '687cebf36585c7baeeb6850d851a1b8fef017865'
@@ -103,6 +104,49 @@ def edit_setting(text,section,key,literal,required=True):
     return '\n'.join(lines)+'\n'
 
 
+def layout_name(value):
+    names={'LayoutEnum("tile")':'tile','LayoutEnum("float")':'float'}
+    require(value in names,'unexpected exact layout serialization: '+repr(value))
+    return names[value]
+
+
+def match_ipc_client(rows,pid,title):
+    matches=[w for w in rows if w.get('pid')==pid and
+             all(w.get(k)==title for k in ('name','class','instance'))]
+    require(len(matches)<=1,'ambiguous IPC client identity')
+    if not matches: return None
+    require(isinstance(matches[0].get('id'),int) and matches[0]['id']>0,'invalid IPC window ID')
+    return matches[0]
+
+
+def native_properties(text,pid,title):
+    expected={'WM_NAME(STRING)':f'"{title}"',
+              'WM_CLASS(STRING)':f'"{title}", "{title}"',
+              '_NET_WM_PID(CARDINAL)':str(pid)}
+    rows={}
+    for line in text.splitlines():
+        key,sep,value=line.partition(' = ')
+        require(sep and key not in rows,'malformed or duplicate native property')
+        rows[key]=value
+    require(rows==expected,'native XID property identity mismatch')
+
+
+def key_events(path,raw_xid):
+    data=path.read_bytes()
+    if data and not data.endswith(b'\n'): return None
+    events=[json.loads(line) for line in data.splitlines()]
+    for event in events:
+        require(set(event)=={'window','send_event','text_hex'} and event['window']==raw_xid
+                and event['send_event']==0,'receipt from unexpected native window/event')
+        require(isinstance(event['text_hex'],str) and re.fullmatch(r'(?:[0-9a-f]{2})+',event['text_hex']),
+                'invalid input receipt encoding')
+    return events
+
+
+def event_text(events):
+    return b''.join(bytes.fromhex(e['text_hex']) for e in events)
+
+
 class Session:
     def __init__(self, root, client, out, work, expected, same_tag, build):
         self.root=checked_source(root,expected)
@@ -112,7 +156,7 @@ class Session:
         self.children=[]; self.logs=[]; self.counter=0
         self.server=None; self.wm=None; self.phase='setup'
         self.bin=root/'target/release/jwm'
-        self.receipts={}; self.windows={}
+        self.receipts={}; self.windows={}; self.raw_xids={}; self.client_identities={}; self.client_processes={}
 
     def save(self, name, data):
         (self.out/(name+'.json')).write_text(json.dumps(data,indent=2))
@@ -150,20 +194,36 @@ class Session:
         if not target[0]['focused']: self.ipc('focusmon',{'value':1})
         wait(lambda:any(m['name']==name and m['focused'] for m in self.monitors()),'focus target output')
 
+    def verify_client(self,letter):
+        require(self.client_processes[letter].poll() is None,'owned native client exited '+letter)
+        identity=self.client_identities[letter]
+        raw=self.raw_xids[letter]
+        props=self.run_command(['/usr/bin/xprop','-id',str(raw),'WM_NAME','WM_CLASS','_NET_WM_PID']).stdout
+        native_properties(props,identity['pid'],identity['title'])
+        row=match_ipc_client(self.ipc('get_windows'),identity['pid'],identity['title'])
+        require(row and row['id']==self.windows[letter],'IPC identity mapping changed')
+        self.save(f'identity-{letter}-{self.counter:03}',{**identity,'raw_xid':raw,'ipc_id':row['id'],
+                                                        'native_properties':props,'ipc_row':row})
+
     def input_receipt(self,label):
-        # No focus command here: verify the real recipient after the actual output event.
+        # No focus command here: native recipient is checked against native XID,
+        # whereas selected_id and every IPC action use the separate abstract ID.
+        for letter in self.windows: self.verify_client(letter)
         focus=int(self.run_command(['/usr/bin/xdotool','getwindowfocus']).stdout.strip())
-        require(focus==self.windows['B'],'X input focus is not survivor B')
-        before={k:p.read_bytes() for k,p in self.receipts.items()}
+        require(focus==self.raw_xids['B'],'X input focus is not native survivor B')
+        before={k:key_events(p,self.raw_xids[k]) for k,p in self.receipts.items()}
+        require(all(v is not None for v in before.values()),'partial pre-input receipt')
         token=('probe'+secrets.token_hex(8)).encode()
         self.run_command(['/usr/bin/xdotool','type','--clearmodifiers','--delay','2',token.decode()])
-        wait(lambda:self.receipts['B'].read_bytes()==before['B']+token,'actual key receipt B')
-        time.sleep(.1)
-        after={k:p.read_bytes() for k,p in self.receipts.items()}
-        require(after['A']==before['A'] and after['B']==before['B']+token,'unexpected key recipient')
-        self.save(label,{'focus':focus,'token':token.decode(),
-                        'before':{k:v.decode() for k,v in before.items()},
-                        'after':{k:v.decode() for k,v in after.items()}})
+        def delivered():
+            events=key_events(self.receipts['B'],self.raw_xids['B'])
+            return events is not None and event_text(events)==event_text(before['B'])+token
+        wait(delivered,'actual native key receipt B'); time.sleep(.1)
+        after={k:key_events(p,self.raw_xids[k]) for k,p in self.receipts.items()}
+        require(after['A']==before['A'] and after['B'] is not None and
+                event_text(after['B'])==event_text(before['B'])+token,'unexpected key recipient')
+        self.save(label,{'focus_raw_xid':focus,'expected_raw_xid':self.raw_xids['B'],
+                        'expected_ipc_id':self.windows['B'],'token':token.decode(),'before':before,'after':after})
 
     def start(self):
         checked_source(self.root,self.expected)
@@ -187,10 +247,12 @@ class Session:
         config=self.work/'config/jwm/config_x11.toml'; text=config.read_text()
         for section,key,value,required in [
             ('status_bar','show_bar','false',True),('status_bar','name','"/bin/true"',True),
-            ('desktop_shell','enabled','false',False),('behavior','compositor','false',True),
+            ('desktop_shell','enabled','false',False),('behavior','eva_companion_enabled','false',True),('behavior','compositor','false',True),
             ('behavior','focus_follows_new_window','true',True),
             ('behavior','wallpaper_effect','"off"',False),('animation','enabled','false',True)]:
             text=edit_setting(text,section,key,value,required=required)
+        if 'desktop_shell' not in tomllib.loads(text): text+='\n[desktop_shell]\nenabled = false\n'
+        require(tomllib.loads(text)['desktop_shell']['enabled'] is False,'companion shell not explicitly disabled')
         config.write_text(text); (self.out/'config_x11.toml').write_text(text)
         self.run_command([self.bin,'--backend','x11rb','--check-config'])
         self.wm=self.spawn(['/usr/bin/dbus-run-session','--',self.bin,'--backend','x11rb'],'jwm')
@@ -205,15 +267,22 @@ class Session:
             ready=self.work/(letter+'.ready'); receipt=self.out/(letter+'.keys')
             title='org.jwm.randrfixture'+letter.lower()
             child=self.spawn([self.client,title,receipt,ready],letter)
+            self.client_processes[letter]=child
             wait(lambda:ready.exists() and ready.stat().st_size>0,'client ready '+letter)
             xid,pid=map(int,ready.read_text().split()); require(pid==child.pid,'fixture PID mismatch')
-            self.windows[letter]=xid; self.receipts[letter]=receipt
-            rows=wait(lambda:[w for w in self.ipc('get_windows') if w['id']==xid],'managed client '+letter)
-            require(len(rows)==1 and rows[0]['pid']==pid and rows[0]['class']==title,'client identity mismatch')
+            self.raw_xids[letter]=xid; self.receipts[letter]=receipt
+            self.client_identities[letter]={'pid':pid,'title':title}
+            native=self.run_command(['/usr/bin/xprop','-id',str(xid),'WM_NAME','WM_CLASS','_NET_WM_PID']).stdout
+            native_properties(native,pid,title)
+            row=wait(lambda:match_ipc_client(self.ipc('get_windows'),pid,title),'managed client '+letter)
+            self.windows[letter]=row['id']
+            self.save(letter+'-binding',{'raw_ready':ready.read_text(),'raw_xid':xid,'ipc_id':row['id'],
+                                        'child_pid':child.pid,'native_properties':native,'ipc_row':row})
+            rows=[row]
             monitor=next(m for m in self.monitors() if m['name']==output)
             require(rows[0]['monitor']==monitor['num'] and rows[0]['tags']==tag,'client setup placement')
             if letter=='A' and self.same_tag:
-                self.ipc('focus_window',{'id':xid}); self.ipc('tag',{'tag':B_TAG})
+                self.ipc('focus_window',{'id':self.windows[letter]}); self.ipc('tag',{'tag':B_TAG})
         self.run_command(['/usr/bin/xdotool','mousemove','1500','300'])
         self.ipc('focus_window',{'id':self.windows['B']})
         wait(lambda:any(w['id']==self.windows['B'] and w['is_focused'] for w in self.ipc('get_windows')),'B IPC focus')
@@ -221,11 +290,11 @@ class Session:
         self.b=next(m for m in self.before['get_monitors'] if m['name']=='DUMMY1')
         a=next(m for m in self.before['get_monitors'] if m['name']=='DUMMY0')
         require(a['num']==0 and self.b['num']==1,'fixture requires A first, B second in initial protocol order')
-        require((a['active_tags'],a['layout'],a['n_master'])==(A_TAG,'TILE',2),'A setup contract')
-        require((self.b['active_tags'],self.b['layout'],self.b['n_master'])==(B_TAG,'FLOAT',4),'B setup contract')
+        require((a['active_tags'],layout_name(a['layout']),a['n_master'])==(A_TAG,'tile',2),'A setup contract')
+        require((self.b['active_tags'],layout_name(self.b['layout']),self.b['n_master'])==(B_TAG,'float',4),'B setup contract')
         require(self.b['selected_id']==self.windows['B'] and self.b['focused'],'B setup selection')
         self.b_workspace=next(w for w in self.before['get_workspaces'] if w['monitor']==self.b['num'] and w['tag_mask']==B_TAG)
-        require((self.b_workspace['layout'],self.b_workspace['n_master'])==('FLOAT',4),'B per-tag setup')
+        require((layout_name(self.b_workspace['layout']),self.b_workspace['n_master'])==('float',4),'B per-tag setup')
         self.input_receipt('before-input')
 
     def differences(self,snapshot):
@@ -249,7 +318,7 @@ class Session:
         else:
             for key in ('layout','n_master','m_fact','gap'):
                 if spaces[0][key]!=self.b_workspace[key]: reasons.append({'field':'workspace-'+key,'expected':self.b_workspace[key],'actual':spaces[0][key]})
-        if snapshot['input_focus']!=self.windows['B']: reasons.append({'field':'input_focus','expected':self.windows['B'],'actual':snapshot['input_focus']})
+        if snapshot['input_focus']!=self.raw_xids['B']: reasons.append({'field':'input_focus','expected':self.raw_xids['B'],'actual':snapshot['input_focus']})
         return reasons
 
     def probe(self):
@@ -258,6 +327,7 @@ class Session:
         require(randr(self.server,self.out,'A-off',{'DUMMY1':(0,0,1280,720)})==self.ids,'RandR identity changed')
         wait(lambda:len(self.monitors())==1,'JWM real removal event')
         time.sleep(.2)
+        for letter in self.windows: self.verify_client(letter)
         after=self.snapshot('after-removal')
         b=after['get_monitors'][0]
         require(b['name']=='DUMMY1' and b['output_id']==self.ids['DUMMY1'],'real event mapping not established')

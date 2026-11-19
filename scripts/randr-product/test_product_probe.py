@@ -10,14 +10,14 @@ import product_probe as p
 
 class Contracts(unittest.TestCase):
     def session(self):
-        s=p.Session.__new__(p.Session); s.same_tag=False; s.windows={'A':101,'B':102}
-        s.b={'num':1,'active_tags':64,'layout':'FLOAT','n_master':4,'focused':True,'selected_id':102}
-        s.b_workspace={'layout':'FLOAT','n_master':4,'m_fact':.55,'gap':8}
+        s=p.Session.__new__(p.Session); s.same_tag=False; s.windows={'A':101,'B':102};s.raw_xids={'A':8388609,'B':8388610}
+        s.b={'num':1,'active_tags':64,'layout':'LayoutEnum("float")','n_master':4,'focused':True,'selected_id':102}
+        s.b_workspace={'layout':'LayoutEnum("float")','n_master':4,'m_fact':.55,'gap':8}
         snap={'get_monitors':[{'name':'DUMMY1',**s.b}],
               'get_workspaces':[{'monitor':1,'tag_mask':64,**s.b_workspace}],
               'get_windows':[{'id':101,'monitor':1,'tags':4,'is_on_view':False,'is_focused':False},
                              {'id':102,'monitor':1,'tags':64,'is_on_view':True,'is_focused':True}],
-              'input_focus':102}
+              'input_focus':8388610}
         return s,snap
     def test_correct_snapshot(self):
         s,snap=self.session(); self.assertEqual(s.differences(snap),[])
@@ -88,5 +88,37 @@ class Contracts(unittest.TestCase):
             s.build={'source':p.BASE,'exit_code':0,'root':str(root),'binary':str(binary),'binary_sha256':'0'*64}
             with patch.object(p,'checked_source'),patch.object(p.subprocess,'Popen',side_effect=AssertionError('must not execute')):
                 with self.assertRaisesRegex(RuntimeError,'binary changed'): s.start()
+
+    def test_real_artifact_separates_id_domains(self):
+        evidence=json.loads((Path(__file__).parent/'fixtures/initial-730c2705.json').read_text())
+        row=evidence['ipc_window'];raw=evidence['native_xid_from_jwm_log']
+        self.assertEqual(row['id'],4);self.assertEqual(raw,8388609)
+        self.assertEqual([w for w in [row] if w['id']==raw],[])  # former timeout cause
+        self.assertEqual(p.match_ipc_client([row],11686,'org.jwm.randrfixturea')['id'],4)
+        self.assertEqual(p.layout_name(row['layout']),'tile')
+    def test_wrong_and_ambiguous_ipc_identity_rejected(self):
+        row={'id':4,'pid':11686,'name':'fixture','class':'fixture','instance':'fixture'}
+        self.assertIsNone(p.match_ipc_client([row],999,'fixture'))
+        for key in ('name','class','instance'):
+            self.assertIsNone(p.match_ipc_client([{**row,key:'other'}],11686,'fixture'))
+        with self.assertRaisesRegex(RuntimeError,'ambiguous'):
+            p.match_ipc_client([row,{**row,'id':5}],11686,'fixture')
+    def test_layout_contract_is_exact(self):
+        self.assertEqual(p.layout_name('LayoutEnum("float")'),'float')
+        for value in ('FLOAT','float','junkLayoutEnum("float")','LayoutEnum("float")suffix','LayoutEnum("fibonacci")'):
+            with self.assertRaisesRegex(RuntimeError,'unexpected exact'):p.layout_name(value)
+    def test_native_property_identity_is_exact(self):
+        text='WM_NAME(STRING) = "fixture"\nWM_CLASS(STRING) = "fixture", "fixture"\n_NET_WM_PID(CARDINAL) = 11686\n'
+        p.native_properties(text,11686,'fixture')
+        for altered in (text.replace('11686','9'),text.replace('"fixture",','"other",'),text+text.splitlines()[0]+'\n'):
+            with self.assertRaises(RuntimeError):p.native_properties(altered,11686,'fixture')
+    def test_receipt_requires_native_not_abstract_id(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path=Path(tmp)/'receipt'
+            path.write_text(json.dumps({'window':8388609,'send_event':0,'text_hex':'6162'})+'\n')
+            self.assertEqual(p.event_text(p.key_events(path,8388609)),b'ab')
+            with self.assertRaisesRegex(RuntimeError,'unexpected native'):p.key_events(path,4)
+            path.write_text(json.dumps({'window':8388609,'send_event':1,'text_hex':'6162'})+'\n')
+            with self.assertRaisesRegex(RuntimeError,'unexpected native'):p.key_events(path,8388609)
 
 if __name__=='__main__': unittest.main()
