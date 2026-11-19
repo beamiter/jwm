@@ -1341,14 +1341,18 @@ impl App {
         } else {
             text
         };
-        if let Some(editor) = self.active_editor() {
+        let changed = if let Some(editor) = self.active_editor() {
+            let revision = editor.revision;
             if commit {
                 editor.preedit.clear();
                 editor.insert(&text);
             } else {
                 editor.preedit = text;
             }
-        }
+            editor.revision != revision
+        } else {
+            false
+        };
         if commit
             && self.focus != Focus::Preview
             && self.dialog.is_none()
@@ -1357,7 +1361,10 @@ impl App {
             if self.focus == Focus::Find {
                 n.find.sync(&mut n.editor);
             } else if self.focus == Focus::Search {
-                n.refresh();
+                if changed {
+                    n.refresh();
+                    n.list_scroll = 0.;
+                }
             } else {
                 n.edited();
             }
@@ -1454,6 +1461,99 @@ impl Picker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ime_search_reveals_first_result_without_resetting_preedit_or_noop() {
+        let directory = std::env::temp_dir().join(format!("jwm-ime-search-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let source = "正文保持不变";
+        let current = directory.join("current.txt");
+        std::fs::write(&current, source).unwrap();
+        for i in 0..20 {
+            std::fs::write(
+                directory.join(format!("{i:02}.txt")),
+                format!("项目 {i:02}"),
+            )
+            .unwrap();
+        }
+        let mut app = App::new(true, vec![current.clone()]).unwrap();
+        if let Document::Notes(n) = &mut app.document {
+            n.managed = true;
+            n.directory = directory.clone();
+            n.refresh();
+            n.list_scroll = 480.;
+        }
+        app.action(Action::Search);
+        app.ime("项".into(), false);
+        if let Document::Notes(n) = &app.document {
+            assert_eq!(n.list_scroll, 480.);
+            assert_eq!(n.search.preedit, "项");
+            assert_eq!(n.search.text, "");
+        }
+        app.ime("项目".into(), true);
+        let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 960, 680).unwrap();
+        let cr = cairo::Context::new(&surface).unwrap();
+        app.draw(&cr, 960., 680., false);
+        let visible = app
+            .hits
+            .iter()
+            .filter(|hit| matches!(hit.action, Action::Note(_)))
+            .count();
+        if let Document::Notes(n) = &app.document {
+            let first = n.rows[0].0.clone();
+            let first_visible = app
+                .hits
+                .iter()
+                .any(|hit| hit.action == Action::Note(first.clone()));
+            eprintln!(
+                "IME_SEARCH scroll={} rows={} visible={} first_visible={}",
+                n.list_scroll,
+                n.rows.len(),
+                visible,
+                first_visible
+            );
+            assert!(first_visible, "committed query must reveal first result");
+            assert_eq!(n.list_scroll, 0.);
+            assert_eq!(n.search.cursor, "项目".len());
+            assert!(n.search.preedit.is_empty());
+        }
+        assert!(app.focus == Focus::Search);
+        // Empty commit and an uninterrupted preedit must not jump a scrolled result list.
+        if let Document::Notes(n) = &mut app.document {
+            n.list_scroll = 240.;
+        }
+        app.ime(String::new(), true);
+        app.ime("不存在".into(), false);
+        if let Document::Notes(n) = &app.document {
+            assert_eq!(n.list_scroll, 240.);
+            assert_eq!(n.rows.len(), 20);
+        }
+        if let Document::Notes(n) = &mut app.document {
+            n.search.select_all();
+        }
+        app.ime("不存在".into(), true);
+        if let Document::Notes(n) = &app.document {
+            assert!(n.rows.is_empty());
+            assert_eq!(n.list_scroll, 0.);
+        }
+        // Committed empty replacement is a real edit, distinct from an empty no-op.
+        if let Document::Notes(n) = &mut app.document {
+            n.search.select_all();
+        }
+        app.ime(String::new(), true);
+        if let Document::Notes(n) = &app.document {
+            assert_eq!(n.rows.len(), 21);
+            assert_eq!(n.list_scroll, 0.);
+            assert_eq!(n.search.cursor, 0);
+            assert_eq!(n.editor.text, source);
+            assert_eq!(n.editor.revision, 0);
+            assert!(!n.dirty);
+        }
+        assert!(app.focus == Focus::Search);
+        assert!(app.effects.is_empty());
+        assert_eq!(std::fs::read_to_string(&current).unwrap(), source);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 
     #[test]
     fn code_view_status_preserves_external_file_bytes() {
