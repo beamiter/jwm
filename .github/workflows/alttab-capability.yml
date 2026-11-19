@@ -1,0 +1,98 @@
+# Unpublished template: bind d4ac836fc4f8ce1d2066e2a7555dc677934343f4 after remote product tree verification.
+name: Private Alt-Tab capability acceptance
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, converted_to_draft]
+    branches: ['dot/alttab-capability-acceptance-base']
+    paths:
+      - '.github/workflows/alttab-capability.yml'
+      - 'scripts/alttab-capability/**'
+permissions:
+  contents: read
+jobs:
+  capability:
+    if: github.event.pull_request.draft == true && github.event.pull_request.head.ref == 'dot/alttab-capability-acceptance'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: fixture
+          persist-credentials: false
+      - name: Initialize evidence
+        run: |
+          mkdir -m 700 artifacts
+          printf '%s\n' '${{ github.event.pull_request.head.sha }}' > artifacts/fixture-head.txt
+          printf '%s\n' d4ac836fc4f8ce1d2066e2a7555dc677934343f4 > artifacts/expected-source.txt
+          git -C fixture rev-parse HEAD > artifacts/fixture-checkout.txt
+          sha256sum fixture/scripts/alttab-capability/* > artifacts/fixture-sha256.txt
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: beamiter/jwm
+          ref: d4ac836fc4f8ce1d2066e2a7555dc677934343f4
+          path: source
+          persist-credentials: false
+      - name: Official Ubuntu dependencies
+        timeout-minutes: 10
+        shell: bash
+        run: |
+          set -euo pipefail
+          unset JWM_CI_APT_SOURCES JWM_CI_PREFETCH_CJK
+          bash source/scripts/ci-install-deps.sh build-essential pkg-config libglib2.0-dev libcairo2-dev libpango1.0-dev \
+            libasound2-dev libdbus-1-dev libudev-dev libinput-dev libseat-dev libdrm-dev libgbm-dev \
+            libegl1-mesa-dev libgl1-mesa-dev libgl1-mesa-dri libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libx11-dev libx11-xcb-dev libxext-dev libxxf86vm-dev libxcb1-dev libxcb-composite0-dev \
+            libxcb-damage0-dev libxcb-present-dev libxcb-randr0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libxcursor-dev libxfixes-dev libxi-dev libxrandr-dev libxrender-dev \
+            xvfb xwayland xauth xdotool x11-utils libxres1 dbus-daemon 2>&1 | tee artifacts/dependencies.log
+          dpkg-query -W > artifacts/packages.txt
+          apt-cache policy xvfb xdotool x11-utils > artifacts/package-policy.txt
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        timeout-minutes: 10
+        with:
+          toolchain: stable
+      - name: Offline fixture contracts
+        timeout-minutes: 2
+        shell: bash
+        run: |
+          set -euo pipefail
+          /usr/bin/python3 -I - <<'PY' 2>&1 | tee artifacts/contracts.log
+          import pathlib,sys,unittest
+          p=pathlib.Path('fixture/scripts/alttab-capability').resolve()
+          sys.path.insert(0,str(p))
+          r=unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.discover(str(p),pattern='test_*.py'))
+          raise SystemExit(not r.wasSuccessful())
+          PY
+      - name: Cold exact-source build without inherited wrappers
+        timeout-minutes: 40
+        shell: bash
+        run: |
+          set -euo pipefail
+          toolbin="$(dirname "$(rustup which cargo)")"
+          sha256sum "$toolbin/cargo" "$toolbin/rustc" /usr/bin/cc /usr/bin/python3 > artifacts/tools-sha256.txt
+          mkdir -m 700 build-home build-cargo build-config
+          env -i PATH="$toolbin:/usr/bin:/bin" HOME="$PWD/build-home" CARGO_HOME="$PWD/build-cargo" \
+            XDG_CONFIG_HOME="$PWD/build-config" RUSTC="$toolbin/rustc" CARGO_BUILD_JOBS=2 \
+            LANG=C.UTF-8 LC_ALL=C.UTF-8 GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
+            /bin/bash fixture/scripts/alttab-capability/build.sh "$PWD/source" "$PWD/artifacts" d4ac836fc4f8ce1d2066e2a7555dc677934343f4 \
+            2>&1 | tee artifacts/build.log
+      - name: Actual winit capability refusal and native input preservation
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -euo pipefail
+          env -i PATH=/usr/bin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 \
+            /usr/bin/python3 -I fixture/scripts/alttab-capability/probe.py \
+            --source-root "$PWD/source" --expected-source d4ac836fc4f8ce1d2066e2a7555dc677934343f4 --build-receipt "$PWD/artifacts/build.json" \
+            --bin-dir "$PWD/source/target/release" \
+            --client-bin "$PWD/source/target/native/debug/examples/native_shell_client" \
+            --evidence-dir "$PWD/artifacts/winit" 2>&1 | tee artifacts/probe.log
+      - name: Retain all evidence including failed positive controls
+        if: always()
+        timeout-minutes: 3
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: alttab-capability-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts
+          if-no-files-found: error
