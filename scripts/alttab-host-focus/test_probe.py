@@ -1,4 +1,6 @@
 import json
+import os
+import errno
 from pathlib import Path
 import tempfile
 import unittest
@@ -6,6 +8,31 @@ from unittest.mock import patch
 import probe
 
 class Contracts(unittest.TestCase):
+    def test_real_lock_contract_exact_pid_owner_and_type(self):
+        with tempfile.TemporaryDirectory() as d:
+            lock=Path(d)/'lock';lock.write_text(f'{os.getpid():>10}\n')
+            probe.require_server_lock(lock,os.getpid(),os.getuid())
+            for pid,uid in ((os.getpid()+1,os.getuid()),(os.getpid(),os.getuid()+1)):
+                with self.assertRaises(RuntimeError):probe.require_server_lock(lock,pid,uid)
+            link=Path(d)/'link';link.symlink_to(lock)
+            with self.assertRaises(OSError):probe.require_server_lock(link,os.getpid(),os.getuid())
+            fifo=Path(d)/'fifo';os.mkfifo(fifo)
+            with self.assertRaises(RuntimeError):probe.require_server_lock(fifo,os.getpid(),os.getuid())
+    def test_preexisting_display_paths_are_not_modified(self):
+        with tempfile.TemporaryDirectory() as d:
+            lock,endpoint=Path(d)/'lock',Path(d)/'socket'
+            with patch.object(probe,'display_paths',return_value=(lock,endpoint)):
+                for path in (lock,endpoint):
+                    path.symlink_to(Path(d)/'missing')
+                    with self.assertRaises(RuntimeError):probe.require_unused_display('199')
+                    self.assertTrue(path.is_symlink());path.unlink()
+    def test_abstract_collision_fails_closed(self):
+        with patch.object(probe.os.path,'lexists',return_value=False),patch.object(probe.socket,'socket') as sock:
+            with self.assertRaises(RuntimeError):probe.require_unused_display('199')
+            sock.return_value.__enter__.return_value.connect.side_effect=OSError(errno.ECONNREFUSED,'absent')
+            probe.require_unused_display('199')
+            sock.return_value.__enter__.return_value.connect.side_effect=OSError(errno.EACCES,'denied')
+            with self.assertRaises(OSError):probe.require_unused_display('199')
     def test_native_press_needs_pid_key_and_state(self):
         line='123 42 key 9 51 48 Value(Pressed)'
         self.assertTrue(probe.received([line],48,123))

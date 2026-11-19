@@ -17,10 +17,11 @@ not exist. Both JWM/jwm-tool and native_shell_client are really built --locked,
 source is checked clean before/after, hashes recorded then checked by probe.
 The normal Draft checkout supplies only reviewed test files, not product builds.
 
-Private Xvfb: -displayfd, -nolisten tcp, random private cookie; no inherited
+Private Xvfb: explicit :199, -nolisten tcp, random private cookie; no inherited
 DISPLAY/Xauthority/buses/home. Validate peer PID+UID+live child+/proc executable,
-wrong cookie must fail and private cookie succeed. Never require X lock file
-(displayfd does not create it). Native clients have no DISPLAY, only private
+wrong cookie must fail and private cookie succeed. Require the real Xvfb-created lock with exact owned PID/UID; reject existing
+lock/pathname/abstract endpoints before startup. No manufactured lock, no
+-displayfd, no manual removal of shared X11 paths. A conflict fails closed. Native clients have no DISPLAY, only private
 WAYLAND_DISPLAY. Cleanup only owned process groups, all failures retained.
 
 Positive controls must succeed first: actual IPC window_switcher opens on real
@@ -67,3 +68,12 @@ Residual selector gate: observe read-only IPC for a full 2-second window after r
 record elapsed monotonic time with every sample, and require the final three consecutive
 inactive observations. All scheduled samples are retained, even after it first hides. A brief queue delay that settles is not labeled a residual
 bug. Failure retains the whole timeline; no repair input during observation.
+
+## First real run and minimal fixture correction
+Run 44472651354 (head 9556dafc) failed during setup before any Alt-Tab control.
+The displayfd-selected :0 pathname disappeared while Xvfb was still live.
+Exact baseline Smithay's Xwayland allocation removes a lock-free display's
+pathname before binding; the log records its abstract bind collision on :0.
+This is not evidence of Alt-Tab residue. The replacement uses normal server
+locking on :199; all existing peer PID/UID/exe and cookie checks remain.
+No product source changes, no retry of the old head, no claimed runtime pass.

@@ -2,10 +2,39 @@
 """Strict native Alt-Tab host-focus regression. Own Xvfb only; never host desktop."""
 import argparse, hashlib, json, os, secrets, socket, struct, tomllib
 from pathlib import Path
-import select, shutil, signal, subprocess, tempfile, time, traceback
+import errno, shutil, signal, stat, subprocess, tempfile, time, traceback
 
 BASELINE='c994017ba60687c7209e2fc6d451be8745cfdea2'
 class DeadlineError(RuntimeError): pass
+
+# Dedicated runner display, outside Smithay's automatic 0..32 allocation range.
+DISPLAY_NUMBER = '199'
+
+def display_paths(number):
+    return Path('/tmp/.X'+number+'-lock'), Path('/tmp/.X11-unix/X'+number)
+
+def require_unused_display(number):
+    lock, endpoint = display_paths(number)
+    for path in (lock, endpoint):
+        if os.path.lexists(path):
+            raise RuntimeError('display already occupied: '+str(path))
+    with socket.socket(socket.AF_UNIX) as peer:
+        peer.settimeout(2)
+        try:peer.connect('\0'+str(endpoint))
+        except OSError as error:
+            if error.errno not in (errno.ENOENT, errno.ECONNREFUSED):raise
+        else:raise RuntimeError('display abstract endpoint already occupied')
+
+def require_server_lock(path, pid, uid):
+    fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+    try:
+        info=os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid!=uid:
+            raise RuntimeError('wrong Xvfb lock owner/type')
+        raw=os.read(fd,32)
+        if raw != f'{pid:>10}\n'.encode():
+            raise RuntimeError('wrong Xvfb lock PID')
+    finally:os.close(fd)
 
 def edit_setting(text,section,key,value,required=True):
     lines=text.splitlines(); inside=False; changed=False
@@ -84,6 +113,7 @@ def main():
     log=(out/'session.log').open('w');extra_logs=[];xserver=None;sequence=0
     def verify_server():
         if xserver is None or xserver.poll() is not None:raise RuntimeError('owned Xvfb is not live')
+        require_server_lock(display_paths(DISPLAY_NUMBER)[0],xserver.pid,os.getuid())
         with socket.socket(socket.AF_UNIX) as peer:
             peer.settimeout(2);peer.connect('/tmp/.X11-unix/X'+env['DISPLAY'][1:])
             pid,uid,_=struct.unpack('3i',peer.getsockopt(socket.SOL_SOCKET,socket.SO_PEERCRED,12))
@@ -141,22 +171,21 @@ def main():
         assert hashlib.sha256(Path(__file__).with_name('host_identity.py').read_bytes()).hexdigest()==receipt['host_identity_sha256']
         report['build_receipt']=receipt
         authority=work/'authority';auth_file(authority);env['XAUTHORITY']=str(authority)
-        read,write=os.pipe()
-        try:
-            xserver=spawn(['/usr/bin/Xvfb','-auth',authority,'-displayfd',write,'-screen','0','1280x800x24','-nolisten','tcp','-noreset'],pass_fds=(write,))
-            os.close(write);write=None
-            assert select.select([read],[],[],8)[0],'Xvfb readiness'
-            display=os.read(read,32).decode().strip();assert display.isdigit(),display
-            env['DISPLAY']=':'+display
-        finally:
-            os.close(read)
-            if write is not None:os.close(write)
+        env['DISPLAY']=':'+DISPLAY_NUMBER
+        report['display_setup']={'display':env['DISPLAY'],'mode':'explicit-server-created-lock'}
+        require_unused_display(DISPLAY_NUMBER)
+        xserver=spawn(['/usr/bin/Xvfb',env['DISPLAY'],'-auth',authority,'-screen','0','1280x800x24','-nolisten','tcp','-noreset'])
+        def server_ready():
+            if xserver.poll() is not None:raise RuntimeError('owned Xvfb exited during startup')
+            if not all(os.path.lexists(path) for path in display_paths(DISPLAY_NUMBER)):return False
+            verify_server();return True
+        wait(server_ready,'owned Xvfb socket and server-created lock')
         verify_server()
         wrong=work/'wrong-authority';auth_file(wrong)
         denied=subprocess.run(['/usr/bin/xdpyinfo'],env={**env,'XAUTHORITY':str(wrong)},capture_output=True,text=True,timeout=8)
         verify_server();assert denied.returncode!=0,'Xvfb accepted wrong cookie'
         report['wrong_cookie_rc']=denied.returncode
-        run('/usr/bin/xdpyinfo');report['owner']={'pid':xserver.pid,'uid':os.getuid(),'display':env['DISPLAY'],'peer_verified':True}
+        run('/usr/bin/xdpyinfo');report['owner']={'pid':xserver.pid,'uid':os.getuid(),'display':env['DISPLAY'],'peer_verified':True,'server_lock_verified':True}
         binary=a.bin_dir.resolve()/'jwm' 
         run(binary,'--backend',a.backend,'--gen-config')
         cfg=work/'config/jwm/config_wayland.toml';text=cfg.read_text()
