@@ -45,7 +45,9 @@ jobs:
             . -> target
             crates/jwm_shell -> target
       - name: Offline diagnostic contracts
-        run: python3 scripts/test-terminal-exit-wayland.py --self-test
+        run: |
+          python3 scripts/test-terminal-exit-wayland.py --self-test
+          python3 scripts/diagnose-terminal-clock-control.py --self-test
       - name: Build compositor and native wl_shm client
         run: |
           cargo build --locked --release --no-default-features --features backend-wayland-nested --bin jwm --bin jwm-tool
@@ -55,10 +57,10 @@ jobs:
           for filter in nested_exit_geometry nested_terminal_visual native_visual_hook promotion_is_visual_only; do
             cargo test --locked --release --no-default-features --features backend-wayland-nested --lib "$filter"
           done
-      - name: Real native pixels and stationary-pointer handoff
-        timeout-minutes: 5
+      - name: Bounded OFF ON ON OFF control (any failure fails aggregate)
+        timeout-minutes: 13
         run: |
-          python3 scripts/test-terminal-exit-wayland.py --backend '${{ matrix.backend }}' --bin-dir target/release --client-bin crates/jwm_shell/target/debug/examples/native_shell_client --evidence-dir artifacts/native-wayland-terminal --diagnose --trace-clock
+          python3 scripts/diagnose-terminal-clock-control.py
       - name: Retain acceptance pixels, native input receipts and logs
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
