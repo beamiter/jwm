@@ -1,0 +1,36 @@
+# UNPUBLISHED PROPOSAL. Requires a separately approved draft PR to trigger.
+name: Private RandR output preflight
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/randr-preflight.yml'
+      - 'scripts/randr-preflight/**'
+permissions:
+  contents: read
+jobs:
+  output-preflight:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Official runner-distribution dependencies
+        run: |
+          bash scripts/ci-install-deps.sh xserver-xorg-core xserver-xorg-video-dummy x11-xserver-utils x11-utils
+          mkdir -p artifacts
+          dpkg-query -W xserver-xorg-core xserver-xorg-video-dummy x11-xserver-utils x11-utils > artifacts/packages.txt
+          apt-cache policy xserver-xorg-core xserver-xorg-video-dummy > artifacts/package-policy.txt
+          sha256sum /usr/lib/xorg/modules/drivers/dummy_drv.so > artifacts/driver-sha256.txt
+      - name: Offline failure contracts
+        run: python3 scripts/randr-preflight/test_owned_xorg.py
+      - name: Owned server and stable output prerequisite only
+        timeout-minutes: 3
+        run: python3 scripts/randr-preflight/owned_xorg.py --output artifacts/randr
+      - name: Preserve every result
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: private-randr-preflight
+          path: artifacts
+          if-no-files-found: error
