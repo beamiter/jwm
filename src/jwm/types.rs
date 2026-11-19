@@ -157,6 +157,26 @@ impl WMKey {
     }
 }
 
+/// Whether a matching rule uses an application's last closed placement.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlacementPolicy {
+    #[default]
+    Inherit,
+    Current,
+    Remember,
+}
+
+impl PlacementPolicy {
+    pub const fn records_history(self, global: bool) -> bool {
+        match self {
+            Self::Inherit => global,
+            Self::Current => false,
+            Self::Remember => true,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct WMRule {
     pub class: String,
@@ -165,6 +185,7 @@ pub struct WMRule {
     pub tags: usize,
     pub is_floating: bool,
     pub monitor: i32,
+    pub placement: PlacementPolicy,
 }
 
 impl WMRule {
@@ -183,7 +204,14 @@ impl WMRule {
             tags,
             is_floating,
             monitor,
+            placement: PlacementPolicy::Inherit,
         }
+    }
+
+    #[must_use]
+    pub fn with_placement(mut self, placement: PlacementPolicy) -> Self {
+        self.placement = placement;
+        self
     }
 }
 

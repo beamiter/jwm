@@ -1528,7 +1528,7 @@ impl Jwm {
             self.broadcast_ipc_event("dnd/toggle", serde_json::json!({ "enabled": dnd }));
             self.refresh_open_control_center();
         }
-        self.reconcile_closed_placement_config(cfg.behavior().remember_closed_placement);
+        self.reconcile_closed_placement_config(cfg.remembers_any_closed_placement());
 
         // Config hot-disable must close already-active modal features as well
         // as gate future entry. Otherwise JWM can keep an invisible keyboard

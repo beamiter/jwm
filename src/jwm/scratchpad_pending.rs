@@ -142,6 +142,21 @@ impl ScratchpadPendingRegistry {
         self.by_pid.contains_key(&pid)
     }
 
+    /// Inspect ownership without consuming the eventual successful manage claim.
+    pub(crate) fn matches_pending(
+        &self,
+        pid: u32,
+        observed_start_time: Option<u64>,
+        now: Instant,
+    ) -> bool {
+        self.by_pid.get(&pid).is_some_and(|pending| {
+            now < pending.deadline
+                && pending
+                    .process_start_time
+                    .is_none_or(|expected| observed_start_time == Some(expected))
+        })
+    }
+
     pub(crate) fn ensure_name_can_spawn(&self, name: &str) -> Result<(), PendingRegistrationError> {
         if !valid_scratchpad_name(name) {
             return Err(PendingRegistrationError::InvalidName);
@@ -393,6 +408,37 @@ impl Jwm {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn placement_policy_pending_probe_matches_claim_without_consuming() {
+        let now = Instant::now();
+        for (saved, observed, pid, delay, expected) in [
+            (Some(1), Some(1), 101, Duration::ZERO, true),
+            (Some(1), Some(2), 101, Duration::ZERO, false),
+            (Some(1), None, 101, Duration::ZERO, false),
+            (Some(1), Some(1), 999, Duration::ZERO, false),
+            (Some(1), Some(1), 101, PENDING_SCRATCHPAD_TTL, false),
+            (None, None, 101, Duration::ZERO, true),
+            (None, None, 101, UNVERIFIED_PENDING_SCRATCHPAD_TTL, false),
+        ] {
+            let mut registry = ScratchpadPendingRegistry::default();
+            registry
+                .register_spawned(101, "term".into(), saved, now)
+                .unwrap();
+            assert_eq!(
+                registry.matches_pending(pid, observed, now + delay),
+                expected
+            );
+            assert_eq!(registry.len(), 1);
+            assert_eq!(
+                matches!(
+                    registry.claim(pid, observed, now + delay),
+                    PendingClaim::Claimed(_)
+                ),
+                expected
+            );
+        }
+    }
 
     #[test]
     fn proc_stat_parser_handles_spaces_and_closing_parentheses_in_comm() {

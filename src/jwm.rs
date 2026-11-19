@@ -1494,7 +1494,7 @@ impl Jwm {
                 }
                 #[cfg(not(test))]
                 {
-                    if CONFIG.load().behavior().remember_closed_placement {
+                    if CONFIG.load().remembers_any_closed_placement() {
                         closed_placement::ClosedPlacementMemory::load()
                     } else {
                         closed_placement::ClosedPlacementMemory::load_disabled()

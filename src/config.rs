@@ -16,6 +16,7 @@ use std::rc::Rc;
 use crate::core::animation::{AnimationSpeed, Easing};
 use crate::core::layout::LayoutEnum;
 use crate::jwm::WMFuncType;
+use crate::jwm::types::PlacementPolicy;
 use crate::jwm::{self, Jwm, WMButton, WMClickType, WMKey, WMRule};
 use crate::terminal_prober::{ADVANCED_TERMINAL_PROBER, TerminalPurpose};
 use std::time::Duration;
@@ -2352,6 +2353,8 @@ pub struct RuleConfig {
     pub tags: usize,
     pub is_floating: bool,
     pub monitor: i32,
+    #[serde(default)]
+    pub placement: PlacementPolicy,
 }
 
 #[derive(Clone)]
@@ -3766,6 +3769,19 @@ impl Config {
         &self.inner.behavior
     }
 
+    /// Whether the shared snapshot can be used under this configuration.
+    ///
+    /// Preserve it if any rule opts in, even if a particular window is
+    /// shadowed by an earlier match. Per-window eligibility is decided separately.
+    pub fn remembers_any_closed_placement(&self) -> bool {
+        self.behavior().remember_closed_placement
+            || self
+                .inner
+                .rules
+                .iter()
+                .any(|rule| rule.placement == PlacementPolicy::Remember)
+    }
+
     pub fn input(&self) -> &InputConfig {
         &self.inner.input
     }
@@ -4333,6 +4349,7 @@ impl Config {
                     rule.is_floating,
                     rule.monitor,
                 )
+                .with_placement(rule.placement)
             })
             .collect()
     }
@@ -6801,6 +6818,56 @@ mod tests {
             let restarted: TomlConfig = toml::from_str(&persisted).unwrap();
             assert_eq!(restarted.behavior.remember_closed_placement, enabled);
         }
+    }
+
+    #[test]
+    fn per_app_placement_compatibility_and_snapshot_gate() {
+        use super::{PlacementPolicy, RuleConfig};
+
+        let fields = r#"
+class = "anvil"
+instance = ""
+name = ""
+tags = 0
+is_floating = false
+monitor = -1
+"#;
+        let mut config = Config::default();
+        for (setting, expected) in [
+            ("", PlacementPolicy::Inherit),
+            ("placement = \"inherit\"", PlacementPolicy::Inherit),
+            ("placement = \"current\"", PlacementPolicy::Current),
+            ("placement = \"remember\"", PlacementPolicy::Remember),
+        ] {
+            let parsed: RuleConfig = toml::from_str(&format!("{fields}{setting}")).unwrap();
+            assert_eq!(parsed.placement, expected);
+            let encoded = toml::to_string(&parsed).unwrap();
+            let decoded: RuleConfig = toml::from_str(&encoded).unwrap();
+            assert_eq!(decoded.placement, expected);
+
+            config.inner.rules = vec![decoded];
+            assert_eq!(config.get_rules()[0].placement, expected);
+            for global in [false, true] {
+                config.inner.behavior.remember_closed_placement = global;
+                assert_eq!(
+                    config.remembers_any_closed_placement(),
+                    global || expected == PlacementPolicy::Remember
+                );
+                assert_eq!(
+                    expected.records_history(global),
+                    match expected {
+                        PlacementPolicy::Inherit => global,
+                        PlacementPolicy::Current => false,
+                        PlacementPolicy::Remember => true,
+                    },
+                );
+            }
+        }
+        config.inner.behavior.remember_closed_placement = false;
+        assert!(config.remembers_any_closed_placement());
+        config.inner.rules.clear();
+        assert!(!config.remembers_any_closed_placement());
+        assert!(toml::from_str::<RuleConfig>(&format!("{fields}placement = \"typo\"")).is_err());
     }
 
     #[test]
