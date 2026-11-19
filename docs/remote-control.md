@@ -260,11 +260,12 @@ rejection are unchanged; this is not a timeout for slow filesystem/device I/O.
 Start with viewing only:
 
 ```bash
-# Host: sharing this machine's desktop on your trusted LAN
-jwm-remote host --listen 0.0.0.0 --allow-lan
+# Replace 192.168.1.50 with the address of the machine sharing its desktop.
+# Host
+jwm-remote host --listen 192.168.1.50 --allow-lan
 
-# Viewer: replace HOST with that machine's actual LAN hostname or IP
-jwm-remote connect HOST --view-only
+# Viewer
+jwm-remote connect 192.168.1.50 --view-only
 ```
 
 The default port is 48221: `HOST`, `HOST:48221`, `[::1]`, and `[::1]:48221`
@@ -781,7 +782,14 @@ keycode keeps the session, remapping a real key ends it.
 
 ## First LAN connection
 
-Create the key once on either machine. The command refuses to overwrite an
+Use direct TCP when the viewer can reach the host's private IPv4 or IPv6
+address and the network permits the connection. No Internet service, relay or
+automatic NAT traversal is involved. Being on the same company network does
+not guarantee access between devices or VLANs. If direct TCP is not allowed
+but SSH is, use [SSH mode](#automatic-hardware-video-over-ssh) instead.
+
+Start with a view-only session and enable control only after verifying that
+the expected desktop appears. Create the key once on either machine. The command refuses to overwrite an
 existing path:
 
 ```bash
@@ -802,20 +810,26 @@ On the machine being controlled:
 
 ```bash
 jwm-remote host \
-  --listen 0.0.0.0:48221 \
+  --listen 192.168.1.50:48221 \
   --allow-lan \
-  --allow-input \
   --key-file ~/.config/jwm/remote.key
 ```
 
-Restrict TCP port `48221` to the intended local subnet in the host firewall.
-On the controlling JWM machine, replace the address with the host's LAN IP:
+Replace the example address with the host's actual LAN address. Bind that
+address rather than every interface. Restrict TCP port `48221` to the intended
+viewer or trusted subnet as permitted by your network administrator. On the
+viewer, use the same host address:
 
 ```bash
 jwm-remote connect 192.168.1.50:48221 \
   --key-file ~/.config/jwm/remote.key \
-  --grab-input
+  --view-only
 ```
+
+For IPv6, put the host address in brackets when giving an explicit port,
+for example `'[fd00::50]:48221'`, on both commands. If you want keyboard and
+pointer control, restart the host with `--allow-input` and reconnect with
+`--grab-input` in place of `--view-only`.
 
 With `--grab-input`, click inside the viewer before using JWM shortcuts. Press
 **Ctrl+Super+F12** (Super is the Win key) to release the local keyboard/pointer
@@ -827,17 +841,16 @@ For example, `--escape-key Pause` uses Ctrl+Super+Pause.
 
 Without Ctrl+Super, F12 is forwarded to the remote machine like any other key,
 including repeated presses and double taps. The release shortcut itself is
-handled locally. Closing the viewer also releases input. Without
-`--grab-input`, ordinary pointer and key events are forwarded while the viewer
-has focus, but local JWM global shortcuts may win their passive grabs.
+handled locally. Closing the viewer also releases input. In a session where
+the host permits control and the viewer is not view-only, omitting
+`--grab-input` still forwards ordinary pointer and key events while the viewer
+has focus. Local JWM global shortcuts may intercept some keystrokes.
 
-For view-only use, omit host `--allow-input` or pass client `--view-only`:
-
-```bash
-jwm-remote connect 192.168.1.50:48221 \
-  --key-file ~/.config/jwm/remote.key \
-  --view-only
-```
+A direct `connect` session uses JPEG. To compare direct TCP and SSH without
+also changing codecs, run `jwm-remote ssh user@desktop --jpeg --view-only`
+for the SSH trial and keep the source, viewer size and workload the same.
+Leave `--jpeg` and `--jpeg-quality` unset to test SSH's automatic hardware
+selection separately.
 
 ## Tuning and troubleshooting
 
@@ -1897,6 +1910,11 @@ as the host command, and persists these host quality settings. For example:
 jwm-remote profile save office --replace -- ssh user@office --monitor DP-0 --fps 24 --jpeg-quality 70 --max-width 1280 --clipboard --clipboard-file-limit 512M
 jwm-remote profile run office --view-only --no-clipboard
 ```
+
+A saved `--jpeg-quality` forces JPEG when the SSH profile runs, even on peers
+that support hardware video. If an older profile unexpectedly stays on JPEG,
+check `profile show NAME`. For hardware negotiation, omit that option when
+saving the profile or run `ssh` directly with the same scope.
 
 Run-time profile overrides can only reduce permissions. Direct connections cannot
 change a separately running host's monitor or quality. Profiles can reapply an
