@@ -1403,7 +1403,8 @@ impl Jwm {
         crate::jwm::native_chrome::apply_native_color_schemes(backend)?;
         crate::jwm::native_chrome::apply_root_cursor(backend);
         info!("[new] JWM initialization completed successfully");
-        let outputs = backend.output_ops().enumerate_outputs();
+        let (outputs, output_ids_are_authoritative) =
+            backend.output_ops().enumerate_outputs_with_provenance();
         let config_revision = crate::config::Config::get_config_modified_time().ok();
         let runtime_backend: String = runtime_backend.into();
         let ipc_server = ControlSocketSource::for_build().open(&runtime_backend);
@@ -1559,6 +1560,7 @@ impl Jwm {
         for out in outputs {
             jwm.add_monitor(out);
         }
+        jwm.state.output_ids_are_authoritative = output_ids_are_authoritative;
         if !jwm.state.monitor_order.is_empty() {
             jwm.state.sel_mon = Some(jwm.state.monitor_order[0]);
         }

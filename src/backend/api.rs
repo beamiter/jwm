@@ -2967,6 +2967,13 @@ pub struct IconData {
 pub trait OutputOps: Send {
     /// 获取当前所有连接的输出设备
     fn enumerate_outputs(&self) -> Vec<OutputInfo>;
+
+    /// Return outputs and whether every ID came from an authoritative backend
+    /// output, not an index, a CRTC substitute, or a synthetic screen.
+    /// The provenance must describe this exact batch; default to untrusted.
+    fn enumerate_outputs_with_provenance(&self) -> (Vec<OutputInfo>, bool) {
+        (self.enumerate_outputs(), false)
+    }
     /// 获取主屏幕信息 (兼容旧接口)
     fn screen_info(&self) -> ScreenInfo;
 

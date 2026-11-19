@@ -14,6 +14,8 @@ pub struct WMState {
     pub client_stack_order: Vec<ClientKey>, // 渲染堆叠顺序
     pub monitor_order: Vec<MonitorKey>,
     pub output_map: SecondaryMap<MonitorKey, OutputId>,
+    /// Provenance of the complete batch from which output_map was reconciled.
+    pub output_ids_are_authoritative: bool,
     pub win_to_client: HashMap<WindowId, ClientKey>, // WindowId → ClientKey O(1) lookup
 
     // 焦点与选择
@@ -34,6 +36,7 @@ impl WMState {
             client_stack_order: Vec::new(),
             monitor_order: Vec::new(),
             output_map: SecondaryMap::new(),
+            output_ids_are_authoritative: false,
             win_to_client: HashMap::new(),
             sel_mon: None,
             motion_mon: None,

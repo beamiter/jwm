@@ -913,6 +913,7 @@ mod tests {
             input_ops: DummyInputOps,
             property_ops: DummyPropertyOps,
             output_ops: SpyOutputOps {
+                authoritative: true,
                 outputs: vec![output(1, 0, 0, 1920, 1080), output(2, 1920, 0, 1920, 1080)],
             },
             key_ops: DummyKeyOps,
@@ -1013,6 +1014,7 @@ mod tests {
             input_ops: DummyInputOps,
             property_ops: DummyPropertyOps,
             output_ops: SpyOutputOps {
+                authoritative: true,
                 outputs: vec![output(1, 0, 0, 1920, 1080), output(2, 1920, 0, 1920, 1080)],
             },
             key_ops: DummyKeyOps,
@@ -1115,6 +1117,7 @@ mod tests {
                 input_ops: DummyInputOps,
                 property_ops: DummyPropertyOps,
                 output_ops: SpyOutputOps {
+                    authoritative: true,
                     outputs: vec![
                         output(1, 0, 0, 1920, 1080),
                         output(2, 1920, 0, 1920, target_height),

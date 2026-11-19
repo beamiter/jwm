@@ -4956,12 +4956,15 @@ fn xcb_edid_bytes(reply: &xcb::randr::GetOutputPropertyReply) -> Option<&[u8]> {
     (data.len() >= 128).then_some(data)
 }
 
+type OutputSnapshot = (Vec<OutputInfo>, bool);
+
 struct XcbOutputOps {
     conn: Arc<xcb::Connection>,
     root: x::Window,
     width: i32,
     height: i32,
-    cached_outputs: Mutex<Option<Vec<OutputInfo>>>,
+    // The list and provenance must describe the same RandR observation.
+    cached_outputs: Mutex<Option<OutputSnapshot>>,
 }
 
 impl XcbOutputOps {
@@ -5026,7 +5029,7 @@ impl XcbOutputOps {
         crate::backend::edid::parse_edid_hdr_from_bytes(xcb_edid_bytes(&reply)?)
     }
 
-    fn get_cached_or_query(&self) -> Vec<OutputInfo> {
+    fn get_cached_or_query(&self) -> OutputSnapshot {
         if let Ok(cache) = self.cached_outputs.lock() {
             if let Some(outputs) = cache.as_ref() {
                 return outputs.clone();
@@ -5040,7 +5043,7 @@ impl XcbOutputOps {
         outputs
     }
 
-    fn query_outputs_internal(&self) -> Vec<OutputInfo> {
+    fn query_outputs_internal(&self) -> OutputSnapshot {
         let version_cookie = self.conn.send_request(&xcb::randr::QueryVersion {
             major_version: 1,
             minor_version: 5,
@@ -5101,9 +5104,11 @@ impl XcbOutputOps {
                         }
                     }
 
+                    let mut authoritative = true;
                     let mut crtc_cookies = Vec::new();
                     for (idx, output, cookie) in info_cookies {
                         if let Ok(info) = self.conn.wait_for_reply(cookie) {
+                            authoritative &= info.status() == xcb::randr::SetConfig::Success;
                             if let Some(output_info) = outputs.get_mut(idx) {
                                 if let Ok(name) = String::from_utf8(info.name().to_vec()) {
                                     if !name.is_empty() {
@@ -5140,6 +5145,9 @@ impl XcbOutputOps {
                         }
                     }
 
+                    // Only successful GetOutputInfo replies for a monitor's
+                    // actual first output can set a name before this point.
+                    authoritative &= outputs.iter().all(|output| !output.name.is_empty());
                     for (idx, output) in outputs.iter_mut().enumerate() {
                         if output.name.is_empty() {
                             output.name = format!("Monitor-{idx}");
@@ -5153,7 +5161,7 @@ impl XcbOutputOps {
                         );
                     }
                     if !outputs.is_empty() {
-                        return outputs;
+                        return (outputs, authoritative);
                     }
                 }
             }
@@ -5163,6 +5171,7 @@ impl XcbOutputOps {
             .conn
             .send_request(&xcb::randr::GetScreenResourcesCurrent { window: self.root });
         if let Ok(resources) = self.conn.wait_for_reply(cookie) {
+            let mut authoritative = true;
             let modes = resources.modes().to_vec();
             let mut outputs = Vec::new();
             let mut crtc_cookies = Vec::with_capacity(resources.crtcs().len());
@@ -5174,61 +5183,71 @@ impl XcbOutputOps {
                 crtc_cookies.push((idx, crtc, info_cookie));
             }
             for (idx, crtc, info_cookie) in crtc_cookies {
-                if let Ok(info) = self.conn.wait_for_reply(info_cookie) {
-                    if info.width() == 0 || info.height() == 0 {
-                        continue;
-                    }
-                    let refresh = modes
-                        .iter()
-                        .find(|mode| mode.id == info.mode().resource_id())
-                        .map(Self::calc_refresh_mhz)
-                        .unwrap_or(DEFAULT_OUTPUT_REFRESH_MHZ);
-                    let first_output = info.outputs().first().copied();
-                    let id = first_output
-                        .map(|output| OutputId(output.resource_id() as u64))
-                        .unwrap_or(OutputId(crtc.resource_id() as u64));
-                    let name = first_output
-                        .and_then(|output| {
-                            self.conn
-                                .wait_for_reply(self.conn.send_request(
-                                    &xcb::randr::GetOutputInfo {
-                                        output,
-                                        config_timestamp: 0,
-                                    },
-                                ))
-                                .ok()
-                                .and_then(|info| String::from_utf8(info.name().to_vec()).ok())
-                        })
-                        .filter(|name| !name.is_empty())
-                        .unwrap_or_else(|| format!("CRTC-{}", idx));
-                    let (hdr_capable, hdr_metadata) = if let Some(output) = first_output {
-                        let caps = self.query_output_edid_hdr(output);
-                        (
-                            self.query_output_hdr_capable(output) || caps.is_some(),
-                            caps,
-                        )
-                    } else {
-                        (false, None)
-                    };
-                    outputs.push(build_output_info(
-                        id,
-                        name,
-                        info.x() as i32,
-                        info.y() as i32,
-                        info.width() as i32,
-                        info.height() as i32,
-                        refresh,
-                        hdr_capable,
-                        hdr_metadata,
-                    ));
+                let Ok(info) = self.conn.wait_for_reply(info_cookie) else {
+                    // Keep partial legacy results, but do not treat a missing
+                    // CRTC reply as evidence that an output disconnected.
+                    authoritative = false;
+                    continue;
+                };
+                authoritative &= info.status() == xcb::randr::SetConfig::Success;
+                if info.width() == 0 || info.height() == 0 {
+                    continue;
                 }
+                let refresh = modes
+                    .iter()
+                    .find(|mode| mode.id == info.mode().resource_id())
+                    .map(Self::calc_refresh_mhz)
+                    .unwrap_or(DEFAULT_OUTPUT_REFRESH_MHZ);
+                let first_output = info.outputs().first().copied();
+                let id = first_output
+                    .map(|output| OutputId(output.resource_id() as u64))
+                    .unwrap_or(OutputId(crtc.resource_id() as u64));
+                let name = first_output
+                    .and_then(|output| {
+                        self.conn
+                            .wait_for_reply(self.conn.send_request(&xcb::randr::GetOutputInfo {
+                                output,
+                                config_timestamp: 0,
+                            }))
+                            .ok()
+                            .and_then(|info| {
+                                authoritative &= info.status() == xcb::randr::SetConfig::Success;
+                                String::from_utf8(info.name().to_vec()).ok()
+                            })
+                    })
+                    .filter(|name| !name.is_empty());
+                authoritative &= name.is_some();
+                let name = name.unwrap_or_else(|| format!("CRTC-{}", idx));
+                let (hdr_capable, hdr_metadata) = if let Some(output) = first_output {
+                    let caps = self.query_output_edid_hdr(output);
+                    (
+                        self.query_output_hdr_capable(output) || caps.is_some(),
+                        caps,
+                    )
+                } else {
+                    (false, None)
+                };
+                outputs.push(build_output_info(
+                    id,
+                    name,
+                    info.x() as i32,
+                    info.y() as i32,
+                    info.width() as i32,
+                    info.height() as i32,
+                    refresh,
+                    hdr_capable,
+                    hdr_metadata,
+                ));
             }
             if !outputs.is_empty() {
-                return outputs;
+                return (outputs, authoritative);
             }
         }
 
-        vec![fallback_output("Default", self.width, self.height)]
+        (
+            vec![fallback_output("Default", self.width, self.height)],
+            false,
+        )
     }
 
     fn output_to_crtc(&self, output_id: u32) -> Option<xcb::randr::Crtc> {
@@ -5264,6 +5283,10 @@ impl XcbOutputOps {
 
 impl OutputOps for XcbOutputOps {
     fn enumerate_outputs(&self) -> Vec<OutputInfo> {
+        self.get_cached_or_query().0
+    }
+
+    fn enumerate_outputs_with_provenance(&self) -> OutputSnapshot {
         self.get_cached_or_query()
     }
 
@@ -5275,7 +5298,7 @@ impl OutputOps for XcbOutputOps {
     }
 
     fn output_at(&self, x: i32, y: i32) -> Option<OutputId> {
-        let outputs = self.get_cached_or_query();
+        let (outputs, _) = self.get_cached_or_query();
         output_at(&outputs, x, y)
     }
 
@@ -8632,7 +8655,11 @@ mod parity_tests {
             if invalidate {
                 ops.invalidate_output_cache();
             }
-            let outputs = ops.enumerate_outputs();
+            let (outputs, authoritative) = ops.enumerate_outputs_with_provenance();
+            assert!(
+                authoritative,
+                "all RandR monitor IDs came from real output replies"
+            );
             assert_eq!(outputs.len(), expected.len());
             for (id, name) in &expected {
                 let output = outputs.iter().find(|output| output.id == *id).unwrap();

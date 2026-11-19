@@ -5351,14 +5351,16 @@ mod output_ops {
         )
     }
 
+    type OutputSnapshot = (Vec<OutputInfo>, bool);
+
     pub(super) struct X11OutputOps<C: Connection> {
         conn: Arc<C>,
         root: u32,
         sw: i32,
         sh: i32,
         /// Cached output layout - invalidated on RandR events
-        /// None = cache miss, Some(vec) = cached outputs
-        cached_outputs: Arc<Mutex<Option<Vec<OutputInfo>>>>,
+        /// Cache the output list and its provenance as a single observation.
+        cached_outputs: Arc<Mutex<Option<OutputSnapshot>>>,
         /// VRR-capable outputs: output_id -> true if VRR supported
         vrr_capable_outputs: Arc<Mutex<std::collections::HashMap<u32, bool>>>,
     }
@@ -5482,7 +5484,7 @@ mod output_ops {
         }
 
         /// Get cached outputs or query if cache miss
-        fn get_cached_or_query(&self) -> Vec<OutputInfo> {
+        fn get_cached_or_query(&self) -> OutputSnapshot {
             // Fast path: check cache
             if let Ok(cache) = self.cached_outputs.lock() {
                 if let Some(ref outputs) = *cache {
@@ -5502,7 +5504,7 @@ mod output_ops {
         }
 
         /// Internal query method (does the actual X11 round-trips)
-        fn query_outputs_internal(&self) -> Vec<OutputInfo> {
+        fn query_outputs_internal(&self) -> OutputSnapshot {
             // Try RandR 1.5 first (monitors API)
             if let Ok(ver) = self.conn.randr_query_version(1, 5) {
                 if let Ok(v) = ver.reply() {
@@ -5519,6 +5521,7 @@ mod output_ops {
                                     .unwrap_or_default();
 
                                 let mut out = Vec::with_capacity(4);
+                                let mut authoritative = true;
                                 for (i, m) in reply.monitors.into_iter().enumerate() {
                                     if m.width > 0 && m.height > 0 {
                                         // Resolve refresh rate: output → output_info → crtc → crtc_info → mode
@@ -5576,11 +5579,14 @@ mod output_ops {
                                                     .reply()
                                                     .ok()
                                                     .and_then(|info| {
+                                                        authoritative &= info.status
+                                                            == randr::SetConfig::SUCCESS;
                                                         String::from_utf8(info.name).ok()
                                                     })
                                             })
-                                            .filter(|name| !name.is_empty())
-                                            .unwrap_or_else(|| format!("Monitor-{}", i));
+                                            .filter(|name| !name.is_empty());
+                                        authoritative &= name.is_some();
+                                        let name = name.unwrap_or_else(|| format!("Monitor-{}", i));
 
                                         out.push(build_output_info(
                                             id,
@@ -5611,7 +5617,7 @@ mod output_ops {
                                     }
                                 }
                                 if !out.is_empty() {
-                                    return out;
+                                    return (out, authoritative);
                                 }
                             }
                         }
@@ -5623,70 +5629,82 @@ mod output_ops {
         }
 
         // Also used when RandR 1.5 is unavailable or reports no monitors.
-        fn query_crtc_outputs(&self) -> Vec<OutputInfo> {
+        fn query_crtc_outputs(&self) -> OutputSnapshot {
             // Fallback: RandR 1.2 CRTC enumeration
             if let Ok(cookie) = self.conn.randr_get_screen_resources_current(self.root) {
                 if let Ok(resources) = cookie.reply() {
                     let modes = &resources.modes;
                     let mut out = Vec::with_capacity(4);
+                    let mut authoritative = true;
                     for (i, crtc) in resources.crtcs.iter().enumerate() {
-                        if let Ok(cookie) = self.conn.randr_get_crtc_info(*crtc, 0) {
-                            if let Ok(ci) = cookie.reply() {
-                                if ci.width > 0 && ci.height > 0 {
-                                    let refresh = modes
-                                        .iter()
-                                        .find(|m| m.id == ci.mode)
-                                        .map(calc_refresh_mhz)
-                                        .unwrap_or(DEFAULT_OUTPUT_REFRESH_MHZ);
-                                    let first_output = ci.outputs.first().copied();
-                                    let id = first_output
-                                        .map(|output| OutputId(output as u64))
-                                        .unwrap_or(OutputId((*crtc) as u64));
-                                    let name = first_output
-                                        .and_then(|output| {
-                                            self.conn
-                                                .randr_get_output_info(output, 0)
-                                                .ok()?
-                                                .reply()
-                                                .ok()
-                                                .and_then(|info| String::from_utf8(info.name).ok())
+                        let Some(ci) = self
+                            .conn
+                            .randr_get_crtc_info(*crtc, 0)
+                            .ok()
+                            .and_then(|cookie| cookie.reply().ok())
+                        else {
+                            // Partial observations are useful to legacy callers,
+                            // but missing replies cannot prove monitor removal.
+                            authoritative = false;
+                            continue;
+                        };
+                        authoritative &= ci.status == randr::SetConfig::SUCCESS;
+                        if ci.width > 0 && ci.height > 0 {
+                            let refresh = modes
+                                .iter()
+                                .find(|m| m.id == ci.mode)
+                                .map(calc_refresh_mhz)
+                                .unwrap_or(DEFAULT_OUTPUT_REFRESH_MHZ);
+                            let first_output = ci.outputs.first().copied();
+                            let id = first_output
+                                .map(|output| OutputId(output as u64))
+                                .unwrap_or(OutputId((*crtc) as u64));
+                            let name = first_output
+                                .and_then(|output| {
+                                    self.conn
+                                        .randr_get_output_info(output, 0)
+                                        .ok()?
+                                        .reply()
+                                        .ok()
+                                        .and_then(|info| {
+                                            authoritative &=
+                                                info.status == randr::SetConfig::SUCCESS;
+                                            String::from_utf8(info.name).ok()
                                         })
-                                        .filter(|name| !name.is_empty())
-                                        .unwrap_or_else(|| format!("CRTC-{}", i));
-                                    let (hdr_capable, hdr_metadata) = if let Some(output) =
-                                        first_output
-                                    {
-                                        let caps = self.query_output_edid_hdr(output);
-                                        (
-                                            self.query_output_hdr_capable(output) || caps.is_some(),
-                                            caps,
-                                        )
-                                    } else {
-                                        (false, None)
-                                    };
-                                    out.push(build_output_info(
-                                        id,
-                                        name,
-                                        ci.x as i32,
-                                        ci.y as i32,
-                                        ci.width as i32,
-                                        ci.height as i32,
-                                        refresh,
-                                        hdr_capable,
-                                        hdr_metadata,
-                                    ));
-                                }
-                            }
+                                })
+                                .filter(|name| !name.is_empty());
+                            authoritative &= name.is_some();
+                            let name = name.unwrap_or_else(|| format!("CRTC-{}", i));
+                            let (hdr_capable, hdr_metadata) = if let Some(output) = first_output {
+                                let caps = self.query_output_edid_hdr(output);
+                                (
+                                    self.query_output_hdr_capable(output) || caps.is_some(),
+                                    caps,
+                                )
+                            } else {
+                                (false, None)
+                            };
+                            out.push(build_output_info(
+                                id,
+                                name,
+                                ci.x as i32,
+                                ci.y as i32,
+                                ci.width as i32,
+                                ci.height as i32,
+                                refresh,
+                                hdr_capable,
+                                hdr_metadata,
+                            ));
                         }
                     }
                     if !out.is_empty() {
-                        return out;
+                        return (out, authoritative);
                     }
                 }
             }
 
             // Ultimate fallback: single screen
-            vec![fallback_output("Default", self.sw, self.sh)]
+            (vec![fallback_output("Default", self.sw, self.sh)], false)
         }
     }
 
@@ -5699,11 +5717,15 @@ mod output_ops {
         }
 
         fn output_at(&self, x: i32, y: i32) -> Option<OutputId> {
-            let outputs = self.get_cached_or_query();
+            let (outputs, _) = self.get_cached_or_query();
             output_at(&outputs, x, y)
         }
 
         fn enumerate_outputs(&self) -> Vec<OutputInfo> {
+            self.get_cached_or_query().0
+        }
+
+        fn enumerate_outputs_with_provenance(&self) -> OutputSnapshot {
             self.get_cached_or_query()
         }
 
@@ -5864,7 +5886,11 @@ mod output_ops {
             .check()
             .unwrap();
 
-            let outputs = ops.query_crtc_outputs();
+            let (outputs, authoritative) = ops.query_crtc_outputs();
+            assert!(
+                authoritative,
+                "active RandR output has a real connector name"
+            );
             let info = outputs
                 .iter()
                 .find(|info| info.id == OutputId(output as u64))
