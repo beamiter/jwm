@@ -394,7 +394,9 @@ def main():
                             raise
 
                     barrier = wait(connect_reader, "Old preflight never reached the FIFO read barrier")
-                    os.write(barrier, b'{"scripts":{"dev":"exit 42"}}')
+                    # Do not send even a complete short JSON record: some Node
+                    # versions finish readFile after a short FIFO read before EOF.
+                    # With zero bytes and a live writer, the read stays blocked.
 
                     def blocked_child():
                         for children in Path(f"/proc/{tsx_app.pid}/task").glob("*/children"):
