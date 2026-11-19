@@ -110,6 +110,14 @@ def layout_name(value):
     return names[value]
 
 
+def selected_id(row):
+    # Only this field is optional in MonitorInfoIpc. Do not use .get for the
+    # required monitor/state fields: a malformed contract must remain failure.
+    value=row.get('selected_id')
+    require(value is None or (type(value) is int and value>0),'invalid selected_id type/value')
+    return value
+
+
 def match_ipc_client(rows,pid,title):
     matches=[w for w in rows if w.get('pid')==pid and
              all(w.get(k)==title for k in ('name','class','instance'))]
@@ -292,7 +300,7 @@ class Session:
         require(a['num']==0 and self.b['num']==1,'fixture requires A first, B second in initial protocol order')
         require((a['active_tags'],layout_name(a['layout']),a['n_master'])==(A_TAG,'tile',2),'A setup contract')
         require((self.b['active_tags'],layout_name(self.b['layout']),self.b['n_master'])==(B_TAG,'float',4),'B setup contract')
-        require(self.b['selected_id']==self.windows['B'] and self.b['focused'],'B setup selection')
+        require(selected_id(self.b)==self.windows['B'] and self.b['focused'],'B setup selection')
         self.b_workspace=next(w for w in self.before['get_workspaces'] if w['monitor']==self.b['num'] and w['tag_mask']==B_TAG)
         require((layout_name(self.b_workspace['layout']),self.b_workspace['n_master'])==('float',4),'B per-tag setup')
         self.input_receipt('before-input')
@@ -300,8 +308,11 @@ class Session:
     def differences(self,snapshot):
         monitors=snapshot['get_monitors']; windows=snapshot['get_windows']; reasons=[]
         b=next(m for m in monitors if m['name']=='DUMMY1')
-        for key in ('num','active_tags','layout','n_master','focused','selected_id'):
+        for key in ('num','active_tags','layout','n_master','focused'):
             if b[key]!=self.b[key]: reasons.append({'field':key,'expected':self.b[key],'actual':b[key]})
+        actual_selected,expected_selected=selected_id(b),selected_id(self.b)
+        if actual_selected!=expected_selected:
+            reasons.append({'field':'selected_id','expected':expected_selected,'actual':actual_selected})
         for letter,xid in self.windows.items():
             rows=[w for w in windows if w['id']==xid]
             if len(rows)!=1: reasons.append({'field':'window-'+letter,'expected':'exactly once','actual':len(rows)})

@@ -121,4 +121,31 @@ class Contracts(unittest.TestCase):
             path.write_text(json.dumps({'window':8388609,'send_event':1,'text_hex':'6162'})+'\n')
             with self.assertRaisesRegex(RuntimeError,'unexpected native'):p.key_events(path,8388609)
 
+    def test_optional_selection_from_real_artifact(self):
+        evidence=json.loads((Path(__file__).parent/'fixtures/same-tag-removal-6313f04c.json').read_text())
+        s=p.Session.__new__(p.Session);s.same_tag=True;s.windows=evidence['ipc_ids'];s.raw_xids=evidence['raw_xids']
+        s.b=evidence['before_B'];s.b_workspace=evidence['before_B_workspace']
+        self.assertNotIn('selected_id',evidence['after']['get_monitors'][0])
+        for selection in ('absent',None,4,5):
+            with self.subTest(selection=selection):
+                snap=copy.deepcopy(evidence['after'])
+                if selection!='absent':snap['get_monitors'][0]['selected_id']=selection
+                differences=s.differences(snap)
+                selected=[d for d in differences if d['field']=='selected_id']
+                if selection==5:self.assertEqual(selected,[])
+                else:self.assertEqual(selected,[{'field':'selected_id','expected':5,'actual':None if selection=='absent' else selection}])
+                self.assertIn('active_tags',[d['field'] for d in differences])
+    def test_selection_wrong_types_are_not_absent(self):
+        for value in (False,True,0,-1,'5',5.0,[],{}):
+            with self.subTest(value=value),self.assertRaisesRegex(RuntimeError,'invalid selected_id'):
+                p.selected_id({'selected_id':value})
+    def test_only_selected_id_is_optional(self):
+        s,snap=self.session()
+        snap['get_monitors'][0].pop('layout')
+        snap['get_monitors'][0]['layouts']='LayoutEnum("float")'
+        with self.assertRaises(KeyError):s.differences(snap)
+    def test_fixed_missing_selection_remains_difference(self):
+        s,snap=self.session();snap['get_monitors'][0].pop('selected_id')
+        self.assertEqual(s.differences(snap),[{'field':'selected_id','expected':102,'actual':None}])
+
 if __name__=='__main__': unittest.main()
