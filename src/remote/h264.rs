@@ -21,6 +21,7 @@ struct Format {
     decoder: codec::Id,
     pixels: Pixel,
     bitrate: usize,
+    rate_control_buffer_bits: i32,
     preset: &'static str,
     devices: [Hardware; 2],
     probe: &'static [u8],
@@ -33,6 +34,7 @@ static H264: Format = Format {
     decoder: codec::Id::H264,
     pixels: Pixel::YUV420P,
     bitrate: 6_000_000,
+    rate_control_buffer_bits: 400_000,
     preset: "p1",
     devices: [Hardware::Vaapi, Hardware::Cuda],
     probe: H264_PROBE,
@@ -45,6 +47,9 @@ static HEVC444: Format = Format {
     decoder: codec::Id::HEVC,
     pixels: Pixel::YUV444P,
     bitrate: 10_000_000,
+    // Allow more bits for desktop keyframes, which can stay on screen until
+    // the next damage event. The target and maximum rates still match.
+    rate_control_buffer_bits: 1_333_333,
     preset: "p3",
     devices: [Hardware::Cuda, Hardware::Vaapi],
     probe: HEVC444_PROBE,
@@ -220,9 +225,9 @@ impl Encoder {
         encoder.set_bit_rate(format.bitrate);
         encoder.set_max_bit_rate(format.bitrate);
         encoder.set_flags(codec::Flags::LOW_DELAY);
-        // rc_buffer_size is in bits. The codec context still belongs to encoder.
+        // The codec context still belongs to encoder.
         unsafe {
-            (*encoder.as_mut_ptr()).rc_buffer_size = (format.bitrate / 15) as i32;
+            (*encoder.as_mut_ptr()).rc_buffer_size = format.rate_control_buffer_bits;
         }
 
         let mut options = ffmpeg::Dictionary::new();

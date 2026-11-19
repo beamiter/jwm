@@ -137,7 +137,8 @@ jwm-remote ssh user@desktop --monitor DP-0 --grab-input
 
 Ordinary SSH sessions probe both peers. When available, HEVC 4:4:4 keeps
 full chroma resolution for colored text and thin lines. Its NVENC target is
-10 Mbit/s and the viewer prefers NVIDIA hardware decoding. H.264 4:2:0 uses
+10 Mbit/s, with a larger rate-control buffer to preserve more detail on static
+desktop keyframes. The viewer prefers NVIDIA hardware decoding. H.264 4:2:0 uses
 a 6 Mbit/s target and tries VA-API first. Negotiation falls back from HEVC
 to H.264 and then to JPEG as needed. Pass `--jpeg` to select JPEG for one
 session. An explicit `--jpeg-quality` setting also selects JPEG. Custom
