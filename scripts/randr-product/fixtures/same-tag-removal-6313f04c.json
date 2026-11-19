@@ -1,0 +1,129 @@
+{
+  "source_run": 44461764249,
+  "artifact_sha256": "a7bcb2108da9d8857ea3066fe9c632e075acbf898148f9e256de8124b6e62038",
+  "before_B": {
+    "num": 1,
+    "active_tags": 64,
+    "layout": "LayoutEnum(\"float\")",
+    "n_master": 4,
+    "focused": true,
+    "selected_id": 5
+  },
+  "before_B_workspace": {
+    "layout": "LayoutEnum(\"float\")",
+    "n_master": 4,
+    "m_fact": 0.550000011920929,
+    "gap": 5
+  },
+  "after": {
+    "get_monitors": [
+      {
+        "active_tags": 4,
+        "focused": true,
+        "layout": "LayoutEnum(\"tile\")",
+        "n_master": 2,
+        "name": "DUMMY1",
+        "num": 0
+      }
+    ],
+    "get_windows": [
+      {
+        "id": 4,
+        "is_focused": false,
+        "is_on_view": false,
+        "monitor": 0,
+        "tags": 64
+      },
+      {
+        "id": 5,
+        "is_focused": false,
+        "is_on_view": false,
+        "monitor": 0,
+        "tags": 64
+      }
+    ],
+    "get_workspaces": [
+      {
+        "gap": 5,
+        "layout": "LayoutEnum(\"fibonacci\")",
+        "m_fact": 0.550000011920929,
+        "monitor": 0,
+        "n_master": 1,
+        "tag_mask": 1
+      },
+      {
+        "gap": 5,
+        "layout": "LayoutEnum(\"fibonacci\")",
+        "m_fact": 0.550000011920929,
+        "monitor": 0,
+        "n_master": 1,
+        "tag_mask": 2
+      },
+      {
+        "gap": 5,
+        "layout": "LayoutEnum(\"tile\")",
+        "m_fact": 0.550000011920929,
+        "monitor": 0,
+        "n_master": 2,
+        "tag_mask": 4
+      },
+      {
+        "gap": 5,
+        "layout": "LayoutEnum(\"fibonacci\")",
+        "m_fact": 0.550000011920929,
+        "monitor": 0,
+        "n_master": 1,
+        "tag_mask": 8
+      },
+      {
+        "gap": 5,
+        "layout": "LayoutEnum(\"fibonacci\")",
+        "m_fact": 0.550000011920929,
+        "monitor": 0,
+        "n_master": 1,
+        "tag_mask": 16
+      },
+      {
+        "gap": 5,
+        "layout": "LayoutEnum(\"fibonacci\")",
+        "m_fact": 0.550000011920929,
+        "monitor": 0,
+        "n_master": 1,
+        "tag_mask": 32
+      },
+      {
+        "gap": 5,
+        "layout": "LayoutEnum(\"fibonacci\")",
+        "m_fact": 0.550000011920929,
+        "monitor": 0,
+        "n_master": 1,
+        "tag_mask": 64
+      },
+      {
+        "gap": 5,
+        "layout": "LayoutEnum(\"fibonacci\")",
+        "m_fact": 0.550000011920929,
+        "monitor": 0,
+        "n_master": 1,
+        "tag_mask": 128
+      },
+      {
+        "gap": 5,
+        "layout": "LayoutEnum(\"fibonacci\")",
+        "m_fact": 0.550000011920929,
+        "monitor": 0,
+        "n_master": 1,
+        "tag_mask": 256
+      }
+    ],
+    "input_focus": 627
+  },
+  "ipc_ids": {
+    "A": 4,
+    "B": 5
+  },
+  "raw_xids": {
+    "A": 8388609,
+    "B": 10485761
+  }
+}
