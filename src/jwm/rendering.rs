@@ -384,18 +384,59 @@ impl Jwm {
         let _ = backend.compositor_render_frame(&scene, focused);
     }
 
+    /// Synchronize the one nested-only drawable copy without moving input.
+    pub(super) fn sync_terminal_exit_visual(&self, backend: &mut dyn Backend) -> Option<ClientKey> {
+        let candidate = self.scratchpads.get("term").copied().and_then(|key| {
+            let client = self.state.clients.get(key)?;
+            let animation = self.animations.active.get(&key)?;
+            if !CONFIG.load().motion_enabled()
+                || client.state.tags != 0
+                || client.state.is_hidden
+                || client.state.is_swallowed
+                || animation.kind != AnimationKind::Hide
+            {
+                return None;
+            }
+            let rect = animation.sample(Instant::now()).0;
+            let border = client.geometry.border_w.max(0);
+            Some((
+                key,
+                client.win,
+                crate::backend::api::Geometry {
+                    x: rect.x.saturating_add(border),
+                    y: rect.y.saturating_add(border),
+                    w: rect.w.max(1) as u32,
+                    h: rect.h.max(1) as u32,
+                    border: border as u32,
+                },
+            ))
+        });
+        let accepted = backend.set_terminal_exit_visual(candidate.map(|(_, win, geo)| (win, geo)));
+        accepted.then(|| candidate.map(|(key, _, _)| key)).flatten()
+    }
+
     /// Submit the first dismissal visual in the same action that releases input.
     /// The ordinary immediate path skips active animations; waiting for the next
     /// full update can otherwise leave the previous (occluded) scene presented.
     pub(super) fn present_terminal_dismissal(&mut self, backend: &mut dyn Backend, key: ClientKey) {
-        if !backend.has_compositor()
-            || self.scratchpads.get("term") != Some(&key)
+        if self.scratchpads.get("term") != Some(&key)
             || !self
                 .animations
                 .active
                 .get(&key)
                 .is_some_and(|a| a.kind == AnimationKind::Hide)
         {
+            return;
+        }
+        if !backend.has_compositor() {
+            if self.sync_terminal_exit_visual(backend) == Some(key) {
+                match backend.present_terminal_exit_visual() {
+                    Ok(()) => log::info!("nested terminal dismissal first frame submitted"),
+                    Err(error) => {
+                        log::warn!("nested terminal dismissal first frame failed: {error:?}");
+                    }
+                }
+            }
             return;
         }
         let now = Instant::now();
@@ -540,6 +581,19 @@ impl Jwm {
         self.flush_system_ui(backend);
 
         let composited = backend.has_compositor();
+        // A live reduced-motion change retires the nested copy and its driver.
+        if !CONFIG.load().motion_enabled()
+            && backend.set_terminal_exit_visual(None)
+            && let Some(&key) = self.scratchpads.get("term")
+            && self
+                .animations
+                .active
+                .get(&key)
+                .is_some_and(|a| a.kind == AnimationKind::Hide)
+        {
+            self.animations.remove(key);
+        }
+        let nested_terminal = self.sync_terminal_exit_visual(backend);
 
         if !self.animations.has_active() {
             // Deliver tab groups ahead of the render gate, as
@@ -599,7 +653,7 @@ impl Jwm {
                 // Store visual override — compositor draws at interpolated position.
                 // Real window is already at the target position (set by resizeclient).
                 visual_overrides.insert(key, rect);
-            } else {
+            } else if nested_terminal != Some(key) {
                 // Non-composited fallback: physically move the window each frame
                 if let Some(client) = self.state.clients.get(key) {
                     let _ = backend.window_ops().configure(
@@ -631,6 +685,7 @@ impl Jwm {
             let _ = backend.compositor_render_frame(&scene, focused);
         }
 
+        let terminal_completed = nested_terminal.is_some_and(|key| completed.contains(&key));
         for key in completed {
             if let Some(animation) = self.animations.active.remove(&key)
                 && !composited
@@ -648,6 +703,9 @@ impl Jwm {
                     client.geometry.border_w.max(0) as u32,
                 );
             }
+        }
+        if terminal_completed {
+            backend.set_terminal_exit_visual(None);
         }
     }
 

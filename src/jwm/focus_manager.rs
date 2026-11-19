@@ -1093,6 +1093,9 @@ mod scratchpad_reveal_tests {
         rendered_scenes: Vec<CapturedScene>,
         focus_at_render: Vec<Option<WindowId>>,
         composited: bool,
+        nested_visual_supported: bool,
+        nested_present_focus: Vec<Option<WindowId>>,
+        terminal_visual: Option<(WindowId, crate::backend::api::Geometry)>,
     }
 
     impl ScratchpadBackend {
@@ -1112,6 +1115,9 @@ mod scratchpad_reveal_tests {
                 rendered_scenes: Vec::new(),
                 focus_at_render: Vec::new(),
                 composited: true,
+                nested_visual_supported: false,
+                nested_present_focus: Vec::new(),
+                terminal_visual: None,
             }
         }
     }
@@ -1143,6 +1149,25 @@ mod scratchpad_reveal_tests {
     }
 
     impl Backend for ScratchpadBackend {
+        fn set_terminal_exit_visual(
+            &mut self,
+            visual: Option<(WindowId, crate::backend::api::Geometry)>,
+        ) -> bool {
+            if !self.nested_visual_supported {
+                return false;
+            }
+            self.terminal_visual = visual;
+            true
+        }
+
+        fn present_terminal_exit_visual(&mut self) -> Result<(), BackendError> {
+            assert!(self.nested_visual_supported);
+            assert!(self.terminal_visual.is_some());
+            self.nested_present_focus
+                .push(self.focused.last().copied().flatten());
+            Ok(())
+        }
+
         fn compositor_render_frame(
             &mut self,
             scene: &[(u64, i32, i32, u32, u32)],
@@ -2136,6 +2161,66 @@ mod scratchpad_reveal_tests {
             assert_eq!(jwm.state.clients[key].state.tags, 0);
             assert_ne!(jwm.get_selected_client_key(), Some(key));
         }
+    }
+
+    #[test]
+    fn nested_terminal_visual_parks_input_and_clears_on_reverse_or_completion() {
+        let (mut jwm, key, window, _) = jwm_with_cross_monitor_scratchpad(false);
+        let mut backend = ScratchpadBackend::new();
+        backend.composited = false;
+        backend.nested_visual_supported = true;
+        jwm.reveal_and_focus(&mut backend, window).unwrap();
+        jwm.animations.remove(key);
+        let visible = jwm.state.clients[key].rect();
+        let arg = WMArgEnum::StringVec(vec!["term".into()]);
+        jwm.togglescratchpad(&mut backend, &arg).unwrap();
+        assert_eq!(backend.nested_present_focus.len(), 1);
+        assert_ne!(backend.nested_present_focus[0], Some(window));
+        assert!(backend.rendered_scenes.is_empty());
+        let (id, visual) = backend.terminal_visual.unwrap();
+        assert_eq!(id, window);
+        assert!(visual.x >= visible.0);
+        assert!(jwm.state.clients[key].geometry.x < 0);
+        assert_eq!(jwm.state.clients[key].state.tags, 0);
+        assert_ne!(jwm.get_selected_client_key(), Some(key));
+        let animation = jwm.animations.active.get_mut(&key).unwrap();
+        animation.duration = Duration::from_secs(600);
+        animation.started_at = Instant::now() - Duration::from_secs(300);
+        jwm.last_battery_poll = Some(Instant::now());
+        jwm.last_idle_poll = Some(Instant::now());
+        jwm.tick_animations(&mut backend);
+        assert_eq!(
+            backend.nested_present_focus.len(),
+            1,
+            "ticks must not force-submit"
+        );
+        assert!(backend.terminal_visual.unwrap().1.y < visual.y);
+        assert!(jwm.state.clients[key].geometry.x < 0);
+        jwm.togglescratchpad(&mut backend, &arg).unwrap();
+        assert!(backend.terminal_visual.is_none());
+        assert_eq!(jwm.get_selected_client_key(), Some(key));
+        jwm.togglescratchpad(&mut backend, &arg).unwrap();
+        let animation = jwm.animations.active.get_mut(&key).unwrap();
+        animation.started_at = Instant::now() - animation.duration - Duration::from_secs(1);
+        jwm.tick_animations(&mut backend);
+        assert!(backend.terminal_visual.is_none());
+        assert!(!jwm.animations.active.contains_key(&key));
+        assert_eq!(jwm.state.clients[key].state.tags, 0);
+    }
+
+    #[test]
+    fn native_visual_hook_does_not_capture_other_named_scratchpads() {
+        let (mut jwm, key, window, _) = jwm_with_cross_monitor_scratchpad(false);
+        let mut backend = ScratchpadBackend::new();
+        backend.composited = false;
+        backend.nested_visual_supported = true;
+        jwm.reveal_and_focus(&mut backend, window).unwrap();
+        jwm.scratchpads.remove("term");
+        jwm.scratchpads.insert("music".into(), key);
+        jwm.togglescratchpad(&mut backend, &WMArgEnum::StringVec(vec!["music".into()]))
+            .unwrap();
+        assert!(backend.nested_present_focus.is_empty());
+        assert!(backend.terminal_visual.is_none());
     }
 
     #[test]

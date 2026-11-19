@@ -4362,6 +4362,19 @@ pub trait Backend:
 
     fn run(&mut self, handler: &mut dyn EventHandler) -> Result<(), BackendError>;
 
+    /// Optional nested-only terminal dismissal visual. Geometry is a visual
+    /// content rectangle, never an input placement. `None` retires the copy.
+    /// Return true only when the backend owns this separate visual channel.
+    fn set_terminal_exit_visual(&mut self, _visual: Option<(WindowId, Geometry)>) -> bool {
+        false
+    }
+
+    /// Submit the first nested terminal dismissal frame synchronously, after
+    /// input focus and native geometry have been released. Not a per-tick hook.
+    fn present_terminal_exit_visual(&mut self) -> Result<(), BackendError> {
+        Ok(())
+    }
+
     fn compositor_render_frame(
         &mut self,
         _scene: &[(u64, i32, i32, u32, u32)],

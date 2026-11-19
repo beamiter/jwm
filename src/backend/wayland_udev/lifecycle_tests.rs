@@ -1699,3 +1699,49 @@ fn monitor_lock_shades_hide_clients_from_input_routing() {
     server.state.set_monitor_shades(&[]);
     assert_eq!(hit(&server).as_ref(), Some(&bar_surface));
 }
+
+#[cfg(feature = "backend-wayland-nested")]
+#[test]
+fn nested_exit_geometry_is_visual_only_and_retired_with_owner() {
+    let (mut state, _) = headless_state();
+    let term = WindowId::from_raw(1001);
+    let other = WindowId::from_raw(1002);
+    let dock = WindowId::from_raw(1003);
+    state.window_stack = vec![term, dock, other];
+    state.mapped_windows.extend([term, dock, other]);
+    state
+        .window_type_overrides
+        .insert(dock, vec![WindowType::Dock]);
+    state.window_geometry.insert(
+        term,
+        Geometry {
+            x: -2000,
+            y: 20,
+            w: 400,
+            h: 300,
+            border: 2,
+        },
+    );
+    let visual = Geometry {
+        x: 100,
+        y: -40,
+        w: 400,
+        h: 300,
+        border: 2,
+    };
+    state.set_nested_terminal_exit(Some((term, visual)));
+    assert_eq!(state.window_geometry[&term].x, -2000);
+    assert_eq!(state.nested_drawing_geometry(term).unwrap().x, 100);
+    assert_eq!(state.nested_drawing_order(), vec![dock, term, other]);
+    assert_eq!(state.window_stack, vec![term, dock, other]);
+    state.session_locked = true;
+    assert_eq!(state.nested_drawing_geometry(term).unwrap().x, -2000);
+    assert_eq!(state.nested_drawing_order(), vec![other, dock, term]);
+    state.session_locked = false;
+    state.set_nested_terminal_exit(None);
+    assert_eq!(state.nested_drawing_geometry(term).unwrap().x, -2000);
+    state.set_nested_terminal_exit(Some((term, visual)));
+    state.retire_window_geometry(term);
+    assert!(state.terminal_exit_visual.is_none());
+    assert!(state.nested_drawing_geometry(term).is_none());
+}

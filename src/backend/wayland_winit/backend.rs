@@ -964,7 +964,8 @@ impl WaylandWinitBackend {
             );
         }
 
-        for win in self.state.window_stack.iter().rev() {
+        let drawing_order = self.state.nested_drawing_order();
+        for win in &drawing_order {
             // Layer surfaces are already composed in their dedicated passes;
             // policy raising a Dock must not paint translucent panels twice.
             if self.state.layer_surfaces.contains_key(win) {
@@ -973,7 +974,7 @@ impl WaylandWinitBackend {
             if !self.state.mapped_windows.contains(win) {
                 continue;
             }
-            let Some(geo) = self.state.window_geometry.get(win) else {
+            let Some(geo) = self.state.nested_drawing_geometry(*win) else {
                 continue;
             };
             let Some(surface) = self.state.surface_for_window(*win) else {
@@ -981,7 +982,16 @@ impl WaylandWinitBackend {
             };
 
             // Render popups belonging to this toplevel above it.
-            for (popup_surface, popup_rect) in self.state.popup_rects_for_toplevel(*win) {
+            let popup_rects = if self
+                .state
+                .terminal_exit_visual
+                .is_some_and(|(id, _)| id == *win)
+            {
+                Vec::new()
+            } else {
+                self.state.popup_rects_for_toplevel(*win)
+            };
+            for (popup_surface, popup_rect) in popup_rects {
                 if !popup_rect.overlaps(output_rect_global) {
                     continue;
                 }
@@ -2358,6 +2368,23 @@ impl RenderScheduler for WaylandWinitBackend {
 }
 
 impl Backend for WaylandWinitBackend {
+    fn set_terminal_exit_visual(
+        &mut self,
+        visual: Option<(WindowId, crate::backend::api::Geometry)>,
+    ) -> bool {
+        if self.state.set_nested_terminal_exit(visual) {
+            self.request_flush();
+        }
+        true
+    }
+
+    fn present_terminal_exit_visual(&mut self) -> Result<(), BackendError> {
+        if self.state.terminal_exit_visual.is_some() {
+            self.render_if_needed()?;
+        }
+        Ok(())
+    }
+
     fn child_environment(&self) -> crate::child_environment::ChildEnvironment {
         self.child_environment.clone()
     }

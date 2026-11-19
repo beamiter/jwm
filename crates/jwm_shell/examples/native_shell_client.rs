@@ -20,10 +20,43 @@ use smithay_client_toolkit::{
 use wayland_client::{
     Connection, Dispatch, QueueHandle, delegate_noop,
     globals::registry_queue_init,
-    protocol::{wl_keyboard, wl_output, wl_seat, wl_shm, wl_surface},
+    protocol::{wl_keyboard, wl_output, wl_pointer, wl_seat, wl_shm, wl_surface},
 };
 
+fn option(name: &str) -> Option<String> {
+    let args: Vec<_> = std::env::args().collect();
+    args.windows(2)
+        .find(|pair| pair[0] == name)
+        .map(|pair| pair[1].clone())
+}
+fn event_log(event: &str) {
+    use std::io::Write;
+    if let Some(path) = std::env::var_os("JWM_TEST_EVENT_LOG")
+        && let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+    {
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_micros();
+        let _ = writeln!(file, "{} {timestamp} {event}", std::process::id());
+    }
+}
 fn main() -> Result<()> {
+    event_log("start");
+    let color = option("--color")
+        .map(|value| -> Result<[u8; 4]> {
+            anyhow::ensure!(value.len() == 6 && value.is_ascii(), "color must be RRGGBB");
+            Ok([
+                u8::from_str_radix(&value[4..6], 16)?,
+                u8::from_str_radix(&value[2..4], 16)?,
+                u8::from_str_radix(&value[0..2], 16)?,
+                255,
+            ])
+        })
+        .transpose()?;
     let conn = Connection::connect_to_env()?;
     let (globals, mut queue) = registry_queue_init::<Client>(&conn)?;
     let qh = queue.handle();
@@ -32,6 +65,7 @@ fn main() -> Result<()> {
     let shm = Shm::bind(&globals, &qh)?;
     let seat = globals.bind::<wl_seat::WlSeat, _, _>(&qh, 5..=5, ())?;
     let _keyboard = seat.get_keyboard(&qh, ());
+    let _pointer = seat.get_pointer(&qh, ());
     let window = shell.create_window(
         compositor.create_surface(&qh),
         WindowDecorations::RequestServer,
@@ -43,6 +77,9 @@ fn main() -> Result<()> {
     } else {
         "SharedShellNativeTask"
     });
+    if let Some(title) = option("--title") {
+        window.set_title(title);
+    }
     window.set_app_id("jwm.shared-shell.native-test");
     window.set_min_size(Some((200, 120)));
     if fullscreen {
@@ -57,6 +94,7 @@ fn main() -> Result<()> {
         pool,
         window,
         exit: false,
+        color,
     };
     while !state.exit {
         queue.blocking_dispatch(&mut state)?;
@@ -70,6 +108,7 @@ struct Client {
     pool: SlotPool,
     window: Window,
     exit: bool,
+    color: Option<[u8; 4]>,
 }
 impl CompositorHandler for Client {
     fn scale_factor_changed(
@@ -148,7 +187,7 @@ impl WindowHandler for Client {
                 for (index, pixel) in canvas.chunks_exact_mut(4).enumerate() {
                     let x = index % width as usize;
                     let y = index / width as usize;
-                    pixel.copy_from_slice(&[
+                    pixel.copy_from_slice(&self.color.unwrap_or([
                         if (x / 40 + y / 40).is_multiple_of(2) {
                             140
                         } else {
@@ -157,7 +196,7 @@ impl WindowHandler for Client {
                         110,
                         60,
                         255,
-                    ]);
+                    ]));
                 }
                 if buffer.attach_to(self.window.wl_surface()).is_err() {
                     self.exit = true;
@@ -167,6 +206,7 @@ impl WindowHandler for Client {
                     .wl_surface()
                     .damage_buffer(0, 0, width as i32, height as i32);
                 self.window.commit();
+                event_log(&format!("commit {width} {height}"));
             }
             Err(error) => {
                 eprintln!("native test buffer failed: {error}");
@@ -189,6 +229,21 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for Client {
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
+        match &event {
+            wl_keyboard::Event::Enter { serial, .. } => {
+                event_log(&format!("keyboard_enter {serial}"))
+            }
+            wl_keyboard::Event::Leave { serial, .. } => {
+                event_log(&format!("keyboard_leave {serial}"))
+            }
+            wl_keyboard::Event::Key {
+                serial,
+                time,
+                key,
+                state,
+            } => event_log(&format!("key {serial} {time} {key} {state:?}")),
+            _ => {}
+        }
         if let wl_keyboard::Event::Key {
             key,
             state: wayland_client::WEnum::Value(wl_keyboard::KeyState::Pressed),
@@ -204,6 +259,35 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for Client {
             {
                 let _ = writeln!(file, "{key}");
             }
+        }
+    }
+}
+impl Dispatch<wl_pointer::WlPointer, ()> for Client {
+    fn event(
+        _: &mut Self,
+        _: &wl_pointer::WlPointer,
+        event: wl_pointer::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match event {
+            wl_pointer::Event::Enter {
+                serial,
+                surface_x,
+                surface_y,
+                ..
+            } => event_log(&format!("pointer_enter {serial} {surface_x} {surface_y}")),
+            wl_pointer::Event::Leave { serial, .. } => {
+                event_log(&format!("pointer_leave {serial}"))
+            }
+            wl_pointer::Event::Button {
+                serial,
+                time,
+                button,
+                state,
+            } => event_log(&format!("button {serial} {time} {button} {state:?}")),
+            _ => {}
         }
     }
 }
