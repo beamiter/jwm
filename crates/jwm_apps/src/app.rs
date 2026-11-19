@@ -44,6 +44,7 @@ enum Action {
     Edit,
     TogglePreview,
     ToggleCodeView,
+    TsxCheck,
     Preview,
     Note(PathBuf),
     Cancel,
@@ -75,6 +76,7 @@ enum PickerMode {
     Notes,
     Images,
     Save(bool),
+    TsxProject,
 }
 struct Picker {
     mode: PickerMode,
@@ -85,6 +87,8 @@ struct Picker {
 enum Dialog {
     Picker(Box<Picker>),
     Error(String),
+    TsxStatus(String),
+    TsxChecked(String),
     Unsaved,
     Trash,
     Overwrite(PathBuf, bool),
@@ -107,6 +111,8 @@ pub(crate) struct App {
     pub focused: bool,
     pub caret: bool,
     next_blink: Instant,
+    tsx: crate::tsx_preview::Controller,
+    tsx_document: Option<(PathBuf, u64)>,
 }
 impl App {
     pub fn new(notes: bool, paths: Vec<PathBuf>) -> Result<Self, String> {
@@ -128,16 +134,23 @@ impl App {
             focused: true,
             caret: true,
             next_blink: Instant::now() + Duration::from_millis(500),
+            tsx: crate::tsx_preview::Controller::default(),
+            tsx_document: None,
         })
     }
     pub fn title(&self) -> String {
+        if matches!(self.dialog, Some(Dialog::TsxChecked(_)))
+            && let Document::Notes(n) = &self.document
+        {
+            return format!("{} — TSX 预检通过（未运行） — JWM 备忘录", n.title());
+        }
         match &self.document {
             Document::Notes(n) => format!("{} — JWM 备忘录", n.title()),
             Document::Image(v) => format!("{} — JWM 图片查看器", v.title()),
         }
     }
     pub fn loading(&self) -> bool {
-        matches!(&self.document,Document::Image(v) if v.loading())
+        self.tsx.is_busy() || matches!(&self.document,Document::Image(v) if v.loading())
     }
     pub fn show_error(&mut self, error: String) {
         self.error(error);
@@ -147,7 +160,7 @@ impl App {
         self.dialog = Some(Dialog::Error(error));
     }
     pub fn tick(&mut self) -> bool {
-        let mut dirty = false;
+        let mut dirty = self.poll_tsx();
         match &mut self.document {
             Document::Notes(n) if n.due.is_some_and(|due| Instant::now() >= due) => {
                 if let Err(error) = n.save() {
@@ -167,6 +180,84 @@ impl App {
                     || matches!(self.dialog, Some(Dialog::Picker(_))));
         }
         dirty
+    }
+    fn tsx_file(&self) -> Option<PathBuf> {
+        let Document::Notes(n) = &self.document else {
+            return None;
+        };
+        if n.managed {
+            return None;
+        }
+        let path = n.document.as_ref()?.file.path()?;
+        let extension = path.extension()?.to_str()?;
+        ["tsx", "jsx"]
+            .iter()
+            .any(|candidate| extension.eq_ignore_ascii_case(candidate))
+            .then_some(path)
+    }
+    fn clean_tsx_document(&self) -> Option<(PathBuf, u64)> {
+        let Document::Notes(n) = &self.document else {
+            return None;
+        };
+        if n.dirty || !n.editor.preedit.is_empty() {
+            return None;
+        }
+        Some((self.tsx_file()?, n.editor.revision))
+    }
+    fn start_tsx_check(&mut self, project: &Path) {
+        if self.tsx_document.is_none() || self.clean_tsx_document() != self.tsx_document {
+            self.tsx_document = None;
+            self.error("文件已改变；请保存后重新预检。未运行项目。".into());
+            return;
+        }
+        let entry = &self.tsx_document.as_ref().unwrap().0;
+        match self.tsx.check(project, entry) {
+            Ok(()) => {
+                self.dialog = Some(Dialog::TsxStatus(format!(
+                    "正在检查项目元数据…\n项目：{}\n文件：{}\n\n不运行项目、不安装依赖、不打开浏览器。取消可停止检查。",
+                    project.display(),
+                    entry.display()
+                )))
+            }
+            Err(error) => {
+                self.tsx_document = None;
+                self.error(error);
+            }
+        }
+    }
+    fn poll_tsx(&mut self) -> bool {
+        if self.tsx_document.is_some() && self.clean_tsx_document() != self.tsx_document {
+            self.tsx.stop();
+            self.tsx_document = None;
+            if matches!(self.dialog, Some(Dialog::TsxStatus(_))) {
+                self.dialog = Some(Dialog::TsxStatus(
+                    "文件已改变，旧检查已取消。请保存后重新检查；未运行项目。".into(),
+                ));
+            }
+            return true;
+        }
+        let Some(event) = self.tsx.poll() else {
+            return false;
+        };
+        if self.tsx_document.take().is_none() {
+            return false;
+        }
+        self.dialog_focus = None;
+        self.dialog = Some(match event {
+            crate::tsx_preview::Event::Checked(info) => Dialog::TsxChecked(format!(
+                "元数据检查通过，不代表项目可信或可安全执行。\n项目：{}\n入口：{}\nVite：{}\n模式：默认导出组件（无 props）\n\n没有运行项目、安装依赖或打开浏览器。本批仅提供诊断；实际预览仍需独立 CLI 和显式信任授权。",
+                info.project.display(),
+                info.entry.display(),
+                info.vite
+            )),
+            crate::tsx_preview::Event::Failed(error) => {
+                Dialog::TsxStatus(format!("检查未通过：{error}\n\n没有启动项目或浏览器。"))
+            }
+            crate::tsx_preview::Event::Stopped => {
+                Dialog::TsxStatus("检查已取消，未运行项目。".into())
+            }
+        });
+        true
     }
     fn sidebar(&self) -> f64 {
         if matches!(&self.document,Document::Notes(n) if n.managed) {
@@ -396,6 +487,15 @@ impl App {
                 Rect::new(488., ui::header() + 6., 110., ui::tools() - 12.),
                 label,
                 Action::ToggleCodeView,
+                false,
+            );
+        }
+        if self.tsx_file().is_some() && width >= 782. {
+            self.text_button(
+                cr,
+                Rect::new(610., ui::header() + 6., 160., ui::tools() - 12.),
+                "TSX 预检（不运行）",
+                Action::TsxCheck,
                 false,
             );
         }
@@ -649,7 +749,10 @@ impl App {
         cr.set_source_rgba(0., 0., 0., 0.65);
         let _ = cr.paint();
         let w = (self.size.0 - 48.).min(640.);
-        let h = if matches!(self.dialog, Some(Dialog::Picker(_))) {
+        let h = if matches!(
+            self.dialog,
+            Some(Dialog::Picker(_) | Dialog::TsxStatus(_) | Dialog::TsxChecked(_))
+        ) {
             (self.size.1 - 48.).min(480.)
         } else {
             300_f64.min(self.size.1 - 32.)
@@ -663,6 +766,7 @@ impl App {
                     PickerMode::Notes => "打开 UTF-8 文本文件",
                     PickerMode::Images => "打开图片",
                     PickerMode::Save(_) => "导出 / 另存为文本文件",
+                    PickerMode::TsxProject => "选择项目目录 · 仅预检，不运行项目",
                 };
                 ui::text(
                     cr,
@@ -724,7 +828,9 @@ impl App {
                 self.text_button(
                     cr,
                     Rect::new(r.x + r.w - 112., r.y + r.h - 52., 88., 32.),
-                    if matches!(picker.mode, PickerMode::Save(_)) {
+                    if matches!(picker.mode, PickerMode::TsxProject) {
+                        "检查目录"
+                    } else if matches!(picker.mode, PickerMode::Save(_)) {
                         "保存"
                     } else {
                         "打开"
@@ -737,6 +843,9 @@ impl App {
             dialog => {
                 let (title, message) = match &dialog {
                     Dialog::Error(e) => ("操作未完成", e.as_str()),
+                    Dialog::TsxStatus(message) | Dialog::TsxChecked(message) => {
+                        ("TSX 预检 · 不启动预览", message.as_str())
+                    }
                     Dialog::Unsaved => (
                         "保存当前修改？",
                         "当前内容尚未保存。可以保存、另存为，或放弃修改。",
@@ -809,7 +918,9 @@ impl App {
             Some(Dialog::Overwrite(path, close)) => {
                 vec![Action::Cancel, Action::Overwrite(path.clone(), *close)]
             }
-            Some(Dialog::Error(_)) => vec![Action::Cancel],
+            Some(Dialog::Error(_) | Dialog::TsxStatus(_) | Dialog::TsxChecked(_)) => {
+                vec![Action::Cancel]
+            }
             None => vec![],
         }
     }
@@ -847,6 +958,10 @@ impl App {
             return;
         };
         let path = picker.resolve();
+        if matches!(picker.mode, PickerMode::TsxProject) {
+            self.start_tsx_check(&path);
+            return;
+        }
         if path.is_dir() {
             picker.path = Editor::new(path.to_string_lossy().into_owned());
             picker.refresh();
@@ -854,6 +969,7 @@ impl App {
             return;
         }
         match picker.mode {
+            PickerMode::TsxProject => unreachable!(),
             PickerMode::Notes => {
                 self.effects.push(Effect::OpenNote(path));
             }
@@ -895,6 +1011,19 @@ impl App {
     }
     fn action(&mut self, action: Action) {
         self.dialog_focus = None;
+        if matches!(
+            action,
+            Action::Open
+                | Action::New
+                | Action::Note(_)
+                | Action::SaveAs(_)
+                | Action::Close
+                | Action::Discard
+                | Action::SaveClose
+        ) {
+            self.tsx.stop();
+            self.tsx_document = None;
+        }
         match action {
             Action::Minimize => self.effects.push(Effect::Minimize),
             Action::Maximize => self.effects.push(Effect::Maximize),
@@ -915,7 +1044,28 @@ impl App {
                 PickerMode::Images
             }),
             Action::SaveAs(close) => self.picker(PickerMode::Save(close)),
-            Action::Cancel => self.dialog = None,
+            Action::TsxCheck => {
+                if self.tsx.is_busy() {
+                    self.tsx.stop();
+                    self.tsx_document = None;
+                    self.dialog = Some(Dialog::TsxStatus(
+                        "正在取消上次预检。请关闭此提示，稍后重新检查；未运行项目。".into(),
+                    ));
+                    return;
+                }
+                self.tsx_document = None;
+                if let Some(document) = self.clean_tsx_document() {
+                    self.tsx_document = Some(document);
+                    self.picker(PickerMode::TsxProject);
+                } else {
+                    self.error("请先完成输入法输入并保存外部 TSX/JSX 文件。预检只读取磁盘，不保存或运行项目。".into());
+                }
+            }
+            Action::Cancel => {
+                self.tsx.stop();
+                self.tsx_document = None;
+                self.dialog = None;
+            }
             Action::Accept => self.accept_picker(),
             Action::Discard => self.effects.push(Effect::Close),
             Action::SaveClose => {
@@ -1195,7 +1345,9 @@ impl App {
                 }
                 match self.dialog {
                     Some(Dialog::Picker(_)) => self.action(Action::Accept),
-                    Some(Dialog::Error(_)) => self.dialog = None,
+                    Some(Dialog::Error(_) | Dialog::TsxStatus(_) | Dialog::TsxChecked(_)) => {
+                        self.action(Action::Cancel)
+                    }
                     _ => (),
                 }
                 return;
@@ -1218,6 +1370,7 @@ impl App {
         };
         let action = if mods.control_key() {
             match character.as_str() {
+                "t" if mods.shift_key() && self.tsx_file().is_some() => Some(Action::TsxCheck),
                 "p" if mods.shift_key() && matches!(self.document, Document::Notes(_)) => {
                     Some(Action::TogglePreview)
                 }
@@ -1454,6 +1607,50 @@ impl Picker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tsx_precheck_requires_saved_external_document_and_never_grants_execution() {
+        let path = std::env::temp_dir().join(format!("jwm-tsx-gate-{}.tsx", std::process::id()));
+        std::fs::write(&path, "export default () => <div/>;").unwrap();
+        let mut app = App::new(true, vec![path.clone()]).unwrap();
+        app.action(Action::TsxCheck);
+        assert!(
+            matches!(&app.dialog, Some(Dialog::Picker(p)) if matches!(p.mode, PickerMode::TsxProject))
+        );
+        assert!(!app.tsx.is_busy());
+        assert!(app.effects.is_empty());
+        app.action(Action::Cancel);
+        assert!(app.tsx_document.is_none());
+        assert!(app.dialog.is_none());
+        app.ime("dirty".into(), true);
+        app.action(Action::TsxCheck);
+        assert!(matches!(app.dialog, Some(Dialog::Error(_))));
+        assert!(!app.tsx.is_busy());
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "export default () => <div/>;"
+        );
+        app.action(Action::Cancel);
+        app.action(Action::Save);
+        app.ime("composing".into(), false);
+        app.action(Action::TsxCheck);
+        assert!(matches!(app.dialog, Some(Dialog::Error(_))));
+        assert!(app.tsx_document.is_none());
+        app.action(Action::Cancel);
+        app.clear_preedit();
+        app.action(Action::TsxCheck);
+        assert!(app.tsx_document.is_some());
+        let Document::Notes(n) = &mut app.document else {
+            panic!()
+        };
+        n.editor.insert("newer");
+        n.edited();
+        app.start_tsx_check(path.parent().unwrap());
+        assert!(app.tsx_document.is_none());
+        assert!(!app.tsx.is_busy());
+        assert!(app.effects.is_empty());
+        std::fs::remove_file(path).unwrap();
+    }
 
     #[test]
     fn code_view_status_preserves_external_file_bytes() {

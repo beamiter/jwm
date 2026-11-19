@@ -86,6 +86,33 @@ This is Markdown rendering, **not TSX execution**. React/TSX live preview needs 
 separate isolated runtime and remains planned; the editor does not run project
 scripts, install npm dependencies or execute embedded JavaScript.
 
+### TSX/JSX metadata preflight (no execution)
+
+For saved external `.tsx`/`.jsx` documents, press **Ctrl+Shift+T** or use
+**TSX 预检（不运行）** in the toolbar (shown in windows at least 782 logical
+pixels wide). Finish
+IME composition and save changes first, then choose the project directory and
+select **检查目录**. The result identifies the canonical project, component
+entry and local Vite version, or explains why metadata validation failed.
+This is a diagnostic, **not browser preview**: it does not start Vite, execute
+project JavaScript/configuration, install dependencies, or open a browser. A
+successful check neither grants trust nor proves the component will render.
+
+Preflight requires the separately installed `~/.local/bin/jwm-tsx-preview` from
+the same JWM revision and a root-owned system `/usr/bin/node`. It deliberately
+does not use PATH, a project-local launcher, or an nvm interpreter. Install the
+launcher manually with `bash scripts/install-tsx-preview.sh` from that revision.
+The installed file must match the source bundled in Notes; Notes executes only
+that bundled check-only source with a cleared environment, not the installed
+file. Unsupported or mismatching installations fail closed.
+
+Cancel stops the check; changing the document invalidates pending results.
+Closing the window cancels its worker. Unsaved content is never silently saved
+or sent to the tool. Results describe the saved file at check time, not a lasting
+trust grant. Actual external-browser preview remains the separate, explicitly
+trusted [TSX CLI workflow](tsx-preview.md); no executable preview action is
+included in this batch.
+
 ## Image viewer
 
 Run `jwm-image-viewer -- FILE…`, use Ctrl+O, or drop files onto its window.

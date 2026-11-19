@@ -327,6 +327,59 @@ def main():
                 assert code_path.read_bytes() == code_source + b"// appended"
                 print("Native code-view toggle, source editing and BOM/CRLF preservation: PASS", flush=True)
 
+                # TSX preflight is explicitly not browser preview or project execution.
+                fixture = work / "preflight-project"
+                fixture.mkdir()
+                sentinel = fixture / "MUST_NOT_RUN"
+                malicious = f"require('node:fs').writeFileSync({str(sentinel)!r}, 'executed')"
+                (fixture / "package.json").write_text('{"scripts":{"dev":"exit 42"}}')
+                for package in ("vite", "react", "react-dom"):
+                    package_dir = fixture / "node_modules" / package
+                    (package_dir / "dist/node").mkdir(parents=True)
+                    (package_dir / "package.json").write_text('{"version":"8.3.8"}')
+                    (package_dir / "dist/node/index.js").write_text(malicious)
+                (fixture / "vite.config.js").write_text(malicious)
+                tsx_path = fixture / "preflight.tsx"
+                tsx_source = "export default () => <div>metadata only</div>;"
+                tsx_path.write_text(tsx_source)
+                installed = work / ".local/bin/jwm-tsx-preview"
+                installed.parent.mkdir(parents=True)
+                installed.write_bytes((ROOT / "scripts/jwm-tsx-preview.mjs").read_bytes())
+                installed.chmod(0o755)
+                tsx_app = launch("jwm-notes", tsx_path)
+                tsx_window = window("preflight.tsx.*JWM 备忘录")
+                focus(tsx_window)
+                # Cancel project selection twice, without starting a check.
+                for _ in range(2):
+                    command("xdotool", "mousemove", "--window", tsx_window, 680, 86, "click", "1")
+                    key("Escape")
+                # Dirty content is retained and the check is refused, not autosaved.
+                key("ctrl+End")
+                type_text("// saved later")
+                command("xdotool", "mousemove", "--window", tsx_window, 680, 86, "click", "1")
+                assert tsx_path.read_text() == tsx_source
+                key("Escape", "ctrl+s")
+                wait(lambda: tsx_path.read_text() == tsx_source + "// saved later", "Preflight changed save behavior")
+                for _ in range(2):
+                    command("xdotool", "mousemove", "--window", tsx_window, 680, 86, "click", "1")
+                    type_text(str(fixture))
+                    key("Return")
+                    wait(lambda: "TSX 预检通过（未运行）" in command("xprop", "-id", tsx_window, "_NET_WM_NAME"),
+                         "TSX preflight never reached verified metadata success")
+                    assert tsx_app.poll() is None, "Preflight killed Notes"
+                    assert not sentinel.exists(), "Preflight executed project code"
+                    if args.evidence_dir:
+                        screenshot(tsx_window).save(args.evidence_dir / "tsx-preflight-no-execution.png")
+                    key("Escape")
+                # Close during a newly submitted check; no preview server exists.
+                command("xdotool", "mousemove", "--window", tsx_window, 680, 86, "click", "1")
+                type_text(str(fixture))
+                key("Return", "Escape", "ctrl+w")
+                wait(lambda: tsx_app.poll() is not None, "Preflight cancellation prevented closing")
+                assert not sentinel.exists()
+                assert tsx_path.read_text() == tsx_source + "// saved later"
+                print("Native TSX preflight: save gate, cancel/repeat/close, no project execution: PASS", flush=True)
+
                 # Code indentation is one undo transaction across selected lines.
                 indent_path = work / "indent.tsx"
                 indent_source = b"\xef\xbb\xbf    first\r\nsecond\r\n"
