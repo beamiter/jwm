@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Exercise native stream startup/shutdown against an isolated PipeWire daemon.
+# Exercise stream lifecycle and SHM pixels against an isolated PipeWire daemon.
 set -euo pipefail
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 PREFIX=${JWM_PIPEWIRE_PREFIX:-"$HOME/.cache/jwm/pipewire-prefix"}
@@ -35,6 +35,14 @@ context.modules = [
     { name = libpipewire-module-link-factory }
     { name = libpipewire-module-access args = { access.force = unrestricted } }
 ]
+# Own the graph clock. No desktop WirePlumber, hardware, or user graph is needed.
+context.objects = [
+    { factory = spa-node-factory
+      args = { factory.name = support.node.driver
+               node.name = jwm-ci-driver
+               node.group = pipewire.dummy
+               priority.driver = 20000 } }
+]
 CONF
 export PIPEWIRE_RUNTIME_DIR="$TEST_ROOT"
 export PIPEWIRE_REMOTE=pipewire-0
@@ -59,3 +67,8 @@ fi
 cd "$ROOT"
 bash scripts/test.sh -p jwm-portal --bin jwm-portal -- \
     --ignored pipewire_stream::lifecycle_tests::private_daemon_stream_starts_and_stops
+
+# Run the real linked consumer after the empty-source lifecycle test. Keep the
+# capture output visible as evidence in the hosted job log.
+timeout --kill-after=5s 45s bash scripts/test.sh -p jwm-portal --bin jwm-portal -- \
+    --ignored --exact --nocapture pipewire_stream::shm_tests::private_daemon_shm_delivers_two_frames_and_retires_producer
