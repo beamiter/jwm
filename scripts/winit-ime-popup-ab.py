@@ -202,6 +202,30 @@ def timeout_signal(*_):
     raise TimeoutError("hosted fixture deadline interrupted")
 
 
+def display_paths(number):
+    return Path(f"/tmp/.X11-unix/X{number}"), Path(f"/tmp/.X{number}-lock")
+
+
+def display_state(number):
+    outer, lock = display_paths(number)
+    names = {line.split()[-1] for line in Path("/proc/net/unix").read_text().splitlines()
+             if line.split()}
+    return {"filesystem_socket": os.path.lexists(outer), "lock": os.path.lexists(lock),
+            "unix_socket": str(outer) in names, "abstract_socket": "@" + str(outer) in names}
+
+
+def stop_xvfb(child):
+    """Only signal the directly spawned child; Xvfb removes its own paths."""
+    if child.poll() is not None:
+        return "already-exited", child.returncode
+    child.terminate()
+    try:
+        return "SIGTERM", child.wait(timeout=3)
+    except subprocess.TimeoutExpired:
+        child.kill()
+        return "SIGKILL-fallback", child.wait(timeout=2)
+
+
 def run(args, out, report):
     with tempfile.TemporaryDirectory(prefix="jwm-fcitx-") as temp:
         work = Path(temp)
@@ -217,6 +241,9 @@ def run(args, out, report):
             env[key] = str(work / leaf)
         procs = []
         xvfb = None
+        display_number = {"A": 199, "B": 200}[args.role]
+        outer_report = {"display": f":{display_number}", "owned_pid": None}
+        report["outer_display"] = outer_report
 
         def verify_outer():
             require(xvfb is not None and xvfb.poll() is None, "owned Xvfb not live")
@@ -290,16 +317,15 @@ def run(args, out, report):
             env["XAUTHORITY"] = str(auth)
             # Explicit display gets a real native lock file. Xvfb -displayfd
             # can omit that lock, enabling nested XWayland to collide with it.
-            display_number = 199
-            outer_path = Path(f"/tmp/.X11-unix/X{display_number}")
-            lock = Path(f"/tmp/.X{display_number}-lock")
-            require(not os.path.lexists(outer_path) and not os.path.lexists(lock)
-                    and not any(line.split()[-1:] in ([str(outer_path)], ["@" + str(outer_path)])
-                                for line in Path("/proc/net/unix").read_text().splitlines()),
-                    "fixed outer display/lock/socket is not free")
+            outer_path, lock = display_paths(display_number)
+            outer_report["preflight"] = display_state(display_number)
+            save()
+            require(not any(outer_report["preflight"].values()),
+                    "fixed outer display/lock/socket not free; no foreign cleanup attempted")
             env["DISPLAY"] = f":{display_number}"
             xvfb = launch("xvfb", "/usr/bin/Xvfb", env["DISPLAY"], "-auth", auth,
                            "-screen", "0", "1280x900x24", "-nolisten", "tcp", "-noreset")
+            outer_report["owned_pid"] = xvfb.pid
 
             def x_ready():
                 require(xvfb.poll() is None, "owned Xvfb exited")
@@ -308,6 +334,7 @@ def run(args, out, report):
             wait(x_ready, "owned outer Xvfb socket/lock not ready", 8)
             require(lock.read_text().strip() == str(xvfb.pid), "wrong outer Xvfb lock owner")
             verify_outer()
+            outer_report["peer_and_lock_verified"] = True
             cmd("xdpyinfo")
             rejected = subprocess.run(["/usr/bin/xdpyinfo"], env={**env, "XAUTHORITY": str(wrong)},
                                       capture_output=True, timeout=5)
@@ -497,12 +524,35 @@ def run(args, out, report):
             report["phase"] = "complete"
             save()
         finally:
+            cleanup_errors = []
             for p in reversed(procs):
+                if p is xvfb:
+                    continue
                 try:
-                    os.killpg(p.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                p.wait(timeout=3)
+                    # No signal after poll() has reaped this direct child.
+                    if p.returncode is None:
+                        try:
+                            os.killpg(p.pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                    p.wait(timeout=3)
+                except Exception as error:
+                    cleanup_errors.append(repr(error))
+            if xvfb is not None:
+                try:
+                    method, code = stop_xvfb(xvfb)
+                    outer_report["cleanup"] = {"method": method, "returncode": code,
+                                               "paths": display_state(display_number)}
+                except Exception as error:
+                    cleanup_errors.append(repr(error))
+            else:
+                outer_report["cleanup"] = {"method": "not-started",
+                                           "paths": display_state(display_number)}
+            # Report any residue but never unlink X11 socket/lock paths.
+            # A and B intentionally use independent displays.
+            if cleanup_errors:
+                outer_report["cleanup_errors"] = cleanup_errors
+                raise RuntimeError("owned fixture process cleanup failed")
 
 
 def main():
