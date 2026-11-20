@@ -11,6 +11,7 @@ mod host;
 pub mod notes;
 mod preview;
 mod theme;
+mod tsx_preview;
 mod ui;
 pub mod viewer;
 

@@ -6,6 +6,7 @@ uses the user's display, session bus, notes, or application defaults. Build the
 apps before running.
 """
 import argparse
+import errno
 import io
 import os
 import re
@@ -71,8 +72,8 @@ def main():
             def command(*argv):
                 return subprocess.check_output(list(map(str, argv)), env=env, stderr=subprocess.PIPE).decode().strip()
 
-            def wait(predicate, message):
-                deadline = time.monotonic() + 8
+            def wait(predicate, message, timeout=8):
+                deadline = time.monotonic() + timeout
                 last_probe_error = None
                 while time.monotonic() < deadline:
                     try:
@@ -115,8 +116,8 @@ def main():
                         key("Return")
                     command("xdotool", "type", "--clearmodifiers", "--delay", "1", line)
 
-            def screenshot(identifier):
-                result = subprocess.check_output(["import", "-window", str(identifier), "png:-"], env=env)
+            def screenshot(identifier, timeout=None):
+                result = subprocess.check_output(["import", "-window", str(identifier), "png:-"], env=env, timeout=timeout)
                 return Image.open(io.BytesIO(result)).convert("RGB")
 
             def close_button(identifier):
@@ -326,6 +327,150 @@ def main():
                 wait(lambda: code_app.poll() is not None, "Code-view editor did not close")
                 assert code_path.read_bytes() == code_source + b"// appended"
                 print("Native code-view toggle, source editing and BOM/CRLF preservation: PASS", flush=True)
+
+                # TSX preflight is explicitly not browser preview or project execution.
+                fixture = work / "preflight-project"
+                fixture.mkdir()
+                sentinel = fixture / "MUST_NOT_RUN"
+                malicious = f"require('node:fs').writeFileSync({str(sentinel)!r}, 'executed')"
+                (fixture / "package.json").write_text('{"scripts":{"dev":"exit 42"}}')
+                for package in ("vite", "react", "react-dom"):
+                    package_dir = fixture / "node_modules" / package
+                    (package_dir / "dist/node").mkdir(parents=True)
+                    (package_dir / "package.json").write_text('{"version":"8.3.8"}')
+                    (package_dir / "dist/node/index.js").write_text(malicious)
+                (fixture / "vite.config.js").write_text(malicious)
+                tsx_path = fixture / "preflight.tsx"
+                tsx_source = "export default () => <div>metadata only</div>;"
+                tsx_path.write_text(tsx_source)
+                installed = work / ".local/bin/jwm-tsx-preview"
+                installed.parent.mkdir(parents=True)
+                installed.write_bytes((ROOT / "scripts/jwm-tsx-preview.mjs").read_bytes())
+                installed.chmod(0o755)
+                tsx_app = launch("jwm-notes", tsx_path)
+                tsx_window = window("preflight.tsx.*JWM 备忘录")
+                focus(tsx_window)
+                # Cancel project selection twice, without starting a check.
+                for _ in range(2):
+                    command("xdotool", "mousemove", "--window", tsx_window, 680, 86, "click", "1")
+                    key("Escape")
+                # Dirty content is retained and the check is refused, not autosaved.
+                key("ctrl+End")
+                type_text("// saved later")
+                command("xdotool", "mousemove", "--window", tsx_window, 680, 86, "click", "1")
+                assert tsx_path.read_text() == tsx_source
+                key("Escape", "ctrl+s")
+                wait(lambda: tsx_path.read_text() == tsx_source + "// saved later", "Preflight changed save behavior")
+                for _ in range(2):
+                    command("xdotool", "mousemove", "--window", tsx_window, 680, 86, "click", "1")
+                    type_text(str(fixture))
+                    key("Return")
+                    wait(lambda: "TSX 预检通过（未运行）" in command("xprop", "-id", tsx_window, "_NET_WM_NAME"),
+                         "TSX preflight never reached verified metadata success")
+                    assert tsx_app.poll() is None, "Preflight killed Notes"
+                    assert not sentinel.exists(), "Preflight executed project code"
+                    if args.evidence_dir:
+                        # The title is published before the next Cairo paint.
+                        # Keep the success assertion above; separately wait for
+                        # stable pixels so evidence does not retain the old frame.
+                        frame_state = [None, time.monotonic()]
+
+                        def settled_success_frame():
+                            frame = screenshot(tsx_window, timeout=2)
+                            pixels = frame.tobytes()
+                            if pixels != frame_state[0]:
+                                frame_state[:] = [pixels, time.monotonic()]
+                                return None
+                            return frame if time.monotonic() - frame_state[1] >= .5 else None
+
+                        wait(settled_success_frame, "TSX success pixels did not settle").save(
+                            args.evidence_dir / "tsx-preflight-no-execution.png")
+                    key("Escape")
+                # A real read barrier, not a timing guess: hold package.json's
+                # FIFO writer open so Node cannot complete metadata inspection.
+                # Notes opens another file in a NEW window in the same host.
+                manifest = fixture / "package.json"
+                manifest.unlink()
+                os.mkfifo(manifest)
+                barrier = None
+                try:
+                    command("xdotool", "mousemove", "--window", tsx_window, 680, 86, "click", "1")
+                    type_text(str(fixture))
+                    check_started = time.monotonic()
+                    key("Return")
+
+                    def connect_reader():
+                        try:
+                            return os.open(manifest, os.O_WRONLY | os.O_NONBLOCK)
+                        except OSError as error:
+                            if error.errno == errno.ENXIO:
+                                return None
+                            raise
+
+                    barrier = wait(connect_reader, "Old preflight never reached the FIFO read barrier")
+                    # Do not send even a complete short JSON record: some Node
+                    # versions finish readFile after a short FIFO read before EOF.
+                    # With zero bytes and a live writer, the read stays blocked.
+
+                    def blocked_child():
+                        for children in Path(f"/proc/{tsx_app.pid}/task").glob("*/children"):
+                            for pid in children.read_text().split():
+                                for descriptor in Path(f"/proc/{pid}/fd").glob("*"):
+                                    try:
+                                        if descriptor.resolve() == manifest:
+                                            return int(pid)
+                                    except FileNotFoundError:
+                                        pass
+                        return None
+
+                    old_pid = wait(blocked_child, "No owned metadata child held the FIFO")
+                    second_path = work / "second-preflight.tsx"
+                    second_source = "export default () => <div>second document</div>;"
+                    second_path.write_text(second_source)
+                    # Escape dismisses the modal; Open cancels the old request.
+                    key("Escape")
+                    assert Path(f"/proc/{old_pid}").exists(), "Old check was not pending before Open"
+                    key("ctrl+o")
+                    type_text(str(second_path))
+                    key("Return")
+                    second_window = window("second-preflight.tsx.*JWM 备忘录")
+                    assert second_window != tsx_window, "Open unexpectedly reused the old window"
+                    # Keep the writer open: EOF cannot complete the check.
+                    # Also finish before its five-second production timeout.
+                    wait(lambda: not Path(f"/proc/{old_pid}").exists(), "Open did not reap the blocked preflight child",
+                         timeout=max(0, 4.5 - (time.monotonic() - check_started)))
+                    os.close(barrier)
+                    barrier = None
+                    focus(second_window)
+                    key("ctrl+End")
+                    type_text("// new window remains editable")
+                    key("ctrl+s")
+                    wait(lambda: second_path.read_text() == second_source + "// new window remains editable",
+                         "Old preflight completion intercepted input in the new window")
+                    assert "TSX 预检通过" not in command("xprop", "-id", second_window, "_NET_WM_NAME")
+                    assert "TSX 预检通过" not in command("xprop", "-id", tsx_window, "_NET_WM_NAME")
+                    assert tsx_path.read_text() == tsx_source + "// saved later"
+                    assert not sentinel.exists()
+                    if args.evidence_dir:
+                        screenshot(second_window).save(args.evidence_dir / "tsx-preflight-file-switch.png")
+                    key("ctrl+w")
+                    focus(tsx_window)
+                    key("Escape")
+                finally:
+                    if barrier is not None:
+                        os.close(barrier)
+                    manifest.unlink()
+                    manifest.write_text('{"scripts":{"dev":"exit 42"}}')
+                print("Native TSX FIFO barrier: opening another file cancels/reaps old check without stale UI: PASS", flush=True)
+
+                # Close during a newly submitted check; no preview server exists.
+                command("xdotool", "mousemove", "--window", tsx_window, 680, 86, "click", "1")
+                type_text(str(fixture))
+                key("Return", "Escape", "ctrl+w")
+                wait(lambda: tsx_app.poll() is not None, "Preflight cancellation prevented closing")
+                assert not sentinel.exists()
+                assert tsx_path.read_text() == tsx_source + "// saved later"
+                print("Native TSX preflight: save gate, cancel/repeat/close, no project execution: PASS", flush=True)
 
                 # Code indentation is one undo transaction across selected lines.
                 indent_path = work / "indent.tsx"
