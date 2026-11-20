@@ -411,6 +411,21 @@ area while keeping the PiP window at the user's chosen drop position.
 
 ### Restarts and sessions
 
+Manual `restore_session` applies placement only when a saved and current
+window are each other’s unique best match. The class must be nonempty and
+match case-insensitively.
+An exact nonempty instance outranks the older class-only fallback, which
+still works for a unique pair. If multiple saved or live windows could
+claim a placement, JWM leaves those windows in place, including a single
+survivor of two saved windows. It logs the skipped-window count and skips
+replaying saved tile order on monitors with an ambiguous window or a stale
+ordering record. Unambiguous placements still restore and can change the
+layout. If your application supports distinct instance names,
+choose a stable name per window and save the session again. Titles, PIDs
+and XIDs are not used to resolve this ambiguity. Existing snapshot files
+need no conversion, but duplicate identities no longer restore by
+occurrence. This does not change X11 managed restart handoff.
+
 Session snapshots (v5+) store an output connector / `stable_key` on each
 client entry and each monitor order list, alongside the numeric
 `monitor_num`. `restore_session` resolves the connector through `output_map`

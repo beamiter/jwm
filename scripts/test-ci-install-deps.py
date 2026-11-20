@@ -16,7 +16,10 @@ WORKFLOWS = ("ci.yml", "remote-wayland-safety.yml", "remote-window-safety.yml",
 
 
 class DependencyInstallTests(unittest.TestCase):
-    def invoke(self, packages=("libx11-dev", "pkg-config"), update=0, install=0, source="valid"):
+    ARCHIVES = "/var/cache/apt/archives/jwm-bridge-ci.aB0dc9E7"
+
+    def invoke(self, packages=("libx11-dev", "pkg-config"), update=0, install=0, source="valid",
+               bridge=False, cjk=False, download=(0, 0), archives=ARCHIVES, cleanup=0):
         with tempfile.TemporaryDirectory() as directory:
             folder = Path(directory)
             log = folder / "calls.jsonl"
@@ -24,19 +27,35 @@ class DependencyInstallTests(unittest.TestCase):
             if source != "missing":
                 sources.write_text("Types: deb\nURIs: https://archive.ubuntu.com/ubuntu\nSuites: noble\nComponents: main\n" if source == "valid" else "")
             fake = folder / "sudo"
-            fake.write_text(
-                "#!/usr/bin/python3\n"
-                "import json, os, sys\n"
-                "args = sys.argv[1:]\n"
-                "with open(os.environ['FAKE_APT_LOG'], 'a') as log:\n"
-                "    log.write(json.dumps(args) + '\\n')\n"
-                "assert args[0] == 'apt-get'\n"
-                "phase = 'UPDATE' if args[-1] == 'update' else 'INSTALL'\n"
-                "sys.exit(int(os.environ['FAKE_' + phase + '_STATUS']))\n"
-            )
+            fake.write_text(textwrap.dedent("""\
+                #!/usr/bin/python3
+                import json, os, sys
+                args = sys.argv[1:]
+                with open(os.environ['FAKE_APT_LOG'], 'a') as log:
+                    log.write(json.dumps(args) + '\\n')
+                command = args[1] if args[0] == '-n' else args[0]
+                if command == '/usr/bin/mktemp':
+                    print(os.environ['FAKE_ARCHIVES'])
+                    sys.exit(0)
+                if command == '/usr/bin/chmod':
+                    sys.exit(0)
+                if command == '/usr/bin/rm':
+                    sys.exit(int(os.environ['FAKE_CLEANUP_STATUS']))
+                if command == '/usr/bin/timeout':
+                    assert '--download-only' in args
+                    index = ['120s', '180s'].index(args[3])
+                    sys.exit(json.loads(os.environ['FAKE_DOWNLOAD_STATUS'])[index])
+                assert command == 'apt-get', args
+                phase = 'UPDATE' if args[-1] == 'update' else 'INSTALL'
+                sys.exit(int(os.environ['FAKE_' + phase + '_STATUS']))
+            """))
             fake.chmod(0o755)
             env = dict(os.environ, PATH=str(folder), FAKE_APT_LOG=str(log),
-                       JWM_CI_APT_SOURCES=str(sources), FAKE_UPDATE_STATUS=str(update), FAKE_INSTALL_STATUS=str(install))
+                       JWM_CI_APT_SOURCES=str(sources), FAKE_UPDATE_STATUS=str(update),
+                       FAKE_INSTALL_STATUS=str(install), FAKE_DOWNLOAD_STATUS=json.dumps(download),
+                       FAKE_ARCHIVES=archives, FAKE_CLEANUP_STATUS=str(cleanup),
+                       JWM_CI_BRIDGE_DOWNLOAD_RETRY=str(int(bridge)),
+                       JWM_CI_PREFETCH_CJK=str(int(cjk)))
             result = subprocess.run(["/bin/bash", str(HELPER), *packages], env=env,
                                     text=True, capture_output=True, timeout=5, check=False)
             calls = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
@@ -80,8 +99,70 @@ class DependencyInstallTests(unittest.TestCase):
                 self.assertEqual(calls, [])
                 self.assertIn("missing or empty Ubuntu source file", result.stderr)
 
+    def test_bridge_cache_is_minted_by_root_and_all_phases_use_same_apt_config(self):
+        result, calls = self.invoke(bridge=True, packages=("dbus", "mpv", "ffmpeg"))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(calls), 6)
+        self.assertEqual(calls[0][-3:], ["-o", "APT::Update::Error-Mode=any", "update"])
+        self.assertEqual(calls[1], ["-n", "/usr/bin/mktemp", "-d", "--",
+                                    "/var/cache/apt/archives/jwm-bridge-ci.XXXXXXXX"])
+        self.assertEqual(calls[2], ["-n", "/usr/bin/chmod", "0755", "--", self.ARCHIVES])
+        apt = calls[0][:-3] + ["-o", f"Dir::Cache::archives={self.ARCHIVES}"]
+        packages = ["install", "-y", "--no-install-recommends", "dbus", "mpv", "ffmpeg"]
+        self.assertEqual(calls[3], ["-n", "/usr/bin/timeout", "--kill-after=5s", "120s"]
+                         + apt + ["--download-only"] + packages)
+        self.assertEqual(calls[4], ["-n"] + apt + ["--no-download"] + packages)
+        self.assertEqual(calls[5], ["-n", "/usr/bin/rm", "-rf", "--", self.ARCHIVES])
+
+    def test_bridge_reissues_only_download_on_timeout_and_reuses_archive(self):
+        result, calls = self.invoke(bridge=True, download=(124, 0))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(calls), 7)
+        self.assertEqual(calls[3][3], "120s")
+        self.assertEqual(calls[4][3], "180s")
+        self.assertEqual(calls[3][4:], calls[4][4:])
+        self.assertIn("--no-download", calls[5])
+        self.assertIn("retrying once from the same sources", result.stderr)
+
+    def test_bridge_skips_install_on_failure_and_preserves_status(self):
+        cases = (((100, 0), 1, 100), ((137, 0), 1, 137), ((124, 124), 2, 124),
+                 ((124, 100), 2, 100))
+        for download, attempts, status in cases:
+            with self.subTest(download=download):
+                result, calls = self.invoke(bridge=True, download=download)
+                self.assertEqual(result.returncode, status, result.stderr)
+                self.assertEqual([c[3] for c in calls if "--download-only" in c],
+                                 ["120s", "180s"][:attempts])
+                self.assertFalse(any("--no-download" in c for c in calls))
+                self.assertEqual(calls[-1], ["-n", "/usr/bin/rm", "-rf", "--", self.ARCHIVES])
+
+    def test_bridge_never_retries_install_or_ignores_cleanup_failure(self):
+        for install, expected in ((100, 100), (0, 1)):
+            with self.subTest(install=install):
+                result, calls = self.invoke(bridge=True, install=install, cleanup=1)
+                self.assertEqual(result.returncode, expected)
+                self.assertEqual(sum("--no-download" in c for c in calls), 1)
+                self.assertIn("could not remove private Bridge archives", result.stderr)
+
+    def test_bridge_bad_archive_path_or_failed_update_never_downloads_or_deletes(self):
+        result, calls = self.invoke(bridge=True, archives="/tmp/caller-controlled")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("unexpected private archive path", result.stderr)
+        self.assertEqual(len(calls), 2)  # update and creation only
+        self.assertEqual(calls[-1][1], "/usr/bin/mktemp")
+        result, calls = self.invoke(bridge=True, update=100)
+        self.assertEqual(result.returncode, 100)
+        self.assertEqual(len(calls), 1)
+
+    def test_cjk_and_bridge_modes_fail_before_sudo_if_combined(self):
+        result, calls = self.invoke(bridge=True, cjk=True)
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(calls, [])
+        self.assertIn("cannot be combined", result.stderr)
+
     def test_all_workflow_installs_have_step_deadlines_and_no_bypass(self):
         count = 0
+        bridge_count = 0
         for name in WORKFLOWS:
             text = (ROOT / ".github/workflows" / name).read_text()
             self.assertNotIn("apt-get", text, name)
@@ -93,8 +174,13 @@ class DependencyInstallTests(unittest.TestCase):
                 self.assertNotIn("continue-on-error", step)
                 self.assertNotIn("|| true", step)
                 self.assertNotIn("cargo test", step)  # install timeout must not truncate tests
+                if "JWM_CI_BRIDGE_DOWNLOAD_RETRY" in step:
+                    self.assertIn("Install D-Bus and playback test tools", step)
+                    self.assertIn("ci-install-deps.sh dbus mpv ffmpeg", step)
+                    bridge_count += 1
                 count += 1
         self.assertEqual(count, 14)
+        self.assertEqual(bridge_count, 1)
 
 
 class AptSourceSelectionTests(unittest.TestCase):
