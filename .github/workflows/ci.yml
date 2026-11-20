@@ -509,6 +509,8 @@ jobs:
       # Bound mirror stalls without changing repositories or skipping native tests.
       - name: Install D-Bus and playback test tools
         timeout-minutes: 10
+        env:
+          JWM_CI_BRIDGE_DOWNLOAD_RETRY: "1"
         run: |
           bash scripts/ci-install-deps.sh dbus mpv ffmpeg
 
