@@ -1,3 +1,6 @@
+#[cfg(feature = "accessibility")]
+pub(crate) mod accessibility;
+
 use crate::{
     editor::Editor,
     notes::Notes,
@@ -69,6 +72,7 @@ enum Focus {
     Preview,
     Editor,
     Search,
+    Results,
     Find,
 }
 enum PickerMode {
@@ -100,6 +104,9 @@ pub(crate) struct App {
     dialog: Option<Dialog>,
     dialog_focus: Option<usize>,
     focus: Focus,
+    result_path: Option<PathBuf>,
+    result_index: Option<usize>,
+    result_enter: bool,
     hits: Vec<Hit>,
     pub pointer: (f64, f64),
     pub size: (f64, f64),
@@ -121,6 +128,9 @@ impl App {
             dialog: None,
             dialog_focus: None,
             focus: Focus::Editor,
+            result_path: None,
+            result_index: None,
+            result_enter: false,
             hits: vec![],
             pointer: (0., 0.),
             size: (960., 680.),
@@ -246,7 +256,14 @@ impl App {
         });
     }
     pub fn draw(&mut self, cr: &cairo::Context, width: f64, height: f64, maximized: bool) {
+        let resized = self.size != (width, height);
         self.size = (width, height);
+        if self.focus == Focus::Results {
+            let index = self.result_index();
+            if resized || index != self.result_index {
+                self.reveal_result(index);
+            }
+        }
         self.hits.clear();
         ui::fill(cr, Rect::new(0., 0., width, height), ui::canvas());
         ui::fill(cr, Rect::new(0., 0., width, ui::header()), ui::panel());
@@ -485,7 +502,12 @@ impl App {
                         if rect.y + rect.h <= body.y + 60. || rect.y >= body.y + body.h {
                             continue;
                         }
-                        if n.document.as_ref().and_then(|d| d.file.path()).as_ref() == Some(path) {
+                        let selected = if self.focus == Focus::Results {
+                            self.result_path.as_ref() == Some(path)
+                        } else {
+                            n.document.as_ref().and_then(|d| d.file.path()).as_ref() == Some(path)
+                        };
+                        if selected {
                             ui::rounded(cr, rect, ui::select());
                         } else if rect.contains(self.pointer.0, self.pointer.1) {
                             ui::rounded(cr, rect, ui::hover());
@@ -1029,6 +1051,9 @@ impl App {
                             if n.document.as_ref().and_then(|d| d.file.path()).as_ref()
                                 == Some(&path)
                             {
+                                if self.focus == Focus::Results {
+                                    self.focus = Focus::Editor;
+                                }
                                 Ok(())
                             } else {
                                 n.save().and_then(|()| n.load(path)).map(|()| {
@@ -1163,6 +1188,100 @@ impl App {
             }
         }
     }
+    fn result_index(&self) -> Option<usize> {
+        let Document::Notes(notes) = &self.document else {
+            return None;
+        };
+        let path = self.result_path.as_ref()?;
+        notes.rows.iter().position(|(row, _)| row == path)
+    }
+
+    fn reveal_result(&mut self, index: Option<usize>) {
+        self.result_index = index;
+        let height = (self.body().h - 60.).max(1.);
+        if let Document::Notes(notes) = &mut self.document {
+            if let Some(index) = index {
+                let top = index as f64 * 48.;
+                notes.list_scroll = notes
+                    .list_scroll
+                    .clamp((top + 44. - height).max(0.).min(top), top);
+            } else {
+                self.result_path = None;
+            }
+        }
+    }
+
+    fn notebook_results_key(&mut self, key: &Key, mods: ModifiersState, repeat: bool) -> bool {
+        // A held result Enter must not insert newlines into the opened document
+        // or dismiss a modal save/load error on subsequent repeat events.
+        if *key == Key::Named(NamedKey::Enter) {
+            if repeat && self.result_enter {
+                return true;
+            }
+            if !repeat {
+                self.result_enter = false;
+            }
+        }
+        if self.dialog.is_some()
+            || !mods.is_empty()
+            || !matches!(self.focus, Focus::Search | Focus::Results)
+        {
+            return false;
+        }
+        let Document::Notes(notes) = &self.document else {
+            return false;
+        };
+        if !notes.managed {
+            return false;
+        }
+
+        match key {
+            Key::Named(NamedKey::ArrowDown | NamedKey::ArrowUp) => {
+                if !notes.search.preedit.is_empty() || notes.rows.is_empty() {
+                    return true;
+                }
+                let last = notes.rows.len() - 1;
+                let up = *key == Key::Named(NamedKey::ArrowUp);
+                let current = if self.focus == Focus::Results {
+                    self.result_index()
+                } else {
+                    None
+                };
+                let index = match (current, up) {
+                    (Some(index), true) => index.saturating_sub(1),
+                    (Some(index), false) => (index + 1).min(last),
+                    (None, true) => last,
+                    (None, false) => 0,
+                };
+                self.result_path = Some(notes.rows[index].0.clone());
+                self.focus = Focus::Results;
+                self.dragging = false;
+                self.reveal_result(Some(index));
+                true
+            }
+            Key::Named(NamedKey::Enter) if self.focus == Focus::Results => {
+                if !repeat {
+                    self.result_enter = true;
+                    // A redraw need not have happened since the list was changed.
+                    if let Some(index) = self.result_index() {
+                        let top = index as f64 * 48. - notes.list_scroll;
+                        if top + 44. > 0. && top < self.body().h - 60. {
+                            self.action(Action::Note(notes.rows[index].0.clone()));
+                        } else {
+                            // The user may have scrolled the highlight away.
+                            // Reveal it without opening an invisible note.
+                            self.reveal_result(Some(index));
+                        }
+                    } else {
+                        self.reveal_result(None);
+                    }
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+
     pub fn key(
         &mut self,
         event: &KeyEvent,
@@ -1171,6 +1290,9 @@ impl App {
     ) {
         self.caret = true;
         self.next_blink = Instant::now() + Duration::from_millis(500);
+        if self.notebook_results_key(&event.logical_key, mods, event.repeat) {
+            return;
+        }
         if self.dialog.is_some() {
             if event.logical_key == Key::Named(NamedKey::Tab) {
                 let count = self.dialog_actions().len();
@@ -1262,7 +1384,7 @@ impl App {
                 self.focus = Focus::Editor;
                 return;
             }
-            if self.focus == Focus::Preview {
+            if matches!(self.focus, Focus::Preview | Focus::Results) {
                 return;
             }
             let find = self.focus == Focus::Find;
@@ -1324,7 +1446,7 @@ impl App {
             None => (),
         }
         match &mut self.document {
-            Document::Notes(_) if self.focus == Focus::Preview => None,
+            Document::Notes(_) if matches!(self.focus, Focus::Preview | Focus::Results) => None,
             Document::Notes(n) => Some(if self.focus == Focus::Find {
                 &mut n.find.query
             } else if self.focus == Focus::Search {
@@ -1350,7 +1472,7 @@ impl App {
             }
         }
         if commit
-            && self.focus != Focus::Preview
+            && !matches!(self.focus, Focus::Preview | Focus::Results)
             && self.dialog.is_none()
             && let Document::Notes(n) = &mut self.document
         {
@@ -1377,7 +1499,7 @@ impl App {
             Some(_) => 0,
             None => match &self.document {
                 Document::Notes(_) => {
-                    if self.focus == Focus::Preview {
+                    if matches!(self.focus, Focus::Preview | Focus::Results) {
                         0
                     } else if self.focus == Focus::Find {
                         4
@@ -1454,6 +1576,166 @@ impl Picker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn notebook_keyboard_open_preserves_identity_and_guards_save() {
+        let directory =
+            std::env::temp_dir().join(format!("jwm-result-keys-{}", std::process::id()));
+        std::fs::create_dir(&directory).unwrap();
+        let original = directory.join("current.txt");
+        std::fs::write(&original, "original").unwrap();
+        for i in 0..24 {
+            std::fs::write(directory.join(format!("{i:02}.txt")), "same result title").unwrap();
+        }
+        let mut app = App::new(true, vec![original.clone()]).unwrap();
+        let Document::Notes(n) = &mut app.document else {
+            panic!("expected note")
+        };
+        n.managed = true;
+        n.directory = directory.clone();
+        n.refresh();
+        app.action(Action::Search);
+        app.ime("same result".to_owned(), true);
+        app.ime("预编辑".to_owned(), false);
+        let key = |app: &mut App, key, repeat| {
+            app.notebook_results_key(&Key::Named(key), ModifiersState::empty(), repeat)
+        };
+        assert!(key(&mut app, NamedKey::ArrowDown, false));
+        assert!(app.focus == Focus::Search);
+        assert!(app.result_path.is_none());
+        app.clear_preedit();
+        assert!(key(&mut app, NamedKey::ArrowUp, false));
+        assert!(app.focus == Focus::Results);
+        assert_eq!(app.ime_target(), 0);
+        app.ime("stale composition".to_owned(), true);
+        let last = app.result_path.clone().unwrap();
+        let Document::Notes(n) = &mut app.document else {
+            panic!("expected note")
+        };
+        assert!(n.list_scroll > 0.);
+        assert_eq!(n.editor.text, "original");
+        assert_eq!(n.search.text, "same result");
+        assert!(!n.dirty);
+        n.rows.reverse();
+
+        let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 960, 680).unwrap();
+        let cr = cairo::Context::new(&surface).unwrap();
+        app.draw(&cr, 960., 680., false);
+        assert_eq!(app.result_path.as_ref(), Some(&last));
+        assert!(
+            app.hits
+                .iter()
+                .any(|hit| hit.action == Action::Note(last.clone()))
+        );
+        #[cfg(feature = "accessibility")]
+        {
+            let mut semantics = accessibility::Semantics::default();
+            let tree = semantics.update(&app, 1.);
+            assert!(tree.nodes.iter().any(|(id, node)| {
+                *id == tree.focus
+                    && node.label() == Some("same result title")
+                    && node.supports_action(accesskit::Action::Click)
+            }));
+        }
+        // Manual scrolling may hide the selected row. Enter must reveal it
+        // without opening (or writing) until a fresh Enter confirms it.
+        app.pointer.0 = 10.;
+        app.scroll(-100., ModifiersState::empty());
+        app.draw(&cr, 960., 680., false);
+        assert!(
+            !app.hits
+                .iter()
+                .any(|hit| hit.action == Action::Note(last.clone()))
+        );
+        #[cfg(feature = "accessibility")]
+        {
+            let mut semantics = accessibility::Semantics::default();
+            let tree = semantics.update(&app, 1.);
+            assert!(
+                tree.nodes.iter().any(|(id, node)| {
+                    *id == tree.focus && node.role() == accesskit::Role::Window
+                })
+            );
+        }
+        assert!(key(&mut app, NamedKey::Enter, false));
+        assert!(key(&mut app, NamedKey::Enter, true));
+        assert!(app.focus == Focus::Results);
+        let Document::Notes(n) = &app.document else {
+            panic!("expected note")
+        };
+        assert_eq!(
+            n.document.as_ref().unwrap().file.path().as_ref(),
+            Some(&original)
+        );
+        assert_eq!(std::fs::read_to_string(&original).unwrap(), "original");
+        app.draw(&cr, 960., 680., false);
+        assert!(
+            app.hits
+                .iter()
+                .any(|hit| hit.action == Action::Note(last.clone()))
+        );
+
+        assert!(key(&mut app, NamedKey::ArrowDown, true));
+        let target = app.result_path.clone().unwrap();
+        assert_ne!(target, last);
+        let Document::Notes(n) = &mut app.document else {
+            panic!("expected note")
+        };
+        n.rows.retain(|(path, _)| path != &target);
+        assert!(key(&mut app, NamedKey::Enter, false));
+        assert!(app.result_path.is_none());
+        assert!(app.focus == Focus::Results);
+        assert!(key(&mut app, NamedKey::Enter, true));
+        assert!(key(&mut app, NamedKey::ArrowDown, false));
+        assert_eq!(app.result_path.as_ref(), Some(&last));
+
+        let Document::Notes(n) = &mut app.document else {
+            panic!("expected note")
+        };
+        n.editor.insert("pending ");
+        n.edited();
+        std::fs::write(&original, "external replacement with different length").unwrap();
+        assert!(key(&mut app, NamedKey::Enter, false));
+        assert!(matches!(app.dialog, Some(Dialog::Error(_))));
+        assert!(key(&mut app, NamedKey::Enter, true));
+        assert!(matches!(app.dialog, Some(Dialog::Error(_))));
+        let Document::Notes(n) = &app.document else {
+            panic!("expected note")
+        };
+        assert!(n.dirty);
+        assert_eq!(n.editor.text, "pending original");
+        assert_eq!(
+            n.document.as_ref().unwrap().file.path().as_ref(),
+            Some(&original)
+        );
+
+        app.action(Action::Cancel);
+        let Document::Notes(n) = &mut app.document else {
+            panic!("expected note")
+        };
+        n.load(original.clone()).unwrap();
+        n.editor.insert("save me ");
+        n.edited();
+        assert!(key(&mut app, NamedKey::Enter, false));
+        assert_eq!(app.ime_target(), 1);
+        assert!(app.focus == Focus::Editor);
+        assert!(key(&mut app, NamedKey::Enter, true));
+        let Document::Notes(n) = &app.document else {
+            panic!("expected note")
+        };
+        assert_eq!(n.editor.text, "same result title");
+        assert_eq!(
+            n.document.as_ref().unwrap().file.path().as_ref(),
+            Some(&last)
+        );
+        assert_eq!(
+            std::fs::read_to_string(original).unwrap(),
+            "save me external replacement with different length"
+        );
+        assert!(!key(&mut app, NamedKey::Enter, false));
+        assert!(app.effects.is_empty());
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 
     #[test]
     fn code_view_status_preserves_external_file_bytes() {

@@ -4,6 +4,7 @@
 import copy
 import datetime as dt
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -16,6 +17,7 @@ from acceptance_evidence import (
     audit,
     daily_gate,
     dependency_hashes,
+    mixed_scale_reasons,
     release_gate,
 )
 
@@ -152,7 +154,37 @@ class EvidenceTests(unittest.TestCase):
             if outputs == 2:
                 record["hardware"]["outputs"].append({"name": "HDMI-A-1", "mode": "1920x1080@60"})
             records.append(record)
+        mixed = next(r for r in records if r["case"] == "mixed-scale")
+        self.add_mixed_trace(mixed, self.mixed_trace())
         return records
+
+    def mixed_trace(self):
+        images = [self.root / name for name in ("before.png", "after.png")]
+        for i, path in enumerate(images):
+            path.write_text(f"synthetic visual evidence {i}")
+        trace = {
+            "format": "jwm-mixed-scale-v1",
+            "protocol": "zwlr_output_manager_v1",
+            "heads": [
+                {"name": "DP-1", "effective_scale": 1, "logical_rect": [-100, 0, 100, 100]},
+                {"name": "HDMI-A-1", "effective_scale": 1.5, "logical_rect": [0, 0, 100, 100]},
+            ],
+            "pointer_visual_samples": [
+                {"output": "DP-1", "input_event": "wl_pointer.enter", "pointer_logical": [-10, 30],
+                 "visual_target_logical_rect": [-20, 20, 20, 20], "visual_evidence": str(images[0])},
+                {"output": "HDMI-A-1", "input_event": "wl_pointer.enter", "pointer_logical": [10, 30],
+                 "visual_target_logical_rect": [0, 20, 20, 20], "visual_evidence": str(images[1])},
+            ],
+        }
+        return trace
+
+    def add_mixed_trace(self, record, trace):
+        path = self.root / "mixed-scale-raw.json"
+        path.write_text(json.dumps(trace))
+        record["raw_evidence"] = [
+            artifact(path), artifact(self.root / "before.png"), artifact(self.root / "after.png")
+        ]
+        record["hardware"]["mixed_scale_trace"] = str(path)
 
     def test_daily_gate_does_not_promote_isolated_or_wrong_backend(self):
         records = self.daily_records()
@@ -161,7 +193,7 @@ class EvidenceTests(unittest.TestCase):
         self.assertTrue(report["isolated_ready"])
         self.assertFalse(report["physical_ready"])
         self.assertFalse(report["daily_ready"])
-        self.assertEqual(len([r for r in report["cases"] if r["state"] == "missing"]), 7)
+        self.assertEqual(len([r for r in report["cases"] if r["state"] == "missing"]), 8)
 
         states = {r["case"]: r["state"] for r in report["cases"]}
         self.assertEqual(states["session-host-isolated"], "passed")
@@ -213,6 +245,101 @@ class EvidenceTests(unittest.TestCase):
         records = self.daily_records()
         records[0]["provenance"]["dependencies"].remove("Cargo.lock")
         self.assertFalse(daily_gate(records, self.root)["isolated_ready"])
+
+    def mixed_row(self, records):
+        report = daily_gate(records, self.root)
+        return report, next(row for row in report["cases"] if row["case"] == "mixed-scale")
+
+    def test_mixed_scale_needs_observed_distinct_finite_scales(self):
+        records = self.daily_records()
+        record = next(r for r in records if r["case"] == "mixed-scale")
+        for value in (1, 0, -1, "1.5", True, float("nan"), float("inf"), 10 ** 400):
+            with self.subTest(scale=value):
+                trace = self.mixed_trace()
+                trace["heads"][1]["effective_scale"] = value
+                self.add_mixed_trace(record, trace)
+                report, row = self.mixed_row(records)
+                self.assertFalse(report["physical_ready"])
+                self.assertEqual(row["state"], "invalid")
+        trace = self.mixed_trace()
+        trace["protocol"] = "static-config"
+        self.add_mixed_trace(record, trace)
+        self.assertEqual(self.mixed_row(records)[1]["state"], "invalid")
+
+    def test_mixed_scale_rejects_unmatched_output_and_pointer_visual_geometry(self):
+        records = self.daily_records()
+        record = next(r for r in records if r["case"] == "mixed-scale")
+        for field, value in (
+            ("output", "DP-1"), ("output", "unknown"),
+            ("input_event", "configured"), ("pointer_logical", [-15, 30]),
+            ("pointer_logical", [float("inf"), 30]),
+            ("visual_target_logical_rect", [15, 20, 20, 20]),
+            ("visual_target_logical_rect", [-1, 20, 20, 20]),
+            ("visual_target_logical_rect", [0, 20, 0, 20]),
+            ("visual_evidence", str(self.root / "before.png")),
+            ("visual_evidence", "/not-in-evidence"),
+        ):
+            with self.subTest(field=field, value=value):
+                trace = self.mixed_trace()
+                trace["pointer_visual_samples"][1][field] = value
+                self.add_mixed_trace(record, trace)
+                report, row = self.mixed_row(records)
+                self.assertFalse(report["physical_ready"])
+                self.assertEqual(row["state"], "invalid")
+        trace = self.mixed_trace()
+        trace["heads"][1]["name"] = "fake-connector"
+        self.add_mixed_trace(record, trace)
+        self.assertEqual(self.mixed_row(records)[1]["state"], "invalid")
+
+    def test_mixed_scale_requires_bound_raw_evidence_and_physical_backend(self):
+        records = self.daily_records()
+        record = next(r for r in records if r["case"] == "mixed-scale")
+        trace = self.mixed_trace()
+        self.add_mixed_trace(record, trace)
+        self.assertTrue(self.mixed_row(records)[0]["daily_ready"])
+        self.assertEqual(self.mixed_row(records)[1]["state"], "passed")
+
+        record.update(level="isolated", backend="wayland-nested")
+        self.assertEqual(self.mixed_row(records)[1]["state"], "wrong-scope")
+        record.update(level="physical", backend="wayland-udev")
+        record["raw_evidence"].pop(0)
+        self.assertEqual(self.mixed_row(records)[1]["state"], "invalid")
+        self.add_mixed_trace(record, trace)
+        (self.root / "after.png").write_text("modified after collection")
+        self.assertEqual(self.mixed_row(records)[1]["state"], "invalid")
+        self.add_mixed_trace(record, self.mixed_trace())
+        oversized = self.root / "mixed-scale-raw.json"
+        oversized.write_text(" " * 65537)
+        record["raw_evidence"][0] = artifact(oversized)
+        self.assertEqual(self.mixed_row(records)[1]["state"], "invalid")
+
+    def test_mixed_scale_rejects_copied_visual_bytes_at_a_different_path(self):
+        records = self.daily_records()
+        record = next(r for r in records if r["case"] == "mixed-scale")
+        first, second = self.root / "before.png", self.root / "after.png"
+        self.assertNotEqual(first, second)
+        second.write_bytes(first.read_bytes())
+        # This is a duplicate observation, not the ordinary stale-hash failure.
+        record["raw_evidence"][2] = artifact(second)
+        self.assertTrue(audit(record, self.root)["current"])
+        report, row = self.mixed_row(records)
+        self.assertFalse(report["physical_ready"])
+        self.assertEqual(row["state"], "invalid")
+        self.assertIn("different visual artifact bytes", row["attempts"][0]["reasons"][0])
+
+    def test_mixed_scale_trace_reopen_does_not_read_a_fifo(self):
+        # Exercise the additional descriptor check directly, as if the type
+        # changed after the general audit. No writer is opened.
+        fifo = self.root / "nonregular"
+        os.mkfifo(fifo)
+        record = {
+            "hardware": {"mixed_scale_trace": str(fifo)},
+            "raw_evidence": [{"path": str(fifo), "sha256": "0" * 64}],
+        }
+        self.assertEqual(
+            mixed_scale_reasons(record, {"DP-1", "HDMI-A-1"}),
+            ["mixed-scale trace must be a regular file"],
+        )
 
     def test_daily_cli_with_no_evidence_is_a_nonzero_checklist(self):
         result = subprocess.run(

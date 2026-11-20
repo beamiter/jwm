@@ -695,3 +695,6 @@ mod format_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod shm_tests;

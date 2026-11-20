@@ -13,8 +13,11 @@ import argparse
 import datetime as dt
 import hashlib
 import json
+import math
+import os
 import platform
 from pathlib import Path
+import stat
 import subprocess
 import sys
 
@@ -35,6 +38,8 @@ DAILY_CASES = (
      "Two physical outputs; reconnect one and verify geometry, focus and input recovery."),
     ("dual-output-suspend", "physical", "wayland-udev", 2,
      "Suspend/resume with two outputs; verify layout, keyboard, pointer and lock recovery."),
+    ("mixed-scale", "physical", "wayland-udev", 2,
+     "Two unequal effective Wayland output scales; verify interactive pointer and visual geometry across both."),
     ("ime", "physical", "wayland-udev", 1,
      "Real IME: candidate choice and committed text across native apps and a focus change."),
     ("portal", "physical", "wayland-udev", 1,
@@ -229,6 +234,118 @@ def release_gate(records, root=ROOT, waivers=None):
     }
 
 
+def _finite(value):
+    return type(value) in (int, float) and math.isfinite(value)
+
+
+def _logical_numbers(values, count):
+    return (
+        isinstance(values, list) and len(values) == count
+        and all(_finite(value) for value in values)
+    )
+
+
+def _logical_rect(value):
+    if not _logical_numbers(value, 4):
+        return None
+    x, y, width, height = value
+    if width <= 0 or height <= 0:
+        return None
+    right, bottom = x + width, y + height
+    if not _finite(right) or not _finite(bottom) or right <= x or bottom <= y:
+        return None
+    return x, y, right, bottom
+
+
+def _contains(rect, point):
+    x, y, right, bottom = rect
+    return x <= point[0] < right and y <= point[1] < bottom
+
+
+def mixed_scale_reasons(record, output_names):
+    """Check the structure of an observed trace, not the truth of its measurements."""
+    trace_path = record["hardware"].get("mixed_scale_trace")
+    raw = {item["path"]: item["sha256"] for item in record["raw_evidence"]}
+    if not isinstance(trace_path, str) or trace_path not in raw:
+        return ["mixed-scale requires a hashed trace in raw_evidence"]
+    # The general audit checked the path and hash already. Reopening must not
+    # block or read a device if the trace path changed since that check.
+    fd = os.open(trace_path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return ["mixed-scale trace must be a regular file"]
+        with os.fdopen(fd, "rb", closefd=False) as stream:
+            payload = stream.read(65537)
+    finally:
+        os.close(fd)
+    if len(payload) > 65536:
+        return ["mixed-scale trace exceeds 64 KiB"]
+    if hashlib.sha256(payload).hexdigest() != raw[trace_path]:
+        return ["mixed-scale trace no longer matches raw_evidence"]
+    try:
+        trace = json.loads(payload)
+        if (
+            trace.get("format") != "jwm-mixed-scale-v1"
+            or trace.get("protocol") != "zwlr_output_manager_v1"
+        ):
+            return ["mixed-scale requires an observed Wayland output-management trace"]
+        heads = trace.get("heads")
+        if not isinstance(heads, list) or len(heads) != 2:
+            return ["mixed-scale requires two protocol-observed output heads"]
+
+        layout = {}
+        scales = []
+        for head in heads:
+            name = head["name"]
+            scale = head["effective_scale"]
+            rect = _logical_rect(head["logical_rect"])
+            if not isinstance(name, str) or name not in output_names or name in layout:
+                return ["mixed-scale protocol heads must match two distinct physical outputs"]
+            if not _finite(scale) or scale <= 0:
+                return ["mixed-scale effective scales must be finite positive numbers"]
+            if rect is None:
+                return ["mixed-scale protocol heads need valid logical output rectangles"]
+            layout[name] = rect
+            scales.append(scale)
+        if scales[0] == scales[1]:
+            return ["mixed-scale effective scales must differ"]
+
+        samples = trace.get("pointer_visual_samples")
+        if not isinstance(samples, list) or len(samples) != 2:
+            return ["mixed-scale requires before/after cross-output pointer and visual samples"]
+        visited = set()
+        captures = set()
+        capture_hashes = set()
+        for sample in samples:
+            name = sample["output"]
+            if name not in layout or name in visited:
+                return ["mixed-scale pointer must cross between the two protocol heads"]
+            visited.add(name)
+            other = next(rect for key, rect in layout.items() if key != name)
+            point = sample["pointer_logical"]
+            rect = _logical_rect(sample["visual_target_logical_rect"])
+            x, y, right, bottom = layout[name]
+            if (
+                sample.get("input_event") != "wl_pointer.enter"
+                or not _logical_numbers(point, 2) or rect is None
+                or not _contains(layout[name], point)
+                or _contains(other, point)
+                or not _contains(rect, point)
+                or not (x <= rect[0] < rect[2] <= right and y <= rect[1] < rect[3] <= bottom)
+            ):
+                return ["mixed-scale pointer and observed visual target do not agree with output geometry"]
+            capture = sample["visual_evidence"]
+            if not isinstance(capture, str) or capture == trace_path or capture not in raw or capture in captures:
+                return ["mixed-scale samples require separate hashed visual evidence for both outputs"]
+            if raw[capture] in capture_hashes:
+                return ["mixed-scale requires different visual artifact bytes across outputs"]
+            captures.add(capture)
+            capture_hashes.add(raw[capture])
+    except (AttributeError, KeyError, OverflowError, RecursionError, TypeError, ValueError):
+        return ["malformed mixed-scale trace"]
+    return []
+
+
 def daily_gate(records, root=ROOT):
     """Require each case at its own level; evidence metadata is not attestation."""
     known = {case for case, *_ in DAILY_CASES}
@@ -288,6 +405,8 @@ def daily_gate(records, root=ROOT):
                                 "requires a physical GPU/driver, software_renderer=false, "
                                 f"and {output_count} distinct physical output(s) with modes"
                             )
+                        elif case == "mixed-scale" and not reasons:
+                            reasons.extend(mixed_scale_reasons(record, names))
                 except (AttributeError, KeyError, OSError, TypeError, ValueError):
                     reasons.append("malformed or unreadable evidence")
                 if status != "pass":
