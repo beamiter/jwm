@@ -1,0 +1,76 @@
+name: Notes AT-SPI MVP (private X11)
+on:
+  pull_request:
+    branches: [master]
+    paths:
+      - '.github/workflows/notes-atspi-mvp.yml'
+      - 'scripts/notes-atspi/**'
+      - 'scripts/ci-install-deps.sh'
+      - 'crates/jwm_apps/**'
+      - 'crates/jwm_ipc_client/**'
+      - 'crates/jwm_ipc_transport/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: notes-atspi-mvp-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  private-x11:
+    if: >-
+      github.repository == 'beamiter/jwm' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Check out exact candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Test probe control logic
+        run: /usr/bin/python3 -m unittest discover -s scripts/notes-atspi -p 'test_*.py' -v
+      - name: Install Ubuntu build and private desktop dependencies
+        timeout-minutes: 8
+        run: |
+          bash scripts/ci-install-deps.sh build-essential pkg-config libcairo2-dev libpango1.0-dev libglib2.0-dev libxkbcommon-dev libxkbcommon-x11-dev libxkbcommon-x11-0 xvfb xauth xdotool dbus-x11 at-spi2-core libatk-adaptor gir1.2-atspi-2.0 gir1.2-gtk-3.0 python3-gi
+          dpkg-query -W at-spi2-core gir1.2-atspi-2.0 libgtk-3-0t64 xvfb
+          /usr/bin/python3 -c 'import gi; gi.require_version("Atspi","2.0"); gi.require_version("Gtk","3.0"); from gi.repository import Atspi,Gtk'
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          toolchain: '1.92.0'
+      - name: Build pinned baseline, feature-off and feature-on binaries with locks
+        run: |
+          set -euo pipefail
+          baseline=0631f2639676e6dc1cc4d1c81cdad8d0a2804e17
+          archive_tree="$RUNNER_TEMP/notes-atspi-baseline-src"
+          mkdir -p "$archive_tree"
+          git rev-parse "$baseline"
+          git rev-parse HEAD
+          git archive "$baseline" | tar -xf - -C "$archive_tree"
+          target="$RUNNER_TEMP/notes-atspi-target"
+          cargo build --locked --manifest-path "$archive_tree/crates/jwm_apps/Cargo.toml" --target-dir "$target" --bin jwm-notes
+          install -m 700 "$target/debug/jwm-notes" "$RUNNER_TEMP/notes-baseline"
+          cargo build --locked --manifest-path crates/jwm_apps/Cargo.toml --target-dir "$target" --bin jwm-notes --no-default-features
+          install -m 700 "$target/debug/jwm-notes" "$RUNNER_TEMP/notes-feature-off"
+          cargo build --locked --manifest-path crates/jwm_apps/Cargo.toml --target-dir "$target" --bin jwm-notes --no-default-features --features accessibility
+          install -m 700 "$target/debug/jwm-notes" "$RUNNER_TEMP/notes-feature-on"
+      - name: Assert independent GTK receipt and all three Notes outcomes
+        run: |
+          unset DBUS_SESSION_BUS_ADDRESS AT_SPI_BUS_ADDRESS DISPLAY WAYLAND_DISPLAY WAYLAND_SOCKET
+          probe() (
+            set -euo pipefail
+            xdg_dir=$(mktemp -d)
+            trap 'rmdir "$xdg_dir" 2>/dev/null || true' EXIT
+            chmod 700 "$xdg_dir"
+            export XDG_RUNTIME_DIR="$xdg_dir"
+            printf 'AT-SPI Notes variant=%s expected=%s\n' "$1" "$2"
+            env JWM_ATSPI_ISOLATED=1 timeout -k 5s 80s dbus-run-session -- xvfb-run -a -s '-screen 0 1280x800x24 -nolisten tcp' \
+              /usr/bin/python3 scripts/notes-atspi/probe.py --notes "$RUNNER_TEMP/notes-$1" --expect "$2"
+          )
+          probe baseline baseline
+          probe feature-off baseline
+          probe feature-on working

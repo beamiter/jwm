@@ -1,3 +1,6 @@
+#[cfg(feature = "accessibility")]
+pub(crate) mod accessibility;
+
 use crate::{
     editor::Editor,
     notes::Notes,
