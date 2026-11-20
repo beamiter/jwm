@@ -4,6 +4,33 @@ This first version is an **external-browser development tool**, not an embedded
 Notes panel and not a sandbox. Edit and save in JWM Notes, then view the saved
 project in your browser. Nothing starts just because a TSX file is opened.
 
+## Installing or refreshing the launcher
+
+From the same checkout/revision used to build Notes, run:
+
+```sh
+bash scripts/install-tsx-preview.sh
+```
+
+This replaces only `~/.local/bin/jwm-tsx-preview`, atomically. It does not install
+Node/dependencies, run project code, or grant trust. Preserve an existing launcher
+before replacing it if you need a local rollback; restore that file or reinstall
+from its original revision. Restoring an older launcher may make newer Notes
+reject its version until both match again.
+
+For builds offering Notes TSX **preflight**, a root-owned, non-group/world-writable
+system `/usr/bin/node` is required. PATH/nvm Node is not a fallback for Notes.
+The installer reports this prerequisite from file metadata without executing
+Node. A successful launcher copy is not a claim that preflight or rendering is
+ready. Notes still checks the exact launcher bytes against its bundled revision.
+The native-apps installer does not currently synchronize this separate launcher;
+after an upgrade, repeat the command from the new matching checkout if requested.
+HOME is resolved once to its canonical directory, as in Notes. A HOME symlink
+to a safely owned directory is accepted; symlinks in `.local` or `.local/bin`
+are not. Unsafe installation directories or special-file targets are refused,
+not repaired. A failed copy leaves the previous launcher intact and removes
+its temporary file.
+
 ## Start and stop
 
 Requirements: Linux, Node 22.12+ (or 20.19+), and an existing trusted project with

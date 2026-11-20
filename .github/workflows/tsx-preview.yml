@@ -2,13 +2,30 @@ name: TSX preview
 on:
   push:
     branches: [master]
-    paths: ['scripts/*tsx-preview*', 'tests/tsx-preview/**', 'docs/tsx-preview.md', '.github/workflows/tsx-preview.yml']
+    paths: ['scripts/*tsx-preview*', 'scripts/test-tsx-installer.py', 'tests/tsx-preview/**', 'docs/tsx-preview.md', '.github/workflows/tsx-preview.yml']
   pull_request:
-    paths: ['scripts/*tsx-preview*', 'tests/tsx-preview/**', 'docs/tsx-preview.md', '.github/workflows/tsx-preview.yml']
+    paths: ['scripts/*tsx-preview*', 'scripts/test-tsx-installer.py', 'tests/tsx-preview/**', 'docs/tsx-preview.md', '.github/workflows/tsx-preview.yml']
   workflow_dispatch:
 permissions:
   contents: read
 jobs:
+  installer:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install system Node and shell lint prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y nodejs shellcheck
+      - name: Verify optional launcher installation without project execution
+        env:
+          JWM_TEST_REQUIRE_TRUSTED_NODE: '1'
+        run: |
+          test -x /usr/bin/node
+          shellcheck scripts/install-tsx-preview.sh
+          bash -n scripts/install-tsx-preview.sh
+          python3 scripts/test-tsx-installer.py -v
   preview:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
