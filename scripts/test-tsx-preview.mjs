@@ -135,3 +135,24 @@ test('SIGTERM during dependency startup removes temporary cache without a ready 
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test('Notes documentation links the shipped manual launcher with separate check and trust steps', async () => {
+  const { readFile } = await import('node:fs/promises');
+  const notes = await readFile(new URL('../docs/native-apps.md', import.meta.url), 'utf8');
+  const preview = await readFile(new URL('../docs/tsx-preview.md', import.meta.url), 'utf8');
+  assert.ok(notes.includes('[TSX preview launcher](tsx-preview.md)'));
+  assert.ok(preview.includes('(native-apps.md#tsx-preview-in-an-external-browser)'));
+  assert.ok(notes.includes('### TSX preview in an external browser'));
+  assert.ok(!notes.includes('separate isolated runtime and remains planned'));
+  const commands = [...notes.matchAll(/^\s*~\/\.local\/bin\/jwm-tsx-preview (.+)$/gm)]
+    .map(match => parseArgs(match[1].trim().split(/\s+/)));
+  assert.equal(commands.length, 2);
+  assert.equal(commands[0].check, true);
+  assert.equal(commands[0].trust, false);
+  assert.equal(commands[0].open, false);
+  assert.equal(commands[1].check, false);
+  assert.equal(commands[1].trust, true);
+  assert.equal(commands[1].open, true);
+  assert.equal(commands[0].project, commands[1].project);
+  assert.equal(commands[0].component, commands[1].component);
+});
