@@ -7,7 +7,8 @@ Only `jwm-v<semver>` tags start the workflow, and the tag version must exactly
 equal the root `jwm` version in `Cargo.toml`. Components elsewhere in the
 monorepo retain independent SemVer versions.
 
-The job runs on x86_64 Ubuntu 22.04, the binary bundle's Linux ABI baseline. It
+The job runs on x86_64 Ubuntu 24.04; this does not establish compatibility
+with older Linux ABIs. It
 checks formatting and shell syntax, compiles all root targets and eight feature
 profiles, runs Clippy and tests with required headless EGL coverage,
 tests the shared protocol, provider adapters, bundled bar, and install
@@ -17,9 +18,19 @@ lifecycle, then runs:
 bash scripts/package-release.sh --output-dir dist
 ```
 
-It creates `jwm-<version>-source.tar.gz` with `git archive`, writes and verifies
-`SHA256SUMS` over source and binary archives, passes that manifest to
-`actions/attest@v4`, then uses `gh release create` on the existing tag.
+It separately builds and verifies the optional descriptor-only Debian package
+used by [older Portal brokers](../packaging/README.md#optional-debian-package-for-portal-discovery).
+The Debian version uses the root version, replaces the prerelease delimiter
+with `~`, keeps any `+build` suffix, and appends the Debian revision `-1`.
+For example, `0.2.0-rc.1+g123` becomes `0.2.0~rc.1+g123-1`, which sorts
+below `0.2.0-1`. Debian compares the resulting full version, including build
+metadata; it does not reproduce every SemVer precedence rule. The package is
+not part of the core binary tarball lifecycle.
+
+The job creates `jwm-<version>-source.tar.gz` with `git archive`, writes and
+verifies `SHA256SUMS` over the source archive, binary bundle, and Portal
+`.deb`, passes that manifest to `actions/attest@v4`, then uploads the
+artifacts with `gh release create` on the existing tag.
 
 ## Maintainer checklist
 
@@ -50,6 +61,10 @@ It creates `jwm-<version>-source.tar.gz` with `git archive`, writes and verifies
    (cd bridge && JWM_REQUIRE_DBUS_DAEMON=1 cargo test --locked --all-targets)
    bash scripts/test-install-lifecycle.sh
    bash scripts/package-release.sh --output-dir dist
+   bash scripts/test-install-portal.sh
+   bash scripts/test-package-portal-metadata.sh
+   SOURCE_DATE_EPOCH="$(git show -s --format=%ct HEAD)" \
+     bash scripts/package-portal-metadata.sh dist
    ```
 
    The root `cargo test` line above tests only the root package, so the portal

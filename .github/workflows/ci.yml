@@ -429,6 +429,11 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Verify Portal installer and Debian package offline
+        run: |
+          bash scripts/test-install-portal.sh
+          bash scripts/test-package-portal-metadata.sh
+
       - name: Install Linux build dependencies
         timeout-minutes: 10
         run: |

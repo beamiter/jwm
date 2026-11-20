@@ -152,11 +152,34 @@ jobs:
       - name: Install and uninstall the actual ELF release archive
         run: python3 scripts/test-release-archives.py dist/jwm-*-linux-*.tar.gz --output dist/install-acceptance.json
 
+      - name: Build and verify optional Portal descriptor Debian package
+        id: portal_deb
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          export SOURCE_DATE_EPOCH="$(git show -s --format=%ct HEAD)"
+          bash scripts/test-install-portal.sh
+          bash scripts/test-package-portal-metadata.sh
+          artifact="$(bash scripts/package-portal-metadata.sh dist)"
+          upstream="${VERSION%%+*}"
+          deb_version="$upstream"
+          if [[ "$upstream" == *-* ]]; then
+            deb_version="${upstream%%-*}~${upstream#*-}"
+          fi
+          if [[ "$VERSION" == *+* ]]; then
+            deb_version+="+${VERSION#*+}"
+          fi
+          python3 scripts/test-package-portal-metadata.py "$artifact" --version "${deb_version}-1"
+          printf 'asset=%s\n' "${artifact##*/}" >> "$GITHUB_OUTPUT"
+
       - name: Create Git source archive and SHA-256 manifest
         shell: bash
         env:
           VERSION: ${{ steps.version.outputs.version }}
           TAG: ${{ steps.version.outputs.tag }}
+          PORTAL_DEB: ${{ steps.portal_deb.outputs.asset }}
         run: |
           set -euo pipefail
           git archive --format=tar.gz --prefix="jwm-${VERSION}/" \
@@ -168,11 +191,12 @@ jobs:
               \( -name '*.tar.gz' -o -name '*.tar.zst' -o -name '*.zip' \) \
               -printf '%f\0' | sort -z)
             (( ${#artifacts[@]} > 0 )) || { echo "no release archives" >&2; exit 1; }
-            sha256sum "${artifacts[@]}" > SHA256SUMS
+            [[ -f "$PORTAL_DEB" && ! -L "$PORTAL_DEB" ]]
+            sha256sum -- "${artifacts[@]}" "$PORTAL_DEB" > SHA256SUMS
             sha256sum --check SHA256SUMS
           )
 
-      - name: Attest archive provenance
+      - name: Attest release asset provenance
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6  # v4
         with:
           subject-checksums: dist/SHA256SUMS
@@ -182,11 +206,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.version.outputs.tag }}
+          PORTAL_DEB: ${{ steps.portal_deb.outputs.asset }}
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
           mapfile -d '' assets < <(find dist -maxdepth 1 -type f \
             \( -name '*.tar.gz' -o -name '*.tar.zst' -o -name '*.zip' -o -name SHA256SUMS \) \
             -print0 | sort -z)
-          gh release create "$TAG" "${assets[@]}" --verify-tag \
+          [[ -f "dist/$PORTAL_DEB" && ! -L "dist/$PORTAL_DEB" ]]
+          gh release create "$TAG" "${assets[@]}" "dist/$PORTAL_DEB" --verify-tag \
             --title "JWM ${VERSION}" --generate-notes
