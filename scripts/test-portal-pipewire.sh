@@ -11,9 +11,14 @@ fi
 TEST_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/jwm-portal-pw-test.XXXXXXXX")
 daemon_pid=''
 cleanup() {
+    local rc=$?
     if [[ -n $daemon_pid ]]; then
         kill "$daemon_pid" 2>/dev/null || true
         wait "$daemon_pid" 2>/dev/null || true
+    fi
+    if ((rc != 0)) && [[ -f $TEST_ROOT/daemon.log ]]; then
+        echo 'test-portal-pipewire: private daemon log (last 160 lines)' >&2
+        tail -n 160 -- "$TEST_ROOT/daemon.log" >&2 || true
     fi
     rm -rf -- "$TEST_ROOT"
 }
@@ -40,14 +45,15 @@ context.objects = [
     { factory = spa-node-factory
       args = { factory.name = support.node.driver
                node.name = jwm-ci-driver
-               node.group = pipewire.dummy
+               node.group = jwm-ci-shm-clock
                priority.driver = 20000 } }
 ]
 CONF
 export PIPEWIRE_RUNTIME_DIR="$TEST_ROOT"
 export PIPEWIRE_REMOTE=pipewire-0
 export JWM_PORTAL_TEST_PIPEWIRE=1
-LD_LIBRARY_PATH="$PREFIX/lib:$PREFIX/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+PIPEWIRE_DEBUG='2,pw.context:4,pw.link:4,pw.node:3' \
+    LD_LIBRARY_PATH="$PREFIX/lib:$PREFIX/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
     "$PIPEWIRE_BIN" --config "$TEST_ROOT/test.conf" > "$TEST_ROOT/daemon.log" 2>&1 &
 daemon_pid=$!
 ready=false
@@ -60,7 +66,6 @@ for ((attempt=0; attempt<100; attempt++)); do
     sleep 0.05
 done
 if [[ $ready != true ]]; then
-    cat "$TEST_ROOT/daemon.log" >&2
     echo 'test-portal-pipewire: private daemon did not start' >&2
     exit 1
 fi

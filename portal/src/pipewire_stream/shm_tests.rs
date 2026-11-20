@@ -9,6 +9,7 @@ const HEIGHT: u32 = 16;
 const STRIDE: u32 = WIDTH * 4;
 const SIZE: u32 = STRIDE * HEIGHT;
 const WAIT: Duration = Duration::from_secs(5);
+const CLOCK_GROUP: &str = "jwm-ci-shm-clock";
 
 fn pixels(seed: u8) -> Vec<u8> {
     (0..HEIGHT)
@@ -28,6 +29,12 @@ fn pixels(seed: u8) -> Vec<u8> {
 #[derive(Default)]
 struct Observation {
     format: Option<spa::param::video::VideoInfoRaw>,
+    process: usize,
+    no_buffer: usize,
+    no_data: usize,
+    empty: usize,
+    last_chunk: Option<(u32, u32, i32)>,
+    link: Option<String>,
     a: usize,
     b: usize,
     error: Option<String>,
@@ -57,12 +64,15 @@ fn consumer_buffers() -> OwnedPod {
     )
 }
 
-fn poll_until(loop_: &pw::loop_::Loop, label: &str, mut ready: impl FnMut() -> bool) {
+fn poll_until(loop_: &pw::loop_::Loop, mut ready: impl FnMut() -> bool) -> bool {
     let started = Instant::now();
     while !ready() {
-        assert!(started.elapsed() < WAIT, "timed out waiting for {label}");
+        if started.elapsed() >= WAIT {
+            return false;
+        }
         loop_.iterate(pw::loop_::Timeout::Finite(Duration::from_millis(20)));
     }
+    true
 }
 
 #[test]
@@ -159,6 +169,9 @@ fn private_daemon_shm_delivers_two_frames_and_retires_producer() {
             *pw::keys::MEDIA_TYPE => "Video",
             *pw::keys::MEDIA_CATEGORY => "Capture",
             *pw::keys::MEDIA_CLASS => "Stream/Input/Video",
+            // The real producer advertises DRIVER. Without group membership,
+            // the isolated timer driver may not own this linked graph at all.
+            *pw::keys::NODE_GROUP => CLOCK_GROUP,
         },
     )
     .expect("consumer stream");
@@ -193,20 +206,25 @@ fn private_daemon_shm_delivers_two_frames_and_retires_producer() {
         .process({
             let second = second.clone();
             move |consumer, observed| {
+                observed.borrow_mut().process += 1;
                 let Some(mut buffer) = consumer.dequeue_buffer() else {
+                    observed.borrow_mut().no_buffer += 1;
                     return;
                 };
                 let Some(data) = buffer.datas_mut().first_mut() else {
+                    observed.borrow_mut().no_data += 1;
                     return;
                 };
                 let (raw_offset, size, stride) = {
                     let chunk = data.chunk();
                     (chunk.offset(), chunk.size(), chunk.stride())
                 };
+                let mut observed = observed.borrow_mut();
+                observed.last_chunk = Some((raw_offset, size, stride));
                 if size == 0 {
+                    observed.empty += 1;
                     return;
                 }
-                let mut observed = observed.borrow_mut();
                 if size != SIZE || stride != STRIDE as i32 {
                     observed.error = Some(format!(
                         "expected frame bytes={SIZE} stride={STRIDE}; got {size}/{stride}"
@@ -237,30 +255,53 @@ fn private_daemon_shm_delivers_two_frames_and_retires_producer() {
             &mut [format[0].as_pod()],
         )
         .expect("publish consumer input port");
-    let check = || {
+    let snapshot = || {
         let observed = observed.borrow();
+        let format = observed
+            .format
+            .as_ref()
+            .map(|info| (info.format(), info.size()));
+        format!(
+            "producer {producer_id} seen={} removed={}; consumer {} {:?} driving={};              link={:?} format={format:?} process={} no_buffer={} no_data={}              empty={} last_chunk={:?} matched=[{}, {}] error={:?}",
+            seen.get(),
+            removed.get(),
+            consumer.node_id(),
+            consumer.state(),
+            consumer.is_driving(),
+            observed.link,
+            observed.process,
+            observed.no_buffer,
+            observed.no_data,
+            observed.empty,
+            observed.last_chunk,
+            observed.a,
+            observed.b,
+            observed.error,
+        )
+    };
+    let check = || {
         assert!(
-            observed.error.is_none(),
-            "PipeWire graph error: {:?}",
-            observed.error
-        );
-        assert!(
-            !matches!(consumer.state(), pw::stream::StreamState::Error(_)),
-            "consumer failed: {:?}",
-            consumer.state()
+            observed.borrow().error.is_none()
+                && !matches!(consumer.state(), pw::stream::StreamState::Error(_)),
+            "private PipeWire graph failure: {}",
+            snapshot()
         );
     };
     let lp = loop_.loop_();
-    poll_until(lp, "both node IDs", || {
-        check();
-        seen.get()
-            && consumer.state() == pw::stream::StreamState::Paused
-            && consumer.node_id() != pw::constants::ID_ANY
-    });
+    assert!(
+        poll_until(lp, || {
+            check();
+            seen.get()
+                && consumer.state() == pw::stream::StreamState::Paused
+                && consumer.node_id() != pw::constants::ID_ANY
+        }),
+        "timed out waiting for both node IDs: {}",
+        snapshot()
+    );
     // Explicit graph ownership: there is no WirePlumber/session manager and
     // each stream has one port. Omit port IDs so the link factory picks those
     // ports on the exact published nodes rather than global default devices.
-    let _link = core
+    let link = core
         .create_object::<pw::link::Link>(
             "link-factory",
             &pw::properties::properties! {
@@ -269,10 +310,34 @@ fn private_daemon_shm_delivers_two_frames_and_retires_producer() {
             },
         )
         .expect("link producer to consumer");
-    poll_until(lp, "exact first frame", || {
-        check();
-        observed.borrow().a > 0
-    });
+    let _link_listener = link
+        .add_listener_local()
+        .info({
+            let observed = observed.clone();
+            move |info| {
+                let state = info.state();
+                let mut observed = observed.borrow_mut();
+                observed.link = Some(format!(
+                    "{state:?} ({}:{} -> {}:{})",
+                    info.output_node_id(),
+                    info.output_port_id(),
+                    info.input_node_id(),
+                    info.input_port_id()
+                ));
+                if let pw::link::LinkState::Error(err) = state {
+                    observed.error = Some(format!("link refused the graph: {err}"));
+                }
+            }
+        })
+        .register();
+    assert!(
+        poll_until(lp, || {
+            check();
+            observed.borrow().a > 0
+        }),
+        "timed out waiting for exact first frame: {}",
+        snapshot()
+    );
     {
         let observed = observed.borrow();
         let format = observed
@@ -295,10 +360,14 @@ fn private_daemon_shm_delivers_two_frames_and_retires_producer() {
         frame.data.copy_from_slice(&second);
         frame.seq += 1;
     }
-    poll_until(lp, "exact updated frame", || {
-        check();
-        observed.borrow().b > 0
-    });
+    assert!(
+        poll_until(lp, || {
+            check();
+            observed.borrow().b > 0
+        }),
+        "timed out waiting for exact updated frame: {}",
+        snapshot()
+    );
     eprintln!(
         "private PipeWire: verified two {WIDTH}x{HEIGHT} frames, {SIZE} bytes/stride {STRIDE}"
     );
@@ -306,9 +375,13 @@ fn private_daemon_shm_delivers_two_frames_and_retires_producer() {
     // Producer Drop wakes and joins the worker. Verify its actual registry
     // removal and consumer leaving Streaming, not just successful Drop.
     drop(producer);
-    poll_until(lp, "producer registry removal", || {
-        removed.get() && consumer.state() != pw::stream::StreamState::Streaming
-    });
+    assert!(
+        poll_until(lp, || {
+            removed.get() && consumer.state() != pw::stream::StreamState::Streaming
+        }),
+        "timed out waiting for producer registry removal: {}",
+        snapshot()
+    );
     let count = {
         let frames = observed.borrow();
         frames.a + frames.b
