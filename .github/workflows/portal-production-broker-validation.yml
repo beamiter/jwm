@@ -1,0 +1,83 @@
+name: Isolated Ubuntu Portal production package discovery
+
+'on':
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [dot/portal-production-broker-base-0631]
+    paths:
+      - '.github/workflows/portal-production-broker-validation.yml'
+      - 'scripts/portal-production-broker/**'
+
+permissions:
+  contents: read
+
+jobs:
+  broker-package:
+    if: >-
+      github.repository == 'beamiter/jwm' &&
+      github.event.pull_request.draft &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.head_ref == 'dot/portal-production-broker-validation' &&
+      github.event.pull_request.base.sha == '4ffc3663bfa7ee2ca18bf547122f59f737c0a436'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 16
+    env:
+      FIXTURE_SHA: ${{ github.event.pull_request.head.sha }}
+      BASE_SHA: '4ffc3663bfa7ee2ca18bf547122f59f737c0a436'
+      PRODUCT_TREE: 'a67413fbccaf3e89e86f42885bb33d804fb617bf'
+    steps:
+      - name: Start evidence
+        shell: bash
+        run: |
+          mkdir -p artifacts/portal-package
+          printf 'fixture=%s\nbase=%s\n' "$FIXTURE_SHA" "$BASE_SHA" > artifacts/portal-package/identity.txt
+          cat /etc/os-release > artifacts/portal-package/os-release.txt
+      - name: Check out exact fixture
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 3
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+          path: source
+      - name: Install pinned distro broker prerequisites
+        timeout-minutes: 8
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git -C source rev-parse HEAD)" = "$FIXTURE_SHA"
+          test "$(git -C source rev-parse HEAD^)" = '17e42a71f7643fecf216860d36685a7acdac88fc'
+          test "$(git -C source rev-parse HEAD~2)" = "$BASE_SHA"
+          test "$(git -C source rev-parse HEAD~2^{tree})" = "$PRODUCT_TREE"
+          for f in scripts/package-portal-metadata.sh scripts/test-package-portal-metadata.py portal/dist/jwm.portal; do
+            test "$(git -C source hash-object "$f")" = "$(git -C source rev-parse "$BASE_SHA:$f")"
+          done
+          git -C source log -1 --format='product=%H%ntree=%T%nepoch=%ct' "$BASE_SHA" \
+            > artifacts/portal-package/product-identity.txt
+          test "$(dpkg --print-architecture)" = amd64
+          unset JWM_CI_APT_SOURCES JWM_CI_PREFETCH_CJK
+          bash source/scripts/ci-install-deps.sh dbus-daemon python3-gi xdg-desktop-portal xdg-desktop-portal-gtk \
+            2>&1 | tee artifacts/portal-package/packages.log
+          dpkg-query -W dbus-daemon python3-gi xdg-desktop-portal xdg-desktop-portal-gtk \
+            > artifacts/portal-package/package-versions.txt
+      - name: Verify installer, package and probe contracts
+        timeout-minutes: 2
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash source/scripts/test-install-portal.sh 2>&1 | tee artifacts/portal-package/installer-contracts.log
+          bash source/scripts/test-package-portal-metadata.sh 2>&1 | tee artifacts/portal-package/packaging-contracts.log
+          env -i PATH=/usr/bin:/bin LANG=C.UTF-8 PYTHONDONTWRITEBYTECODE=1 \
+            /usr/bin/python3 -I -B source/scripts/portal-production-broker/test_portal_probe.py -v \
+            2>&1 | tee artifacts/portal-package/probe-contracts.log
+      - name: Compare normal discovery before, after, and after uninstall
+        timeout-minutes: 4
+        shell: bash
+        run: |
+          bash source/scripts/portal-production-broker/validate.sh "$PWD/source" "$PWD/artifacts/portal-package" "$BASE_SHA"
+      - name: Upload package and broker evidence even on failure
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: portal-package-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/portal-package/
+          if-no-files-found: error
