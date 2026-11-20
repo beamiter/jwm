@@ -28,7 +28,10 @@ printf '#!/bin/sh\nexit 0\n' > "$target/release/jwm-portal"
 chmod +x "$target/release/jwm-portal"
 STUB
 for command in systemctl pkill; do
-    printf '#!/bin/sh\ntouch "$HOME/service-called"\n' > "$TEST_ROOT/bin/$command"
+    cat > "$TEST_ROOT/bin/$command" <<'STUB'
+#!/bin/sh
+touch "$HOME/service-called"
+STUB
 done
 cat > "$TEST_ROOT/bin/dpkg-query" <<'STUB'
 #!/usr/bin/env bash
