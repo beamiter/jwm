@@ -650,6 +650,11 @@ impl PropertyOps for WaylandPropertyOps {
     }
 }
 
+// Return an owned event, never a queue guard across a policy callback.
+fn pop_pending_event<T>(queue: &Mutex<VecDeque<T>>) -> Option<T> {
+    queue.lock_safe().pop_front()
+}
+
 pub struct WaylandWinitBackend {
     child_environment: crate::child_environment::ChildEnvironment,
     event_loop: SendWrapper<EventLoop<'static, JwmWaylandState>>,
@@ -2504,7 +2509,15 @@ impl Backend for WaylandWinitBackend {
         loop {
             let frame_start = std::time::Instant::now();
 
-            while let Some(ev) = { self.pending_events.lock_safe().pop_front() } {
+            // Ready input reaches policy before this tick's render and sleep,
+            // rather than waiting through the remaining frame budget.
+            self.event_loop
+                .dispatch(Some(Duration::ZERO), &mut *self.state)
+                .map_err(|e| BackendError::Other(Box::new(e)))?;
+
+            loop {
+                let next = pop_pending_event(&self.pending_events);
+                let Some(ev) = next else { break };
                 handler.handle_event(self, ev)?;
             }
             // Policy has now seen every queued set/unset_maximized; answer the
@@ -2524,10 +2537,15 @@ impl Backend for WaylandWinitBackend {
                 break;
             }
 
-            self.event_loop
-                .dispatch(Some(Duration::ZERO), &mut *self.state)
-                .map_err(|e| BackendError::Other(Box::new(e)))?;
-
+            // Policy/render can produce focus/configure/frame output after
+            // dispatch. Flush it before sleep, without collecting more input.
+            if self.flush_pending.load(Ordering::SeqCst)
+                && let Err(err) = self._display.borrow_mut().flush_clients()
+            {
+                log::debug!("wayland flush_clients failed: {err:?}");
+            }
+            // Keep the original flag/token: next dispatch consumes it normally.
+            // Coalesced requests retain a wakeup; at most one extra flush occurs.
             let elapsed = frame_start.elapsed();
             if elapsed < frame_budget {
                 std::thread::sleep(frame_budget - elapsed);
@@ -2540,6 +2558,86 @@ impl Backend for WaylandWinitBackend {
 #[cfg(test)]
 mod nested_input_tests {
     use super::*;
+
+    // Control-flow contracts are not live Winit timing measurements.
+    fn run_source() -> &'static str {
+        include_str!("backend.rs")
+            .split_once("    fn run(&mut self, handler: &mut dyn EventHandler)")
+            .unwrap()
+            .1
+            .split_once("\n#[cfg(test)]")
+            .unwrap()
+            .0
+    }
+
+    #[test]
+    fn scoped_fifo_pop_releases_lock_before_reentrant_enqueue() {
+        let queue = Mutex::new(VecDeque::from([1, 2]));
+        let mut handled = Vec::new();
+        loop {
+            let next = pop_pending_event(&queue);
+            let Some(event) = next else { break };
+            handled.push(event);
+            if event == 1 {
+                queue
+                    .try_lock()
+                    .expect("policy callback must not inherit queue guard")
+                    .push_back(3);
+            }
+        }
+        assert_eq!(handled, [1, 2, 3]);
+    }
+
+    #[test]
+    fn ready_input_policy_output_and_sleep_keep_single_tick_order() {
+        let source = run_source();
+        let stages = [
+            "let frame_start = std::time::Instant::now()",
+            ".dispatch(Some(Duration::ZERO)",
+            "let next = pop_pending_event(&self.pending_events)",
+            "handler.handle_event(self, ev)?",
+            "self.state.flush_owed_xdg_state_replies()",
+            "self.state.sync_foreign_toplevel_outputs()",
+            "handler.update(self)?",
+            "self.render_if_needed()?",
+            "handler.should_exit() || self.exit_requested.load(Ordering::SeqCst)",
+            "if self.flush_pending.load(Ordering::SeqCst)",
+            "self._display.borrow_mut().flush_clients()",
+            "let elapsed = frame_start.elapsed()",
+            "std::thread::sleep(frame_budget - elapsed)",
+        ];
+        let positions: Vec<_> = stages
+            .iter()
+            .map(|stage| source.find(stage).unwrap())
+            .collect();
+        assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
+        assert_eq!(source.matches(".dispatch(Some(Duration::ZERO)").count(), 1);
+        assert_eq!(source.matches("handler.update(self)?").count(), 1);
+        assert_eq!(source.matches("self.render_if_needed()?").count(), 1);
+        assert_eq!(source.matches("std::thread::sleep(").count(), 1);
+    }
+
+    #[test]
+    fn host_close_errors_and_protocol_flush_preserve_bounded_exit() {
+        let source = run_source();
+        assert!(source.contains(".map_err(|e| BackendError::Other(Box::new(e)))?"));
+        assert!(source.contains("Duration::from_secs_f64(1_000f64 / refresh as f64)"));
+        assert!(source.contains("if elapsed < frame_budget"));
+        let exit = source.find("handler.should_exit()").unwrap();
+        let flush = source
+            .find("if self.flush_pending.load(Ordering::SeqCst)")
+            .unwrap();
+        assert!(source[exit..flush].contains("break;"));
+        assert!(!source[flush..].contains("flush_pending.store("));
+        assert!(!source[flush..].contains("flush_pending.swap("));
+        assert!(source[flush..].contains("log::debug!"));
+        // Callback must still set the flag that the same tick observes.
+        let callbacks = include_str!("backend.rs")
+            .split_once("    fn run(&mut self, handler:")
+            .unwrap()
+            .0;
+        assert!(callbacks.contains("WinitEvent::CloseRequested => {\n                            exit_requested.store(true, Ordering::SeqCst);"));
+    }
 
     #[test]
     fn pointer_buttons_use_policy_numbers() {
