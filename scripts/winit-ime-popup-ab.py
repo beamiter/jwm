@@ -104,7 +104,7 @@ def popup_protocol(text):
     last = None
     detached = None
     for sequence, raw in enumerate(text.splitlines(), 1):
-        if not (m := re.fullmatch(r"\[(\d+\.\d+)\]\s+(->\s+)?(\w+)@(\d+)\.(\w+)\((.*)\)", raw)):
+        if not (m := re.fullmatch(r"\[ *(\d+\.\d+)\]\s+(->\s+)?(\w+)@(\d+)\.(\w+)\((.*)\)", raw)):
             continue
         stamp, arrow, kind, oid, event, args = m.groups()
         item = {"line": sequence, "wayland_ms": float(stamp), "trace": raw.strip()}
