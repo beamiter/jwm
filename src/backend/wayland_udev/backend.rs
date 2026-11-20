@@ -6005,10 +6005,7 @@ impl DisplayControl for UdevBackend {
                 scene_linear_active,
             ) && kms::hdr_enable_refusal_is_permanent(refusal)
             {
-                return Err(BackendError::Message(format!(
-                    "HDR signalling is unavailable on this output: {}",
-                    refusal.wire_name()
-                )));
+                return Err(BackendError::Message(refusal.enable_command_message()));
             }
         }
         kms.borrow_mut().set_hdr_requested(index, enabled);
