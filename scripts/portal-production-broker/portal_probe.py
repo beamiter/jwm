@@ -13,7 +13,7 @@ import tempfile
 import time
 from xml.sax.saxutils import escape
 
-BASE = "0631f2639676e6dc1cc4d1c81cdad8d0a2804e17"
+BASE = "4ffc3663bfa7ee2ca18bf547122f59f737c0a436"
 OBJ = "/org/freedesktop/portal/desktop"
 FRONT = "org.freedesktop.portal.Desktop"
 BUS = "org.freedesktop.DBus"

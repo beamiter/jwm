@@ -35,7 +35,7 @@ jobs:
       - name: Check out exact fixture
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
-          fetch-depth: 2
+          fetch-depth: 3
           ref: ${{ github.event.pull_request.head.sha }}
           persist-credentials: false
           path: source
@@ -45,8 +45,9 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git -C source rev-parse HEAD)" = "$FIXTURE_SHA"
-          test "$(git -C source rev-parse HEAD^)" = "$BASE_SHA"
-          test "$(git -C source rev-parse HEAD^1^{tree})" = "$PRODUCT_TREE"
+          test "$(git -C source rev-parse HEAD^)" = '17e42a71f7643fecf216860d36685a7acdac88fc'
+          test "$(git -C source rev-parse HEAD~2)" = "$BASE_SHA"
+          test "$(git -C source rev-parse HEAD~2^{tree})" = "$PRODUCT_TREE"
           for f in scripts/package-portal-metadata.sh scripts/test-package-portal-metadata.py portal/dist/jwm.portal; do
             test "$(git -C source hash-object "$f")" = "$(git -C source rev-parse "$BASE_SHA:$f")"
           done
