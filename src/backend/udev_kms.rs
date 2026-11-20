@@ -1207,6 +1207,20 @@ impl HdrEnableRefusal {
             Self::OverlappingOutputProfileConflict => "overlapping_output_profile_conflict",
         }
     }
+
+    /// Human-readable command error. Status JSON continues using the wire name.
+    pub(super) fn enable_command_message(self) -> String {
+        let reason = self.wire_name();
+        if self == Self::SoftwareRegionTopologyUnsupported {
+            format!(
+                "HDR signalling is unavailable on this output: {reason}. \
+                 HDR needs scale 1.0, normal transform and non-negative positions on every participating output, including SDR outputs. \
+                 After correcting the layout, request HDR again."
+            )
+        } else {
+            format!("HDR signalling is unavailable on this output: {reason}")
+        }
+    }
 }
 
 /// Per-output, per-frame evidence for the HDR signalling decision. Plain data
@@ -13733,6 +13747,63 @@ mod compositor_texture_ownership_tests {
         assert_eq!(regions[0].rect, [0, 0, 1920, 1080]);
         assert_eq!(regions[1].rect, [1920, 0, 1920, 1080]);
         assert_eq!(regions[1].output_tf, TransferKind::St2084Pq);
+    }
+
+    #[test]
+    fn scaled_sdr_neighbor_blocks_hdr_until_layout_is_corrected() {
+        use super::HdrEnableRefusal as R;
+        use super::HdrSignallingAction as A;
+        use super::hdr_signalling_action as action;
+
+        let mut hdr = color_region_candidate((0, 0), TransferKind::St2084Pq);
+        let mut sdr = color_region_candidate((1920, 0), TransferKind::Srgb);
+        let verdict = |candidates: &[OutputColorRegionCandidate]| {
+            let mut evidence = hdr_ready();
+            evidence.region_topology_supported = candidates
+                .iter()
+                .filter(|candidate| candidate.participating)
+                .all(|candidate| {
+                    super::software_region_topology_supported(
+                        candidate.origin,
+                        candidate.mode_size,
+                        candidate.scale,
+                        candidate.transform,
+                    )
+                });
+            evidence.software_region_planned = plan_software_color_regions(candidates).is_some();
+            hdr_enable_refusal(&evidence)
+        };
+
+        assert_eq!(verdict(&[hdr, sdr]), None);
+        sdr.scale = 1.25;
+        assert!(plan_software_color_regions(&[hdr, sdr]).is_none());
+        let refusal = verdict(&[hdr, sdr]).expect("scaled SDR neighbor must block HDR");
+        assert_eq!(refusal, R::SoftwareRegionTopologyUnsupported);
+        assert_eq!(refusal.wire_name(), "software_region_topology_unsupported");
+        assert!(super::hdr_enable_refusal_is_permanent(refusal));
+        let message = refusal.enable_command_message();
+        assert!(message.contains("every participating output, including SDR outputs"));
+        assert!(message.contains("request HDR again"));
+        assert_eq!(
+            R::EdidLacksHdrProfile.enable_command_message(),
+            "HDR signalling is unavailable on this output: edid_lacks_hdr_profile"
+        );
+
+        // The restriction is scale 1.0 on every participating output, not
+        // merely matching scales. An output that isn't participating is skipped.
+        hdr.scale = sdr.scale;
+        assert_eq!(verdict(&[hdr, sdr]), Some(refusal));
+        hdr.scale = 1.0;
+        sdr.participating = false;
+        assert_eq!(verdict(&[hdr, sdr]), None);
+
+        // Fixing topology takes away the refusal but does not re-arm intent
+        // already dropped by reconciliation. The next explicit request can assert.
+        sdr.participating = true;
+        sdr.scale = 1.0;
+        assert_eq!(verdict(&[hdr, sdr]), None);
+        assert_eq!(action(false, false, false, false), A::Hold);
+        assert_eq!(action(true, false, false, false), A::Assert);
     }
 
     #[test]
