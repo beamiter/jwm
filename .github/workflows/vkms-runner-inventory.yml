@@ -1,0 +1,78 @@
+name: VKMS hosted runner inventory (read only)
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, converted_to_draft]
+    branches: ['dot/vkms-inventory-base']
+    paths: ['.github/workflows/vkms-runner-inventory.yml']
+
+permissions:
+  contents: read
+concurrency:
+  group: vkms-runner-inventory-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  inventory:
+    if: >-
+      github.repository == 'beamiter/jwm' &&
+      github.event.pull_request.draft &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.base.ref == 'dot/vkms-inventory-base' &&
+      github.event.pull_request.base.sha == 'a81a08d59cf13c559c612ccecc23988296fb16ae' &&
+      github.event.pull_request.head.ref == 'dot/vkms-inventory'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 4
+    steps:
+      - name: Collect read-only kernel and device capability evidence
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          mkdir -m 700 evidence
+          release=$(uname -r)
+          printf '%s\n' "$release" > evidence/kernel.txt
+          command -v modinfo > evidence/modinfo-path.txt || true
+          /usr/bin/python3 -I - <<'PY'
+          import json, os, re, shutil, subprocess
+          from pathlib import Path
+          release = os.uname().release
+          root = Path("/lib/modules", release)
+          cfg = Path("/boot", "config-" + release)
+          modinfo = shutil.which("modinfo")
+          rec = {"kernel": release, "machine": os.uname().machine,
+                 "mode": "inventory-only-no-module-load",
+                 "module_tree": root.is_dir(), "module_loaded": Path("/sys/module/vkms").is_dir(),
+                 "kernel_config_vkms": None, "modinfo": None,
+                 "drm_cards": sorted(p.name for p in Path("/sys/class/drm").glob("card*")
+                                     if re.fullmatch(r"card\d+", p.name)),
+                 "kvm_present": Path("/dev/kvm").exists(), "tty0_present": Path("/dev/tty0").exists()}
+          if cfg.is_file():
+              options = [line for line in cfg.read_text().splitlines() if "CONFIG_DRM_VKMS" in line]
+              rec["kernel_config_vkms"] = options
+          verified = False
+          if modinfo:
+              p = subprocess.run([modinfo, "-n", "vkms"], capture_output=True, text=True, timeout=5)
+              path = Path(p.stdout.strip())
+              verified = (p.returncode == 0 and path.is_file()
+                          and path.resolve().is_relative_to(root.resolve()))
+              rec["modinfo"] = {"rc": p.returncode, "output": p.stdout, "stderr": p.stderr}
+          rec["vkms_module_present_for_running_kernel"] = verified
+          if not verified:
+              rec["recommendation"] = "direct module probe blocked on this runner image; no JWM test performed"
+          elif rec["module_loaded"] or rec["drm_cards"]:
+              rec["recommendation"] = "module present, but exclusive disposable device ownership not established"
+          else:
+              rec["recommendation"] = "module file present; load, seatd, Mesa and JWM remain unverified"
+          data = json.dumps(rec, indent=2) + "\n"
+          Path("evidence/inventory.json").write_text(data)
+          print(data)
+          PY
+      - name: Retain inventory even if setup fails
+        if: always()
+        timeout-minutes: 1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: vkms-runner-inventory-${{ github.run_id }}-${{ github.run_attempt }}
+          path: evidence/
+          if-no-files-found: error
