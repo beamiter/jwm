@@ -22,6 +22,32 @@ fi
 PORTAL_BINARY="$PORTAL_TARGET_DIR/release/jwm-portal"
 SERVICE_TEMPLATE="$ROOT/portal/dist/jwm-portal.service"
 SERVICE_DEST="$DBUS_SVC/org.freedesktop.impl.portal.desktop.jwm.service"
+PORTAL_METADATA="$ROOT/portal/dist/jwm.portal"
+NOBLE_PORTAL_METADATA=/usr/share/xdg-desktop-portal/portals/jwm.portal
+
+# The tested Ubuntu 24.04 1.18.4-1ubuntu2.24.04.x update family does not
+# discover per-user .portal metadata. Refuse before building, installing or
+# restarting anything if the known broker has no matching package metadata.
+# Do not infer this layout for other distributions or vendor backports.
+portal_package_version=''
+if command -v dpkg-query >/dev/null 2>&1; then
+    portal_package_version=$(dpkg-query -W -f='${db:Status-Status} ${Version}' xdg-desktop-portal 2>/dev/null) ||
+        portal_package_version=''
+fi
+noble_portal_update='^installed 1\.18\.4-1ubuntu2\.24\.04\.[0-9]+$'
+if [[ $portal_package_version =~ $noble_portal_update ]] &&
+   ! { [[ -f $NOBLE_PORTAL_METADATA ]] && cmp -s -- "$PORTAL_METADATA" "$NOBLE_PORTAL_METADATA"; }; then
+    cat >&2 <<EOF
+[install-portal] The installed Ubuntu 24.04 broker update (${portal_package_version#installed }) does not discover the per-user jwm.portal.
+[install-portal] No files were installed and no services were restarted.
+[install-portal] Install JWM metadata through a distro package at:
+  $NOBLE_PORTAL_METADATA
+[install-portal] Use portal/dist/jwm.portal from this JWM checkout, then rerun this installer.
+[install-portal] See packaging/README.md for package staging. Do not set XDG_DESKTOP_PORTAL_DIR.
+EOF
+    exit 1
+fi
+
 
 # Resolve complete development metadata before Cargo starts any dependency
 # build scripts. A shell that only has the PipeWire runtime gets a reusable
@@ -44,7 +70,7 @@ echo "[install-portal] building jwm-portal (release)…"
 mkdir -p "$LIBEXEC" "$DBUS_SVC" "$PORTAL_DIR" "$PORTAL_CONF"
 
 install -m755 "$PORTAL_BINARY" "$LIBEXEC/jwm-portal"
-install -m644 "$ROOT/portal/dist/jwm.portal"          "$PORTAL_DIR/jwm.portal"
+install -m644 "$PORTAL_METADATA"                    "$PORTAL_DIR/jwm.portal"
 install -m644 "$ROOT/portal/dist/jwm-portals.conf"    "$PORTAL_CONF/jwm-portals.conf"
 # xdg-desktop-portal picks the config file by case-sensitive XDG_CURRENT_DESKTOP
 # match. jwm-wayland.desktop currently sets DesktopNames=JWM, so install under
@@ -95,13 +121,14 @@ Files installed:
   $SERVICE_DEST
   $PORTAL_CONF/jwm-portals.conf
 
-Verify:
+Verify from a JWM Wayland session (frontend interface check, not a capture test):
   gdbus introspect --session \\
-    --dest org.freedesktop.impl.portal.desktop.jwm \\
-    --object-path /org/freedesktop/portal/desktop
+    --dest org.freedesktop.portal.Desktop \\
+    --object-path /org/freedesktop/portal/desktop | grep -F org.freedesktop.portal.ScreenCast
 
-  XDG_CURRENT_DESKTOP=jwm chromium --enable-features=WebRTCPipeWireCapturer
-  XDG_CURRENT_DESKTOP=jwm obs
+A direct call to the JWM backend does not prove frontend routing. Check
+ScreenCast in your application in that session. Setting XDG_CURRENT_DESKTOP
+on the application alone does not reconfigure an already running broker.
 
 Source consent:
   The portal auto-detects rofi, then wofi. Without a usable picker it cancels.
