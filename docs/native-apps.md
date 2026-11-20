@@ -157,7 +157,11 @@ case-sensitive and non-overlapping (not regular expressions). Unicode matches
 are selected and scrolled into view; query input, including IME, never dirties
 the source or enters its undo history. Escape retains the selected match so
 ordinary editing can continue. Empty and missing queries do not change source
-selection. Notebook Ctrl+F keeps its existing notebook-filter behavior.
+selection. In the notebook, Ctrl+F focuses the notebook filter. Press Down
+(or Up to start at the last result) to highlight a matching note, then Up/Down
+to move and Enter to open it. If you scroll the highlighted note out of view,
+the first Enter only brings it back into view. Ctrl+F returns to the filter;
+Escape returns focus to the editor without opening the highlighted note.
 
 ### Code-text view and document status
 

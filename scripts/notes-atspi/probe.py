@@ -71,7 +71,8 @@ def activate(node):
     return len(indexes) == 1 and api.do_action(indexes[0])
 
 
-def evaluate(atspi, gtk_pid, notes_pid, receipt, window, seconds, enable_reader=None):
+def evaluate(atspi, gtk_pid, notes_pid, receipt, window, seconds, enable_reader=None,
+             keyboard=None):
     def application(pid):
         desktop = atspi.get_desktop(0)
         if desktop is None:
@@ -105,6 +106,9 @@ def evaluate(atspi, gtk_pid, notes_pid, receipt, window, seconds, enable_reader=
 
     if wait(current, seconds) is None:
         return "notes-no-atspi-application-for-pid"
+
+    if keyboard is not None:
+        return keyboard(atspi, lambda: application(notes_pid), window)
 
     def controls():
         root = current()
@@ -153,7 +157,46 @@ def xdo(*args, env, timeout=3):
                           timeout=timeout, env=env)
 
 
-def run_isolated(notes_path, atspi, set_reader):
+def keyboard_results(atspi, current, window, send):
+    """Drive real keys. Use AT-SPI only as an observation channel."""
+    roles = atspi.Role
+    fields = {roles.ENTRY, roles.TEXT, roles.DOCUMENT_TEXT}
+    buttons = {roles.PUSH_BUTTON, roles.LIST_ITEM}
+
+    def result(index):
+        return f"JWM Keys target {index:02}"
+
+    def require(predicate, failure):
+        if not wait(predicate, 5):
+            raise ProbeError(failure)
+
+    def focus(label, accepted):
+        node = named(current(), label, accepted)
+        return node is not None and node.get_state_set().contains(atspi.StateType.FOCUSED)
+
+    require(lambda: focus(EDITOR, fields), "initial-editor-not-focused")
+    if named(current(), result(23), buttons) is not None:
+        raise ProbeError("last-result-initially-visible")
+    send("key", "ctrl+f")
+    require(lambda: focus(SEARCH, fields), "keyboard-search-not-focused")
+    send("type", "--", "JWM Keys")
+    for key, index in (("Down", 0), ("Down", 1), ("Up", 0)):
+        send("key", key)
+        require(lambda: focus(result(index), buttons), f"keyboard-result-{index:02}-not-focused")
+    if named(current(), result(23), buttons) is not None:
+        raise ProbeError("last-result-visible-before-up-from-search")
+    send("key", "Escape")
+    require(lambda: window(INITIAL) and focus(EDITOR, fields), "escape-did-not-restore-editor")
+    send("key", "ctrl+f")
+    require(lambda: focus(SEARCH, fields), "keyboard-search-not-refocused")
+    send("key", "Up")
+    require(lambda: focus(result(23), buttons), "offscreen-last-result-not-revealed")
+    send("key", "Return")
+    require(lambda: window(result(23)) and focus(EDITOR, fields), "keyboard-result-not-opened")
+    return "notes-keyboard-down-up-escape-reveal-and-enter-observed"
+
+
+def run_isolated(notes_path, atspi, set_reader, keyboard=False):
     env = dict(os.environ)
     launched = []
     with tempfile.TemporaryDirectory(prefix="jwm-notes-atspi-") as t:
@@ -165,6 +208,13 @@ def run_isolated(notes_path, atspi, set_reader):
         (n / "z.txt").write_text(TARGET + "\n")
         os.utime(n / "a.txt", (1700010000, 1700010000))
         os.utime(n / "z.txt", (1700000000, 1700000000))
+        if keyboard:
+            for index in range(24):
+                path = n / f"key-{index:02}.txt"
+                path.write_text(f"JWM Keys target {index:02}\n", encoding="utf8")
+                timestamp = 1700009000 - 100 * index
+                os.utime(path, (timestamp, timestamp))
+        original = {path.name: path.read_bytes() for path in n.glob("*.txt")}
         for name in ("home", "config", "cache", "state", "run"):
             (temp / name).mkdir(mode=0o700)
         env.update(HOME=str(temp / "home"), XDG_DATA_HOME=str(data),
@@ -212,8 +262,21 @@ def run_isolated(notes_path, atspi, set_reader):
                 focus = xdo("getwindowfocus", "-f", env=env)
                 return focus.returncode == 0 and focus.stdout.strip() == wid
 
-            return evaluate(atspi, control.pid, notes.pid, receipt, window, 7,
-                            enable_reader=lambda: set_reader(True))
+            def send(*argv):
+                # Without --window, xdotool uses real XTEST input to the focused
+                # window, rather than XSendEvent. Never inject to a foreign window.
+                focused = xdo("getwindowfocus", "-f", env=env)
+                if focused.returncode or focused.stdout.strip() != wid:
+                    raise ProbeError("notes-not-focused-before-key")
+                if xdo(*argv, env=env).returncode:
+                    raise ProbeError("x11-key-injection-failed")
+
+            outcome = evaluate(atspi, control.pid, notes.pid, receipt, window, 7,
+                               enable_reader=lambda: set_reader(True),
+                               keyboard=(lambda *a: keyboard_results(*a, send)) if keyboard else None)
+            if keyboard and {path.name: path.read_bytes() for path in n.glob("*.txt")} != original:
+                raise ProbeError("keyboard-navigation-modified-notebook")
+            return outcome
         finally:
             for child in reversed(launched):
                 if child.poll() is None:
@@ -225,7 +288,7 @@ def main():
     args = argparse.ArgumentParser(description=__doc__)
     args.add_argument("--gtk", type=Path, help=argparse.SUPPRESS)
     args.add_argument("--notes", type=Path)
-    args.add_argument("--expect", choices=("baseline", "working"))
+    args.add_argument("--expect", choices=("baseline", "working", "keyboard"))
     opt = args.parse_args()
     if (os.getenv("JWM_ATSPI_ISOLATED") != "1" or not os.getenv("DISPLAY")
             or not os.getenv("DBUS_SESSION_BUS_ADDRESS") or os.getenv("AT_SPI_BUS_ADDRESS")):
@@ -256,7 +319,7 @@ def main():
         if Atspi.init() != 0:
             raise ProbeError("atspi-init-failed")
         Atspi.set_timeout(1500, 3000)
-        outcome = run_isolated(opt.notes.resolve(), Atspi, set_reader)
+        outcome = run_isolated(opt.notes.resolve(), Atspi, set_reader, keyboard=opt.expect == "keyboard")
     except (ProbeError, GLib.Error, OSError, AttributeError, TypeError,
             subprocess.SubprocessError) as exc:
         outcome = str(exc) if isinstance(exc, ProbeError) else "probe-transport-or-fixture-error"
@@ -265,8 +328,11 @@ def main():
     print(json.dumps({"backend": "x11", "outcome": outcome,
                       "gtk_positive_control": "action-observed", "screen_reader_enabled": True,
                       "speech": "not-tested"}))
-    expected = ("notes-no-atspi-application-for-pid" if opt.expect == "baseline"
-                else "notes-named-controls-action-and-focus-observed")
+    expected = {
+        "baseline": "notes-no-atspi-application-for-pid",
+        "working": "notes-named-controls-action-and-focus-observed",
+        "keyboard": "notes-keyboard-down-up-escape-reveal-and-enter-observed",
+    }[opt.expect]
     return 0 if outcome == expected else 1
 
 
