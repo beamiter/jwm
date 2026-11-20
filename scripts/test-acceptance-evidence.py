@@ -3,11 +3,21 @@
 
 import copy
 import datetime as dt
+import json
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import unittest
 
-from acceptance_evidence import artifact, audit, dependency_hashes, release_gate
+from acceptance_evidence import (
+    DAILY_CASES,
+    artifact,
+    audit,
+    daily_gate,
+    dependency_hashes,
+    release_gate,
+)
 
 
 class EvidenceTests(unittest.TestCase):
@@ -123,6 +133,97 @@ class EvidenceTests(unittest.TestCase):
             )["candidate_ready"]
         )
 
+
+    def daily_records(self):
+        for manifest in ("Cargo.toml", "Cargo.lock"):
+            (self.root / manifest).write_text("fixture")
+        config = self.root / "jwm.toml"
+        config.write_text("tested config")
+        dependencies = ["src", "Cargo.toml", "Cargo.lock"]
+        records = []
+        for case, level, backend, outputs, _ in DAILY_CASES:
+            record = copy.deepcopy(self.record)
+            record.update(case=case, level=level, backend=backend, configs=[artifact(config)])
+            record["provenance"].update(
+                dependencies=dependencies.copy(),
+                dependency_sha256=dependency_hashes(dependencies, self.root),
+            )
+            record["hardware"]["software_renderer"] = False
+            if outputs == 2:
+                record["hardware"]["outputs"].append({"name": "HDMI-A-1", "mode": "1920x1080@60"})
+            records.append(record)
+        return records
+
+    def test_daily_gate_does_not_promote_isolated_or_wrong_backend(self):
+        records = self.daily_records()
+        software = [record for record in records if record["level"] == "isolated"]
+        report = daily_gate(software, self.root)
+        self.assertTrue(report["isolated_ready"])
+        self.assertFalse(report["physical_ready"])
+        self.assertFalse(report["daily_ready"])
+        self.assertEqual(len([r for r in report["cases"] if r["state"] == "missing"]), 7)
+
+        states = {r["case"]: r["state"] for r in report["cases"]}
+        self.assertEqual(states["session-host-isolated"], "passed")
+        self.assertEqual(states["portal"], "missing")
+        portal = next(record for record in records if record["case"] == "portal")
+        portal.update(level="isolated", backend="host")
+        report = daily_gate(software + [portal], self.root)
+        self.assertEqual(next(r for r in report["cases"] if r["case"] == "portal")["state"], "wrong-scope")
+        portal.update(level="physical", backend="x11rb")
+        self.assertFalse(daily_gate(records, self.root)["physical_ready"])
+
+    def test_daily_gate_physical_topology_and_level_are_explicit(self):
+        records = self.daily_records()
+        self.assertTrue(daily_gate(records, self.root)["daily_ready"])
+        for case in ("dual-output-hotplug", "dual-output-suspend"):
+            record = next(r for r in records if r["case"] == case)
+            with self.subTest(case=case):
+                original = copy.deepcopy(record["hardware"])
+                record["hardware"]["outputs"][1]["name"] = record["hardware"]["outputs"][0]["name"]
+                self.assertFalse(daily_gate(records, self.root)["physical_ready"])
+                record["hardware"] = copy.deepcopy(original)
+                del record["hardware"]["software_renderer"]
+                self.assertFalse(daily_gate(records, self.root)["physical_ready"])
+                record["hardware"] = original
+
+    def test_daily_gate_does_not_hide_skips_failures_or_stale_passes(self):
+        records = self.daily_records()
+        hotplug = next(r for r in records if r["case"] == "dual-output-hotplug")
+        hotplug.update(status="skip", reason="no external screen")
+        report = daily_gate(records, self.root)
+        self.assertFalse(report["daily_ready"])
+        row = next(r for r in report["cases"] if r["case"] == "dual-output-hotplug")
+        self.assertEqual(row["state"], "skipped")
+        self.assertEqual(row["attempts"][0]["reasons"], ["no external screen"])
+        hotplug.update(status="pass", reason=None)
+        fail = dict(hotplug, status="fail", reason="focus not recovered")
+        self.assertFalse(daily_gate(records + [fail], self.root)["daily_ready"])
+        (self.root / "jwm.toml").write_text("replaced config")
+        self.assertFalse(daily_gate(records, self.root)["daily_ready"])
+
+    def test_daily_gate_rejects_incomplete_or_inconsistent_pass_provenance(self):
+        records = self.daily_records()
+        records[0]["configs"] = []
+        self.assertFalse(daily_gate(records, self.root)["isolated_ready"])
+        records = self.daily_records()
+        records[0]["provenance"]["dependencies"].remove("Cargo.lock")
+        del records[0]["provenance"]["dependency_sha256"]["Cargo.lock"]
+        self.assertFalse(daily_gate(records, self.root)["isolated_ready"])
+        records = self.daily_records()
+        records[0]["provenance"]["dependencies"].remove("Cargo.lock")
+        self.assertFalse(daily_gate(records, self.root)["isolated_ready"])
+
+    def test_daily_cli_with_no_evidence_is_a_nonzero_checklist(self):
+        result = subprocess.run(
+            [sys.executable, str(Path(__file__).with_name("acceptance_evidence.py")), "daily"],
+            capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(result.returncode, 1, result.stderr)
+        report = json.loads(result.stdout)
+        self.assertFalse(report["daily_ready"])
+        self.assertEqual({r["state"] for r in report["cases"]}, {"missing"})
+        self.assertTrue(all(r["checklist"] for r in report["cases"]))
 
 if __name__ == "__main__":
     unittest.main()
