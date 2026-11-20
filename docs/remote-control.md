@@ -170,6 +170,8 @@ so enlarging the window can preserve more source detail.
 
 ### One key for a machine you use often
 
+For a pair of LAN hosts, set up [Super+R for bidirectional LAN control](#superr-for-bidirectional-lan-control).
+
 Bind the command in `config_x11.toml`, one key per monitor if you like:
 
 ```toml
@@ -860,6 +862,76 @@ jwm-remote connect 192.168.1.50:48221 \
   --key-file ~/.config/jwm/remote.key \
   --view-only
 ```
+
+### Super+R for bidirectional LAN control
+
+Run a `jwm-remote host` and configure a viewer shortcut on each X11 machine.
+The example pairs `alice@192.0.2.10` with `bob@192.0.2.20`. Use your own LAN
+addresses, login names, home directories, and monitor names.
+
+On each machine, generate its own inbound key once.
+
+```bash
+install -d -m 700 "$HOME/.config/jwm/lan-peers"
+jwm-remote keygen --output "$HOME/.config/jwm/lan-peers/listen.key"
+```
+
+Copy each machine's `listen.key` to the other machine as `peer.key`. For the
+first setup, run the corresponding pair of commands on each machine.
+
+```bash
+# On Alice's machine
+scp -p bob@192.0.2.20:.config/jwm/lan-peers/listen.key "$HOME/.config/jwm/lan-peers/peer.key"
+chmod 600 "$HOME/.config/jwm/lan-peers/peer.key"
+
+# On Bob's machine
+scp -p alice@192.0.2.10:.config/jwm/lan-peers/listen.key "$HOME/.config/jwm/lan-peers/peer.key"
+chmod 600 "$HOME/.config/jwm/lan-peers/peer.key"
+```
+
+Save this example as `~/.config/systemd/user/jwm-remote-lan.service` on each
+machine. Bind to that machine's own LAN address and scope the firewall rule
+for TCP port `48221` to the peer. Use the installed absolute path to
+`jwm-remote` and a local monitor name from `xrandr --listmonitors`. Omit
+`--monitor DP-0` to share the entire X11 desktop.
+
+```ini
+[Unit]
+Description=JWM Remote LAN host
+StartLimitIntervalSec=0
+
+[Service]
+ExecStart=/usr/local/bin/jwm-remote host --display auto --listen 192.0.2.10:48221 --key-file %h/.config/jwm/lan-peers/listen.key --allow-lan --allow-input --allow-clipboard --monitor DP-0
+Restart=on-failure
+RestartSec=3s
+
+[Install]
+WantedBy=default.target
+```
+
+Enable the service on both machines. The host discovers the running JWM X11
+session and retries startup if the display or LAN address is unavailable.
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now jwm-remote-lan.service
+```
+
+In each `config_x11.toml`, add or replace the `Super+R` binding. On Alice's
+machine it points at Bob's address and uses Alice's absolute path to the
+copied `peer.key`. Reverse the addresses and use Bob's key path for his binding.
+
+```toml
+[[keybindings.keys]]
+modifier = ["Mod4"]
+key = "r"
+function = "spawn"
+argument = ["/usr/local/bin/jwm-remote", "connect", "192.0.2.20:48221", "--key-file", "/home/alice/.config/jwm/lan-peers/peer.key", "--grab-input", "--seamless-input=click", "--clipboard", "--notify"]
+```
+
+Click the remote image to take control. Move out of the image or press
+**Ctrl+Super+F12** to release it. Both sides opt in to clipboard sharing via
+`--allow-clipboard` on the host and `--clipboard` on the viewer. [Clipboard sharing](#clipboard-sharing)
 
 ## Tuning and troubleshooting
 
