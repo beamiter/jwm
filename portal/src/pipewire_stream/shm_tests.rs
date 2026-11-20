@@ -13,7 +13,14 @@ const WAIT: Duration = Duration::from_secs(5);
 fn pixels(seed: u8) -> Vec<u8> {
     (0..HEIGHT)
         .flat_map(|y| {
-            (0..WIDTH).flat_map(move |x| [seed.wrapping_add(x as u8), y as u8, (x ^ y) as u8, 255])
+            (0..WIDTH).flat_map(move |x| {
+                let (b, g, r) = (seed.wrapping_add(x as u8), y as u8, (x ^ y) as u8);
+                if cfg!(target_endian = "little") {
+                    [b, g, r, 255]
+                } else {
+                    [255, r, g, b]
+                }
+            })
         })
         .collect()
 }
@@ -231,10 +238,11 @@ fn private_daemon_shm_delivers_two_frames_and_retires_producer() {
         )
         .expect("publish consumer input port");
     let check = || {
+        let observed = observed.borrow();
         assert!(
-            observed.borrow().error.is_none(),
+            observed.error.is_none(),
             "PipeWire graph error: {:?}",
-            observed.borrow().error
+            observed.error
         );
         assert!(
             !matches!(consumer.state(), pw::stream::StreamState::Error(_)),
@@ -271,10 +279,13 @@ fn private_daemon_shm_delivers_two_frames_and_retires_producer() {
             .format
             .as_ref()
             .expect("consumer format negotiated");
-        assert_eq!(
-            format.format(),
-            shm_video_format(false, cfg!(target_endian = "little"))
-        );
+        use spa::param::video::VideoFormat;
+        let expected = if cfg!(target_endian = "little") {
+            VideoFormat::BGRx
+        } else {
+            VideoFormat::xRGB
+        };
+        assert_eq!(format.format(), expected);
         assert_eq!((format.size().width, format.size().height), (WIDTH, HEIGHT));
         assert_eq!(observed.b, 0, "second image arrived before publication");
     }
