@@ -26,9 +26,59 @@ apt_options=(
     -o Acquire::Retries=2
     -o DPkg::Lock::Timeout=60
 )
+# The two CI opt-ins deliberately use different caches and must not be mixed.
+bridge_retry=${JWM_CI_BRIDGE_DOWNLOAD_RETRY:-0}
+if [[ $bridge_retry == 1 && ${JWM_CI_PREFETCH_CJK:-0} == 1 ]]; then
+    printf 'ci-install-deps: Bridge download retry cannot be combined with CJK prefetch\n' >&2
+    exit 2
+fi
+
 # A partial update (including an unreachable repository) must not quietly
 # succeed with stale indexes and allow the build to continue.
 sudo apt-get "${apt_options[@]}" -o APT::Update::Error-Mode=any update
+# Bridge's mpv/ffmpeg dependency closure can exceed the workflow deadline
+# while the signed indexes are healthy. Retry only a timed-out transfer, not
+# a package-manager error or dpkg. Both attempts use apt and the same source
+# selection, proxy, signatures, and private archive directory.
+if [[ $bridge_retry == 1 ]]; then
+    archives=$(sudo -n /usr/bin/mktemp -d -- /var/cache/apt/archives/jwm-bridge-ci.XXXXXXXX)
+    if [[ ! $archives =~ ^/var/cache/apt/archives/jwm-bridge-ci\.[a-zA-Z0-9]{8}$ ]]; then
+        printf 'ci-install-deps: unexpected private archive path\n' >&2
+        exit 1
+    fi
+    # The parent and this fresh directory are owned by root. Let apt's _apt
+    # user traverse the directory to its own partial subdirectory, but not
+    # rewrite the verified cache. No caller-controlled archive path is used.
+    cleanup_bridge_archives() {
+        local status=$?
+        trap - EXIT
+        if ! sudo -n /usr/bin/rm -rf -- "$archives"; then
+            printf 'ci-install-deps: could not remove private Bridge archives\n' >&2
+            if ((status == 0)); then
+                status=1
+            fi
+        fi
+        exit "$status"
+    }
+    trap cleanup_bridge_archives EXIT
+    sudo -n /usr/bin/chmod 0755 -- "$archives"
+    apt_options+=(-o "Dir::Cache::archives=$archives")
+    install_args=(install -y --no-install-recommends "$@")
+    if sudo -n /usr/bin/timeout --kill-after=5s 120s apt-get "${apt_options[@]}" \
+        --download-only "${install_args[@]}"; then
+        :
+    else
+        rc=$?
+        if ((rc != 124)); then
+            exit "$rc"
+        fi
+        printf 'ci-install-deps: Bridge download reached 120s; retrying once from the same sources\n' >&2
+        sudo -n /usr/bin/timeout --kill-after=5s 180s apt-get "${apt_options[@]}" \
+            --download-only "${install_args[@]}"
+    fi
+    sudo -n apt-get "${apt_options[@]}" --no-download "${install_args[@]}"
+    exit
+fi
 # Only the native UI job opts in; all other callers keep the original path.
 if [[ ${JWM_CI_PREFETCH_CJK:-0} == 1 ]]; then
     sudo /usr/bin/python3 "$(dirname "$0")/ci-prefetch-cjk.py" "${apt_options[@]}"
