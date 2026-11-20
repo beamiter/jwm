@@ -1,0 +1,99 @@
+name: Notes Fcitx5 nested Wayland validation
+on:
+  pull_request:
+    branches: [dot/notes-fcitx-a81-base]
+    types: [opened, synchronize, reopened, converted_to_draft]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: notes-fcitx-validation-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  fcitx5:
+    if: >-
+      github.repository == 'beamiter/jwm' &&
+      github.event.pull_request.draft &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.base.ref == 'dot/notes-fcitx-a81-base' &&
+      github.event.pull_request.head.ref == 'dot/notes-fcitx-validation'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 65
+    defaults:
+      run:
+        shell: bash
+        working-directory: source
+    steps:
+      - name: Initialize evidence
+        working-directory: .
+        run: mkdir -m 700 evidence
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          path: source
+          persist-credentials: false
+      - name: Confirm exact product pin and test-only diff
+        env:
+          EVENT_BASE: ${{ github.event.pull_request.base.sha }}
+          EVENT_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          pin=a81a08d59cf13c559c612ccecc23988296fb16ae
+          [[ "$EVENT_BASE" == "$pin" && "$(git rev-parse HEAD)" == "$EVENT_HEAD" ]]
+          git merge-base --is-ancestor "$pin" HEAD
+          git diff --exit-code "$pin" -- . ':!.github/workflows/notes-fcitx-validation.yml' ':!scripts/notes-fcitx-nested.py'
+          git rev-parse HEAD "$pin" > ../evidence/revisions.txt
+          sha256sum scripts/notes-fcitx-nested.py > ../evidence/fixture.sha256
+          /usr/bin/python3 -m py_compile scripts/notes-fcitx-nested.py
+      - name: Install signed graphics, Xvfb and Pinyin dependencies
+        timeout-minutes: 12
+        env:
+          JWM_CI_PREFETCH_CJK: "1"
+        run: |
+          bash scripts/ci-install-deps.sh build-essential pkg-config libglib2.0-dev libcairo2-dev libpango1.0-dev \
+            libasound2-dev libdbus-1-dev libudev-dev libinput-dev libseat-dev libdrm-dev libgbm-dev \
+            libegl1-mesa-dev libgl1-mesa-dev libgl1-mesa-dri libwayland-dev libxkbcommon-dev \
+            libxkbcommon-x11-dev libx11-dev libx11-xcb-dev libxext-dev libxxf86vm-dev libxcb1-dev \
+            libxcb-composite0-dev libxcb-damage0-dev libxcb-present-dev libxcb-randr0-dev libxcb-shape0-dev \
+            libxcb-xfixes0-dev libxcursor-dev libxfixes-dev libxi-dev libxrandr-dev libxrender-dev \
+            xvfb xauth xdotool x11-utils xwayland imagemagick dbus-x11 fonts-noto-cjk \
+            fcitx5 fcitx5-pinyin fcitx5-modules
+          dpkg-query -W 'fcitx5*' xvfb xdotool libgl1-mesa-dri fonts-noto-cjk > ../evidence/dependencies.txt
+          fcitx5 --version >> ../evidence/dependencies.txt 2>&1
+          dpkg-query -L fcitx5-modules | grep -E "(classicui|waylandim)\.(conf|so)$" >> ../evidence/dependencies.txt
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          toolchain: stable
+      - name: Build locked exact binaries
+        timeout-minutes: 43
+        run: |
+          set -euo pipefail
+          cargo --version | tee ../evidence/cargo.txt
+          rustc --version | tee ../evidence/rustc.txt
+          cargo build --locked --release --no-default-features --features backend-wayland-nested --bin jwm 2>&1 | tee ../evidence/jwm-build.log
+          cargo build --locked --manifest-path crates/jwm_apps/Cargo.toml --bin jwm-notes --target-dir target/fcitx-notes 2>&1 | tee ../evidence/notes-build.log
+          sha256sum target/release/jwm target/fcitx-notes/debug/jwm-notes > ../evidence/binaries.sha256
+      - name: Real outer XTEST, native Fcitx grab, preedit and commit
+        timeout-minutes: 4
+        run: |
+          set -euo pipefail
+          unset DISPLAY XAUTHORITY WAYLAND_DISPLAY WAYLAND_SOCKET DBUS_SESSION_BUS_ADDRESS DBUS_SYSTEM_BUS_ADDRESS
+          scope=$(mktemp -d)
+          trap 'rm -rf -- "$scope"' EXIT
+          install -d -m 700 "$scope"/{config,run}
+          env HOME="$scope" XDG_CONFIG_HOME="$scope/config" XDG_RUNTIME_DIR="$scope/run" \
+            JWM_FCITX_ISOLATED=1 GSETTINGS_BACKEND=memory \
+            timeout -k 15s 150s dbus-run-session -- \
+            /usr/bin/python3 -I scripts/notes-fcitx-nested.py --jwm "$PWD/target/release/jwm" \
+              --notes "$PWD/target/fcitx-notes/debug/jwm-notes" --out "$PWD/../evidence/probe" \
+            2>&1 | tee ../evidence/probe.log
+      - name: Retain setup, native protocol traces and candidate screenshot
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: notes-fcitx-nested-${{ github.run_id }}-${{ github.run_attempt }}
+          path: evidence/
+          if-no-files-found: error
