@@ -1,7 +1,9 @@
 //! JWM-to-JWM remote desktop helper for trusted X11 LANs.
 
 use clap::{Args, Parser, Subcommand};
-use jwm::remote::client::{ClientOptions, run_client_reconnecting_with_video_codec};
+use jwm::remote::client::{
+    ClientOptions, run_client_reconnecting_with_video_codec, run_client_toggling_with_video_codec,
+};
 use jwm::remote::clipboard_files::{parse_size, staging_root};
 use jwm::remote::clipboard_policy::{ClipboardDirection, ClipboardMode};
 use jwm::remote::clipboard_staging_budget::{self, Status as StagingBudgetStatus};
@@ -519,6 +521,14 @@ enum Command {
         #[arg(long)]
         jpeg: bool,
 
+        /// Open or close this endpoint's direct X11 viewer. Super+R also closes it while it holds input.
+        #[arg(long)]
+        toggle: bool,
+
+        /// Cycle this direct viewer's shared sources. Opens it if needed.
+        #[arg(long, requires = "toggle")]
+        next_source: bool,
+
         /// Additional attempts after a proven transport drop and clean teardown.
         /// Direct connect only; no retries on startup, escape/close or host refusal.
         #[arg(long, default_value_t = 0, value_parser = clap::value_parser!(u8).range(0..=5))]
@@ -789,6 +799,8 @@ fn profile_from_command(command: Command) -> RemoteResult<Profile> {
             reconnect_attempts,
             address,
             jpeg,
+            toggle,
+            next_source: _,
             key_file,
             display,
             window_size,
@@ -819,6 +831,11 @@ fn profile_from_command(command: Command) -> RemoteResult<Profile> {
             if jpeg {
                 return Err(
                     profile_error("profiles do not store --jpeg; use connect directly").into(),
+                );
+            }
+            if toggle {
+                return Err(
+                    profile_error("profiles do not store --toggle; use connect directly").into(),
                 );
             }
             if wayland_seamless_input || wayland_control_duration.is_some() {
@@ -1548,14 +1565,28 @@ fn run(command: Command) -> RemoteResult<()> {
                 jpeg,
             )
         }
-        command @ Command::Connect { jpeg, .. } => {
+        command @ Command::Connect {
+            jpeg,
+            toggle,
+            next_source,
+            ..
+        } => {
             let (options, reconnect_attempts) = connect_options(command)?;
             let preferred = if jpeg || !cfg!(feature = "remote-h264") {
                 FrameCodec::JpegTiles
             } else {
                 FrameCodec::Hevc444
             };
-            run_client_reconnecting_with_video_codec(options, reconnect_attempts, preferred)
+            if toggle {
+                run_client_toggling_with_video_codec(
+                    options,
+                    reconnect_attempts,
+                    preferred,
+                    next_source,
+                )
+            } else {
+                run_client_reconnecting_with_video_codec(options, reconnect_attempts, preferred)
+            }
         }
     }
 }
@@ -1728,6 +1759,55 @@ fn parse_window_id(value: &str) -> Result<u32, String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn toggle_is_an_explicit_direct_x11_action() {
+        let arguments = [
+            "jwm-remote",
+            "connect",
+            "127.0.0.1",
+            "--key-file",
+            "/unused-key",
+        ];
+        let ordinary = Cli::try_parse_from(arguments).unwrap().command;
+        assert!(matches!(ordinary, Command::Connect { toggle: false, .. }));
+        assert!(Cli::try_parse_from(arguments.into_iter().chain(["--next-source"])).is_err());
+        let cycle = Cli::try_parse_from(arguments.into_iter().chain(["--toggle", "--next-source"]))
+            .unwrap()
+            .command;
+        assert!(matches!(
+            cycle,
+            Command::Connect {
+                toggle: true,
+                next_source: true,
+                ..
+            }
+        ));
+        let toggled = Cli::try_parse_from(arguments.into_iter().chain(["--toggle"]))
+            .unwrap()
+            .command;
+        assert!(matches!(toggled, Command::Connect { toggle: true, .. }));
+        assert!(
+            profile_from_command(toggled)
+                .unwrap_err()
+                .to_string()
+                .contains("--toggle")
+        );
+        let native = Cli::try_parse_from(arguments.into_iter().chain([
+            "--toggle",
+            "--viewer-backend",
+            "wayland",
+            "--view-only",
+        ]))
+        .unwrap()
+        .command;
+        assert!(
+            connect_options(native)
+                .unwrap_err()
+                .to_string()
+                .contains("--toggle requires the X11 viewer")
+        );
+    }
+
     #[test]
     fn seamless_input_is_explicit_and_never_profile_saved() {
         for command in ["connect", "ssh"] {
@@ -4829,6 +4909,8 @@ fn connect_options(command: Command) -> RemoteResult<(ClientOptions, u8)> {
         reconnect_attempts,
         address,
         jpeg: _,
+        toggle,
+        next_source: _,
         key_file,
         display,
         window_size,
@@ -4859,6 +4941,9 @@ fn connect_options(command: Command) -> RemoteResult<(ClientOptions, u8)> {
     else {
         return Err(profile_error("connect command expected").into());
     };
+    if toggle && viewer_backend != ViewerBackend::X11 {
+        return Err(profile_error("--toggle requires the X11 viewer").into());
+    }
     validate_control_lossless_cli(
         static_lossless,
         wayland_control,

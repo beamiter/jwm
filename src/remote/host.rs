@@ -922,6 +922,7 @@ impl CaptureStageStats {
 struct X11CaptureStats {
     monitor_geometry: CaptureStageStats,
     core_readback: CaptureStageStats,
+    shm_readback: CaptureStageStats,
     pixel_conversion: CaptureStageStats,
     cpu_resize: CaptureStageStats,
     damage_notifications: u64,
@@ -932,6 +933,7 @@ impl X11CaptureStats {
     fn record(&mut self, metrics: X11CaptureMetrics) {
         self.monitor_geometry.record(metrics.monitor_geometry);
         self.core_readback.record(metrics.core_readback);
+        self.shm_readback.record(metrics.shm_readback);
         self.pixel_conversion.record(metrics.pixel_conversion);
         self.cpu_resize.record(metrics.cpu_resize);
         self.damage_notifications = self
@@ -949,6 +951,7 @@ impl X11CaptureStats {
             "stages": {
                 "monitor_geometry_ms": self.monitor_geometry.json(),
                 "core_readback_ms": self.core_readback.json(),
+                "shm_readback_ms": self.shm_readback.json(),
                 "pixel_conversion_ms": self.pixel_conversion.json(),
                 "cpu_resize_ms": self.cpu_resize.json(),
             },
@@ -5171,7 +5174,11 @@ impl HardwareVideoSender {
             .encoder
             .as_ref()
             .is_none_or(|(previous, _)| *previous != scope);
-        if fresh {
+        if self
+            .encoder
+            .as_ref()
+            .is_none_or(|(_, encoder)| encoder.dimensions() != (padded_width, padded_height))
+        {
             // Release the old hardware session before asking for a new one.
             self.encoder = None;
             self.encoder = Some((
@@ -5191,19 +5198,17 @@ impl HardwareVideoSender {
             pad_hardware_rgb(&frame.image, &mut self.padded, padded_width, padded_height);
             &self.padded
         };
-        let encoder = &mut self
-            .encoder
-            .as_mut()
-            .expect("hardware encoder has a scope")
-            .1;
+        let (previous, encoder) = self.encoder.as_mut().expect("hardware encoder has a scope");
         // Preserve display credit for changed pixels while an earlier frame
         // awaits ACK. With credit fully returned, identical input may refine
         // the picture normally. Skipping before NVENC preserves references.
-        if may_defer_duplicate && encoder.matches_last_input(rgb) {
+        if !fresh && may_defer_duplicate && encoder.matches_last_input(rgb) {
             return Ok(None);
         }
         self.annex_b.clear();
-        encoder.encode_into(rgb, &mut self.annex_b)?;
+        // The viewer starts a new canvas at each scope boundary. An IDR
+        // cuts all temporal references even when NVENC stays open.
+        encoder.encode_into(rgb, &mut self.annex_b, fresh)?;
         let keyframe = hardware_has_idr(self.codec, &self.annex_b);
         if fresh && !keyframe {
             return Err(
@@ -5224,6 +5229,7 @@ impl HardwareVideoSender {
             &self.annex_b,
             self.limits,
         )?;
+        *previous = scope;
         Ok(Some(keyframe))
     }
 }
@@ -13039,6 +13045,7 @@ mod tests {
             }
             stats.record(X11CaptureMetrics {
                 monitor_geometry: Some(Duration::ZERO),
+                shm_readback: Some(Duration::from_millis(3)),
                 damage_notifications: 2,
                 forced_refreshes: 1,
                 ..X11CaptureMetrics::default()
@@ -13056,6 +13063,8 @@ mod tests {
         assert_eq!(stages["core_readback_ms"]["observations"], 130);
         assert_eq!(stages["core_readback_ms"]["quantiles"]["samples"], 128);
         assert_eq!(stages["core_readback_ms"]["quantiles"]["p95_ms"], 12.0);
+        assert_eq!(stages["shm_readback_ms"]["observations"], 1);
+        assert_eq!(stages["shm_readback_ms"]["mean"], 3.0);
         assert_eq!(stages["pixel_conversion_ms"]["mean"], 2.0);
         assert_eq!(stages["cpu_resize_ms"]["observations"], 0);
         assert_eq!(

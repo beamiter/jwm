@@ -30,6 +30,7 @@ OPTIONAL_STAGES = {'h264_ms': 'h264_frames', 'hevc444_ms': 'hevc444_frames'}
 X11_CAPTURE_COUNTERS = ('damage_notifications', 'forced_refreshes')
 X11_CAPTURE_STAGES = ('monitor_geometry_ms', 'core_readback_ms',
                       'pixel_conversion_ms', 'cpu_resize_ms')
+OPTIONAL_X11_CAPTURE_STAGES = ('shm_readback_ms',)
 POLICY = 'nearest-rank, most recent 128 observations per stage per window'
 
 
@@ -90,8 +91,11 @@ def validate_x11_capture(capture):
         raise ValueError('invalid X11 capture object')
     for field in X11_CAPTURE_COUNTERS:
         number(capture.get(field), 'x11_capture.' + field, integer=True)
-    for stage in X11_CAPTURE_STAGES:
-        item = capture['stages'].get(stage)
+    items = capture['stages']
+    for stage in X11_CAPTURE_STAGES + OPTIONAL_X11_CAPTURE_STAGES:
+        if stage in OPTIONAL_X11_CAPTURE_STAGES and stage not in items:
+            continue
+        item = items.get(stage)
         count = stage_quantile_count(item, 'x11_capture.' + stage)
         observations = number(item.get('observations'), stage + '.observations', integer=True)
         if observations > 2**64 - 1 or count != min(observations, 128):
@@ -198,9 +202,11 @@ def summarize_x11_capture(windows):
         return None
     captures = [window['x11_capture'] for window in capture_windows]
     stages = {}
-    for stage in X11_CAPTURE_STAGES:
-        observed = [capture['stages'][stage] for capture in captures
-                    if capture['stages'][stage]['observations'] > 0]
+    for stage in X11_CAPTURE_STAGES + OPTIONAL_X11_CAPTURE_STAGES:
+        reported = [capture['stages'][stage] for capture in captures if stage in capture['stages']]
+        if not reported and stage in OPTIONAL_X11_CAPTURE_STAGES:
+            continue
+        observed = [item for item in reported if item['observations'] > 0]
         count = sum(item['observations'] for item in observed)
         means = [item['mean'] for item in observed]
         stages[stage] = {

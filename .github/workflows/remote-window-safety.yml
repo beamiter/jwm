@@ -74,7 +74,7 @@ jobs:
           '
       - name: Actual core readback compatibility and top-edge display pixels
         run: |
-          cargo test --locked --no-default-features --features remote-x11,backend-x11rb --lib owned_x_core_compatibility_survives_viewport_limits_and_source_switch -- --test-threads=1 --nocapture
+          cargo test --locked --no-default-features --features remote-x11,backend-x11rb --lib owned_x_direct_readback_policy_survives_viewport_limits_and_source_switch -- --test-threads=1 --nocapture
           xvfb-run -a -s '-screen 0 1280x900x24 -nolisten tcp' sh -ec '
             export JWM_REMOTE_TEST_VIEWER_OWNED=1
             export JWM_REMOTE_TEST_VIEWER_DISPLAY="$DISPLAY"

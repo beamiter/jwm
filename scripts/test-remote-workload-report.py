@@ -73,6 +73,7 @@ class ReportTests(unittest.TestCase):
         a.update(backpressure_skipped=0, damage_skipped=30, x11_capture=x11_capture(1000, 4))
         a['x11_capture'].update(damage_notifications=43, forced_refreshes=1, secret='PRIVATE')
         b.update(damage_skipped=2, x11_capture=x11_capture(1, 100))
+        b['x11_capture']['stages']['shm_readback_ms'] = x11_capture(23, 3)['stages']['core_readback_ms']
         b['window_seconds'] = .25
         report = m.summarize(*self.read([older, a, b]), 'terminal', 'x11')
         self.assertEqual(report['totals']['backpressure_skipped'], 0)
@@ -88,6 +89,9 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(readback['window_means_range_ms'], [4, 100])
         self.assertEqual(readback['max_reported_window_recent_p95_ms'], 100)
         self.assertIsNone(readback['whole_run_percentiles'])
+        shm = capture['stages']['shm_readback_ms']
+        self.assertEqual(shm['observations'], 23)
+        self.assertEqual(shm['whole_run_weighted_mean_ms'], 3)
         resize = capture['stages']['cpu_resize_ms']
         self.assertEqual(resize['observations'], 0)
         self.assertIsNone(resize['whole_run_weighted_mean_ms'])

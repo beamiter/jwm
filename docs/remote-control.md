@@ -410,8 +410,9 @@ network reader, after the old receiver, sender and clipboard workers have
 successfully stopped. Each retry opens a new window and repeats normal key
 loading, authentication and permission negotiation. The original command's
 permission flags remain unchanged. Delays are 1, 2, 4, 8 and 8 seconds; the
-budget never resets during the command. Ctrl+C stops the command, including
-while waiting between attempts.
+budget never resets during the command. The new session starts at the host's
+default source. Ctrl+C stops the command, including while waiting between
+attempts.
 
 This network-loss retry budget excludes startup/connect failures,
 authentication/protocol/decode failures observed by the viewer, frame-idle and
@@ -444,7 +445,9 @@ observed window geometry or clipboard transfer progress. The network-loss retry
 budget applies to the current `connect` command.
 
 Offline tests cover classification, budgets, cleanup and a loopback EOF path.
-Live X11 reconnection and two-machine network-loss acceptance remain unverified.
+With `connect --toggle`, pressing the same shortcut during backoff cancels
+the pending attempt. An isolated X11 test exercised a live viewer through
+transport loss, automatic reconnect, and cancellation during backoff.
 
 ### Short real-machine acceptance checklist (not run by offline tests)
 
@@ -926,8 +929,31 @@ copied `peer.key`. Reverse the addresses and use Bob's key path for his binding.
 modifier = ["Mod4"]
 key = "r"
 function = "spawn"
-argument = ["/usr/local/bin/jwm-remote", "connect", "192.0.2.20:48221", "--key-file", "/home/alice/.config/jwm/lan-peers/peer.key", "--grab-input", "--seamless-input=click", "--clipboard", "--notify"]
+argument = ["/usr/local/bin/jwm-remote", "connect", "192.0.2.20:48221", "--toggle", "--key-file", "/home/alice/.config/jwm/lan-peers/peer.key", "--grab-input", "--seamless-input=click", "--clipboard", "--reconnect-attempts", "2", "--notify"]
+
+[[keybindings.keys]]
+modifier = ["Mod4", "Shift"]
+key = "r"
+function = "spawn"
+argument = ["/usr/local/bin/jwm-remote", "connect", "192.0.2.20:48221", "--toggle", "--next-source", "--key-file", "/home/alice/.config/jwm/lan-peers/peer.key", "--grab-input", "--seamless-input=click", "--clipboard", "--reconnect-attempts", "2", "--notify"]
 ```
+
+With `--toggle`, the first press starts the direct viewer. Press `Super+R`
+again to cancel startup or close the viewer and release remote input. The
+viewer handles the shortcut locally while it holds the keyboard. The slot
+belongs to this endpoint on the local X11 screen.
+
+Add `--share-monitor DP-2` to the host service's `ExecStart` to make another
+display available. Run `systemctl --user daemon-reload` and restart that host
+service after editing it. `Super+Shift+R` brings the direct viewer forward
+and cycles through the shared displays in the same window and connection.
+From a closed viewer it opens the next display after the default. With one
+shared display it opens or focuses that display. During a switch, the viewer
+releases held remote keys and buttons, shows the destination in its title,
+and waits for the new image before accepting input again.
+With hardware video, a switch between matching coded dimensions reuses the
+encoder and decoder. A fresh IDR picture starts the new source and the viewer
+discards the old decoder's reference pictures before drawing it.
 
 Click the remote image to take control. Move out of the image or press
 **Ctrl+Super+F12** to release it. Both sides opt in to clipboard sharing via
@@ -1291,6 +1317,9 @@ In the viewer, **Ctrl+Super+Shift+F12** cycles the granted sources, including in
 view-only mode. With `--escape-key Pause`, use Ctrl+Super+Shift+Pause instead.
 The shortcut stays local, releases input grabs, and holds input until the new
 source's frame arrives. Ordinary Ctrl+Super+F12 still releases control.
+The direct X11 viewer in toggle mode also handles **Super+Shift+R** locally
+while it holds input. Use `connect HOST --toggle --next-source` from a
+window-manager binding to cycle or open that same viewer regardless of focus.
 
 Grants are immutable for the session. Switching selects only an existing ID;
 it cannot broaden sharing, clipboard permission, or input permission. Source
@@ -1722,7 +1751,7 @@ jwm-remote: capture mode now overlay/cpu-resize/shm/damage/cursor-events
 ```
 
 The healthy reading is `overlay/xrender/shm/damage/cursor-events`, or
-`overlay/cpu-resize/core-getimage/damage/cursor-events` on NVIDIA's proprietary driver
+`overlay/cpu-resize/shm/damage/cursor-events` on NVIDIA's proprietary driver
 (see [Half-drawn frames on NVIDIA](#half-drawn-frames-on-nvidia)). Each field
 names its fallback explicitly rather than disappearing, so a degraded session
 is obvious at a glance: `root`, `cpu-resize`, `core-getimage`, `no-damage`,
@@ -1796,9 +1825,11 @@ part of the capture call:
   including repeated validation within an attempt.
 - `core_readback_ms` starts at the core X11 `GetImage` request and ends at
   its synchronous reply. It covers both X server wait and data transfer.
+- `shm_readback_ms` covers the direct MIT-SHM `GetImage` request through
+  its reply. The image data is already in the mapped segment at that point.
 - `pixel_conversion_ms` covers layout validation and conversion of the
-  core readback reply to RGB. Both readback and conversion timings apply
-  to the direct software capture path.
+  direct core or SHM readback to RGB. Older telemetry may omit
+  `shm_readback_ms` and samples for SHM conversion.
 - `cpu_resize_ms` covers CPU resizing when a frame uses that path.
 
 Each stage sums its measured spans into one observation per capture
@@ -1838,11 +1869,11 @@ more often than a periodic screen grab would. Measured on an RTX 4090 D
 XRender; 0 through a core `GetImage`, which the driver synchronizes with GL
 rendering; 0 in 2,700 frames of ffmpeg recording the host's screen directly.
 
-`--scaling auto`, the default on `host`, `connect`, and `ssh`, selects compatibility
-paths for this previously measured failure. On the host, it reads the screen with core `GetImage`
-(not MIT-SHM `GetImage`)
-and shrinks it on the CPU when the X server has the `NV-GLX` or `NV-CONTROL`
-extension, and says so at session start. The CPU path averages each output
+`--scaling auto`, the default on `host`, `connect`, and `ssh`, uses direct
+readback and CPU scaling on X servers with `NV-GLX` or `NV-CONTROL`.
+The host reads the source drawable through MIT-SHM 1.2 when supported.
+If SHM is unavailable or fails and core readback succeeds, it uses core
+`GetImage`. The CPU path averages each output
 pixel's source area across threads; it took the place of a generic filter
 that cost about 90 ms per 2560x1440 frame. On the same loaded desktop the
 corrected path captured at about 152 ms per frame against 117 ms through
@@ -1850,13 +1881,11 @@ XRender, both dominated by waiting for the GPU. On the viewer, `--scaling auto`
 disables XRender upscaling on NVIDIA systems, performing high-quality multi-threaded
 CPU upscaling instead. This does not disable viewer SHM uploads or the cursor renderer,
 and is not a guarantee against every source of top-edge noise. `--scaling gpu` restores
-XRender for anyone who prefers that speed and does not see the artifacts;
-`--scaling cpu` forces the direct CPU path elsewhere. On the host, CPU mode and
-NVIDIA Auto also skip SHM segment creation, including after viewport or capture-area
-changes. Older implementations disabled XRender but still attempted MIT-SHM; that
-was not the same readback path as the core-GetImage measurement above. Software
-Xvfb regressions now check actual core/SHM requests and codec-to-display top-edge
-pixels. They do not reproduce or certify a physical NVIDIA driver.
+XRender for anyone who prefers that speed and does not see the artifacts.
+On the host, `--scaling cpu` forces direct core `GetImage` plus CPU scaling.
+Software Xvfb regressions check actual core and SHM requests after viewport,
+frame-limit, and capture-area changes. Another regression checks top-edge
+pixels through encoding, transport, and drawing.
 
 - A black/invalid Composite overlay can be bypassed with
   `--capture-source root`. Root capture is a compatibility fallback and may

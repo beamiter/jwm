@@ -344,9 +344,13 @@ impl Encoder {
         })
     }
 
+    pub(crate) fn dimensions(&self) -> (u32, u32) {
+        (self.rgb.width(), self.rgb.height())
+    }
+
     /// The packed RGB staging frame still holds the input to the last access unit.
     pub(crate) fn matches_last_input(&self, image: &RgbImage) -> bool {
-        if self.sequence == 0 || image.dimensions() != (self.rgb.width(), self.rgb.height()) {
+        if self.sequence == 0 || image.dimensions() != self.dimensions() {
             return false;
         }
         let width = image.width() as usize * 3;
@@ -363,8 +367,13 @@ impl Encoder {
     }
 
     /// Append one complete Annex B access unit to the existing output.
-    pub(crate) fn encode_into(&mut self, rgb: &RgbImage, output: &mut Vec<u8>) -> io::Result<()> {
-        if rgb.dimensions() != (self.rgb.width(), self.rgb.height()) {
+    pub(crate) fn encode_into(
+        &mut self,
+        rgb: &RgbImage,
+        output: &mut Vec<u8>,
+        force_idr: bool,
+    ) -> io::Result<()> {
+        if rgb.dimensions() != self.dimensions() {
             return Err(invalid("capture size changed during video encoding"));
         }
         let next = self
@@ -388,7 +397,8 @@ impl Encoder {
         })?;
         self.converter.convert(&self.rgb, &mut self.yuv)?;
         self.yuv.set_pts(Some(self.sequence));
-        self.yuv.set_kind(if self.sequence == 0 {
+        let keyframe = self.sequence == 0 || force_idr;
+        self.yuv.set_kind(if keyframe {
             ffmpeg::picture::Type::I
         } else {
             ffmpeg::picture::Type::None
@@ -401,7 +411,7 @@ impl Encoder {
         self.codec
             .receive_packet(&mut packet)
             .map_err(|error| codec_error("waiting for low-delay NVENC output", error))?;
-        if packet.pts() != Some(self.sequence) || (self.sequence == 0 && !packet.is_key()) {
+        if packet.pts() != Some(self.sequence) || (keyframe && !packet.is_key()) {
             return Err(invalid(
                 "unexpected NVENC packet timestamp or missing keyframe",
             ));
@@ -566,6 +576,16 @@ impl Decoder {
         })
     }
 
+    pub(crate) fn dimensions(&self) -> (u32, u32) {
+        (self.format.width as u32, self.format.height as u32)
+    }
+
+    /// Discard queued output and reference pictures at a source or geometry change.
+    pub(crate) fn reset(&mut self) {
+        self.codec.flush();
+        self.first = true;
+    }
+
     pub(crate) fn decode(&mut self, bytes: &[u8]) -> io::Result<RgbImage> {
         validate_packet(bytes)?;
         use ffmpeg::codec::packet::Mut;
@@ -584,7 +604,7 @@ impl Decoder {
         self.codec
             .receive_frame(&mut hardware)
             .map_err(|error| codec_error("waiting for low-delay video decode", error))?;
-        let expected = (self.format.width as u32, self.format.height as u32);
+        let expected = self.dimensions();
         // AV_PIX_FMT_VAAPI has different spelling in the Rust enum across
         // supported FFmpeg versions, so compare libavutil's raw AVPixelFormat.
         if unsafe { (*hardware.as_ptr()).format } != self.format.pixel as i32
@@ -676,7 +696,7 @@ pub(crate) fn probe_decode(kind: FrameCodec) -> io::Result<()> {
 
 pub(crate) fn probe_encode(kind: FrameCodec) -> io::Result<()> {
     let mut encoder = Encoder::new(kind, 256, 256, 30)?;
-    encoder.encode_into(&RgbImage::new(256, 256), &mut Vec::new())
+    encoder.encode_into(&RgbImage::new(256, 256), &mut Vec::new(), false)
 }
 
 // One 256x256 baseline IDR generated from FFmpeg's solid-color test source
@@ -808,11 +828,31 @@ mod tests {
             for color in [[56, 60, 68], [80, 96, 111], [90, 120, 135]] {
                 packet.clear();
                 let frame = RgbImage::from_pixel(width, height, image::Rgb(color));
-                encoder.encode_into(&frame, &mut packet).unwrap();
+                encoder.encode_into(&frame, &mut packet, false).unwrap();
                 let decoded = decoder.decode(&packet).unwrap();
                 let pixel = decoded.get_pixel(width / 2, height / 2).0;
                 assert!(
                     pixel
+                        .into_iter()
+                        .zip(color)
+                        .all(|(a, b)| a.abs_diff(b) <= 10)
+                );
+            }
+
+            // A source switch retains NVENC but starts a fresh decoder.
+            // The later IDR must contain enough headers to decode by itself.
+            packet.clear();
+            let color = [180, 130, 70];
+            let frame = RgbImage::from_pixel(width, height, image::Rgb(color));
+            encoder.encode_into(&frame, &mut packet, true).unwrap();
+            assert!(super::super::h264_wire::hardware_has_idr(kind, &packet));
+            decoder.reset();
+            let mut fresh = Decoder::new(kind, width, height).unwrap();
+            for receiver in [&mut decoder, &mut fresh] {
+                let rgb = receiver.decode(&packet).unwrap();
+                assert!(
+                    rgb.get_pixel(width / 2, height / 2)
+                        .0
                         .into_iter()
                         .zip(color)
                         .all(|(a, b)| a.abs_diff(b) <= 10)
