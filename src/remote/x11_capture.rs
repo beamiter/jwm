@@ -990,6 +990,7 @@ pub struct CursorSample {
 pub(super) struct X11CaptureMetrics {
     pub(super) monitor_geometry: Option<Duration>,
     pub(super) core_readback: Option<Duration>,
+    pub(super) shm_readback: Option<Duration>,
     pub(super) pixel_conversion: Option<Duration>,
     pub(super) cpu_resize: Option<Duration>,
     pub(super) damage_notifications: u64,
@@ -1087,7 +1088,7 @@ impl X11Capture {
         // frame establishes the exact native image size.
         let nvidia = driver_probe(&conn);
         let gpu_scaling = scaling.allows_gpu(nvidia);
-        let shm_readback = if scaling.requires_core_readback(nvidia) {
+        let shm_readback = if scaling.requires_core_readback() {
             eprintln!(
                 "jwm-remote: compatibility readback: core GetImage + CPU scaling (MIT-SHM and XRender disabled)"
             );
@@ -1171,8 +1172,7 @@ impl X11Capture {
         };
         if !gpu_scaling && scaling == ScalingPolicy::Auto {
             eprintln!(
-                "jwm-remote: NVIDIA driver: scaling on the CPU, because XRender reads of the \
-                 composited screen can return unfinished frames (--scaling gpu overrides)"
+                "jwm-remote: NVIDIA driver: direct readback with CPU scaling to capture complete compositor frames"
             );
         }
         let render_scaler = if max_width == 0 || !gpu_scaling {
@@ -2935,14 +2935,19 @@ impl ShmReadback {
         size: (u16, u16),
         layout: ReadbackLayout,
         buffers: &mut CaptureImageRecycler,
-        metrics: Option<&mut X11CaptureMetrics>,
+        mut metrics: Option<&mut X11CaptureMetrics>,
     ) -> RemoteResult<RgbImage> {
-        let (width, height) = size;
         let shm_result = match self {
             Self::Disabled => None,
-            Self::Enabled(readback) => {
-                Some(readback.capture_rgb(conn, drawable, origin, width, height, layout, buffers))
-            }
+            Self::Enabled(readback) => Some(readback.capture_rgb(
+                conn,
+                drawable,
+                origin,
+                size,
+                layout,
+                buffers,
+                metrics.as_deref_mut(),
+            )),
         };
         match resolve_readback(shm_result, || {
             core_capture_rgb(conn, drawable, origin, size, layout, buffers, metrics)
@@ -2983,13 +2988,21 @@ impl EnabledShmReadback {
         conn: &RustConnection,
         drawable: u32,
         origin: (i16, i16),
-        width: u16,
-        height: u16,
+        size: (u16, u16),
         layout: ReadbackLayout,
         buffers: &mut CaptureImageRecycler,
+        metrics: Option<&mut X11CaptureMetrics>,
     ) -> RemoteResult<RgbImage> {
+        let (width, height) = size;
         let expected_size = shm_buffer_size(width, height, self.format)?;
         self.ensure_capacity(conn, expected_size)?;
+        let (readback, conversion) = match metrics {
+            Some(metrics) => (
+                Some(&mut metrics.shm_readback),
+                Some(&mut metrics.pixel_conversion),
+            ),
+            None => (None, None),
+        };
         let (image, capacity) = {
             let segment = self
                 .segment
@@ -3000,40 +3013,41 @@ impl EnabledShmReadback {
                 let (core, shm, alloc) = c.get();
                 c.set((core, shm + 1, alloc));
             });
-            let reply = shm::get_image(
-                conn,
-                drawable,
-                origin.0,
-                origin.1,
-                width,
-                height,
-                u32::MAX,
-                u8::from(ImageFormat::Z_PIXMAP),
-                segment.id,
-                0,
-            )?
-            .reply()?;
-            let image_size = validate_shm_reply(
-                self.format.depth,
-                expected_size,
-                segment.mapping.len(),
-                reply.depth,
-                reply.size,
-            )?;
-            let bytes = segment.mapping.bytes(image_size)?;
-            let ximage = XImage::new(
-                width,
-                height,
-                self.format.scanline_pad.try_into()?,
-                reply.depth,
-                self.format.bits_per_pixel.try_into()?,
-                conn.setup().image_byte_order.try_into()?,
-                Cow::Borrowed(bytes),
-            )?;
-            (
-                decode_readback_image(conn, &ximage, width, height, reply.visual, layout, buffers)?,
-                segment.mapping.len(),
-            )
+            let reply = measure_stage(readback, || -> RemoteResult<_> {
+                Ok(shm::get_image(
+                    conn,
+                    drawable,
+                    origin.0,
+                    origin.1,
+                    width,
+                    height,
+                    u32::MAX,
+                    u8::from(ImageFormat::Z_PIXMAP),
+                    segment.id,
+                    0,
+                )?
+                .reply()?)
+            })?;
+            let image = measure_stage(conversion, || {
+                let image_size = validate_shm_reply(
+                    self.format.depth,
+                    expected_size,
+                    segment.mapping.len(),
+                    reply.depth,
+                    reply.size,
+                )?;
+                let ximage = XImage::new(
+                    width,
+                    height,
+                    self.format.scanline_pad.try_into()?,
+                    reply.depth,
+                    self.format.bits_per_pixel.try_into()?,
+                    conn.setup().image_byte_order.try_into()?,
+                    Cow::Borrowed(segment.mapping.bytes(image_size)?),
+                )?;
+                decode_readback_image(conn, &ximage, width, height, reply.visual, layout, buffers)
+            })?;
+            (image, segment.mapping.len())
         };
         if !self.reported_active {
             eprintln!(
@@ -4884,7 +4898,7 @@ mod tests {
         feature = "wayland-backends"
     ))]
     #[test]
-    fn owned_x_core_compatibility_survives_viewport_limits_and_source_switch() {
+    fn owned_x_direct_readback_policy_survives_viewport_limits_and_source_switch() {
         let x11 = crate::backend::clipboard_offer::IsolatedXvfb::acquire();
         for (policy, probe) in [
             (
@@ -4896,6 +4910,7 @@ mod tests {
                 (|_: &RustConnection| true) as fn(&RustConnection) -> bool,
             ),
         ] {
+            let core = policy == ScalingPolicy::Cpu;
             for initial_width in [0, 32] {
                 READBACK_REQUESTS.with(|c| c.set((0, 0, 0)));
                 let region = CaptureRegion {
@@ -4937,7 +4952,7 @@ mod tests {
                     }
                     assert!(!capture.gpu_scaling);
                     assert!(capture.render_scaler.is_none());
-                    assert!(!capture.shm_readback.is_enabled());
+                    assert_ne!(capture.shm_readback.is_enabled(), core);
                     let before = READBACK_REQUESTS.with(Cell::get);
                     let CaptureOutcome::Frame(frame) = capture.frame().unwrap() else {
                         panic!("fresh frame required");
@@ -4945,26 +4960,27 @@ mod tests {
                     assert_eq!((frame.source_width, frame.source_height), (64, 48));
                     let metrics = capture.take_capture_metrics().unwrap();
                     assert!(metrics.monitor_geometry.is_none());
-                    assert!(metrics.core_readback.is_some());
+                    assert_eq!(metrics.core_readback.is_some(), core);
+                    assert_ne!(metrics.shm_readback.is_some(), core);
                     assert!(metrics.pixel_conversion.is_some());
                     assert_eq!(
                         metrics.cpu_resize.is_some(),
                         frame.image.dimensions() != (64, 48)
                     );
-                    assert!(
-                        capture
-                            .take_capture_metrics()
-                            .unwrap()
-                            .core_readback
-                            .is_none()
-                    );
+                    let drained = capture.take_capture_metrics().unwrap();
+                    assert!(drained.core_readback.is_none() && drained.shm_readback.is_none());
                     let after = READBACK_REQUESTS.with(Cell::get);
-                    assert!(after.0 > before.0, "must issue core GetImage");
-                    assert_eq!(
-                        (after.1, after.2),
-                        (0, 0),
-                        "no SHM image or segment requests"
-                    );
+                    if core {
+                        assert!(after.0 > before.0, "must issue core GetImage");
+                        assert_eq!(
+                            (after.1, after.2),
+                            (0, 0),
+                            "no SHM image or segment requests"
+                        );
+                    } else {
+                        assert_eq!(after.0, 0, "NVIDIA Auto uses direct MIT-SHM");
+                        assert!(after.1 > before.1 && after.2 > 0);
+                    }
                 }
             }
         }
@@ -4996,7 +5012,8 @@ mod tests {
             assert!(matches!(capture.frame().unwrap(), CaptureOutcome::Frame(_)));
             let metrics = capture.take_capture_metrics().unwrap();
             assert!(metrics.core_readback.is_none());
-            assert!(metrics.pixel_conversion.is_none());
+            assert!(metrics.shm_readback.is_some());
+            assert!(metrics.pixel_conversion.is_some());
             assert!(metrics.cpu_resize.is_none());
             let counts = READBACK_REQUESTS.with(Cell::get);
             assert_eq!(counts.0, 0);

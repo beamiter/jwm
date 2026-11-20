@@ -1223,6 +1223,38 @@ mod tests {
     }
 
     #[test]
+    fn hello_roundtrips_supported_hardware_profiles() {
+        // Wire support is not permission or encoder availability: negotiation
+        // and proof/tile denial remain covered by their separate tests.
+        for codec in [FrameCodec::H264, FrameCodec::Hevc444] {
+            for cursor in [CursorMode::Composited, CursorMode::Independent] {
+                let stream = StreamCapabilities {
+                    codec,
+                    cursor,
+                    ..Default::default()
+                };
+                let client = ClientHello {
+                    stream,
+                    initial_viewport: Some((1920, 1080)),
+                    request_input: false,
+                    request_clipboard: false,
+                    request_clipboard_files: false,
+                    keymap: KeymapTable::empty(),
+                };
+                assert_eq!(ClientHello::decode(&client.encode()).unwrap(), client);
+                let server = ServerHello {
+                    stream,
+                    pointer_enabled: false,
+                    keyboard_enabled: false,
+                    clipboard_enabled: false,
+                    clipboard_files_enabled: false,
+                };
+                assert_eq!(ServerHello::decode(&server.encode()).unwrap(), server);
+            }
+        }
+    }
+
+    #[test]
     fn hello_refuses_unimplemented_profiles_before_any_stream_work() {
         let client = ClientHello {
             stream: Default::default(),
@@ -1241,8 +1273,14 @@ mod tests {
             clipboard_files_enabled: false,
         }
         .encode();
-        for offset in HELLO_PREFIX_LEN..HELLO_PREFIX_LEN + 3 {
-            for unsupported in [0, 3, u8::MAX] {
+        // Codec 2/3 now represent H.264/HEVC, while cursor 2 is independent.
+        // Check every unknown value per field, not a shared obsolete blacklist.
+        for (field, supported) in [&[1_u8, 2, 3][..], &[1, 2][..], &[1][..]]
+            .into_iter()
+            .enumerate()
+        {
+            let offset = HELLO_PREFIX_LEN + field;
+            for unsupported in (0..=u8::MAX).filter(|value| !supported.contains(value)) {
                 let mut client = client.clone();
                 client[offset] = unsupported;
                 assert!(ClientHello::decode(&client).is_err());

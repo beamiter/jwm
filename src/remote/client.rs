@@ -32,6 +32,7 @@ use super::clipboard_sync::{
 };
 use super::clipboard_wire::{ClipboardRestriction, RestrictionState};
 use super::close_wire::{SessionClose, SessionCloseCode};
+use super::connect_toggle::ConnectToggle;
 use super::deadline::TcpStreamDeadline;
 use super::frame::{RecyclableDecodedFrame, SharedDecodeBufferPool, new_decode_buffer_pool};
 #[cfg(feature = "remote-h264")]
@@ -512,11 +513,28 @@ pub(super) fn run_client_with_video_codec(
     options: ClientOptions,
     preferred: FrameCodec,
 ) -> RemoteResult<()> {
+    run_client_attempt(options, preferred, None)
+}
+
+fn run_client_attempt(
+    options: ClientOptions,
+    preferred: FrameCodec,
+    toggle: Option<&ConnectToggle>,
+) -> RemoteResult<()> {
+    if toggle.is_some_and(|toggle| !toggle.begin_attempt()) {
+        return Ok(());
+    }
     let mut stage = ClientStage::Setup;
-    let result = run_client_session(options, preferred, &mut stage);
+    let result = run_client_session(options, preferred, &mut stage, toggle);
     match result {
         Ok(()) => {
             eprintln!("jwm-remote: session ended");
+            Ok(())
+        }
+        Err(_)
+            if stage != ClientStage::Session
+                && toggle.is_some_and(ConnectToggle::close_requested) =>
+        {
             Ok(())
         }
         Err(cause) if cause.is::<ClientFailure>() => Err(cause),
@@ -535,6 +553,46 @@ pub fn run_client_reconnecting_with_hardware(
     options: ClientOptions,
     attempts: u8,
     hardware_h264: bool,
+) -> RemoteResult<()> {
+    let preferred = if hardware_h264 {
+        FrameCodec::H264
+    } else {
+        FrameCodec::JpegTiles
+    };
+    run_client_reconnecting_with_video_codec(options, attempts, preferred)
+}
+
+pub fn run_client_reconnecting_with_video_codec(
+    options: ClientOptions,
+    attempts: u8,
+    preferred: FrameCodec,
+) -> RemoteResult<()> {
+    reconnect_client(options, attempts, preferred, None)
+}
+
+/// Toggle one direct viewer per X11 screen and endpoint, or cycle its shared source.
+pub fn run_client_toggling_with_video_codec(
+    options: ClientOptions,
+    attempts: u8,
+    preferred: FrameCodec,
+    next_source: bool,
+) -> RemoteResult<()> {
+    if options.viewer_backend != ViewerBackend::X11 {
+        return Err(invalid_data("--toggle requires the X11 viewer").into());
+    }
+    let Some(toggle) =
+        ConnectToggle::claim(options.display.as_deref(), &options.address, next_source)?
+    else {
+        return Ok(());
+    };
+    reconnect_client(options, attempts, preferred, Some(&toggle))
+}
+
+fn reconnect_client(
+    options: ClientOptions,
+    attempts: u8,
+    mut preferred: FrameCodec,
+    toggle: Option<&ConnectToggle>,
 ) -> RemoteResult<()> {
     if (options.follow_source_size
         || options.resize_source.is_some()
@@ -558,13 +616,35 @@ pub fn run_client_reconnecting_with_hardware(
     }
     reconnect_with(
         attempts,
-        || run_client_with_hardware(options.clone(), hardware_h264),
+        || {
+            let outcome = run_client_attempt(options.clone(), preferred, toggle);
+            if outcome.as_ref().err().is_some_and(|error| {
+                error
+                    .downcast_ref::<ClientFailure>()
+                    .is_some_and(|failure| {
+                        failure.stage == ClientStage::Negotiate
+                            && failure.cause.is::<LegacyVideoProfileRefused>()
+                    })
+            }) {
+                preferred = FrameCodec::JpegTiles;
+                eprintln!("jwm-remote: host requires the JPEG stream profile; retrying with JPEG");
+                return run_client_attempt(options.clone(), preferred, toggle);
+            }
+            outcome
+        },
         |attempt, delay| {
+            if toggle.is_some_and(ConnectToggle::close_requested) {
+                return;
+            }
             eprintln!(
                 "jwm-remote: transport lost; reconnect attempt {attempt}/{attempts} in {} seconds (Ctrl+C to stop)",
                 delay.as_secs()
             );
-            thread::sleep(delay);
+            if let Some(toggle) = toggle {
+                toggle.wait_to_retry(delay);
+            } else {
+                thread::sleep(delay);
+            }
         },
     )
 }
@@ -877,6 +957,7 @@ fn run_client_session(
     options: ClientOptions,
     preferred: FrameCodec,
     stage: &mut ClientStage,
+    toggle: Option<&ConnectToggle>,
 ) -> RemoteResult<()> {
     if let Some(size) = options.window_size {
         size.validate()?;
@@ -938,9 +1019,17 @@ fn run_client_session(
         ),
     };
     let requested_codec = requested_video_codec(&options, preferred);
+    if toggle.is_some_and(ConnectToggle::close_requested) {
+        return Ok(());
+    }
     *stage = ClientStage::Connect;
     eprintln!("jwm-remote: connecting to {}", options.peer_label);
     let stream = connect_with_timeout(&options.address, CONNECT_TIMEOUT)?;
+    if let Some(toggle) = toggle
+        && !toggle.watch_startup(&stream)?
+    {
+        return Ok(());
+    }
     *stage = ClientStage::Negotiate;
     eprintln!("jwm-remote: connection opened; authenticating and negotiating permissions");
     let popup_requested_at = Instant::now();
@@ -1161,6 +1250,9 @@ fn run_client_session(
         .map_err(|_| invalid_data("initial frame is taller than an X11 window"))?;
     let last_sequence = first_frame.frame.sequence();
     *stage = ClientStage::Display;
+    if toggle.is_some_and(ConnectToggle::close_requested) {
+        return Ok(());
+    }
     let mut viewer = Viewer::connect(
         &options,
         initial_width,
@@ -1169,6 +1261,12 @@ fn run_client_session(
         hello.keyboard_enabled,
         hello.keyboard_enabled.then_some(keymap),
     )?;
+    if let Some(toggle) = toggle {
+        viewer.enable_toggle_shortcut()?;
+        if !toggle.begin_viewing(&wake_sender)? {
+            return Ok(());
+        }
+    }
     #[cfg(feature = "remote-wayland")]
     if options.wayland_control {
         let digest = viewer
@@ -1363,6 +1461,7 @@ fn run_client_session(
         clipboard_status.as_deref(),
         hello.stream.clipboard_directions,
         &mut pending_presentations,
+        toggle,
     );
     let graceful_close = matches!(
         &loop_result,
@@ -1402,7 +1501,13 @@ fn run_client_session(
         clipboard_result,
     );
     let result = include_local_cleanup(result, local_cleanup);
-    finalize_retry_intent(result, || viewer.reconnect_allowed_after_cleanup())
+    finalize_retry_intent(result, || {
+        if toggle.is_some_and(ConnectToggle::close_requested) {
+            Ok(false)
+        } else {
+            viewer.reconnect_allowed_after_cleanup()
+        }
+    })
 }
 
 /// Reconnecting with the original CLI grant could silently undo a runtime
@@ -1760,7 +1865,7 @@ fn negotiate_session(
         .encode(),
     )?;
     writer.flush()?;
-    let hello = read_server_hello(&mut reader)?;
+    let hello = read_server_hello(&mut reader, requested_codec)?;
     requested_codec.confirm(hello.stream.codec)?;
     validate_server_frame_limits(&hello, frame_limits)?;
     if hello.stream.static_lossless != request_static_lossless
@@ -1902,13 +2007,38 @@ fn negotiate_session(
     Ok((reader, writer, hello))
 }
 
+#[derive(Debug)]
+struct LegacyVideoProfileRefused;
+
+impl std::fmt::Display for LegacyVideoProfileRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("host refused the hardware video stream profile before admission")
+    }
+}
+
+impl std::error::Error for LegacyVideoProfileRefused {}
+
+const LEGACY_VIDEO_PROFILE_REFUSAL: &[u8] =
+    b"unsupported remote codec, cursor or input mode; update jwm-remote on both machines together";
+
 /// Read only authenticated records, accepting explicit terminal responses before
 /// HelloAck as well as after negotiation. The phase remains in ClientFailure.
-fn read_server_hello<R: io::Read>(reader: &mut SessionReader<R>) -> RemoteResult<ServerHello> {
+fn read_server_hello<R: io::Read>(
+    reader: &mut SessionReader<R>,
+    requested_codec: FrameCodec,
+) -> RemoteResult<ServerHello> {
     let (kind, payload) = reader
         .read_message()
         .map_err(|error| explain_negotiation_eof(error, true))?;
     match kind {
+        // Pre-hardware hosts reject codec IDs in Hello before admitting a
+        // session. Match their exact authenticated legacy response, not EOF,
+        // authentication failures or any later refusal.
+        MessageKind::Close
+            if requested_codec.is_hardware() && payload == LEGACY_VIDEO_PROFILE_REFUSAL =>
+        {
+            Err(LegacyVideoProfileRefused.into())
+        }
         MessageKind::Close | MessageKind::SessionClose => {
             let mut close = PeerClosed::decode(kind, &payload)?;
             if close.reason.trim().is_empty() {
@@ -2082,6 +2212,7 @@ fn viewer_loop(
     clipboard_status: Option<&SyncStatus>,
     clipboard_directions: u8,
     pending_presentations: &mut std::collections::VecDeque<PendingFrameTiming>,
+    toggle: Option<&ConnectToggle>,
 ) -> RemoteResult<ViewerLoopExit> {
     let mut clipboard_status_seen = 0;
     let mut reported_control_generation = None;
@@ -2099,6 +2230,7 @@ fn viewer_loop(
     let mut presented_scope = (1, 1);
     let mut switching = false;
     let mut requested_epoch = None;
+    let mut source_ready = false;
     let source_cycle_available = state
         .catalog
         .lock()
@@ -2109,6 +2241,9 @@ fn viewer_loop(
     'viewer: loop {
         state.wayland_text.lock().unwrap().check()?;
         wake.drain()?;
+        if toggle.is_some_and(ConnectToggle::close_requested) {
+            viewer.request_close();
+        }
         #[cfg(feature = "remote-wayland")]
         {
             let (seamless, may_enter) = {
@@ -2694,16 +2829,23 @@ fn viewer_loop(
                 eprintln!("jwm-remote: restricting clipboard to {label}; confirmation pending");
             }
         }
-        if events.contains(&ViewerEvent::CycleSource)
-            && !events.contains(&ViewerEvent::Close)
-            && !switching
-        {
-            let next = state
-                .catalog
-                .lock()
-                .unwrap()
-                .as_ref()
-                .and_then(|catalog| next_source(catalog, source_epoch));
+        // The host accepts selection only after the current source's first
+        // drawn ACK. Keep a shortcut pressed during startup or a switch queued.
+        if source_ready && !switching && !events.contains(&ViewerEvent::Close) {
+            let external_cycle = toggle.is_some_and(ConnectToggle::take_next_source);
+            if external_cycle {
+                viewer.request_activation()?;
+            }
+            let next = if external_cycle || events.contains(&ViewerEvent::CycleSource) {
+                state
+                    .catalog
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .and_then(|catalog| next_source(catalog, source_epoch))
+            } else {
+                None
+            };
             if let Some((target, label)) = next {
                 if let Some(follow) = state.resize.lock().unwrap().follow.as_mut() {
                     follow.stop("source change requested");
@@ -3020,6 +3162,7 @@ fn viewer_loop(
             viewer.source_presented(presented_scope.1);
             viewer.enable_source_cycle(source_cycle_available);
             switching = false;
+            source_ready = true;
         }
         if viewer.can_submit_frame() {
             if let Some(frame) = take_latest(state, source_epoch) {
@@ -3070,7 +3213,11 @@ fn viewer_loop(
         }
         // A source barrier may race the loop-top epoch snapshot. Never wait
         // after leaving its first keyframe/cursor queued for the next pass.
-        if state.source_epoch.load(Ordering::Acquire) != source_epoch {
+        if state.source_epoch.load(Ordering::Acquire) != source_epoch
+            || (source_ready
+                && !switching
+                && toggle.is_some_and(ConnectToggle::next_source_pending))
+        {
             continue;
         }
         if !state.alive.load(Ordering::Acquire) && state.latest.lock().unwrap().is_none() {
@@ -3596,18 +3743,18 @@ impl Drop for ClientTelemetryReporter<'_> {
     }
 }
 
-struct WakeSender {
+pub(super) struct WakeSender {
     stream: UnixStream,
 }
 
 impl WakeSender {
-    fn try_clone(&self) -> io::Result<Self> {
+    pub(super) fn try_clone(&self) -> io::Result<Self> {
         Ok(Self {
             stream: self.stream.try_clone()?,
         })
     }
 
-    fn signal(&self) -> io::Result<()> {
+    pub(super) fn signal(&self) -> io::Result<()> {
         loop {
             match (&self.stream).write(&[1]) {
                 Ok(1) => return Ok(()),
@@ -4706,7 +4853,7 @@ struct SessionVideoDecoder {
     #[cfg(feature = "remote-h264")]
     hardware: Option<(HardwareFrameHeader, super::h264::Decoder)>,
     #[cfg(feature = "remote-h264")]
-    geometry_epoch: u64,
+    geometry_epoch: Option<u64>,
 }
 
 impl From<TileDecoder> for SessionVideoDecoder {
@@ -4716,12 +4863,21 @@ impl From<TileDecoder> for SessionVideoDecoder {
             #[cfg(feature = "remote-h264")]
             hardware: None,
             #[cfg(feature = "remote-h264")]
-            geometry_epoch: 0,
+            geometry_epoch: None,
         }
     }
 }
 
 impl SessionVideoDecoder {
+    fn reset_source(&mut self, state: &ReceiveState) -> RemoteResult<()> {
+        self.jpeg = state.new_tile_decoder()?;
+        #[cfg(feature = "remote-h264")]
+        {
+            self.geometry_epoch = None;
+        }
+        Ok(())
+    }
+
     #[cfg(not(feature = "remote-h264"))]
     fn decode_hardware_session(
         &mut self,
@@ -4767,10 +4923,13 @@ impl SessionVideoDecoder {
                 self.decode_hardware(state, header, annex_b)?
             }
         };
-        if frame.frame.geometry_epoch() < self.geometry_epoch {
+        if self
+            .geometry_epoch
+            .is_some_and(|epoch| frame.frame.geometry_epoch() < epoch)
+        {
             return Err(invalid_data("video geometry epoch moved backwards").into());
         }
-        self.geometry_epoch = frame.frame.geometry_epoch();
+        self.geometry_epoch = Some(frame.frame.geometry_epoch());
         Ok(frame)
     }
 
@@ -4781,7 +4940,10 @@ impl SessionVideoDecoder {
         header: HardwareFrameHeader,
         annex_b: &[u8],
     ) -> RemoteResult<QueuedFrame> {
-        if header.geometry_epoch < self.geometry_epoch {
+        if self
+            .geometry_epoch
+            .is_some_and(|epoch| header.geometry_epoch < epoch)
+        {
             return Err(invalid_data("video geometry epoch moved backwards").into());
         }
         let decode_started = Instant::now();
@@ -4792,23 +4954,33 @@ impl SessionVideoDecoder {
         let (padded_w, padded_h) =
             h264_wire::h264_padded_dimensions(header.encoded_width, header.encoded_height)?;
         let padded = (u32::from(padded_w), u32::from(padded_h));
-        let reset = self.hardware.as_ref().is_none_or(|(previous, _)| {
-            previous.geometry_epoch != header.geometry_epoch
-                || previous.source_width != header.source_width
-                || previous.source_height != header.source_height
-                || previous.encoded_width != header.encoded_width
-                || previous.encoded_height != header.encoded_height
-        });
+        let reset = self.geometry_epoch.is_none()
+            || self.hardware.as_ref().is_none_or(|(previous, _)| {
+                previous.geometry_epoch != header.geometry_epoch
+                    || previous.source_width != header.source_width
+                    || previous.source_height != header.source_height
+                    || previous.encoded_width != header.encoded_width
+                    || previous.encoded_height != header.encoded_height
+            });
         if reset {
             if !h264_wire::hardware_has_idr(state.frame_codec, annex_b) {
                 return Err(
                     invalid_data("new video frame geometry requires an IDR picture").into(),
                 );
             }
-            self.hardware = None;
-            let decoder = super::h264::Decoder::new(state.frame_codec, padded.0, padded.1)
-                .map_err(hardware_decoder_error)?;
-            self.hardware = Some((header, decoder));
+            if let Some((previous, decoder)) = self
+                .hardware
+                .as_mut()
+                .filter(|(_, decoder)| decoder.dimensions() == padded)
+            {
+                decoder.reset();
+                *previous = header;
+            } else {
+                self.hardware = None;
+                let decoder = super::h264::Decoder::new(state.frame_codec, padded.0, padded.1)
+                    .map_err(hardware_decoder_error)?;
+                self.hardware = Some((header, decoder));
+            }
         }
         let (_, decoder) = self
             .hardware
@@ -5223,7 +5395,7 @@ fn receive_frame_records(
                     }
                     catalog.current = changed;
                 }
-                video_decoder = state.new_video_decoder()?;
+                video_decoder.reset_source(&state)?;
                 *state.latest.lock().unwrap() = None;
                 *state.cursor.lock().unwrap() = super::cursor::CursorInbox::default();
                 if state.wayland_popup.lock().unwrap().enabled {
@@ -6484,7 +6656,7 @@ pub(super) mod tests {
         let cause = match phase {
             ClientStage::Negotiate => {
                 reader.set_max_payload_len(MAX_NEGOTIATION_PAYLOAD_LEN);
-                read_server_hello(&mut reader).unwrap_err()
+                read_server_hello(&mut reader, FrameCodec::JpegTiles).unwrap_err()
             }
             ClientStage::FirstFrame => {
                 read_initial_frame_records(&mut reader, true, true, |_, _| {
@@ -6658,6 +6830,62 @@ pub(super) mod tests {
                 assert!(serde_json::to_value(summary).unwrap()["peer_close_code"].is_null());
             }
         }
+    }
+
+    #[test]
+    fn only_an_authenticated_exact_legacy_close_refuses_a_hardware_offer() {
+        let marker =
+            b"unsupported remote codec, cursor or input mode; update jwm-remote on both machines together";
+        let read_close = |codec, kind, payload: &[u8], receive_key| {
+            let mut writer = SessionWriter::new(Vec::new(), TEST_PSK);
+            writer.write_message(kind, payload).unwrap();
+            let mut reader = SessionReader::new(Cursor::new(writer.into_inner()), receive_key);
+            reader.set_max_payload_len(MAX_NEGOTIATION_PAYLOAD_LEN);
+            read_server_hello(&mut reader, codec).unwrap_err()
+        };
+
+        for codec in [FrameCodec::H264, FrameCodec::Hevc444] {
+            assert!(
+                read_close(codec, MessageKind::Close, marker, TEST_PSK)
+                    .is::<LegacyVideoProfileRefused>()
+            );
+        }
+
+        let mut near_marker = marker.to_vec();
+        near_marker.push(b'.');
+        for (codec, payload) in [
+            (FrameCodec::Hevc444, near_marker.as_slice()),
+            (FrameCodec::JpegTiles, marker.as_slice()),
+        ] {
+            let close = read_close(codec, MessageKind::Close, payload, TEST_PSK)
+                .downcast::<PeerClosed>()
+                .unwrap();
+            assert_eq!(close.code, None);
+        }
+
+        let structured =
+            SessionClose::new(SessionCloseCode::Busy, std::str::from_utf8(marker).unwrap())
+                .encode();
+        let close = read_close(
+            FrameCodec::Hevc444,
+            MessageKind::SessionClose,
+            &structured,
+            TEST_PSK,
+        )
+        .downcast::<PeerClosed>()
+        .unwrap();
+        assert_eq!(close.code, Some(SessionCloseCode::Busy));
+
+        let error = read_close(
+            FrameCodec::Hevc444,
+            MessageKind::Close,
+            marker,
+            [0xff; PSK_LEN],
+        );
+        assert!(matches!(
+            error.downcast_ref::<ProtocolError>(),
+            Some(ProtocolError::AuthenticationFailed)
+        ));
     }
 
     #[test]

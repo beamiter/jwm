@@ -123,7 +123,7 @@ user, including a host with `--allow-input`. The session's traffic is
 encrypted twice. SSH also provides its independently authenticated channel;
 the native transport now has ephemeral forward secrecy of its own.
 
-### Automatic hardware video over SSH
+### Automatic hardware video
 
 Build the helper on both machines with `remote-h264`. This feature uses the
 system FFmpeg development libraries (`libavcodec`, `libavformat`, `libavutil`
@@ -135,14 +135,31 @@ cargo build --locked --release --bin jwm-remote --features remote-h264
 jwm-remote ssh user@desktop --monitor DP-0 --grab-input
 ```
 
-Ordinary SSH sessions probe both peers. When available, HEVC 4:4:4 keeps
-full chroma resolution for colored text and thin lines. Its NVENC target is
-10 Mbit/s, with a larger rate-control buffer to preserve more detail on static
-desktop keyframes. The viewer prefers NVIDIA hardware decoding. H.264 4:2:0 uses
-a 6 Mbit/s target and tries VA-API first. Negotiation falls back from HEVC
-to H.264 and then to JPEG as needed. Pass `--jpeg` to select JPEG for one
-session. An explicit `--jpeg-quality` setting also selects JPEG. Custom
-helpers selected by `--remote-command` should support a read-only `host --help`.
+Ordinary SSH sessions and direct X11 `connect` sessions negotiate the codec
+from hardware available on both peers. Eligible standalone X11 desktop hosts
+offer hardware video automatically. A host configured with `--jpeg-quality`,
+`--jpeg-quality-floor` or `--fixed-jpeg-quality` uses JPEG by default. An
+explicit `--allow-h264` takes precedence and limits hardware video to H.264.
+Add `--allow-hevc444` alongside it to allow HEVC as well. [First LAN connection](#first-lan-connection)
+
+When available, HEVC 4:4:4 keeps full chroma resolution for colored text and
+thin lines. Its NVENC target is 10 Mbit/s, with a larger rate-control buffer
+to preserve more detail on static desktop keyframes. The viewer prefers
+NVIDIA hardware decoding. H.264 4:2:0 uses a 6 Mbit/s target and tries VA-API
+first. Negotiation falls back from HEVC to H.264 and then to JPEG as needed.
+Native Wayland sessions, individual-window capture and sessions requesting
+JPEG-specific extensions use JPEG. Pass `--jpeg` to `ssh` or `connect` to
+select JPEG for that session. An explicit SSH `--jpeg-quality` also selects
+JPEG. Custom SSH helpers selected by `--remote-command` should support a
+read-only `host --help`. A direct connection retries once with JPEG when a
+compatible older host returns the authenticated unsupported-profile response
+before accepting the session.
+
+On large HEVC 4:4:4 frames, each peer can use up to four CPU workers for
+color conversion. While a recent frame awaits a draw acknowledgement, the
+host skips encoding an exact RGB duplicate so the next visual change can
+use the available frame credit. These skips count toward `unchanged-suppressed`.
+An acknowledgement allows identical frames to refine the picture again.
 
 Both hardware modes retain the X11 capture, cursor, source selection and draw
 acknowledgement paths. The viewer decodes frames in wire order and can skip
@@ -152,6 +169,8 @@ cropped back before display. The viewer area sets the requested resolution,
 so enlarging the window can preserve more source detail.
 
 ### One key for a machine you use often
+
+For a pair of LAN hosts, set up [Super+R for bidirectional LAN control](#superr-for-bidirectional-lan-control).
 
 Bind the command in `config_x11.toml`, one key per monitor if you like:
 
@@ -373,11 +392,11 @@ happened, instead of quoting Rust's `failed to fill whole buffer`:
 | `host closed the session: the host stopped sharing its desktop` | The host was stopped (Ctrl+C or SIGTERM) and said goodbye. |
 | `the connection closed without a goodbye from the host` | The host process was killed or the network dropped. |
 
-Reconnect is off by default. After a disconnect, inspect both terminals,
-verify the intended host/key and the selected monitor or region, then rerun the
-same `connect` command from shell history. A new connection authenticates and
-negotiates permissions again. Do not put key contents into a shell command or a
-reconnect script.
+Network-loss reconnect is off by default. After a disconnect, inspect both
+terminals, verify the intended host/key and the selected monitor or region,
+then rerun the same `connect` command from shell history. A new connection
+authenticates and negotiates permissions again. Do not put key contents into a
+shell command or a reconnect script.
 
 Direct connections can explicitly opt into a small retry budget:
 
@@ -391,12 +410,14 @@ network reader, after the old receiver, sender and clipboard workers have
 successfully stopped. Each retry opens a new window and repeats normal key
 loading, authentication and permission negotiation. The original command's
 permission flags remain unchanged. Delays are 1, 2, 4, 8 and 8 seconds; the
-budget never resets during the command. Ctrl+C stops the command, including
-while waiting between attempts.
+budget never resets during the command. The new session starts at the host's
+default source. Ctrl+C stops the command, including while waiting between
+attempts.
 
-Startup/connect failures, authentication/protocol/decode failures observed by
-the viewer, frame-idle and socket timeouts, explicit host Close/SessionClose,
-local X11/clipboard errors, and any incomplete local cleanup never retry. Sender-side failures also stop conservatively,
+This network-loss retry budget excludes startup/connect failures,
+authentication/protocol/decode failures observed by the viewer, frame-idle and
+socket timeouts, explicit host Close/SessionClose, local X11/clipboard errors,
+and any incomplete local cleanup. Sender-side failures also stop conservatively,
 even when the underlying cause might be network loss. Closing the viewer never
 retries. Using Ctrl+Super+F12 (or the configured escape shortcut) still only
 releases the grab; it also disables reconnect for that session so a later drop
@@ -418,12 +439,15 @@ rejections and identity/authentication failures do not silently retry or
 downgrade. Every replacement connection repeats normal permission negotiation.
 A bare EOF/reset is ambiguous: it can also result from a host failure whose
 best-effort terminal record could not be delivered. Client cleanup certification
-does not prove the host stopped only because of network loss. A fresh connection reapplies an explicit `--window-size`, if supplied, but does
-not restore observed window geometry or clipboard transfer progress. SSH and saved profile runs never reconnect automatically;
-nonzero reconnect consent cannot be saved in a profile.
+does not prove the host stopped only because of network loss. A fresh connection
+reapplies an explicit `--window-size`, if supplied, but does not restore
+observed window geometry or clipboard transfer progress. The network-loss retry
+budget applies to the current `connect` command.
 
 Offline tests cover classification, budgets, cleanup and a loopback EOF path.
-Live X11 reconnection and two-machine network-loss acceptance remain unverified.
+With `connect --toggle`, pressing the same shortcut during backoff cancels
+the pending attempt. An isolated X11 test exercised a live viewer through
+transport loss, automatic reconnect, and cancellation during backoff.
 
 ### Short real-machine acceptance checklist (not run by offline tests)
 
@@ -817,6 +841,9 @@ jwm-remote connect 192.168.1.50:48221 \
   --grab-input
 ```
 
+With a hardware-enabled build on both machines, this connection can select
+HEVC 4:4:4 or H.264 automatically. [Automatic hardware video](#automatic-hardware-video)
+
 With `--grab-input`, click inside the viewer before using JWM shortcuts. Press
 **Ctrl+Super+F12** (Super is the Win key) to release the local keyboard/pointer
 grab and every remotely held key/button. This matches JWM's default shortcut
@@ -838,6 +865,99 @@ jwm-remote connect 192.168.1.50:48221 \
   --key-file ~/.config/jwm/remote.key \
   --view-only
 ```
+
+### Super+R for bidirectional LAN control
+
+Run a `jwm-remote host` and configure a viewer shortcut on each X11 machine.
+The example pairs `alice@192.0.2.10` with `bob@192.0.2.20`. Use your own LAN
+addresses, login names, home directories, and monitor names.
+
+On each machine, generate its own inbound key once.
+
+```bash
+install -d -m 700 "$HOME/.config/jwm/lan-peers"
+jwm-remote keygen --output "$HOME/.config/jwm/lan-peers/listen.key"
+```
+
+Copy each machine's `listen.key` to the other machine as `peer.key`. For the
+first setup, run the corresponding pair of commands on each machine.
+
+```bash
+# On Alice's machine
+scp -p bob@192.0.2.20:.config/jwm/lan-peers/listen.key "$HOME/.config/jwm/lan-peers/peer.key"
+chmod 600 "$HOME/.config/jwm/lan-peers/peer.key"
+
+# On Bob's machine
+scp -p alice@192.0.2.10:.config/jwm/lan-peers/listen.key "$HOME/.config/jwm/lan-peers/peer.key"
+chmod 600 "$HOME/.config/jwm/lan-peers/peer.key"
+```
+
+Save this example as `~/.config/systemd/user/jwm-remote-lan.service` on each
+machine. Bind to that machine's own LAN address and scope the firewall rule
+for TCP port `48221` to the peer. Use the installed absolute path to
+`jwm-remote` and a local monitor name from `xrandr --listmonitors`. Omit
+`--monitor DP-0` to share the entire X11 desktop.
+
+```ini
+[Unit]
+Description=JWM Remote LAN host
+StartLimitIntervalSec=0
+
+[Service]
+ExecStart=/usr/local/bin/jwm-remote host --display auto --listen 192.0.2.10:48221 --key-file %h/.config/jwm/lan-peers/listen.key --allow-lan --allow-input --allow-clipboard --monitor DP-0
+Restart=on-failure
+RestartSec=3s
+
+[Install]
+WantedBy=default.target
+```
+
+Enable the service on both machines. The host discovers the running JWM X11
+session and retries startup if the display or LAN address is unavailable.
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now jwm-remote-lan.service
+```
+
+In each `config_x11.toml`, add or replace the `Super+R` binding. On Alice's
+machine it points at Bob's address and uses Alice's absolute path to the
+copied `peer.key`. Reverse the addresses and use Bob's key path for his binding.
+
+```toml
+[[keybindings.keys]]
+modifier = ["Mod4"]
+key = "r"
+function = "spawn"
+argument = ["/usr/local/bin/jwm-remote", "connect", "192.0.2.20:48221", "--toggle", "--key-file", "/home/alice/.config/jwm/lan-peers/peer.key", "--grab-input", "--seamless-input=click", "--clipboard", "--reconnect-attempts", "2", "--notify"]
+
+[[keybindings.keys]]
+modifier = ["Mod4", "Shift"]
+key = "r"
+function = "spawn"
+argument = ["/usr/local/bin/jwm-remote", "connect", "192.0.2.20:48221", "--toggle", "--next-source", "--key-file", "/home/alice/.config/jwm/lan-peers/peer.key", "--grab-input", "--seamless-input=click", "--clipboard", "--reconnect-attempts", "2", "--notify"]
+```
+
+With `--toggle`, the first press starts the direct viewer. Press `Super+R`
+again to cancel startup or close the viewer and release remote input. The
+viewer handles the shortcut locally while it holds the keyboard. The slot
+belongs to this endpoint on the local X11 screen.
+
+Add `--share-monitor DP-2` to the host service's `ExecStart` to make another
+display available. Run `systemctl --user daemon-reload` and restart that host
+service after editing it. `Super+Shift+R` brings the direct viewer forward
+and cycles through the shared displays in the same window and connection.
+From a closed viewer it opens the next display after the default. With one
+shared display it opens or focuses that display. During a switch, the viewer
+releases held remote keys and buttons, shows the destination in its title,
+and waits for the new image before accepting input again.
+With hardware video, a switch between matching coded dimensions reuses the
+encoder and decoder. A fresh IDR picture starts the new source and the viewer
+discards the old decoder's reference pictures before drawing it.
+
+Click the remote image to take control. Move out of the image or press
+**Ctrl+Super+F12** to release it. Both sides opt in to clipboard sharing via
+`--allow-clipboard` on the host and `--clipboard` on the viewer. [Clipboard sharing](#clipboard-sharing)
 
 ## Tuning and troubleshooting
 
@@ -1197,6 +1317,9 @@ In the viewer, **Ctrl+Super+Shift+F12** cycles the granted sources, including in
 view-only mode. With `--escape-key Pause`, use Ctrl+Super+Shift+Pause instead.
 The shortcut stays local, releases input grabs, and holds input until the new
 source's frame arrives. Ordinary Ctrl+Super+F12 still releases control.
+The direct X11 viewer in toggle mode also handles **Super+Shift+R** locally
+while it holds input. Use `connect HOST --toggle --next-source` from a
+window-manager binding to cycle or open that same viewer regardless of focus.
 
 Grants are immutable for the session. Switching selects only an existing ID;
 it cannot broaden sharing, clipboard permission, or input permission. Source
@@ -1628,7 +1751,7 @@ jwm-remote: capture mode now overlay/cpu-resize/shm/damage/cursor-events
 ```
 
 The healthy reading is `overlay/xrender/shm/damage/cursor-events`, or
-`overlay/cpu-resize/core-getimage/damage/cursor-events` on NVIDIA's proprietary driver
+`overlay/cpu-resize/shm/damage/cursor-events` on NVIDIA's proprietary driver
 (see [Half-drawn frames on NVIDIA](#half-drawn-frames-on-nvidia)). Each field
 names its fallback explicitly rather than disappearing, so a degraded session
 is obvious at a glance: `root`, `cpu-resize`, `core-getimage`, `no-damage`,
@@ -1702,9 +1825,11 @@ part of the capture call:
   including repeated validation within an attempt.
 - `core_readback_ms` starts at the core X11 `GetImage` request and ends at
   its synchronous reply. It covers both X server wait and data transfer.
+- `shm_readback_ms` covers the direct MIT-SHM `GetImage` request through
+  its reply. The image data is already in the mapped segment at that point.
 - `pixel_conversion_ms` covers layout validation and conversion of the
-  core readback reply to RGB. Both readback and conversion timings apply
-  to the direct software capture path.
+  direct core or SHM readback to RGB. Older telemetry may omit
+  `shm_readback_ms` and samples for SHM conversion.
 - `cpu_resize_ms` covers CPU resizing when a frame uses that path.
 
 Each stage sums its measured spans into one observation per capture
@@ -1744,11 +1869,11 @@ more often than a periodic screen grab would. Measured on an RTX 4090 D
 XRender; 0 through a core `GetImage`, which the driver synchronizes with GL
 rendering; 0 in 2,700 frames of ffmpeg recording the host's screen directly.
 
-`--scaling auto`, the default on `host`, `connect`, and `ssh`, selects compatibility
-paths for this previously measured failure. On the host, it reads the screen with core `GetImage`
-(not MIT-SHM `GetImage`)
-and shrinks it on the CPU when the X server has the `NV-GLX` or `NV-CONTROL`
-extension, and says so at session start. The CPU path averages each output
+`--scaling auto`, the default on `host`, `connect`, and `ssh`, uses direct
+readback and CPU scaling on X servers with `NV-GLX` or `NV-CONTROL`.
+The host reads the source drawable through MIT-SHM 1.2 when supported.
+If SHM is unavailable or fails and core readback succeeds, it uses core
+`GetImage`. The CPU path averages each output
 pixel's source area across threads; it took the place of a generic filter
 that cost about 90 ms per 2560x1440 frame. On the same loaded desktop the
 corrected path captured at about 152 ms per frame against 117 ms through
@@ -1756,13 +1881,11 @@ XRender, both dominated by waiting for the GPU. On the viewer, `--scaling auto`
 disables XRender upscaling on NVIDIA systems, performing high-quality multi-threaded
 CPU upscaling instead. This does not disable viewer SHM uploads or the cursor renderer,
 and is not a guarantee against every source of top-edge noise. `--scaling gpu` restores
-XRender for anyone who prefers that speed and does not see the artifacts;
-`--scaling cpu` forces the direct CPU path elsewhere. On the host, CPU mode and
-NVIDIA Auto also skip SHM segment creation, including after viewport or capture-area
-changes. Older implementations disabled XRender but still attempted MIT-SHM; that
-was not the same readback path as the core-GetImage measurement above. Software
-Xvfb regressions now check actual core/SHM requests and codec-to-display top-edge
-pixels. They do not reproduce or certify a physical NVIDIA driver.
+XRender for anyone who prefers that speed and does not see the artifacts.
+On the host, `--scaling cpu` forces direct core `GetImage` plus CPU scaling.
+Software Xvfb regressions check actual core and SHM requests after viewport,
+frame-limit, and capture-area changes. Another regression checks top-edge
+pixels through encoding, transport, and drawing.
 
 - A black/invalid Composite overlay can be bypassed with
   `--capture-source root`. Root capture is a compatibility fallback and may
@@ -1786,8 +1909,8 @@ pixels. They do not reproduce or certify a physical NVIDIA driver.
   shown through the negotiated independent plane or composited-video fallback; the viewer cursor is transparent during ordinary input
   forwarding and an active grab, while view-only and released-grab windows keep
   a visible local cursor; the rest of the client desktop is never affected;
-- video uses JPEG tiles or automatic hardware video over SSH. Clipboard
-  sharing covers text, images and files;
+- video uses JPEG tiles or automatic hardware video over SSH and direct X11
+  connections. Clipboard sharing covers text, images and files;
 - video uses cumulative display acknowledgements, at most two unacknowledged
   frames, and one latest queued frame; persistently slow viewers therefore
   reduce capture/encode/network work instead of accumulating stale video;
@@ -1887,6 +2010,10 @@ permissions. Replacing a name needs `profile save NAME --replace -- ssh ...`.
 before `run`. The saved `connect`/`ssh` defaults match those commands: input is
 permitted unless `--view-only` is present; clipboard is off unless `--clipboard`
 was explicitly saved. Use `--view-only` when saving a viewing-only profile.
+
+Saved direct X11 and SSH profiles use automatic codec selection. The `--jpeg`
+override is for a single `connect` or `ssh` command. Saving a profile with
+`--jpeg` is rejected.
 
 Supported settings include the address/SSH alias, monitor selection for SSH,
 local display, input mode, grab-release keysym, clipboard consent and file limit.
@@ -1999,6 +2126,8 @@ No horizontal/smooth scroll, drag, new input permission, or lease extension is a
 
 `jwm-remote host --scroll-copy` explicitly enables a CPU tile-codec optimization.
 It is off by default and is not saved in profiles or implicitly enabled by SSH.
+For direct viewers, `jwm-remote connect HOST --jpeg` advertises support for
+copy deltas in the JPEG stream profile.
 The flag grants **no input permission**: `--allow-wayland-scroll` remains a
 separate, explicitly authorized single-notch input capability.
 

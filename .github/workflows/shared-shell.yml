@@ -15,6 +15,7 @@ on:
       - 'bars/tao_glow_bar/**'
       - 'bridge/src/player/**'
       - 'scripts/test-shared-sidebar-shell-x11.py'
+      - 'scripts/test-shared-xvfb-startup.py'
       - 'scripts/test-shared-sidebar-shell-daemon.py'
       - 'scripts/test-daemon-stderr-evidence.py'
       - 'scripts/test-daemon-native-log-evidence.py'
@@ -47,6 +48,7 @@ on:
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'scripts/*shared*shell*'
+      - 'scripts/test-shared-xvfb-startup.py'
       - 'scripts/test-daemon-stderr-evidence.py'
       - 'scripts/test-daemon-native-log-evidence.py'
       - 'scripts/fixtures/daemon_native_log.py'
@@ -84,6 +86,8 @@ jobs:
           python3 scripts/test-daemon-restart-cycles.py
       - name: Test bounded passive frontend failure evidence
         run: python3 scripts/test_frontend_failure_evidence.py
+      - name: Verify private Xvfb startup diagnostics
+        run: python3 scripts/test-shared-xvfb-startup.py
       - id: inventory
         run: |
           python3 - <<'PY' >> "$GITHUB_OUTPUT"

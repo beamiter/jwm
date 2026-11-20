@@ -160,7 +160,8 @@ def main():
             with log_path.open('w') as log:
                 status = subprocess.run(command, cwd=ROOT, env=env, stdout=log, stderr=log).returncode
             fixture = evidence_dir / f'{name}-{backend}-1280x800-light'
-            raw = [log_path, fixture / 'result.json', fixture / 'session.log']
+            raw = [log_path, fixture / 'result.json', fixture / 'session.log',
+                   fixture / 'xvfb-startup.json', fixture / 'xvfb.stdout.log', fixture / 'xvfb.stderr.log']
             runtime_binaries = [artifact(path) for path in
                                 (binary, args.bin_dir / 'jwm', args.bin_dir / 'jwm-tool', args.shell_bin)
                                 if path.is_file()]

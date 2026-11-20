@@ -35,6 +35,64 @@ FIXTURE_SHA256 = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
 
 
 
+def start_private_xvfb(spawn, width, height, evidence, observed, *, ready_timeout=10):
+    """Read only the private Xvfb displayfd; keep the pre-product evidence."""
+    started = time.monotonic()
+    ready_started = None
+    child = None
+    read_fd = write_fd = None
+    number = bytearray()
+    observed.update(phase="pipe-setup", stdout="xvfb.stdout.log", stderr="xvfb.stderr.log",
+                    readiness_timeout_seconds=ready_timeout)
+    try:
+        read_fd, write_fd = os.pipe()
+        observed["phase"] = "spawn"
+        # Regular files cannot block displayfd readiness the way undrained
+        # stdout/stderr pipes could. Keep them after the fixture's child cleanup.
+        with (evidence / observed["stdout"]).open("wb") as stdout, \
+                (evidence / observed["stderr"]).open("wb") as stderr:
+            child = spawn("Xvfb", "-displayfd", write_fd, "-screen", "0", f"{width}x{height}x24",
+                          "-nolisten", "tcp", "-noreset", pass_fds=(write_fd,),
+                          stdout=stdout, stderr=stderr)
+        observed["child_pid"] = child.pid
+        os.close(write_fd)
+        write_fd = None
+        ready_started = time.monotonic()
+        deadline = ready_started + ready_timeout
+        observed["phase"] = "waiting-displayfd"
+        while b"\n" not in number:
+            if not select.select([read_fd], [], [], max(0, deadline - time.monotonic()))[0]:
+                observed["phase"] = "displayfd-timeout"
+                raise TimeoutError("Xvfb readiness: display number not received before deadline")
+            chunk = os.read(read_fd, 32)
+            if not chunk:
+                observed["phase"] = "displayfd-eof"
+                raise RuntimeError("Xvfb readiness: pipe closed before a complete display number")
+            number.extend(chunk)
+            if len(number) > 32:
+                observed["phase"] = "displayfd-invalid"
+                raise RuntimeError("Xvfb readiness: unexpected displayfd payload length")
+        if not re.fullmatch(rb"[0-9]+\n", number):
+            observed["phase"] = "displayfd-invalid"
+            raise RuntimeError("Xvfb readiness: invalid display number")
+        display = ":" + number[:-1].decode("ascii")
+        observed.update(phase="ready", display=display)
+        return display
+    finally:
+        boundary = time.monotonic()
+        # Observe child state before the parent closes the reader: a later
+        # server write error need not explain why it missed this boundary.
+        observed.update(elapsed_ms=round(1000 * (boundary - started), 3),
+                        displayfd_wait_ms=None if ready_started is None else
+                        round(1000 * (boundary - ready_started), 3),
+                        displayfd_bytes=len(number),
+                        child_returncode_at_boundary=None if child is None else child.poll())
+        for fd in (read_fd, write_fd):
+            if fd is not None:
+                os.close(fd)
+        (evidence / "xvfb-startup.json").write_text(json.dumps(observed, indent=2) + "\n")
+
+
 def player_reuse_observation(windows):
     """Bound diagnostics without copying titles, paths, or arbitrary metadata."""
     return {"window_count": len(windows),
@@ -144,6 +202,7 @@ def main():
     started_at = time.time()
     started = time.monotonic()
     children = []
+    xvfb_startup = {}
     launched_application = None
     service_identities = []
     with tempfile.TemporaryDirectory(prefix="jwm-shared-shell-") as directory:
@@ -217,8 +276,8 @@ def main():
             return subprocess.check_output(list(map(str, argv)), env=env, text=True,
                                            stderr=subprocess.STDOUT, timeout=15)
 
-        def spawn(*argv, **kwargs):
-            process = subprocess.Popen(list(map(str, argv)), env=env, stdout=log, stderr=log,
+        def spawn(*argv, stdout=log, stderr=log, **kwargs):
+            process = subprocess.Popen(list(map(str, argv)), env=env, stdout=stdout, stderr=stderr,
                                        start_new_session=True, **kwargs)
             children.append(process)
             return process
@@ -728,24 +787,7 @@ def main():
             if args.deep and args.second_bar != args.bar:
                 assert second_bin.is_file(), second_bin
                 (work / "bin" / args.second_bar).symlink_to(second_bin)
-            read_fd, write_fd = os.pipe()
-            try:
-                spawn("Xvfb", "-displayfd", write_fd, "-screen", "0", f"{width}x{height}x24",
-                      "-nolisten", "tcp", "-noreset", pass_fds=(write_fd,))
-                os.close(write_fd)
-                write_fd = None
-                number = bytearray()
-                deadline = time.monotonic() + 10
-                while b"\n" not in number:
-                    assert select.select([read_fd], [], [], max(0, deadline - time.monotonic()))[0], "Xvfb readiness"
-                    chunk = os.read(read_fd, 32)
-                    assert chunk, "Xvfb closed its readiness pipe"
-                    number.extend(chunk)
-                env["DISPLAY"] = ":" + number.decode().strip()
-            finally:
-                os.close(read_fd)
-                if write_fd is not None:
-                    os.close(write_fd)
+            env["DISPLAY"] = start_private_xvfb(spawn, width, height, evidence, xvfb_startup)
             run(args.bin_dir / "jwm", "--backend", args.backend, "--gen-config")
             config = work / "config/jwm/config_x11.toml"
             text = config.read_text()
@@ -1251,6 +1293,12 @@ def main():
                             process.wait(timeout=20)
                         except subprocess.TimeoutExpired:
                             cleanup_errors.append({"pid": process.pid, "command": list(map(str, process.args))})
+            if xvfb_startup:
+                xvfb = next((p for p in children if p.pid == xvfb_startup.get("child_pid")), None)
+                result["xvfb_startup"] = {
+                    **xvfb_startup,
+                    "child_returncode_after_cleanup": None if xvfb is None else xvfb.returncode,
+                }
             try:
                 mount_cleanup = release_private_gvfs_mount(work)
                 if mount_cleanup:

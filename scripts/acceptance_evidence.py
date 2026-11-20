@@ -4,6 +4,8 @@
 `record` binds an actual runner's result/logs to source, executable and config.
 `audit` detects changed dependencies and missing/replaced evidence, retaining
 historical results. `release` additionally enforces physical GPU and soak gates.
+`daily` checks a separate daily-driver matrix without waivers or promotion of
+isolated evidence to physical evidence.
 No command starts/stops the user's display, services, or applications.
 """
 
@@ -11,14 +13,41 @@ import argparse
 import datetime as dt
 import hashlib
 import json
+import math
+import os
 import platform
 from pathlib import Path
+import stat
 import subprocess
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 LEVELS = ("compiled", "runnable", "isolated", "physical")
 STATUSES = ("pass", "fail", "skip")
+
+DAILY_CASES = (
+    ("compositor-isolated", "isolated", "wayland-nested", 0,
+     "Owned compositor: map, focus, switch tag, capture, and cleanly exit."),
+    ("session-host-isolated", "isolated", "host", 0,
+     "Private session bus and portal host: request/reply, cancel, cleanup."),
+    ("login-upgrade", "physical", "wayland-udev", 1,
+     "Fresh isolated login on the installed candidate; verify actual executable and config."),
+    ("rollback", "physical", "wayland-udev", 1,
+     "Return to the known-good install and login again; verify the new session's identity."),
+    ("dual-output-hotplug", "physical", "wayland-udev", 2,
+     "Two physical outputs; reconnect one and verify geometry, focus and input recovery."),
+    ("dual-output-suspend", "physical", "wayland-udev", 2,
+     "Suspend/resume with two outputs; verify layout, keyboard, pointer and lock recovery."),
+    ("mixed-scale", "physical", "wayland-udev", 2,
+     "Two unequal effective Wayland output scales; verify interactive pointer and visual geometry across both."),
+    ("ime", "physical", "wayland-udev", 1,
+     "Real IME: candidate choice and committed text across native apps and a focus change."),
+    ("portal", "physical", "wayland-udev", 1,
+     "Real desktop portal client: share only the selected source, cancel and close."),
+    ("basic-app", "physical", "wayland-udev", 1,
+     "Launch, focus, type, copy/paste, switch tag, minimize/restore and close a real app."),
+)
+DAILY_DEPENDENCIES = {"src", "Cargo.toml", "Cargo.lock"}
 
 
 def digest(path):
@@ -205,6 +234,212 @@ def release_gate(records, root=ROOT, waivers=None):
     }
 
 
+def _finite(value):
+    return type(value) in (int, float) and math.isfinite(value)
+
+
+def _logical_numbers(values, count):
+    return (
+        isinstance(values, list) and len(values) == count
+        and all(_finite(value) for value in values)
+    )
+
+
+def _logical_rect(value):
+    if not _logical_numbers(value, 4):
+        return None
+    x, y, width, height = value
+    if width <= 0 or height <= 0:
+        return None
+    right, bottom = x + width, y + height
+    if not _finite(right) or not _finite(bottom) or right <= x or bottom <= y:
+        return None
+    return x, y, right, bottom
+
+
+def _contains(rect, point):
+    x, y, right, bottom = rect
+    return x <= point[0] < right and y <= point[1] < bottom
+
+
+def mixed_scale_reasons(record, output_names):
+    """Check the structure of an observed trace, not the truth of its measurements."""
+    trace_path = record["hardware"].get("mixed_scale_trace")
+    raw = {item["path"]: item["sha256"] for item in record["raw_evidence"]}
+    if not isinstance(trace_path, str) or trace_path not in raw:
+        return ["mixed-scale requires a hashed trace in raw_evidence"]
+    # The general audit checked the path and hash already. Reopening must not
+    # block or read a device if the trace path changed since that check.
+    fd = os.open(trace_path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return ["mixed-scale trace must be a regular file"]
+        with os.fdopen(fd, "rb", closefd=False) as stream:
+            payload = stream.read(65537)
+    finally:
+        os.close(fd)
+    if len(payload) > 65536:
+        return ["mixed-scale trace exceeds 64 KiB"]
+    if hashlib.sha256(payload).hexdigest() != raw[trace_path]:
+        return ["mixed-scale trace no longer matches raw_evidence"]
+    try:
+        trace = json.loads(payload)
+        if (
+            trace.get("format") != "jwm-mixed-scale-v1"
+            or trace.get("protocol") != "zwlr_output_manager_v1"
+        ):
+            return ["mixed-scale requires an observed Wayland output-management trace"]
+        heads = trace.get("heads")
+        if not isinstance(heads, list) or len(heads) != 2:
+            return ["mixed-scale requires two protocol-observed output heads"]
+
+        layout = {}
+        scales = []
+        for head in heads:
+            name = head["name"]
+            scale = head["effective_scale"]
+            rect = _logical_rect(head["logical_rect"])
+            if not isinstance(name, str) or name not in output_names or name in layout:
+                return ["mixed-scale protocol heads must match two distinct physical outputs"]
+            if not _finite(scale) or scale <= 0:
+                return ["mixed-scale effective scales must be finite positive numbers"]
+            if rect is None:
+                return ["mixed-scale protocol heads need valid logical output rectangles"]
+            layout[name] = rect
+            scales.append(scale)
+        if scales[0] == scales[1]:
+            return ["mixed-scale effective scales must differ"]
+
+        samples = trace.get("pointer_visual_samples")
+        if not isinstance(samples, list) or len(samples) != 2:
+            return ["mixed-scale requires before/after cross-output pointer and visual samples"]
+        visited = set()
+        captures = set()
+        capture_hashes = set()
+        for sample in samples:
+            name = sample["output"]
+            if name not in layout or name in visited:
+                return ["mixed-scale pointer must cross between the two protocol heads"]
+            visited.add(name)
+            other = next(rect for key, rect in layout.items() if key != name)
+            point = sample["pointer_logical"]
+            rect = _logical_rect(sample["visual_target_logical_rect"])
+            x, y, right, bottom = layout[name]
+            if (
+                sample.get("input_event") != "wl_pointer.enter"
+                or not _logical_numbers(point, 2) or rect is None
+                or not _contains(layout[name], point)
+                or _contains(other, point)
+                or not _contains(rect, point)
+                or not (x <= rect[0] < rect[2] <= right and y <= rect[1] < rect[3] <= bottom)
+            ):
+                return ["mixed-scale pointer and observed visual target do not agree with output geometry"]
+            capture = sample["visual_evidence"]
+            if not isinstance(capture, str) or capture == trace_path or capture not in raw or capture in captures:
+                return ["mixed-scale samples require separate hashed visual evidence for both outputs"]
+            if raw[capture] in capture_hashes:
+                return ["mixed-scale requires different visual artifact bytes across outputs"]
+            captures.add(capture)
+            capture_hashes.add(raw[capture])
+    except (AttributeError, KeyError, OverflowError, RecursionError, TypeError, ValueError):
+        return ["malformed mixed-scale trace"]
+    return []
+
+
+def daily_gate(records, root=ROOT):
+    """Require each case at its own level; evidence metadata is not attestation."""
+    known = {case for case, *_ in DAILY_CASES}
+    rows = []
+    for case, level, backend, output_count, checklist in DAILY_CASES:
+        attempts = []
+        for record in records:
+            if record.get("case") != case:
+                continue
+            status = record.get("status")
+            scope = (record.get("level"), record.get("backend"))
+            reasons = []
+            if scope != (level, backend):
+                state = "wrong-scope"
+                reasons.append(f"requires {level}/{backend}")
+            elif status == "skip" and isinstance(record.get("reason"), str) and record["reason"].strip():
+                state = "skipped"
+                reasons.append(record["reason"])
+            elif status == "fail":
+                state = "failed"
+                reasons.append(record.get("reason") or "failure had no reason")
+            else:
+                try:
+                    reasons.extend(audit(record, root)["invalidated_by"])
+                    provenance = record.get("provenance", {})
+                    dependencies = provenance.get("dependency_sha256", {})
+                    if not DAILY_DEPENDENCIES.issubset(dependencies):
+                        reasons.append("must fingerprint src, Cargo.toml and Cargo.lock")
+                    if set(provenance.get("dependencies", ())) != set(dependencies):
+                        reasons.append("dependency list and fingerprint keys must agree")
+                    if not record.get("configs"):
+                        reasons.append("no tested config identity")
+                    if output_count:
+                        hardware = record.get("hardware", {})
+                        outputs = hardware.get("outputs", [])
+                        names = {
+                            item["name"].strip()
+                            for item in outputs
+                            if isinstance(item, dict)
+                            and isinstance(item.get("name"), str)
+                            and item["name"].strip()
+                            and isinstance(item.get("mode"), str)
+                            and item["mode"].strip()
+                        }
+                        vendor = hardware.get("gpu_vendor", "")
+                        driver = hardware.get("driver", "")
+                        if (
+                            not isinstance(vendor, str)
+                            or vendor.lower() not in ("intel", "amd", "nvidia")
+                            or not isinstance(driver, str)
+                            or not driver.strip()
+                            or hardware.get("software_renderer") is not False
+                            or not isinstance(outputs, list)
+                            or len(names) < output_count
+                        ):
+                            reasons.append(
+                                "requires a physical GPU/driver, software_renderer=false, "
+                                f"and {output_count} distinct physical output(s) with modes"
+                            )
+                        elif case == "mixed-scale" and not reasons:
+                            reasons.extend(mixed_scale_reasons(record, names))
+                except (AttributeError, KeyError, OSError, TypeError, ValueError):
+                    reasons.append("malformed or unreadable evidence")
+                if status != "pass":
+                    reasons.append("expected pass or fail/skip with a reason")
+                state = "invalid" if reasons else "passed"
+            attempts.append({
+                "reported_status": status, "level": scope[0], "backend": scope[1],
+                "state": state, "reasons": reasons,
+            })
+        states = {attempt["state"] for attempt in attempts}
+        # A pass cannot hide a failure or stale pass supplied for the same scope.
+        state = next(
+            (value for value in ("failed", "invalid", "passed", "skipped", "wrong-scope")
+             if value in states),
+            "missing",
+        )
+        rows.append({
+            "case": case, "level": level, "backend": backend, "checklist": checklist,
+            "state": state, "attempts": attempts,
+        })
+    isolated_ready = all(r["state"] == "passed" for r in rows if r["level"] == "isolated")
+    physical_ready = all(r["state"] == "passed" for r in rows if r["level"] == "physical")
+    return {
+        "daily_ready": isolated_ready and physical_ready,
+        "isolated_ready": isolated_ready,
+        "physical_ready": physical_ready,
+        "cases": rows,
+        "ignored_cases": sorted({
+            str(r.get("case")) for r in records
+            if not isinstance(r.get("case"), str) or r["case"] not in known
+        }),
+    }
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="action", required=True)
@@ -224,9 +459,9 @@ def main():
         help="JSON: GPU/driver/output topology/scenario, optional soak timestamps",
     )
     record.add_argument("--output", type=Path, required=True)
-    for action in ("audit", "release"):
+    for action in ("audit", "release", "daily"):
         child = sub.add_parser(action)
-        child.add_argument("records", type=Path, nargs="+")
+        child.add_argument("records", type=Path, nargs="*" if action == "daily" else "+")
         if action == "release":
             child.add_argument(
                 "--waive",
@@ -273,7 +508,16 @@ def main():
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps(data, indent=2) + "\n")
         return 0
-    records = [json.loads(path.read_text()) for path in args.records]
+    try:
+        records = [json.loads(path.read_text()) for path in args.records]
+    except (OSError, ValueError) as error:
+        parser.error(f"cannot read evidence: {error}")
+    if any(not isinstance(item, dict) for item in records):
+        parser.error("evidence records must be JSON objects")
+    if args.action == "daily":
+        result = daily_gate(records)
+        print(json.dumps(result, indent=2))
+        return int(not result["daily_ready"])
     if args.action == "release":
         if args.waive and not args.waiver_reason:
             parser.error(

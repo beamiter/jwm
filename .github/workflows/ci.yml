@@ -429,6 +429,11 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Verify Portal installer and Debian package offline
+        run: |
+          bash scripts/test-install-portal.sh
+          bash scripts/test-package-portal-metadata.sh
+
       - name: Install Linux build dependencies
         timeout-minutes: 10
         run: |
@@ -480,7 +485,8 @@ jobs:
         working-directory: portal
         run: cargo test --locked --all-targets
 
-      - name: Test stream lifecycle against a private PipeWire daemon
+      - name: Test stream lifecycle and SHM pixels against a private PipeWire daemon
+        timeout-minutes: 3
         run: bash scripts/test-portal-pipewire.sh
 
   bridge:
@@ -503,6 +509,8 @@ jobs:
       # Bound mirror stalls without changing repositories or skipping native tests.
       - name: Install D-Bus and playback test tools
         timeout-minutes: 10
+        env:
+          JWM_CI_BRIDGE_DOWNLOAD_RETRY: "1"
         run: |
           bash scripts/ci-install-deps.sh dbus mpv ffmpeg
 

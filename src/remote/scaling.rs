@@ -12,16 +12,16 @@ pub enum ScalingPolicy {
     Auto,
     /// Always use XRender scaling in the X server.
     Gpu,
-    /// Always scale on the CPU.
+    /// Force CPU scaling and the host's core X11 readback.
     Cpu,
 }
 
 impl ScalingPolicy {
-    /// Host compatibility readback uses core GetImage, not MIT-SHM. This
-    /// preserves the tested core path; it does not diagnose SHM as faulty.
+    /// Explicit compatibility mode also forces the host's core GetImage.
+    /// Automatic CPU scaling can still use direct MIT-SHM readback.
     #[must_use]
-    pub(crate) fn requires_core_readback(self, nvidia_driver: bool) -> bool {
-        matches!(self, Self::Cpu) || (self == Self::Auto && nvidia_driver)
+    pub(crate) fn requires_core_readback(self) -> bool {
+        self == Self::Cpu
     }
 
     #[must_use]
@@ -92,11 +92,11 @@ mod tests {
             (ScalingPolicy::Cpu, false, true),
             (ScalingPolicy::Cpu, true, true),
             (ScalingPolicy::Auto, false, false),
-            (ScalingPolicy::Auto, true, true),
+            (ScalingPolicy::Auto, true, false),
             (ScalingPolicy::Gpu, false, false),
             (ScalingPolicy::Gpu, true, false),
         ] {
-            assert_eq!(policy.requires_core_readback(nvidia), core);
+            assert_eq!(policy.requires_core_readback(), core);
             if core {
                 assert!(!policy.allows_gpu(nvidia));
             }
