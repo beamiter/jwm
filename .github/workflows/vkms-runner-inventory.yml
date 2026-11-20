@@ -34,7 +34,7 @@ jobs:
           printf '%s\n' "$release" > evidence/kernel.txt
           command -v modinfo > evidence/modinfo-path.txt || true
           /usr/bin/python3 -I - <<'PY'
-          import json, os, re, shutil, subprocess
+          import contextlib, fcntl, json, os, re, shutil, stat, subprocess
           from pathlib import Path
           release = os.uname().release
           root = Path("/lib/modules", release)
@@ -64,6 +64,53 @@ jobs:
               rec["recommendation"] = "module present, but exclusive disposable device ownership not established"
           else:
               rec["recommendation"] = "module file present; load, seatd, Mesa and JWM remain unverified"
+          # Linux x86_64 uapi/linux/kvm.h _IO requests. No run, emulation,
+          # device permission changes, group changes, module loading or sudo.
+          kvm = {"phase": "open", "api": None, "created_vm": False, "created_vcpu0": False}
+          try:
+              if os.geteuid() == 0 or rec["machine"] != "x86_64":
+                  raise RuntimeError("probe requires an unprivileged x86_64 runner")
+              with contextlib.ExitStack() as close:
+                  dev = os.open("/dev/kvm", os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW)
+                  close.callback(os.close, dev)
+                  st = os.fstat(dev)
+                  if not stat.S_ISCHR(st.st_mode) or (os.major(st.st_rdev), os.minor(st.st_rdev)) != (10, 232):
+                      raise RuntimeError("unexpected /dev/kvm node type or device number")
+                  kvm["phase"] = "api"
+                  kvm["api"] = fcntl.ioctl(dev, 0xAE00, 0)
+                  if kvm["api"] != 12:
+                      raise RuntimeError("unexpected KVM API version")
+                  kvm["phase"] = "create-vm"
+                  vm = fcntl.ioctl(dev, 0xAE01, 0)
+                  close.callback(os.close, vm)
+                  kvm["created_vm"] = True
+                  kvm["phase"] = "create-vcpu0"
+                  cpu = fcntl.ioctl(vm, 0xAE41, 0)
+                  close.callback(os.close, cpu)
+                  kvm["created_vcpu0"] = True
+                  kvm["phase"] = "complete"
+          except (OSError, RuntimeError) as e:
+              kvm["error"] = str(e)
+              if isinstance(e, OSError):
+                  kvm["errno"] = e.errno
+          rec["kvm_api_probe"] = kvm
+          def can_read_one(path):
+              try:
+                  with path.open("rb") as stream:
+                      return bool(stream.read(1))
+              except OSError:
+                  return False
+          kernel_image = Path("/boot", f"vmlinuz-{release}")
+          rec["exact_boot_kernel_image"] = {"path": str(kernel_image), "readable": can_read_one(kernel_image)}
+          rec["running_vkms_module_readable"] = verified and can_read_one(Path(rec["modinfo"]["output"].strip()))
+          rec["modules_dependency_index_readable"] = any(can_read_one(root / name) for name in ("modules.dep.bin", "modules.dep"))
+          rec["guest_launch_not_attempted"] = True
+          if not kvm["created_vcpu0"]:
+              rec["guest_next_gate"] = "KVM unavailable to the unprivileged runner; do not change permissions or fall back"
+          elif not rec["exact_boot_kernel_image"]["readable"]:
+              rec["guest_next_gate"] = "KVM reached vCPU allocation; exact signed kernel image needs rootless package extraction"
+          else:
+              rec["guest_next_gate"] = "KVM reached vCPU allocation; signed exact kernel/initramfs guest boot still unverified"
           data = json.dumps(rec, indent=2) + "\n"
           Path("evidence/inventory.json").write_text(data)
           print(data)
