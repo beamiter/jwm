@@ -485,7 +485,8 @@ jobs:
         working-directory: portal
         run: cargo test --locked --all-targets
 
-      - name: Test stream lifecycle against a private PipeWire daemon
+      - name: Test stream lifecycle and SHM pixels against a private PipeWire daemon
+        timeout-minutes: 3
         run: bash scripts/test-portal-pipewire.sh
 
   bridge:
