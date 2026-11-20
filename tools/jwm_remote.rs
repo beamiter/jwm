@@ -1,13 +1,13 @@
 //! JWM-to-JWM remote desktop helper for trusted X11 LANs.
 
 use clap::{Args, Parser, Subcommand};
-use jwm::remote::client::{ClientOptions, run_client_reconnecting};
+use jwm::remote::client::{ClientOptions, run_client_reconnecting_with_video_codec};
 use jwm::remote::clipboard_files::{parse_size, staging_root};
 use jwm::remote::clipboard_policy::{ClipboardDirection, ClipboardMode};
 use jwm::remote::clipboard_staging_budget::{self, Status as StagingBudgetStatus};
 use jwm::remote::host::{HostOptions, run_host_with_video_codecs};
 use jwm::remote::key::{KeySource, generate_key_file};
-use jwm::remote::messages::FrameLimits;
+use jwm::remote::messages::{FrameCodec, FrameLimits};
 use jwm::remote::profiles::{Connection, Profile, Store, Viewer};
 use jwm::remote::resumable_control::ControlDuration;
 use jwm::remote::session_env;
@@ -222,7 +222,7 @@ enum Command {
         #[arg(long, default_value = "30", value_parser = parse_fps)]
         fps: u16,
 
-        /// Allow mutually requested NVENC H.264 for an X11 desktop session.
+        /// Limit hardware video to NVENC H.264 unless --allow-hevc444 is also set.
         #[arg(long, conflicts_with_all = ["wayland_select", "window", "scroll_copy", "allow_static_lossless"])]
         allow_h264: bool,
 
@@ -230,9 +230,9 @@ enum Command {
         #[arg(long, requires = "allow_h264")]
         allow_hevc444: bool,
 
-        /// Adaptive quality ceiling; the default floor stays 40 for congestion recovery.
-        #[arg(long, default_value = "85", value_parser = parse_quality)]
-        jpeg_quality: u8,
+        /// JPEG quality ceiling (default 85). Setting it selects JPEG unless hardware is explicitly allowed.
+        #[arg(long, value_parser = parse_quality)]
+        jpeg_quality: Option<u8>,
 
         /// Lowest quality used by ACK-driven adaptation (defaults to min(40, quality)).
         #[arg(
@@ -515,6 +515,10 @@ enum Command {
         #[arg(value_name = "HOST[:PORT]", value_parser = normalize_address)]
         address: String,
 
+        /// Use JPEG for this session instead of automatic hardware video.
+        #[arg(long)]
+        jpeg: bool,
+
         /// Additional attempts after a proven transport drop and clean teardown.
         /// Direct connect only; no retries on startup, escape/close or host refusal.
         #[arg(long, default_value_t = 0, value_parser = clap::value_parser!(u8).range(0..=5))]
@@ -784,6 +788,7 @@ fn profile_from_command(command: Command) -> RemoteResult<Profile> {
             viewer_wayland_display,
             reconnect_attempts,
             address,
+            jpeg,
             key_file,
             display,
             window_size,
@@ -811,6 +816,11 @@ fn profile_from_command(command: Command) -> RemoteResult<Profile> {
             frame_limits,
             scaling,
         } => {
+            if jpeg {
+                return Err(
+                    profile_error("profiles do not store --jpeg; use connect directly").into(),
+                );
+            }
             if wayland_seamless_input || wayland_control_duration.is_some() {
                 return Err(profile_error("Wayland seamless input consent cannot be saved in a profile; use connect directly").into());
             }
@@ -1423,6 +1433,14 @@ fn run(command: Command) -> RemoteResult<()> {
             } else {
                 resolve_host_display(display)?
             };
+            let automatic_video = !wayland_select
+                && window.is_none()
+                && !scroll_copy
+                && !allow_static_lossless
+                && jpeg_quality.is_none()
+                && jpeg_quality_floor.is_none()
+                && !fixed_jpeg_quality;
+            let jpeg_quality = jpeg_quality.unwrap_or(85);
             let jpeg_quality_floor = resolve_quality_floor(jpeg_quality, jpeg_quality_floor)?;
             let capture_area = match (window, monitor, region) {
                 (Some(id), _, _) => CaptureArea::Window(id),
@@ -1471,8 +1489,8 @@ fn run(command: Command) -> RemoteResult<()> {
                     once,
                     stats_json,
                 },
-                allow_h264,
-                allow_hevc444,
+                allow_h264 || automatic_video,
+                allow_hevc444 || (automatic_video && !allow_h264),
             )
         }
         Command::Ssh {
@@ -1530,9 +1548,14 @@ fn run(command: Command) -> RemoteResult<()> {
                 jpeg,
             )
         }
-        command @ Command::Connect { .. } => {
+        command @ Command::Connect { jpeg, .. } => {
             let (options, reconnect_attempts) = connect_options(command)?;
-            run_client_reconnecting(options, reconnect_attempts)
+            let preferred = if jpeg || !cfg!(feature = "remote-h264") {
+                FrameCodec::JpegTiles
+            } else {
+                FrameCodec::Hevc444
+            };
+            run_client_reconnecting_with_video_codec(options, reconnect_attempts, preferred)
         }
     }
 }
@@ -3140,9 +3163,9 @@ mod tests {
         else {
             panic!("host expected")
         };
-        assert_eq!((fps, jpeg_quality, max_width), (30, 85, 0));
+        assert_eq!((fps, jpeg_quality, max_width), (30, None, 0));
         assert_eq!(
-            resolve_quality_floor(jpeg_quality, jpeg_quality_floor).unwrap(),
+            resolve_quality_floor(jpeg_quality.unwrap_or(85), jpeg_quality_floor).unwrap(),
             40
         );
         let Command::Host {
@@ -3165,7 +3188,7 @@ mod tests {
         else {
             panic!("host expected")
         };
-        assert_eq!((fps, jpeg_quality, max_width), (12, 70, 1280));
+        assert_eq!((fps, jpeg_quality, max_width), (12, Some(70), 1280));
     }
 
     #[test]
@@ -4805,6 +4828,7 @@ fn connect_options(command: Command) -> RemoteResult<(ClientOptions, u8)> {
         viewer_wayland_display,
         reconnect_attempts,
         address,
+        jpeg: _,
         key_file,
         display,
         window_size,

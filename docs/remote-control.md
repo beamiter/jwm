@@ -123,7 +123,7 @@ user, including a host with `--allow-input`. The session's traffic is
 encrypted twice. SSH also provides its independently authenticated channel;
 the native transport now has ephemeral forward secrecy of its own.
 
-### Automatic hardware video over SSH
+### Automatic hardware video
 
 Build the helper on both machines with `remote-h264`. This feature uses the
 system FFmpeg development libraries (`libavcodec`, `libavformat`, `libavutil`
@@ -135,14 +135,31 @@ cargo build --locked --release --bin jwm-remote --features remote-h264
 jwm-remote ssh user@desktop --monitor DP-0 --grab-input
 ```
 
-Ordinary SSH sessions probe both peers. When available, HEVC 4:4:4 keeps
-full chroma resolution for colored text and thin lines. Its NVENC target is
-10 Mbit/s, with a larger rate-control buffer to preserve more detail on static
-desktop keyframes. The viewer prefers NVIDIA hardware decoding. H.264 4:2:0 uses
-a 6 Mbit/s target and tries VA-API first. Negotiation falls back from HEVC
-to H.264 and then to JPEG as needed. Pass `--jpeg` to select JPEG for one
-session. An explicit `--jpeg-quality` setting also selects JPEG. Custom
-helpers selected by `--remote-command` should support a read-only `host --help`.
+Ordinary SSH sessions and direct X11 `connect` sessions negotiate the codec
+from hardware available on both peers. Eligible standalone X11 desktop hosts
+offer hardware video automatically. A host configured with `--jpeg-quality`,
+`--jpeg-quality-floor` or `--fixed-jpeg-quality` uses JPEG by default. An
+explicit `--allow-h264` takes precedence and limits hardware video to H.264.
+Add `--allow-hevc444` alongside it to allow HEVC as well. [First LAN connection](#first-lan-connection)
+
+When available, HEVC 4:4:4 keeps full chroma resolution for colored text and
+thin lines. Its NVENC target is 10 Mbit/s, with a larger rate-control buffer
+to preserve more detail on static desktop keyframes. The viewer prefers
+NVIDIA hardware decoding. H.264 4:2:0 uses a 6 Mbit/s target and tries VA-API
+first. Negotiation falls back from HEVC to H.264 and then to JPEG as needed.
+Native Wayland sessions, individual-window capture and sessions requesting
+JPEG-specific extensions use JPEG. Pass `--jpeg` to `ssh` or `connect` to
+select JPEG for that session. An explicit SSH `--jpeg-quality` also selects
+JPEG. Custom SSH helpers selected by `--remote-command` should support a
+read-only `host --help`. A direct connection retries once with JPEG when a
+compatible older host returns the authenticated unsupported-profile response
+before accepting the session.
+
+On large HEVC 4:4:4 frames, each peer can use up to four CPU workers for
+color conversion. While a recent frame awaits a draw acknowledgement, the
+host skips encoding an exact RGB duplicate so the next visual change can
+use the available frame credit. These skips count toward `unchanged-suppressed`.
+An acknowledgement allows identical frames to refine the picture again.
 
 Both hardware modes retain the X11 capture, cursor, source selection and draw
 acknowledgement paths. The viewer decodes frames in wire order and can skip
@@ -373,11 +390,11 @@ happened, instead of quoting Rust's `failed to fill whole buffer`:
 | `host closed the session: the host stopped sharing its desktop` | The host was stopped (Ctrl+C or SIGTERM) and said goodbye. |
 | `the connection closed without a goodbye from the host` | The host process was killed or the network dropped. |
 
-Reconnect is off by default. After a disconnect, inspect both terminals,
-verify the intended host/key and the selected monitor or region, then rerun the
-same `connect` command from shell history. A new connection authenticates and
-negotiates permissions again. Do not put key contents into a shell command or a
-reconnect script.
+Network-loss reconnect is off by default. After a disconnect, inspect both
+terminals, verify the intended host/key and the selected monitor or region,
+then rerun the same `connect` command from shell history. A new connection
+authenticates and negotiates permissions again. Do not put key contents into a
+shell command or a reconnect script.
 
 Direct connections can explicitly opt into a small retry budget:
 
@@ -394,9 +411,10 @@ permission flags remain unchanged. Delays are 1, 2, 4, 8 and 8 seconds; the
 budget never resets during the command. Ctrl+C stops the command, including
 while waiting between attempts.
 
-Startup/connect failures, authentication/protocol/decode failures observed by
-the viewer, frame-idle and socket timeouts, explicit host Close/SessionClose,
-local X11/clipboard errors, and any incomplete local cleanup never retry. Sender-side failures also stop conservatively,
+This network-loss retry budget excludes startup/connect failures,
+authentication/protocol/decode failures observed by the viewer, frame-idle and
+socket timeouts, explicit host Close/SessionClose, local X11/clipboard errors,
+and any incomplete local cleanup. Sender-side failures also stop conservatively,
 even when the underlying cause might be network loss. Closing the viewer never
 retries. Using Ctrl+Super+F12 (or the configured escape shortcut) still only
 releases the grab; it also disables reconnect for that session so a later drop
@@ -418,9 +436,10 @@ rejections and identity/authentication failures do not silently retry or
 downgrade. Every replacement connection repeats normal permission negotiation.
 A bare EOF/reset is ambiguous: it can also result from a host failure whose
 best-effort terminal record could not be delivered. Client cleanup certification
-does not prove the host stopped only because of network loss. A fresh connection reapplies an explicit `--window-size`, if supplied, but does
-not restore observed window geometry or clipboard transfer progress. SSH and saved profile runs never reconnect automatically;
-nonzero reconnect consent cannot be saved in a profile.
+does not prove the host stopped only because of network loss. A fresh connection
+reapplies an explicit `--window-size`, if supplied, but does not restore
+observed window geometry or clipboard transfer progress. The network-loss retry
+budget applies to the current `connect` command.
 
 Offline tests cover classification, budgets, cleanup and a loopback EOF path.
 Live X11 reconnection and two-machine network-loss acceptance remain unverified.
@@ -816,6 +835,9 @@ jwm-remote connect 192.168.1.50:48221 \
   --key-file ~/.config/jwm/remote.key \
   --grab-input
 ```
+
+With a hardware-enabled build on both machines, this connection can select
+HEVC 4:4:4 or H.264 automatically. [Automatic hardware video](#automatic-hardware-video)
 
 With `--grab-input`, click inside the viewer before using JWM shortcuts. Press
 **Ctrl+Super+F12** (Super is the Win key) to release the local keyboard/pointer
@@ -1786,8 +1808,8 @@ pixels. They do not reproduce or certify a physical NVIDIA driver.
   shown through the negotiated independent plane or composited-video fallback; the viewer cursor is transparent during ordinary input
   forwarding and an active grab, while view-only and released-grab windows keep
   a visible local cursor; the rest of the client desktop is never affected;
-- video uses JPEG tiles or automatic hardware video over SSH. Clipboard
-  sharing covers text, images and files;
+- video uses JPEG tiles or automatic hardware video over SSH and direct X11
+  connections. Clipboard sharing covers text, images and files;
 - video uses cumulative display acknowledgements, at most two unacknowledged
   frames, and one latest queued frame; persistently slow viewers therefore
   reduce capture/encode/network work instead of accumulating stale video;
@@ -1887,6 +1909,10 @@ permissions. Replacing a name needs `profile save NAME --replace -- ssh ...`.
 before `run`. The saved `connect`/`ssh` defaults match those commands: input is
 permitted unless `--view-only` is present; clipboard is off unless `--clipboard`
 was explicitly saved. Use `--view-only` when saving a viewing-only profile.
+
+Saved direct X11 and SSH profiles use automatic codec selection. The `--jpeg`
+override is for a single `connect` or `ssh` command. Saving a profile with
+`--jpeg` is rejected.
 
 Supported settings include the address/SSH alias, monitor selection for SSH,
 local display, input mode, grab-release keysym, clipboard consent and file limit.
@@ -1999,6 +2025,8 @@ No horizontal/smooth scroll, drag, new input permission, or lease extension is a
 
 `jwm-remote host --scroll-copy` explicitly enables a CPU tile-codec optimization.
 It is off by default and is not saved in profiles or implicitly enabled by SSH.
+For direct viewers, `jwm-remote connect HOST --jpeg` advertises support for
+copy deltas in the JPEG stream profile.
 The flag grants **no input permission**: `--allow-wayland-scroll` remains a
 separate, explicitly authorized single-notch input capability.
 

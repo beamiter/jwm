@@ -2048,6 +2048,18 @@ impl FrameCredits {
         outstanding_frames(&state)
     }
 
+    #[cfg(feature = "remote-h264")]
+    fn can_defer_duplicate(&self, now: Instant) -> bool {
+        let Ok(state) = self.state.lock() else {
+            return false;
+        };
+        // Even a completely static desktop must eventually fill the second
+        // credit and reach the normal ACK timeout if the viewer stalls.
+        state.in_flight.back().is_some_and(|frame| {
+            now.saturating_duration_since(frame.sent_at) < UNCHANGED_FRAME_KEEPALIVE
+        })
+    }
+
     fn close(&self) {
         let mut state = match self.state.lock() {
             Ok(state) => state,
@@ -5108,7 +5120,7 @@ fn send_frames_scoped<W: std::io::Write + SetWriteTimeout>(
 }
 
 #[cfg(feature = "remote-h264")]
-type EncoderScope = (SourceVersion, u64, u16, u16);
+type EncoderScope = (SourceVersion, u64, (u16, u16), (u16, u16));
 
 #[cfg(feature = "remote-h264")]
 struct HardwareVideoSender {
@@ -5138,7 +5150,8 @@ impl HardwareVideoSender {
         payload: &mut Vec<u8>,
         sequence: u64,
         pending: &PendingFrame,
-    ) -> RemoteResult<bool> {
+        may_defer_duplicate: bool,
+    ) -> RemoteResult<Option<bool>> {
         use super::h264_wire::{
             HardwareFrameHeader, encode_hardware_frame, h264_padded_dimensions, hardware_has_idr,
         };
@@ -5148,7 +5161,12 @@ impl HardwareVideoSender {
         self.limits.validate_dimensions(width, height)?;
         let (padded_width, padded_height) = h264_padded_dimensions(width, height)?;
         let (padded_width, padded_height) = (u32::from(padded_width), u32::from(padded_height));
-        let scope = (pending.source_version, frame.geometry_epoch, width, height);
+        let scope = (
+            pending.source_version,
+            frame.geometry_epoch,
+            (frame.source_width, frame.source_height),
+            (width, height),
+        );
         let fresh = self
             .encoder
             .as_ref()
@@ -5173,12 +5191,19 @@ impl HardwareVideoSender {
             pad_hardware_rgb(&frame.image, &mut self.padded, padded_width, padded_height);
             &self.padded
         };
-        self.annex_b.clear();
-        self.encoder
+        let encoder = &mut self
+            .encoder
             .as_mut()
             .expect("hardware encoder has a scope")
-            .1
-            .encode_into(rgb, &mut self.annex_b)?;
+            .1;
+        // Preserve display credit for changed pixels while an earlier frame
+        // awaits ACK. With credit fully returned, identical input may refine
+        // the picture normally. Skipping before NVENC preserves references.
+        if may_defer_duplicate && encoder.matches_last_input(rgb) {
+            return Ok(None);
+        }
+        self.annex_b.clear();
+        encoder.encode_into(rgb, &mut self.annex_b)?;
         let keyframe = hardware_has_idr(self.codec, &self.annex_b);
         if fresh && !keyframe {
             return Err(
@@ -5199,7 +5224,7 @@ impl HardwareVideoSender {
             &self.annex_b,
             self.limits,
         )?;
-        Ok(keyframe)
+        Ok(Some(keyframe))
     }
 }
 
@@ -5335,25 +5360,36 @@ fn send_frames_with_encoder_scoped<W: std::io::Write + SetWriteTimeout>(
         }
         let planned_at = Instant::now();
         #[cfg(feature = "remote-h264")]
-        let hardware_frame = match hardware.as_mut().map(|codec| {
+        let hardware_frame = if let Some(codec) = hardware.as_mut() {
             let started = Instant::now();
-            codec
-                .encode_frame(&mut payload, sequence, &pending)
-                .map(|keyframe| (codec.codec, keyframe, started.elapsed()))
-        }) {
-            Some(Ok(encoded)) => {
-                if !hardware_active {
-                    eprintln!("jwm-remote: hardware {} encoding active", encoded.0.name());
-                    hardware_active = true;
+            match codec.encode_frame(
+                &mut payload,
+                sequence,
+                &pending,
+                credits.can_defer_duplicate(started),
+            ) {
+                Ok(Some(keyframe)) => {
+                    if !hardware_active {
+                        eprintln!(
+                            "jwm-remote: hardware {} encoding active",
+                            codec.codec.name()
+                        );
+                        hardware_active = true;
+                    }
+                    Some((codec.codec, keyframe, started.elapsed()))
                 }
-                Some(encoded)
+                Ok(None) => {
+                    telemetry.record_unchanged_suppressed();
+                    continue;
+                }
+                Err(error) => {
+                    eprintln!("jwm-remote: hardware encoding failed, switching to JPEG: {error}");
+                    hardware = None;
+                    None
+                }
             }
-            Some(Err(error)) => {
-                eprintln!("jwm-remote: hardware encoding failed, switching to JPEG: {error}");
-                hardware = None;
-                None
-            }
-            None => None,
+        } else {
+            None
         };
         #[cfg(not(feature = "remote-h264"))]
         let hardware_frame: Option<(FrameCodec, bool, Duration)> = None;
@@ -11406,6 +11442,89 @@ mod tests {
             captured_at: Instant::now(),
             capture_completed_at: Instant::now(),
             recycler: None,
+        }
+    }
+
+    #[cfg(feature = "remote-h264")]
+    #[test]
+    fn hardware_duplicate_deferral_expires_or_clears_on_ack() {
+        let credits = FrameCredits::new();
+        let now = Instant::now();
+        assert!(!credits.can_defer_duplicate(now));
+        credits.mark_sent(0, now, now, 100, 0, 0).unwrap();
+        assert!(
+            credits.can_defer_duplicate(now + UNCHANGED_FRAME_KEEPALIVE - Duration::from_millis(1))
+        );
+        assert!(!credits.can_defer_duplicate(now + UNCHANGED_FRAME_KEEPALIVE));
+        credits.acknowledge(0).unwrap();
+        assert!(!credits.can_defer_duplicate(now));
+    }
+
+    #[cfg(feature = "remote-h264")]
+    #[test]
+    #[ignore = "requires a HEVC 4:4:4 NVENC encoder"]
+    fn hardware_video_preserves_credit_for_changed_pixels_and_refreshes_after_ack() {
+        use super::super::h264_wire::{VideoPayload, decode_video_payload};
+
+        let limits = super::super::messages::FrameLimits::default();
+        for (width, height) in [(256u16, 256u16), (257, 255)] {
+            let mut sender = HardwareVideoSender::new(FrameCodec::Hevc444, limits, 30);
+            let mut pending = test_pending_frame(0);
+            pending.frame.image = RgbImage::new(width.into(), height.into());
+            pending.frame.source_width = width;
+            pending.frame.source_height = height;
+            let mut payload = Vec::new();
+            assert_eq!(
+                sender
+                    .encode_frame(&mut payload, 0, &pending, true)
+                    .unwrap(),
+                Some(true)
+            );
+            let previous = payload.clone();
+            assert_eq!(
+                sender
+                    .encode_frame(&mut payload, 1, &pending, true)
+                    .unwrap(),
+                None
+            );
+            assert_eq!(payload, previous);
+
+            pending
+                .frame
+                .image
+                .get_pixel_mut(u32::from(width - 1), u32::from(height - 1))[2] = 1;
+            assert!(
+                sender
+                    .encode_frame(&mut payload, 1, &pending, true)
+                    .unwrap()
+                    .is_some()
+            );
+            let VideoPayload::Hardware { header, .. } =
+                decode_video_payload(&payload, limits).unwrap()
+            else {
+                panic!("expected hardware frame");
+            };
+            assert_eq!(header.sequence, 1);
+            assert!(
+                sender
+                    .encode_frame(&mut payload, 2, &pending, false)
+                    .unwrap()
+                    .is_some()
+            );
+            pending.frame.source_width += 1;
+            assert_eq!(
+                sender
+                    .encode_frame(&mut payload, 3, &pending, true)
+                    .unwrap(),
+                Some(true)
+            );
+            pending.source_version.epoch += 1;
+            assert_eq!(
+                sender
+                    .encode_frame(&mut payload, 4, &pending, true)
+                    .unwrap(),
+                Some(true)
+            );
         }
     }
 

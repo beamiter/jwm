@@ -333,7 +333,7 @@ fn authenticated_tcp_scroll_copy_permission_and_source_reset() {
                 )
                 .unwrap();
             writer.flush().unwrap();
-            let hello = read_server_hello(&mut reader).unwrap();
+            let hello = read_server_hello(&mut reader, FrameCodec::JpegTiles).unwrap();
             assert_eq!(hello.stream.scroll_copy, enabled);
             assert!(!hello.pointer_enabled && !hello.keyboard_enabled && !hello.clipboard_enabled);
             let mut initial = ReceiveState::new();

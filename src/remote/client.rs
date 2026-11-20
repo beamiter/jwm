@@ -536,6 +536,19 @@ pub fn run_client_reconnecting_with_hardware(
     attempts: u8,
     hardware_h264: bool,
 ) -> RemoteResult<()> {
+    let preferred = if hardware_h264 {
+        FrameCodec::H264
+    } else {
+        FrameCodec::JpegTiles
+    };
+    run_client_reconnecting_with_video_codec(options, attempts, preferred)
+}
+
+pub fn run_client_reconnecting_with_video_codec(
+    options: ClientOptions,
+    attempts: u8,
+    mut preferred: FrameCodec,
+) -> RemoteResult<()> {
     if (options.follow_source_size
         || options.resize_source.is_some()
         || options.wayland_keyboard
@@ -558,7 +571,22 @@ pub fn run_client_reconnecting_with_hardware(
     }
     reconnect_with(
         attempts,
-        || run_client_with_hardware(options.clone(), hardware_h264),
+        || {
+            let outcome = run_client_with_video_codec(options.clone(), preferred);
+            if outcome.as_ref().err().is_some_and(|error| {
+                error
+                    .downcast_ref::<ClientFailure>()
+                    .is_some_and(|failure| {
+                        failure.stage == ClientStage::Negotiate
+                            && failure.cause.is::<LegacyVideoProfileRefused>()
+                    })
+            }) {
+                preferred = FrameCodec::JpegTiles;
+                eprintln!("jwm-remote: host requires the JPEG stream profile; retrying with JPEG");
+                return run_client_with_video_codec(options.clone(), preferred);
+            }
+            outcome
+        },
         |attempt, delay| {
             eprintln!(
                 "jwm-remote: transport lost; reconnect attempt {attempt}/{attempts} in {} seconds (Ctrl+C to stop)",
@@ -1760,7 +1788,7 @@ fn negotiate_session(
         .encode(),
     )?;
     writer.flush()?;
-    let hello = read_server_hello(&mut reader)?;
+    let hello = read_server_hello(&mut reader, requested_codec)?;
     requested_codec.confirm(hello.stream.codec)?;
     validate_server_frame_limits(&hello, frame_limits)?;
     if hello.stream.static_lossless != request_static_lossless
@@ -1902,13 +1930,38 @@ fn negotiate_session(
     Ok((reader, writer, hello))
 }
 
+#[derive(Debug)]
+struct LegacyVideoProfileRefused;
+
+impl std::fmt::Display for LegacyVideoProfileRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("host refused the hardware video stream profile before admission")
+    }
+}
+
+impl std::error::Error for LegacyVideoProfileRefused {}
+
+const LEGACY_VIDEO_PROFILE_REFUSAL: &[u8] =
+    b"unsupported remote codec, cursor or input mode; update jwm-remote on both machines together";
+
 /// Read only authenticated records, accepting explicit terminal responses before
 /// HelloAck as well as after negotiation. The phase remains in ClientFailure.
-fn read_server_hello<R: io::Read>(reader: &mut SessionReader<R>) -> RemoteResult<ServerHello> {
+fn read_server_hello<R: io::Read>(
+    reader: &mut SessionReader<R>,
+    requested_codec: FrameCodec,
+) -> RemoteResult<ServerHello> {
     let (kind, payload) = reader
         .read_message()
         .map_err(|error| explain_negotiation_eof(error, true))?;
     match kind {
+        // Pre-hardware hosts reject codec IDs in Hello before admitting a
+        // session. Match their exact authenticated legacy response, not EOF,
+        // authentication failures or any later refusal.
+        MessageKind::Close
+            if requested_codec.is_hardware() && payload == LEGACY_VIDEO_PROFILE_REFUSAL =>
+        {
+            Err(LegacyVideoProfileRefused.into())
+        }
         MessageKind::Close | MessageKind::SessionClose => {
             let mut close = PeerClosed::decode(kind, &payload)?;
             if close.reason.trim().is_empty() {
@@ -6484,7 +6537,7 @@ pub(super) mod tests {
         let cause = match phase {
             ClientStage::Negotiate => {
                 reader.set_max_payload_len(MAX_NEGOTIATION_PAYLOAD_LEN);
-                read_server_hello(&mut reader).unwrap_err()
+                read_server_hello(&mut reader, FrameCodec::JpegTiles).unwrap_err()
             }
             ClientStage::FirstFrame => {
                 read_initial_frame_records(&mut reader, true, true, |_, _| {
@@ -6658,6 +6711,62 @@ pub(super) mod tests {
                 assert!(serde_json::to_value(summary).unwrap()["peer_close_code"].is_null());
             }
         }
+    }
+
+    #[test]
+    fn only_an_authenticated_exact_legacy_close_refuses_a_hardware_offer() {
+        let marker =
+            b"unsupported remote codec, cursor or input mode; update jwm-remote on both machines together";
+        let read_close = |codec, kind, payload: &[u8], receive_key| {
+            let mut writer = SessionWriter::new(Vec::new(), TEST_PSK);
+            writer.write_message(kind, payload).unwrap();
+            let mut reader = SessionReader::new(Cursor::new(writer.into_inner()), receive_key);
+            reader.set_max_payload_len(MAX_NEGOTIATION_PAYLOAD_LEN);
+            read_server_hello(&mut reader, codec).unwrap_err()
+        };
+
+        for codec in [FrameCodec::H264, FrameCodec::Hevc444] {
+            assert!(
+                read_close(codec, MessageKind::Close, marker, TEST_PSK)
+                    .is::<LegacyVideoProfileRefused>()
+            );
+        }
+
+        let mut near_marker = marker.to_vec();
+        near_marker.push(b'.');
+        for (codec, payload) in [
+            (FrameCodec::Hevc444, near_marker.as_slice()),
+            (FrameCodec::JpegTiles, marker.as_slice()),
+        ] {
+            let close = read_close(codec, MessageKind::Close, payload, TEST_PSK)
+                .downcast::<PeerClosed>()
+                .unwrap();
+            assert_eq!(close.code, None);
+        }
+
+        let structured =
+            SessionClose::new(SessionCloseCode::Busy, std::str::from_utf8(marker).unwrap())
+                .encode();
+        let close = read_close(
+            FrameCodec::Hevc444,
+            MessageKind::SessionClose,
+            &structured,
+            TEST_PSK,
+        )
+        .downcast::<PeerClosed>()
+        .unwrap();
+        assert_eq!(close.code, Some(SessionCloseCode::Busy));
+
+        let error = read_close(
+            FrameCodec::Hevc444,
+            MessageKind::Close,
+            marker,
+            [0xff; PSK_LEN],
+        );
+        assert!(matches!(
+            error.downcast_ref::<ProtocolError>(),
+            Some(ProtocolError::AuthenticationFailed)
+        ));
     }
 
     #[test]
