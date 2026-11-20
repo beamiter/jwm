@@ -138,3 +138,35 @@ After hardware validation, replace nested/CI footage in `video-demo/` with a
 short **real DRM/KMS** capture that shows: cold start, Shell Hub audio switch,
 screenshot to clipboard, and a cube/expose transition — then link it from the
 README.
+
+## Optional JWM ScreenCast portal on Ubuntu 24.04
+
+The tested Ubuntu 24.04 update `xdg-desktop-portal`
+`1.18.4-1ubuntu2.24.04.3` can read JWM per-user routing configuration
+but does not discover the JWM backend descriptor under `$XDG_DATA_HOME`.
+A direct call to the backend does not show that the frontend exports
+ScreenCast. The source installer stops before building or writing files
+for the recognized `1.18.4-1ubuntu2.24.04.x` update family when the matching
+descriptor is missing from the distro's discovery directory. It does not
+guess at other package versions or distro backports.
+
+Stage only the checked-in descriptor for the distro package. For example,
+without privileges, produce a package image in a new private directory:
+
+```sh
+DESTDIR=$(mktemp -d) &&
+install -D -m 0644 portal/dist/jwm.portal \
+  "$DESTDIR/usr/share/xdg-desktop-portal/portals/jwm.portal"
+```
+
+Let the package manager install and remove that descriptor. After installing
+the package, rerun `scripts/install-portal.sh` as the session user to build
+and install the per-user backend, D-Bus service and JWM-specific routing.
+Do not run the user installer with sudo. Do not export
+`XDG_DESKTOP_PORTAL_DIR` (a test override that can hide other backends)
+or replace a global `portals.conf`.
+
+Verify the frontend in the actual JWM Wayland session and make a ScreenCast
+request in the target app. Setting `XDG_CURRENT_DESKTOP` on the app alone
+does not reconfigure an existing broker. There is no JWM ScreenCast X11
+fallback; FileChooser routing and ScreenCast source consent are unchanged.
