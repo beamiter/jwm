@@ -8,6 +8,7 @@ use std::sync::OnceLock;
 use ffmpeg::{codec, ffi, format::Pixel, frame::Video, software::scaling};
 use ffmpeg_next as ffmpeg;
 use image::RgbImage;
+use rayon::prelude::*;
 
 use super::messages::FrameCodec;
 
@@ -149,39 +150,124 @@ fn scaler(input: Pixel, output: Pixel, width: u32, height: u32) -> io::Result<sc
         .map_err(|error| codec_error("opening video pixel converter", error))
 }
 
-fn convert(scaler: &mut scaling::Context, input: &Video, output: &mut Video) -> io::Result<()> {
-    let source = scaler.input();
-    let target = scaler.output();
-    if input.format() != source.format
-        || input.width() != source.width
-        || input.height() != source.height
-        || output.format() != target.format
-        || output.width() != target.width
-        || output.height() != target.height
-    {
-        return Err(invalid("unexpected video pixel conversion format"));
+struct ColorBand {
+    first_row: u32,
+    scaler: scaling::Context,
+}
+
+// Each band owns its SwsContext exclusively. A context can move between
+// threads but a frame must never be submitted to it concurrently.
+unsafe impl Send for ColorBand {}
+
+struct PixelConverter {
+    full: scaling::Context,
+    parallel: Option<(rayon::ThreadPool, Vec<ColorBand>)>,
+}
+
+impl PixelConverter {
+    fn new(input: Pixel, output: Pixel, width: u32, height: u32) -> io::Result<Self> {
+        let full = scaler(input, output, width, height)?;
+        let threads = std::thread::available_parallelism().map_or(1, usize::from);
+        let parallel = Self::bands(input, output, width, height, threads);
+        Ok(Self { full, parallel })
     }
 
-    // Both frames have FFmpeg-allocated buffers of the dimensions and pixel
-    // formats used to initialize this scaler. The destination is writable.
+    fn bands(
+        input: Pixel,
+        output: Pixel,
+        width: u32,
+        height: u32,
+        threads: usize,
+    ) -> Option<(rayon::ThreadPool, Vec<ColorBand>)> {
+        // At 1:1 RGB <-> 4:4:4 every output row depends only on its own
+        // input row. Subsampled chroma can cross a band boundary.
+        let workers = threads.min(4).min(height as usize / 64);
+        if workers < 2
+            || width * height < 1024 * 1024
+            || !matches!(
+                (input, output),
+                (Pixel::RGB24, Pixel::YUV444P) | (Pixel::YUV444P, Pixel::RGB24)
+            )
+        {
+            return None;
+        }
+        // Keep the vertical phase of libswscale's 8-row dithering pattern.
+        let rows = height.div_ceil(workers as u32).next_multiple_of(8);
+        let mut bands = Vec::with_capacity(workers);
+        for first_row in (0..height).step_by(rows as usize) {
+            bands.push(ColorBand {
+                first_row,
+                scaler: scaler(input, output, width, rows.min(height - first_row)).ok()?,
+            });
+        }
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(bands.len())
+            .thread_name(|index| format!("jwm-remote-color-{index}"))
+            .build()
+            .ok()?;
+        Some((pool, bands))
+    }
+
+    fn convert(&mut self, input: &Video, output: &mut Video) -> io::Result<()> {
+        let source = self.full.input();
+        let target = self.full.output();
+        if (input.format(), input.width(), input.height())
+            != (source.format, source.width, source.height)
+            || (output.format(), output.width(), output.height())
+                != (target.format, target.width, target.height)
+        {
+            return Err(invalid("unexpected video pixel conversion format"));
+        }
+
+        if let Some((pool, bands)) = &mut self.parallel {
+            let output = &*output;
+            pool.install(|| {
+                bands.par_iter_mut().try_for_each(|band| {
+                    // Each call owns its context and writes a disjoint range
+                    // of full-stride rows. All writes finish before return.
+                    unsafe { convert_band(&mut band.scaler, input, output, band.first_row) }
+                })
+            })
+        } else {
+            // This context covers the entire exclusively borrowed destination.
+            unsafe { convert_band(&mut self.full, input, output, 0) }
+        }
+    }
+}
+
+/// The caller owns the destination rows for the full lifetime of this call.
+/// Nonzero offsets require full-height planes, as in RGB24 and YUV444P.
+unsafe fn convert_band(
+    scaler: &mut scaling::Context,
+    input: &Video,
+    output: &Video,
+    first_row: u32,
+) -> io::Result<()> {
+    let height = scaler.input().height as i32;
     let rows = unsafe {
         let input = &*input.as_ptr();
-        let output = &mut *output.as_mut_ptr();
+        let output = &*output.as_ptr();
+        let starts = |frame: &ffi::AVFrame| {
+            let mut data = frame.data;
+            for (plane, stride) in data.iter_mut().zip(frame.linesize) {
+                *plane = plane.wrapping_offset(first_row as isize * stride as isize);
+            }
+            data
+        };
         ffi::sws_scale(
             scaler.as_mut_ptr(),
-            input.data.as_ptr().cast(),
+            starts(input).as_ptr().cast(),
             input.linesize.as_ptr(),
             0,
-            input.height,
-            output.data.as_ptr().cast(),
+            height,
+            starts(output).as_ptr(),
             output.linesize.as_ptr(),
         )
     };
     checked_av("converting video pixels", rows)?;
-    if rows as u32 != output.height() {
+    if rows != height {
         return Err(invalid("incomplete video pixel conversion"));
     }
-
     Ok(())
 }
 
@@ -197,7 +283,7 @@ pub(crate) struct Encoder {
     codec: codec::encoder::video::Encoder,
     rgb: Video,
     yuv: Video,
-    converter: scaling::Context,
+    converter: PixelConverter,
     sequence: i64,
 }
 
@@ -253,14 +339,41 @@ impl Encoder {
             codec,
             rgb: video_buffer(Pixel::RGB24, width, height)?,
             yuv: video_buffer(format.pixels, width, height)?,
-            converter: scaler(Pixel::RGB24, format.pixels, width, height)?,
+            converter: PixelConverter::new(Pixel::RGB24, format.pixels, width, height)?,
             sequence: 0,
         })
     }
 
+    pub(crate) fn dimensions(&self) -> (u32, u32) {
+        (self.rgb.width(), self.rgb.height())
+    }
+
+    /// The packed RGB staging frame still holds the input to the last access unit.
+    pub(crate) fn matches_last_input(&self, image: &RgbImage) -> bool {
+        if self.sequence == 0 || image.dimensions() != self.dimensions() {
+            return false;
+        }
+        let width = image.width() as usize * 3;
+        let stride = self.rgb.stride(0);
+        let stored = self.rgb.data(0);
+        let pixels = image.as_raw().as_slice();
+        if width == stride {
+            return stored[..pixels.len()] == *pixels;
+        }
+        stored
+            .chunks_exact(stride)
+            .zip(pixels.chunks_exact(width))
+            .all(|(row, pixels)| row[..width] == *pixels)
+    }
+
     /// Append one complete Annex B access unit to the existing output.
-    pub(crate) fn encode_into(&mut self, rgb: &RgbImage, output: &mut Vec<u8>) -> io::Result<()> {
-        if rgb.dimensions() != (self.rgb.width(), self.rgb.height()) {
+    pub(crate) fn encode_into(
+        &mut self,
+        rgb: &RgbImage,
+        output: &mut Vec<u8>,
+        force_idr: bool,
+    ) -> io::Result<()> {
+        if rgb.dimensions() != self.dimensions() {
             return Err(invalid("capture size changed during video encoding"));
         }
         let next = self
@@ -282,9 +395,10 @@ impl Encoder {
         checked_av("making NVENC input writable", unsafe {
             ffi::av_frame_make_writable(self.yuv.as_mut_ptr())
         })?;
-        convert(&mut self.converter, &self.rgb, &mut self.yuv)?;
+        self.converter.convert(&self.rgb, &mut self.yuv)?;
         self.yuv.set_pts(Some(self.sequence));
-        self.yuv.set_kind(if self.sequence == 0 {
+        let keyframe = self.sequence == 0 || force_idr;
+        self.yuv.set_kind(if keyframe {
             ffmpeg::picture::Type::I
         } else {
             ffmpeg::picture::Type::None
@@ -297,7 +411,7 @@ impl Encoder {
         self.codec
             .receive_packet(&mut packet)
             .map_err(|error| codec_error("waiting for low-delay NVENC output", error))?;
-        if packet.pts() != Some(self.sequence) || (self.sequence == 0 && !packet.is_key()) {
+        if packet.pts() != Some(self.sequence) || (keyframe && !packet.is_key()) {
             return Err(invalid(
                 "unexpected NVENC packet timestamp or missing keyframe",
             ));
@@ -388,7 +502,7 @@ pub(crate) struct Decoder {
     codec: codec::decoder::Video,
     format: Box<DecodeFormat>,
     rgb: Video,
-    converter: Option<scaling::Context>,
+    converter: Option<PixelConverter>,
     first: bool,
 }
 
@@ -462,6 +576,16 @@ impl Decoder {
         })
     }
 
+    pub(crate) fn dimensions(&self) -> (u32, u32) {
+        (self.format.width as u32, self.format.height as u32)
+    }
+
+    /// Discard queued output and reference pictures at a source or geometry change.
+    pub(crate) fn reset(&mut self) {
+        self.codec.flush();
+        self.first = true;
+    }
+
     pub(crate) fn decode(&mut self, bytes: &[u8]) -> io::Result<RgbImage> {
         validate_packet(bytes)?;
         use ffmpeg::codec::packet::Mut;
@@ -480,7 +604,7 @@ impl Decoder {
         self.codec
             .receive_frame(&mut hardware)
             .map_err(|error| codec_error("waiting for low-delay video decode", error))?;
-        let expected = (self.format.width as u32, self.format.height as u32);
+        let expected = self.dimensions();
         // AV_PIX_FMT_VAAPI has different spelling in the Rust enum across
         // supported FFmpeg versions, so compare libavutil's raw AVPixelFormat.
         if unsafe { (*hardware.as_ptr()).format } != self.format.pixel as i32
@@ -509,12 +633,17 @@ impl Decoder {
         if self
             .converter
             .as_ref()
-            .is_none_or(|converter| converter.input().format != format)
+            .is_none_or(|converter| converter.full.input().format != format)
         {
-            self.converter = Some(scaler(format, Pixel::RGB24, expected.0, expected.1)?);
+            self.converter = Some(PixelConverter::new(
+                format,
+                Pixel::RGB24,
+                expected.0,
+                expected.1,
+            )?);
         }
         let converter = self.converter.as_mut().expect("converter initialized");
-        convert(converter, &downloaded, &mut self.rgb)?;
+        converter.convert(&downloaded, &mut self.rgb)?;
         let row_bytes = expected.0 as usize * 3;
         let mut rgb = Vec::with_capacity(row_bytes * expected.1 as usize);
         for row in self
@@ -567,7 +696,7 @@ pub(crate) fn probe_decode(kind: FrameCodec) -> io::Result<()> {
 
 pub(crate) fn probe_encode(kind: FrameCodec) -> io::Result<()> {
     let mut encoder = Encoder::new(kind, 256, 256, 30)?;
-    encoder.encode_into(&RgbImage::new(256, 256), &mut Vec::new())
+    encoder.encode_into(&RgbImage::new(256, 256), &mut Vec::new(), false)
 }
 
 // One 256x256 baseline IDR generated from FFmpeg's solid-color test source
@@ -630,11 +759,61 @@ mod tests {
                 pair.copy_from_slice(&[220, 37, 35, 34, 98, 208]);
             }
         }
-        let mut conversion = scaler(Pixel::RGB24, Pixel::YUV444P, 8, 8).unwrap();
-        convert(&mut conversion, &rgb, &mut yuv).unwrap();
+        let mut conversion = PixelConverter::new(Pixel::RGB24, Pixel::YUV444P, 8, 8).unwrap();
+        conversion.convert(&rgb, &mut yuv).unwrap();
         assert!(yuv.data(1)[0].abs_diff(yuv.data(1)[1]) > 70);
         assert!(yuv.data(2)[0].abs_diff(yuv.data(2)[1]) > 70);
         assert!(!HEVC444.accepts_transfer(Pixel::NV12));
+    }
+
+    #[test]
+    fn parallel_color_conversion_matches_full_frame_in_both_directions() {
+        for (width, height, workers) in [(2560, 1440, 4), (1394, 786, 3)] {
+            for (source, target) in [
+                (Pixel::RGB24, Pixel::YUV444P),
+                (Pixel::YUV444P, Pixel::RGB24),
+            ] {
+                let mut input = video_buffer(source, width, height).unwrap();
+                let mut seed = 17u32;
+                for plane in 0..input.planes() {
+                    for byte in input.data_mut(plane) {
+                        seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                        *byte = (seed >> 24) as u8;
+                    }
+                }
+                let mut expected = video_buffer(target, width, height).unwrap();
+                let mut actual = video_buffer(target, width, height).unwrap();
+                let mut full = scaler(source, target, width, height).unwrap();
+                full.run(&input, &mut expected).unwrap();
+                let mut parallel = PixelConverter {
+                    full,
+                    parallel: Some(
+                        PixelConverter::bands(source, target, width, height, workers).unwrap(),
+                    ),
+                };
+                parallel.convert(&input, &mut actual).unwrap();
+                let row_bytes = width as usize * if target == Pixel::RGB24 { 3 } else { 1 };
+                for plane in 0..expected.planes() {
+                    let rows = expected.data(plane).chunks_exact(expected.stride(plane));
+                    let converted = actual.data(plane).chunks_exact(actual.stride(plane));
+                    for (row, (a, b)) in rows.zip(converted).enumerate() {
+                        assert!(a[..row_bytes] == b[..row_bytes], "plane {plane}, row {row}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn subsampled_small_and_single_core_conversions_use_the_full_frame() {
+        for (source, target, width, height, threads) in [
+            (Pixel::RGB24, Pixel::YUV420P, 2560, 1440, 4),
+            (Pixel::NV12, Pixel::RGB24, 2560, 1440, 4),
+            (Pixel::RGB24, Pixel::YUV444P, 640, 480, 4),
+            (Pixel::YUV444P, Pixel::RGB24, 2560, 1440, 1),
+        ] {
+            assert!(PixelConverter::bands(source, target, width, height, threads).is_none());
+        }
     }
 
     #[test]
@@ -649,11 +828,31 @@ mod tests {
             for color in [[56, 60, 68], [80, 96, 111], [90, 120, 135]] {
                 packet.clear();
                 let frame = RgbImage::from_pixel(width, height, image::Rgb(color));
-                encoder.encode_into(&frame, &mut packet).unwrap();
+                encoder.encode_into(&frame, &mut packet, false).unwrap();
                 let decoded = decoder.decode(&packet).unwrap();
                 let pixel = decoded.get_pixel(width / 2, height / 2).0;
                 assert!(
                     pixel
+                        .into_iter()
+                        .zip(color)
+                        .all(|(a, b)| a.abs_diff(b) <= 10)
+                );
+            }
+
+            // A source switch retains NVENC but starts a fresh decoder.
+            // The later IDR must contain enough headers to decode by itself.
+            packet.clear();
+            let color = [180, 130, 70];
+            let frame = RgbImage::from_pixel(width, height, image::Rgb(color));
+            encoder.encode_into(&frame, &mut packet, true).unwrap();
+            assert!(super::super::h264_wire::hardware_has_idr(kind, &packet));
+            decoder.reset();
+            let mut fresh = Decoder::new(kind, width, height).unwrap();
+            for receiver in [&mut decoder, &mut fresh] {
+                let rgb = receiver.decode(&packet).unwrap();
+                assert!(
+                    rgb.get_pixel(width / 2, height / 2)
+                        .0
                         .into_iter()
                         .zip(color)
                         .all(|(a, b)| a.abs_diff(b) <= 10)

@@ -232,6 +232,8 @@ fn exercise(
                 &host_options(host_permission),
                 &stopping,
                 &Mutex::new(Some(host::GrantedCapture::Wayland(Box::new(capture)))),
+                false, // No hardware encoder in this JPEG/source-permission fixture.
+                false,
             )
         })()
         .map_err(|e| e.to_string());

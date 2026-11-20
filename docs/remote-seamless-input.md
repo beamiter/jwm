@@ -18,7 +18,9 @@ forwarded remote keys/buttons. The pointer is never confined. The pre-existing
 local focus is not rewritten. The title indicates the current input mode.
 
 Use `--seamless-input=click` with `ssh` or `connect` to acquire input with a
-click. A shallow exit releases the grab after 500 ms outside the image.
+click. The local pointer stays visible as you position it before clicking and
+comes back as soon as control is released. A shallow exit releases the grab
+after 500 ms outside the image.
 Returning inside during that time keeps control. Moving 24 pixels past an
 edge releases immediately, and resuming control takes another click.
 During a forwarded drag, the viewer keeps control until it sends the last

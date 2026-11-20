@@ -24,8 +24,8 @@ use x11rb::protocol::render::{
 use x11rb::protocol::xproto::{
     Atom, AtomEnum, ClientMessageEvent, ConnectionExt as _, CreateGCAux, CreateWindowAux, Cursor,
     EventMask, Format, Gcontext, GrabMode, GrabStatus, ImageFormat, ImageOrder as X11ImageOrder,
-    KeyButMask, Mapping, NotifyMode, Pixmap, PropMode, Rectangle, Screen, Setup, VisualClass,
-    Visualtype, Window, WindowClass,
+    KeyButMask, KeyPressEvent, Mapping, NotifyMode, Pixmap, PropMode, Rectangle, Screen, Setup,
+    VisualClass, Visualtype, Window, WindowClass,
 };
 use x11rb::protocol::{ErrorKind, Event, shm};
 use x11rb::rust_connection::RustConnection;
@@ -686,6 +686,7 @@ pub struct Viewer {
     grabbed: bool,
     escape_keycodes: Vec<u8>,
     escape_keysym: u32,
+    toggle_keycodes: Option<Vec<u8>>,
     escape_name: String,
     /// The machine this window shows, first in its title.
     peer_label: String,
@@ -1266,6 +1267,7 @@ impl Viewer {
             cleanup_failed: false,
             escape_keycodes,
             escape_keysym,
+            toggle_keycodes: None,
             escape_name: escape_key.to_string(),
             peer_label: peer_label.to_string(),
             keyboard: ViewerKeyboardState::default(),
@@ -1283,6 +1285,28 @@ impl Viewer {
     /// Explicit window closure, latched before fallible local input release.
     pub fn user_close_requested(&self) -> bool {
         self.user_close_requested
+    }
+
+    pub(super) fn request_close(&mut self) {
+        self.user_close_requested = true;
+        self.closed = true;
+    }
+
+    pub(super) fn enable_toggle_shortcut(&mut self) -> RemoteResult<()> {
+        self.toggle_keycodes = Some(load_escape_keycodes(
+            &self.conn,
+            xkbcommon::xkb::keysyms::KEY_r,
+        )?);
+        Ok(())
+    }
+
+    fn is_toggle_press(&self, event: &KeyPressEvent, modifiers: KeyButMask) -> bool {
+        event.event == self.window
+            && self
+                .toggle_keycodes
+                .as_ref()
+                .is_some_and(|keys| keys.contains(&event.detail))
+            && toggle_modifiers_match(event.state, modifiers)
     }
 
     /// Sticky escape intent; releasing a grab is not session cancellation.
@@ -1354,6 +1378,10 @@ impl Viewer {
                 Event::DestroyNotify(event) if event.window == self.window => {
                     self.user_close_requested = true;
                     self.closed = true;
+                    result.push(ViewerEvent::Close);
+                }
+                Event::KeyPress(event) if self.is_toggle_press(&event, KeyButMask::MOD4) => {
+                    self.request_close();
                     result.push(ViewerEvent::Close);
                 }
                 Event::KeyPress(event)
@@ -1835,6 +1863,14 @@ impl Viewer {
                     }
                 }
                 Event::KeyPress(event)
+                    if self.is_toggle_press(&event, KeyButMask::MOD4)
+                        && !self.keyboard.held.contains(&event.detail) =>
+                {
+                    self.request_close();
+                    self.report_close(&mut result)?;
+                    break;
+                }
+                Event::KeyPress(event)
                     if event.event == self.window
                         && (self.clipboard_shortcut.held.contains(&event.detail)
                             || (self.clipboard_narrowing_enabled
@@ -1863,12 +1899,14 @@ impl Viewer {
                         .defer_release(event.detail, event.time, Instant::now());
                 }
                 Event::KeyPress(event)
-                    if event.event == self.window
-                        && self.source_cycle_enabled
-                        && self.is_escape(event.detail)
-                        && source_cycle_modifiers_match(event.state) =>
+                    if (self.is_toggle_press(&event, KeyButMask::MOD4 | KeyButMask::SHIFT)
+                        && !self.keyboard.held.contains(&event.detail))
+                        || (event.event == self.window
+                            && self.source_cycle_enabled
+                            && self.is_escape(event.detail)
+                            && source_cycle_modifiers_match(event.state)) =>
                 {
-                    if !self.source_switching {
+                    if self.source_cycle_enabled && !self.source_switching {
                         self.release_local_grab()?;
                         self.release_all_input(&mut result);
                         self.source_switching = true;
@@ -1937,6 +1975,9 @@ impl Viewer {
                         .into());
                     }
                     self.escape_keycodes = escape_keycodes;
+                    if self.toggle_keycodes.is_some() {
+                        self.enable_toggle_shortcut()?;
+                    }
                 }
                 Event::Error(error) if is_closed_window_error(&error, self.window) => {
                     self.closed = true;
@@ -2085,6 +2126,11 @@ impl Viewer {
     pub(crate) fn set_source_label(&mut self, label: String) {
         self.source_label = Some(label);
         self.update_title();
+    }
+
+    pub(super) fn request_activation(&self) -> RemoteResult<()> {
+        let root = self.conn.setup().roots[self.cursor_screen].root;
+        request_window_activation(&self.conn, root, self.window)
     }
 
     pub(crate) fn begin_source_switch(&mut self, label: String) {
@@ -3117,13 +3163,17 @@ impl Viewer {
             target,
             source: None,
         });
-        self.conn
-            .change_window_attributes(
-                self.window,
-                &x11rb::protocol::xproto::ChangeWindowAttributesAux::new()
-                    .cursor(self.blank_cursor),
-            )?
-            .check()?;
+        if !self.grab_input {
+            self.conn
+                .change_window_attributes(
+                    self.window,
+                    &x11rb::protocol::xproto::ChangeWindowAttributesAux::new()
+                        .cursor(self.blank_cursor),
+                )?
+                .check()?;
+        }
+        // With click-to-grab, GrabPointer supplies the blank cursor only
+        // during control. Ungrab restores the window's inherited cursor.
         self.cursor_plane.enabled = true;
         self.refresh_cursor()
     }
@@ -4892,7 +4942,16 @@ pub fn focus_existing_viewer(display: Option<&str>, peer_label: &str) -> RemoteR
     let Some(window) = find_viewer_window(&conn, root, peer_label)? else {
         return Ok(false);
     };
-    let active_window = intern_atom(&conn, b"_NET_ACTIVE_WINDOW")?;
+    request_window_activation(&conn, root, window)?;
+    Ok(true)
+}
+
+fn request_window_activation(
+    conn: &RustConnection,
+    root: Window,
+    window: Window,
+) -> RemoteResult<()> {
+    let active_window = intern_atom(conn, b"_NET_ACTIVE_WINDOW")?;
     // Source 2: a pager-like request on the user's behalf, which window
     // managers honour without focus-stealing prevention.
     let event = ClientMessageEvent::new(32, window, active_window, [2, CURRENT_TIME, 0, 0, 0]);
@@ -4903,7 +4962,7 @@ pub fn focus_existing_viewer(display: Option<&str>, peer_label: &str) -> RemoteR
         event,
     )?;
     conn.flush()?;
-    Ok(true)
+    Ok(())
 }
 
 /// Close an open viewer of `peer_label` the way its close button does.
@@ -4930,7 +4989,7 @@ pub fn close_existing_viewer(display: Option<&str>, peer_label: &str) -> RemoteR
     Ok(true)
 }
 
-fn open_root(display: Option<&str>) -> RemoteResult<(RustConnection, Window)> {
+pub(super) fn open_root(display: Option<&str>) -> RemoteResult<(RustConnection, Window)> {
     let (conn, screen_num) = xbar_core::x11_connection::connect(display)?;
     let root = conn
         .setup()
@@ -5108,6 +5167,16 @@ fn clipboard_narrow_modifiers_match(state: KeyButMask) -> bool {
 fn escape_modifiers_match(state: KeyButMask) -> bool {
     let modifiers = KeyButMask::SHIFT | KeyButMask::CONTROL | KeyButMask::MOD1 | KeyButMask::MOD4;
     state & modifiers == KeyButMask::CONTROL | KeyButMask::MOD4
+}
+
+fn toggle_modifiers_match(state: KeyButMask, expected: KeyButMask) -> bool {
+    let modifiers = KeyButMask::SHIFT
+        | KeyButMask::CONTROL
+        | KeyButMask::MOD1
+        | KeyButMask::MOD3
+        | KeyButMask::MOD4
+        | KeyButMask::MOD5;
+    state & modifiers == expected
 }
 
 /// Check an escape-key name before anything slow happens.
@@ -7495,7 +7564,7 @@ mod tests {
     #[test]
     #[ignore = "requires a dedicated owned JWM_TEST_X11_DISPLAY Xvfb server"]
     fn click_input_requires_a_click_after_each_edge_release_on_x11() {
-        use x11rb::protocol::{xproto, xtest::ConnectionExt as _};
+        use x11rb::protocol::{xfixes::ConnectionExt as _, xproto, xtest::ConnectionExt as _};
         assert_eq!(
             std::env::var("JWM_REMOTE_TEST_VIEWER_OWNED").as_deref(),
             Ok("1")
@@ -7517,6 +7586,7 @@ mod tests {
         )
         .unwrap();
         viewer.set_seamless_input(Some(SeamlessInput::Click));
+        viewer.enable_cursor_plane().unwrap();
         viewer
             .draw(DecodedFrame {
                 sequence: 1,
@@ -7541,13 +7611,38 @@ mod tests {
                 .check()
                 .unwrap();
         };
+        driver.xfixes_query_version(5, 0).unwrap().reply().unwrap();
+        let local_cursor_visible = || {
+            driver
+                .xfixes_get_cursor_image()
+                .unwrap()
+                .reply()
+                .unwrap()
+                .cursor_image
+                .iter()
+                .any(|pixel| pixel >> 24 != 0)
+        };
 
         move_pointer(root, 0, 0);
         move_pointer(window, 20, 70);
-        viewer.poll_events().unwrap();
+        let events = viewer.poll_events().unwrap();
+        assert!(!viewer.grabbed);
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, ViewerEvent::Pointer { .. }))
+        );
+        assert!(
+            local_cursor_visible(),
+            "the local pointer must be visible before clicking the remote image"
+        );
         button(xproto::BUTTON_PRESS_EVENT);
         let events = viewer.poll_events().unwrap();
         assert!(viewer.grabbed, "the initial click starts capture");
+        assert!(
+            !local_cursor_visible(),
+            "the remote cursor takes over during the grab"
+        );
         assert!(events.contains(&ViewerEvent::Button {
             button: 1,
             pressed: true,
@@ -7593,6 +7688,10 @@ mod tests {
         );
         assert!(events.contains(&ViewerEvent::ReleaseAll));
         assert!(viewer.click_edge_deadline.is_none());
+        assert!(
+            local_cursor_visible(),
+            "release restores the local pointer even inside the viewer"
+        );
 
         for (target, x, y) in [(root, 0, 0), (window, 20, 2)] {
             move_pointer(window, 20, 70);
@@ -7691,6 +7790,7 @@ mod tests {
         assert!(!viewer.grabbed);
         assert!(viewer.click_edge_deadline.is_none());
         assert!(events.contains(&ViewerEvent::ReleaseAll));
+        assert!(local_cursor_visible(), "escape restores the local pointer");
     }
 
     #[test]

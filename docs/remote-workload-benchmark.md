@@ -112,9 +112,10 @@ Report interpretation:
 - Stages overlap and have different denominators. Do not sum their means.
   Capture-start-to-ACK includes capture and viewer drawing; send-to-ACK also
   includes viewer work. Neither is network RTT or physical input-to-display.
-- The X11 software path exposes the combined `GetImage` request and reply
-  time. Separate platform traces can distinguish GPU synchronization from
-  data transfer inside that span and identify encoder copies.
+- The X11 direct path exposes separate core `GetImage` and MIT-SHM timing
+  spans. Each runs from the request through the reply. Separate platform
+  traces can distinguish GPU synchronization from data transfer inside
+  those spans and identify encoder copies.
 
 ## Physical latency and acceptance
 

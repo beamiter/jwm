@@ -3,11 +3,23 @@
 
 import copy
 import datetime as dt
+import json
+import os
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import unittest
 
-from acceptance_evidence import artifact, audit, dependency_hashes, release_gate
+from acceptance_evidence import (
+    DAILY_CASES,
+    artifact,
+    audit,
+    daily_gate,
+    dependency_hashes,
+    mixed_scale_reasons,
+    release_gate,
+)
 
 
 class EvidenceTests(unittest.TestCase):
@@ -123,6 +135,222 @@ class EvidenceTests(unittest.TestCase):
             )["candidate_ready"]
         )
 
+
+    def daily_records(self):
+        for manifest in ("Cargo.toml", "Cargo.lock"):
+            (self.root / manifest).write_text("fixture")
+        config = self.root / "jwm.toml"
+        config.write_text("tested config")
+        dependencies = ["src", "Cargo.toml", "Cargo.lock"]
+        records = []
+        for case, level, backend, outputs, _ in DAILY_CASES:
+            record = copy.deepcopy(self.record)
+            record.update(case=case, level=level, backend=backend, configs=[artifact(config)])
+            record["provenance"].update(
+                dependencies=dependencies.copy(),
+                dependency_sha256=dependency_hashes(dependencies, self.root),
+            )
+            record["hardware"]["software_renderer"] = False
+            if outputs == 2:
+                record["hardware"]["outputs"].append({"name": "HDMI-A-1", "mode": "1920x1080@60"})
+            records.append(record)
+        mixed = next(r for r in records if r["case"] == "mixed-scale")
+        self.add_mixed_trace(mixed, self.mixed_trace())
+        return records
+
+    def mixed_trace(self):
+        images = [self.root / name for name in ("before.png", "after.png")]
+        for i, path in enumerate(images):
+            path.write_text(f"synthetic visual evidence {i}")
+        trace = {
+            "format": "jwm-mixed-scale-v1",
+            "protocol": "zwlr_output_manager_v1",
+            "heads": [
+                {"name": "DP-1", "effective_scale": 1, "logical_rect": [-100, 0, 100, 100]},
+                {"name": "HDMI-A-1", "effective_scale": 1.5, "logical_rect": [0, 0, 100, 100]},
+            ],
+            "pointer_visual_samples": [
+                {"output": "DP-1", "input_event": "wl_pointer.enter", "pointer_logical": [-10, 30],
+                 "visual_target_logical_rect": [-20, 20, 20, 20], "visual_evidence": str(images[0])},
+                {"output": "HDMI-A-1", "input_event": "wl_pointer.enter", "pointer_logical": [10, 30],
+                 "visual_target_logical_rect": [0, 20, 20, 20], "visual_evidence": str(images[1])},
+            ],
+        }
+        return trace
+
+    def add_mixed_trace(self, record, trace):
+        path = self.root / "mixed-scale-raw.json"
+        path.write_text(json.dumps(trace))
+        record["raw_evidence"] = [
+            artifact(path), artifact(self.root / "before.png"), artifact(self.root / "after.png")
+        ]
+        record["hardware"]["mixed_scale_trace"] = str(path)
+
+    def test_daily_gate_does_not_promote_isolated_or_wrong_backend(self):
+        records = self.daily_records()
+        software = [record for record in records if record["level"] == "isolated"]
+        report = daily_gate(software, self.root)
+        self.assertTrue(report["isolated_ready"])
+        self.assertFalse(report["physical_ready"])
+        self.assertFalse(report["daily_ready"])
+        self.assertEqual(len([r for r in report["cases"] if r["state"] == "missing"]), 8)
+
+        states = {r["case"]: r["state"] for r in report["cases"]}
+        self.assertEqual(states["session-host-isolated"], "passed")
+        self.assertEqual(states["portal"], "missing")
+        portal = next(record for record in records if record["case"] == "portal")
+        portal.update(level="isolated", backend="host")
+        report = daily_gate(software + [portal], self.root)
+        self.assertEqual(next(r for r in report["cases"] if r["case"] == "portal")["state"], "wrong-scope")
+        portal.update(level="physical", backend="x11rb")
+        self.assertFalse(daily_gate(records, self.root)["physical_ready"])
+
+    def test_daily_gate_physical_topology_and_level_are_explicit(self):
+        records = self.daily_records()
+        self.assertTrue(daily_gate(records, self.root)["daily_ready"])
+        for case in ("dual-output-hotplug", "dual-output-suspend"):
+            record = next(r for r in records if r["case"] == case)
+            with self.subTest(case=case):
+                original = copy.deepcopy(record["hardware"])
+                record["hardware"]["outputs"][1]["name"] = record["hardware"]["outputs"][0]["name"]
+                self.assertFalse(daily_gate(records, self.root)["physical_ready"])
+                record["hardware"] = copy.deepcopy(original)
+                del record["hardware"]["software_renderer"]
+                self.assertFalse(daily_gate(records, self.root)["physical_ready"])
+                record["hardware"] = original
+
+    def test_daily_gate_does_not_hide_skips_failures_or_stale_passes(self):
+        records = self.daily_records()
+        hotplug = next(r for r in records if r["case"] == "dual-output-hotplug")
+        hotplug.update(status="skip", reason="no external screen")
+        report = daily_gate(records, self.root)
+        self.assertFalse(report["daily_ready"])
+        row = next(r for r in report["cases"] if r["case"] == "dual-output-hotplug")
+        self.assertEqual(row["state"], "skipped")
+        self.assertEqual(row["attempts"][0]["reasons"], ["no external screen"])
+        hotplug.update(status="pass", reason=None)
+        fail = dict(hotplug, status="fail", reason="focus not recovered")
+        self.assertFalse(daily_gate(records + [fail], self.root)["daily_ready"])
+        (self.root / "jwm.toml").write_text("replaced config")
+        self.assertFalse(daily_gate(records, self.root)["daily_ready"])
+
+    def test_daily_gate_rejects_incomplete_or_inconsistent_pass_provenance(self):
+        records = self.daily_records()
+        records[0]["configs"] = []
+        self.assertFalse(daily_gate(records, self.root)["isolated_ready"])
+        records = self.daily_records()
+        records[0]["provenance"]["dependencies"].remove("Cargo.lock")
+        del records[0]["provenance"]["dependency_sha256"]["Cargo.lock"]
+        self.assertFalse(daily_gate(records, self.root)["isolated_ready"])
+        records = self.daily_records()
+        records[0]["provenance"]["dependencies"].remove("Cargo.lock")
+        self.assertFalse(daily_gate(records, self.root)["isolated_ready"])
+
+    def mixed_row(self, records):
+        report = daily_gate(records, self.root)
+        return report, next(row for row in report["cases"] if row["case"] == "mixed-scale")
+
+    def test_mixed_scale_needs_observed_distinct_finite_scales(self):
+        records = self.daily_records()
+        record = next(r for r in records if r["case"] == "mixed-scale")
+        for value in (1, 0, -1, "1.5", True, float("nan"), float("inf"), 10 ** 400):
+            with self.subTest(scale=value):
+                trace = self.mixed_trace()
+                trace["heads"][1]["effective_scale"] = value
+                self.add_mixed_trace(record, trace)
+                report, row = self.mixed_row(records)
+                self.assertFalse(report["physical_ready"])
+                self.assertEqual(row["state"], "invalid")
+        trace = self.mixed_trace()
+        trace["protocol"] = "static-config"
+        self.add_mixed_trace(record, trace)
+        self.assertEqual(self.mixed_row(records)[1]["state"], "invalid")
+
+    def test_mixed_scale_rejects_unmatched_output_and_pointer_visual_geometry(self):
+        records = self.daily_records()
+        record = next(r for r in records if r["case"] == "mixed-scale")
+        for field, value in (
+            ("output", "DP-1"), ("output", "unknown"),
+            ("input_event", "configured"), ("pointer_logical", [-15, 30]),
+            ("pointer_logical", [float("inf"), 30]),
+            ("visual_target_logical_rect", [15, 20, 20, 20]),
+            ("visual_target_logical_rect", [-1, 20, 20, 20]),
+            ("visual_target_logical_rect", [0, 20, 0, 20]),
+            ("visual_evidence", str(self.root / "before.png")),
+            ("visual_evidence", "/not-in-evidence"),
+        ):
+            with self.subTest(field=field, value=value):
+                trace = self.mixed_trace()
+                trace["pointer_visual_samples"][1][field] = value
+                self.add_mixed_trace(record, trace)
+                report, row = self.mixed_row(records)
+                self.assertFalse(report["physical_ready"])
+                self.assertEqual(row["state"], "invalid")
+        trace = self.mixed_trace()
+        trace["heads"][1]["name"] = "fake-connector"
+        self.add_mixed_trace(record, trace)
+        self.assertEqual(self.mixed_row(records)[1]["state"], "invalid")
+
+    def test_mixed_scale_requires_bound_raw_evidence_and_physical_backend(self):
+        records = self.daily_records()
+        record = next(r for r in records if r["case"] == "mixed-scale")
+        trace = self.mixed_trace()
+        self.add_mixed_trace(record, trace)
+        self.assertTrue(self.mixed_row(records)[0]["daily_ready"])
+        self.assertEqual(self.mixed_row(records)[1]["state"], "passed")
+
+        record.update(level="isolated", backend="wayland-nested")
+        self.assertEqual(self.mixed_row(records)[1]["state"], "wrong-scope")
+        record.update(level="physical", backend="wayland-udev")
+        record["raw_evidence"].pop(0)
+        self.assertEqual(self.mixed_row(records)[1]["state"], "invalid")
+        self.add_mixed_trace(record, trace)
+        (self.root / "after.png").write_text("modified after collection")
+        self.assertEqual(self.mixed_row(records)[1]["state"], "invalid")
+        self.add_mixed_trace(record, self.mixed_trace())
+        oversized = self.root / "mixed-scale-raw.json"
+        oversized.write_text(" " * 65537)
+        record["raw_evidence"][0] = artifact(oversized)
+        self.assertEqual(self.mixed_row(records)[1]["state"], "invalid")
+
+    def test_mixed_scale_rejects_copied_visual_bytes_at_a_different_path(self):
+        records = self.daily_records()
+        record = next(r for r in records if r["case"] == "mixed-scale")
+        first, second = self.root / "before.png", self.root / "after.png"
+        self.assertNotEqual(first, second)
+        second.write_bytes(first.read_bytes())
+        # This is a duplicate observation, not the ordinary stale-hash failure.
+        record["raw_evidence"][2] = artifact(second)
+        self.assertTrue(audit(record, self.root)["current"])
+        report, row = self.mixed_row(records)
+        self.assertFalse(report["physical_ready"])
+        self.assertEqual(row["state"], "invalid")
+        self.assertIn("different visual artifact bytes", row["attempts"][0]["reasons"][0])
+
+    def test_mixed_scale_trace_reopen_does_not_read_a_fifo(self):
+        # Exercise the additional descriptor check directly, as if the type
+        # changed after the general audit. No writer is opened.
+        fifo = self.root / "nonregular"
+        os.mkfifo(fifo)
+        record = {
+            "hardware": {"mixed_scale_trace": str(fifo)},
+            "raw_evidence": [{"path": str(fifo), "sha256": "0" * 64}],
+        }
+        self.assertEqual(
+            mixed_scale_reasons(record, {"DP-1", "HDMI-A-1"}),
+            ["mixed-scale trace must be a regular file"],
+        )
+
+    def test_daily_cli_with_no_evidence_is_a_nonzero_checklist(self):
+        result = subprocess.run(
+            [sys.executable, str(Path(__file__).with_name("acceptance_evidence.py")), "daily"],
+            capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(result.returncode, 1, result.stderr)
+        report = json.loads(result.stdout)
+        self.assertFalse(report["daily_ready"])
+        self.assertEqual({r["state"] for r in report["cases"]}, {"missing"})
+        self.assertTrue(all(r["checklist"] for r in report["cases"]))
 
 if __name__ == "__main__":
     unittest.main()

@@ -157,7 +157,11 @@ case-sensitive and non-overlapping (not regular expressions). Unicode matches
 are selected and scrolled into view; query input, including IME, never dirties
 the source or enters its undo history. Escape retains the selected match so
 ordinary editing can continue. Empty and missing queries do not change source
-selection. Notebook Ctrl+F keeps its existing notebook-filter behavior.
+selection. In the notebook, Ctrl+F focuses the notebook filter. Press Down
+(or Up to start at the last result) to highlight a matching note, then Up/Down
+to move and Enter to open it. If you scroll the highlighted note out of view,
+the first Enter only brings it back into view. Ctrl+F returns to the filter;
+Escape returns focus to the editor without opening the highlighted note.
 
 ### Code-text view and document status
 
@@ -195,3 +199,21 @@ add bracket-dependent indentation, or reformat the document. LF insertion uses
 the existing file encoding policy (uniform CRLF files are saved as CRLF; mixed
 files keep existing separators and insert LF). Notebook/theme text behavior is
 unchanged. None of these operations execute source code.
+
+### Experimental Notes accessibility
+
+Build the native app with `--features accessibility` in `crates/jwm_apps` to
+enable its AccessKit adapter. This is opt-in; neither the default build nor the
+image viewer exposes a new accessibility tree.
+
+The Notes tree exposes focus on the notebook search field, activation of named
+result buttons currently visible in the sidebar, and focus on the editor after
+a successful document switch. Scroll the sidebar to expose more results. A
+result retains its identity while visible even if it is reordered; a result
+that leaves the viewport is published as a new node if it later comes back.
+Result names are the same visible note titles shown by the sidebar. The
+accessibility tree does not provide the note body, editable text protocol,
+selection, deletion, overwrite, or file chooser actions. Dialogs replace the
+normal accessible controls with a separate named scope, rather than leaving
+underlying result buttons available. The regular keyboard and pointer controls
+still work. This MVP is not a claim of full screen-reader support.

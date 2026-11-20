@@ -10,6 +10,7 @@ points so external packagers can pick the project up after the first
 | Artifact | Source |
 | --- | --- |
 | Binary + session bundle | `scripts/package-release.sh` → GitHub Release on `jwm-v*` |
+| Optional JWM Portal descriptor Debian package | `scripts/package-portal-metadata.sh` → separate `jwm-portal-metadata_*_all.deb` release asset |
 | Source archive | `git archive` from the same tag |
 | Checksums / provenance | `SHA256SUMS` + `actions/attest` |
 
@@ -53,6 +54,41 @@ upgrade, rollback, and uninstall. Rolling back to a pre-player payload leaves
 the player's managed links inactive; final uninstall restores any legacy files
 that were replaced with explicit `--replace`. Existing unrelated files at new
 destinations are never overwritten without that option.
+
+## Optional Debian package for Portal discovery
+
+The Ubuntu 24.04 broker update `1.18.4-1ubuntu2.24.04.3` does not discover the user's
+`jwm.portal` descriptor. Install the optional `jwm-portal-metadata_*_all.deb`
+from the **same JWM release** (verify its checksum and provenance first), or
+build it in a private directory from the checkout containing the matching
+`portal/dist/jwm.portal`:
+
+```bash
+out=$(mktemp -d)
+artifact=$(bash scripts/package-portal-metadata.sh "$out")
+dpkg-deb --contents "$artifact"    # inspect without installing
+sudo apt install "$artifact"     # explicit, only on the intended Debian/Ubuntu host
+bash scripts/install-portal.sh    # as your session user, not with sudo
+```
+
+This metadata-only, architecture-independent package owns
+`/usr/share/xdg-desktop-portal/portals/jwm.portal`. It does not install the JWM
+backend or user configuration and has no maintainer scripts. The user installer
+installs the backend and JWM-specific routing configuration separately. The
+package does not overwrite GTK descriptors, set global session environment,
+select a different desktop's backend, or disable the source picker. Do not use
+`XDG_DESKTOP_PORTAL_DIR` as an installation workaround. On a broker that
+already finds per-user descriptors, the package is not needed. The installer
+only enforces this check for the tested broker version; other revisions and
+vendor builds require their own discovery check.
+
+This package has its own lifecycle, outside the core tarball upgrade,
+rollback, or uninstall. Keep its descriptor aligned with the backend version
+and remove it separately with `sudo apt remove jwm-portal-metadata` if no
+longer needed. Removing the package does not remove any per-user files. Verify
+routing from the JWM Wayland session, not by calling the backend directly.
+A visible ScreenCast interface confirms broker export, not that the compositor
+can capture or that PipeWire delivered a frame.
 
 ## Arch Linux (AUR sketch)
 

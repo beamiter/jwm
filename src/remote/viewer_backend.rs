@@ -157,6 +157,20 @@ impl Viewer {
             Self::Wayland(v) => v.poll_events(),
         }
     }
+    pub(super) fn enable_toggle_shortcut(&mut self) -> RemoteResult<()> {
+        match self {
+            Self::X11(v) => v.enable_toggle_shortcut(),
+            #[cfg(feature = "remote-wayland")]
+            Self::Wayland(_) => unreachable!("the connection toggle requires X11"),
+        }
+    }
+    pub(super) fn request_close(&mut self) {
+        match self {
+            Self::X11(v) => v.request_close(),
+            #[cfg(feature = "remote-wayland")]
+            Self::Wayland(_) => unreachable!("the connection toggle requires X11"),
+        }
+    }
     pub(super) fn viewport(&self) -> (u16, u16) {
         match self {
             Self::X11(v) => v.viewport(),
@@ -246,6 +260,13 @@ impl Viewer {
             Self::X11(v) => v.set_source_label(label),
             #[cfg(feature = "remote-wayland")]
             Self::Wayland(v) => v.set_source_label(label),
+        }
+    }
+    pub(super) fn request_activation(&self) -> RemoteResult<()> {
+        match self {
+            Self::X11(v) => v.request_activation(),
+            #[cfg(feature = "remote-wayland")]
+            Self::Wayland(_) => Ok(()),
         }
     }
     pub(super) fn source_presented(&mut self, epoch: u64) {
