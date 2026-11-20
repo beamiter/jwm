@@ -85,6 +85,9 @@ impl Semantics {
                     self.rows.insert(path.clone(), id);
                     let mut result = named(Role::Button, &hit.label);
                     result.add_action(Request::Click);
+                    if app.focus == Focus::Results && app.result_path.as_ref() == Some(path) {
+                        focus = id;
+                    }
                     result.set_bounds(bounds(hit.rect, scale));
                     result_ids.push(id);
                     nodes.push((id, result));
