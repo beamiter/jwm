@@ -1504,11 +1504,10 @@ pub fn capture_snapshot_excluding(
     }
 }
 
-/// 把快照匹配到当前客户端，生成恢复计划。
-///
-/// 匹配规则：class 必须忽略大小写相等；若双方都有 instance，则 instance 也需
-/// 相等。每个保存条目最多匹配一个客户端（已用过的条目不再匹配），从而让同一
-/// 应用的多个实例尽量映射到不同的保存条目。具有精确 instance 匹配的条目优先。
+/// Match saved placement to live clients only when each is the other's
+/// unique best candidate. Class and nonempty instance comparisons are
+/// ASCII case-insensitive. Exact instance matches outrank the legacy
+/// class-only fallback when an instance is empty on either side.
 ///
 /// An entry saved on no tag (a hidden scratchpad in a snapshot an older JWM
 /// wrote) never matches: applied to anything, it could only move that window
@@ -1518,50 +1517,81 @@ where
     I: IntoIterator<Item = (ClientKey, &'a str, &'a str)>,
 {
     plan_restore_detailed(snapshot, clients)
+        .plans
         .into_iter()
         .map(|(key, plan)| (key, plan.restore))
         .collect()
 }
 
-fn plan_restore_detailed<'a, I>(
-    snapshot: &SessionSnapshot,
-    clients: I,
-) -> Vec<(ClientKey, DetailedRestorePlan)>
+#[derive(Default)]
+struct RestoreMatching {
+    plans: Vec<(ClientKey, DetailedRestorePlan)>,
+    ambiguous: HashSet<ClientKey>,
+}
+
+#[derive(Clone, Copy, Default)]
+struct RestoreChoice {
+    rank: u8,
+    index: usize,
+    tied: bool,
+}
+
+impl RestoreChoice {
+    fn consider(&mut self, rank: u8, index: usize) {
+        if rank > self.rank {
+            *self = Self {
+                rank,
+                index,
+                tied: false,
+            };
+        } else if rank == self.rank {
+            self.tied = true;
+        }
+    }
+}
+
+fn plan_restore_detailed<'a, I>(snapshot: &SessionSnapshot, clients: I) -> RestoreMatching
 where
     I: IntoIterator<Item = (ClientKey, &'a str, &'a str)>,
 {
-    let mut used = vec![false; snapshot.clients.len()];
-    let mut out = Vec::new();
-
-    for (key, class, instance) in clients {
-        let mut fallback: Option<usize> = None;
-        let mut exact: Option<usize> = None;
-
-        for (i, e) in snapshot.clients.iter().enumerate() {
-            // An entry on no tag is a hidden scratchpad an older JWM saved.
-            // Applied to anything it could only move that window onto the
-            // current view, so it is never a candidate.
-            if used[i] || e.tags == 0 || !e.class.eq_ignore_ascii_case(class) {
-                continue;
-            }
-            let both_have_instance = !e.instance.is_empty() && !instance.is_empty();
-            if both_have_instance {
-                if e.instance.eq_ignore_ascii_case(instance) {
-                    exact = Some(i);
-                    break;
-                }
-                // class matches but instance differs — not a candidate.
-                continue;
-            }
-            if fallback.is_none() {
-                fallback = Some(i);
-            }
+    let live: Vec<_> = clients.into_iter().collect();
+    let mut choices = vec![RestoreChoice::default(); live.len()];
+    let mut owners = vec![RestoreChoice::default(); snapshot.clients.len()];
+    // Require mutually unique best matches. In particular, two saved
+    // instances do not identify a single survivor, and a blank instance
+    // cannot steal an entry from an exact counterpart processed later.
+    for (j, &(_, class, instance)) in live.iter().enumerate() {
+        if class.is_empty() {
+            continue;
         }
+        for (i, e) in snapshot.clients.iter().enumerate() {
+            if e.tags == 0 || !e.class.eq_ignore_ascii_case(class) {
+                continue;
+            }
+            let rank = if e.instance.is_empty() || instance.is_empty() {
+                1
+            } else if e.instance.eq_ignore_ascii_case(instance) {
+                2
+            } else {
+                continue;
+            };
+            choices[j].consider(rank, i);
+            owners[i].consider(rank, j);
+        }
+    }
 
-        if let Some(i) = exact.or(fallback) {
-            used[i] = true;
+    let mut out = RestoreMatching::default();
+    for (j, (&(key, _, _), choice)) in live.iter().zip(choices).enumerate() {
+        if choice.rank == 0 {
+            continue;
+        }
+        let i = choice.index;
+        let owner = owners[i];
+        if choice.tied || owner.tied || owner.index != j {
+            out.ambiguous.insert(key);
+        } else {
             let e = &snapshot.clients[i];
-            out.push((
+            out.plans.push((
                 key,
                 DetailedRestorePlan {
                     restore: RestorePlan {
@@ -1646,15 +1676,13 @@ impl Jwm {
             .map_err(|e| format!("session_snapshot_unavailable: {e}"))
     }
     pub(crate) fn eva_restore_matching_keys(&self, snapshot: &SessionSnapshot) -> Vec<ClientKey> {
-        self.eva_restore_plans(snapshot)
+        self.session_restore_matching(snapshot)
+            .plans
             .into_iter()
             .map(|(key, _)| key)
             .collect()
     }
-    fn eva_restore_plans(
-        &self,
-        snapshot: &SessionSnapshot,
-    ) -> Vec<(ClientKey, DetailedRestorePlan)> {
+    fn session_restore_matching(&self, snapshot: &SessionSnapshot) -> RestoreMatching {
         let scratchpads: HashSet<ClientKey> = self.scratchpads.values().copied().collect();
         let current: Vec<_> = self
             .state
@@ -1668,26 +1696,26 @@ impl Jwm {
                     .map(|c| (*key, c.class.as_str(), c.instance.as_str()))
             })
             .collect();
-        plan_restore_detailed(snapshot, current)
-            .into_iter()
-            .map(|(key, mut plan)| {
-                if let Some(live) = self.state.clients.get(key) {
-                    plan.preserve_unrecorded(snapshot.recorded_version, live)
-                }
-                (key, plan)
-            })
-            .collect()
+        let mut matching = plan_restore_detailed(snapshot, current);
+        for (key, plan) in &mut matching.plans {
+            if let Some(live) = self.state.clients.get(*key) {
+                plan.preserve_unrecorded(snapshot.recorded_version, live);
+            }
+        }
+        matching
     }
     pub(crate) fn eva_restore_frozen_snapshot(
         &mut self,
         backend: &mut dyn Backend,
         snapshot: &SessionSnapshot,
     ) -> serde_json::Value {
-        let plans = self.eva_restore_plans(snapshot);
+        let matching = self.session_restore_matching(snapshot);
+        let plans = &matching.plans;
+        let matched: HashSet<_> = plans.iter().map(|(key, _)| *key).collect();
         self.apply_session_snapshot(backend, snapshot);
         let mut outcomes = Vec::new();
         let mut verified = 0;
-        for (key, plan) in &plans {
+        for (key, plan) in plans {
             let Some(c) = self.state.clients.get(*key) else {
                 outcomes.push(serde_json::json!({"status":"target_gone"}));
                 continue;
@@ -1791,6 +1819,7 @@ impl Jwm {
         // Re-running the pure ordering planner against the poststate must be
         // a fixed point; this checks saved relative order without mutating it.
         let mut order_verified = true;
+        let mut order_skipped = 0;
         for saved in &snapshot.monitor_orders {
             let num = self.resolve_session_monitor_num(
                 backend,
@@ -1809,34 +1838,27 @@ impl Jwm {
             let Some(keys) = self.state.monitor_clients.get(m) else {
                 continue;
             };
-            let current: Vec<_> = keys
-                .iter()
-                .filter_map(|key| {
-                    self.state.clients.get(*key).map(|c| {
-                        (
-                            *key,
-                            SessionWindowIdentity {
-                                class: c.class.clone(),
-                                instance: c.instance.clone(),
-                            },
-                        )
-                    })
-                })
-                .collect();
-            let (held, current): (Vec<_>, Vec<_>) = current
-                .into_iter()
-                .partition(|(key, _)| self.scratchpads.values().any(|saved| saved == key));
-            let mut expected = plan_order_restore(&saved.clients, &current);
-            expected.extend(held.into_iter().map(|(key, _)| key));
-            expected.sort_by_key(|key| {
-                self.state
-                    .clients
-                    .get(*key)
-                    .is_some_and(|c| c.state.is_floating)
-            });
-            order_verified &= expected.as_slice() == keys.as_slice();
+            if let Some(expected) =
+                self.plan_session_monitor_order(saved, keys, &matched, &matching.ambiguous)
+            {
+                order_verified &= expected.as_slice() == keys.as_slice();
+            } else {
+                order_skipped += 1;
+                order_verified = false;
+            }
         }
-        serde_json::json!({"status":if verified==plans.len()&&order_verified{"succeeded"}else if verified>0{"partial"}else{"failed"},"matched_windows":plans.len(),"verified_windows":verified,"order_verified":order_verified,"windows":outcomes})
+        let skipped = matching.ambiguous.len();
+        let status =
+            if verified == plans.len() && order_verified && skipped == 0 && order_skipped == 0 {
+                "succeeded"
+            } else if verified > 0 {
+                "partial"
+            } else {
+                "failed"
+            };
+        serde_json::json!({"status":status,"matched_windows":plans.len(),"verified_windows":verified,
+            "ambiguous_windows_skipped":skipped,"monitor_orders_skipped":order_skipped,
+            "order_verified":order_verified,"windows":outcomes})
     }
 
     pub(crate) fn saved_session_matches_live(&self, backend: &dyn Backend) -> bool {
@@ -1949,35 +1971,18 @@ impl Jwm {
         backend: &mut dyn Backend,
         snapshot: &SessionSnapshot,
     ) -> usize {
-        // Build (key, class, instance) view of current clients. Scratchpads
-        // are left out: their visibility belongs to their toggle, and a hidden
-        // one matched to any entry would be retagged onto a shown tag.
-        let scratchpads: HashSet<ClientKey> = self.scratchpads.values().copied().collect();
-        let current: Vec<(ClientKey, String, String)> = self
-            .state
-            .client_order
-            .iter()
-            .filter(|k| !scratchpads.contains(k))
-            .filter_map(|k| {
-                self.state
-                    .clients
-                    .get(*k)
-                    .map(|c| (*k, c.class.clone(), c.instance.clone()))
-            })
-            .collect();
-
-        let plans: Vec<(ClientKey, DetailedRestorePlan)> = plan_restore_detailed(
-            snapshot,
-            current.iter().map(|(k, c, i)| (*k, c.as_str(), i.as_str())),
-        )
-        .into_iter()
-        .map(|(key, mut plan)| {
-            if let Some(live) = self.state.clients.get(key) {
-                plan.preserve_unrecorded(snapshot.recorded_version, live);
-            }
-            (key, plan)
-        })
-        .collect();
+        let matching = self.session_restore_matching(snapshot);
+        let plans = matching.plans;
+        if !matching.ambiguous.is_empty() {
+            log::warn!(
+                "session restore left {} windows unchanged: ambiguous class/instance",
+                matching.ambiguous.len()
+            );
+        }
+        if plans.is_empty() {
+            return 0;
+        }
+        let matched: HashSet<_> = plans.iter().map(|(key, _)| *key).collect();
 
         for (key, plan) in &plans {
             let monitor_num = self.resolve_session_monitor_num(
@@ -2110,7 +2115,7 @@ impl Jwm {
         // 全部窗口状态（tag / 浮动 / 所在显示器）恢复完成后，最后按快照
         // 重排每个显示器的平铺顺序，再统一 arrange。v1/v2 快照的
         // monitor_orders 为空，这里自然成为无操作。
-        self.restore_monitor_client_order(backend, snapshot);
+        self.restore_monitor_client_order(backend, snapshot, &matched, &matching.ambiguous);
 
         let monitor_keys: Vec<_> = self.state.monitor_order.clone();
         for mk in monitor_keys {
@@ -2316,8 +2321,13 @@ impl Jwm {
     /// 保存列表中的窗口按保存序在前（保持相对序），列表外的新窗口按现有
     /// 相对顺序追加；`monitor_clients` 的「平铺组在前、浮动组在后」不变量
     /// 优先于保存顺序——保存后浮动状态发生变化的窗口回到它当前所属的组。
-    fn restore_monitor_client_order(&mut self, backend: &dyn Backend, snapshot: &SessionSnapshot) {
-        let scratchpads: HashSet<ClientKey> = self.scratchpads.values().copied().collect();
+    fn restore_monitor_client_order(
+        &mut self,
+        backend: &dyn Backend,
+        snapshot: &SessionSnapshot,
+        matched: &HashSet<ClientKey>,
+        ambiguous: &HashSet<ClientKey>,
+    ) {
         for saved in &snapshot.monitor_orders {
             let monitor_num = self.resolve_session_monitor_num(
                 backend,
@@ -2341,51 +2351,63 @@ impl Jwm {
             let Some(current_keys) = self.state.monitor_clients.get(monitor_key) else {
                 continue;
             };
-            let current: Vec<(ClientKey, SessionWindowIdentity)> = current_keys
-                .iter()
-                .filter_map(|&key| {
-                    self.state.clients.get(key).map(|client| {
-                        (
-                            key,
-                            SessionWindowIdentity {
-                                class: client.class.clone(),
-                                instance: client.instance.clone(),
-                            },
-                        )
-                    })
-                })
-                .collect();
-            if current.len() != current_keys.len() {
-                // 列表与客户端表不一致时不重排，避免覆盖丢失 key。
-                continue;
-            }
-            // Scratchpads are never saved, so they claim no saved slot: one
-            // matching an ordinary window's identity would push that window
-            // out of its place. They keep their relative order after the rest.
-            let (held_back, current): (Vec<_>, Vec<_>) = current
-                .into_iter()
-                .partition(|(key, _)| scratchpads.contains(key));
-            let mut planned = plan_order_restore(&saved.clients, &current);
-            planned.extend(held_back.into_iter().map(|(key, _)| key));
-            let mut tiled: Vec<ClientKey> = Vec::with_capacity(planned.len());
-            let mut floating: Vec<ClientKey> = Vec::new();
-            for key in planned {
-                let is_floating = self
-                    .state
-                    .clients
-                    .get(key)
-                    .is_some_and(|client| client.state.is_floating);
-                if is_floating {
-                    floating.push(key);
-                } else {
-                    tiled.push(key);
-                }
-            }
-            tiled.extend(floating);
-            if let Some(client_list) = self.state.monitor_clients.get_mut(monitor_key) {
-                *client_list = tiled;
+            if let Some(order) =
+                self.plan_session_monitor_order(saved, current_keys, matched, ambiguous)
+            {
+                self.state.monitor_clients[monitor_key] = order;
+            } else {
+                log::warn!(
+                    "session restore kept monitor {monitor_num} order: ambiguous or stale saved identities"
+                );
             }
         }
+    }
+
+    fn plan_session_monitor_order(
+        &self,
+        saved: &SessionMonitorOrder,
+        keys: &[ClientKey],
+        matched: &HashSet<ClientKey>,
+        ambiguous: &HashSet<ClientKey>,
+    ) -> Option<Vec<ClientKey>> {
+        let mut current = Vec::new();
+        let mut held = Vec::new();
+        for &key in keys {
+            let c = self.state.clients.get(key)?;
+            if ambiguous.contains(&key) {
+                return None;
+            }
+            if self
+                .scratchpads
+                .values()
+                .any(|&scratchpad| scratchpad == key)
+            {
+                held.push(key);
+            } else {
+                current.push((
+                    key,
+                    SessionWindowIdentity {
+                        class: c.class.clone(),
+                        instance: c.instance.clone(),
+                    },
+                ));
+            }
+        }
+        // A stale order list must not claim a live window independently of
+        // the placement plan, nor assign a unique survivor two saved slots.
+        let mut ordered_keys = HashSet::new();
+        for identity in &saved.clients {
+            for (key, live) in &current {
+                if identity.matches(live) && (!matched.contains(key) || !ordered_keys.insert(*key))
+                {
+                    return None;
+                }
+            }
+        }
+        let mut order = plan_order_restore(&saved.clients, &current);
+        order.extend(held);
+        order.sort_by_key(|key| self.state.clients[*key].state.is_floating);
+        Some(order)
     }
 }
 
@@ -2968,7 +2990,7 @@ mod tests {
         assert_eq!(plans[0].0, k[0]);
         assert_eq!(plans[0].1.tags, 0b100);
         assert_eq!(
-            plan_restore_detailed(&snap, vec![(k[0], "firefox", "navigator")])[0]
+            plan_restore_detailed(&snap, vec![(k[0], "firefox", "navigator")]).plans[0]
                 .1
                 .monitor_num,
             0
@@ -2984,15 +3006,26 @@ mod tests {
     }
 
     #[test]
-    fn plan_restore_each_entry_used_at_most_once() {
-        // Two terminals saved on different tags; two open terminals should map
-        // to distinct entries rather than both matching the first.
-        let snap = snapshot_with_clients(vec![entry("Term", "", 0b1), entry("Term", "", 0b10)]);
+    fn plan_restore_declines_equal_candidates_in_both_directions() {
+        let snap = snapshot_with_clients(vec![entry("Term", "", 1), entry("Term", "", 2)]);
         let k = keys(2);
-        let plans = plan_restore(&snap, vec![(k[0], "Term", ""), (k[1], "Term", "")]);
-        assert_eq!(plans.len(), 2);
-        let tags: Vec<u32> = plans.iter().map(|(_, p)| p.tags).collect();
-        assert!(tags.contains(&0b1) && tags.contains(&0b10));
+        assert!(plan_restore(&snap, [(k[0], "Term", ""), (k[1], "Term", "")]).is_empty());
+        assert!(plan_restore(&snap, [(k[0], "Term", "")]).is_empty());
+        let single = snapshot_with_clients(vec![entry("Term", "kitty", 8)]);
+        assert!(
+            plan_restore(&single, [(k[0], "term", "kitty"), (k[1], "TERM", "KITTY")]).is_empty()
+        );
+        let plans = plan_restore(&single, [(k[0], "Term", ""), (k[1], "Term", "kitty")]);
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].0, k[1]);
+        assert_eq!(plans[0].1.tags, 8);
+        let unlabeled = snapshot_with_clients(vec![entry("", "", 1)]);
+        assert!(plan_restore(&unlabeled, [(k[0], "", "")]).is_empty());
+        let plans = plan_restore(&single, [(k[0], "Term", "")]);
+        assert_eq!(
+            plans[0].1.tags, 8,
+            "unambiguous legacy fallback still works"
+        );
     }
 
     #[test]
@@ -4017,6 +4050,166 @@ mod tests {
         assert!(!jwm.is_client_visible_by_key(scratchpad));
         assert_eq!(jwm.state.clients[terminal].state.tags, 1 << 3);
         assert!(!jwm.state.clients[terminal].state.is_floating);
+    }
+
+    #[test]
+    fn captured_session_skips_reversed_duplicates_and_single_survivor() {
+        use crate::backend::api::OutputIdentity;
+        for (distinct_instances, surviving_labels) in
+            [(false, &[1, 0][..]), (false, &[1][..]), (true, &[1, 0][..])]
+        {
+            let mut left = output(1, 0, 0, 1920, 1080);
+            left.name = "DP-1".into();
+            left.identity = OutputIdentity::connector_only("DP-1");
+            let mut right = output(2, 1920, 0, 1920, 1080);
+            right.name = "HDMI-A-1".into();
+            right.identity = OutputIdentity::connector_only("HDMI-A-1");
+            let mut backend = DisplaySpyBackend::new(vec![left, right]);
+            let mut source =
+                Jwm::new_with_runtime_backend(&mut backend, "test").expect("source jwm");
+            let mut live = Jwm::new_with_runtime_backend(&mut backend, "test").expect("live jwm");
+            let saved_monitors = source.state.monitor_order.clone();
+            let live_monitors = live.state.monitor_order.clone();
+            let add = |wm: &mut Jwm, label: usize, raw: u32, monitor, tags| {
+                let mut client = WMClient::new(WindowId::from_raw(raw.into()));
+                client.class = "Alacritty".into();
+                client.instance = if distinct_instances {
+                    ["terminal-a", "terminal-b"][label].into()
+                } else {
+                    "Alacritty".into()
+                };
+                client.name = ["Document A", "Document B"][label].into();
+                client.state.tags = tags;
+                client.mon = Some(monitor);
+                client.geometry.w = 640;
+                client.geometry.h = 480;
+                let key = wm.insert_client(client);
+                wm.attach_to_monitor(key, monitor);
+                key
+            };
+            for label in [0, 1] {
+                add(
+                    &mut source,
+                    label,
+                    0x70 + label as u32,
+                    saved_monitors[label],
+                    1 << (label + 1),
+                );
+            }
+            let mut snapshot = capture_snapshot(&source.state, "status-bar");
+            source.attach_session_connectors(&backend, &mut snapshot);
+            assert_eq!(
+                snapshot
+                    .clients
+                    .iter()
+                    .map(|c| c.name.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["Document A", "Document B"]
+            );
+            assert_eq!(snapshot.clients[0].connector.as_deref(), Some("DP-1"));
+            assert_eq!(snapshot.clients[1].connector.as_deref(), Some("HDMI-A-1"));
+            let live_keys: Vec<_> = surviving_labels
+                .iter()
+                .map(|&label| {
+                    (
+                        label,
+                        add(&mut live, label, 0x80 + label as u32, live_monitors[0], 1),
+                    )
+                })
+                .collect();
+            let preview: HashSet<_> = live
+                .eva_restore_matching_keys(&snapshot)
+                .into_iter()
+                .map(|key| live.state.clients[key].win.raw().to_string())
+                .collect();
+            let receipt = live.eva_restore_frozen_snapshot(&mut backend, &snapshot);
+            let actual: HashSet<_> = receipt["windows"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|row| row["window_id"].as_str().unwrap().to_string())
+                .collect();
+            assert_eq!(actual, preview);
+            assert_eq!(
+                receipt["matched_windows"],
+                if distinct_instances { 2 } else { 0 }
+            );
+            assert_eq!(
+                receipt["ambiguous_windows_skipped"],
+                if distinct_instances {
+                    0
+                } else {
+                    live_keys.len()
+                }
+            );
+            assert_eq!(
+                receipt["status"],
+                if distinct_instances {
+                    "succeeded"
+                } else {
+                    "failed"
+                }
+            );
+            for (label, key) in live_keys {
+                let c = &live.state.clients[key];
+                assert_eq!(c.name, ["Document A", "Document B"][label]);
+                assert_eq!(
+                    c.state.tags,
+                    if distinct_instances {
+                        1 << (label + 1)
+                    } else {
+                        1
+                    }
+                );
+                assert_eq!(
+                    c.mon,
+                    Some(live_monitors[if distinct_instances { label } else { 0 }])
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn stale_monitor_order_cannot_reorder_unique_or_ambiguous_windows() {
+        let mut backend = DisplaySpyBackend::new(vec![output(1, 0, 0, 1920, 1080)]);
+        for stale_order in [false, true] {
+            let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").expect("test jwm");
+            let mon = jwm.state.monitor_order[0];
+            let keys = ["A", "B"].map(|class| {
+                let mut c = WMClient::new(WindowId::from_raw(u64::from(class.as_bytes()[0])));
+                c.class = class.into();
+                c.instance = class.into();
+                c.state.tags = 1;
+                c.mon = Some(mon);
+                c.geometry.w = 640;
+                c.geometry.h = 480;
+                let key = jwm.insert_client(c);
+                jwm.attach_to_monitor(key, mon);
+                key
+            });
+            let mut snapshot = capture_snapshot(&jwm.state, "status-bar");
+            snapshot.clients[1].tags = 2;
+            snapshot.monitor_orders[0].clients = vec![identity("B", "B"), identity("A", "A")];
+            if stale_order {
+                snapshot.monitor_orders[0].clients.push(identity("b", "b"));
+            } else {
+                snapshot.clients.push(snapshot.clients[0].clone());
+            }
+            let receipt = jwm.eva_restore_frozen_snapshot(&mut backend, &snapshot);
+            assert_eq!(receipt["status"], "partial");
+            assert_eq!(receipt["monitor_orders_skipped"], 1);
+            assert_eq!(receipt["order_verified"], false);
+            assert_eq!(
+                receipt["ambiguous_windows_skipped"],
+                usize::from(!stale_order)
+            );
+            assert_eq!(jwm.state.monitor_clients[mon].as_slice(), keys);
+            assert_eq!(jwm.state.clients[keys[0]].state.tags, 1);
+            assert_eq!(
+                jwm.state.clients[keys[1]].state.tags, 2,
+                "unambiguous placement still applied"
+            );
+        }
     }
 
     #[test]
