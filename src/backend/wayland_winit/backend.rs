@@ -33,9 +33,9 @@ use smithay::backend::renderer::{Color32F, ImportAll, ImportEgl, ImportMem};
 use smithay::backend::winit::{
     self as smithay_winit, WinitEvent, WinitEventLoop, WinitGraphicsBackend,
 };
-use smithay::desktop::layer_map_for_output;
 use smithay::desktop::space::SurfaceTree;
-use smithay::desktop::utils::send_frames_surface_tree;
+use smithay::desktop::utils::{send_frames_surface_tree, under_from_surface_tree};
+use smithay::desktop::{WindowSurfaceType, layer_map_for_output};
 use smithay::input::keyboard::{FilterResult, ModifiersState};
 use smithay::input::pointer::{ButtonEvent, MotionEvent};
 use smithay::output::{Mode as WlMode, Output, PhysicalProperties, Subpixel};
@@ -85,6 +85,8 @@ struct SharedState {
     /// held-modifier window switcher commits on nothing else.
     system_ui_grab_active: bool,
     host_focused: bool,
+    ime_pointer_regions: Vec<NestedImePointerRegion>,
+    ime_pressed_buttons: HashSet<u32>,
     /// Cached key bindings (mods, keysym) for key event suppression.
     key_bindings: Vec<(Mods, KeySym)>,
     /// xkb keycode (0..=255) -> base (unmodified) keysym.
@@ -105,6 +107,8 @@ impl Default for SharedState {
             mods_state: 0,
             system_ui_grab_active: false,
             host_focused: false,
+            ime_pointer_regions: Vec::new(),
+            ime_pressed_buttons: HashSet::new(),
             key_bindings: Vec::new(),
             keysym_table: vec![0; 256],
             suppressed_keycodes: HashSet::new(),
@@ -655,6 +659,89 @@ fn pop_pending_event<T>(queue: &Mutex<VecDeque<T>>) -> Option<T> {
     queue.lock_safe().pop_front()
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NestedImeSlot {
+    AboveParent,
+    Legacy,
+}
+
+fn nested_ime_parent_slot(
+    mapped: bool,
+    on_output: bool,
+    terminal_exit: bool,
+    legacy: bool,
+) -> Option<NestedImeSlot> {
+    if !mapped || !on_output || terminal_exit {
+        return None;
+    }
+    Some(if legacy {
+        NestedImeSlot::Legacy
+    } else {
+        NestedImeSlot::AboveParent
+    })
+}
+
+/// The managed toplevel and surface origin used by the last successful submit.
+struct NestedImePointerRegion {
+    parent: WindowId,
+    surface: wayland_server::Weak<WlSurface>,
+    origin: Point<i32, Logical>,
+    output: Rectangle<i32, Logical>,
+}
+
+fn nested_ime_pointer_focus(
+    state: &JwmWaylandState,
+    shared: &Mutex<SharedState>,
+    location: Point<f64, Logical>,
+    ordinary_hit: Option<WindowId>,
+) -> Option<(WlSurface, Point<f64, Logical>)> {
+    let parent = ordinary_hit?;
+    let pointer = state.seat.get_pointer()?;
+    // Only promote the popup over its own focused managed client. Higher
+    // surfaces, an XDG grab, a WM overlay and ordinary drags take precedence.
+    if state.session_locked
+        || state.point_in_monitor_shade(location)
+        || state.active_toplevel != Some(parent)
+        || state.popup_grab_toplevel.is_some()
+        || state.terminal_exit_visual.is_some()
+        || state.popup_surface_under(location).is_some()
+        || pointer.is_grabbed()
+    {
+        return None;
+    }
+    let shared = shared.lock_safe();
+    if shared.system_ui_grab_active {
+        return None;
+    }
+    shared.ime_pointer_regions.iter().find_map(|region| {
+        if region.parent != parent || !region.output.to_f64().contains(location) {
+            return None;
+        }
+        let root = region.surface.upgrade().ok()?;
+        let (surface, origin) =
+            under_from_surface_tree(&root, location, region.origin, WindowSurfaceType::ALL)?;
+        Some((surface, origin.to_f64()))
+    })
+}
+
+fn update_ime_button_capture(
+    buttons: &mut HashSet<u32>,
+    button: u32,
+    pressed: bool,
+    start: bool,
+    retain_grab: bool,
+) -> bool {
+    if !pressed {
+        return buttons.remove(&button);
+    }
+    if start || (retain_grab && !buttons.is_empty()) {
+        buttons.insert(button);
+        true
+    } else {
+        false
+    }
+}
+
 pub struct WaylandWinitBackend {
     child_environment: crate::child_environment::ChildEnvironment,
     event_loop: SendWrapper<EventLoop<'static, JwmWaylandState>>,
@@ -969,6 +1056,98 @@ impl WaylandWinitBackend {
             );
         }
 
+        let ime_anchors: Vec<_> = if locked_epoch.is_none() {
+            self.state
+                .im_popup_positions()
+                .into_iter()
+                .filter_map(|anchor| {
+                    let parent = anchor.parent_window;
+                    let legacy = self.state.layer_surfaces.contains_key(&parent)
+                        || self.state.x11_surfaces.contains_key(&parent);
+                    let bounds = self.state.nested_drawing_geometry(parent).map(|geo| {
+                        Rectangle::<i32, Logical>::new(
+                            (geo.x, geo.y).into(),
+                            (geo.w as i32, geo.h as i32).into(),
+                        )
+                    });
+                    let exit_visual = self
+                        .state
+                        .terminal_exit_visual
+                        .is_some_and(|(id, _)| id == parent);
+                    let slot = nested_ime_parent_slot(
+                        self.state.mapped_windows.contains(&parent),
+                        bounds.is_some_and(|rect| rect.overlaps(output_rect_global)),
+                        exit_visual,
+                        legacy,
+                    )?;
+                    Some((anchor, slot))
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let output = &self.output;
+        let mut ime_pointer_regions = Vec::new();
+        let render_ime =
+            |anchor: &crate::backend::wayland::state::ImPopupAnchor,
+             renderer: &mut GlesRenderer,
+             frame_roots: &mut Vec<WlSurface>,
+             visible_surfaces: &mut HashSet<wayland_server::Weak<WlSurface>>,
+             elements: &mut Vec<WinitRenderElement<GlesRenderer>>| {
+                let im_surface = anchor.surface.clone();
+                frame_roots.push(im_surface.clone());
+                with_surface_tree_downward(
+                    &im_surface,
+                    (),
+                    |_, _, _| TraversalAction::DoChildren(()),
+                    |child_surface, child_states, _| {
+                        let data = child_states
+                            .data_map
+                            .get::<smithay::backend::renderer::utils::RendererSurfaceStateUserData>(
+                        );
+                        let Some(data) = data else {
+                            return;
+                        };
+                        if data.lock_safe().view().is_some() {
+                            output.enter(child_surface);
+                            visible_surfaces.insert(child_surface.downgrade());
+                        }
+                    },
+                    |_, _, _| true,
+                );
+                // Flip the candidate box above the cursor on bottom overflow; clamp x.
+                let bbox = smithay::desktop::utils::bbox_from_surface_tree(
+                    &im_surface,
+                    Point::<i32, Logical>::from((0, 0)),
+                );
+                let pw = bbox.size.w.max(1);
+                let ph = bbox.size.h.max(1);
+                let bx = (anchor.x + bbox.loc.x)
+                    .min(anchor.area_right - pw)
+                    .max(anchor.area_left);
+                let below_top = anchor.cursor_bottom + bbox.loc.y;
+                let by = if below_top + ph <= anchor.area_bottom {
+                    below_top
+                } else {
+                    (anchor.cursor_top - ph).max(anchor.area_top)
+                };
+                let abs_x = bx - bbox.loc.x;
+                let abs_y = by - bbox.loc.y;
+                let location: Point<i32, Physical> = (abs_x - ox, abs_y - oy).into();
+                let tree = SurfaceTree::from_surface(&im_surface);
+                let im_elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
+                    AsRenderElements::<GlesRenderer>::render_elements(
+                        &tree, renderer, location, scale, 1.0,
+                    );
+                let drawable = !im_elements.is_empty();
+                elements.extend(im_elements.into_iter().map(WinitRenderElement::Surface));
+                drawable.then(|| NestedImePointerRegion {
+                    parent: anchor.parent_window,
+                    surface: im_surface.downgrade(),
+                    origin: (abs_x, abs_y).into(),
+                    output: output_rect_global,
+                })
+            };
         let drawing_order = self.state.nested_drawing_order();
         for win in &drawing_order {
             // Layer surfaces are already composed in their dedicated passes;
@@ -1045,6 +1224,23 @@ impl WaylandWinitBackend {
                 continue;
             }
 
+            // DamageTracker consumes front-to-back elements. Keep IM popups
+            // above their own mapped client, below its xdg popups and higher
+            // surfaces; don't promote stale anchors from hidden windows.
+            for (anchor, _) in ime_anchors.iter().filter(|(anchor, slot)| {
+                *slot == NestedImeSlot::AboveParent && anchor.parent_window == *win
+            }) {
+                if let Some(region) = render_ime(
+                    anchor,
+                    self.winit_backend.renderer(),
+                    &mut frame_roots,
+                    &mut visible_surfaces,
+                    &mut elements,
+                ) {
+                    ime_pointer_regions.push(region);
+                }
+            }
+
             frame_roots.push(surface.clone());
 
             with_surface_tree_downward(
@@ -1103,58 +1299,27 @@ impl WaylandWinitBackend {
             }
         }
 
-        // IME popup surfaces (candidate windows) above normal windows.
-        for anchor in self.state.im_popup_positions() {
-            let im_surface = anchor.surface;
-            frame_roots.push(im_surface.clone());
-            with_surface_tree_downward(
-                &im_surface,
-                (),
-                |_, _, _| TraversalAction::DoChildren(()),
-                |child_surface, child_states, _| {
-                    let data = child_states
-                        .data_map
-                        .get::<smithay::backend::renderer::utils::RendererSurfaceStateUserData>(
-                    );
-                    let Some(data) = data else {
-                        return;
-                    };
-                    if data.lock_safe().view().is_some() {
-                        self.output.enter(child_surface);
-                        visible_surfaces.insert(child_surface.downgrade());
-                    }
-                },
-                |_, _, _| true,
+        // Keep known legacy layers/XWayland in their previous position, but
+        // require that their real parent surface rendered on this output.
+        // Native anchors which did not match a drawn parent never fall back.
+        for (anchor, _) in ime_anchors
+            .iter()
+            .filter(|(_, slot)| *slot == NestedImeSlot::Legacy)
+        {
+            if !self
+                .state
+                .surface_for_window(anchor.parent_window)
+                .is_some_and(|parent| visible_surfaces.contains(&parent.downgrade()))
+            {
+                continue;
+            }
+            let _ = render_ime(
+                anchor,
+                self.winit_backend.renderer(),
+                &mut frame_roots,
+                &mut visible_surfaces,
+                &mut elements,
             );
-            // Flip the candidate box above the cursor on bottom overflow; clamp x.
-            let bbox = smithay::desktop::utils::bbox_from_surface_tree(
-                &im_surface,
-                Point::<i32, Logical>::from((0, 0)),
-            );
-            let pw = bbox.size.w.max(1);
-            let ph = bbox.size.h.max(1);
-            let bx = (anchor.x + bbox.loc.x)
-                .min(anchor.area_right - pw)
-                .max(anchor.area_left);
-            let below_top = anchor.cursor_bottom + bbox.loc.y;
-            let by = if below_top + ph <= anchor.area_bottom {
-                below_top
-            } else {
-                (anchor.cursor_top - ph).max(anchor.area_top)
-            };
-            let abs_x = bx - bbox.loc.x;
-            let abs_y = by - bbox.loc.y;
-            let location: Point<i32, Physical> = (abs_x - ox, abs_y - oy).into();
-            let tree = SurfaceTree::from_surface(&im_surface);
-            let im_elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
-                AsRenderElements::<GlesRenderer>::render_elements(
-                    &tree,
-                    self.winit_backend.renderer(),
-                    location,
-                    scale,
-                    1.0,
-                );
-            elements.extend(im_elements.into_iter().map(WinitRenderElement::Surface));
         }
 
         for gone in self.surfaces_on_output.difference(&visible_surfaces) {
@@ -1181,6 +1346,7 @@ impl WaylandWinitBackend {
         // Using `age = 0` forces a conservative full redraw.
         let age = 0;
 
+        self.shared.lock_safe().ime_pointer_regions.clear();
         let submit_damage: Option<Vec<Rectangle<i32, Physical>>>;
         {
             let (renderer, mut fb) = self
@@ -1217,6 +1383,7 @@ impl WaylandWinitBackend {
         }
 
         self.host_surface_presented = true;
+        self.shared.lock_safe().ime_pointer_regions = ime_pointer_regions;
         // The host presents what was just submitted: a locked frame pays the
         // pending session lock its `locked` confirmation.
         if let Some(epoch) = locked_epoch {
@@ -1762,7 +1929,22 @@ fn process_input_event_windowed<B: InputBackend>(
             let hit = under
                 .as_ref()
                 .and_then(|(win, _, _)| win.map(HitTarget::Surface));
-            let focus = under.map(|(_win, surface, origin)| (surface, origin));
+            let ime_focus = nested_ime_pointer_focus(
+                state,
+                shared,
+                location,
+                under.as_ref().and_then(|(win, _, _)| *win),
+            );
+            let over_ime = ime_focus.is_some()
+                || (!state.session_locked
+                    && !state.point_in_monitor_shade(location)
+                    && state
+                        .seat
+                        .get_pointer()
+                        .is_some_and(|pointer| pointer.is_grabbed())
+                    && !shared.lock_safe().ime_pressed_buttons.is_empty());
+            let focus =
+                ime_focus.or_else(|| under.map(|(_win, surface, origin)| (surface, origin)));
 
             if let Some(pointer) = state.seat.get_pointer() {
                 crate::backend::wayland_scroll::motion(
@@ -1778,6 +1960,9 @@ fn process_input_event_windowed<B: InputBackend>(
                 pointer.frame(state);
             }
 
+            if over_ime {
+                return;
+            }
             pending_events
                 .lock()
                 .unwrap()
@@ -1833,7 +2018,22 @@ fn process_input_event_windowed<B: InputBackend>(
             let hit = under
                 .as_ref()
                 .and_then(|(win, _, _)| win.map(HitTarget::Surface));
-            let focus = under.map(|(_win, surface, origin)| (surface, origin));
+            let ime_focus = nested_ime_pointer_focus(
+                state,
+                shared,
+                location,
+                under.as_ref().and_then(|(win, _, _)| *win),
+            );
+            let over_ime = ime_focus.is_some()
+                || (!state.session_locked
+                    && !state.point_in_monitor_shade(location)
+                    && state
+                        .seat
+                        .get_pointer()
+                        .is_some_and(|pointer| pointer.is_grabbed())
+                    && !shared.lock_safe().ime_pressed_buttons.is_empty());
+            let focus =
+                ime_focus.or_else(|| under.map(|(_win, surface, origin)| (surface, origin)));
 
             if let Some(pointer) = state.seat.get_pointer() {
                 crate::backend::wayland_scroll::motion(
@@ -1849,6 +2049,9 @@ fn process_input_event_windowed<B: InputBackend>(
                 pointer.frame(state);
             }
 
+            if over_ime {
+                return;
+            }
             pending_events
                 .lock()
                 .unwrap()
@@ -1912,9 +2115,48 @@ fn process_input_event_windowed<B: InputBackend>(
             let hit = under
                 .as_ref()
                 .and_then(|(win, _, _)| win.map(HitTarget::Surface));
-            let focus = under.map(|(_win, surface, origin)| (surface, origin));
+            let ime_focus = if pressed {
+                nested_ime_pointer_focus(
+                    state,
+                    shared,
+                    location,
+                    under.as_ref().and_then(|(win, _, _)| *win),
+                )
+            } else {
+                None
+            };
+            let grabbed = state
+                .seat
+                .get_pointer()
+                .is_some_and(|pointer| pointer.is_grabbed());
+            let retain_grab =
+                grabbed && !state.session_locked && !state.point_in_monitor_shade(location);
+            let for_ime = update_ime_button_capture(
+                &mut shared.lock_safe().ime_pressed_buttons,
+                button_code,
+                pressed,
+                ime_focus.is_some(),
+                retain_grab,
+            );
+            // A lock (or a cancelled grab) must not turn a captured release
+            // into input for another client. Still retire Smithay's pressed
+            // button with no focus, or its next ordinary grab can stick.
+            let locked_ime_release = for_ime
+                && !pressed
+                && (state.session_locked || state.point_in_monitor_shade(location));
+            let focus =
+                ime_focus.or_else(|| under.map(|(_win, surface, origin)| (surface, origin)));
 
             if let Some(pointer) = state.seat.get_pointer() {
+                if locked_ime_release && pointer.is_grabbed() {
+                    pointer.unset_grab(state, SCOUNTER.next_serial(), time);
+                }
+                let focus = if for_ime && !pressed && (locked_ime_release || !pointer.is_grabbed())
+                {
+                    None
+                } else {
+                    focus
+                };
                 crate::backend::wayland_scroll::motion(
                     &pointer,
                     state,
@@ -1940,6 +2182,10 @@ fn process_input_event_windowed<B: InputBackend>(
                     },
                 );
                 pointer.frame(state);
+            }
+
+            if for_ime {
+                return;
             }
 
             if pressed {
@@ -2557,6 +2803,24 @@ impl Backend for WaylandWinitBackend {
 
 #[cfg(test)]
 mod nested_input_tests {
+    #[test]
+    fn nested_ime_paints_only_live_on_output_parents_in_their_policy_slot() {
+        use super::{NestedImeSlot, nested_ime_parent_slot};
+        assert_eq!(
+            nested_ime_parent_slot(true, true, false, false),
+            Some(NestedImeSlot::AboveParent)
+        );
+        assert_eq!(
+            nested_ime_parent_slot(true, true, false, true),
+            Some(NestedImeSlot::Legacy)
+        );
+        for legacy in [false, true] {
+            assert_eq!(nested_ime_parent_slot(false, true, false, legacy), None);
+            assert_eq!(nested_ime_parent_slot(true, false, false, legacy), None);
+            assert_eq!(nested_ime_parent_slot(true, true, true, legacy), None);
+        }
+    }
+
     use super::*;
 
     // Control-flow contracts are not live Winit timing measurements.
@@ -2637,6 +2901,68 @@ mod nested_input_tests {
             .unwrap()
             .0;
         assert!(callbacks.contains("WinitEvent::CloseRequested => {\n                            exit_requested.store(true, Ordering::SeqCst);"));
+    }
+
+    #[test]
+    fn winit_ime_consumes_only_buttons_covered_by_its_own_grab() {
+        let mut buttons = HashSet::new();
+        assert!(!update_ime_button_capture(
+            &mut buttons,
+            272,
+            true,
+            false,
+            true
+        ));
+        assert!(update_ime_button_capture(
+            &mut buttons,
+            272,
+            true,
+            true,
+            false
+        ));
+        assert!(!update_ime_button_capture(
+            &mut buttons,
+            273,
+            true,
+            false,
+            false
+        ));
+        assert!(update_ime_button_capture(
+            &mut buttons,
+            273,
+            true,
+            false,
+            true
+        ));
+        assert!(!update_ime_button_capture(
+            &mut buttons,
+            274,
+            false,
+            false,
+            true
+        ));
+        assert!(update_ime_button_capture(
+            &mut buttons,
+            272,
+            false,
+            false,
+            true
+        ));
+        assert!(update_ime_button_capture(
+            &mut buttons,
+            273,
+            false,
+            false,
+            false
+        ));
+        assert!(!update_ime_button_capture(
+            &mut buttons,
+            273,
+            false,
+            false,
+            false
+        ));
+        assert!(buttons.is_empty());
     }
 
     #[test]
