@@ -18,8 +18,11 @@ forwarded remote keys/buttons. The pointer is never confined. The pre-existing
 local focus is not rewritten. The title indicates the current input mode.
 
 Use `--seamless-input=click` with `ssh` or `connect` to acquire input with a
-click. Moving out of the image releases it, and re-entering requires another
-click to resume control. Ctrl+Super+F12 also releases the grab.
+click. A shallow exit releases the grab after 500 ms outside the image.
+Returning inside during that time keeps control. Moving 24 pixels past an
+edge releases immediately, and resuming control takes another click.
+During a forwarded drag, the viewer keeps control until it sends the last
+button-up, then applies the edge rule. Ctrl+Super+F12 releases immediately.
 
 In hover mode, the viewer checks the X server's hit path before acquisition
 and again while input is synchronously grabbed. This rejects queued entry events when another local

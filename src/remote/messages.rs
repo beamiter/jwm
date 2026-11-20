@@ -139,6 +139,44 @@ pub struct StreamCapabilities {
 pub enum FrameCodec {
     #[default]
     JpegTiles = 1,
+    /// Selects tagged ordinary-video records supporting H.264 and JPEG.
+    H264 = 2,
+    /// Offers HEVC 4:4:4, H.264 and JPEG, or selects a tagged HEVC stream.
+    Hevc444 = 3,
+}
+
+impl FrameCodec {
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::JpegTiles => "JPEG",
+            Self::H264 => "H.264",
+            Self::Hevc444 => "HEVC 4:4:4",
+        }
+    }
+
+    #[must_use]
+    pub fn is_hardware(self) -> bool {
+        matches!(self, Self::H264 | Self::Hevc444)
+    }
+
+    #[must_use]
+    pub fn negotiate(self, host_can_encode_h264: bool, host_can_encode_hevc444: bool) -> Self {
+        match self {
+            Self::Hevc444 if host_can_encode_hevc444 => Self::Hevc444,
+            Self::H264 | Self::Hevc444 if host_can_encode_h264 => Self::H264,
+            _ => Self::JpegTiles,
+        }
+    }
+
+    pub fn confirm(self, selected: Self) -> RemoteResult<()> {
+        if self.negotiate(selected == Self::H264, selected == Self::Hevc444) != selected {
+            return Err(
+                invalid_data("host selected a video codec outside the client offer").into(),
+            );
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -206,11 +244,21 @@ impl StreamCapabilities {
                 invalid_data("extended duration requires explicit resumable control").into(),
             );
         }
-        let cursor = match &payload[..3] {
-            [1, 1, 1] => CursorMode::Composited,
-            [1, 2, 1] => CursorMode::Independent,
+        let (codec, cursor) = match &payload[..3] {
+            [1, 1, 1] => (FrameCodec::JpegTiles, CursorMode::Composited),
+            [1, 2, 1] => (FrameCodec::JpegTiles, CursorMode::Independent),
+            [2, 1, 1] => (FrameCodec::H264, CursorMode::Composited),
+            [2, 2, 1] => (FrameCodec::H264, CursorMode::Independent),
+            [3, 1, 1] => (FrameCodec::Hevc444, CursorMode::Composited),
+            [3, 2, 1] => (FrameCodec::Hevc444, CursorMode::Independent),
             _ => return Err(invalid_data("unsupported remote codec, cursor or input mode").into()),
         };
+        if codec.is_hardware() && payload[26..34].iter().any(|byte| *byte != 0) {
+            return Err(invalid_data(
+                "hardware video capabilities cannot include proof or tile extensions",
+            )
+            .into());
+        }
         if payload[33] > 1
             || (payload[33] == 1 && payload[23..33].iter().any(|b| *b != 0))
             || !matches!(payload[23], 0 | 1 | 3 | 7)
@@ -251,6 +299,7 @@ impl StreamCapabilities {
         frame_limits.validate()?;
         Ok(Self {
             frame_limits,
+            codec,
             cursor,
             clipboard_file_limit: u64::from_be_bytes(payload[3..11].try_into().unwrap()),
             clipboard_content: payload[23],
@@ -868,6 +917,55 @@ fn invalid_data(message: impl Into<String>) -> io::Error {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn video_codec_selection_keeps_jpeg_default_and_requires_an_offer() {
+        let jpeg = StreamCapabilities::default();
+        let h264 = StreamCapabilities {
+            codec: FrameCodec::H264,
+            cursor: CursorMode::Independent,
+            ..jpeg
+        };
+        assert_eq!(&jpeg.encode()[..3], &[1, 1, 1]);
+        assert_eq!(&h264.encode()[..3], &[2, 2, 1]);
+        assert_eq!(StreamCapabilities::decode(&jpeg.encode()).unwrap(), jpeg);
+        assert_eq!(StreamCapabilities::decode(&h264.encode()).unwrap(), h264);
+        assert_eq!(jpeg.codec.negotiate(true, true), FrameCodec::JpegTiles);
+        assert_eq!(h264.codec.negotiate(false, true), FrameCodec::JpegTiles);
+        assert_eq!(h264.codec.negotiate(true, true), FrameCodec::H264);
+        assert!(h264.codec.confirm(FrameCodec::JpegTiles).is_ok());
+        assert!(jpeg.codec.confirm(FrameCodec::H264).is_err());
+        assert!(h264.codec.confirm(FrameCodec::Hevc444).is_err());
+        let hevc = StreamCapabilities {
+            codec: FrameCodec::Hevc444,
+            ..h264
+        };
+        assert_eq!(&hevc.encode()[..3], &[3, 2, 1]);
+        assert_eq!(StreamCapabilities::decode(&hevc.encode()).unwrap(), hevc);
+        assert_eq!(hevc.codec.negotiate(false, false), FrameCodec::JpegTiles);
+        assert_eq!(hevc.codec.negotiate(true, false), FrameCodec::H264);
+        assert_eq!(hevc.codec.negotiate(true, true), FrameCodec::Hevc444);
+        assert!(hevc.codec.confirm(FrameCodec::H264).is_ok());
+        assert!(hevc.codec.confirm(FrameCodec::Hevc444).is_ok());
+        let mut unknown = jpeg.encode();
+        unknown[0] = 4;
+        assert!(StreamCapabilities::decode(&unknown).is_err());
+    }
+
+    #[test]
+    fn hardware_profile_rejects_proof_and_tile_extensions() {
+        for codec in [FrameCodec::H264, FrameCodec::Hevc444] {
+            let hardware = StreamCapabilities {
+                codec,
+                ..Default::default()
+            };
+            for offset in 26..34 {
+                let mut conflicting = hardware.encode();
+                conflicting[offset] = 1;
+                assert!(StreamCapabilities::decode(&conflicting).is_err());
+            }
+        }
+    }
+
+    #[test]
     fn horizontal_scroll_capability_is_independent_and_bounded() {
         use super::StreamCapabilities;
         for control in [false, true] {
@@ -1125,6 +1223,38 @@ mod tests {
     }
 
     #[test]
+    fn hello_roundtrips_supported_hardware_profiles() {
+        // Wire support is not permission or encoder availability: negotiation
+        // and proof/tile denial remain covered by their separate tests.
+        for codec in [FrameCodec::H264, FrameCodec::Hevc444] {
+            for cursor in [CursorMode::Composited, CursorMode::Independent] {
+                let stream = StreamCapabilities {
+                    codec,
+                    cursor,
+                    ..Default::default()
+                };
+                let client = ClientHello {
+                    stream,
+                    initial_viewport: Some((1920, 1080)),
+                    request_input: false,
+                    request_clipboard: false,
+                    request_clipboard_files: false,
+                    keymap: KeymapTable::empty(),
+                };
+                assert_eq!(ClientHello::decode(&client.encode()).unwrap(), client);
+                let server = ServerHello {
+                    stream,
+                    pointer_enabled: false,
+                    keyboard_enabled: false,
+                    clipboard_enabled: false,
+                    clipboard_files_enabled: false,
+                };
+                assert_eq!(ServerHello::decode(&server.encode()).unwrap(), server);
+            }
+        }
+    }
+
+    #[test]
     fn hello_refuses_unimplemented_profiles_before_any_stream_work() {
         let client = ClientHello {
             stream: Default::default(),
@@ -1143,8 +1273,14 @@ mod tests {
             clipboard_files_enabled: false,
         }
         .encode();
-        for offset in HELLO_PREFIX_LEN..HELLO_PREFIX_LEN + 3 {
-            for unsupported in [0, 3, u8::MAX] {
+        // Codec 2/3 now represent H.264/HEVC, while cursor 2 is independent.
+        // Check every unknown value per field, not a shared obsolete blacklist.
+        for (field, supported) in [&[1_u8, 2, 3][..], &[1, 2][..], &[1][..]]
+            .into_iter()
+            .enumerate()
+        {
+            let offset = HELLO_PREFIX_LEN + field;
+            for unsupported in (0..=u8::MAX).filter(|value| !supported.contains(value)) {
                 let mut client = client.clone();
                 client[offset] = unsupported;
                 assert!(ClientHello::decode(&client).is_err());

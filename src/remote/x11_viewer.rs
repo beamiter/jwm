@@ -45,6 +45,8 @@ const WM_CLASS: &[u8] = b"jwm-remote\0JwmRemote\0";
 /// Default base key of the Ctrl+Super grab-release shortcut.
 pub const DEFAULT_ESCAPE_KEY: &str = "F12";
 const KEY_RELEASE_DEFER: Duration = Duration::from_millis(8);
+const CLICK_EDGE_DISTANCE: i32 = 24;
+const CLICK_EDGE_DWELL: Duration = Duration::from_millis(500);
 const MAX_PENDING_PRESENTATIONS: usize = 3;
 const SHM_UPLOAD_SLOTS: usize = 3;
 const PRESENTATION_TIMEOUT: Duration = Duration::from_secs(5);
@@ -119,6 +121,11 @@ impl ForwardedButtons {
 
     fn release(&mut self, button: u8) -> bool {
         self.0.remove(&button)
+    }
+
+    fn drag_held(&self) -> bool {
+        // Core X11 represents scroll notches as button 4–7 impulses.
+        self.0.iter().any(|button| !(4..=7).contains(button))
     }
 
     fn clear(&mut self) {
@@ -656,6 +663,7 @@ pub struct Viewer {
     grab_input: bool,
     seamless_input: Option<SeamlessInput>,
     seamless_suspended: bool,
+    click_edge_deadline: Option<Instant>,
     cleanup_started: bool,
     cleanup_had_grab: bool,
     cleanup_failed: bool,
@@ -1252,6 +1260,7 @@ impl Viewer {
             grabbed: false,
             seamless_input: None,
             seamless_suspended: false,
+            click_edge_deadline: None,
             cleanup_started: false,
             cleanup_had_grab: false,
             cleanup_failed: false,
@@ -1697,7 +1706,9 @@ impl Viewer {
                 }
                 Event::EnterNotify(event)
                     if event.event == self.window
-                        && self.seamless_input == Some(SeamlessInput::Hover)
+                        && (self.seamless_input == Some(SeamlessInput::Hover)
+                            || (self.seamless_input == Some(SeamlessInput::Click)
+                                && self.grabbed))
                         && event.mode == NotifyMode::NORMAL =>
                 {
                     self.update_seamless_input(event.event_x, event.event_y, &mut result)?;
@@ -1708,9 +1719,13 @@ impl Viewer {
                         && event.mode == NotifyMode::NORMAL
                         && event.detail != x11rb::protocol::xproto::NotifyDetail::INFERIOR =>
                 {
-                    self.release_local_grab()?;
-                    self.release_all_input(&mut result);
-                    self.seamless_suspended = false;
+                    if self.seamless_input == Some(SeamlessInput::Click) {
+                        self.update_seamless_input(event.event_x, event.event_y, &mut result)?;
+                    } else {
+                        self.release_local_grab()?;
+                        self.release_all_input(&mut result);
+                        self.seamless_suspended = false;
+                    }
                 }
                 Event::MotionNotify(event)
                     if event.event == self.window && self.seamless_input.is_some() =>
@@ -1786,6 +1801,11 @@ impl Viewer {
                     if self.forwarding_input() {
                         if let Some((x, y)) = self.map_pointer(event.event_x, event.event_y) {
                             self.held_buttons.press(event.detail, inside_image);
+                            if self.seamless_input == Some(SeamlessInput::Click)
+                                && self.held_buttons.drag_held()
+                            {
+                                self.click_edge_deadline = None;
+                            }
                             push_pointer(&mut result, x, y);
                             result.push(ViewerEvent::Button {
                                 button: event.detail,
@@ -1808,6 +1828,11 @@ impl Viewer {
                         button: event.detail,
                         pressed: false,
                     });
+                    if self.seamless_input == Some(SeamlessInput::Click)
+                        && !self.held_buttons.drag_held()
+                    {
+                        self.update_seamless_input(event.event_x, event.event_y, &mut result)?;
+                    }
                 }
                 Event::KeyPress(event)
                     if event.event == self.window
@@ -1950,6 +1975,10 @@ impl Viewer {
             self.clipboard_shortcut.flush_release(&mut result, false);
         }
 
+        if !budget.exhausted() && !self.closed && self.click_edge_due() {
+            self.finish_click_edge_dwell(&mut result)?;
+        }
+
         if (self.width, self.height) != backing_dimensions && !self.closed {
             // Coalesce this batch, but do not allocate/render before its input
             // reaches the host. Continuous event floods yield at the budget.
@@ -2007,13 +2036,14 @@ impl Viewer {
             self.deferred_events.push_back(event);
             return Ok(true);
         }
-        Ok([&self.keyboard, &self.clipboard_shortcut]
-            .into_iter()
-            .any(|keyboard| {
-                keyboard
-                    .pending_release
-                    .is_some_and(|release| release.queued_at.elapsed() >= KEY_RELEASE_DEFER)
-            }))
+        Ok(self.click_edge_due()
+            || [&self.keyboard, &self.clipboard_shortcut]
+                .into_iter()
+                .any(|keyboard| {
+                    keyboard
+                        .pending_release
+                        .is_some_and(|release| release.queued_at.elapsed() >= KEY_RELEASE_DEFER)
+                }))
     }
 
     /// File descriptor used by the event-driven client loop.
@@ -2023,7 +2053,7 @@ impl Viewer {
     }
 
     /// Earliest local input deadline that must wake the event loop even when
-    /// the X server has no new event (currently the autorepeat release filter).
+    /// the X server has no new event.
     #[must_use]
     pub fn next_event_deadline(&self) -> Option<Instant> {
         let key = self
@@ -2035,7 +2065,11 @@ impl Viewer {
             .pending_release
             .and_then(|release| release.queued_at.checked_add(KEY_RELEASE_DEFER));
         let presentation = self.presentations.front().map(|pending| pending.deadline);
-        key.into_iter().chain(shortcut).chain(presentation).min()
+        key.into_iter()
+            .chain(shortcut)
+            .chain(presentation)
+            .chain(self.click_edge_deadline)
+            .min()
     }
 
     /// The session enables this only for its originally negotiated clipboard.
@@ -2602,6 +2636,7 @@ impl Viewer {
 
     /// Explicit per-session local policy; does not grant remote input permission.
     pub(super) fn set_seamless_input(&mut self, mode: Option<SeamlessInput>) {
+        self.click_edge_deadline = None;
         self.seamless_input = mode.filter(|mode| {
             self.grab_input
                 && self.pointer_enabled
@@ -2619,14 +2654,29 @@ impl Viewer {
         if self.cleanup_started {
             return Ok(());
         }
-        if !self.pointer_is_inside_image(x, y) {
+        let geometry = self.image_letterbox();
+        if !geometry.is_some_and(|geometry| pointer_inside_letterbox(x, y, geometry)) {
             if self.grabbed {
+                if self.seamless_input == Some(SeamlessInput::Click) {
+                    if self.held_buttons.drag_held() {
+                        self.click_edge_deadline = None;
+                        return Ok(());
+                    }
+                    if geometry.is_some_and(|geometry| {
+                        pointer_inside_letterbox_margin(x, y, geometry, CLICK_EDGE_DISTANCE - 1)
+                    }) {
+                        self.click_edge_deadline
+                            .get_or_insert_with(|| Instant::now() + CLICK_EDGE_DWELL);
+                        return Ok(());
+                    }
+                }
                 self.release_local_grab()?;
                 self.release_all_input(events);
             }
             self.seamless_suspended = false;
             return Ok(());
         }
+        self.click_edge_deadline = None;
         if self.seamless_input != Some(SeamlessInput::Hover)
             || self.grabbed
             || self.seamless_suspended
@@ -2687,6 +2737,24 @@ impl Viewer {
                     return Err(error);
                 }
             }
+        }
+        Ok(())
+    }
+
+    fn click_edge_due(&self) -> bool {
+        self.click_edge_deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
+    }
+
+    fn finish_click_edge_dwell(&mut self, events: &mut Vec<ViewerEvent>) -> RemoteResult<()> {
+        self.click_edge_deadline = None;
+        // The pointer can sit just outside indefinitely without another X11
+        // event. Confirm the current position before ending the grab.
+        let pointer = self.conn.query_pointer(self.window)?.reply()?;
+        if !pointer.same_screen || !self.pointer_is_inside_image(pointer.win_x, pointer.win_y) {
+            self.release_local_grab()?;
+            self.release_all_input(events);
+            self.seamless_suspended = false;
         }
         Ok(())
     }
@@ -2785,6 +2853,7 @@ impl Viewer {
     }
 
     fn release_local_grab(&mut self) -> RemoteResult<()> {
+        self.click_edge_deadline = None;
         if !self.grabbed {
             return Ok(());
         }
@@ -2817,17 +2886,15 @@ impl Viewer {
     }
 
     fn pointer_is_inside_image(&self, x: i16, y: i16) -> bool {
-        let Some(frame) = self.last_frame.as_ref() else {
-            return false;
-        };
-        let Ok(width) = u16::try_from(frame.image().width()) else {
-            return false;
-        };
-        let Ok(height) = u16::try_from(frame.image().height()) else {
-            return false;
-        };
-        letterbox(self.width, self.height, width, height)
+        self.image_letterbox()
             .is_some_and(|geometry| pointer_inside_letterbox(x, y, geometry))
+    }
+
+    fn image_letterbox(&self) -> Option<Letterbox> {
+        let frame = self.last_frame.as_ref()?;
+        let width = u16::try_from(frame.image().width()).ok()?;
+        let height = u16::try_from(frame.image().height()).ok()?;
+        letterbox(self.width, self.height, width, height)
     }
 
     fn map_pointer(&self, x: i16, y: i16) -> Option<(u16, u16)> {
@@ -4697,12 +4764,16 @@ struct Letterbox {
 }
 
 fn pointer_inside_letterbox(x: i16, y: i16, geometry: Letterbox) -> bool {
+    pointer_inside_letterbox_margin(x, y, geometry, 0)
+}
+
+fn pointer_inside_letterbox_margin(x: i16, y: i16, geometry: Letterbox, margin: i32) -> bool {
     let (x, y) = (i32::from(x), i32::from(y));
     let (left, top) = (i32::from(geometry.x), i32::from(geometry.y));
-    x >= left
-        && y >= top
-        && x < left + i32::from(geometry.width)
-        && y < top + i32::from(geometry.height)
+    x >= left - margin
+        && y >= top - margin
+        && x < left + i32::from(geometry.width) + margin
+        && y < top + i32::from(geometry.height) + margin
 }
 
 fn should_use_render_upscale(geometry: Letterbox, image_width: u16, image_height: u16) -> bool {
@@ -5915,6 +5986,7 @@ mod tests {
         assert_eq!(keyboard.press(96, false, true), KeyPressAction::Forward);
         keyboard.defer_release(96, 9, now);
         assert!(buttons.press(1, true));
+        assert!(buttons.drag_held());
         // Another client grabs the keyboard while Ctrl + button are held.
         // Releases during that grab will never reach this viewer.
         // poll_events flushes a pending release before matching FocusOut.
@@ -5936,6 +6008,7 @@ mod tests {
         assert!(!keyboard.consume_repeat(96, 9));
         keyboard.flush_release(&mut events, true);
         assert!(!buttons.release(1));
+        assert!(!buttons.drag_held());
         assert_eq!(
             events,
             [
@@ -6174,6 +6247,7 @@ mod tests {
         for button in 4..=7 {
             for _ in 0..3 {
                 assert!(buttons.press(button, true));
+                assert!(!buttons.drag_held());
                 assert!(buttons.release(button));
             }
             assert!(!buttons.press(button, false));
@@ -7469,6 +7543,57 @@ mod tests {
         };
 
         move_pointer(root, 0, 0);
+        move_pointer(window, 20, 70);
+        viewer.poll_events().unwrap();
+        button(xproto::BUTTON_PRESS_EVENT);
+        let events = viewer.poll_events().unwrap();
+        assert!(viewer.grabbed, "the initial click starts capture");
+        assert!(events.contains(&ViewerEvent::Button {
+            button: 1,
+            pressed: true,
+        }));
+        button(xproto::BUTTON_RELEASE_EVENT);
+        viewer.poll_events().unwrap();
+
+        // The 180-pixel image begins 30 pixels down in the 240-pixel window.
+        move_pointer(window, 20, 22);
+        let events = viewer.poll_events().unwrap();
+        assert!(viewer.grabbed, "an 8-pixel excursion starts a dwell");
+        assert!(!events.contains(&ViewerEvent::ReleaseAll));
+        assert!(viewer.click_edge_deadline.is_some());
+
+        move_pointer(window, 20, 70);
+        let events = viewer.poll_events().unwrap();
+        assert!(!events.contains(&ViewerEvent::ReleaseAll));
+        assert!(viewer.grabbed, "returning cancels the pending release");
+        assert!(viewer.click_edge_deadline.is_none());
+
+        button(xproto::BUTTON_PRESS_EVENT);
+        viewer.poll_events().unwrap();
+        move_pointer(window, 20, 22);
+        viewer.poll_events().unwrap();
+        assert!(viewer.click_edge_deadline.is_none(), "a drag holds capture");
+        button(xproto::BUTTON_RELEASE_EVENT);
+        let events = viewer.poll_events().unwrap();
+        assert!(viewer.grabbed, "a shallow mouse-up starts the dwell");
+        assert!(events.contains(&ViewerEvent::Pointer { x: 20, y: 0 }));
+        assert!(events.contains(&ViewerEvent::Button {
+            button: 1,
+            pressed: false,
+        }));
+        assert!(!events.contains(&ViewerEvent::ReleaseAll));
+
+        let deadline = viewer.click_edge_deadline.unwrap();
+        assert_eq!(viewer.next_event_deadline(), Some(deadline));
+        std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
+        let events = viewer.poll_events().unwrap();
+        assert!(
+            !viewer.grabbed,
+            "an idle pointer outside completes the dwell"
+        );
+        assert!(events.contains(&ViewerEvent::ReleaseAll));
+        assert!(viewer.click_edge_deadline.is_none());
+
         for (target, x, y) in [(root, 0, 0), (window, 20, 2)] {
             move_pointer(window, 20, 70);
             viewer.poll_events().unwrap();
@@ -7484,16 +7609,88 @@ mod tests {
 
             move_pointer(target, x, y);
             let events = viewer.poll_events().unwrap();
-            assert!(!viewer.grabbed);
-            assert!(events.contains(&ViewerEvent::ReleaseAll));
+            assert!(viewer.grabbed, "even a deep exit keeps the drag captured");
+            assert!(!events.contains(&ViewerEvent::ReleaseAll));
+            assert!(viewer.click_edge_deadline.is_none());
             button(xproto::BUTTON_RELEASE_EVENT);
             let events = viewer.poll_events().unwrap();
             assert!(
+                !viewer.grabbed,
+                "a deep mouse-up releases capture immediately"
+            );
+            assert!(
                 !events
                     .iter()
-                    .any(|event| matches!(event, ViewerEvent::Button { .. }))
+                    .any(|event| matches!(event, ViewerEvent::Button { pressed: true, .. }))
             );
+            assert!(events.windows(3).any(|events| matches!(
+                events,
+                [
+                    ViewerEvent::Pointer { y: 0, .. },
+                    ViewerEvent::Button {
+                        button: 1,
+                        pressed: false
+                    },
+                    ViewerEvent::ReleaseAll
+                ]
+            )));
         }
+
+        move_pointer(window, 20, 70);
+        viewer.poll_events().unwrap();
+        button(xproto::BUTTON_PRESS_EVENT);
+        viewer.poll_events().unwrap();
+        button(xproto::BUTTON_RELEASE_EVENT);
+        viewer.poll_events().unwrap();
+        move_pointer(window, 20, 2);
+        let events = viewer.poll_events().unwrap();
+        assert!(
+            !viewer.grabbed,
+            "a deep exit without a drag releases immediately"
+        );
+        assert!(events.contains(&ViewerEvent::ReleaseAll));
+
+        move_pointer(window, 20, 70);
+        viewer.poll_events().unwrap();
+        button(xproto::BUTTON_PRESS_EVENT);
+        viewer.poll_events().unwrap();
+        button(xproto::BUTTON_RELEASE_EVENT);
+        viewer.poll_events().unwrap();
+        move_pointer(window, 20, 22);
+        viewer.poll_events().unwrap();
+        assert!(viewer.click_edge_deadline.is_some());
+        driver
+            .send_event(
+                false,
+                window,
+                EventMask::KEY_PRESS,
+                xproto::KeyPressEvent {
+                    response_type: xproto::KEY_PRESS_EVENT,
+                    detail: viewer.escape_keycodes[0],
+                    sequence: 0,
+                    time: 10,
+                    root,
+                    event: window,
+                    child: x11rb::NONE,
+                    root_x: 0,
+                    root_y: 0,
+                    event_x: 20,
+                    event_y: 22,
+                    state: KeyButMask::CONTROL | KeyButMask::MOD4,
+                    same_screen: true,
+                },
+            )
+            .unwrap()
+            .check()
+            .unwrap();
+        let events = viewer.poll_events().unwrap();
+        assert!(
+            viewer.user_released_grab(),
+            "escape bypasses the edge dwell"
+        );
+        assert!(!viewer.grabbed);
+        assert!(viewer.click_edge_deadline.is_none());
+        assert!(events.contains(&ViewerEvent::ReleaseAll));
     }
 
     #[test]

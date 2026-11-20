@@ -25,7 +25,8 @@ COUNTS = {'capture_ms': 'captured', 'writer_wait_ms': 'sent',
 COUNTERS = ('scheduled', 'captured', 'sent', 'bytes', 'replaced',
             'unchanged_suppressed', 'dirty_tiles', 'total_tiles',
             'drawn_acks', 'viewer_superseded')
-OPTIONAL_COUNTERS = ('backpressure_skipped', 'damage_skipped')
+OPTIONAL_COUNTERS = ('backpressure_skipped', 'damage_skipped', 'h264_frames', 'hevc444_frames')
+OPTIONAL_STAGES = {'h264_ms': 'h264_frames', 'hevc444_ms': 'hevc444_frames'}
 X11_CAPTURE_COUNTERS = ('damage_notifications', 'forced_refreshes')
 X11_CAPTURE_STAGES = ('monitor_geometry_ms', 'core_readback_ms',
                       'pixel_conversion_ms', 'cpu_resize_ms')
@@ -142,6 +143,11 @@ def read_windows(path):
                     raise ValueError('invalid dimensions')
         for stage in STAGES:
             stage_quantile_count(value['stages'].get(stage), stage)
+        for stage, counter in OPTIONAL_STAGES.items():
+            if stage in value['stages'] or counter in value:
+                samples = stage_quantile_count(value['stages'].get(stage), stage)
+                if counter not in value or samples != min(128, value[counter]):
+                    raise ValueError(f'{stage} and {counter} disagree')
         windows.append(value)
         if len(windows) > MAX_WINDOWS:
             raise ValueError('too many telemetry windows')
@@ -235,15 +241,18 @@ def summarize(windows, ignored, workload, run_id):
             counter_windows[field] = len(values)
             totals[field] = sum(values)
     stages = {}
-    for stage in STAGES:
-        means = [w['stages'][stage]['mean'] for w in windows
+    for stage in (*STAGES, *OPTIONAL_STAGES):
+        applicable = [w for w in windows if stage in w['stages']]
+        if not applicable:
+            continue
+        means = [w['stages'][stage]['mean'] for w in applicable
                  if w['stages'][stage]['quantiles']['samples'] > 0]
-        q95 = [w['stages'][stage]['quantiles']['p95_ms'] for w in windows
+        q95 = [w['stages'][stage]['quantiles']['p95_ms'] for w in applicable
                if w['stages'][stage]['quantiles']['samples'] > 0]
-        counter = COUNTS.get(stage)
+        counter = COUNTS.get(stage) or OPTIONAL_STAGES.get(stage)
         count = totals[counter] if counter else None
         stages[stage] = {
-            'whole_run_weighted_mean_ms': (sum(w['stages'][stage]['mean'] * w[counter] for w in windows) / count
+            'whole_run_weighted_mean_ms': (sum(w['stages'][stage]['mean'] * w[counter] for w in applicable) / count
                                            if count else None),
             'mean_denominator': counter,
             'window_means_range_ms': [min(means), max(means)] if means else None,

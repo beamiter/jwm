@@ -35,6 +35,10 @@ pub mod cursor;
 mod deadline;
 mod downscale;
 pub mod frame;
+#[cfg(feature = "remote-h264")]
+mod h264;
+#[cfg(feature = "remote-h264")]
+mod h264_wire;
 pub mod host;
 mod host_capture;
 pub mod key;

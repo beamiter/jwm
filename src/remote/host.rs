@@ -26,8 +26,8 @@ use super::close_wire::{SessionClose, SessionCloseCode};
 use super::deadline::TcpStreamDeadline;
 use super::key::KeySource;
 use super::messages::{
-    ClientHello, MAX_CLIPBOARD_BYTES, MIN_VIEWPORT_HEIGHT, MIN_VIEWPORT_WIDTH, ServerHello,
-    decode_source_frame_ack, decode_source_input, decode_viewport,
+    ClientHello, FrameCodec, MAX_CLIPBOARD_BYTES, MIN_VIEWPORT_HEIGHT, MIN_VIEWPORT_WIDTH,
+    ServerHello, decode_source_frame_ack, decode_source_input, decode_viewport,
 };
 use super::pacing::capture_rate_limit_wait;
 use super::protocol::{
@@ -997,6 +997,12 @@ struct HostTelemetryWindow {
     jpeg_encoded: u64,
     png_encoded: u64,
     png_elapsed: Duration,
+    h264_encoded: u64,
+    h264_elapsed: Duration,
+    h264_samples: StageSamples,
+    hevc444_encoded: u64,
+    hevc444_elapsed: Duration,
+    hevc444_samples: StageSamples,
     codec_elapsed: Duration,
     png_samples: StageSamples,
     codec_samples: StageSamples,
@@ -1177,6 +1183,29 @@ impl HostTelemetry {
             };
             window.codec_elapsed = window.codec_elapsed.saturating_add(codec);
             window.codec_samples.record(codec);
+        });
+    }
+
+    fn record_hardware_encode(&self, codec: FrameCodec, elapsed: Duration) {
+        self.update(|window| {
+            let (count, sum, samples) = match codec {
+                FrameCodec::H264 => (
+                    &mut window.h264_encoded,
+                    &mut window.h264_elapsed,
+                    &mut window.h264_samples,
+                ),
+                FrameCodec::Hevc444 => (
+                    &mut window.hevc444_encoded,
+                    &mut window.hevc444_elapsed,
+                    &mut window.hevc444_samples,
+                ),
+                FrameCodec::JpegTiles => return,
+            };
+            *count = count.saturating_add(1);
+            *sum = sum.saturating_add(elapsed);
+            samples.record(elapsed);
+            window.codec_elapsed = window.codec_elapsed.saturating_add(elapsed);
+            window.codec_samples.record(elapsed);
         });
     }
 
@@ -1561,7 +1590,7 @@ impl JpegQualityController {
     }
 
     fn observe_ack_at(&self, ack: AckObservation, now: Instant) {
-        if !self.adaptive {
+        if !self.adaptive || ack.jpeg_quality == 0 {
             return;
         }
         let mut state = match self.state.lock() {
@@ -2427,6 +2456,8 @@ struct SourceControl {
     #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
     proof_delta: Option<(bool, Arc<ProofDeltaProbe>)>,
     input_wake: std::sync::OnceLock<input_wake::InputWake>,
+    #[cfg(feature = "remote-h264")]
+    hardware_video: std::sync::OnceLock<(FrameCodec, super::messages::FrameLimits, u16)>,
     #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
     input_wake_probe: Option<Arc<InputWakeProbe>>,
     follow_geometry: AtomicBool,
@@ -2512,6 +2543,8 @@ impl SourceControl {
             #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
             legacy_retained_proof_slots: LEGACY_RETAINED_PROOF_SLOTS.with(|v| v.get()),
             input_wake: std::sync::OnceLock::new(),
+            #[cfg(feature = "remote-h264")]
+            hardware_video: std::sync::OnceLock::new(),
             #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
             input_wake_probe: input_wake::test_probe(),
             follow_geometry: AtomicBool::new(false),
@@ -2836,6 +2869,18 @@ impl GrantedCapture {
 }
 
 pub fn run_host(options: HostOptions) -> RemoteResult<()> {
+    run_host_with_hardware(options, false)
+}
+
+pub fn run_host_with_hardware(options: HostOptions, allow_h264: bool) -> RemoteResult<()> {
+    run_host_with_video_codecs(options, allow_h264, false)
+}
+
+pub fn run_host_with_video_codecs(
+    options: HostOptions,
+    allow_h264: bool,
+    allow_hevc444: bool,
+) -> RemoteResult<()> {
     options.frame_limits.validate()?;
     JpegQualityController::new_at(
         options.jpeg_quality,
@@ -2914,7 +2959,14 @@ pub fn run_host(options: HostOptions) -> RemoteResult<()> {
     let once = options.once;
     let session_shutdown = Arc::clone(&shutdown);
     accept_connections(&listener, key, &shutdown, once, move |peer| {
-        serve_authenticated(peer, &options, &session_shutdown, &window_capture)
+        serve_authenticated(
+            peer,
+            &options,
+            &session_shutdown,
+            &window_capture,
+            allow_h264,
+            allow_hevc444,
+        )
     })
 }
 
@@ -3264,11 +3316,29 @@ fn authenticate_peer(mut stream: TcpStream, key: &[u8]) -> RemoteResult<Authenti
     })
 }
 
+fn hardware_encoder_available(codec: FrameCodec) -> bool {
+    #[cfg(feature = "remote-h264")]
+    match super::h264::probe_encode(codec) {
+        Ok(()) => true,
+        Err(error) => {
+            eprintln!("jwm-remote: {} NVENC probe failed: {error}", codec.name());
+            false
+        }
+    }
+    #[cfg(not(feature = "remote-h264"))]
+    {
+        let _ = codec;
+        false
+    }
+}
+
 fn serve_authenticated(
     peer: AuthenticatedPeer,
     options: &HostOptions,
     shutdown: &Arc<AtomicBool>,
     window_capture: &Mutex<Option<GrantedCapture>>,
+    allow_h264: bool,
+    allow_hevc444: bool,
 ) -> RemoteResult<()> {
     let AuthenticatedPeer {
         accepted_at,
@@ -3355,6 +3425,18 @@ fn serve_authenticated(
         capture.set_encoded_bounds(width, height);
     }
     let mut negotiated_stream = hello.stream;
+    let desktop = matches!(&capture, HostCapture::Desktop(_));
+    let offered = hello.stream.codec;
+    let can_use_hevc444 = desktop
+        && allow_hevc444
+        && offered == FrameCodec::Hevc444
+        && hardware_encoder_available(FrameCodec::Hevc444);
+    let can_use_h264 = desktop
+        && allow_h264
+        && offered.is_hardware()
+        && !can_use_hevc444
+        && hardware_encoder_available(FrameCodec::H264);
+    negotiated_stream.codec = offered.negotiate(can_use_h264, can_use_hevc444);
     negotiated_stream.frame_limits = frame_limits;
     negotiated_stream.scroll_copy = hello.stream.negotiate_scroll_copy(options.scroll_copy);
     negotiated_stream.static_lossless =
@@ -3579,6 +3661,17 @@ fn serve_authenticated(
             input_area,
             capture.geometry_epoch(),
         )?);
+        #[cfg(feature = "remote-h264")]
+        if negotiated_stream.codec.is_hardware() {
+            sources
+                .hardware_video
+                .set((negotiated_stream.codec, frame_limits, options.fps.max(1)))
+                .map_err(|_| io::Error::other("hardware video codec already selected"))?;
+            eprintln!(
+                "jwm-remote: {} NVENC negotiated",
+                negotiated_stream.codec.name()
+            );
+        }
         if input_wake::enabled()
             && (negotiated_stream.wayland_text
                 || negotiated_stream.wayland_control
@@ -5014,6 +5107,127 @@ fn send_frames_scoped<W: std::io::Write + SetWriteTimeout>(
     )
 }
 
+#[cfg(feature = "remote-h264")]
+type EncoderScope = (SourceVersion, u64, u16, u16);
+
+#[cfg(feature = "remote-h264")]
+struct HardwareVideoSender {
+    codec: FrameCodec,
+    limits: super::messages::FrameLimits,
+    fps: u16,
+    encoder: Option<(EncoderScope, super::h264::Encoder)>,
+    annex_b: Vec<u8>,
+    padded: image::RgbImage,
+}
+
+#[cfg(feature = "remote-h264")]
+impl HardwareVideoSender {
+    fn new(codec: FrameCodec, limits: super::messages::FrameLimits, fps: u16) -> Self {
+        Self {
+            codec,
+            limits,
+            fps,
+            encoder: None,
+            annex_b: Vec::new(),
+            padded: image::RgbImage::new(0, 0),
+        }
+    }
+
+    fn encode_frame(
+        &mut self,
+        payload: &mut Vec<u8>,
+        sequence: u64,
+        pending: &PendingFrame,
+    ) -> RemoteResult<bool> {
+        use super::h264_wire::{
+            HardwareFrameHeader, encode_hardware_frame, h264_padded_dimensions, hardware_has_idr,
+        };
+        let frame = &pending.frame;
+        let width = u16::try_from(frame.image.width())?;
+        let height = u16::try_from(frame.image.height())?;
+        self.limits.validate_dimensions(width, height)?;
+        let (padded_width, padded_height) = h264_padded_dimensions(width, height)?;
+        let (padded_width, padded_height) = (u32::from(padded_width), u32::from(padded_height));
+        let scope = (pending.source_version, frame.geometry_epoch, width, height);
+        let fresh = self
+            .encoder
+            .as_ref()
+            .is_none_or(|(previous, _)| *previous != scope);
+        if fresh {
+            // Release the old hardware session before asking for a new one.
+            self.encoder = None;
+            self.encoder = Some((
+                scope,
+                super::h264::Encoder::new(
+                    self.codec,
+                    padded_width,
+                    padded_height,
+                    u32::from(self.fps),
+                )?,
+            ));
+        }
+
+        let rgb = if frame.image.dimensions() == (padded_width, padded_height) {
+            &frame.image
+        } else {
+            pad_hardware_rgb(&frame.image, &mut self.padded, padded_width, padded_height);
+            &self.padded
+        };
+        self.annex_b.clear();
+        self.encoder
+            .as_mut()
+            .expect("hardware encoder has a scope")
+            .1
+            .encode_into(rgb, &mut self.annex_b)?;
+        let keyframe = hardware_has_idr(self.codec, &self.annex_b);
+        if fresh && !keyframe {
+            return Err(
+                invalid_data("hardware encoder did not start the geometry with an IDR").into(),
+            );
+        }
+        encode_hardware_frame(
+            payload,
+            self.codec,
+            HardwareFrameHeader {
+                sequence,
+                source_width: frame.source_width,
+                source_height: frame.source_height,
+                encoded_width: width,
+                encoded_height: height,
+                geometry_epoch: frame.geometry_epoch,
+            },
+            &self.annex_b,
+            self.limits,
+        )?;
+        Ok(keyframe)
+    }
+}
+
+#[cfg(feature = "remote-h264")]
+fn pad_hardware_rgb(
+    source: &image::RgbImage,
+    padded: &mut image::RgbImage,
+    width: u32,
+    height: u32,
+) {
+    if padded.dimensions() != (width, height) {
+        *padded = image::RgbImage::new(width, height);
+    }
+    let stride = source.width() as usize * 3;
+    let padded_stride = width as usize * 3;
+    let last_row = source.height() as usize - 1;
+    let bytes: &mut [u8] = padded.as_mut();
+    for (row, output) in bytes.chunks_exact_mut(padded_stride).enumerate() {
+        let offset = row.min(last_row) * stride;
+        let input = &source.as_raw()[offset..offset + stride];
+        let (visible, padding) = output.split_at_mut(stride);
+        visible.copy_from_slice(input);
+        if !padding.is_empty() {
+            padding.copy_from_slice(&input[stride - 3..]);
+        }
+    }
+}
+
 fn send_frames_with_encoder_scoped<W: std::io::Write + SetWriteTimeout>(
     mailbox: Arc<LatestMailbox<PendingFrame>>,
     writer: Arc<Mutex<SessionWriter<DeadlineWriter<W>>>>,
@@ -5028,6 +5242,19 @@ fn send_frames_with_encoder_scoped<W: std::io::Write + SetWriteTimeout>(
     let mut sequence = 0_u64;
     let mut payload = Vec::new();
     let mut payload_retention = PayloadBufferRetention::default();
+    #[cfg(feature = "remote-h264")]
+    let profile = sources
+        .and_then(|source| source.hardware_video.get())
+        .copied();
+    #[cfg(feature = "remote-h264")]
+    let mut hardware =
+        profile.map(|(codec, limits, fps)| HardwareVideoSender::new(codec, limits, fps));
+    #[cfg(feature = "remote-h264")]
+    let tagged_video = profile.is_some();
+    #[cfg(feature = "remote-h264")]
+    let mut hardware_active = false;
+    #[cfg(feature = "remote-h264")]
+    let mut hardware_needs_reset = false;
     // Test-only: move, never clone, the just-flushed immutable capture. The
     // ordinary latest mailbox remains live while this one opportunity waits
     // for normal display credit. At most one PNG precedes the next dequeue.
@@ -5035,6 +5262,14 @@ fn send_frames_with_encoder_scoped<W: std::io::Write + SetWriteTimeout>(
     let mut region_followup: Option<PendingFrame> = None;
 
     while running.load(Ordering::Acquire) {
+        #[cfg(feature = "remote-h264")]
+        if std::mem::take(&mut hardware_needs_reset)
+            && let Some(codec) = hardware.as_mut()
+        {
+            // A prior access unit was never published. Retire references
+            // without holding the writer or source lock.
+            codec.encoder = None;
+        }
         let Some(ack_wait) = credits.wait_for_credit(running, FRAME_ACK_TIMEOUT)? else {
             break;
         };
@@ -5099,135 +5334,205 @@ fn send_frames_with_encoder_scoped<W: std::io::Write + SetWriteTimeout>(
             }
         }
         let planned_at = Instant::now();
-        #[cfg(test)]
-        let region_plan = if is_region_followup {
-            Some(
-                sender
-                    .plan_region_repair_at(&pending.frame, planned_at)
-                    .map_err(LocalRuntimeFailure::encoding)?,
-            )
-        } else {
-            None
-        };
-        #[cfg(not(test))]
-        let region_plan: Option<TilePlan> = None;
-        let mut plan = if let Some(plan) = region_plan {
-            plan
-        } else {
-            sender
-                .plan_record_at(
-                    &pending.frame,
-                    planned_at,
-                    pending.pointer_serial.is_some(),
-                    legacy_keyframe,
-                )
-                .map_err(LocalRuntimeFailure::encoding)?
-        };
-        if let Some(sources) = sources {
-            pointer_repair::observe_debt(sources, sender.encoder.has_stable_exact_debt(planned_at));
-            control_repair::observe_debt(sources, sender.encoder.has_stable_exact_debt(planned_at));
-        }
-        if (pending
-            .pointer_repair
-            .is_some_and(|s| matches!(s.intent, pointer_repair::Intent::Visual(_)))
-            || pending
-                .control_repair
-                .is_some_and(|s| matches!(s.intent, control_repair::Intent::Visual(_))))
-            && !plan.emit
-        {
-            plan =
-                sender
-                    .encoder
-                    .plan_at(&pending.frame, TileEncodeRequest::Keepalive, planned_at)?;
-        }
-        if !sender.static_lossless && !plan.keyframe && sender.refinement_due(planned_at) {
-            let current = jpeg_quality.current_quality();
-            if sender.encoder.has_quality_debt(current) {
-                plan = sender
-                    .refine_at(current, planned_at)
-                    .map_err(LocalRuntimeFailure::encoding)?;
+        #[cfg(feature = "remote-h264")]
+        let hardware_frame = match hardware.as_mut().map(|codec| {
+            let started = Instant::now();
+            codec
+                .encode_frame(&mut payload, sequence, &pending)
+                .map(|keyframe| (codec.codec, keyframe, started.elapsed()))
+        }) {
+            Some(Ok(encoded)) => {
+                if !hardware_active {
+                    eprintln!("jwm-remote: hardware {} encoding active", encoded.0.name());
+                    hardware_active = true;
+                }
+                Some(encoded)
             }
-        }
-        telemetry.record_dirty_scan(planned_at.elapsed());
-        if !plan.emit {
-            telemetry.record_unchanged_suppressed();
-            continue;
-        }
-        let quality = jpeg_quality.quality_before_encode_at(Instant::now());
-        if sender.pending_refinement {
-            // Pending ACKs can lower quality after the read-only debt check.
-            // Replan at the actual epoch's quality, never upgrading debt using
-            // a stale pre-congestion target or overwriting a sharper tile.
-            plan = sender
-                .refine_at(quality.quality, planned_at)
-                .map_err(LocalRuntimeFailure::encoding)?;
-        }
-        let unchanged_keepalive = plan.dirty_tiles == 0;
-        if let Some(adjustment) = quality.adjustment {
-            let direction = match adjustment {
-                JpegQualityAdjustment::Decreased => "decreased",
-                JpegQualityAdjustment::Increased => "increased",
-            };
-            eprintln!(
-                "jwm-remote: adaptive JPEG quality {direction} {} -> {} (ACKs {}, pressure {}, max send-to-ACK {:.1} ms, payload {} bytes, same-epoch outstanding {}, same-epoch-superseded {})",
-                quality.previous,
-                quality.quality,
-                quality.signals.acknowledgements,
-                quality.accumulated_pressure,
-                quality.signals.max_ack_rtt.as_secs_f64() * 1000.0,
-                quality.signals.max_payload_bytes,
-                quality.signals.max_outstanding,
-                quality.signals.same_epoch_superseded,
-            );
-        }
-        if !plan.emit {
-            telemetry.record_unchanged_suppressed();
-            continue;
-        }
-        let encode_started = Instant::now();
-        if let Err(error) =
-            sender
-                .encoder
-                .encode_into(&mut payload, sequence, &pending.frame, quality.quality)
-        {
-            if sender.static_lossless && sender.encoder.lossless_encode_rejected() {
-                sender.discard();
-                sender.lossless_retry_after = Some(Instant::now() + STATIC_REFINEMENT_INTERVAL);
-                continue;
+            Some(Err(error)) => {
+                eprintln!("jwm-remote: hardware encoding failed, switching to JPEG: {error}");
+                hardware = None;
+                None
             }
-            return Err(LocalRuntimeFailure::encoding(error));
-        }
+            None => None,
+        };
+        #[cfg(not(feature = "remote-h264"))]
+        let hardware_frame: Option<(FrameCodec, bool, Duration)> = None;
+        let is_hardware_frame = hardware_frame.is_some();
         #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
-        if let Some((_, probe)) = sources.and_then(|s| s.lossless_schedule_test.as_ref()) {
-            let mut stats = probe.stats.lock().unwrap();
-            stats.encode_ns += encode_started.elapsed().as_nanos();
-            if let Some(t) = sender.encoder.encode_timings() {
-                if let Some(png) = t.png {
-                    stats.encoded_png += 1;
-                    stats.png_ns += png.as_nanos();
-                } else {
-                    stats.encoded_jpeg += 1;
-                    stats.jpeg_ns += t.jpeg.as_nanos();
+        let schedule_encode_ns;
+        let (plan, quality, quality_epoch, unchanged_keepalive, frame_purpose) = if let Some((
+            codec,
+            keyframe,
+            elapsed,
+        )) =
+            hardware_frame
+        {
+            let plan = TilePlan {
+                keyframe,
+                dirty_tiles: 0,
+                total_tiles: 0,
+                emit: true,
+            };
+            telemetry.record_encoded(elapsed, plan);
+            telemetry.record_hardware_encode(codec, elapsed);
+            #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+            {
+                schedule_encode_ns = elapsed.as_nanos();
+            }
+            // JPEG adapts only from frames sent by its own encoder.
+            (plan, 0, 0, false, FramePurpose::Video)
+        } else {
+            #[cfg(test)]
+            let region_plan = if is_region_followup {
+                Some(
+                    sender
+                        .plan_region_repair_at(&pending.frame, planned_at)
+                        .map_err(LocalRuntimeFailure::encoding)?,
+                )
+            } else {
+                None
+            };
+            #[cfg(not(test))]
+            let region_plan: Option<TilePlan> = None;
+            let mut plan = if let Some(plan) = region_plan {
+                plan
+            } else {
+                sender
+                    .plan_record_at(
+                        &pending.frame,
+                        planned_at,
+                        pending.pointer_serial.is_some(),
+                        legacy_keyframe,
+                    )
+                    .map_err(LocalRuntimeFailure::encoding)?
+            };
+            if let Some(sources) = sources {
+                pointer_repair::observe_debt(
+                    sources,
+                    sender.encoder.has_stable_exact_debt(planned_at),
+                );
+                control_repair::observe_debt(
+                    sources,
+                    sender.encoder.has_stable_exact_debt(planned_at),
+                );
+            }
+            if (pending
+                .pointer_repair
+                .is_some_and(|s| matches!(s.intent, pointer_repair::Intent::Visual(_)))
+                || pending
+                    .control_repair
+                    .is_some_and(|s| matches!(s.intent, control_repair::Intent::Visual(_))))
+                && !plan.emit
+            {
+                plan = sender.encoder.plan_at(
+                    &pending.frame,
+                    TileEncodeRequest::Keepalive,
+                    planned_at,
+                )?;
+            }
+            if !sender.static_lossless && !plan.keyframe && sender.refinement_due(planned_at) {
+                let current = jpeg_quality.current_quality();
+                if sender.encoder.has_quality_debt(current) {
+                    plan = sender
+                        .refine_at(current, planned_at)
+                        .map_err(LocalRuntimeFailure::encoding)?;
                 }
             }
-        }
-        #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
-        let schedule_encode_ns = encode_started.elapsed().as_nanos();
-        telemetry.record_encoded(encode_started.elapsed(), plan);
-        if let Some(stages) = sender.encoder.encode_timings() {
-            telemetry.record_encode_stages(stages);
-        }
-        let is_png = sender
-            .encoder
-            .encode_timings()
-            .is_some_and(|t| t.png.is_some());
-        let frame_purpose = match (pending.native_proof_serial, is_png) {
-            (Some(_), true) => {
-                return Err(invalid_data("native proof cannot use PNG repair encoding").into());
+            telemetry.record_dirty_scan(planned_at.elapsed());
+            if !plan.emit {
+                telemetry.record_unchanged_suppressed();
+                continue;
             }
-            (Some(_), false) => FramePurpose::NativeProof,
-            (None, true) => FramePurpose::VisualRepair,
-            (None, false) => FramePurpose::Video,
+            let quality = jpeg_quality.quality_before_encode_at(Instant::now());
+            if sender.pending_refinement {
+                // Pending ACKs can lower quality after the read-only debt check.
+                // Replan at the actual epoch's quality, never upgrading debt using
+                // a stale pre-congestion target or overwriting a sharper tile.
+                plan = sender
+                    .refine_at(quality.quality, planned_at)
+                    .map_err(LocalRuntimeFailure::encoding)?;
+            }
+            let unchanged_keepalive = plan.dirty_tiles == 0;
+            if let Some(adjustment) = quality.adjustment {
+                let direction = match adjustment {
+                    JpegQualityAdjustment::Decreased => "decreased",
+                    JpegQualityAdjustment::Increased => "increased",
+                };
+                eprintln!(
+                    "jwm-remote: adaptive JPEG quality {direction} {} -> {} (ACKs {}, pressure {}, max send-to-ACK {:.1} ms, payload {} bytes, same-epoch outstanding {}, same-epoch-superseded {})",
+                    quality.previous,
+                    quality.quality,
+                    quality.signals.acknowledgements,
+                    quality.accumulated_pressure,
+                    quality.signals.max_ack_rtt.as_secs_f64() * 1000.0,
+                    quality.signals.max_payload_bytes,
+                    quality.signals.max_outstanding,
+                    quality.signals.same_epoch_superseded,
+                );
+            }
+            if !plan.emit {
+                telemetry.record_unchanged_suppressed();
+                continue;
+            }
+            let encode_started = Instant::now();
+            if let Err(error) =
+                sender
+                    .encoder
+                    .encode_into(&mut payload, sequence, &pending.frame, quality.quality)
+            {
+                if sender.static_lossless && sender.encoder.lossless_encode_rejected() {
+                    sender.discard();
+                    sender.lossless_retry_after = Some(Instant::now() + STATIC_REFINEMENT_INTERVAL);
+                    continue;
+                }
+                return Err(LocalRuntimeFailure::encoding(error));
+            }
+            #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+            if let Some((_, probe)) = sources.and_then(|s| s.lossless_schedule_test.as_ref()) {
+                let mut stats = probe.stats.lock().unwrap();
+                stats.encode_ns += encode_started.elapsed().as_nanos();
+                if let Some(t) = sender.encoder.encode_timings() {
+                    if let Some(png) = t.png {
+                        stats.encoded_png += 1;
+                        stats.png_ns += png.as_nanos();
+                    } else {
+                        stats.encoded_jpeg += 1;
+                        stats.jpeg_ns += t.jpeg.as_nanos();
+                    }
+                }
+            }
+            #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
+            {
+                schedule_encode_ns = encode_started.elapsed().as_nanos();
+            }
+            telemetry.record_encoded(encode_started.elapsed(), plan);
+            if let Some(stages) = sender.encoder.encode_timings() {
+                telemetry.record_encode_stages(stages);
+            }
+            let is_png = sender
+                .encoder
+                .encode_timings()
+                .is_some_and(|t| t.png.is_some());
+            let frame_purpose = match (pending.native_proof_serial, is_png) {
+                (Some(_), true) => {
+                    return Err(invalid_data("native proof cannot use PNG repair encoding").into());
+                }
+                (Some(_), false) => FramePurpose::NativeProof,
+                (None, true) => FramePurpose::VisualRepair,
+                (None, false) => FramePurpose::Video,
+            };
+            #[cfg(feature = "remote-h264")]
+            if tagged_video {
+                super::h264_wire::tag_jpeg_frame(&mut payload)
+                    .map_err(LocalRuntimeFailure::encoding)?;
+            }
+            (
+                plan,
+                quality.quality,
+                quality.epoch,
+                unchanged_keepalive,
+                frame_purpose,
+            )
         };
         if sources.is_some() {
             if payload.len() > super::source_wire::MAX_FRAME_INNER_PAYLOAD_LEN {
@@ -5287,29 +5592,38 @@ fn send_frames_with_encoder_scoped<W: std::io::Write + SetWriteTimeout>(
         let write_started = Instant::now();
         let write_result = {
             let mut writer = lock_writer(&writer);
+            let mut discard_pending = || {
+                sender.discard();
+                #[cfg(feature = "remote-h264")]
+                {
+                    hardware_needs_reset = is_hardware_frame;
+                }
+            };
             // The writer is the source publication barrier. A sender already
             // encoding old pixels must recheck before reserving credit or
             // writing, and can never appear after SourceChanged.
             if let (Some(sources), Some(stamp)) = (sources, pending.pointer_repair) {
                 if !pointer_repair::permits_write(sources, stamp) {
-                    sender.discard();
+                    discard_pending();
                     continue;
                 }
             }
             if let (Some(sources), Some(stamp)) = (sources, pending.control_repair) {
                 if !control_repair::permits_write(sources, stamp) {
-                    sender.discard();
+                    discard_pending();
                     continue;
                 }
             }
             let mut source_state = sources.map(|sources| sources.state.lock().unwrap());
             if source_state.as_ref().is_some_and(|state| {
                 !state.policy.accepts_capture(pending.source_version)
-                    || (sources
-                        .is_some_and(|sources| sources.follow_geometry.load(Ordering::Acquire))
+                    || ((is_hardware_frame
+                        || sources.is_some_and(|sources| {
+                            sources.follow_geometry.load(Ordering::Acquire)
+                        }))
                         && state.geometry_epoch != pending.frame.geometry_epoch)
             }) {
-                sender.discard();
+                discard_pending();
                 continue;
             }
             if let (Some(sources), Some(serial)) = (sources, pending.pointer_serial) {
@@ -5317,7 +5631,7 @@ fn send_frames_with_encoder_scoped<W: std::io::Write + SetWriteTimeout>(
                 let Some(frame) = retained.as_mut().filter(|frame| frame.serial == serial) else {
                     // Capture-age expiry can retire a frame while JPEG encoding
                     // runs. Drop it before reserving credit, never reuse its proof.
-                    sender.discard();
+                    discard_pending();
                     continue;
                 };
                 frame.scope = Some(DrawnScope {
@@ -5332,8 +5646,8 @@ fn send_frames_with_encoder_scoped<W: std::io::Write + SetWriteTimeout>(
                 pending.captured_at,
                 sent_at,
                 wire_payload.len(),
-                quality.quality,
-                quality.epoch,
+                quality,
+                quality_epoch,
                 pending.source_version.epoch,
                 pending.frame.geometry_epoch,
                 frame_purpose,
@@ -5374,7 +5688,9 @@ fn send_frames_with_encoder_scoped<W: std::io::Write + SetWriteTimeout>(
         // flush succeeded. A partial/failed write therefore cannot suppress a
         // future frame in a replacement session or test harness.
         let flushed_at = Instant::now();
-        sender.commit_at(&pending.frame, flushed_at);
+        if !is_hardware_frame {
+            sender.commit_at(&pending.frame, flushed_at);
+        }
         if let (Some(sources), Some(stamp)) = (sources, pending.pointer_repair) {
             pointer_repair::flushed(
                 sources,
@@ -5476,7 +5792,8 @@ fn send_frames_with_encoder_scoped<W: std::io::Write + SetWriteTimeout>(
         payload_retention.observe(&mut payload);
         #[cfg(test)]
         if !is_region_followup
-            && !is_png
+            && !is_hardware_frame
+            && frame_purpose != FramePurpose::VisualRepair
             && !plan.keyframe
             && pending.pointer_serial.is_none()
             && pending.native_proof_serial.is_none()
@@ -5819,7 +6136,7 @@ fn host_telemetry_json(snapshot: HostTelemetrySnapshot, outstanding: u64) -> ser
         "backpressure_skipped": w.skipped, "damage_skipped": w.damage_skipped,
         "replaced": w.replaced, "unchanged_suppressed": w.unchanged_suppressed,
         "dirty_tiles": w.dirty_tiles, "total_tiles": w.total_tiles,
-        "jpeg_atlases": w.jpeg_encoded, "png_atlases": w.png_encoded,
+        "jpeg_atlases": w.jpeg_encoded, "png_atlases": w.png_encoded, "h264_frames": w.h264_encoded, "hevc444_frames": w.hevc444_encoded,
         "legacy_stage_aliases": {"atlas_pack_and_jpeg_ms": "atlas_pack_and_codec_ms; historical name includes all codecs and empty-frame encode work"},
         "drawn_acks": w.drawn_acks, "viewer_superseded": w.viewer_superseded,
         "outstanding": outstanding, "max_outstanding": w.max_outstanding,
@@ -5832,7 +6149,9 @@ fn host_telemetry_json(snapshot: HostTelemetrySnapshot, outstanding: u64) -> ser
             "atlas_pack_ms": {"mean": average_millis(w.atlas_pack_elapsed, w.atlas_encoded), "quantiles": w.atlas_pack_samples.json()},
             "jpeg_ms": {"mean": average_millis(w.jpeg_elapsed, w.jpeg_encoded), "quantiles": w.jpeg_samples.json()},
             "png_ms": {"mean": average_millis(w.png_elapsed, w.png_encoded), "quantiles": w.png_samples.json()},
-            "codec_ms": {"mean": average_millis(w.codec_elapsed, w.atlas_encoded), "quantiles": w.codec_samples.json()},
+            "h264_ms": {"mean": average_millis(w.h264_elapsed, w.h264_encoded), "quantiles": w.h264_samples.json()},
+            "hevc444_ms": {"mean": average_millis(w.hevc444_elapsed, w.hevc444_encoded), "quantiles": w.hevc444_samples.json()},
+            "codec_ms": {"mean": average_millis(w.codec_elapsed, w.atlas_encoded.saturating_add(w.h264_encoded).saturating_add(w.hevc444_encoded)), "quantiles": w.codec_samples.json()},
             "atlas_pack_and_codec_ms": {"mean": average_millis(w.encode_elapsed, w.encoded), "quantiles": w.encode_samples.json()},
             "atlas_pack_and_jpeg_ms": {"mean": average_millis(w.encode_elapsed, w.encoded), "quantiles": w.encode_samples.json()},
             "writer_wait_ms": {"mean": average_millis(w.writer_wait_elapsed, w.sent), "quantiles": w.writer_wait_samples.json()},
@@ -12547,6 +12866,38 @@ mod tests {
         assert_eq!(reset.window.dirty_scans, 0);
         assert_eq!(reset.window.atlas_encoded, 0);
         assert_eq!(reset.window.jpeg_samples.count, 0);
+    }
+
+    #[test]
+    #[cfg(feature = "remote-h264")]
+    fn h264_odd_rgb_extent_repeats_the_last_row_and_column() {
+        let source = RgbImage::from_fn(3, 3, |x, y| Rgb([x as u8, y as u8, (x + y) as u8]));
+        let mut padded = RgbImage::new(0, 0);
+        pad_hardware_rgb(&source, &mut padded, 4, 4);
+        for (x, y, value) in padded.enumerate_pixels() {
+            assert_eq!(value, source.get_pixel(x.min(2), y.min(2)));
+        }
+    }
+
+    #[test]
+    fn telemetry_json_keeps_h264_samples_separate_from_jpeg_and_atlas_pack() {
+        let base = Instant::now();
+        let telemetry = HostTelemetry::new_at(base);
+        telemetry.record_encoded(Duration::from_millis(5), test_tile_plan(0, 0));
+        telemetry.record_hardware_encode(FrameCodec::H264, Duration::from_millis(5));
+        telemetry.record_encode_stages(super::super::tile::EncodeStageTimings {
+            atlas_pack: Duration::from_millis(2),
+            jpeg: Duration::from_millis(11),
+            png: None,
+        });
+        let snapshot = telemetry.take_due_at(base + TELEMETRY_INTERVAL).unwrap();
+        let report = host_telemetry_json(snapshot, 0);
+        assert_eq!(report["h264_frames"], 1);
+        assert_eq!(report["jpeg_atlases"], 1);
+        assert_eq!(report["stages"]["h264_ms"]["mean"], 5.0);
+        assert_eq!(report["stages"]["jpeg_ms"]["mean"], 11.0);
+        assert_eq!(report["stages"]["codec_ms"]["mean"], 8.0);
+        assert_eq!(report["stages"]["atlas_pack_ms"]["mean"], 2.0);
     }
 
     #[test]

@@ -5,13 +5,13 @@ use jwm::remote::client::{ClientOptions, run_client_reconnecting};
 use jwm::remote::clipboard_files::{parse_size, staging_root};
 use jwm::remote::clipboard_policy::{ClipboardDirection, ClipboardMode};
 use jwm::remote::clipboard_staging_budget::{self, Status as StagingBudgetStatus};
-use jwm::remote::host::{HostOptions, run_host};
+use jwm::remote::host::{HostOptions, run_host_with_video_codecs};
 use jwm::remote::key::{KeySource, generate_key_file};
 use jwm::remote::messages::FrameLimits;
 use jwm::remote::profiles::{Connection, Profile, Store, Viewer};
 use jwm::remote::resumable_control::ControlDuration;
 use jwm::remote::session_env;
-use jwm::remote::ssh::{SshOptions, run_ssh};
+use jwm::remote::ssh::{SshOptions, run_ssh_with_jpeg_override};
 use jwm::remote::usability::{
     default_key_path, key_metadata, normalize_address, normalize_listen_address,
 };
@@ -222,6 +222,14 @@ enum Command {
         #[arg(long, default_value = "30", value_parser = parse_fps)]
         fps: u16,
 
+        /// Allow mutually requested NVENC H.264 for an X11 desktop session.
+        #[arg(long, conflicts_with_all = ["wayland_select", "window", "scroll_copy", "allow_static_lossless"])]
+        allow_h264: bool,
+
+        /// Allow mutually requested NVENC HEVC 4:4:4 for an X11 desktop.
+        #[arg(long, requires = "allow_h264")]
+        allow_hevc444: bool,
+
         /// Adaptive quality ceiling; the default floor stays 40 for congestion recovery.
         #[arg(long, default_value = "85", value_parser = parse_quality)]
         jpeg_quality: u8,
@@ -406,6 +414,10 @@ enum Command {
         /// Host frame-rate ceiling (same range as host --fps).
         #[arg(long, value_parser = parse_fps)]
         fps: Option<u16>,
+
+        /// Use JPEG for this session. SSH otherwise tries hardware HEVC 4:4:4 and H.264 in order.
+        #[arg(long)]
+        jpeg: bool,
         /// Host adaptive JPEG quality ceiling (same range as host).
         #[arg(long, value_parser = parse_quality)]
         jpeg_quality: Option<u8>,
@@ -875,6 +887,7 @@ fn profile_from_command(command: Command) -> RemoteResult<Profile> {
             monitor,
             shares,
             fps,
+            jpeg,
             jpeg_quality,
             max_width,
             display,
@@ -894,6 +907,9 @@ fn profile_from_command(command: Command) -> RemoteResult<Profile> {
             scaling,
         } => {
             jwm::remote::ssh::validate_destination(&destination)?;
+            if jpeg {
+                return Err(profile_error("profiles do not store --jpeg; use ssh directly").into());
+            }
             if seamless_input.is_some() {
                 return Err(profile_error("seamless input consent cannot be saved in a profile; use connect or ssh directly").into());
             }
@@ -1353,6 +1369,8 @@ fn run(command: Command) -> RemoteResult<()> {
             key_stdin,
             display,
             fps,
+            allow_h264,
+            allow_hevc444,
             jpeg_quality,
             jpeg_quality_floor,
             fixed_jpeg_quality,
@@ -1413,49 +1431,54 @@ fn run(command: Command) -> RemoteResult<()> {
                 (None, None, None) => CaptureArea::Root,
             };
             let shared_sources = shares.areas(&capture_area)?;
-            run_host(HostOptions {
-                max_control_duration: max_wayland_control_duration.unwrap_or_default(),
-                listen,
-                key,
-                display,
-                fps,
-                jpeg_quality,
-                jpeg_quality_floor,
-                fixed_jpeg_quality,
-                max_width,
-                capture_source,
-                capture_area,
-                shared_sources,
-                scaling,
-                allow_lan,
-                allow_input,
-                allow_window_resize,
-                wayland_select,
-                wayland_resize_follow,
-                wayland_popups,
-                allow_wayland_keyboard,
-                allow_wayland_pointer,
-                allow_wayland_control,
-                allow_resumable_control,
-                allow_wayland_text,
-                allow_wayland_popup_pointer,
-                allow_static_lossless,
-                allow_wayland_scroll,
-                allow_wayland_horizontal_scroll,
-                scroll_copy,
-                wayland_display,
-                allow_clipboard,
-                clipboard_mode,
-                clipboard_direction,
-                clipboard_file_limit,
-                frame_limits: frame_limits.limits(),
-                once,
-                stats_json,
-            })
+            run_host_with_video_codecs(
+                HostOptions {
+                    max_control_duration: max_wayland_control_duration.unwrap_or_default(),
+                    listen,
+                    key,
+                    display,
+                    fps,
+                    jpeg_quality,
+                    jpeg_quality_floor,
+                    fixed_jpeg_quality,
+                    max_width,
+                    capture_source,
+                    capture_area,
+                    shared_sources,
+                    scaling,
+                    allow_lan,
+                    allow_input,
+                    allow_window_resize,
+                    wayland_select,
+                    wayland_resize_follow,
+                    wayland_popups,
+                    allow_wayland_keyboard,
+                    allow_wayland_pointer,
+                    allow_wayland_control,
+                    allow_resumable_control,
+                    allow_wayland_text,
+                    allow_wayland_popup_pointer,
+                    allow_static_lossless,
+                    allow_wayland_scroll,
+                    allow_wayland_horizontal_scroll,
+                    scroll_copy,
+                    wayland_display,
+                    allow_clipboard,
+                    clipboard_mode,
+                    clipboard_direction,
+                    clipboard_file_limit,
+                    frame_limits: frame_limits.limits(),
+                    once,
+                    stats_json,
+                },
+                allow_h264,
+                allow_hevc444,
+            )
         }
         Command::Ssh {
             destination,
             fps,
+            jpeg,
             jpeg_quality,
             max_width,
             monitor,
@@ -1480,29 +1503,32 @@ fn run(command: Command) -> RemoteResult<()> {
                 .clone()
                 .map_or(CaptureArea::Root, CaptureArea::Monitor);
             let shared_sources = shares.areas(&initial)?;
-            run_ssh(SshOptions {
-                destination,
-                fps,
-                jpeg_quality,
-                max_width,
-                ssh_options,
-                remote_command,
-                monitor,
-                shared_sources,
-                display,
-                window_size,
-                window_position,
-                view_only,
-                grab_input,
-                seamless_input,
-                clipboard,
-                clipboard_mode,
-                clipboard_direction,
-                clipboard_file_limit,
-                frame_limits: frame_limits.limits(),
-                escape_key,
-                scaling,
-            })
+            run_ssh_with_jpeg_override(
+                SshOptions {
+                    destination,
+                    fps,
+                    jpeg_quality,
+                    max_width,
+                    ssh_options,
+                    remote_command,
+                    monitor,
+                    shared_sources,
+                    display,
+                    window_size,
+                    window_position,
+                    view_only,
+                    grab_input,
+                    seamless_input,
+                    clipboard,
+                    clipboard_mode,
+                    clipboard_direction,
+                    clipboard_file_limit,
+                    frame_limits: frame_limits.limits(),
+                    escape_key,
+                    scaling,
+                },
+                jpeg,
+            )
         }
         command @ Command::Connect { .. } => {
             let (options, reconnect_attempts) = connect_options(command)?;

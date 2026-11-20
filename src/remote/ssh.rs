@@ -18,10 +18,10 @@
 //! that user, including a host with `--allow-input`.
 
 use super::RemoteResult;
-use super::client::{ClientOptions, run_client};
+use super::client::{ClientOptions, run_client_with_video_codec};
 use super::clipboard_policy::{ClipboardDirection, ClipboardMode};
 use super::key::{KeySource, generate_session_key};
-use super::messages::FrameLimits;
+use super::messages::{FrameCodec, FrameLimits};
 use super::scaling::ScalingPolicy;
 use super::ssh_diagnostics::DiagnosticPump;
 use super::viewer_backend::SeamlessInput;
@@ -33,7 +33,7 @@ use std::net::TcpListener;
 use std::os::fd::{AsFd, AsRawFd};
 use std::path::PathBuf;
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -48,6 +48,8 @@ const MANAGED_REMOTE_COMMAND: &str = "/usr/local/lib/jwm/current/bin/jwm-remote"
 /// Remote loopback ports are drawn from the dynamic range.
 const REMOTE_PORT_BASE: u16 = 49152;
 const REMOTE_PORT_SPAN: u16 = 16000;
+const H264_HELPER_READY: &str = "hardware H.264 negotiation available";
+const HEVC444_HELPER_READY: &str = "hardware HEVC 4:4:4 negotiation available";
 
 #[derive(Clone, Debug)]
 pub struct SshOptions {
@@ -84,6 +86,27 @@ pub struct SshOptions {
 }
 
 pub fn run_ssh(options: SshOptions) -> RemoteResult<()> {
+    run_ssh_with_jpeg_override(options, false)
+}
+
+pub fn run_ssh_with_jpeg_override(options: SshOptions, jpeg_only: bool) -> RemoteResult<()> {
+    let jpeg_only = jpeg_only || options.jpeg_quality.is_some();
+    if jpeg_only || !cfg!(feature = "remote-h264") {
+        return run_ssh_session(options, false, jpeg_only);
+    }
+    let result = run_ssh_session(options.clone(), true, false);
+    if result
+        .as_ref()
+        .err()
+        .is_some_and(|error| super::client::hardware_decode_failure_clean(error.as_ref()))
+    {
+        eprintln!("jwm-remote: hardware decoding stopped; reopening the SSH session with JPEG");
+        return run_ssh_session(options, false, false);
+    }
+    result
+}
+
+fn run_ssh_session(options: SshOptions, offer_hardware: bool, jpeg_only: bool) -> RemoteResult<()> {
     if options
         .shared_sources
         .iter()
@@ -108,14 +131,19 @@ pub fn run_ssh(options: SshOptions) -> RemoteResult<()> {
     )?;
     super::x11_viewer::validate_escape_key(&options.escape_key)?;
     let _diagnostics = DiagnosticPump::install()?;
-    let label = peer_label(&options);
+    let label = peer_label_with_jpeg_override(&options, jpeg_only);
     let Some(_session_lock) = claim_session(&options, &label)? else {
         return Ok(());
     };
     let (key, printable_key) = generate_session_key();
     let local_port = free_local_port()?;
     let remote_port = REMOTE_PORT_BASE + rand::random::<u16>() % REMOTE_PORT_SPAN;
-    let remote_script = remote_host_script(&options, remote_port);
+    let remote_script = remote_host_script_with_hardware(
+        &options,
+        remote_port,
+        MANAGED_REMOTE_COMMAND,
+        offer_hardware,
+    );
 
     eprintln!(
         "jwm-remote: starting a host on {} over SSH",
@@ -148,13 +176,20 @@ pub fn run_ssh(options: SshOptions) -> RemoteResult<()> {
         .take()
         .ok_or_else(|| io::Error::other("ssh standard error was not captured"))?;
     let (ready_tx, ready_rx) = mpsc::channel();
+    let host_codec = Arc::new(AtomicU8::new(FrameCodec::JpegTiles as u8));
+    let relay_codec = Arc::clone(&host_codec);
     let relay_stop = Arc::new(AtomicBool::new(false));
     let reader = RelayReader::new(stderr, Arc::clone(&relay_stop));
     let relay = thread::Builder::new()
         .name("jwm-remote-ssh-relay".into())
         .spawn(move || {
             relay_host_messages_with_output(BufReader::new(reader), &ready_tx, |line| {
-                eprintln!("{line}")
+                let codec = match line.strip_prefix("jwm-remote: host: ") {
+                    Some(HEVC444_HELPER_READY) => FrameCodec::Hevc444,
+                    Some(H264_HELPER_READY) => FrameCodec::H264,
+                    _ => return eprintln!("{line}"),
+                };
+                relay_codec.fetch_max(codec as u8, Ordering::Release);
             });
         });
     let result = match relay {
@@ -166,39 +201,52 @@ pub fn run_ssh(options: SshOptions) -> RemoteResult<()> {
             &ready_rx,
         )
         .and_then(|()| {
-            run_client(ClientOptions {
-                control_duration: Default::default(),
-                viewer_backend: crate::remote::viewer_backend::ViewerBackend::X11,
-                viewer_wayland_display: None,
-                wayland_keyboard: false,
-                wayland_pointer: false,
-                wayland_control: false,
-                resumable_control: false,
-                wayland_seamless_input: false,
-                wayland_text: None,
-                static_lossless: false,
-                wayland_scroll: false,
-                wayland_horizontal_scroll: false,
-                wayland_popup_pointer: false,
-                resize_source: None,
-                follow_source_size: false,
-                window_size: options.window_size,
-                window_position: options.window_position,
-                address: format!("127.0.0.1:{local_port}"),
-                peer_label: label.clone(),
-                key: KeySource::Bytes(key),
-                display: options.display.clone(),
-                view_only: options.view_only,
-                grab_input: options.grab_input,
-                seamless_input: options.seamless_input,
-                clipboard: options.clipboard,
-                clipboard_mode: options.clipboard_mode,
-                clipboard_direction: options.clipboard_direction,
-                clipboard_file_limit: options.clipboard_file_limit,
-                frame_limits: options.frame_limits,
-                escape_key: options.escape_key.clone(),
-                scaling: options.scaling,
-            })
+            let preferred = match host_codec.load(Ordering::Acquire) {
+                codec if offer_hardware && codec == FrameCodec::Hevc444 as u8 => {
+                    FrameCodec::Hevc444
+                }
+                codec if offer_hardware && codec == FrameCodec::H264 as u8 => FrameCodec::H264,
+                _ => FrameCodec::JpegTiles,
+            };
+            if offer_hardware && preferred == FrameCodec::JpegTiles {
+                eprintln!("jwm-remote: the SSH helper uses the JPEG stream profile");
+            }
+            run_client_with_video_codec(
+                ClientOptions {
+                    control_duration: Default::default(),
+                    viewer_backend: crate::remote::viewer_backend::ViewerBackend::X11,
+                    viewer_wayland_display: None,
+                    wayland_keyboard: false,
+                    wayland_pointer: false,
+                    wayland_control: false,
+                    resumable_control: false,
+                    wayland_seamless_input: false,
+                    wayland_text: None,
+                    static_lossless: false,
+                    wayland_scroll: false,
+                    wayland_horizontal_scroll: false,
+                    wayland_popup_pointer: false,
+                    resize_source: None,
+                    follow_source_size: false,
+                    window_size: options.window_size,
+                    window_position: options.window_position,
+                    address: format!("127.0.0.1:{local_port}"),
+                    peer_label: label.clone(),
+                    key: KeySource::Bytes(key),
+                    display: options.display.clone(),
+                    view_only: options.view_only,
+                    grab_input: options.grab_input,
+                    seamless_input: options.seamless_input,
+                    clipboard: options.clipboard,
+                    clipboard_mode: options.clipboard_mode,
+                    clipboard_direction: options.clipboard_direction,
+                    clipboard_file_limit: options.clipboard_file_limit,
+                    frame_limits: options.frame_limits,
+                    escape_key: options.escape_key.clone(),
+                    scaling: options.scaling,
+                },
+                preferred,
+            )
         }),
         Err(ref error) => Err(io::Error::new(error.kind(), error.to_string()).into()),
     };
@@ -623,7 +671,12 @@ fn session_lock_path(destination: &str) -> PathBuf {
     directory.join(format!("jwm-remote-ssh-{name}.lock"))
 }
 
+#[cfg(test)]
 fn peer_label(options: &SshOptions) -> String {
+    peer_label_with_jpeg_override(options, false)
+}
+
+fn peer_label_with_jpeg_override(options: &SshOptions, jpeg_only: bool) -> String {
     let initial = match &options.monitor {
         Some(monitor) => format!("{} ({monitor})", options.destination),
         None => options.destination.clone(),
@@ -654,9 +707,11 @@ fn peer_label(options: &SshOptions) -> String {
     } else {
         ""
     };
+    // Automatic negotiation and its fallback keep the legacy session identity.
+    let codec = if jpeg_only { ";codec=jpeg" } else { "" };
     let digest = Sha256::digest(
         format!(
-            "session-v2;connection={:?};{:?};clipboard={content},{direction},{file_limit};view_only={};frames={:?};local_input={:?}{edge_release}",
+            "session-v2;connection={:?};{:?};clipboard={content},{direction},{file_limit};view_only={};frames={:?};local_input={:?}{edge_release}{codec}",
             (&options.destination, &options.ssh_options, &options.remote_command),
             options.shared_sources,
             options.view_only,
@@ -739,11 +794,22 @@ fn ssh_arguments(
 
 /// The POSIX script the remote login shell runs: find the helper, then
 /// replace the shell with a loopback-only host for one session.
+#[cfg(test)]
 fn remote_host_script(options: &SshOptions, remote_port: u16) -> String {
     remote_host_script_with(options, remote_port, MANAGED_REMOTE_COMMAND)
 }
 
+#[cfg(test)]
 fn remote_host_script_with(options: &SshOptions, remote_port: u16, managed: &str) -> String {
+    remote_host_script_with_hardware(options, remote_port, managed, false)
+}
+
+fn remote_host_script_with_hardware(
+    options: &SshOptions,
+    remote_port: u16,
+    managed: &str,
+    hardware_video: bool,
+) -> String {
     let candidates = match &options.remote_command {
         None => format!("jwm-remote {}", shell_quote(managed)),
         Some(command) => match command.strip_prefix("~/") {
@@ -813,9 +879,20 @@ fn remote_host_script_with(options: &SshOptions, remote_port: u16, managed: &str
     if options.scaling != ScalingPolicy::Auto {
         host.push_str(&format!(" --scaling {}", options.scaling));
     }
+    let hardware_branch = if hardware_video {
+        format!(
+            "if helper_help=$(\"$candidate\" host --help </dev/null 2>/dev/null) && \
+             printf '%s\\n' \"$helper_help\" | grep -Eq -- '^[[:space:]]+--allow-h264([[:space:]]|$)'; then \
+             if printf '%s\\n' \"$helper_help\" | grep -Eq -- '^[[:space:]]+--allow-hevc444([[:space:]]|$)'; then \
+             echo 'jwm-remote: {HEVC444_HELPER_READY}' >&2; exec \"$candidate\" {host} --allow-h264 --allow-hevc444; fi; \
+             echo 'jwm-remote: {H264_HELPER_READY}' >&2; exec \"$candidate\" {host} --allow-h264; fi; "
+        )
+    } else {
+        String::new()
+    };
     format!(
         "for candidate in {candidates}; do \
-         if command -v \"$candidate\" >/dev/null 2>&1; then exec \"$candidate\" {host}; fi; \
+         if command -v \"$candidate\" >/dev/null 2>&1; then {hardware_branch}exec \"$candidate\" {host}; fi; \
          done; \
          echo 'jwm-remote: jwm-remote is not installed on this machine \
          (looked in PATH and {managed}); pass --remote-command PATH' >&2; \
@@ -1384,6 +1461,66 @@ mod tests {
             printed.contains("[--clipboard-file-limit]\n[2147483648]\n"),
             "{printed}"
         );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn hardware_ssh_uses_the_best_codec_the_selected_helper_supports() {
+        let directory =
+            std::env::temp_dir().join(format!("jwm-h264-ssh-test-{:016x}", rand::random::<u64>()));
+        fake_helper(&directory);
+        let path = format!("{}:/usr/bin:/bin", directory.display());
+        let opts = options();
+        let script = remote_host_script_with_hardware(&opts, 50000, "/missing/helper", true);
+        let legacy = run_script(&script, &path);
+        assert!(legacy.status.success());
+        assert!(
+            !String::from_utf8(legacy.stdout)
+                .unwrap()
+                .contains("--allow-h264")
+        );
+        assert!(legacy.stderr.is_empty());
+
+        std::fs::write(
+            directory.join("jwm-remote"),
+            "#!/bin/sh\nif [ \"$2\" = --help ]; then echo '      --allow-h264'; exit; fi\n\
+             printf '[%s]\n' \"$@\"\n",
+        )
+        .unwrap();
+        let supported = run_script(&script, &path);
+        assert!(supported.status.success());
+        assert!(
+            String::from_utf8(supported.stdout)
+                .unwrap()
+                .contains("[--allow-h264]")
+        );
+        assert_eq!(
+            String::from_utf8(supported.stderr).unwrap().trim(),
+            format!("jwm-remote: {H264_HELPER_READY}")
+        );
+
+        std::fs::write(
+            directory.join("jwm-remote"),
+            "#!/bin/sh\nif [ \"$2\" = --help ]; then printf '%s\\n' '      --allow-h264' '      --allow-hevc444'; exit; fi\n\
+             printf '[%s]\\n' \"$@\"\n",
+        )
+        .unwrap();
+        let supported = run_script(&script, &path);
+        assert!(supported.status.success());
+        assert!(
+            String::from_utf8(supported.stdout)
+                .unwrap()
+                .contains("[--allow-h264]\n[--allow-hevc444]\n")
+        );
+        assert_eq!(
+            String::from_utf8(supported.stderr).unwrap().trim(),
+            format!("jwm-remote: {HEVC444_HELPER_READY}")
+        );
+
+        assert!(!same_session_policy(
+            &peer_label(&opts),
+            &peer_label_with_jpeg_override(&opts, true)
+        ));
         std::fs::remove_dir_all(directory).unwrap();
     }
 
