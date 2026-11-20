@@ -677,6 +677,8 @@ struct PendingSessionLock {
 /// has been imported, so the final clamp happens at render time.
 pub struct ImPopupAnchor {
     pub surface: WlSurface,
+    #[cfg(feature = "backend-wayland-nested")]
+    pub parent_window: WindowId,
     pub x: i32,
     /// Top of the text-cursor line (popup top when flipped above).
     pub cursor_top: i32,
@@ -4729,6 +4731,8 @@ impl JwmWaylandState {
             );
             result.push(ImPopupAnchor {
                 surface: popup.wl_surface().clone(),
+                #[cfg(feature = "backend-wayland-nested")]
+                parent_window: parent_win,
                 x: abs_x,
                 cursor_top,
                 cursor_bottom,
