@@ -19,8 +19,18 @@ use winit::{
     window::{CursorIcon, Fullscreen, ResizeDirection, Window, WindowId},
 };
 
+#[cfg(feature = "accessibility")]
+type UserEvent = accesskit_winit::Event;
+#[cfg(not(feature = "accessibility"))]
+type UserEvent = ();
+
 type Error = Box<dyn std::error::Error>;
 struct NativeWindow {
+    #[cfg(feature = "accessibility")]
+    accessibility: Option<(
+        accesskit_winit::Adapter,
+        crate::app::accessibility::Semantics,
+    )>,
     surface: softbuffer::Surface<Rc<Window>, Rc<Window>>,
     _context: softbuffer::Context<Rc<Window>>,
     window: Rc<Window>,
@@ -30,6 +40,8 @@ struct NativeWindow {
     last_click: Option<Instant>,
 }
 struct Host {
+    #[cfg(feature = "accessibility")]
+    accessibility_proxy: winit::event_loop::EventLoopProxy<UserEvent>,
     id: String,
     theme: crate::theme::ThemeWatcher,
     initial: Option<(bool, Vec<PathBuf>)>,
@@ -62,8 +74,13 @@ pub(crate) fn run(id: &str, notes: bool, paths: Vec<PathBuf>) -> Result<(), Erro
         }
         return Ok(());
     }
+    #[cfg(not(feature = "accessibility"))]
     let event_loop = EventLoop::new()?;
+    #[cfg(feature = "accessibility")]
+    let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
     let mut host = Host {
+        #[cfg(feature = "accessibility")]
+        accessibility_proxy: event_loop.create_proxy(),
         id: id.into(),
         theme: crate::theme::ThemeWatcher::start(),
         initial: Some((notes, paths)),
@@ -113,7 +130,19 @@ impl Host {
             .with_decorations(false);
         let attrs = WindowAttributesExtWayland::with_name(attrs, identity, &self.id);
         let attrs = WindowAttributesExtX11::with_name(attrs, identity, &self.id);
+        #[cfg(feature = "accessibility")]
+        let attrs = attrs.with_visible(!notes);
         let window = Rc::new(event_loop.create_window(attrs)?);
+        #[cfg(feature = "accessibility")]
+        let accessibility = notes.then(|| {
+            let adapter = accesskit_winit::Adapter::with_event_loop_proxy(
+                event_loop,
+                &window,
+                self.accessibility_proxy.clone(),
+            );
+            window.set_visible(true);
+            (adapter, crate::app::accessibility::Semantics::default())
+        });
         window.set_ime_allowed(app.ime_target() != 0);
         let context = softbuffer::Context::new(window.clone())?;
         let surface = softbuffer::Surface::new(&context, window.clone())?;
@@ -121,6 +150,8 @@ impl Host {
         self.windows.insert(
             window.id(),
             NativeWindow {
+                #[cfg(feature = "accessibility")]
+                accessibility,
                 surface,
                 _context: context,
                 window,
@@ -180,7 +211,41 @@ impl Host {
         }
     }
 }
-impl ApplicationHandler for Host {
+impl ApplicationHandler<UserEvent> for Host {
+    #[cfg(feature = "accessibility")]
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
+        use accesskit_winit::WindowEvent as AccessibilityEvent;
+        let id = event.window_id;
+        let Some(native) = self.windows.get_mut(&id) else {
+            return;
+        };
+        let Some((_, semantics)) = &mut native.accessibility else {
+            return;
+        };
+        match event.window_event {
+            AccessibilityEvent::InitialTreeRequested => {
+                semantics.reset();
+                native.update_accessibility();
+                native.window.request_redraw();
+                return;
+            }
+            AccessibilityEvent::AccessibilityDeactivated => {
+                semantics.reset();
+                return;
+            }
+            AccessibilityEvent::ActionRequested(action) => {
+                let ime_target = native.app.ime_target();
+                if !semantics.action(&mut native.app, action) {
+                    return;
+                }
+                native.sync_ime_target(ime_target);
+                native.window.set_title(&native.app.title());
+                native.window.request_redraw();
+            }
+        }
+        self.effects(event_loop, id);
+    }
+
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         let Some((notes, paths)) = self.initial.take() else {
             return;
@@ -202,6 +267,10 @@ impl ApplicationHandler for Host {
         let Some(native) = self.windows.get_mut(&id) else {
             return;
         };
+        #[cfg(feature = "accessibility")]
+        if let Some((adapter, _)) = &mut native.accessibility {
+            adapter.process_event(&native.window, &event);
+        }
         let ime_target = native.app.ime_target();
         match event {
             WindowEvent::CloseRequested => native.app.close(),
@@ -285,15 +354,7 @@ impl ApplicationHandler for Host {
             }
             _ => return,
         }
-        if native.app.ime_target() != ime_target {
-            // Internal focus changes must end the old composition before a
-            // different editor/path field begins receiving committed text.
-            native.app.clear_preedit();
-            native.window.set_ime_allowed(false);
-            if native.app.ime_target() != 0 {
-                native.window.set_ime_allowed(true);
-            }
-        }
+        native.sync_ime_target(ime_target);
         native.window.set_title(&native.app.title());
         native.window.request_redraw();
         self.effects(event_loop, id);
@@ -349,6 +410,25 @@ impl ApplicationHandler for Host {
     }
 }
 impl NativeWindow {
+    fn sync_ime_target(&mut self, ime_target: u8) {
+        if self.app.ime_target() != ime_target {
+            // Internal focus changes must end the old composition before a
+            // different editor/path field begins receiving committed text.
+            self.app.clear_preedit();
+            self.window.set_ime_allowed(false);
+            if self.app.ime_target() != 0 {
+                self.window.set_ime_allowed(true);
+            }
+        }
+    }
+    #[cfg(feature = "accessibility")]
+    fn update_accessibility(&mut self) {
+        if let Some((adapter, semantics)) = &mut self.accessibility {
+            let scale = self.window.scale_factor();
+            adapter.update_if_active(|| semantics.update(&self.app, scale));
+        }
+    }
+
     fn resize_direction(&self) -> Option<ResizeDirection> {
         if self.window.is_maximized() || self.window.fullscreen().is_some() {
             return None;
@@ -412,6 +492,11 @@ impl NativeWindow {
         }
         self.window.pre_present_notify();
         buffer.present()?;
+        #[cfg(feature = "accessibility")]
+        {
+            drop(data);
+            self.update_accessibility();
+        }
         let (x, y) = self.app.ime_position();
         self.window
             .set_ime_cursor_area(LogicalPosition::new(x, y), LogicalSize::new(2., 20.));
