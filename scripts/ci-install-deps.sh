@@ -49,6 +49,8 @@ if [[ $bridge_retry == 1 ]]; then
     # The parent and this fresh directory are owned by root. Let apt's _apt
     # user traverse the directory to its own partial subdirectory, but not
     # rewrite the verified cache. No caller-controlled archive path is used.
+    # Invoked by the EXIT trap below, not by a direct shell call.
+    # shellcheck disable=SC2329
     cleanup_bridge_archives() {
         local status=$?
         trap - EXIT
