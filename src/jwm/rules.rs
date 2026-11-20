@@ -112,12 +112,18 @@ impl RuleMatcher {
     /// # 返回
     /// 第一个匹配的规则，如果没有匹配则返回 None
     pub fn find_matching_rule(name: &str, class: &str, instance: &str) -> Option<WMRule> {
-        CONFIG
-            .load()
-            .get_rules()
-            .iter()
+        Self::find_in_rules(CONFIG.load().get_rules(), name, class, instance)
+    }
+
+    pub(crate) fn find_in_rules(
+        rules: Vec<WMRule>,
+        name: &str,
+        class: &str,
+        instance: &str,
+    ) -> Option<WMRule> {
+        rules
+            .into_iter()
             .find(|rule| Self::matches(rule, name, class, instance))
-            .cloned()
     }
 }
 
@@ -170,6 +176,7 @@ impl RuleApplication {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::jwm::types::PlacementPolicy;
 
     fn create_test_rule(name: &str, class: &str, instance: &str) -> WMRule {
         WMRule {
@@ -179,7 +186,26 @@ mod tests {
             tags: 1,
             is_floating: false,
             monitor: -1,
+            placement: PlacementPolicy::Inherit,
         }
+    }
+
+    #[test]
+    fn placement_policy_uses_only_the_first_match() {
+        let rules = for_placement_rules();
+        let inherited = RuleMatcher::find_in_rules(rules.clone(), "", "AppAlpha", "").unwrap();
+        assert_eq!(inherited.placement, PlacementPolicy::Inherit);
+        assert_eq!(inherited.tags, 1);
+        let remembered = RuleMatcher::find_in_rules(rules.clone(), "", "AppBeta", "").unwrap();
+        assert_eq!(remembered.placement, PlacementPolicy::Remember);
+        assert!(RuleMatcher::find_in_rules(rules, "", "NoMatch", "").is_none());
+    }
+
+    fn for_placement_rules() -> Vec<WMRule> {
+        vec![
+            create_test_rule("", "AppAlpha", ""),
+            create_test_rule("", "App", "").with_placement(PlacementPolicy::Remember),
+        ]
     }
 
     #[test]
@@ -299,6 +325,7 @@ mod tests {
             tags: 2,
             is_floating: true,
             monitor: 1,
+            placement: PlacementPolicy::Inherit,
         };
 
         let app = RuleApplication::from_rule(&rule);

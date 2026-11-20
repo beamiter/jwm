@@ -2106,6 +2106,7 @@ mod tests {
             tags: 1,
             is_floating: false,
             monitor: -1,
+            placement: crate::jwm::types::PlacementPolicy::Inherit,
         }
     }
 
