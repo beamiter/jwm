@@ -202,10 +202,10 @@ def timeout_signal(*_):
     raise TimeoutError("hosted fixture deadline interrupted")
 
 
-def pointer_receipt(trace, popup_surface):
+def pointer_receipt(trace, popup_surface, skip_lines=0):
     """Identify press with the same live pointer focused on the popup surface."""
     focused, buttons, popup_buttons = {}, [], []
-    for raw in trace.splitlines():
+    for sequence, raw in enumerate(trace.splitlines(), 1):
         event = re.fullmatch(r"\[ *\d+\.\d+\]\s+wl_pointer@(\d+)\.(enter|leave|button)\((.*)\)", raw)
         if not event:
             continue
@@ -215,7 +215,7 @@ def pointer_receipt(trace, popup_surface):
             focused[pointer] = int(enter[1]) if enter else None
         elif name == "leave":
             focused.pop(pointer, None)
-        elif button := re.fullmatch(r"\d+,\s*\d+,\s*272,\s*([01])", params):
+        elif sequence > skip_lines and (button := re.fullmatch(r"\d+,\s*\d+,\s*272,\s*([01])", params)):
             item = {"trace": raw.strip(), "pressed": button[1] == "1", "surface": focused.get(pointer)}
             buttons.append(item)
             if popup_surface is not None and item["surface"] == popup_surface:
@@ -576,19 +576,60 @@ def run(args, out, report):
                     report["phase"] = "outside-control-complete"
                     save()
                     return
-                require(len(press) == 1 and not notes_buttons and engine == app == ["你"]
-                        and after_done(nr, "commit_string"), "candidate click was not delivered exactly once")
+                require(len(press) == 1 and not notes_buttons and not engine and not app
+                        and [item["pressed"] for item in popup_buttons] == [True, False],
+                        "initial candidate click did not stay inside the Fcitx popup")
+                require(events(fr, "zwp_input_method_v2", "set_preedit_string") == ["你hao"]
+                        and events(nr, "zwp_text_input_v3", "preedit_string") == ["你hao"]
+                        and after_done(nr, "preedit_string"), "partial selection did not reach Notes")
+                continuation = ready_popup_frame(lf)
+                require(continuation and continuation["role_created"]["line"] == before["role_created"]["line"]
+                        and continuation["commit"]["line"] > before["commit"]["line"]
+                        and continuation["shm_buffer"]["size"] == [295, 31],
+                        "partial selection did not present the next candidate frame")
+                verified = ready_popup_frame(read(fcitx_log))
+                require(verified and verified["commit"]["line"] == continuation["commit"]["line"],
+                        "continuation frame changed across screenshot boundary")
+                # Independently inspected first candidate 好 in #162's partial
+                # output; use RGB just for that cell, away from hover/cursor.
+                roi = subprocess.run(["/usr/bin/convert", str(out / "after-click.png"),
+                                      "-crop", "44x31+32+180", "+repage", "-alpha", "off",
+                                      "-colorspace", "sRGB", "-depth", "8", "rgb:-"],
+                                     env=env, check=True, capture_output=True, timeout=4).stdout
+                require(len(roi) == 44 * 31 * 3
+                        and hashlib.sha256(roi).hexdigest() ==
+                        "d1d22f6a73006681ac16a4bb14e527d606ae0e6b77bcf9fcc0fee9fe16ed07a6",
+                        "continuation candidate pixels differ from reviewed target")
+                report["click"]["partial"] = {"preedit": "你hao", "frame": continuation}
+                save()
+                cmd("xdotool", "mousemove", "--sync", 49, 195)
+                require(cmd("xdotool", "getwindowfocus", "-f") == xid, "outer input focus changed")
+                cmd("xdotool", "click", "1")
+                wait(lambda: after_done(read(notes_log)[len(ln):], "commit_string"),
+                     "second pointer selection did not commit in Notes")
+                f2, n2 = read(fcitx_log), read(notes_log)
+                engine2 = events(f2[len(lf):], "zwp_input_method_v2", "commit_string")
+                app2 = events(n2[len(ln):], "zwp_text_input_v3", "commit_string")
+                buttons2, popup2 = pointer_receipt(f2, int(before["surface"]), len(lf.splitlines()))
+                notes2, _ = pointer_receipt(n2, None, len(ln.splitlines()))
+                require(engine2 == app2 == [EXPECTED] and not grabbed_presses(f2[led:]),
+                        "second click did not complete the exact phrase without keyboard input")
+                require([item["pressed"] for item in buttons2] == [True, False]
+                        and len(popup2) == 2 and not notes2, "second click did not stay inside popup")
+                report["click"]["completion"] = {"xy": [49, 195], "engine_commit": engine2,
+                                                   "notes_commit": app2, "engine_buttons": buttons2,
+                                                   "notes_buttons": notes2}
                 detached = wait(lambda: popup_protocol(read(fcitx_log))[1], "no popup detach after click", 3)
                 require(detached and detached["selection_key"] is None
-                        and detached["commit"]["line"] > before["commit"]["line"],
+                        and detached["commit"]["line"] > continuation["commit"]["line"],
                         "no same-generation null buffer after pointer selection")
                 report["candidate_evidence"]["detach"] = detached
                 cmd("fcitx5-remote", "-c", e=native)
                 key("ctrl+s")
-                wait(lambda: note.read_text() == "你", "Notes did not save exact clicked candidate")
-                require(events(read(notes_log)[nl:], "zwp_text_input_v3", "commit_string") == ["你"],
+                wait(lambda: note.read_text() == EXPECTED, "Notes did not save exact clicked candidate")
+                require(events(read(notes_log)[nl:], "zwp_text_input_v3", "commit_string") == [EXPECTED],
                         "late repeat after click")
-                report["commit"] = {"notes_and_engine_once": True, "saved": "你",
+                report["commit"] = {"notes_and_engine_once": True, "saved": EXPECTED,
                                     "image": capture("after-commit.png")}
                 report["phase"] = "complete"
                 save()
