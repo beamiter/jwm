@@ -655,6 +655,28 @@ fn pop_pending_event<T>(queue: &Mutex<VecDeque<T>>) -> Option<T> {
     queue.lock_safe().pop_front()
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NestedImeSlot {
+    AboveParent,
+    Legacy,
+}
+
+fn nested_ime_parent_slot(
+    mapped: bool,
+    on_output: bool,
+    terminal_exit: bool,
+    legacy: bool,
+) -> Option<NestedImeSlot> {
+    if !mapped || !on_output || terminal_exit {
+        return None;
+    }
+    Some(if legacy {
+        NestedImeSlot::Legacy
+    } else {
+        NestedImeSlot::AboveParent
+    })
+}
+
 pub struct WaylandWinitBackend {
     child_environment: crate::child_environment::ChildEnvironment,
     event_loop: SendWrapper<EventLoop<'static, JwmWaylandState>>,
@@ -969,6 +991,90 @@ impl WaylandWinitBackend {
             );
         }
 
+        let ime_anchors: Vec<_> = if locked_epoch.is_none() {
+            self.state
+                .im_popup_positions()
+                .into_iter()
+                .filter_map(|anchor| {
+                    let parent = anchor.parent_window;
+                    let legacy = self.state.layer_surfaces.contains_key(&parent)
+                        || self.state.x11_surfaces.contains_key(&parent);
+                    let bounds = self.state.nested_drawing_geometry(parent).map(|geo| {
+                        Rectangle::<i32, Logical>::new(
+                            (geo.x, geo.y).into(),
+                            (geo.w as i32, geo.h as i32).into(),
+                        )
+                    });
+                    let exit_visual = self
+                        .state
+                        .terminal_exit_visual
+                        .is_some_and(|(id, _)| id == parent);
+                    let slot = nested_ime_parent_slot(
+                        self.state.mapped_windows.contains(&parent),
+                        bounds.is_some_and(|rect| rect.overlaps(output_rect_global)),
+                        exit_visual,
+                        legacy,
+                    )?;
+                    Some((anchor, slot))
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let output = &self.output;
+        let render_ime =
+            |anchor: &crate::backend::wayland::state::ImPopupAnchor,
+             renderer: &mut GlesRenderer,
+             frame_roots: &mut Vec<WlSurface>,
+             visible_surfaces: &mut HashSet<wayland_server::Weak<WlSurface>>,
+             elements: &mut Vec<WinitRenderElement<GlesRenderer>>| {
+                let im_surface = anchor.surface.clone();
+                frame_roots.push(im_surface.clone());
+                with_surface_tree_downward(
+                    &im_surface,
+                    (),
+                    |_, _, _| TraversalAction::DoChildren(()),
+                    |child_surface, child_states, _| {
+                        let data = child_states
+                            .data_map
+                            .get::<smithay::backend::renderer::utils::RendererSurfaceStateUserData>(
+                        );
+                        let Some(data) = data else {
+                            return;
+                        };
+                        if data.lock_safe().view().is_some() {
+                            output.enter(child_surface);
+                            visible_surfaces.insert(child_surface.downgrade());
+                        }
+                    },
+                    |_, _, _| true,
+                );
+                // Flip the candidate box above the cursor on bottom overflow; clamp x.
+                let bbox = smithay::desktop::utils::bbox_from_surface_tree(
+                    &im_surface,
+                    Point::<i32, Logical>::from((0, 0)),
+                );
+                let pw = bbox.size.w.max(1);
+                let ph = bbox.size.h.max(1);
+                let bx = (anchor.x + bbox.loc.x)
+                    .min(anchor.area_right - pw)
+                    .max(anchor.area_left);
+                let below_top = anchor.cursor_bottom + bbox.loc.y;
+                let by = if below_top + ph <= anchor.area_bottom {
+                    below_top
+                } else {
+                    (anchor.cursor_top - ph).max(anchor.area_top)
+                };
+                let abs_x = bx - bbox.loc.x;
+                let abs_y = by - bbox.loc.y;
+                let location: Point<i32, Physical> = (abs_x - ox, abs_y - oy).into();
+                let tree = SurfaceTree::from_surface(&im_surface);
+                let im_elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
+                    AsRenderElements::<GlesRenderer>::render_elements(
+                        &tree, renderer, location, scale, 1.0,
+                    );
+                elements.extend(im_elements.into_iter().map(WinitRenderElement::Surface));
+            };
         let drawing_order = self.state.nested_drawing_order();
         for win in &drawing_order {
             // Layer surfaces are already composed in their dedicated passes;
@@ -1045,6 +1151,21 @@ impl WaylandWinitBackend {
                 continue;
             }
 
+            // DamageTracker consumes front-to-back elements. Keep IM popups
+            // above their own mapped client, below its xdg popups and higher
+            // surfaces; don't promote stale anchors from hidden windows.
+            for (anchor, _) in ime_anchors.iter().filter(|(anchor, slot)| {
+                *slot == NestedImeSlot::AboveParent && anchor.parent_window == *win
+            }) {
+                render_ime(
+                    anchor,
+                    self.winit_backend.renderer(),
+                    &mut frame_roots,
+                    &mut visible_surfaces,
+                    &mut elements,
+                );
+            }
+
             frame_roots.push(surface.clone());
 
             with_surface_tree_downward(
@@ -1103,58 +1224,27 @@ impl WaylandWinitBackend {
             }
         }
 
-        // IME popup surfaces (candidate windows) above normal windows.
-        for anchor in self.state.im_popup_positions() {
-            let im_surface = anchor.surface;
-            frame_roots.push(im_surface.clone());
-            with_surface_tree_downward(
-                &im_surface,
-                (),
-                |_, _, _| TraversalAction::DoChildren(()),
-                |child_surface, child_states, _| {
-                    let data = child_states
-                        .data_map
-                        .get::<smithay::backend::renderer::utils::RendererSurfaceStateUserData>(
-                    );
-                    let Some(data) = data else {
-                        return;
-                    };
-                    if data.lock_safe().view().is_some() {
-                        self.output.enter(child_surface);
-                        visible_surfaces.insert(child_surface.downgrade());
-                    }
-                },
-                |_, _, _| true,
+        // Keep known legacy layers/XWayland in their previous position, but
+        // require that their real parent surface rendered on this output.
+        // Native anchors which did not match a drawn parent never fall back.
+        for (anchor, _) in ime_anchors
+            .iter()
+            .filter(|(_, slot)| *slot == NestedImeSlot::Legacy)
+        {
+            if !self
+                .state
+                .surface_for_window(anchor.parent_window)
+                .is_some_and(|parent| visible_surfaces.contains(&parent.downgrade()))
+            {
+                continue;
+            }
+            render_ime(
+                anchor,
+                self.winit_backend.renderer(),
+                &mut frame_roots,
+                &mut visible_surfaces,
+                &mut elements,
             );
-            // Flip the candidate box above the cursor on bottom overflow; clamp x.
-            let bbox = smithay::desktop::utils::bbox_from_surface_tree(
-                &im_surface,
-                Point::<i32, Logical>::from((0, 0)),
-            );
-            let pw = bbox.size.w.max(1);
-            let ph = bbox.size.h.max(1);
-            let bx = (anchor.x + bbox.loc.x)
-                .min(anchor.area_right - pw)
-                .max(anchor.area_left);
-            let below_top = anchor.cursor_bottom + bbox.loc.y;
-            let by = if below_top + ph <= anchor.area_bottom {
-                below_top
-            } else {
-                (anchor.cursor_top - ph).max(anchor.area_top)
-            };
-            let abs_x = bx - bbox.loc.x;
-            let abs_y = by - bbox.loc.y;
-            let location: Point<i32, Physical> = (abs_x - ox, abs_y - oy).into();
-            let tree = SurfaceTree::from_surface(&im_surface);
-            let im_elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
-                AsRenderElements::<GlesRenderer>::render_elements(
-                    &tree,
-                    self.winit_backend.renderer(),
-                    location,
-                    scale,
-                    1.0,
-                );
-            elements.extend(im_elements.into_iter().map(WinitRenderElement::Surface));
         }
 
         for gone in self.surfaces_on_output.difference(&visible_surfaces) {
@@ -2557,6 +2647,24 @@ impl Backend for WaylandWinitBackend {
 
 #[cfg(test)]
 mod nested_input_tests {
+    #[test]
+    fn nested_ime_paints_only_live_on_output_parents_in_their_policy_slot() {
+        use super::{NestedImeSlot, nested_ime_parent_slot};
+        assert_eq!(
+            nested_ime_parent_slot(true, true, false, false),
+            Some(NestedImeSlot::AboveParent)
+        );
+        assert_eq!(
+            nested_ime_parent_slot(true, true, false, true),
+            Some(NestedImeSlot::Legacy)
+        );
+        for legacy in [false, true] {
+            assert_eq!(nested_ime_parent_slot(false, true, false, legacy), None);
+            assert_eq!(nested_ime_parent_slot(true, false, false, legacy), None);
+            assert_eq!(nested_ime_parent_slot(true, true, true, legacy), None);
+        }
+    }
+
     use super::*;
 
     // Control-flow contracts are not live Winit timing measurements.
