@@ -196,6 +196,8 @@ fn actual_wayland_keyboard_viewer_tcp_requires_presented_and_targets_only_origin
                 &host_options(),
                 &host_shutdown,
                 &Mutex::new(Some(host::GrantedCapture::Wayland(Box::new(capture)))),
+                false, // No hardware encoder in this JPEG/source-permission fixture.
+                false,
             )
         })()
         .map_err(|e| e.to_string());

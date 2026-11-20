@@ -347,6 +347,8 @@ fn run(termination: Termination) {
                 &host_options(),
                 &host_shutdown,
                 &Mutex::new(Some(host::GrantedCapture::Wayland(Box::new(capture)))),
+                false, // No hardware encoder in this JPEG/source-permission fixture.
+                false,
             )
         })()
         .map_err(|e| e.to_string());

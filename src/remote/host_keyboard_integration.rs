@@ -503,6 +503,8 @@ fn actual_tcp_keyboard_host_requires_drawn_scope_and_cleans_only_original_recipi
                         &options(case),
                         &shutdown,
                         &Mutex::new(Some(GrantedCapture::Wayland(Box::new(capture)))),
+                        false, // No hardware encoder in this JPEG/source-permission fixture.
+                        false,
                     )
                 }));
             let result = match result {
