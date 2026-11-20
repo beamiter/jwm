@@ -71,7 +71,7 @@ def activate(node):
     return len(indexes) == 1 and api.do_action(indexes[0])
 
 
-def evaluate(atspi, gtk_pid, notes_pid, receipt, window, seconds):
+def evaluate(atspi, gtk_pid, notes_pid, receipt, window, seconds, enable_reader=None):
     def application(pid):
         desktop = atspi.get_desktop(0)
         if desktop is None:
@@ -93,6 +93,8 @@ def evaluate(atspi, gtk_pid, notes_pid, receipt, window, seconds):
         raise ProbeError("gtk-positive-control-not-actionable")
     if not wait(lambda: receipt.exists() and receipt.read_text() == "activated\n", seconds):
         raise ProbeError("gtk-positive-control-action-not-observed")
+    if enable_reader is not None:
+        enable_reader()
     if not window(INITIAL):
         raise ProbeError("initial-notes-window-not-ready")
 
@@ -151,7 +153,7 @@ def xdo(*args, env, timeout=3):
                           timeout=timeout, env=env)
 
 
-def run_isolated(notes_path, atspi):
+def run_isolated(notes_path, atspi, set_reader):
     env = dict(os.environ)
     launched = []
     with tempfile.TemporaryDirectory(prefix="jwm-notes-atspi-") as t:
@@ -174,6 +176,9 @@ def run_isolated(notes_path, atspi):
                      "AT_SPI_BUS_ADDRESS", "GTK_MODULES", "GTK_A11Y"):
             env.pop(name, None)
         receipt = temp / "gtk-action"
+        # AccessKit listens for the actual ScreenReaderEnabled property.
+        # Exercise both transitions only in this owned, disposable bus.
+        set_reader(False)
         try:
             control = subprocess.Popen([sys.executable, __file__, "--gtk", str(receipt)], env=env)
             launched.append(control)
@@ -207,7 +212,8 @@ def run_isolated(notes_path, atspi):
                 focus = xdo("getwindowfocus", "-f", env=env)
                 return focus.returncode == 0 and focus.stdout.strip() == wid
 
-            return evaluate(atspi, control.pid, notes.pid, receipt, window, 7)
+            return evaluate(atspi, control.pid, notes.pid, receipt, window, 7,
+                            enable_reader=lambda: set_reader(True))
         finally:
             for child in reversed(launched):
                 if child.poll() is None:
@@ -231,19 +237,34 @@ def main():
         args.error("--notes and --expect are required")
     import gi
     gi.require_version("Atspi", "2.0")
-    from gi.repository import Atspi, GLib
+    from gi.repository import Atspi, Gio, GLib
+
+    def set_reader(enabled):
+        conn = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+        address = ("org.a11y.Bus", "/org/a11y/bus", "org.freedesktop.DBus.Properties")
+        status = "org.a11y.Status"
+        prop = "ScreenReaderEnabled"
+        conn.call_sync(*address, "Set",
+                       GLib.Variant("(ssv)", (status, prop, GLib.Variant("b", enabled))),
+                       None, Gio.DBusCallFlags.NONE, 3000, None)
+        value = conn.call_sync(*address, "Get", GLib.Variant("(ss)", (status, prop)),
+                               GLib.VariantType("(v)"), Gio.DBusCallFlags.NONE, 3000, None)
+        if value.get_child_value(0).get_variant().get_boolean() != enabled:
+            raise ProbeError("screen-reader-state-not-confirmed")
+
     try:
         if Atspi.init() != 0:
             raise ProbeError("atspi-init-failed")
         Atspi.set_timeout(1500, 3000)
-        outcome = run_isolated(opt.notes.resolve(), Atspi)
+        outcome = run_isolated(opt.notes.resolve(), Atspi, set_reader)
     except (ProbeError, GLib.Error, OSError, AttributeError, TypeError,
             subprocess.SubprocessError) as exc:
         outcome = str(exc) if isinstance(exc, ProbeError) else "probe-transport-or-fixture-error"
         print(json.dumps({"outcome": outcome}))
         return 2
     print(json.dumps({"backend": "x11", "outcome": outcome,
-                      "gtk_positive_control": "action-observed", "speech": "not-tested"}))
+                      "gtk_positive_control": "action-observed", "screen_reader_enabled": True,
+                      "speech": "not-tested"}))
     expected = ("notes-no-atspi-application-for-pid" if opt.expect == "baseline"
                 else "notes-named-controls-action-and-focus-observed")
     return 0 if outcome == expected else 1
