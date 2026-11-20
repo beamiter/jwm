@@ -1,0 +1,80 @@
+name: Isolated Portal broker acceptance
+
+'on':
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [dot/portal-broker-baseline-0631]
+    paths:
+      - '.github/workflows/portal-broker-acceptance.yml'
+      - 'scripts/portal-broker-acceptance/**'
+
+permissions:
+  contents: read
+
+jobs:
+  broker:
+    if: >-
+      github.repository == 'beamiter/jwm' &&
+      github.event.pull_request.draft &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.head_ref == 'dot/portal-broker-acceptance' &&
+      github.event.pull_request.base.sha == '0631f2639676e6dc1cc4d1c81cdad8d0a2804e17'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 14
+    env:
+      FIXTURE_SHA: ${{ github.event.pull_request.head.sha }}
+      BASE_SHA: '0631f2639676e6dc1cc4d1c81cdad8d0a2804e17'
+    steps:
+      - name: Start evidence
+        shell: bash
+        run: |
+          mkdir -p artifacts/portal-broker
+          printf 'fixture=%s\nbase=%s\n' "$FIXTURE_SHA" "$BASE_SHA" > artifacts/portal-broker/identity.txt
+          cat /etc/os-release > artifacts/portal-broker/os-release.txt
+      - name: Check out exact fixture
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 2
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+          path: source
+      - name: Install distro broker and dependencies
+        timeout-minutes: 8
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git -C source rev-parse HEAD)" = "$FIXTURE_SHA"
+          test "$(git -C source rev-parse HEAD^)" = "$BASE_SHA"
+          unset JWM_CI_APT_SOURCES JWM_CI_PREFETCH_CJK
+          bash source/scripts/ci-install-deps.sh dbus-daemon python3-gi xdg-desktop-portal xdg-desktop-portal-gtk \
+            2>&1 | tee artifacts/portal-broker/packages.log
+          dpkg-query -W dbus-daemon python3-gi xdg-desktop-portal xdg-desktop-portal-gtk \
+            > artifacts/portal-broker/package-versions.txt
+          dpkg-query -L xdg-desktop-portal xdg-desktop-portal-gtk \
+            > artifacts/portal-broker/package-files.txt
+      - name: Check probe contracts
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          set -euo pipefail
+          env -i PATH=/usr/bin:/bin LANG=C.UTF-8 PYTHONDONTWRITEBYTECODE=1 \
+            /usr/bin/python3 -I -B source/scripts/portal-broker-acceptance/test_portal_probe.py -v \
+            2>&1 | tee artifacts/portal-broker/contracts.log
+      - name: Activate actual broker on owned buses
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(id -u)" -ne 0
+          env -i PATH=/usr/bin:/bin LANG=C.UTF-8 PYTHONDONTWRITEBYTECODE=1 \
+            timeout --kill-after=3 120 /usr/bin/python3 -I -B \
+            source/scripts/portal-broker-acceptance/portal_probe.py \
+            --repo "$PWD/source" --output "$PWD/artifacts/portal-broker/probe" \
+            2>&1 | tee artifacts/portal-broker/probe.log
+      - name: Upload acceptance evidence even on failure
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: portal-broker-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/portal-broker/
+          if-no-files-found: error
