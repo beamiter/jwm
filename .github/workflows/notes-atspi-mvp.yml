@@ -30,12 +30,7 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           persist-credentials: false
-      - name: Check out pinned pre-AccessKit baseline
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: 0631f2639676e6dc1cc4d1c81cdad8d0a2804e17
-          path: _notes-atspi-baseline
-          persist-credentials: false
+          fetch-depth: 0
       - name: Test probe control logic
         run: /usr/bin/python3 -m unittest discover -s scripts/notes-atspi -p 'test_*.py' -v
       - name: Install Ubuntu build and private desktop dependencies
@@ -49,10 +44,15 @@ jobs:
           toolchain: '1.92.0'
       - name: Build pinned baseline, feature-off and feature-on binaries with locks
         run: |
-          git -C _notes-atspi-baseline rev-parse HEAD
+          set -euo pipefail
+          baseline=0631f2639676e6dc1cc4d1c81cdad8d0a2804e17
+          archive_tree="$RUNNER_TEMP/notes-atspi-baseline-src"
+          mkdir -p "$archive_tree"
+          git rev-parse "$baseline"
           git rev-parse HEAD
+          git archive "$baseline" | tar -xf - -C "$archive_tree"
           target="$RUNNER_TEMP/notes-atspi-target"
-          cargo build --locked --manifest-path _notes-atspi-baseline/crates/jwm_apps/Cargo.toml --target-dir "$target" --bin jwm-notes
+          cargo build --locked --manifest-path "$archive_tree/crates/jwm_apps/Cargo.toml" --target-dir "$target" --bin jwm-notes
           install -m 700 "$target/debug/jwm-notes" "$RUNNER_TEMP/notes-baseline"
           cargo build --locked --manifest-path crates/jwm_apps/Cargo.toml --target-dir "$target" --bin jwm-notes --no-default-features
           install -m 700 "$target/debug/jwm-notes" "$RUNNER_TEMP/notes-feature-off"
