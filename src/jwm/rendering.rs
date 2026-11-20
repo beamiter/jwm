@@ -430,6 +430,7 @@ impl Jwm {
         }
         if !backend.has_compositor() {
             if self.sync_terminal_exit_visual(backend) == Some(key) {
+                crate::backend::terminal_exit_trace::mark("input_released_visual_ready");
                 match backend.present_terminal_exit_visual() {
                     Ok(()) => log::info!("nested terminal dismissal first frame submitted"),
                     Err(error) => {

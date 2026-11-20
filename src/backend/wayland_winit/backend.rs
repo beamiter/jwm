@@ -1209,13 +1209,16 @@ impl WaylandWinitBackend {
             );
         }
 
+        crate::backend::terminal_exit_trace::mark_submit("submit_begin");
         if let Err(err) = self.winit_backend.submit(submit_damage.as_deref()) {
+            crate::backend::terminal_exit_trace::mark_submit("submit_return_error");
             self.host_surface_presented = false;
             log::warn!("[wayland-winit] submit failed: {err:?}");
             self.needs_render = true;
             return Ok(());
         }
 
+        crate::backend::terminal_exit_trace::mark_submit("submit_return_ok");
         self.host_surface_presented = true;
         // The host presents what was just submitted: a locked frame pays the
         // pending session lock its `locked` confirmation.
@@ -2385,7 +2388,16 @@ impl Backend for WaylandWinitBackend {
 
     fn present_terminal_exit_visual(&mut self) -> Result<(), BackendError> {
         if self.state.terminal_exit_visual.is_some() {
-            self.render_if_needed()?;
+            crate::backend::terminal_exit_trace::mark("render_begin");
+            crate::backend::terminal_exit_trace::render_scope(true);
+            let result = self.render_if_needed();
+            crate::backend::terminal_exit_trace::render_scope(false);
+            crate::backend::terminal_exit_trace::mark(if result.is_ok() {
+                "render_return_ok"
+            } else {
+                "render_return_error"
+            });
+            result?;
         }
         Ok(())
     }
@@ -2491,6 +2503,7 @@ impl Backend for WaylandWinitBackend {
     }
 
     fn run(&mut self, handler: &mut dyn EventHandler) -> Result<(), BackendError> {
+        crate::backend::terminal_exit_trace::init();
         // The winit host connection is registered as a calloop source, and its fd
         // can stay perpetually readable with host protocol traffic we don't forward
         // (frame/sync events on queues winit drains but surfaces nothing for). That
