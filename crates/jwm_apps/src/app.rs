@@ -50,6 +50,7 @@ enum Action {
     Accept,
     Parent,
     Entry(PathBuf),
+    PickerPath,
     Discard,
     SaveClose,
     ConfirmTrash,
@@ -671,11 +672,13 @@ impl App {
                     16.,
                     ui::text_color(),
                 );
-                ui::rounded(
-                    cr,
-                    Rect::new(r.x + 20., r.y + 56., r.w - 40., 38.),
-                    ui::canvas(),
-                );
+                let path_rect = Rect::new(r.x + 20., r.y + 56., r.w - 40., 38.);
+                ui::rounded(cr, path_rect, ui::canvas());
+                self.hits.push(Hit {
+                    rect: path_rect,
+                    action: Action::PickerPath,
+                    label: String::new(),
+                });
                 picker.path.draw(
                     cr,
                     Rect::new(r.x + 30., r.y + 64., r.w - 60., 24.),
@@ -917,6 +920,7 @@ impl App {
             Action::SaveAs(close) => self.picker(PickerMode::Save(close)),
             Action::Cancel => self.dialog = None,
             Action::Accept => self.accept_picker(),
+            Action::PickerPath => (),
             Action::Discard => self.effects.push(Effect::Close),
             Action::SaveClose => {
                 if let Document::Notes(n) = &mut self.document {
@@ -1082,17 +1086,19 @@ impl App {
             .map(|h| h.action.clone())
         {
             let edit = matches!(action, Action::Edit | Action::Search | Action::FindField);
+            let picker_path = action == Action::PickerPath;
             self.action(action);
-            if edit {
+            if picker_path {
+                if let Some(Dialog::Picker(p)) = &mut self.dialog {
+                    p.path.click(x, y, mods.shift_key());
+                }
+            } else if edit {
                 self.editor_click(x, y, mods.shift_key());
                 self.dragging = true;
             }
             return false;
         }
         if self.dialog.is_some() {
-            if let Some(Dialog::Picker(p)) = &mut self.dialog {
-                p.path.click(x, y, mods.shift_key());
-            }
             return false;
         }
         if self.body().contains(x, y) && matches!(self.document, Document::Image(_)) {
@@ -1454,6 +1460,61 @@ impl Picker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn picker_path_click_restores_editing_after_button_focus() {
+        let source_path =
+            std::env::temp_dir().join(format!("jwm-picker-focus-{}.txt", std::process::id()));
+        std::fs::write(&source_path, "unchanged source").unwrap();
+        for mode in [
+            PickerMode::Notes,
+            PickerMode::Images,
+            PickerMode::Save(false),
+        ] {
+            let mut app = App::new(true, vec![source_path.clone()]).unwrap();
+            app.picker(mode);
+            if let Some(Dialog::Picker(p)) = &mut app.dialog {
+                p.path = Editor::new("/tmp/ABCDE".into());
+                p.path.cursor = p.path.text.len();
+                p.path.anchor = p.path.cursor;
+            }
+            let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 960, 680).unwrap();
+            let cr = cairo::Context::new(&surface).unwrap();
+            app.draw(&cr, 960., 680., false);
+            // The state reached by Tab from the path field onto Cancel.
+            app.dialog_focus = Some(0);
+            assert_eq!(app.ime_target(), 0);
+            app.pointer = (190., 175.); // start of the drawn text layout
+            assert!(!app.press(ModifiersState::SHIFT));
+            let editor = app.active_editor().unwrap();
+            assert_eq!(editor.anchor, "/tmp/ABCDE".len());
+            assert!(editor.cursor < editor.anchor);
+            app.pointer = (200., 175.);
+            assert!(!app.press(ModifiersState::empty()));
+            let editor = app.active_editor().unwrap();
+            assert_eq!(editor.anchor, editor.cursor);
+            assert_eq!(app.dialog_focus, None);
+            assert_eq!(app.ime_target(), 3);
+            app.active_editor().unwrap().select_all();
+            app.ime("路径".into(), false);
+            assert_eq!(app.active_editor().unwrap().preedit, "路径");
+            app.ime("/tmp/路径.txt".into(), true);
+            assert_eq!(app.active_editor().unwrap().text, "/tmp/路径.txt");
+            assert!(app.effects.is_empty());
+            if let Document::Notes(n) = &app.document {
+                assert_eq!(n.editor.text, "unchanged source");
+                assert_eq!(n.editor.revision, 0);
+                assert!(!n.dirty);
+            }
+            // Clicking empty modal space must not steal a button's focus.
+            app.dialog_focus = Some(1);
+            app.pointer = (180., 120.);
+            app.press(ModifiersState::empty());
+            assert_eq!(app.dialog_focus, Some(1));
+            assert_eq!(app.ime_target(), 0);
+        }
+        std::fs::remove_file(source_path).unwrap();
+    }
 
     #[test]
     fn code_view_status_preserves_external_file_bytes() {
