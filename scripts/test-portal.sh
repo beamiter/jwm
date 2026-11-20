@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Smoke-test for jwm-portal. Run after `scripts/install-portal.sh` AND with a
 # jwm Wayland session active (XDG_CURRENT_DESKTOP=jwm). Exercises the parts we
-# can poke without a full SDK client.
+# can poke without a full SDK client. It does not exercise frontend routing
+# through org.freedesktop.portal.Desktop or actual capture.
 #
 # Exit codes:
 #   0 — all checks passed
@@ -22,6 +23,12 @@ if [[ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]]; then
   exit 2
 fi
 
+# Resolve user paths the same way as install-portal.sh.
+DATA_HOME=${XDG_DATA_HOME:-$HOME/.local/share}
+CONFIG_HOME=${XDG_CONFIG_HOME:-$HOME/.config}
+[[ $DATA_HOME == /* ]] || DATA_HOME="$HOME/.local/share"
+[[ $CONFIG_HOME == /* ]] || CONFIG_HOME="$HOME/.config"
+
 BUS=org.freedesktop.impl.portal.desktop.jwm
 PATH_OBJ=/org/freedesktop/portal/desktop
 IFACE=org.freedesktop.impl.portal.ScreenCast
@@ -32,7 +39,7 @@ if gdbus call --session --dest "$BUS" --object-path "$PATH_OBJ" \
   ok "$BUS is responsive"
 else
   bad "$BUS did not answer Ping — is jwm-portal installed and the .service file present?"
-  echo "    expected: ~/.local/share/dbus-1/services/${BUS}.service" >&2
+  echo "    expected: $DATA_HOME/dbus-1/services/${BUS}.service" >&2
 fi
 
 step "2. Introspect the ScreenCast backend interface"
@@ -56,17 +63,16 @@ else
   bad "introspection failed: $introspect"
 fi
 
-step "3. Confirm xdg-desktop-portal routes ScreenCast to us"
-# Frontend interface lives on org.freedesktop.portal.Desktop. We poke the
-# session-bus name and check that the user's portal config points at jwm.
-conf=~/.config/xdg-desktop-portal/jwm-portals.conf
+step "3. Verify installed ScreenCast config and backend metadata (files only)"
+# The broker's activation environment and backend selection are not checked.
+conf="$CONFIG_HOME/xdg-desktop-portal/jwm-portals.conf"
 if [[ -f "$conf" ]] && grep -q '^org.freedesktop.impl.portal.ScreenCast=jwm' "$conf"; then
-  ok "$conf maps ScreenCast → jwm"
+  ok "$conf requests JWM for ScreenCast"
 else
-  bad "$conf missing or ScreenCast not routed to jwm"
+  bad "$conf missing or does not request JWM for ScreenCast"
 fi
 
-portal_file=~/.local/share/xdg-desktop-portal/portals/jwm.portal
+portal_file="$DATA_HOME/xdg-desktop-portal/portals/jwm.portal"
 if [[ -f "$portal_file" ]] && grep -q "DBusName=$BUS" "$portal_file"; then
   ok "$portal_file advertises $BUS"
 else
@@ -130,6 +136,7 @@ fi
 
 echo
 echo "Results: $PASS pass, $FAIL fail"
+echo "NOT tested: frontend broker routing, source selection, or capture."
 if (( FAIL > 0 )); then
   echo
   echo "Manual follow-up (requires real client + jwm session):"
