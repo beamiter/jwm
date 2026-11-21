@@ -50,14 +50,37 @@ Run on `wayland-udev` unless a row says otherwise. Mark Pass / Fail / Skip.
 | 16 | Touchpad two-finger scroll: vertical, horizontal, diagonal, lift and restart | | |
 | 17 | Pointer stays visible on unequal-height and offset outputs; floating drops adopt the largest overlap | | |
 | 18 | Held mouse button across screenshot, launcher, lock and VT changes releases cleanly | | |
+| 19 | Physical three-finger tag switching, minimize, and exact-window restore preview | | |
 
-For the touchpad row, use a native Wayland client with scrollable content in
-both directions. Verify that lifting the fingers ends each active scroll axis
+For the two-finger touchpad row, use a native Wayland client with scrollable
+content in both directions. Verify that lifting the fingers ends each active scroll axis
 and a new gesture works immediately; normal application kinetic scrolling may
 continue after lift. If available, also check a pointing stick's continuous
 scroll and a mouse wheel, including high-resolution partial wheel steps.
 Nested-backend smoke checks should include a client bound to `wl_pointer`
 version 4 to verify ordinary wheel scrolling without newer axis events.
+
+For the three-finger row, use the actual touchpad and a disposable test window.
+Record the effective directions and `runtime.operational` from
+`jwm-tool msg get_gesture`; note any custom bindings before judging a direction.
+With the default bindings and animated workspace transitions enabled (not
+instant or disabled):
+
+1. Swipe left and right. Check that the tag transition previews without
+   changing the active tag until release. Try a short swipe or reverse before
+   releasing and check that a canceled gesture leaves the tag unchanged.
+2. Swipe up to minimize the focused test window. Swipe down to open restore
+   preview. Check that the test window stays minimized when you press Escape.
+   Open the preview again, confirm the same window and verify that it is
+   restored and focused, rather than a different window.
+3. Immediately try two-finger scroll in the client. With multiple displays,
+   verify that the tag on the display not involved in the swipe is unchanged.
+
+Keep the before/cancel/confirm window state and any preview capture with the
+acceptance notes. A keyboard-driven `basic-app` pass or a synthetic X11 gesture
+does not satisfy this physical row. See
+[touchpad gesture validation](touchpad-gestures.md#validation) for replay
+coverage and device-specific sensitivity checks.
 
 For the multi-output pointer row, move into the gap below a shorter display
 with both a mouse and an absolute device when available. Check output edges,
