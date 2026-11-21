@@ -107,8 +107,11 @@ jobs:
           mkdir -m 700 build-home build-cargo build-config build-runtime
           cargo_test() {
             local arm="$1"
-            (cd "source-$arm" && env -i               HOME="$GITHUB_WORKSPACE/build-home" PATH="$toolbin:/usr/bin:/bin"               CARGO_HOME="$GITHUB_WORKSPACE/build-cargo" CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target"               XDG_CONFIG_HOME="$GITHUB_WORKSPACE/build-config" XDG_RUNTIME_DIR="$GITHUB_WORKSPACE/build-runtime"               RUSTC="$toolbin/rustc" CARGO_BUILD_JOBS=2 CARGO_PROFILE_TEST_DEBUG=0               GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null LANG=C.UTF-8               "$toolbin/cargo" test --locked --no-default-features --features backend-x11rb --lib "$CASE" -- --exact --nocapture               ) 2>&1 | tee "evidence/$arm-test.log"
+            (cd "source-$arm" && env -i               HOME="$GITHUB_WORKSPACE/build-home" PATH="$toolbin:/usr/bin:/bin"               CARGO_HOME="$GITHUB_WORKSPACE/build-cargo" CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target-$arm"               XDG_CONFIG_HOME="$GITHUB_WORKSPACE/build-config" XDG_RUNTIME_DIR="$GITHUB_WORKSPACE/build-runtime"               RUSTC="$toolbin/rustc" CARGO_BUILD_JOBS=2 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0               GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null LANG=C.UTF-8               "$toolbin/cargo" test --locked --no-default-features --features backend-x11rb --lib "$CASE" -- --exact --nocapture               ) 2>&1 | tee "evidence/$arm-test.log"
           }
+          # A shared target can reuse a binary for the other checkout: Cargo's
+          # fingerprint includes target-relative paths and mtimes, not an A/B ID.
+          test ! -e target-a && test ! -e target-b
           cargo_test b
           grep -F "test $CASE ... ok" evidence/b-test.log
           control=0
