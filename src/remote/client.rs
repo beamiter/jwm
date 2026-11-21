@@ -390,10 +390,13 @@ pub fn classify_failure(error: &(dyn std::error::Error + 'static)) -> FailureDia
     for _ in 0..32 {
         let Some(error) = current else { break };
         #[cfg(feature = "remote-wayland")]
-        if error.is::<super::wayland_viewer::PresentationDiscarded>()
-            && result.category == "unknown"
-        {
-            result.category = "wayland_presentation_discarded";
+        if result.category == "unknown" {
+            use super::wayland_viewer::{PresentationDiscarded, PresentationTimeout};
+            if error.is::<PresentationDiscarded>() {
+                result.category = "wayland_presentation_discarded";
+            } else if error.is::<PresentationTimeout>() {
+                result.category = "wayland_presentation_timeout";
+            }
         }
         if let Some(failure) = error.downcast_ref::<ClientFailure>() {
             result.stage.get_or_insert(match failure.stage {
@@ -12245,6 +12248,21 @@ mod diagnostic_tests {
             classify_failure(&ProtocolError::AuthenticationFailed).category,
             "authentication_failed"
         );
+    }
+
+    #[cfg(feature = "remote-wayland")]
+    #[test]
+    fn wayland_presentation_timeouts_have_a_static_terminal_category() {
+        use super::super::wayland_viewer::PresentationTimeout;
+
+        for timeout in [PresentationTimeout::Current, PresentationTimeout::Obsolete] {
+            let error = session(Box::new(timeout));
+            let summary = classify_failure(error.as_ref());
+            assert_eq!(summary.stage, Some("session"));
+            assert_eq!(summary.category, "wayland_presentation_timeout");
+            assert_eq!(summary.cleanup, "unknown");
+            assert!(!summary.reconnect_certified);
+        }
     }
 
     #[test]

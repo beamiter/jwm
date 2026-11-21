@@ -277,9 +277,27 @@ impl std::fmt::Display for PresentationDiscarded {
 
 impl std::error::Error for PresentationDiscarded {}
 
+#[derive(Clone, Copy, Debug)]
+pub(super) enum PresentationTimeout {
+    Current,
+    Obsolete,
+}
+
+impl std::fmt::Display for PresentationTimeout {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Current => "Wayland presentation deadline expired",
+            Self::Obsolete => "obsolete Wayland presentation deadline expired",
+        })
+    }
+}
+
+impl std::error::Error for PresentationTimeout {}
+
 enum Failure {
     Message(&'static str),
     Discarded,
+    Timeout(PresentationTimeout),
 }
 
 impl From<&'static str> for Failure {
@@ -519,6 +537,7 @@ impl State {
             return Err(match failure {
                 Failure::Message(message) => (*message).into(),
                 Failure::Discarded => PresentationDiscarded.into(),
+                Failure::Timeout(timeout) => (*timeout).into(),
             });
         }
         if let Some(retirement) = &self.retirement {
@@ -537,14 +556,14 @@ impl State {
             .as_ref()
             .is_some_and(|p| p.started.elapsed() >= TIMEOUT)
         {
-            return Err("Wayland presentation deadline expired".into());
+            return Err(PresentationTimeout::Current.into());
         }
         if self
             .obsolete_feedback
             .iter()
             .any(|feedback| feedback.started.elapsed() >= TIMEOUT)
         {
-            return Err("obsolete Wayland presentation deadline expired".into());
+            return Err(PresentationTimeout::Obsolete.into());
         }
         if self
             .source_change
@@ -651,7 +670,7 @@ impl State {
         {
             let feedback = self.obsolete_feedback.swap_remove(index);
             if feedback.started.elapsed() >= TIMEOUT {
-                return Err("obsolete Wayland presentation deadline expired".into());
+                return Err(Failure::Timeout(PresentationTimeout::Obsolete));
             }
             return Ok(());
         }
@@ -665,7 +684,7 @@ impl State {
             .filter(|p| p.token == token && !p.presented)
             .ok_or("stale or duplicate Wayland presentation feedback")?;
         if pending.started.elapsed() >= TIMEOUT {
-            return Err("Wayland presentation deadline expired".into());
+            return Err(Failure::Timeout(PresentationTimeout::Current));
         }
         if obsolete {
             pending.presented = true;
