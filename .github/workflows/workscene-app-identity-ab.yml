@@ -19,10 +19,10 @@ env:
   MASTER_TREE: 03736f33b0a69083c5afcd63c5fc6119b787e7c1
   # This control has the same scene wiring as the candidate, but lacks
   # the class/desktop-ID matcher. Stock master cannot show a scene at all.
-  A: 92fb09fd7802cc2d1250efdae5c790d9713ccc46
-  A_TREE: 88aabbe6b70cb8b247fc89d2c3bec5d47d6de420
-  B: f8050ca42421132793d2f3f4e4eb3424198bbb1b
-  B_TREE: afcf35515bca92f440a5fed1b0bc6c1027f4e044
+  A: b83d579e99fb9c6122052b03d3ed9753ccab424c
+  A_TREE: f12afd13b988b08b4955738ab3ab1646a244f40e
+  B: ecd832ee7c17e0dff985efd17f6401ca8546e7d5
+  B_TREE: a6429d24ded9aa8c031e75cf9cbe6c7f5a5276eb
 
 jobs:
   evidence:
@@ -50,14 +50,14 @@ jobs:
         with:
           repository: beamiter/jwm
           ref: ${{ env.B }}
-          fetch-depth: 3
+          fetch-depth: 4
           path: source-b
           persist-credentials: false
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           repository: beamiter/jwm
           ref: ${{ env.A }}
-          fetch-depth: 3
+          fetch-depth: 4
           path: source-a
           persist-credentials: false
       - name: Verify exact pins and validation-only scope
@@ -76,8 +76,8 @@ jobs:
           test "$(git -C source-b rev-parse HEAD)" = "$B"
           test "$(git -C source-b rev-parse 'HEAD^{tree}')" = "$B_TREE"
           test "$(git -C fixture rev-parse "$MASTER^{tree}")" = "$MASTER_TREE"
-          test "$(git -C source-a rev-parse 'HEAD^1')" = "$MASTER"
-          test "$(git -C source-b rev-parse 'HEAD~2')" = "$MASTER"
+          test "$(git -C source-a rev-parse 'HEAD~2')" = "$MASTER"
+          test "$(git -C source-b rev-parse 'HEAD~3')" = "$MASTER"
           # Cross-arm comparison: only the identity parser and matching
           # should differ after giving the control the same launcher path.
           git -C source-b fetch --no-tags --depth=1 ../source-a "$A"
