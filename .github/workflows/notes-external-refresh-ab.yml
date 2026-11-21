@@ -1,0 +1,141 @@
+name: Native Notes external-edit refresh A/B
+on:
+  pull_request:
+    branches: ['dot/notes-external-refresh-ab-base']
+    types: [opened, synchronize, reopened, converted_to_draft]
+    paths:
+      - '.github/workflows/notes-external-refresh-ab.yml'
+      - 'scripts/x11-notes-external-refresh.py'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: notes-external-refresh-ab-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  A: 38f13b9c4c3fc03ae6574a799738da64477b1323
+  A_TREE: 665eef50df78003b6b66990eda0ef4dac30008b0
+  B: 96233dcbcbfa1738cef5d71a2cb2f0da41d51a36
+  B_TREE: f6b8afe6f5e1c067b3c893b7473bcc40350d46f9
+
+jobs:
+  evidence:
+    if: >-
+      github.repository == 'beamiter/jwm' &&
+      github.event.pull_request.draft &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.base.ref == 'dot/notes-external-refresh-ab-base' &&
+      github.event.pull_request.head.ref == 'dot/notes-external-refresh-ab-validation'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 70
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Initialize retained evidence
+        run: mkdir -m 700 evidence
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          path: fixture
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ env.B }}
+          fetch-depth: 2
+          path: source-b
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ env.A }}
+          fetch-depth: 1
+          path: source-a
+          persist-credentials: false
+      - name: Verify source pins and validation-only scope
+        env:
+          EVENT_BASE: ${{ github.event.pull_request.base.sha }}
+          EVENT_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          test "$EVENT_BASE" = "$A"
+          test "$(git -C fixture rev-parse HEAD)" = "$EVENT_HEAD"
+          git -C fixture merge-base --is-ancestor "$A" HEAD
+          git -C fixture diff --exit-code "$A" HEAD -- . ':!.github/workflows/notes-external-refresh-ab.yml' ':!scripts/x11-notes-external-refresh.py'
+          test "$(git -C source-b rev-parse 'HEAD^')" = "$A"
+          for arm in a b; do
+            git -C "source-$arm" rev-parse HEAD 'HEAD^{tree}' > "evidence/source-$arm.txt"
+            test -z "$(git -C "source-$arm" status --porcelain --untracked-files=all)"
+          done
+          diff -u <(printf '%s\n' "$A" "$A_TREE") evidence/source-a.txt
+          diff -u <(printf '%s\n' "$B" "$B_TREE") evidence/source-b.txt
+          sha256sum fixture/scripts/x11-notes-external-refresh.py > evidence/fixture.sha256
+          /usr/bin/python3 -I -m py_compile fixture/scripts/x11-notes-external-refresh.py
+      - name: Install signed X11 and Notes build dependencies
+        timeout-minutes: 12
+        env:
+          JWM_CI_PREFETCH_CJK: "1"
+        run: |
+          set -euo pipefail
+          unset JWM_CI_APT_SOURCES
+          bash source-b/scripts/ci-install-deps.sh build-essential pkg-config libglib2.0-bin libglib2.0-dev \
+            libcairo2-dev libpango1.0-dev libdbus-1-dev libegl1-mesa-dev libgl1-mesa-dev \
+            libwayland-dev libx11-dev libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev xvfb \
+            xauth xdotool x11-utils imagemagick tesseract-ocr tesseract-ocr-eng dbus-x11 fonts-noto-cjk 2>&1 | tee evidence/dependencies.log
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        timeout-minutes: 6
+        with:
+          toolchain: stable
+      - name: Compile independent locked optimized Notes binaries
+        timeout-minutes: 43
+        run: |
+          set -euo pipefail
+          toolbin="$(dirname "$(rustup which cargo)")"
+          mkdir -m 700 build-home build-cargo build-config
+          test ! -e target-a && test ! -e target-b
+          for arm in a b; do
+            (cd "source-$arm"; test -z "$(git status --porcelain --untracked-files=all)"
+              env -i HOME="$GITHUB_WORKSPACE/build-home" PATH="$toolbin:/usr/bin:/bin" \
+                CARGO_HOME="$GITHUB_WORKSPACE/build-cargo" CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target-$arm" \
+                XDG_CONFIG_HOME="$GITHUB_WORKSPACE/build-config" RUSTC="$toolbin/rustc" \
+                CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 LANG=C.UTF-8 \
+                GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
+                timeout -k 10s 19m "$toolbin/cargo" build --locked --release \
+                    --manifest-path crates/jwm_apps/Cargo.toml --bin jwm-notes
+              test -z "$(git status --porcelain --untracked-files=all)"
+            ) 2>&1 | tee "evidence/$arm-build.log"
+          done
+          sha256sum target-{a,b}/release/jwm-notes > evidence/independent-binaries.sha256
+          test "$(cut -d' ' -f1 evidence/independent-binaries.sha256 | sort -u | wc -l)" -eq 2
+      - name: Compare active filtered rows after external edits on X11
+        timeout-minutes: 9
+        run: |
+          set -euo pipefail
+          sha256sum -c evidence/fixture.sha256
+          sha256sum -c evidence/independent-binaries.sha256
+          for arm in a b; do
+            scope=$(mktemp -d)
+            install -d -m 700 "$scope"/{config,data,run,cache}
+            result=0
+            env -i PATH=/usr/bin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 HOME="$scope" \
+              XDG_CONFIG_HOME="$scope/config" XDG_DATA_HOME="$scope/data" XDG_RUNTIME_DIR="$scope/run" \
+              XDG_CACHE_HOME="$scope/cache" JWM_REFRESH_PRIVATE=1 GSETTINGS_BACKEND=memory \
+              LIBGL_ALWAYS_SOFTWARE=1 WINIT_UNIX_BACKEND=x11 GDK_BACKEND=x11 GTK_A11Y=none \
+              timeout -k 5s 85s dbus-run-session -- xvfb-run --auto-servernum \
+                --server-args="-screen 0 1280x900x24 -noreset -nolisten tcp" \
+                /usr/bin/python3 -I fixture/scripts/x11-notes-external-refresh.py \
+                  --notes "target-$arm/release/jwm-notes" --arm "$arm" \
+                  --out "$PWD/evidence/$arm" >"evidence/$arm.log" 2>&1 || result=$?
+            rm -rf -- "$scope"
+            test "$result" -eq 0
+          done
+      - name: Retain actual frames, row evidence and source pins
+        if: always()
+        timeout-minutes: 3
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: notes-external-refresh-ab-${{ github.run_id }}-${{ github.run_attempt }}
+          path: evidence/
+          if-no-files-found: error
