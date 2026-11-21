@@ -1,0 +1,2509 @@
+{
+  "measurement_seconds": 3600.0,
+  "burn_in_seconds": 60,
+  "retained_resources_slots": 120,
+  "scored_progress_delta_frames": 108005,
+  "encoded_fps_from_progress": 30.00138888888889,
+  "terminal_progress_frames": 110010,
+  "resources": {
+    "rss_kib": {
+      "first": 205364,
+      "last_30s_sample": 205856,
+      "retained_end": 205856,
+      "min": 205364,
+      "max": 205856,
+      "slope_per_minute": 5.794235145504128,
+      "slope_bytes_per_encoded_frame": 3.2963137368296804
+    },
+    "rss_anon_kib": {
+      "first": 45996,
+      "last_30s_sample": 46488,
+      "retained_end": 46488,
+      "min": 45996,
+      "max": 46488,
+      "slope_per_minute": 5.794235145504128,
+      "slope_bytes_per_encoded_frame": 3.2963137368296804
+    },
+    "rss_file_kib": {
+      "first": 138216,
+      "last_30s_sample": 138216,
+      "retained_end": 138216,
+      "min": 138216,
+      "max": 138216,
+      "slope_per_minute": 0.0,
+      "slope_bytes_per_encoded_frame": 0.0
+    },
+    "rss_shmem_kib": {
+      "first": 21152,
+      "last_30s_sample": 21152,
+      "retained_end": 21152,
+      "min": 21152,
+      "max": 21152,
+      "slope_per_minute": 0.0,
+      "slope_bytes_per_encoded_frame": 0.0
+    },
+    "threads": {
+      "first": 46,
+      "last_30s_sample": 46,
+      "retained_end": 46,
+      "min": 46,
+      "max": 46,
+      "slope_per_minute": 0.0
+    },
+    "fds": {
+      "first": 39,
+      "last_30s_sample": 39,
+      "retained_end": 39,
+      "min": 39,
+      "max": 39,
+      "slope_per_minute": 0.0
+    }
+  },
+  "vma_boundary": {
+    "vma-start": {
+      "rollup_kib": {
+        "Rss": 205364,
+        "Pss": 190938,
+        "Pss_Anon": 45996,
+        "Pss_File": 123790,
+        "Pss_Shmem": 21152,
+        "Shared_Clean": 16132,
+        "Shared_Dirty": 0,
+        "Private_Clean": 114868,
+        "Private_Dirty": 74364,
+        "Anonymous": 45996,
+        "Swap": 0
+      },
+      "capture_delay_ms": 0.475286
+    },
+    "vma-15m": {
+      "rollup_kib": {
+        "Rss": 205792,
+        "Pss": 191429,
+        "Pss_Anon": 46424,
+        "Pss_File": 123853,
+        "Pss_Shmem": 21152,
+        "Shared_Clean": 16120,
+        "Shared_Dirty": 0,
+        "Private_Clean": 111228,
+        "Private_Dirty": 78444,
+        "Anonymous": 46424,
+        "Swap": 0
+      },
+      "capture_delay_ms": 0.700751
+    },
+    "vma-30m": {
+      "rollup_kib": {
+        "Rss": 205856,
+        "Pss": 191493,
+        "Pss_Anon": 46488,
+        "Pss_File": 123853,
+        "Pss_Shmem": 21152,
+        "Shared_Clean": 16120,
+        "Shared_Dirty": 0,
+        "Private_Clean": 111228,
+        "Private_Dirty": 78508,
+        "Anonymous": 46488,
+        "Swap": 0
+      },
+      "capture_delay_ms": 0.598454
+    },
+    "vma-45m": {
+      "rollup_kib": {
+        "Rss": 205856,
+        "Pss": 191493,
+        "Pss_Anon": 46488,
+        "Pss_File": 123853,
+        "Pss_Shmem": 21152,
+        "Shared_Clean": 16120,
+        "Shared_Dirty": 0,
+        "Private_Clean": 111228,
+        "Private_Dirty": 78508,
+        "Anonymous": 46488,
+        "Swap": 0
+      },
+      "capture_delay_ms": 0.541607
+    },
+    "vma-55m": {
+      "rollup_kib": {
+        "Rss": 205856,
+        "Pss": 191493,
+        "Pss_Anon": 46488,
+        "Pss_File": 123853,
+        "Pss_Shmem": 21152,
+        "Shared_Clean": 16120,
+        "Shared_Dirty": 0,
+        "Private_Clean": 111228,
+        "Private_Dirty": 78508,
+        "Anonymous": 46488,
+        "Swap": 0
+      },
+      "capture_delay_ms": 0.532307
+    },
+    "vma-end": {
+      "rollup_kib": {
+        "Rss": 205856,
+        "Pss": 191429,
+        "Pss_Anon": 46488,
+        "Pss_File": 123789,
+        "Pss_Shmem": 21152,
+        "Shared_Clean": 16132,
+        "Shared_Dirty": 0,
+        "Private_Clean": 111216,
+        "Private_Dirty": 78508,
+        "Anonymous": 46488,
+        "Swap": 0
+      },
+      "capture_delay_ms": 0.519842
+    }
+  },
+  "status": "complete",
+  "scope": "Owned Ubuntu FFmpeg null-output process, 60s burn-in and 3600s of analysis. Same pinned H.264 NVENC library identities as the earlier 240s diagnostic. Reads Linux process RSS and VMAs.",
+  "ffmpeg_sha256": "36d94a605d612e4090d1b8aec889d0c0801c6eafb1593c90f5c0dfd2e2966a45",
+  "ffmpeg_version": "ffmpeg version 4.4.2-0ubuntu0.22.04.1 Copyright (c) 2000-2021 the FFmpeg developers",
+  "encoder_setup_lines": [
+    "  Stream #0:0: Video: rawvideo (I420 / 0x30323449), yuv420p, 1920x1080 [SAR 1:1 DAR 16:9], 30 tbr, 30 tbn, 30 tbc",
+    "  Stream #0:0 -> #0:0 (rawvideo (native) -> h264 (h264_nvenc))",
+    "  Stream #0:0: Video: h264 (Main), yuv420p(progressive), 1920x1080 [SAR 1:1 DAR 16:9], q=2-31, 6000 kb/s, 30 fps, 30 tbn",
+    "      cpb: bitrate max/min/avg: 6000000/0/6000000 buffer size: 400000 vbv_delay: N/A"
+  ],
+  "command": [
+    "/usr/bin/ffmpeg",
+    "-hide_banner",
+    "-nostdin",
+    "-nostats",
+    "-progress",
+    "pipe:1",
+    "-re",
+    "-f",
+    "lavfi",
+    "-i",
+    "testsrc2=size=1920x1080:rate=30",
+    "-t",
+    "3667",
+    "-an",
+    "-c:v",
+    "h264_nvenc",
+    "-pix_fmt",
+    "yuv420p",
+    "-preset",
+    "p1",
+    "-tune",
+    "ull",
+    "-rc",
+    "cbr",
+    "-b:v",
+    "6000000",
+    "-maxrate",
+    "6000000",
+    "-bufsize",
+    "400000",
+    "-g",
+    "60",
+    "-bf",
+    "0",
+    "-rc-lookahead",
+    "0",
+    "-delay",
+    "0",
+    "-zerolatency",
+    "1",
+    "-forced-idr",
+    "1",
+    "-flags",
+    "+low_delay",
+    "-f",
+    "null",
+    "/dev/null"
+  ],
+  "pinned_libraries": {
+    "libcuda.so.580.178.04": {
+      "file_identity": [
+        259,
+        2,
+        19007721
+      ],
+      "path": "/usr/lib/x86_64-linux-gnu/libcuda.so.580.178.04",
+      "sha256": "dcdf334aeb177c95b3385b797c9b871d03a287895713c6d107f79096b0985aa9"
+    },
+    "libnvidia-encode.so.580.178.04": {
+      "file_identity": [
+        259,
+        2,
+        19007674
+      ],
+      "path": "/usr/lib/x86_64-linux-gnu/libnvidia-encode.so.580.178.04",
+      "sha256": "2a860b7fda50bb9eef572c5ea1495c5040d0741c1113e833f7881103d3c32bb3"
+    },
+    "libavcodec.so.58.134.100": {
+      "file_identity": [
+        259,
+        2,
+        19008743
+      ],
+      "path": "/usr/lib/x86_64-linux-gnu/libavcodec.so.58.134.100",
+      "sha256": "388b47f40685028998a161ebc9a541ff38146203bab60319b716e65670ee30b4"
+    },
+    "libavutil.so.56.70.100": {
+      "file_identity": [
+        259,
+        2,
+        19025587
+      ],
+      "path": "/usr/lib/x86_64-linux-gnu/libavutil.so.56.70.100",
+      "sha256": "578d0772a3bd7a6d2bfcc44e989eb51044bff540e5ffa6cc2d074507dfb257e4"
+    }
+  },
+  "samples": [
+    {
+      "elapsed_seconds": 0.010202124,
+      "encoded_frames": 1897,
+      "phase": "measured",
+      "rss_kib": 205364,
+      "rss_anon_kib": 45996,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 30.000756239,
+      "encoded_frames": 2792,
+      "phase": "measured",
+      "rss_kib": 205380,
+      "rss_anon_kib": 46012,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 60.000770266,
+      "encoded_frames": 3703,
+      "phase": "measured",
+      "rss_kib": 205396,
+      "rss_anon_kib": 46028,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 90.000730136,
+      "encoded_frames": 4598,
+      "phase": "measured",
+      "rss_kib": 205408,
+      "rss_anon_kib": 46040,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 120.000781556,
+      "encoded_frames": 5494,
+      "phase": "measured",
+      "rss_kib": 205424,
+      "rss_anon_kib": 46056,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 150.000702219,
+      "encoded_frames": 6404,
+      "phase": "measured",
+      "rss_kib": 205440,
+      "rss_anon_kib": 46072,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 180.000788929,
+      "encoded_frames": 7300,
+      "phase": "measured",
+      "rss_kib": 205452,
+      "rss_anon_kib": 46084,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 210.00126878,
+      "encoded_frames": 8196,
+      "phase": "measured",
+      "rss_kib": 205468,
+      "rss_anon_kib": 46100,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 240.00082765,
+      "encoded_frames": 9092,
+      "phase": "measured",
+      "rss_kib": 205480,
+      "rss_anon_kib": 46112,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 270.000890308,
+      "encoded_frames": 10003,
+      "phase": "measured",
+      "rss_kib": 205500,
+      "rss_anon_kib": 46132,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 300.000753048,
+      "encoded_frames": 10898,
+      "phase": "measured",
+      "rss_kib": 205512,
+      "rss_anon_kib": 46144,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 330.00139704,
+      "encoded_frames": 11793,
+      "phase": "measured",
+      "rss_kib": 205528,
+      "rss_anon_kib": 46160,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 360.000742677,
+      "encoded_frames": 12704,
+      "phase": "measured",
+      "rss_kib": 205540,
+      "rss_anon_kib": 46172,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 390.000871576,
+      "encoded_frames": 13599,
+      "phase": "measured",
+      "rss_kib": 205556,
+      "rss_anon_kib": 46188,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 420.000885153,
+      "encoded_frames": 14496,
+      "phase": "measured",
+      "rss_kib": 205568,
+      "rss_anon_kib": 46200,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 450.000773947,
+      "encoded_frames": 15391,
+      "phase": "measured",
+      "rss_kib": 205584,
+      "rss_anon_kib": 46216,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 480.00081813,
+      "encoded_frames": 16303,
+      "phase": "measured",
+      "rss_kib": 205596,
+      "rss_anon_kib": 46228,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 510.000757965,
+      "encoded_frames": 17198,
+      "phase": "measured",
+      "rss_kib": 205612,
+      "rss_anon_kib": 46244,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 540.00074534,
+      "encoded_frames": 18093,
+      "phase": "measured",
+      "rss_kib": 205624,
+      "rss_anon_kib": 46256,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 570.000840265,
+      "encoded_frames": 19004,
+      "phase": "measured",
+      "rss_kib": 205640,
+      "rss_anon_kib": 46272,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 600.000825195,
+      "encoded_frames": 19899,
+      "phase": "measured",
+      "rss_kib": 205652,
+      "rss_anon_kib": 46284,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 630.000807188,
+      "encoded_frames": 20795,
+      "phase": "measured",
+      "rss_kib": 205668,
+      "rss_anon_kib": 46300,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 660.001125475,
+      "encoded_frames": 21691,
+      "phase": "measured",
+      "rss_kib": 205680,
+      "rss_anon_kib": 46312,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 690.001403178,
+      "encoded_frames": 22602,
+      "phase": "measured",
+      "rss_kib": 205696,
+      "rss_anon_kib": 46328,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 720.000822056,
+      "encoded_frames": 23498,
+      "phase": "measured",
+      "rss_kib": 205708,
+      "rss_anon_kib": 46340,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 750.000825941,
+      "encoded_frames": 24394,
+      "phase": "measured",
+      "rss_kib": 205724,
+      "rss_anon_kib": 46356,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 780.00087358,
+      "encoded_frames": 25303,
+      "phase": "measured",
+      "rss_kib": 205736,
+      "rss_anon_kib": 46368,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 810.000749713,
+      "encoded_frames": 26199,
+      "phase": "measured",
+      "rss_kib": 205752,
+      "rss_anon_kib": 46384,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 840.000746508,
+      "encoded_frames": 27095,
+      "phase": "measured",
+      "rss_kib": 205764,
+      "rss_anon_kib": 46396,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 870.000767728,
+      "encoded_frames": 27991,
+      "phase": "measured",
+      "rss_kib": 205780,
+      "rss_anon_kib": 46412,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 900.012592069,
+      "encoded_frames": 28901,
+      "phase": "measured",
+      "rss_kib": 205792,
+      "rss_anon_kib": 46424,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 930.00075072,
+      "encoded_frames": 29796,
+      "phase": "measured",
+      "rss_kib": 205808,
+      "rss_anon_kib": 46440,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 960.000745785,
+      "encoded_frames": 30691,
+      "phase": "measured",
+      "rss_kib": 205820,
+      "rss_anon_kib": 46452,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 990.00076002,
+      "encoded_frames": 31600,
+      "phase": "measured",
+      "rss_kib": 205836,
+      "rss_anon_kib": 46468,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 1020.000917624,
+      "encoded_frames": 32495,
+      "phase": "measured",
+      "rss_kib": 205848,
+      "rss_anon_kib": 46480,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 1050.000845051,
+      "encoded_frames": 33392,
+      "phase": "measured",
+      "rss_kib": 205856,
+      "rss_anon_kib": 46488,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 1080.000736545,
+      "encoded_frames": 34303,
+      "phase": "measured",
+      "rss_kib": 205856,
+      "rss_anon_kib": 46488,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 1110.00083019,
+      "encoded_frames": 35199,
+      "phase": "measured",
+      "rss_kib": 205856,
+      "rss_anon_kib": 46488,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 1140.000761307,
+      "encoded_frames": 36095,
+      "phase": "measured",
+      "rss_kib": 205856,
+      "rss_anon_kib": 46488,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 1170.00072764,
+      "encoded_frames": 37005,
+      "phase": "measured",
+      "rss_kib": 205856,
+      "rss_anon_kib": 46488,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 1200.000835327,
+      "encoded_frames": 37901,
+      "phase": "measured",
+      "rss_kib": 205856,
+      "rss_anon_kib": 46488,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 1230.000713765,
+      "encoded_frames": 38796,
+      "phase": "measured",
+      "rss_kib": 205856,
+      "rss_anon_kib": 46488,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 1260.000767046,
+      "encoded_frames": 39693,
+      "phase": "measured",
+      "rss_kib": 205856,
+      "rss_anon_kib": 46488,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 1290.000809572,
+      "encoded_frames": 40605,
+      "phase": "measured",
+      "rss_kib": 205856,
+      "rss_anon_kib": 46488,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 1320.000868129,
+      "encoded_frames": 41502,
+      "phase": "measured",
+      "rss_kib": 205856,
+      "rss_anon_kib": 46488,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 1350.00072538,
+      "encoded_frames": 42398,
+      "phase": "measured",
+      "rss_kib": 205856,
+      "rss_anon_kib": 46488,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 1380.000716598,
+      "encoded_frames": 43293,
+      "phase": "measured",
+      "rss_kib": 205856,
+      "rss_anon_kib": 46488,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 1410.00074733,
+      "encoded_frames": 44204,
+      "phase": "measured",
+      "rss_kib": 205856,
+      "rss_anon_kib": 46488,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 1440.000771906,
+      "encoded_frames": 45102,
+      "phase": "measured",
+      "rss_kib": 205856,
+      "rss_anon_kib": 46488,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 1470.000922621,
+      "encoded_frames": 45997,
+      "phase": "measured",
+      "rss_kib": 205856,
+      "rss_anon_kib": 46488,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 1500.000808844,
+      "encoded_frames": 46892,
+      "phase": "measured",
+      "rss_kib": 205856,
+      "rss_anon_kib": 46488,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 1530.000770395,
+      "encoded_frames": 47804,
+      "phase": "measured",
+      "rss_kib": 205856,
+      "rss_anon_kib": 46488,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 1560.000760902,
+      "encoded_frames": 48700,
+      "phase": "measured",
+      "rss_kib": 205856,
+      "rss_anon_kib": 46488,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 1590.000817474,
+      "encoded_frames": 49597,
+      "phase": "measured",
+      "rss_kib": 205856,
+      "rss_anon_kib": 46488,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 1620.000854824,
+      "encoded_frames": 50490,
+      "phase": "measured",
+      "rss_kib": 205856,
+      "rss_anon_kib": 46488,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 1650.000838601,
+      "encoded_frames": 51400,
+      "phase": "measured",
+      "rss_kib": 205856,
+      "rss_anon_kib": 46488,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 1680.000873028,
+      "encoded_frames": 52296,
+      "phase": "measured",
+      "rss_kib": 205856,
+      "rss_anon_kib": 46488,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 1710.000839408,
+      "encoded_frames": 53190,
+      "phase": "measured",
+      "rss_kib": 205856,
+      "rss_anon_kib": 46488,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 1740.000842081,
+      "encoded_frames": 54101,
+      "phase": "measured",
+      "rss_kib": 205856,
+      "rss_anon_kib": 46488,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 1770.000855066,
+      "encoded_frames": 54997,
+      "phase": "measured",
+      "rss_kib": 205856,
+      "rss_anon_kib": 46488,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 1800.010312226,
+      "encoded_frames": 55894,
+      "phase": "measured",
+      "rss_kib": 205856,
+      "rss_anon_kib": 46488,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 1830.000728712,
+      "encoded_frames": 56804,
+      "phase": "measured",
+      "rss_kib": 205856,
+      "rss_anon_kib": 46488,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 1860.00077592,
+      "encoded_frames": 57700,
+      "phase": "measured",
+      "rss_kib": 205856,
+      "rss_anon_kib": 46488,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 1890.000920833,
+      "encoded_frames": 58596,
+      "phase": "measured",
+      "rss_kib": 205856,
+      "rss_anon_kib": 46488,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 1920.000802129,
+      "encoded_frames": 59491,
+      "phase": "measured",
+      "rss_kib": 205856,
+      "rss_anon_kib": 46488,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 1950.000715291,
+      "encoded_frames": 60402,
+      "phase": "measured",
+      "rss_kib": 205856,
+      "rss_anon_kib": 46488,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 1980.000773635,
+      "encoded_frames": 61299,
+      "phase": "measured",
+      "rss_kib": 205856,
+      "rss_anon_kib": 46488,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 2010.000770654,
+      "encoded_frames": 62194,
+      "phase": "measured",
+      "rss_kib": 205856,
+      "rss_anon_kib": 46488,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 2040.001265573,
+      "encoded_frames": 63105,
+      "phase": "measured",
+      "rss_kib": 205856,
+      "rss_anon_kib": 46488,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 2070.001192756,
+      "encoded_frames": 64001,
+      "phase": "measured",
+      "rss_kib": 205856,
+      "rss_anon_kib": 46488,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 2100.000770756,
+      "encoded_frames": 64897,
+      "phase": "measured",
+      "rss_kib": 205856,
+      "rss_anon_kib": 46488,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 2130.000762586,
+      "encoded_frames": 65792,
+      "phase": "measured",
+      "rss_kib": 205856,
+      "rss_anon_kib": 46488,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 2160.000703411,
+      "encoded_frames": 66703,
+      "phase": "measured",
+      "rss_kib": 205856,
+      "rss_anon_kib": 46488,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 2190.001334522,
+      "encoded_frames": 67598,
+      "phase": "measured",
+      "rss_kib": 205856,
+      "rss_anon_kib": 46488,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 2220.001280986,
+      "encoded_frames": 68494,
+      "phase": "measured",
+      "rss_kib": 205856,
+      "rss_anon_kib": 46488,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 2250.000723517,
+      "encoded_frames": 69404,
+      "phase": "measured",
+      "rss_kib": 205856,
+      "rss_anon_kib": 46488,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 2280.000761563,
+      "encoded_frames": 70299,
+      "phase": "measured",
+      "rss_kib": 205856,
+      "rss_anon_kib": 46488,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 2310.00075884,
+      "encoded_frames": 71195,
+      "phase": "measured",
+      "rss_kib": 205856,
+      "rss_anon_kib": 46488,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 2340.000763897,
+      "encoded_frames": 72092,
+      "phase": "measured",
+      "rss_kib": 205856,
+      "rss_anon_kib": 46488,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 2370.000857417,
+      "encoded_frames": 73002,
+      "phase": "measured",
+      "rss_kib": 205856,
+      "rss_anon_kib": 46488,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 2400.001369727,
+      "encoded_frames": 73898,
+      "phase": "measured",
+      "rss_kib": 205856,
+      "rss_anon_kib": 46488,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 2430.000744186,
+      "encoded_frames": 74794,
+      "phase": "measured",
+      "rss_kib": 205856,
+      "rss_anon_kib": 46488,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 2460.000761942,
+      "encoded_frames": 75703,
+      "phase": "measured",
+      "rss_kib": 205856,
+      "rss_anon_kib": 46488,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 2490.000617668,
+      "encoded_frames": 76600,
+      "phase": "measured",
+      "rss_kib": 205856,
+      "rss_anon_kib": 46488,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 2520.000809819,
+      "encoded_frames": 77496,
+      "phase": "measured",
+      "rss_kib": 205856,
+      "rss_anon_kib": 46488,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 2550.00073285,
+      "encoded_frames": 78393,
+      "phase": "measured",
+      "rss_kib": 205856,
+      "rss_anon_kib": 46488,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 2580.000838511,
+      "encoded_frames": 79303,
+      "phase": "measured",
+      "rss_kib": 205856,
+      "rss_anon_kib": 46488,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 2610.000773487,
+      "encoded_frames": 80198,
+      "phase": "measured",
+      "rss_kib": 205856,
+      "rss_anon_kib": 46488,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 2640.000844597,
+      "encoded_frames": 81094,
+      "phase": "measured",
+      "rss_kib": 205856,
+      "rss_anon_kib": 46488,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 2670.001233684,
+      "encoded_frames": 82004,
+      "phase": "measured",
+      "rss_kib": 205856,
+      "rss_anon_kib": 46488,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 2700.010372266,
+      "encoded_frames": 82899,
+      "phase": "measured",
+      "rss_kib": 205856,
+      "rss_anon_kib": 46488,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 2730.000885746,
+      "encoded_frames": 83794,
+      "phase": "measured",
+      "rss_kib": 205856,
+      "rss_anon_kib": 46488,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 2760.001308725,
+      "encoded_frames": 84690,
+      "phase": "measured",
+      "rss_kib": 205856,
+      "rss_anon_kib": 46488,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 2790.000744216,
+      "encoded_frames": 85600,
+      "phase": "measured",
+      "rss_kib": 205856,
+      "rss_anon_kib": 46488,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 2820.000726146,
+      "encoded_frames": 86496,
+      "phase": "measured",
+      "rss_kib": 205856,
+      "rss_anon_kib": 46488,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 2850.000852946,
+      "encoded_frames": 87391,
+      "phase": "measured",
+      "rss_kib": 205856,
+      "rss_anon_kib": 46488,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 2880.00087727,
+      "encoded_frames": 88302,
+      "phase": "measured",
+      "rss_kib": 205856,
+      "rss_anon_kib": 46488,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 2910.000759119,
+      "encoded_frames": 89199,
+      "phase": "measured",
+      "rss_kib": 205856,
+      "rss_anon_kib": 46488,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 2940.000831319,
+      "encoded_frames": 90095,
+      "phase": "measured",
+      "rss_kib": 205856,
+      "rss_anon_kib": 46488,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 2970.000776459,
+      "encoded_frames": 90991,
+      "phase": "measured",
+      "rss_kib": 205856,
+      "rss_anon_kib": 46488,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 3000.000738652,
+      "encoded_frames": 91901,
+      "phase": "measured",
+      "rss_kib": 205856,
+      "rss_anon_kib": 46488,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 3030.000698392,
+      "encoded_frames": 92797,
+      "phase": "measured",
+      "rss_kib": 205856,
+      "rss_anon_kib": 46488,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 3060.000823788,
+      "encoded_frames": 93693,
+      "phase": "measured",
+      "rss_kib": 205856,
+      "rss_anon_kib": 46488,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 3090.000752526,
+      "encoded_frames": 94603,
+      "phase": "measured",
+      "rss_kib": 205856,
+      "rss_anon_kib": 46488,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 3120.000743653,
+      "encoded_frames": 95499,
+      "phase": "measured",
+      "rss_kib": 205856,
+      "rss_anon_kib": 46488,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 3150.001169036,
+      "encoded_frames": 96394,
+      "phase": "measured",
+      "rss_kib": 205856,
+      "rss_anon_kib": 46488,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 3180.000741886,
+      "encoded_frames": 97290,
+      "phase": "measured",
+      "rss_kib": 205856,
+      "rss_anon_kib": 46488,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 3210.000820831,
+      "encoded_frames": 98200,
+      "phase": "measured",
+      "rss_kib": 205856,
+      "rss_anon_kib": 46488,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 3240.000736001,
+      "encoded_frames": 99096,
+      "phase": "measured",
+      "rss_kib": 205856,
+      "rss_anon_kib": 46488,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 3270.000873261,
+      "encoded_frames": 99991,
+      "phase": "measured",
+      "rss_kib": 205856,
+      "rss_anon_kib": 46488,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 3300.010827422,
+      "encoded_frames": 100902,
+      "phase": "measured",
+      "rss_kib": 205856,
+      "rss_anon_kib": 46488,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 3330.000836778,
+      "encoded_frames": 101797,
+      "phase": "measured",
+      "rss_kib": 205856,
+      "rss_anon_kib": 46488,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 3360.00092304,
+      "encoded_frames": 102693,
+      "phase": "measured",
+      "rss_kib": 205856,
+      "rss_anon_kib": 46488,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 3390.000734267,
+      "encoded_frames": 103604,
+      "phase": "measured",
+      "rss_kib": 205856,
+      "rss_anon_kib": 46488,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 3420.000776631,
+      "encoded_frames": 104500,
+      "phase": "measured",
+      "rss_kib": 205856,
+      "rss_anon_kib": 46488,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 3450.000863651,
+      "encoded_frames": 105395,
+      "phase": "measured",
+      "rss_kib": 205856,
+      "rss_anon_kib": 46488,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 3480.000729282,
+      "encoded_frames": 106304,
+      "phase": "measured",
+      "rss_kib": 205856,
+      "rss_anon_kib": 46488,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 3510.000823879,
+      "encoded_frames": 107200,
+      "phase": "measured",
+      "rss_kib": 205856,
+      "rss_anon_kib": 46488,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 3540.000881879,
+      "encoded_frames": 108095,
+      "phase": "measured",
+      "rss_kib": 205856,
+      "rss_anon_kib": 46488,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 3570.000764929,
+      "encoded_frames": 108991,
+      "phase": "measured",
+      "rss_kib": 205856,
+      "rss_anon_kib": 46488,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 3600.010624114,
+      "encoded_frames": 109902,
+      "phase": "retained_end",
+      "rss_kib": 205856,
+      "rss_anon_kib": 46488,
+      "rss_file_kib": 138216,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    }
+  ],
+  "anon_rss_slope_kib_per_minute_by_interval": {
+    "0-900": 28.490377476599974,
+    "900-1800": 2.082303740037168,
+    "1800-2700": 0.0,
+    "2700-3300": 0.0,
+    "3300-3600": 0.0
+  },
+  "unchanged_anonymous_rss_tail": {
+    "anonymous_rss_kib": 46488,
+    "first_sample_elapsed_seconds": 1050.000845051,
+    "duration_seconds_through_terminal_measure": 2550.009779063,
+    "samples": 86
+  },
+  "anonymous_mapping_history": [
+    {
+      "seconds": 0,
+      "same_original_extent": true,
+      "added_extents_since_start": 0,
+      "removed_extents_since_start": 0,
+      "original_extent_overlaps": [
+        {
+          "category": "anonymous_private",
+          "Size_kib": 5616,
+          "Rss_kib": 316,
+          "Pss_kib": 316,
+          "Shared_Clean_kib": 0,
+          "Shared_Dirty_kib": 0,
+          "Private_Clean_kib": 0,
+          "Private_Dirty_kib": 316,
+          "Anonymous_kib": 316,
+          "Swap_kib": 0
+        }
+      ],
+      "snapshot": {
+        "sample_start_offset_ms": 0.475286,
+        "sample_duration_ms": 9.210524,
+        "availability": {
+          "smaps_rollup": {
+            "availability": "captured"
+          },
+          "smaps": {
+            "availability": "captured"
+          }
+        },
+        "rollup_kib": {
+          "Rss": 205364,
+          "Pss": 190938,
+          "Pss_Anon": 45996,
+          "Pss_File": 123790,
+          "Pss_Shmem": 21152,
+          "Shared_Clean": 16132,
+          "Shared_Dirty": 0,
+          "Private_Clean": 114868,
+          "Private_Dirty": 74364,
+          "Anonymous": 45996,
+          "Swap": 0
+        },
+        "vma_kib_by_category": {
+          "anonymous_private": {
+            "mappings": 192,
+            "Size_kib": 13532156,
+            "Rss_kib": 10212,
+            "Pss_kib": 10212,
+            "Shared_Clean_kib": 0,
+            "Shared_Dirty_kib": 0,
+            "Private_Clean_kib": 0,
+            "Private_Dirty_kib": 10212,
+            "Anonymous_kib": 10212,
+            "Swap_kib": 0
+          },
+          "file_backed_other": {
+            "mappings": 1120,
+            "Size_kib": 233752,
+            "Rss_kib": 61408,
+            "Pss_kib": 46877,
+            "Shared_Clean_kib": 16124,
+            "Shared_Dirty_kib": 0,
+            "Private_Clean_kib": 17320,
+            "Private_Dirty_kib": 27964,
+            "Anonymous_kib": 6812,
+            "Swap_kib": 0
+          },
+          "nvidia_device": {
+            "mappings": 72,
+            "Size_kib": 85408,
+            "Rss_kib": 83160,
+            "Pss_kib": 83157,
+            "Shared_Clean_kib": 4,
+            "Shared_Dirty_kib": 0,
+            "Private_Clean_kib": 75940,
+            "Private_Dirty_kib": 7216,
+            "Anonymous_kib": 0,
+            "Swap_kib": 0
+          },
+          "process_heap": {
+            "mappings": 1,
+            "Size_kib": 32504,
+            "Rss_kib": 26876,
+            "Pss_kib": 26876,
+            "Shared_Clean_kib": 0,
+            "Shared_Dirty_kib": 0,
+            "Private_Clean_kib": 0,
+            "Private_Dirty_kib": 26876,
+            "Anonymous_kib": 26876,
+            "Swap_kib": 0
+          },
+          "nvidia_user_space_library": {
+            "mappings": 12,
+            "Size_kib": 94316,
+            "Rss_kib": 17320,
+            "Pss_kib": 17320,
+            "Shared_Clean_kib": 0,
+            "Shared_Dirty_kib": 0,
+            "Private_Clean_kib": 16052,
+            "Private_Dirty_kib": 1268,
+            "Anonymous_kib": 1268,
+            "Swap_kib": 0
+          },
+          "ffmpeg_user_space_library": {
+            "mappings": 22,
+            "Size_kib": 18492,
+            "Rss_kib": 6344,
+            "Pss_kib": 6344,
+            "Shared_Clean_kib": 0,
+            "Shared_Dirty_kib": 0,
+            "Private_Clean_kib": 5556,
+            "Private_Dirty_kib": 788,
+            "Anonymous_kib": 788,
+            "Swap_kib": 0
+          },
+          "process_stack": {
+            "mappings": 1,
+            "Size_kib": 132,
+            "Rss_kib": 40,
+            "Pss_kib": 40,
+            "Shared_Clean_kib": 0,
+            "Shared_Dirty_kib": 0,
+            "Private_Clean_kib": 0,
+            "Private_Dirty_kib": 40,
+            "Anonymous_kib": 40,
+            "Swap_kib": 0
+          },
+          "special_kernel": {
+            "mappings": 3,
+            "Size_kib": 28,
+            "Rss_kib": 4,
+            "Pss_kib": 0,
+            "Shared_Clean_kib": 4,
+            "Shared_Dirty_kib": 0,
+            "Private_Clean_kib": 0,
+            "Private_Dirty_kib": 0,
+            "Anonymous_kib": 0,
+            "Swap_kib": 0
+          }
+        }
+      }
+    },
+    {
+      "seconds": 900,
+      "same_original_extent": true,
+      "added_extents_since_start": 0,
+      "removed_extents_since_start": 0,
+      "original_extent_overlaps": [
+        {
+          "category": "anonymous_private",
+          "Size_kib": 5616,
+          "Rss_kib": 736,
+          "Pss_kib": 736,
+          "Shared_Clean_kib": 0,
+          "Shared_Dirty_kib": 0,
+          "Private_Clean_kib": 0,
+          "Private_Dirty_kib": 736,
+          "Anonymous_kib": 736,
+          "Swap_kib": 0
+        }
+      ],
+      "snapshot": {
+        "sample_start_offset_ms": 0.700751,
+        "sample_duration_ms": 11.305876,
+        "availability": {
+          "smaps_rollup": {
+            "availability": "captured"
+          },
+          "smaps": {
+            "availability": "captured"
+          }
+        },
+        "rollup_kib": {
+          "Rss": 205792,
+          "Pss": 191429,
+          "Pss_Anon": 46424,
+          "Pss_File": 123853,
+          "Pss_Shmem": 21152,
+          "Shared_Clean": 16120,
+          "Shared_Dirty": 0,
+          "Private_Clean": 111228,
+          "Private_Dirty": 78444,
+          "Anonymous": 46424,
+          "Swap": 0
+        },
+        "vma_kib_by_category": {
+          "anonymous_private": {
+            "mappings": 192,
+            "Size_kib": 13532156,
+            "Rss_kib": 10632,
+            "Pss_kib": 10632,
+            "Shared_Clean_kib": 0,
+            "Shared_Dirty_kib": 0,
+            "Private_Clean_kib": 0,
+            "Private_Dirty_kib": 10632,
+            "Anonymous_kib": 10632,
+            "Swap_kib": 0
+          },
+          "file_backed_other": {
+            "mappings": 1120,
+            "Size_kib": 233752,
+            "Rss_kib": 61408,
+            "Pss_kib": 46944,
+            "Shared_Clean_kib": 16112,
+            "Shared_Dirty_kib": 0,
+            "Private_Clean_kib": 17332,
+            "Private_Dirty_kib": 27964,
+            "Anonymous_kib": 6812,
+            "Swap_kib": 0
+          },
+          "nvidia_device": {
+            "mappings": 72,
+            "Size_kib": 85408,
+            "Rss_kib": 83160,
+            "Pss_kib": 83157,
+            "Shared_Clean_kib": 4,
+            "Shared_Dirty_kib": 0,
+            "Private_Clean_kib": 72288,
+            "Private_Dirty_kib": 10868,
+            "Anonymous_kib": 0,
+            "Swap_kib": 0
+          },
+          "process_heap": {
+            "mappings": 1,
+            "Size_kib": 32504,
+            "Rss_kib": 26884,
+            "Pss_kib": 26884,
+            "Shared_Clean_kib": 0,
+            "Shared_Dirty_kib": 0,
+            "Private_Clean_kib": 0,
+            "Private_Dirty_kib": 26884,
+            "Anonymous_kib": 26884,
+            "Swap_kib": 0
+          },
+          "nvidia_user_space_library": {
+            "mappings": 12,
+            "Size_kib": 94316,
+            "Rss_kib": 17320,
+            "Pss_kib": 17320,
+            "Shared_Clean_kib": 0,
+            "Shared_Dirty_kib": 0,
+            "Private_Clean_kib": 16052,
+            "Private_Dirty_kib": 1268,
+            "Anonymous_kib": 1268,
+            "Swap_kib": 0
+          },
+          "ffmpeg_user_space_library": {
+            "mappings": 22,
+            "Size_kib": 18492,
+            "Rss_kib": 6344,
+            "Pss_kib": 6344,
+            "Shared_Clean_kib": 0,
+            "Shared_Dirty_kib": 0,
+            "Private_Clean_kib": 5556,
+            "Private_Dirty_kib": 788,
+            "Anonymous_kib": 788,
+            "Swap_kib": 0
+          },
+          "process_stack": {
+            "mappings": 1,
+            "Size_kib": 132,
+            "Rss_kib": 40,
+            "Pss_kib": 40,
+            "Shared_Clean_kib": 0,
+            "Shared_Dirty_kib": 0,
+            "Private_Clean_kib": 0,
+            "Private_Dirty_kib": 40,
+            "Anonymous_kib": 40,
+            "Swap_kib": 0
+          },
+          "special_kernel": {
+            "mappings": 3,
+            "Size_kib": 28,
+            "Rss_kib": 4,
+            "Pss_kib": 0,
+            "Shared_Clean_kib": 4,
+            "Shared_Dirty_kib": 0,
+            "Private_Clean_kib": 0,
+            "Private_Dirty_kib": 0,
+            "Anonymous_kib": 0,
+            "Swap_kib": 0
+          }
+        }
+      }
+    },
+    {
+      "seconds": 1800,
+      "same_original_extent": true,
+      "added_extents_since_start": 0,
+      "removed_extents_since_start": 0,
+      "original_extent_overlaps": [
+        {
+          "category": "anonymous_private",
+          "Size_kib": 5616,
+          "Rss_kib": 800,
+          "Pss_kib": 800,
+          "Shared_Clean_kib": 0,
+          "Shared_Dirty_kib": 0,
+          "Private_Clean_kib": 0,
+          "Private_Dirty_kib": 800,
+          "Anonymous_kib": 800,
+          "Swap_kib": 0
+        }
+      ],
+      "snapshot": {
+        "sample_start_offset_ms": 0.598454,
+        "sample_duration_ms": 9.167985,
+        "availability": {
+          "smaps_rollup": {
+            "availability": "captured"
+          },
+          "smaps": {
+            "availability": "captured"
+          }
+        },
+        "rollup_kib": {
+          "Rss": 205856,
+          "Pss": 191493,
+          "Pss_Anon": 46488,
+          "Pss_File": 123853,
+          "Pss_Shmem": 21152,
+          "Shared_Clean": 16120,
+          "Shared_Dirty": 0,
+          "Private_Clean": 111228,
+          "Private_Dirty": 78508,
+          "Anonymous": 46488,
+          "Swap": 0
+        },
+        "vma_kib_by_category": {
+          "anonymous_private": {
+            "mappings": 192,
+            "Size_kib": 13532156,
+            "Rss_kib": 10696,
+            "Pss_kib": 10696,
+            "Shared_Clean_kib": 0,
+            "Shared_Dirty_kib": 0,
+            "Private_Clean_kib": 0,
+            "Private_Dirty_kib": 10696,
+            "Anonymous_kib": 10696,
+            "Swap_kib": 0
+          },
+          "file_backed_other": {
+            "mappings": 1120,
+            "Size_kib": 233752,
+            "Rss_kib": 61408,
+            "Pss_kib": 46944,
+            "Shared_Clean_kib": 16112,
+            "Shared_Dirty_kib": 0,
+            "Private_Clean_kib": 17332,
+            "Private_Dirty_kib": 27964,
+            "Anonymous_kib": 6812,
+            "Swap_kib": 0
+          },
+          "nvidia_device": {
+            "mappings": 72,
+            "Size_kib": 85408,
+            "Rss_kib": 83160,
+            "Pss_kib": 83157,
+            "Shared_Clean_kib": 4,
+            "Shared_Dirty_kib": 0,
+            "Private_Clean_kib": 72288,
+            "Private_Dirty_kib": 10868,
+            "Anonymous_kib": 0,
+            "Swap_kib": 0
+          },
+          "process_heap": {
+            "mappings": 1,
+            "Size_kib": 32504,
+            "Rss_kib": 26884,
+            "Pss_kib": 26884,
+            "Shared_Clean_kib": 0,
+            "Shared_Dirty_kib": 0,
+            "Private_Clean_kib": 0,
+            "Private_Dirty_kib": 26884,
+            "Anonymous_kib": 26884,
+            "Swap_kib": 0
+          },
+          "nvidia_user_space_library": {
+            "mappings": 12,
+            "Size_kib": 94316,
+            "Rss_kib": 17320,
+            "Pss_kib": 17320,
+            "Shared_Clean_kib": 0,
+            "Shared_Dirty_kib": 0,
+            "Private_Clean_kib": 16052,
+            "Private_Dirty_kib": 1268,
+            "Anonymous_kib": 1268,
+            "Swap_kib": 0
+          },
+          "ffmpeg_user_space_library": {
+            "mappings": 22,
+            "Size_kib": 18492,
+            "Rss_kib": 6344,
+            "Pss_kib": 6344,
+            "Shared_Clean_kib": 0,
+            "Shared_Dirty_kib": 0,
+            "Private_Clean_kib": 5556,
+            "Private_Dirty_kib": 788,
+            "Anonymous_kib": 788,
+            "Swap_kib": 0
+          },
+          "process_stack": {
+            "mappings": 1,
+            "Size_kib": 132,
+            "Rss_kib": 40,
+            "Pss_kib": 40,
+            "Shared_Clean_kib": 0,
+            "Shared_Dirty_kib": 0,
+            "Private_Clean_kib": 0,
+            "Private_Dirty_kib": 40,
+            "Anonymous_kib": 40,
+            "Swap_kib": 0
+          },
+          "special_kernel": {
+            "mappings": 3,
+            "Size_kib": 28,
+            "Rss_kib": 4,
+            "Pss_kib": 0,
+            "Shared_Clean_kib": 4,
+            "Shared_Dirty_kib": 0,
+            "Private_Clean_kib": 0,
+            "Private_Dirty_kib": 0,
+            "Anonymous_kib": 0,
+            "Swap_kib": 0
+          }
+        }
+      }
+    },
+    {
+      "seconds": 2700,
+      "same_original_extent": true,
+      "added_extents_since_start": 0,
+      "removed_extents_since_start": 0,
+      "original_extent_overlaps": [
+        {
+          "category": "anonymous_private",
+          "Size_kib": 5616,
+          "Rss_kib": 800,
+          "Pss_kib": 800,
+          "Shared_Clean_kib": 0,
+          "Shared_Dirty_kib": 0,
+          "Private_Clean_kib": 0,
+          "Private_Dirty_kib": 800,
+          "Anonymous_kib": 800,
+          "Swap_kib": 0
+        }
+      ],
+      "snapshot": {
+        "sample_start_offset_ms": 0.541607,
+        "sample_duration_ms": 9.298139,
+        "availability": {
+          "smaps_rollup": {
+            "availability": "captured"
+          },
+          "smaps": {
+            "availability": "captured"
+          }
+        },
+        "rollup_kib": {
+          "Rss": 205856,
+          "Pss": 191493,
+          "Pss_Anon": 46488,
+          "Pss_File": 123853,
+          "Pss_Shmem": 21152,
+          "Shared_Clean": 16120,
+          "Shared_Dirty": 0,
+          "Private_Clean": 111228,
+          "Private_Dirty": 78508,
+          "Anonymous": 46488,
+          "Swap": 0
+        },
+        "vma_kib_by_category": {
+          "anonymous_private": {
+            "mappings": 192,
+            "Size_kib": 13532156,
+            "Rss_kib": 10696,
+            "Pss_kib": 10696,
+            "Shared_Clean_kib": 0,
+            "Shared_Dirty_kib": 0,
+            "Private_Clean_kib": 0,
+            "Private_Dirty_kib": 10696,
+            "Anonymous_kib": 10696,
+            "Swap_kib": 0
+          },
+          "file_backed_other": {
+            "mappings": 1120,
+            "Size_kib": 233752,
+            "Rss_kib": 61408,
+            "Pss_kib": 46944,
+            "Shared_Clean_kib": 16112,
+            "Shared_Dirty_kib": 0,
+            "Private_Clean_kib": 17332,
+            "Private_Dirty_kib": 27964,
+            "Anonymous_kib": 6812,
+            "Swap_kib": 0
+          },
+          "nvidia_device": {
+            "mappings": 72,
+            "Size_kib": 85408,
+            "Rss_kib": 83160,
+            "Pss_kib": 83157,
+            "Shared_Clean_kib": 4,
+            "Shared_Dirty_kib": 0,
+            "Private_Clean_kib": 72288,
+            "Private_Dirty_kib": 10868,
+            "Anonymous_kib": 0,
+            "Swap_kib": 0
+          },
+          "process_heap": {
+            "mappings": 1,
+            "Size_kib": 32504,
+            "Rss_kib": 26884,
+            "Pss_kib": 26884,
+            "Shared_Clean_kib": 0,
+            "Shared_Dirty_kib": 0,
+            "Private_Clean_kib": 0,
+            "Private_Dirty_kib": 26884,
+            "Anonymous_kib": 26884,
+            "Swap_kib": 0
+          },
+          "nvidia_user_space_library": {
+            "mappings": 12,
+            "Size_kib": 94316,
+            "Rss_kib": 17320,
+            "Pss_kib": 17320,
+            "Shared_Clean_kib": 0,
+            "Shared_Dirty_kib": 0,
+            "Private_Clean_kib": 16052,
+            "Private_Dirty_kib": 1268,
+            "Anonymous_kib": 1268,
+            "Swap_kib": 0
+          },
+          "ffmpeg_user_space_library": {
+            "mappings": 22,
+            "Size_kib": 18492,
+            "Rss_kib": 6344,
+            "Pss_kib": 6344,
+            "Shared_Clean_kib": 0,
+            "Shared_Dirty_kib": 0,
+            "Private_Clean_kib": 5556,
+            "Private_Dirty_kib": 788,
+            "Anonymous_kib": 788,
+            "Swap_kib": 0
+          },
+          "process_stack": {
+            "mappings": 1,
+            "Size_kib": 132,
+            "Rss_kib": 40,
+            "Pss_kib": 40,
+            "Shared_Clean_kib": 0,
+            "Shared_Dirty_kib": 0,
+            "Private_Clean_kib": 0,
+            "Private_Dirty_kib": 40,
+            "Anonymous_kib": 40,
+            "Swap_kib": 0
+          },
+          "special_kernel": {
+            "mappings": 3,
+            "Size_kib": 28,
+            "Rss_kib": 4,
+            "Pss_kib": 0,
+            "Shared_Clean_kib": 4,
+            "Shared_Dirty_kib": 0,
+            "Private_Clean_kib": 0,
+            "Private_Dirty_kib": 0,
+            "Anonymous_kib": 0,
+            "Swap_kib": 0
+          }
+        }
+      }
+    },
+    {
+      "seconds": 3300,
+      "same_original_extent": true,
+      "added_extents_since_start": 0,
+      "removed_extents_since_start": 0,
+      "original_extent_overlaps": [
+        {
+          "category": "anonymous_private",
+          "Size_kib": 5616,
+          "Rss_kib": 800,
+          "Pss_kib": 800,
+          "Shared_Clean_kib": 0,
+          "Shared_Dirty_kib": 0,
+          "Private_Clean_kib": 0,
+          "Private_Dirty_kib": 800,
+          "Anonymous_kib": 800,
+          "Swap_kib": 0
+        }
+      ],
+      "snapshot": {
+        "sample_start_offset_ms": 0.532307,
+        "sample_duration_ms": 9.722548,
+        "availability": {
+          "smaps_rollup": {
+            "availability": "captured"
+          },
+          "smaps": {
+            "availability": "captured"
+          }
+        },
+        "rollup_kib": {
+          "Rss": 205856,
+          "Pss": 191493,
+          "Pss_Anon": 46488,
+          "Pss_File": 123853,
+          "Pss_Shmem": 21152,
+          "Shared_Clean": 16120,
+          "Shared_Dirty": 0,
+          "Private_Clean": 111228,
+          "Private_Dirty": 78508,
+          "Anonymous": 46488,
+          "Swap": 0
+        },
+        "vma_kib_by_category": {
+          "anonymous_private": {
+            "mappings": 192,
+            "Size_kib": 13532156,
+            "Rss_kib": 10696,
+            "Pss_kib": 10696,
+            "Shared_Clean_kib": 0,
+            "Shared_Dirty_kib": 0,
+            "Private_Clean_kib": 0,
+            "Private_Dirty_kib": 10696,
+            "Anonymous_kib": 10696,
+            "Swap_kib": 0
+          },
+          "file_backed_other": {
+            "mappings": 1120,
+            "Size_kib": 233752,
+            "Rss_kib": 61408,
+            "Pss_kib": 46944,
+            "Shared_Clean_kib": 16112,
+            "Shared_Dirty_kib": 0,
+            "Private_Clean_kib": 17332,
+            "Private_Dirty_kib": 27964,
+            "Anonymous_kib": 6812,
+            "Swap_kib": 0
+          },
+          "nvidia_device": {
+            "mappings": 72,
+            "Size_kib": 85408,
+            "Rss_kib": 83160,
+            "Pss_kib": 83157,
+            "Shared_Clean_kib": 4,
+            "Shared_Dirty_kib": 0,
+            "Private_Clean_kib": 72288,
+            "Private_Dirty_kib": 10868,
+            "Anonymous_kib": 0,
+            "Swap_kib": 0
+          },
+          "process_heap": {
+            "mappings": 1,
+            "Size_kib": 32504,
+            "Rss_kib": 26884,
+            "Pss_kib": 26884,
+            "Shared_Clean_kib": 0,
+            "Shared_Dirty_kib": 0,
+            "Private_Clean_kib": 0,
+            "Private_Dirty_kib": 26884,
+            "Anonymous_kib": 26884,
+            "Swap_kib": 0
+          },
+          "nvidia_user_space_library": {
+            "mappings": 12,
+            "Size_kib": 94316,
+            "Rss_kib": 17320,
+            "Pss_kib": 17320,
+            "Shared_Clean_kib": 0,
+            "Shared_Dirty_kib": 0,
+            "Private_Clean_kib": 16052,
+            "Private_Dirty_kib": 1268,
+            "Anonymous_kib": 1268,
+            "Swap_kib": 0
+          },
+          "ffmpeg_user_space_library": {
+            "mappings": 22,
+            "Size_kib": 18492,
+            "Rss_kib": 6344,
+            "Pss_kib": 6344,
+            "Shared_Clean_kib": 0,
+            "Shared_Dirty_kib": 0,
+            "Private_Clean_kib": 5556,
+            "Private_Dirty_kib": 788,
+            "Anonymous_kib": 788,
+            "Swap_kib": 0
+          },
+          "process_stack": {
+            "mappings": 1,
+            "Size_kib": 132,
+            "Rss_kib": 40,
+            "Pss_kib": 40,
+            "Shared_Clean_kib": 0,
+            "Shared_Dirty_kib": 0,
+            "Private_Clean_kib": 0,
+            "Private_Dirty_kib": 40,
+            "Anonymous_kib": 40,
+            "Swap_kib": 0
+          },
+          "special_kernel": {
+            "mappings": 3,
+            "Size_kib": 28,
+            "Rss_kib": 4,
+            "Pss_kib": 0,
+            "Shared_Clean_kib": 4,
+            "Shared_Dirty_kib": 0,
+            "Private_Clean_kib": 0,
+            "Private_Dirty_kib": 0,
+            "Anonymous_kib": 0,
+            "Swap_kib": 0
+          }
+        }
+      }
+    },
+    {
+      "seconds": 3600,
+      "same_original_extent": true,
+      "added_extents_since_start": 0,
+      "removed_extents_since_start": 0,
+      "original_extent_overlaps": [
+        {
+          "category": "anonymous_private",
+          "Size_kib": 5616,
+          "Rss_kib": 800,
+          "Pss_kib": 800,
+          "Shared_Clean_kib": 0,
+          "Shared_Dirty_kib": 0,
+          "Private_Clean_kib": 0,
+          "Private_Dirty_kib": 800,
+          "Anonymous_kib": 800,
+          "Swap_kib": 0
+        }
+      ],
+      "snapshot": {
+        "sample_start_offset_ms": 0.519842,
+        "sample_duration_ms": 9.591959,
+        "availability": {
+          "smaps_rollup": {
+            "availability": "captured"
+          },
+          "smaps": {
+            "availability": "captured"
+          }
+        },
+        "rollup_kib": {
+          "Rss": 205856,
+          "Pss": 191429,
+          "Pss_Anon": 46488,
+          "Pss_File": 123789,
+          "Pss_Shmem": 21152,
+          "Shared_Clean": 16132,
+          "Shared_Dirty": 0,
+          "Private_Clean": 111216,
+          "Private_Dirty": 78508,
+          "Anonymous": 46488,
+          "Swap": 0
+        },
+        "vma_kib_by_category": {
+          "anonymous_private": {
+            "mappings": 192,
+            "Size_kib": 13532156,
+            "Rss_kib": 10696,
+            "Pss_kib": 10696,
+            "Shared_Clean_kib": 0,
+            "Shared_Dirty_kib": 0,
+            "Private_Clean_kib": 0,
+            "Private_Dirty_kib": 10696,
+            "Anonymous_kib": 10696,
+            "Swap_kib": 0
+          },
+          "file_backed_other": {
+            "mappings": 1120,
+            "Size_kib": 233752,
+            "Rss_kib": 61408,
+            "Pss_kib": 46875,
+            "Shared_Clean_kib": 16124,
+            "Shared_Dirty_kib": 0,
+            "Private_Clean_kib": 17320,
+            "Private_Dirty_kib": 27964,
+            "Anonymous_kib": 6812,
+            "Swap_kib": 0
+          },
+          "nvidia_device": {
+            "mappings": 72,
+            "Size_kib": 85408,
+            "Rss_kib": 83160,
+            "Pss_kib": 83157,
+            "Shared_Clean_kib": 4,
+            "Shared_Dirty_kib": 0,
+            "Private_Clean_kib": 72288,
+            "Private_Dirty_kib": 10868,
+            "Anonymous_kib": 0,
+            "Swap_kib": 0
+          },
+          "process_heap": {
+            "mappings": 1,
+            "Size_kib": 32504,
+            "Rss_kib": 26884,
+            "Pss_kib": 26884,
+            "Shared_Clean_kib": 0,
+            "Shared_Dirty_kib": 0,
+            "Private_Clean_kib": 0,
+            "Private_Dirty_kib": 26884,
+            "Anonymous_kib": 26884,
+            "Swap_kib": 0
+          },
+          "nvidia_user_space_library": {
+            "mappings": 12,
+            "Size_kib": 94316,
+            "Rss_kib": 17320,
+            "Pss_kib": 17320,
+            "Shared_Clean_kib": 0,
+            "Shared_Dirty_kib": 0,
+            "Private_Clean_kib": 16052,
+            "Private_Dirty_kib": 1268,
+            "Anonymous_kib": 1268,
+            "Swap_kib": 0
+          },
+          "ffmpeg_user_space_library": {
+            "mappings": 22,
+            "Size_kib": 18492,
+            "Rss_kib": 6344,
+            "Pss_kib": 6344,
+            "Shared_Clean_kib": 0,
+            "Shared_Dirty_kib": 0,
+            "Private_Clean_kib": 5556,
+            "Private_Dirty_kib": 788,
+            "Anonymous_kib": 788,
+            "Swap_kib": 0
+          },
+          "process_stack": {
+            "mappings": 1,
+            "Size_kib": 132,
+            "Rss_kib": 40,
+            "Pss_kib": 40,
+            "Shared_Clean_kib": 0,
+            "Shared_Dirty_kib": 0,
+            "Private_Clean_kib": 0,
+            "Private_Dirty_kib": 40,
+            "Anonymous_kib": 40,
+            "Swap_kib": 0
+          },
+          "special_kernel": {
+            "mappings": 3,
+            "Size_kib": 28,
+            "Rss_kib": 4,
+            "Pss_kib": 0,
+            "Shared_Clean_kib": 4,
+            "Shared_Dirty_kib": 0,
+            "Private_Clean_kib": 0,
+            "Private_Dirty_kib": 0,
+            "Anonymous_kib": 0,
+            "Swap_kib": 0
+          }
+        }
+      }
+    }
+  ],
+  "fixture_sha256": {
+    "encode_only.py": "73f6bdabc2fe78a0d427679ce1e36bbfc925662a041868a9bd0e9f913fcbb92e",
+    "inspect_rss.py": "6283d9b318d3a822de594c13f7b660c07d795caf923424090a4bf10ffac29d10",
+    "resources.py": "492cf9701b7a9f9ebe58b168587b17cc65e57fb87446ee41974b7d85968a48e2",
+    "protected-library-identities.json": "a53d9bc512adc3ae77507233aeabb18ce781dd061290009ad9883b32cd496c11",
+    "run-peer.sh": "cf9c2e223610ff81ab89925124fb9fcd865159d32606342938c704a6ea9762c4"
+  },
+  "archive": {
+    "sha256": "60a5ce843ab9267fe362ac74f9b91a47a6dcc8548e7c97d50ddd744628cffaa7",
+    "members_sha256": {
+      "remote/vma-30m.json": "306721d4ec59b69cecd8016d9f3609b8a7e9953298f0be4fa96626e7e83708fb",
+      "remote/bounds.json": "7c745f9895c1ec7359e77e500194ae7ee1f3a96ea1310636580a71d002177219",
+      "remote/encode_only.py": "73f6bdabc2fe78a0d427679ce1e36bbfc925662a041868a9bd0e9f913fcbb92e",
+      "remote/resources.py": "492cf9701b7a9f9ebe58b168587b17cc65e57fb87446ee41974b7d85968a48e2",
+      "publish.py": "5960478e98d69e9ba6a8f1b88012e606e2a16317155113e0ecbd29b17257cf95",
+      "remote/controller.exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "remote/result.json": "3a579586f9ce134dadadb99b23c2951e2a2332bb4f784fbb281088fdd25cc3b3",
+      "remote/progress.jsonl": "618be15ae83c61e7d018f3fc54fd0683b2e195306e0de3fde24f01bfdca45d55",
+      "remote/vma-15m.json": "eb4be06faef5356e02652265a84c967540226b020b2df32c8a8b67bbd3a36936",
+      "inputs.sha256": "1ec6bac466803e7be8948057e6a973dd98d7cc28bd1c4d0333d03ceab3826b2a",
+      "remote/run-peer.sh": "cf9c2e223610ff81ab89925124fb9fcd865159d32606342938c704a6ea9762c4",
+      "remote/vma-45m.json": "a3428aee283e5d420ac6ba1312592823d5fbf9bc4f157ec128c5edbb3a055545",
+      "remote/vma-45m.smaps": "e0861329fd59102b08e4309d6047bb809f5670bd047fa0e35f52811a542b43db",
+      "remote/vma-start.smaps": "36bba0c6a728161016163f87ba45f536fc12b20b2af729f8d31f481bc51de409",
+      "run-peer.sh": "cf9c2e223610ff81ab89925124fb9fcd865159d32606342938c704a6ea9762c4",
+      "remote/vma-55m.json": "e88989c5d75babdcc07dda6e251c2d88cb326df041b6a83b7a25045ae935fecf",
+      "remote/inspect_rss.py": "6283d9b318d3a822de594c13f7b660c07d795caf923424090a4bf10ffac29d10",
+      "vma_analyzer.py": "82acf2cb3829c9fb3d56c2184d2a9c6a14d2af8bfb3cc7631bae597681266542",
+      "resources.py": "492cf9701b7a9f9ebe58b168587b17cc65e57fb87446ee41974b7d85968a48e2",
+      "remote/vma-30m.smaps": "e0861329fd59102b08e4309d6047bb809f5670bd047fa0e35f52811a542b43db",
+      "remote/ffmpeg-version.txt": "ff177c4585de71302b95b6fe2751cb5fdfc8c145ce192b81876fd617561ffa9f",
+      "remote/vma-start.json": "6b8a794613211e10c340a2ea898b6feca5faa6dd8ac0bf8a2b8cdcc48c5de067",
+      "remote/vma-15m.smaps": "75706fc19b9c58114c7eab91ed5e7cfcf7eeadaac537071e4b063bf9a85d19df",
+      "package_hour.py": "80850f1b03fb3b00676aec75fea576b28aee8dd89c0f314594e0e9c14336b915",
+      "remote/vma-55m.smaps": "e0861329fd59102b08e4309d6047bb809f5670bd047fa0e35f52811a542b43db",
+      "remote/protected-library-identities.json": "a53d9bc512adc3ae77507233aeabb18ce781dd061290009ad9883b32cd496c11",
+      "remote/ffmpeg.log": "02e9004358a74650bcbbdd6bddcd93f0007cdcdf67ae97c161b670f2acbcc44c",
+      "encode_only.py": "73f6bdabc2fe78a0d427679ce1e36bbfc925662a041868a9bd0e9f913fcbb92e",
+      "protected-library-identities.json": "a53d9bc512adc3ae77507233aeabb18ce781dd061290009ad9883b32cd496c11",
+      "remote/vma-end.smaps": "192099331c9a7f71a042984e857b9bcc8c9cbc48b0bfe99b5bcde16b5018cb1d",
+      "remote/vma-end.json": "1efc892e8ccfacf8ea7761ff487a3573d49ffe36433b03556c698ae79127c4ac",
+      "remote/samples.jsonl": "0b8a409e5069fcd8b2f31b4e506b801d70ecf8660103139b3327ae1cfc4bd418",
+      "inspect_rss.py": "6283d9b318d3a822de594c13f7b660c07d795caf923424090a4bf10ffac29d10"
+    },
+    "vma_header_encoding": "shared ordered boundary identifiers"
+  }
+}
