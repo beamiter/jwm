@@ -449,6 +449,7 @@ pub struct WindowEntry {
 pub struct AppCandidate<'a> {
     /// Lowercased name and command, the haystack the entry already keeps.
     pub search: &'a str,
+    pub aliases: &'a [String],
     /// Precomputed case-insensitive display-name key used only as the final
     /// deterministic tie-breaker. Borrowing it keeps sorting allocation-free.
     pub sort_key: &'a str,
@@ -726,6 +727,32 @@ fn window_score(entry: &WindowEntry, needle: &str) -> Option<usize> {
         .max()
 }
 
+fn app_score(entry: &AppCandidate<'_>, needle: &str) -> Option<usize> {
+    let primary = fuzzy_score(entry.search, needle);
+    // A literal match in the established name or command keeps its original
+    // ranking. An alias may beat a subsequence, but never a literal name or
+    // window match. Score fields independently rather than matching across
+    // the boundary between two unrelated translations or keywords.
+    const ALIAS_BAND: usize = usize::MAX / 2;
+    if needle.is_empty() || primary.is_some_and(|score| score > ALIAS_BAND) {
+        return primary;
+    }
+    let alias = entry
+        .aliases
+        .iter()
+        .filter_map(|field| {
+            fuzzy_score(field, needle).map(|score| {
+                if score > ALIAS_BAND {
+                    score.saturating_sub(ALIAS_BAND).min(ALIAS_BAND)
+                } else {
+                    score.saturating_sub(1)
+                }
+            })
+        })
+        .max();
+    primary.max(alias)
+}
+
 /// Rank open windows and applications into one list.
 ///
 /// The rules, in the order they apply:
@@ -773,7 +800,7 @@ pub fn rank_rows(
     let mut ranked_apps: Vec<(usize, usize)> = if want_apps {
         apps.iter()
             .enumerate()
-            .filter_map(|(index, app)| fuzzy_score(app.search, needle).map(|score| (index, score)))
+            .filter_map(|(index, app)| app_score(app, needle).map(|score| (index, score)))
             .collect()
     } else {
         Vec::new()
@@ -1669,9 +1696,30 @@ mod tests {
         }
     }
 
+    #[test]
+    fn application_aliases_rank_below_literal_names_and_do_not_cross_fields() {
+        let aliases = ["相册".to_string(), "alias two".to_string()];
+        let entry = AppCandidate {
+            aliases: &aliases,
+            ..app("gallery", "gallery", 0)
+        };
+        assert!(app_score(&entry, "相册").is_some());
+        assert!(app_score(&entry, "册alias").is_none());
+        assert!(
+            app_score(&entry, "alias two")
+                < app_score(&app("real alias two", "real", 0), "alias two")
+        );
+        assert_eq!(app_score(&entry, ""), Some(0));
+        assert_eq!(
+            app_score(&entry, "gallery"),
+            fuzzy_score("gallery", "gallery")
+        );
+    }
+
     fn app<'a>(search: &'a str, sort_key: &'a str, usage: u32) -> AppCandidate<'a> {
         AppCandidate {
             search,
+            aliases: &[],
             sort_key,
             usage,
         }

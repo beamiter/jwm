@@ -70,6 +70,8 @@ pub struct LaunchEntry {
     /// down by a directory read per entry.
     pub icon: Option<String>,
     search: String,
+    /// Localized names and desktop keywords are search-only, never persisted as IDs.
+    aliases: Vec<String>,
     /// Lowercased display name retained beside the catalog entry so every
     /// query can use it as a sort tie-breaker without allocating in the
     /// comparator.
@@ -91,6 +93,7 @@ impl LaunchEntry {
             terminal,
             icon,
             search,
+            aliases: Vec::new(),
             sort_key,
         }
     }
@@ -5752,6 +5755,7 @@ impl SystemUiState {
                     .iter()
                     .map(|entry| launcher::AppCandidate {
                         search: &entry.search,
+                        aliases: &entry.aliases,
                         sort_key: &entry.sort_key,
                         usage: usage.score(&entry.name, now),
                     })
@@ -6182,6 +6186,7 @@ fn scan_desktop_dir(
             let mut has_entry = false;
             let mut name = None;
             let mut exec = None;
+            let mut aliases = Vec::new();
             let mut icon = None;
             let mut hidden = false;
             let mut terminal = false;
@@ -6194,27 +6199,29 @@ fn scan_desktop_dir(
                 if !in_entry {
                     continue;
                 }
-                if let Some(v) = line.strip_prefix("Name=") {
-                    name.get_or_insert_with(|| v.to_string());
-                }
-                if let Some(v) = line.strip_prefix("Exec=") {
-                    exec = Some(v.to_string());
-                }
-                // Like `Name`, the first plain `Icon=` wins: a localized
-                // `Icon[de]` never carries a different picture, and an action
-                // group's `Icon` further down describes a menu item. Empty is
-                // as good as absent — the row just keeps its text.
-                if let Some(v) = line.strip_prefix("Icon=") {
-                    let v = v.trim();
-                    if !v.is_empty() {
-                        icon.get_or_insert_with(|| v.to_string());
+                let Some((key, value)) = line.split_once('=') else {
+                    continue;
+                };
+                match key {
+                    "Name" => {
+                        name.get_or_insert_with(|| value.to_string());
                     }
-                }
-                if matches!(line, "Hidden=true" | "NoDisplay=true") {
-                    hidden = true;
-                }
-                if line == "Terminal=true" {
-                    terminal = true;
+                    "Exec" => exec = Some(value.to_string()),
+                    // The first nonempty plain Icon wins. Localized Icon
+                    // and Desktop Action values do not change this row.
+                    "Icon" if !value.trim().is_empty() => {
+                        icon.get_or_insert_with(|| value.trim().to_string());
+                    }
+                    "Hidden" | "NoDisplay" if value == "true" => hidden = true,
+                    "Terminal" if value == "true" => terminal = true,
+                    key if aliases.len() < MAX_DESKTOP_SEARCH_ALIASES => {
+                        if localized_desktop_key(key, "Name") {
+                            push_desktop_alias(&mut aliases, decode_desktop_string_escapes(value));
+                        } else if key == "Keywords" || localized_desktop_key(key, "Keywords") {
+                            push_desktop_keyword_aliases(&mut aliases, value);
+                        }
+                    }
+                    _ => {}
                 }
             }
             // Desktop IDs are relative paths with '/' replaced by '-'. An
@@ -6248,8 +6255,51 @@ fn scan_desktop_dir(
             // hide a different, launchable entry with the same display name.
             seen.insert(name.clone());
             let search = format!("{} {}", name.to_lowercase(), exec.to_lowercase());
-            entries.push(LaunchEntry::new(name, command, terminal, icon, search));
+            let mut entry = LaunchEntry::new(name, command, terminal, icon, search);
+            entry.aliases = aliases;
+            entries.push(entry);
         }
+    }
+}
+
+// Bound per-keystroke work in addition to the catalog's existing byte budget.
+const MAX_DESKTOP_SEARCH_ALIASES: usize = 64;
+
+fn localized_desktop_key(key: &str, base: &str) -> bool {
+    key.strip_prefix(base)
+        .and_then(|suffix| suffix.strip_prefix('[')?.strip_suffix(']'))
+        .is_some_and(|locale| {
+            !locale.is_empty()
+                && locale
+                    .bytes()
+                    .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, b'_' | b'-' | b'.' | b'@'))
+        })
+}
+
+fn push_desktop_alias(aliases: &mut Vec<String>, value: String) {
+    if aliases.len() < MAX_DESKTOP_SEARCH_ALIASES {
+        let value = value.trim().to_lowercase();
+        if !value.is_empty() && !aliases.contains(&value) {
+            aliases.push(value);
+        }
+    }
+}
+
+fn push_desktop_keyword_aliases(aliases: &mut Vec<String>, list: &str) {
+    let mut escaped = false;
+    // Only unescaped semicolons split the list. In particular, an even
+    // number of backslashes before a separator does not escape it.
+    for word in list.split(|ch| {
+        if std::mem::take(&mut escaped) {
+            return false;
+        }
+        escaped = ch == '\\';
+        ch == ';'
+    }) {
+        if aliases.len() >= MAX_DESKTOP_SEARCH_ALIASES {
+            break;
+        }
+        push_desktop_alias(aliases, decode_desktop_value_escapes(word, true));
     }
 }
 
@@ -6357,6 +6407,10 @@ fn expand_exec_fields(
 /// layer and `C:\windows` / `Start Menu` after quoting. An unknown escape is
 /// kept as written for the quoting layer to interpret.
 fn decode_desktop_string_escapes(value: &str) -> String {
+    decode_desktop_value_escapes(value, false)
+}
+
+fn decode_desktop_value_escapes(value: &str, is_list: bool) -> String {
     let mut decoded = String::with_capacity(value.len());
     let mut chars = value.chars();
     while let Some(ch) = chars.next() {
@@ -6370,6 +6424,7 @@ fn decode_desktop_string_escapes(value: &str) -> String {
             Some('t') => decoded.push('\t'),
             Some('r') => decoded.push('\r'),
             Some('\\') => decoded.push('\\'),
+            Some(';') if is_list => decoded.push(';'),
             Some(other) => {
                 decoded.push('\\');
                 decoded.push(other);
@@ -9694,6 +9749,94 @@ mod tests {
             ]
         );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn launcher_finds_shipped_apps_by_desktop_search_aliases() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("crates/jwm_apps/dist");
+        let mut entries = Vec::new();
+        scan_desktop_dir(
+            &root,
+            &mut entries,
+            &mut HashSet::new(),
+            &mut ApplicationScanBudget::default(),
+        );
+        assert_eq!(entries.len(), 2);
+        let entries: Arc<[LaunchEntry]> = entries.into();
+        for (query, name, executable) in [
+            ("备忘录", "JWM Notes", "jwm-notes"),
+            ("JWM 备忘录", "JWM Notes", "jwm-notes"),
+            ("图片查看器", "JWM Image Viewer", "jwm-image-viewer"),
+            ("照片", "JWM Image Viewer", "jwm-image-viewer"),
+            ("notes", "JWM Notes", "jwm-notes"),
+            ("image viewer", "JWM Image Viewer", "jwm-image-viewer"),
+            ("memo", "JWM Notes", "jwm-notes"),
+            ("editor", "JWM Notes", "jwm-notes"),
+        ] {
+            let mut state = launcher_with(&[], "");
+            state.set_launcher_entries(Arc::clone(&entries));
+            for ch in query.chars() {
+                state.push_char(ch);
+            }
+            let choice = state
+                .selected_launch()
+                .unwrap_or_else(|| panic!("missing {query:?}"));
+            assert_eq!(choice.id, name, "query {query:?}");
+            assert_eq!(choice.command, [executable, "--"], "query {query:?}");
+            assert!(!choice.terminal);
+        }
+    }
+
+    #[test]
+    fn desktop_search_aliases_are_independent_and_only_from_the_main_group() {
+        let root = std::env::temp_dir().join(format!(
+            "jwm-desktop-aliases-{}-{:016x}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("aliases.desktop"),
+            r"[Desktop Entry]
+Name=Primary
+Name[fr_CA]=Éditeur\sPhoto
+Name[]=invalid locale
+Exec=unchanged %c
+Keywords=;Landscape;Arc\;de\sTriomphe;back\\;Last;LANDSCAPE;;
+Keywords[zh_CN]=相册;
+[Desktop Action Other]
+Name[zh_CN]=操作别名
+Keywords=action-only;
+",
+        )
+        .unwrap();
+        let mut entries = Vec::new();
+        scan_desktop_dir(
+            &root,
+            &mut entries,
+            &mut HashSet::new(),
+            &mut ApplicationScanBudget::default(),
+        );
+        fs::remove_dir_all(root).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "Primary");
+        assert_eq!(entries[0].command, ["unchanged", "Primary"]);
+        assert_eq!(
+            entries[0].aliases,
+            [
+                "éditeur photo",
+                "landscape",
+                "arc;de triomphe",
+                "back\\",
+                "last",
+                "相册",
+            ]
+        );
+        let mut many = Vec::new();
+        for i in 0..100 {
+            push_desktop_alias(&mut many, i.to_string());
+        }
+        assert_eq!(many.len(), MAX_DESKTOP_SEARCH_ALIASES);
     }
 
     #[test]
