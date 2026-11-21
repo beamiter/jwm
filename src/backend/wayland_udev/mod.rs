@@ -13,6 +13,7 @@ pub mod compositor;
 
 pub mod output_management;
 
+#[cfg(any(feature = "backend-wayland-udev", test))]
 pub mod output_power;
 
 pub mod screencopy;

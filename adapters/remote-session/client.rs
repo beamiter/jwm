@@ -321,9 +321,18 @@ enum Event {
 #[derive(Serialize)]
 #[serde(tag = "command", rename_all = "snake_case")]
 enum Request {
-    ReleaseInput { request: u32 },
-    SelectSource { request: u32, selection: Selection },
-    RequestInput { request: u32, selection: Selection },
+    ReleaseInput {
+        request: u32,
+    },
+    SelectSource {
+        request: u32,
+        selection: Selection,
+    },
+    #[serde(rename = "request_input")]
+    EnableInput {
+        request: u32,
+        selection: Selection,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
@@ -744,7 +753,7 @@ impl RemoteDesktop {
                 .is_some_and(|source| &source.selection == selection)
         {
             let request = self.next_request();
-            self.send(Request::RequestInput {
+            self.send(Request::EnableInput {
                 request,
                 selection: selection.clone(),
             });
@@ -1045,6 +1054,25 @@ mod tests {
                 "--",
                 "127.0.0.1"
             ]
+        );
+    }
+
+    #[test]
+    fn enabling_input_keeps_the_request_input_wire_command() {
+        let value = serde_json::to_value(Request::EnableInput {
+            request: 42,
+            selection: Selection {
+                session_id: "0123456789abcdef0123456789abcdef".into(),
+                source_epoch: "3".into(),
+                source_id: 7,
+            },
+        })
+        .unwrap();
+        assert_eq!(
+            value,
+            json!({"command":"request_input","request":42,
+                   "selection":{"session_id":"0123456789abcdef0123456789abcdef",
+                                "source_epoch":"3","source_id":7}})
         );
     }
 

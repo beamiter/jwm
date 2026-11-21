@@ -513,6 +513,7 @@ pub struct JwmWaylandState {
     pub outputs: Vec<Output>,
 
     /// Confirmed KMS output power modes and per-output protocol controls.
+    #[cfg(any(feature = "backend-wayland-udev", test))]
     pub(crate) output_power: crate::backend::wayland_udev::output_power::OutputPowerState,
 
     /// Runtime bind counters for JWM-owned Wayland globals. Smithay-managed
@@ -3538,11 +3539,14 @@ impl JwmWaylandState {
             None
         };
 
-        if optional_global_enabled(
-            behavior.wayland_enable_output_power,
-            "JWM_ENABLE_OUTPUT_POWER",
-        ) {
-            // wlr-output-power-management-unstable-v1 – DPMS for swayidle.
+        // Only the KMS loop applies power requests and confirms the resulting mode.
+        #[cfg(any(feature = "backend-wayland-udev", test))]
+        if frame_capture_supported
+            && optional_global_enabled(
+                behavior.wayland_enable_output_power,
+                "JWM_ENABLE_OUTPUT_POWER",
+            )
+        {
             crate::backend::wayland_udev::output_power::init_output_power_management(dh);
         }
 
@@ -3785,6 +3789,7 @@ impl JwmWaylandState {
                 layer_keyboard_restore: HashMap::new(),
 
                 outputs: Vec::new(),
+                #[cfg(any(feature = "backend-wayland-udev", test))]
                 output_power: Default::default(),
                 protocol_bind_counts: HashMap::new(),
                 pending_output_acks: std::collections::VecDeque::new(),
@@ -6653,8 +6658,7 @@ mod xwayland_moveresize_tests {
 
     #[test]
     fn xwayland_moveresize_stubs_feed_the_shared_drag_pipeline() {
-        const SOURCE: &str = include_str!("state.rs");
-        let production = SOURCE.split_once("#[cfg(test)]").unwrap().0;
+        let production = super::production_state_source();
         assert!(
             production.contains("fn xwm_resize_edge_direction"),
             "XWayland resize must map edges onto _NET_WM_MOVERESIZE codes"
@@ -6673,8 +6677,7 @@ mod xwayland_moveresize_tests {
 
     #[test]
     fn xdg_moveresize_requests_feed_the_shared_drag_pipeline() {
-        const SOURCE: &str = include_str!("state.rs");
-        let production = SOURCE.split_once("#[cfg(test)]").unwrap().0;
+        let production = super::production_state_source();
         assert!(
             production.contains("fn xdg_resize_edge_direction")
                 && production.contains("fn xdg_seat_has_interactive_grab"),
@@ -6752,8 +6755,7 @@ mod smithay_feature_follow_tests {
 
     #[test]
     fn property_notify_forwards_motif_hints() {
-        const SOURCE: &str = include_str!("state.rs");
-        let production = SOURCE.split_once("#[cfg(test)]").unwrap().0;
+        let production = super::production_state_source();
         assert!(
             production.contains("WmWindowProperty::MotifHints")
                 && production.contains("PropertyKind::MotifHints"),
@@ -6921,8 +6923,7 @@ mod xwayland_legacy_assoc_tests {
 
     #[test]
     fn unmanaged_pacing_has_no_periodic_barrier_tree_scan() {
-        let state = include_str!("state.rs");
-        let production = state.split_once("#[cfg(test)]").unwrap().0;
+        let production = super::production_state_source();
         assert!(production.contains("CommitTimingManagerState::unmanaged"));
         assert!(production.contains("FifoManagerState::unmanaged"));
         assert!(!production.contains("pub fn signal_due_commit_timing_barriers"));
@@ -6935,8 +6936,7 @@ mod xwayland_legacy_assoc_tests {
 
     #[test]
     fn initial_configure_fallback_is_per_toplevel_and_one_shot() {
-        let state = include_str!("state.rs");
-        let production = state.split_once("#[cfg(test)]").unwrap().0;
+        let production = super::production_state_source();
         let arm = format!("Timer::from_duration({})", "INITIAL_CONFIGURE_TIMEOUT");
         assert_eq!(
             production.matches(&arm).count(),
@@ -7206,12 +7206,7 @@ mod clipboard_io_tests {
 
     #[test]
     fn send_selection_mime_branching_is_pinned_in_source() {
-        const SOURCE: &str = include_str!("state.rs");
-        // Exclude this test module so pin strings cannot false-positive.
-        let production = SOURCE
-            .split_once("mod clipboard_io_tests")
-            .map(|(code, _)| code)
-            .unwrap_or(SOURCE);
+        let production = super::production_state_source();
         let handler = production
             .split("impl SelectionHandler for JwmWaylandState")
             .nth(1)
@@ -7792,8 +7787,7 @@ mod protocol_hardening_tests {
 
     #[test]
     fn xwayland_configure_request_no_longer_self_publishes_geometry() {
-        const SOURCE: &str = include_str!("state.rs");
-        let production = SOURCE.split_once("#[cfg(test)]").expect("test split").0;
+        let production = super::production_state_source();
         let body = production
             .split_once("    fn configure_request(\n")
             .expect("XwmHandler::configure_request")
@@ -9369,8 +9363,7 @@ mod protocol_hardening_tests {
 
     #[test]
     fn every_window_retirement_stops_its_capture_sessions() {
-        const SOURCE: &str = include_str!("state.rs");
-        let production = SOURCE.split_once("#[cfg(test)]").expect("test split").0;
+        let production = super::production_state_source();
         // The helper is the only place a window's geometry, the liveness key
         // of its capture sessions, is dropped.
         assert_eq!(
@@ -9398,8 +9391,7 @@ mod protocol_hardening_tests {
 
     #[test]
     fn workspaces_follow_the_configured_tag_count() {
-        const SOURCE: &str = include_str!("state.rs");
-        let production = SOURCE.split_once("#[cfg(test)]").expect("test split").0;
+        let production = super::production_state_source();
         let call = production
             .split_once("init_workspace_protocol(")
             .expect("ext-workspace is initialised")
@@ -9652,4 +9644,14 @@ mod presentation_generation_tests {
         assert_eq!(next_presentation_generation(Some(u64::MAX)), None);
         assert_eq!(next_presentation_generation(None), None);
     }
+}
+
+/// Source for structural assertions whose needles also occur in the tests.
+#[cfg(test)]
+pub(crate) fn production_state_source() -> &'static str {
+    // A production struct or function may contain test-only fields or branches.
+    include_str!("state.rs")
+        .split_once("\n#[cfg(test)]\nmod xwayland_moveresize_tests {")
+        .expect("Wayland state test modules follow the main implementation")
+        .0
 }

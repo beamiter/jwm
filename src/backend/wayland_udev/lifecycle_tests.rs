@@ -1317,26 +1317,31 @@ fn advertised_interfaces(drm_output_pipeline: bool) -> Vec<String> {
 }
 
 #[test]
-fn output_management_is_advertised_only_where_output_configure_is_serviced() {
-    // A nested backend never pops the ack an Apply queues: wlr-randr and
-    // kanshi blocked forever there.
-    assert!(
-        !advertised_interfaces(false)
-            .iter()
-            .any(|interface| interface == "zwlr_output_manager_v1"),
-        "nested backends must not advertise wlr-output-management"
-    );
-    if crate::config::CONFIG
-        .load()
-        .behavior()
-        .wayland_enable_output_management
-    {
+fn output_control_is_advertised_only_with_a_kms_pipeline() {
+    let nested = advertised_interfaces(false);
+    let kms = advertised_interfaces(true);
+    let config = crate::config::CONFIG.load();
+    let behavior = config.behavior();
+    for (interface, enabled) in [
+        (
+            "zwlr_output_manager_v1",
+            behavior.wayland_enable_output_management,
+        ),
+        (
+            "zwlr_output_power_manager_v1",
+            behavior.wayland_enable_output_power,
+        ),
+    ] {
         assert!(
-            advertised_interfaces(true)
-                .iter()
-                .any(|interface| interface == "zwlr_output_manager_v1"),
-            "the DRM/KMS backend keeps wlr-output-management"
+            !nested.iter().any(|candidate| candidate == interface),
+            "the nested backend cannot service {interface}"
         );
+        if enabled {
+            assert!(
+                kms.iter().any(|candidate| candidate == interface),
+                "the DRM/KMS backend advertises {interface} when enabled"
+            );
+        }
     }
 }
 
@@ -1427,7 +1432,7 @@ fn every_wayland_backend_confirms_session_locks_from_presented_frames() {
 
 #[test]
 fn managed_xwayland_windows_reach_foreign_toplevel_managers() {
-    let source = production(include_str!("state.rs"));
+    let source = super::production_state_source();
     let xwm = source
         .split_once("impl XwmHandler for JwmWaylandState")
         .expect("XwmHandler impl")
@@ -1482,7 +1487,7 @@ fn every_wayland_property_ops_has_get_window_pid() {
             "{name}: get_window_pid must ask JwmWaylandState"
         );
     }
-    let state = production(include_str!("state.rs"));
+    let state = super::production_state_source();
     assert!(
         state.contains("fn get_window_pid(&self, win: WindowId)")
             && state.contains("x11.pid()")

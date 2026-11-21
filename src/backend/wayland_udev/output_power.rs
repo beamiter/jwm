@@ -43,6 +43,10 @@ pub(crate) struct OutputPowerState {
 
 impl OutputPowerState {
     pub(crate) fn sync(&mut self, modes: impl IntoIterator<Item = (Output, bool)>) -> bool {
+        #[allow(
+            clippy::mutable_key_type,
+            reason = "Smithay Output hashes and compares its stable Arc identity"
+        )]
         let mut modes: HashMap<_, _> = modes.into_iter().collect();
         let mut sent = false;
         self.outputs.retain(|output, power| {

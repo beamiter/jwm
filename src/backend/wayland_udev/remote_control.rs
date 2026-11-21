@@ -131,6 +131,7 @@ pub(crate) fn init(dh: &DisplayHandle) {
     let version = TEST_MANAGER_VERSION.get();
     dh.create_global::<JwmWaylandState, JwmRemoteControlManagerV1, _>(version, ManagerData);
 }
+#[cfg(feature = "backend-wayland-udev")]
 pub(super) fn needs_window_input_layout(
     state: &JwmWaylandState,
     authority: &Arc<CaptureAuthority>,
@@ -786,9 +787,12 @@ impl Dispatch<JwmRemoteControlLeaseV1, LeaseData> for JwmWaylandState {
                 let mut drag = (kind == 6).then_some(Drag::Root);
                 let mut child = None;
                 if lease.mode == LeaseMode::WindowGestures {
+                    #[cfg(feature = "backend-wayland-udev")]
                     let layout = frame
                         .data::<CaptureFrameData>()
                         .and_then(|data| data.window_input_layout.lock().unwrap().clone());
+                    #[cfg(not(feature = "backend-wayland-udev"))]
+                    let layout = None::<Arc<WindowInputLayout>>;
                     let Some(layout) = layout.filter(|layout| {
                         WindowInputLayout::snapshot(&lease.authority.surface).as_ref()
                             == Some(layout.as_ref())
