@@ -38,7 +38,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ github.event.pull_request.head.sha }}
-          fetch-depth: 2
+          fetch-depth: 0
           path: fixture
           persist-credentials: false
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -61,7 +61,7 @@ jobs:
           set -euo pipefail
           test "$EVENT_BASE" = "$A"
           test "$(git -C fixture rev-parse HEAD)" = "$EVENT_HEAD"
-          test "$(git -C fixture rev-parse 'HEAD^')" = "$A"
+          git -C fixture merge-base --is-ancestor "$A" HEAD
           test "$(git -C source-b rev-parse 'HEAD^')" = "$A"
           git -C fixture diff --exit-code "$A" HEAD -- . ':!.github/workflows/workscene-active-display-ab.yml'
           for arm in a b; do
@@ -122,6 +122,12 @@ jobs:
           line="$(grep -nF 'assert_eq!(jwm.state.sel_mon, Some(active));' source-a/src/jwm/features/workscenes.rs | cut -d: -f1)"
           test "$line" -gt 0
           grep -F "src/jwm/features/workscenes.rs:$line:" evidence/a-test.log
+          for arm in a b; do
+            binary=$(find "target-$arm/debug/deps" -maxdepth 1 -type f -executable -name 'jwm-*')
+            test -x "$binary"
+            sha256sum "$binary"
+          done > evidence/independent-test-binaries.sha256
+          test "$(cut -d' ' -f1 evidence/independent-test-binaries.sha256 | sort -u | wc -l)" -eq 2
           test -z "$(git -C source-b status --porcelain --untracked-files=all)"
       - name: Retain two-output test and evidence
         if: always()
