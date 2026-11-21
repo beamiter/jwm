@@ -282,7 +282,7 @@ impl Dispatch<ZwlrOutputPowerV1, OutputPowerData> for JwmWaylandState {
 
 #[cfg(test)]
 mod tests {
-    use super::init_output_power_management;
+    use super::{OutputPowerState, init_output_power_management};
     use crate::backend::api::BackendEvent;
     use crate::backend::wayland::state::JwmWaylandState;
     use crate::backend::wayland_udev::image_copy_capture::wire_test_client::{

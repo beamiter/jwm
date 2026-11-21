@@ -8,6 +8,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: wayland-build-restore-proof
+  cancel-in-progress: true
+
 jobs:
   exact-native-and-nested:
     runs-on: ubuntu-24.04
@@ -20,11 +24,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-          ref: 07a805b1b439765739c202515745284733ee4e4b
+          ref: 71522fd39dc5af9e82b84b79d131057d53299fcb
       - name: Verify exact product source
         run: |
-          test "$(git rev-parse HEAD)" = "07a805b1b439765739c202515745284733ee4e4b"
-          test "$(git rev-parse HEAD^{tree})" = "600a136206eb0623361eae1080257ca6b01dc101"
+          test "$(git rev-parse HEAD)" = "71522fd39dc5af9e82b84b79d131057d53299fcb"
+          test "$(git rev-parse HEAD^{tree})" = "fd4ee4834a0dc4e296627ad43b222c4ad9362e23"
       - name: Install native build and software renderer dependencies
         timeout-minutes: 10
         run: |

@@ -3007,14 +3007,16 @@ fn viewer_loop(
             Err(error) if viewer.user_close_requested() => {
                 return Err(user_close_cleanup_failure(error));
             }
-            Err(_)
+            Err(error) => {
                 if viewer.managed_wayland_focus_left()
                     && let Some(controller) = local_controller
-                    && release_managed_wayland_control(viewer, writer, state, controller)? =>
-            {
-                Vec::new()
+                    && release_managed_wayland_control(viewer, writer, state, controller)?
+                {
+                    Vec::new()
+                } else {
+                    return Err(error);
+                }
             }
-            Err(error) => return Err(error),
         };
         let polled_layout = viewer.managed_wayland_layout_generation();
         if let Some((deadline, prepared)) = rearm
@@ -3095,16 +3097,16 @@ fn viewer_loop(
                         events.clear();
                         events.push(ViewerEvent::Close);
                     }
-                    Err(_)
+                    Err(error) => {
                         if viewer.managed_wayland_focus_left()
                             && let Some(controller) = local_controller
-                            && release_managed_wayland_control(
-                                viewer, writer, state, controller,
-                            )? =>
-                    {
-                        events.clear()
+                            && release_managed_wayland_control(viewer, writer, state, controller)?
+                        {
+                            events.clear();
+                        } else {
+                            return Err(error);
+                        }
                     }
-                    Err(error) => return Err(error),
                 }
             }
             let validate_resume = events.is_empty()
