@@ -1489,6 +1489,7 @@ impl SystemUiState {
         entries: Arc<[LaunchEntry]>,
         windows: Vec<crate::jwm::features::launcher::WindowEntry>,
         indexing: bool,
+        scenes: Vec<super::workscenes::Workscene>,
     ) -> Self {
         let usage = crate::jwm::features::launcher::UsageStore::load();
         let mut state = Self::Launcher {
@@ -1497,7 +1498,7 @@ impl SystemUiState {
             entries,
             windows,
             sessions: Vec::new(),
-            scenes: Vec::new(),
+            scenes,
             matches: Vec::new(),
             selected: 0,
             usage,

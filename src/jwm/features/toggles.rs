@@ -1470,6 +1470,7 @@ impl Jwm {
             std::sync::Arc::clone(&self.features.launcher_catalog),
             self.launcher_window_snapshot(),
             indexing,
+            CONFIG.load().workscenes().to_vec(),
         );
         launcher.set_agent_sessions(&self.agent_sessions_snapshot());
         launcher
@@ -6337,7 +6338,8 @@ mod shell_entry_tests {
                 .and_hms_opt(12, 0, 0)
                 .unwrap(),
         );
-        let launcher = SystemUiState::open_launcher(std::sync::Arc::from([]), Vec::new(), false);
+        let launcher =
+            SystemUiState::open_launcher(std::sync::Arc::from([]), Vec::new(), false, Vec::new());
         let hub = SystemUiState::control_center(&ControlCenterInputs::default());
 
         assert!(status_bar_shell_is_mine(
@@ -9185,6 +9187,24 @@ pub(crate) mod keyboard_grab_tests {
         jwm.ensure_control_snapshot_refresh_with(now, |_| panic!("running read is not duplicated"));
         assert_eq!(calls.get(), 2);
         assert!(job_in_flight(jwm.features.control_snapshot_job.as_ref()));
+    }
+
+    #[test]
+    fn configured_workscene_is_searchable_from_the_real_launcher_entry() {
+        use crate::jwm::features::connectivity::BackgroundJob;
+
+        let mut backend = GrabSpyBackend::new();
+        let mut jwm = jwm(&mut backend);
+        let config = CONFIG.load();
+        let scene = config.workscenes().first().expect("default scene").clone();
+        drop(config);
+
+        let mut launcher = jwm.cached_launcher_state_with(BackgroundJob::refused);
+        for ch in format!("scenes:{}", scene.name).chars() {
+            launcher.push_char(ch);
+        }
+        assert_eq!(launcher.selected_scene(), Some(&scene));
+        assert!(launcher.selected_launch().is_none());
     }
 
     #[test]
