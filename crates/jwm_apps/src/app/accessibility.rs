@@ -10,6 +10,7 @@ const EDITOR: NodeId = NodeId(2);
 const RESULTS: NodeId = NodeId(3);
 const MODAL: NodeId = NodeId(4);
 const REFRESH: NodeId = NodeId(5);
+const RELOAD: NodeId = NodeId(6);
 
 pub(crate) struct Semantics {
     rows: HashMap<PathBuf, NodeId>,
@@ -23,7 +24,7 @@ impl Default for Semantics {
         Self {
             rows: HashMap::new(),
             row_generation: None,
-            next_id: 6,
+            next_id: 7,
             previous: None,
         }
     }
@@ -120,6 +121,16 @@ impl Semantics {
                 let mut results = named(Role::Group, "搜索结果");
                 results.set_children(result_ids);
                 nodes.push((RESULTS, results));
+            } else if let Some(hit) = app
+                .hits
+                .iter()
+                .find(|hit| hit.action == Action::ReloadExternal)
+            {
+                let mut reload = named(Role::Button, &hit.label);
+                reload.add_action(Request::Click);
+                reload.set_bounds(bounds(hit.rect, scale));
+                children.push(RELOAD);
+                nodes.push((RELOAD, reload));
             }
             let mut editor = named(Role::MultilineTextInput, "备忘录正文");
             editor.set_read_only(); // No accessibility text/value/selection interface yet.
@@ -162,6 +173,7 @@ impl Semantics {
             (SEARCH, Request::Focus) if notes.managed => Action::Search,
             (EDITOR, Request::Focus) => Action::Edit,
             (REFRESH, Request::Click) if notes.managed => Action::RefreshNotebook,
+            (RELOAD, Request::Click) if !notes.managed => Action::ReloadExternal,
             (id, Request::Click) if notes.managed => {
                 let Some(generation) = notes.current_rows() else {
                     return false;

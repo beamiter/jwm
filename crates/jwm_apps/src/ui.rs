@@ -141,6 +141,7 @@ pub(crate) enum Icon {
     Folder,
     Save,
     Export,
+    Reload,
     Trash,
     Previous,
     Next,
@@ -254,7 +255,7 @@ pub fn icon(cr: &Context, kind: Icon, x: f64, y: f64) {
                 rect(8., 8., 8., 8.);
             }
         }
-        Icon::Rotate => {
+        Icon::Rotate | Icon::Reload => {
             cr.arc(12., 12., 8., 0., std::f64::consts::PI * 1.5);
             path(&[(8., 1.), (12., 4.), (8., 7.)]);
         }
