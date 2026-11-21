@@ -2388,18 +2388,34 @@ struct HostSourceState {
     presented_geometry: Option<u64>,
     presented_frame: Option<DrawnScope>,
     presented_native_proof: Option<DrawnScope>,
+    last_acknowledged_frame: Option<DrawnScope>,
 }
 
 impl HostSourceState {
-    fn observe_presentation(&mut self, scope: DrawnScope, purpose: FramePurpose) {
-        if purpose != FramePurpose::VisualRepair {
-            self.presented_geometry = Some(scope.geometry_epoch);
-            self.presented_frame = Some(scope);
+    fn acknowledge_drawn_frame(
+        &mut self,
+        scope: DrawnScope,
+        purpose: FramePurpose,
+        strict_geometry: bool,
+    ) {
+        if purpose == FramePurpose::VisualRepair {
+            return;
         }
+        self.last_acknowledged_frame = Some(scope);
+        if strict_geometry && scope.geometry_epoch != self.geometry_epoch {
+            return;
+        }
+        self.presented_geometry = Some(scope.geometry_epoch);
+        self.presented_frame = Some(scope);
         if purpose == FramePurpose::NativeProof {
             self.presented_native_proof = Some(scope);
         }
     }
+}
+
+struct ManagedControlPrepare {
+    scope: DrawnScope,
+    deadline: Instant,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -2631,7 +2647,7 @@ struct SourceControl {
     text_request: Mutex<Option<super::wayland_text_wire::TextCommit>>,
     control_enabled: AtomicBool,
     managed_source_control: AtomicBool,
-    control_prepare: Mutex<Option<DrawnScope>>,
+    control_prepare: Mutex<Option<ManagedControlPrepare>>,
     control_lease_epoch: AtomicU64,
     control_gestures: AtomicBool,
     resumable_control_enabled: AtomicBool,
@@ -2657,6 +2673,67 @@ struct SourceControl {
 }
 
 impl SourceControl {
+    fn queue_managed_control_prepare(&self, scope: DrawnScope, now: Instant) -> RemoteResult<()> {
+        let mut prepare = self.control_prepare.lock().unwrap();
+        let state = self.state.lock().unwrap();
+        let current = state.policy.current();
+        if !self.managed_source_control.load(Ordering::Acquire)
+            || self.control_enabled.load(Ordering::Acquire)
+            || prepare.is_some()
+            || !state.policy.accepts_input(current)
+            || current.epoch != scope.source_epoch
+            || state.last_acknowledged_frame != Some(scope)
+        {
+            return Err(
+                invalid_data("managed control needs an acknowledged current source").into(),
+            );
+        }
+        *prepare = Some(ManagedControlPrepare {
+            scope,
+            deadline: now + super::wayland_control_wire::MANAGED_PREPARE_TIMEOUT,
+        });
+        eprintln!(
+            "jwm-remote: queued managed input preparation for Wayland source epoch {}",
+            current.epoch
+        );
+        Ok(())
+    }
+
+    fn ready_managed_control_prepare(
+        &self,
+        geometry_epoch: u64,
+        now: Instant,
+    ) -> RemoteResult<Option<SourceVersion>> {
+        let pending = self.control_prepare.lock().unwrap();
+        let Some(prepare) = pending.as_ref() else {
+            return Ok(None);
+        };
+        let state = self.state.lock().unwrap();
+        let source = state.policy.current();
+        if source.epoch != prepare.scope.source_epoch || !state.policy.accepts_input(source) {
+            return Err(
+                invalid_data("managed control preparation lost its presented grant").into(),
+            );
+        }
+        if now >= prepare.deadline {
+            return Err(
+                invalid_data("managed control preparation needs a fresh presentation").into(),
+            );
+        }
+        // A geometry change can overtake a legitimate prepare in transit.
+        // Keep the request for this source and wait for a real ACK at the new
+        // geometry before starting a fresh native control proof.
+        Ok(state
+            .presented_frame
+            .filter(|frame| {
+                frame.source_epoch == source.epoch
+                    && frame.geometry_epoch == state.geometry_epoch
+                    && frame.geometry_epoch == geometry_epoch
+                    && frame.frame_sequence >= prepare.scope.frame_sequence
+            })
+            .map(|_| source))
+    }
+
     fn notify_proof_ack(&self, scope: DrawnScope) -> io::Result<()> {
         #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
         if self.legacy_disable_ack_wake {
@@ -2749,6 +2826,7 @@ impl SourceControl {
                 presented_geometry: None,
                 presented_frame: None,
                 presented_native_proof: None,
+                last_acknowledged_frame: None,
             }),
             changed: Condvar::new(),
             resize_enabled: AtomicBool::new(false),
@@ -5178,6 +5256,7 @@ fn stream_frames(
                     state.presented_geometry = None;
                     state.presented_frame = None;
                     state.presented_native_proof = None;
+                    state.last_acknowledged_frame = None;
                     state
                         .policy
                         .finish_switch(version, |_| Ok::<(), io::Error>(()))??;
@@ -5203,23 +5282,12 @@ fn stream_frames(
             if strict_frame_geometry {
                 synchronize_capture_geometry(sources, capture, &writer, &mailbox);
             }
-            let prepare = sources.control_prepare.lock().unwrap().take();
-            if let Some(prepare) = prepare {
-                let source = {
-                    let state = sources.state.lock().unwrap();
-                    let source = state.policy.current();
-                    if !state.policy.accepts_input(source)
-                        || source.epoch != prepare.source_epoch
-                        || state.geometry_epoch != prepare.geometry_epoch
-                        || !used_control_sources.insert(source.source)
-                    {
-                        return Err(invalid_data(
-                            "managed control preparation lost its presented grant",
-                        )
-                        .into());
-                    }
-                    source
-                };
+            if let Some(source) =
+                sources.ready_managed_control_prepare(capture.geometry_epoch(), Instant::now())?
+            {
+                if !used_control_sources.insert(source.source) {
+                    return Err(invalid_data("managed control preparation reused its grant").into());
+                }
                 capture.enable_control(
                     sources.scroll_enabled.load(Ordering::Acquire),
                     sources.horizontal_scroll_enabled.load(Ordering::Acquire),
@@ -5228,6 +5296,7 @@ fn stream_frames(
                 sources.control_lease_epoch.store(0, Ordering::Release);
                 sources.control_revoke.store(false, Ordering::Release);
                 sources.control_enabled.store(true, Ordering::Release);
+                *sources.control_prepare.lock().unwrap() = None;
                 eprintln!(
                     "jwm-remote: preparing managed control for presented Wayland source epoch {}",
                     source.epoch
@@ -7429,24 +7498,7 @@ fn receive_input_scoped(
                 MessageKind::WaylandControlPrepare => {
                     let sources = sources.ok_or_else(|| invalid_data("control unavailable"))?;
                     let scope = super::wayland_control_wire::decode_prepare(&payload)?;
-                    let mut prepare = sources.control_prepare.lock().unwrap();
-                    let state = sources.state.lock().unwrap();
-                    if !sources.managed_source_control.load(Ordering::Acquire)
-                        || sources.control_enabled.load(Ordering::Acquire)
-                        || prepare.is_some()
-                        || !state.policy.accepts_input(state.policy.current())
-                        || state.policy.current().epoch != scope.source_epoch
-                        || state.geometry_epoch != scope.geometry_epoch
-                        || state.presented_frame != Some(scope)
-                    {
-                        return Err(invalid_data(
-                            "managed control needs the current presented source",
-                        )
-                        .into());
-                    }
-                    *prepare = Some(scope);
-                    drop(state);
-                    drop(prepare);
+                    sources.queue_managed_control_prepare(scope, Instant::now())?;
                     sources.notify_input()?;
                 }
                 MessageKind::WaylandTextCommit => {
@@ -7645,8 +7697,8 @@ fn receive_input_scoped(
                     let sources =
                         sources.ok_or_else(|| invalid_data("source switching unavailable"))?;
                     if sources.managed_source_control.load(Ordering::Acquire)
-                        && (sources.control_enabled.load(Ordering::Acquire)
-                            || sources.control_prepare.lock().unwrap().is_some())
+                        && (sources.control_prepare.lock().unwrap().is_some()
+                            || sources.control_enabled.load(Ordering::Acquire))
                     {
                         return Err(invalid_data(
                             "release native control before switching sources",
@@ -7669,6 +7721,7 @@ fn receive_input_scoped(
                     state.presented_geometry = None;
                     state.presented_frame = None;
                     state.presented_native_proof = None;
+                    state.last_acknowledged_frame = None;
                     state.pending = Some((version, grant));
                     sources.changed.notify_all();
                 }
@@ -7720,11 +7773,11 @@ fn receive_input_scoped(
                                 geometry_epoch: ack.geometry_epoch,
                                 frame_sequence: sequence,
                             };
-                            if !sources.strict_frame_geometry.load(Ordering::Acquire)
-                                || ack.geometry_epoch == state.geometry_epoch
-                            {
-                                state.observe_presentation(scope, ack.purpose);
-                            }
+                            state.acknowledge_drawn_frame(
+                                scope,
+                                ack.purpose,
+                                sources.strict_frame_geometry.load(Ordering::Acquire),
+                            );
                             #[cfg(feature = "remote-h264")]
                             if let (Some(window), Some(feedback)) = (feedback_window, _feedback)
                                 && ack.purpose == FramePurpose::Video
@@ -7737,6 +7790,11 @@ fn receive_input_scoped(
                             }
                             sources.changed.notify_all();
                             drop(state);
+                            if sources.managed_source_control.load(Ordering::Acquire)
+                                && sources.control_prepare.lock().unwrap().is_some()
+                            {
+                                sources.notify_input()?;
+                            }
                             #[cfg(all(
                                 test,
                                 feature = "remote-wayland",
@@ -8878,8 +8936,9 @@ mod tests {
             frame_sequence: 0,
         };
         let mut state = sources.state.lock().unwrap();
-        state.observe_presentation(repair, ack.purpose);
+        state.acknowledge_drawn_frame(repair, ack.purpose, true);
         assert!(state.presented_frame.is_none());
+        assert!(state.last_acknowledged_frame.is_none());
         assert!(state.presented_native_proof.is_none());
         assert!(state.presented_geometry.is_none());
         let mut keyboard = HostKeyboardState::new();
@@ -8898,15 +8957,16 @@ mod tests {
             frame_sequence: 1,
             ..repair
         };
-        state.observe_presentation(proof, FramePurpose::NativeProof);
+        state.acknowledge_drawn_frame(proof, FramePurpose::NativeProof, true);
         let late_repair = DrawnScope {
             frame_sequence: 2,
             ..repair
         };
-        state.observe_presentation(late_repair, FramePurpose::VisualRepair);
+        state.acknowledge_drawn_frame(late_repair, FramePurpose::VisualRepair, true);
         assert_eq!(state.presented_native_proof, Some(proof));
         assert_eq!(state.presented_frame, Some(proof));
-        state.observe_presentation(late_repair, FramePurpose::Video);
+        assert_eq!(state.last_acknowledged_frame, Some(proof));
+        state.acknowledge_drawn_frame(late_repair, FramePurpose::Video, true);
         assert_eq!(state.presented_frame, Some(late_repair));
         assert_eq!(state.presented_native_proof, Some(proof));
         drop(state);
@@ -8929,13 +8989,14 @@ mod tests {
         assert_eq!(ack.purpose, FramePurpose::VisualRepair);
         assert_eq!(credits.outstanding(), 0);
         let mut state = sources.state.lock().unwrap();
-        state.observe_presentation(
+        state.acknowledge_drawn_frame(
             DrawnScope {
                 source_epoch: 1,
                 geometry_epoch: 1,
                 frame_sequence: 1,
             },
             ack.purpose,
+            true,
         );
         assert!(state.presented_native_proof.is_none());
         assert!(state.presented_frame.is_none());
@@ -9899,6 +9960,77 @@ mod tests {
             7,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn managed_input_prepare_waits_for_an_acknowledged_replacement_geometry() {
+        let control = test_source_control();
+        control
+            .managed_source_control
+            .store(true, Ordering::Release);
+        let now = Instant::now();
+        let acknowledged = DrawnScope {
+            source_epoch: 1,
+            geometry_epoch: 7,
+            frame_sequence: 1,
+        };
+        let source = {
+            let mut state = control.state.lock().unwrap();
+            let source = state.policy.current();
+            state
+                .policy
+                .publish_keyframe(source, acknowledged.frame_sequence)
+                .unwrap();
+            state
+                .policy
+                .acknowledge_presentation(source, acknowledged.frame_sequence)
+                .unwrap();
+            state.geometry_epoch = 8;
+            state.acknowledge_drawn_frame(acknowledged, FramePurpose::Video, true);
+            assert!(state.presented_frame.is_none());
+            source
+        };
+        let replacement = DrawnScope {
+            geometry_epoch: 8,
+            frame_sequence: 2,
+            ..acknowledged
+        };
+        assert!(
+            control
+                .queue_managed_control_prepare(replacement, now)
+                .is_err()
+        );
+        control
+            .queue_managed_control_prepare(acknowledged, now)
+            .unwrap();
+        assert_eq!(control.ready_managed_control_prepare(8, now).unwrap(), None);
+        control.state.lock().unwrap().acknowledge_drawn_frame(
+            replacement,
+            FramePurpose::VisualRepair,
+            true,
+        );
+        assert_eq!(control.ready_managed_control_prepare(8, now).unwrap(), None);
+        control.state.lock().unwrap().acknowledge_drawn_frame(
+            DrawnScope {
+                frame_sequence: 3,
+                ..replacement
+            },
+            FramePurpose::Video,
+            true,
+        );
+        assert_eq!(
+            control.ready_managed_control_prepare(8, now).unwrap(),
+            Some(source)
+        );
+        assert_eq!(control.ready_managed_control_prepare(9, now).unwrap(), None);
+        assert!(
+            control
+                .ready_managed_control_prepare(
+                    8,
+                    now + super::super::wayland_control_wire::MANAGED_PREPARE_TIMEOUT
+                )
+                .is_err()
+        );
     }
 
     #[test]

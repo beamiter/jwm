@@ -1430,6 +1430,27 @@ one private viewer process over the observed interval.
 [Sustained resource diagnostic](native-wayland-4k-reuse-sustain.json) ·
 [Procfs observations and replay](native-wayland-4k-reuse-sustain-raw.zip)
 
+A follow-up on the release viewer used the same Ubuntu NVENC source, owned
+Intel Wayland compositor and uncapped SSH route. After a 30-second warmup,
+the viewer presented 103,226 distinct 3840×2160 markers in one hour.
+The full interval averaged 28.67 FPS and the slowest full minute averaged
+28.50 FPS. Visible frame gaps had a p95 of 41.28 ms and a maximum of
+676.74 ms including observation boundaries. The source submitted 60.00 FPS.
+There were 34 invalid marker reads, zero wrong-run reads and zero reordered
+markers. Invalid reads contributed no distinct frame.
+
+The viewer reported two backing allocations in the session and zero in
+the fully matched observation windows, which held 103,000 native
+preparations. It reported zero hardware downloads. Anonymous RSS increased
+216 KiB and held its final value from minute 46 through shutdown. The two
+DRM client resident-memory counters ended 64 KiB and 3.01 MiB above their
+starting values. One had temporary peaks up to 95.99 MiB. The other leveled
+off during minute 30. The viewer stayed at 13 threads and 42–43 descriptors.
+Both endpoints closed normally. The offline replay recognizes the new
+VA-API mapping counters and verifies their values against the saved windows.
+[One-hour motion and resource results](native-wayland-4k-reuse-hour-soak.json) ·
+[Raw windows, fixture and replay](native-wayland-4k-reuse-hour-soak-raw.zip)
+
 An owned Intel regression presented the first real H.264 DMA-BUF and
 verified its pixels and ACK. A test-only hook then injected a timeout
 result after the second real GLES fence wait completed. The viewer
@@ -1561,6 +1582,24 @@ coverage remains separate from these virtio results.
 The Ubuntu peer's read-only DRM check found one enabled connector, the Intel
 `eDP-1` used by its active X11 desktop. The other connectors were disconnected.
 This peer has no second connected output for an isolated physical hotplug test.
+
+### KMS device loss
+
+Two isolated QEMU guest runs removed an entire virtio GPU PCI function.
+The kernel reported removal of the DRM card, render node and both connectors.
+Before removal, the updated read-only Wayland viewer displayed the source
+pattern on `Virtual-1`. The primary framebuffer and screencopy samples
+agreed, and the reported flip matched the guest DRM trace within 2 μs.
+
+The observer sent a new pattern after device removal. The host sent two
+frames and the viewer requested presentation once. Neither produced a
+presentation receipt, and the host's drawn ACK count stayed at two. The
+viewer reported `wayland_presentation_timeout` without a reconnect
+certificate, and the compositor stayed alive. The same observer rejected
+the baseline build because it reported `unknown`. These are guest kernel
+results. The physical GPU lane remains outstanding.
+[Pinned runs and DRM observations](wayland-kms-device-loss.json) ·
+[Sanitized serial records and guarded guest fixture](wayland-kms-device-loss-raw.zip)
 
 ## Managed remote desktop in native terminals
 
@@ -2179,9 +2218,9 @@ reaped the remote PTY, and the native application exited successfully.
 | --- | --- |
 | Continuous motion at a 30 FPS request | At 1080p, the revised XTerm scroll-copy detector reached 27 FPS in three matched pairs, and both Firefox HEVC arms reached 27 FPS in one matched pair. At 1440p, all eight aligned native trials reached 27 FPS inside a 4K root. At exact 4K, all four native X11 preallocation trials reached 27 FPS. In the separate Workbench comparison, the precise wait reached 27 FPS four times and increased the longest gap in three matched pairs. [XTerm](#visible-terminal-scrolling) · [Firefox](#firefox-through-managed-wayland-input) · [1440p](x11-native-1440p-viewport-prefetch-target-aligned-abba.json) · [4K](#native-x11-presentation) · [Workbench](x11-blender-fixed-capture-cadence-abba.json) |
 | Software input release | The source-click dual-machine batch verified all 300 scored releases. Its three p95 upper bounds were 4.21, 4.57 and 4.49 ms. The separate SSH observer return path contributes to the measurement. Three localhost sets had p95 of 2.46–2.55 ms. [Input results](#clipboard-input-during-an-upload) · [Qualified dual-machine batch](x11-release-all-software-latency-source-click-setup.json) |
-| Sustained resource use | The one-hour native 4K retry held 28.57 visible FPS. Host and viewer anonymous RSS leveled off at +480 KiB and +132 KiB, respectively. The separate Ubuntu FFmpeg NVENC run held the same anonymous RSS from minute 17.5 through minute 60. [One-hour native 4K soak](x11-native-4k-prefetch-resource-hour-soak.json) · [One-hour encoder test](ffmpeg-nvenc-only-hour-soak.json) · [Incomplete first 4K attempt](x11-native-4k-prefetch-resource-hour-soak-incomplete.json) |
+| Sustained resource use | The one-hour native X11 4K retry held 28.57 visible FPS. Host and viewer anonymous RSS leveled off at +480 KiB and +132 KiB. The hour-long native Wayland 4K reuse run held 28.67 visible FPS with two backing allocations and +216 KiB viewer anonymous RSS. The separate Ubuntu FFmpeg NVENC run held the same anonymous RSS from minute 17.5 through minute 60. [X11 hour](x11-native-4k-prefetch-resource-hour-soak.json) · [Wayland hour](native-wayland-4k-reuse-hour-soak.json) · [Encoder hour](ffmpeg-nvenc-only-hour-soak.json) · [Incomplete first 4K attempt](x11-native-4k-prefetch-resource-hour-soak-incomplete.json) |
 | Adaptive hardware video | Opt-in X11 H.264 NVENC reduced dimensions and FPS, recovered both, and passed viewport, input, source and JPEG fallback checks in owned sessions. In eight matched Blender trials, stressed p95 changes varied by pair. The adaptive trials had consistently lower pressured-motion cadence and interface contrast. [Resolution results](x11-nvenc-adaptive-resolution.json) · [Scored Blender comparison](x11-blender-nvenc-adaptive-abba.json) |
-| Source change, resize and recovery | Owned X11 and Wayland runs checked pixels and input recipients across scope changes. The managed X11 fixture retained top-level and embedded windows, refreshed the session catalog and cancelled a stalled handshake. Native Aether repeated the embedded workflow. KMS power and connector changes passed on two guest virtio outputs. Physical hotplug and GPU device loss await hardware runs. [Direct recovery](#follow-up-checks) · [Managed recovery](#managed-x11-window-recovery) · [KMS](#kms-power-and-connector-recovery) |
+| Source change, resize and recovery | Owned X11 and Wayland runs checked pixels and input recipients across scope changes. The managed X11 fixture retained top-level and embedded windows, refreshed the session catalog and cancelled a stalled handshake. Native Aether repeated the embedded workflow. KMS power, connector changes and full GPU removal passed in guest virtio runs. Physical hotplug and GPU device loss await hardware runs. [Direct recovery](#follow-up-checks) · [Managed recovery](#managed-x11-window-recovery) · [KMS power and hotplug](#kms-power-and-connector-recovery) · [KMS device loss](#kms-device-loss) |
 | Terminal integration | Forge, Anvil, Ember, Frost and Aether opened real native sessions. The Aether PTY relay recovered the same shell after the SSH connection was cut. [Adapters](#managed-remote-desktop-in-native-terminals) · [PTY recovery](#aether-terminal-semantics) |
 | Application scenes | The 1080p HEVC lossless arms met the cadence and selected glyph-mask checks for XTerm and Firefox. XTerm also retained exact glyph matches in all 900 post-scroll reads. Blender Workbench has independent motion results. Isaac Sim acceptance was skipped at the user's request. [XTerm](x11-terminal-scroll-hevc444-lossless-option-pair.json) · [Firefox](#firefox-through-managed-wayland-input) · [3D workloads](#blender-viewport-through-managed-wayland-input) |
 | 1080p wired physical interaction, p95 ≤ 50 ms | Unmeasured. The tested cross-machine route used Ubuntu Wi-Fi. A physical trigger and a high-speed camera or calibrated optical apparatus are needed for the three sets of at least 100 samples. [Route](#mint-and-ubuntu-network-route) · [Physical measurement protocol](../../remote-workload-benchmark.md#physical-latency-and-acceptance) |

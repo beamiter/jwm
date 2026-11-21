@@ -8,7 +8,7 @@ use std::{
 const CELL: usize = ROI_SIZE as usize / 8;
 
 /// Same central 5×5 majority, complement and checksum as P09's X11 observer.
-fn read_marker(rgba: &[u8]) -> Option<(u8, u16)> {
+fn read_marker(rgba: &[u8], frame_bits: u32) -> Option<(u8, u32)> {
     assert_eq!(rgba.len(), (ROI_SIZE * ROI_SIZE * 4) as usize);
     let mut bits = 0u64;
     for cell in 0..64 {
@@ -31,9 +31,9 @@ fn read_marker(rgba: &[u8]) -> Option<(u8, u16)> {
         }
     }
     let word = bits as u32;
-    let run_id = (word >> 24) as u8;
-    let frame_id = (word >> 8) as u16;
     let identity = word >> 8;
+    let run_id = (identity >> frame_bits) as u8;
+    let frame_id = identity & ((1 << frame_bits) - 1);
     let mut check = identity ^ 0xc949_59a7;
     check = (check ^ (check >> 16)).wrapping_mul(0x7feb_352d);
     check = (check ^ (check >> 15)).wrapping_mul(0x846c_a68b);
@@ -44,30 +44,34 @@ fn read_marker(rgba: &[u8]) -> Option<(u8, u16)> {
 
 #[test]
 fn p09_marker_roi_decodes_identity_and_rejects_corruption() {
-    // Reference word from p09-workload.c marker(41, 1763), with its complement.
-    let word = 0x2906_e30e_u32;
-    let bits = (u64::from(!word) << 32) | u64::from(word);
-    let mut rgba = vec![128; (ROI_SIZE * ROI_SIZE * 4) as usize];
-    for cell in 0..64 {
-        let x = (cell % 8) * CELL + CELL / 2;
-        let y = (cell / 8) * CELL + CELL / 2;
-        let value = if bits & (1 << cell) != 0 { 248 } else { 8 };
-        for row in y - 2..=y + 2 {
-            for column in x - 2..=x + 2 {
-                let start = (row * ROI_SIZE as usize + column) * 4;
-                rgba[start..start + 3].fill(value);
+    // Reference words from the original and 20-bit P09 painters.
+    for (word, frame_bits, expected) in [
+        (0x2906_e30e_u32, 16, (41, 1763)),
+        (0xb300_01c8_u32, 20, (11, 196609)),
+    ] {
+        let bits = (u64::from(!word) << 32) | u64::from(word);
+        let mut rgba = vec![128; (ROI_SIZE * ROI_SIZE * 4) as usize];
+        for cell in 0..64 {
+            let x = (cell % 8) * CELL + CELL / 2;
+            let y = (cell / 8) * CELL + CELL / 2;
+            let value = if bits & (1 << cell) != 0 { 248 } else { 8 };
+            for row in y - 2..=y + 2 {
+                for column in x - 2..=x + 2 {
+                    let start = (row * ROI_SIZE as usize + column) * 4;
+                    rgba[start..start + 3].fill(value);
+                }
             }
         }
-    }
-    assert_eq!(read_marker(&rgba), Some((41, 1763)));
-    // Flip a resilient whole cell so all votes agree but the complement fails.
-    for row in 4..=8 {
-        for column in 4..=8 {
-            let start = (row * ROI_SIZE as usize + column) * 4;
-            rgba[start..start + 3].fill(248);
+        assert_eq!(read_marker(&rgba, frame_bits), Some(expected));
+        // Flip a resilient whole cell so all votes agree but the complement fails.
+        for row in 4..=8 {
+            for column in 4..=8 {
+                let start = (row * ROI_SIZE as usize + column) * 4;
+                rgba[start..start + 3].fill(248);
+            }
         }
+        assert_eq!(read_marker(&rgba, frame_bits), None);
     }
-    assert_eq!(read_marker(&rgba), None);
 }
 
 #[derive(Debug, PartialEq, Eq, serde::Serialize)]
@@ -178,11 +182,11 @@ struct MarkerCounts {
     invalid: u64,
     wrong_run: u64,
     reordered: u64,
-    last_frame: u16,
+    last_frame: u32,
 }
 
 impl MarkerCounts {
-    fn classify(&mut self, marker: Option<(u8, u16)>, expected_run: u8) -> &'static str {
+    fn classify(&mut self, marker: Option<(u8, u32)>, expected_run: u8) -> &'static str {
         self.reads += 1;
         match marker {
             None => {
@@ -242,7 +246,12 @@ fn native_cli_wayland_gpu_viewer_observes_p09_4k_marker() {
         .create(&evidence)
         .expect("new evidence directory");
     let warmup = duration_seconds("JWM_TEST_P09_WARMUP_SECONDS", 0, 0, 120);
-    let duration = duration_seconds("JWM_TEST_P09_OBSERVE_SECONDS", 5, 3, 120);
+    let duration = duration_seconds("JWM_TEST_P09_OBSERVE_SECONDS", 5, 3, 3600);
+    let frame_bits = if duration > 120 { 20 } else { 16 };
+    assert!(
+        u32::from(run_id) < (1 << (24 - frame_bits)),
+        "run ID does not fit this P09 marker format"
+    );
 
     let node = PathBuf::from(std::env::var_os("JWM_TEST_WAYLAND_GPU_CAPTURE_NODE").unwrap());
     let render_node_device = node.metadata().unwrap().rdev();
@@ -331,7 +340,7 @@ fn native_cli_wayland_gpu_viewer_observes_p09_4k_marker() {
             let mut marker = None;
             if let Some(completed_us) =
                 output.present(&mut server, &mut gl.renderer, &surface, |rgba| {
-                    marker = read_marker(rgba)
+                    marker = read_marker(rgba, frame_bits)
                 })
             {
                 let completed = completed_us * 1000;

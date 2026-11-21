@@ -16,8 +16,12 @@ warmup=${8:-0}
 observe=${9:-5}
 [[ $test_bin = /* && -x $test_bin && $viewer_bin = /* && -x $viewer_bin ]]
 [[ $node = /* && -c $node && $key = /* && -r $key && $evidence = /* && ! -e $evidence ]]
-[[ $run_id =~ ^[1-9][0-9]{0,2}$ && $warmup =~ ^(0|[1-9][0-9]{0,2})$ && $observe =~ ^[1-9][0-9]{0,2}$ ]]
-(( run_id <= 255 && warmup <= 120 && observe >= 3 && observe <= 120 ))
+[[ $run_id =~ ^[1-9][0-9]{0,2}$ && $warmup =~ ^(0|[1-9][0-9]{0,2})$ && $observe =~ ^[1-9][0-9]{0,3}$ ]]
+(( run_id <= 255 && warmup <= 120 && observe >= 3 && observe <= 3600 ))
+if (( observe > 120 && run_id > 15 )); then
+  echo 'Observations over 120 seconds require the 20-bit P09 painter and a run ID from 1 to 15.' >&2
+  exit 2
+fi
 
 runtime=$(mktemp -d -t jwm-p09-wayland.XXXXXXXX)
 trap 'rm -rf -- "$runtime"' EXIT

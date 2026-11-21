@@ -473,6 +473,7 @@ struct State {
     popup_live: std::sync::Arc<popup_presentation::Live>,
     control_mode: bool,
     managed_control_viewport: bool,
+    managed_control_preparing: bool,
     managed_resize_pending: bool,
     handoff: handoff::Handoff,
     control_events: Vec<ViewerEvent>,
@@ -634,7 +635,14 @@ impl State {
         {
             self.failure = Some("Wayland surface changed before presentation completed".into());
         }
-        self.invalidate_layout();
+        if self.managed_control_preparing {
+            // The new role has no input lease yet. Refresh its mapping without
+            // tearing down the clean local seat before the first native proof.
+            self.pointer.invalidate_mapping();
+            self.invalidate_viewport();
+        } else {
+            self.invalidate_layout();
+        }
         self.completed.clear();
     }
 
@@ -812,6 +820,7 @@ impl WaylandViewer {
             popup_live: std::sync::Arc::new(popup_presentation::Live::default()),
             control_mode: false,
             managed_control_viewport: false,
+            managed_control_preparing: false,
             managed_resize_pending: false,
             control_events: Vec::new(),
             handoff: handoff::Handoff::default(),
@@ -978,6 +987,7 @@ impl WaylandViewer {
         }
         self.state.control_mode = true;
         self.state.managed_control_viewport = managed_viewport;
+        self.state.managed_control_preparing = fresh_role;
         self.state.pointer.scroll_enabled = scroll_enabled;
         self.state.pointer.horizontal_enabled = horizontal_enabled;
         self.state.pointer.gestures = gestures;
@@ -1044,9 +1054,13 @@ impl WaylandViewer {
             self.disable_wayland_control();
             return Err("Wayland control requires clean dual focus and actual presentation".into());
         }
+        if initial {
+            self.state.managed_control_preparing = false;
+        }
         Ok(true)
     }
     pub(super) fn disable_wayland_control(&mut self) {
+        self.state.managed_control_preparing = false;
         if self.state.handoff.enabled {
             self.state.handoff.fail("local control disabled");
         }

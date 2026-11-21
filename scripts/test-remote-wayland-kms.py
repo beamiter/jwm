@@ -225,6 +225,59 @@ def cycle_idle_dpms(wlopm, status_path, output, env, host, viewer, viewer_log, h
             'drawn_acks_before_off': drawn, 'presented_while_off': 0}
 
 
+def observe_device_loss(card, connector, host, viewer, viewer_log, host_log, events, publish_blue):
+    children = (host, viewer)
+
+    def settled():
+        wire = wire_feedback(text(viewer_log))
+        stats = host_stats(host_log)
+        if wire.discarded:
+            raise RuntimeError('viewer feedback was discarded before DRM device loss')
+        drawn = sum(row['drawn_acks'] for row in stats)
+        if drawn and stats[-1]['outstanding'] == 0 and wire.requested == len(wire.presented):
+            return wire, drawn, sum(row['sent'] for row in stats)
+        return None
+
+    wait_for('an acknowledged frame before DRM device loss', children, settled)
+    try:
+        host.send_signal(signal.SIGSTOP)
+        wait_for('owned host child to stop', children,
+                 lambda: os.waitid(os.P_PID, host.pid, os.WSTOPPED | os.WNOHANG), timeout=3)
+        before, drawn_before, sent_before = wait_for('pre-removal feedback to drain', children, settled, timeout=4)
+        if not card.is_dir() or text(connector / 'status').strip() != 'connected':
+            raise RuntimeError('the selected DRM card and connector must be present before arming')
+        armed = time.monotonic_ns()
+        print(f'JWM_KMS_DEVICE_LOSS_READY {card.name}', flush=True)
+        wait_for('external removal of the DRM card and selected connector', children,
+                 lambda: not card.exists() and not connector.exists(), timeout=15)
+        removed = time.monotonic_ns()
+        publish_blue()
+    finally:
+        host.send_signal(signal.SIGCONT)
+
+    viewer_exit = viewer.wait(timeout=18)
+    host_exit = host.wait(timeout=5)
+    wire = wire_feedback(text(viewer_log))
+    stats = host_stats(host_log)
+    drawn = sum(row['drawn_acks'] for row in stats)
+    sent = sum(row['sent'] for row in stats)
+    terminal = records(events)[-1]
+    failure = terminal.get('failure') or {}
+    if wire.presented != before.presented or drawn != drawn_before:
+        raise RuntimeError('DRM device loss produced presentation feedback or a drawn acknowledgement')
+    if wire.requested <= before.requested or sent <= sent_before:
+        raise RuntimeError('the viewer did not request presentation for a post-removal frame')
+    if (viewer_exit != 1 or terminal.get('state') != 'failed'
+            or failure.get('category') not in {'wayland_presentation_timeout', 'wayland_presentation_discarded'}
+            or failure.get('reconnect_certified') is not False):
+        raise RuntimeError(f'DRM device loss did not produce a terminal presentation failure: {failure}')
+    return {'card': card.name, 'connector': connector.name, 'armed_ns': armed, 'device_gone_observed_ns': removed,
+            'viewer_exit': viewer_exit, 'host_exit': host_exit, 'failure': failure,
+            'drawn_acks_before': drawn_before, 'drawn_acks_after': drawn, 'presented_after_arming': 0,
+            'post_removal_frames_sent': sent - sent_before, 'post_removal_feedback_requests':
+            wire.requested - before.requested, 'discarded_feedback': wire.discarded}
+
+
 def flip_matches(kms_log, wire):
     flips = {}
     for name, serial, ns, sequence, count in FLIP.findall(kms_log):
@@ -319,7 +372,7 @@ def write_viewport_bitmap(path):
 
 def exercise(binary, wayland_socket, output, kms_log, require_path, move_to_output=None, ipc=None,
              check_viewport=False, expected_scales=None, primary_reader=None, drm_card=None,
-             wlopm=None, dpms_status=None, hotplug_status=None):
+             wlopm=None, dpms_status=None, hotplug_status=None, device_loss_card=None):
     env = os.environ.copy()
     for name in ('DISPLAY', 'WAYLAND_SOCKET', 'WAYLAND_DISPLAY'):
         env.pop(name, None)
@@ -387,6 +440,8 @@ def exercise(binary, wayland_socket, output, kms_log, require_path, move_to_outp
             if hotplug_status:
                 cases[1] = (move_to_output, None, blue, yellow)
                 cases.append((output, move_to_output, red, green))
+            if device_loss_card:
+                cases = cases[:1]
             for location, other, color, accent in cases:
                 expected = [color, accent, accent, color] if check_viewport else [color] * 3
                 start_ns = 0
@@ -477,6 +532,12 @@ def exercise(binary, wayland_socket, output, kms_log, require_path, move_to_outp
                     return phase
 
                 phases.append(wait_for('rendered color and matching KMS completion', children, evidence))
+            if device_loss_card:
+                connector = device_loss_card.with_name(device_loss_card.name + '-' + output)
+                loss = observe_device_loss(device_loss_card, connector, host, viewer, viewer_log,
+                                           host_log, events, lambda: paint('#2244cc', '#dfa922'))
+                return {'output': output, 'drawn_acks': loss['drawn_acks_after'],
+                        'phases': phases, 'device_loss': loss}
             viewer.stdin.write(b'{"command":"disconnect","request":1}\n')
             viewer.stdin.flush()
             if viewer.wait(timeout=5) != 0 or host.wait(timeout=5) != 0:
@@ -526,6 +587,8 @@ def main():
     parser.add_argument('--drm-dpms-status', type=Path, help='sysfs dpms file for the selected owned DRM connector')
     parser.add_argument('--hotplug-status', type=Path,
                         help='sysfs status of the initial connector, disconnected and reconnected by the host fixture')
+    parser.add_argument('--device-loss-card', type=Path,
+                        help='observe external removal of the owned DRM card at /sys/class/drm/cardN')
     parser.add_argument('--require-path', choices=('direct', 'composited', 'cursor-overlap'),
                         help='require direct rendering or an effects-composited frame with optional cursor overlap')
     args = parser.parse_args()
@@ -545,6 +608,11 @@ def main():
     if args.drm_dpms_status and (args.output.startswith('*') or args.drm_dpms_status.name != 'dpms'
                                  or not args.drm_dpms_status.parent.name.endswith('-' + args.output)):
         parser.error('--drm-dpms-status must identify the selected connector')
+    if args.device_loss_card and (
+            not re.fullmatch(r'/sys/class/drm/card[0-9]+', str(args.device_loss_card))
+            or not args.device_loss_card.is_dir() or not re.fullmatch(r'[\w.-]+', args.output)
+            or args.move_to_output or args.wlopm):
+        parser.error('--device-loss-card requires a present DRM card and a single owned connector')
     primary_reader = args.virtio_primary_rgb.resolve() if args.virtio_primary_rgb else None
     print('JWM_REMOTE_KMS ' + json.dumps(exercise(str(args.binary.resolve()), args.wayland_display.resolve(),
                                                  args.output, args.kms_log, args.require_path,
@@ -552,7 +620,7 @@ def main():
                                                  args.check_viewport, args.expect_output_scales,
                                                  primary_reader, args.virtio_drm_card,
                                                  args.wlopm.resolve() if args.wlopm else None,
-                                                 args.drm_dpms_status, args.hotplug_status)))
+                                                 args.drm_dpms_status, args.hotplug_status, args.device_loss_card)))
 
 
 if __name__ == '__main__':

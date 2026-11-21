@@ -347,6 +347,16 @@ completion and pixels after each transition. On QEMU's second virtio console,
 the host can set the requested dimensions to 0×0 to disconnect and restore
 the original dimensions to reconnect. [QEMU virtio display state](https://github.com/qemu/qemu/blob/v8.2.2/hw/display/virtio-gpu-base.c#L83-L106)
 
+For full device loss, run the harness against a dedicated compositor with
+`--device-loss-card /sys/class/drm/card0` and the selected connector as
+`--output`. The external fixture should remove the owned device after it
+sees `JWM_KMS_DEVICE_LOSS_READY card0`. The harness observes sysfs, waits up
+to 15 seconds for the card and connector to disappear, and then submits a
+second color. It checks for a terminal presentation timeout or discard
+without a reconnect certificate. The second color must request
+presentation while the original presentation and drawn-ACK counts stay
+fixed.
+
 ### Horizontal wheel opt-in
 
 Use `--wayland-horizontal-scroll` together with `--wayland-pointer` or

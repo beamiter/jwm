@@ -3046,7 +3046,10 @@ fn viewer_loop(
                 )?;
                 writer.flush()?;
                 used_control_sources.insert(current_wayland_grant);
-                rearm = Some((Instant::now() + Duration::from_secs(5), true));
+                rearm = Some((
+                    Instant::now() + super::wayland_control_wire::MANAGED_PREPARE_TIMEOUT,
+                    true,
+                ));
             }
         }
         if let Some(toggle) = local_controller {
