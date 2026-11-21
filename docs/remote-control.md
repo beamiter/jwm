@@ -149,8 +149,12 @@ thin lines. Its NVENC target is 10 Mbit/s, with a larger rate-control buffer
 to preserve more detail on static desktop keyframes. The viewer prefers
 NVIDIA hardware decoding. H.264 4:2:0 uses a 6 Mbit/s target and tries VA-API
 first. Negotiation falls back from HEVC to H.264 and then to JPEG as needed.
-Native Wayland sessions, individual-window capture and sessions requesting
-JPEG-specific extensions use JPEG. Pass `--jpeg` to `ssh` or `connect` to
+Native Wayland control and presentation-proof modes use JPEG. A fixed native
+Wayland source can instead opt into H.264 for view-only use when both endpoints
+support it and the compositor allows compatible DMA-BUF capture. See the
+[native Wayland capture contract](remote-wayland-source.md#narrow-capture-contract).
+X11 individual-window capture and sessions requesting JPEG-specific extensions
+use JPEG. Pass `--jpeg` to `ssh` or `connect` to
 select JPEG for that session. An explicit SSH `--jpeg-quality` also selects
 JPEG. Custom SSH helpers selected by `--remote-command` should support a
 read-only `host --help`. A direct connection retries once with JPEG when a
