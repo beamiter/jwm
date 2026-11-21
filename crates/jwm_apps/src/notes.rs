@@ -226,8 +226,8 @@ pub(crate) struct Notes {
     pub rows: NotesRows,
     query_text: String,
     query_generation: u64,
-    // A save can refresh a settled filter without blanking its visible list.
-    painted_save_refresh: bool,
+    // A list refresh can preserve a settled filter without blanking its visible list.
+    painted_refresh: bool,
     search_wake: Option<SearchWake>,
     search_active: Option<ActiveSearch>,
     pending_search: Option<String>,
@@ -252,7 +252,7 @@ impl Notes {
             rows: vec![],
             query_text: String::new(),
             query_generation: 0,
-            painted_save_refresh: false,
+            painted_refresh: false,
             search_wake: None,
             search_active: None,
             pending_search: None,
@@ -367,12 +367,19 @@ impl Notes {
     /// results off the input loop. The existing worker cancels older scans.
     pub fn autosave(&mut self) -> Result<(), String> {
         if self.persist()? && self.managed {
-            let keep_painted = !self.rows.is_empty()
-                && (self.current_rows().is_some() || self.painted_save_refresh());
-            self.update_query();
-            self.painted_save_refresh = keep_painted && self.search_pending();
+            self.refresh_notebook();
         }
         Ok(())
+    }
+    /// Re-scan results for the existing filter without touching the open note.
+    pub fn refresh_notebook(&mut self) {
+        if !self.managed {
+            return;
+        }
+        let keep_painted =
+            !self.rows.is_empty() && (self.current_rows().is_some() || self.painted_refresh());
+        self.update_query();
+        self.painted_refresh = keep_painted && self.search_pending();
     }
     pub fn open_result(&mut self, path: PathBuf) -> Result<(), String> {
         // Save before loading another note, but scan the result list only
@@ -430,8 +437,8 @@ impl Notes {
         self.publish_rows(rows);
     }
 
-    pub fn painted_save_refresh(&self) -> bool {
-        self.painted_save_refresh && self.query_text == self.search.text && self.search_pending()
+    pub fn painted_refresh(&self) -> bool {
+        self.painted_refresh && self.query_text == self.search.text && self.search_pending()
     }
 
     fn advance_query(&mut self) {
@@ -468,7 +475,7 @@ impl Notes {
     }
 
     pub fn update_query(&mut self) {
-        self.painted_save_refresh = false;
+        self.painted_refresh = false;
         if self.search_wake.is_none() {
             self.refresh();
             return;
@@ -536,7 +543,7 @@ impl Notes {
     }
 
     fn publish_rows(&mut self, rows: NotesRows) {
-        self.painted_save_refresh = false;
+        self.painted_refresh = false;
         self.rows = rows;
         self.list_scroll = self
             .list_scroll
@@ -698,18 +705,18 @@ mod tests {
         notes.editor = Editor::new("new title".into());
         notes.edited();
         notes.autosave().unwrap();
-        assert!(notes.painted_save_refresh());
+        assert!(notes.painted_refresh());
         assert_eq!(notes.rows, vec![(current.clone(), "old title".into())]);
         assert!(notes.current_rows().is_none());
         wait();
 
         notes.search.text = "new".into();
         notes.update_query();
-        assert!(!notes.painted_save_refresh());
+        assert!(!notes.painted_refresh());
         assert!(!notes.poll_search());
         wait();
         assert!(notes.poll_search());
-        assert!(!notes.painted_save_refresh() && notes.current_rows().is_some());
+        assert!(!notes.painted_refresh() && notes.current_rows().is_some());
         assert_eq!(notes.rows, vec![(current, "new title".into())]);
         std::fs::remove_dir_all(dir).unwrap();
     }

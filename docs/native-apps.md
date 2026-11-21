@@ -56,6 +56,7 @@ retain a previous version as a `~` backup beside the file.
 | Ctrl+S | Save |
 | Ctrl+Shift+S | Export note / save text file as |
 | Ctrl+F | Search the notebook, or find text in an external document |
+| F5 | Refresh the managed notebook list without reloading the open note |
 | Enter / Shift+Enter in find, F3 / Shift+F3 | Next / previous document match (wraps) |
 | Escape | Close document find and return to the selected source match |
 | Ctrl+Shift+P | Toggle Markdown split preview |
@@ -162,6 +163,8 @@ selection. In the notebook, Ctrl+F focuses the notebook filter. Press Down
 to move and Enter to open it. If you scroll the highlighted note out of view,
 the first Enter only brings it back into view. Ctrl+F returns to the filter;
 Escape returns focus to the editor without opening the highlighted note.
+After changing notebook files from another editor, use **刷新列表 F5** to
+refresh the current filter without reloading or saving the document you are editing.
 
 ### Code-text view and document status
 

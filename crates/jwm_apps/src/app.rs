@@ -40,6 +40,7 @@ enum Action {
     Maximize,
     Close,
     Search,
+    RefreshNotebook,
     Find,
     FindField,
     FindNext(bool),
@@ -269,7 +270,9 @@ impl App {
     pub fn draw(&mut self, cr: &cairo::Context, width: f64, height: f64, maximized: bool) {
         let resized = self.size != (width, height);
         self.size = (width, height);
-        if self.focus == Focus::Results {
+        if self.focus == Focus::Results
+            && !matches!(&self.document, Document::Notes(n) if n.painted_refresh())
+        {
             let index = self.result_index();
             if resized || index != self.result_index {
                 self.reveal_result(index);
@@ -402,6 +405,15 @@ impl App {
                 false,
             );
         }
+        if matches!(&self.document, Document::Notes(n) if n.managed) {
+            self.text_button(
+                cr,
+                Rect::new(366., ui::header() + 6., 119., ui::tools() - 12.),
+                "刷新列表 F5",
+                Action::RefreshNotebook,
+                false,
+            );
+        }
         if matches!(&self.document, Document::Notes(n) if !n.managed) {
             self.text_button(
                 cr,
@@ -503,7 +515,7 @@ impl App {
                     let _ = cr.save();
                     cr.rectangle(0., body.y + 60., sidebar, body.h - 60.);
                     cr.clip();
-                    let keep_painted = n.painted_save_refresh();
+                    let keep_painted = n.painted_refresh();
                     if n.search_pending() && !keep_painted {
                         ui::text(
                             cr,
@@ -1080,6 +1092,10 @@ impl App {
                             self.focus = Focus::Search;
                             Ok(())
                         }
+                        Action::RefreshNotebook => {
+                            n.refresh_notebook();
+                            Ok(())
+                        }
                         Action::Edit => {
                             self.focus = Focus::Editor;
                             Ok(())
@@ -1248,6 +1264,20 @@ impl App {
         }
     }
 
+    fn notebook_refresh_key(&mut self, key: &Key, mods: ModifiersState, repeat: bool) -> bool {
+        if *key != Key::Named(NamedKey::F5)
+            || !mods.is_empty()
+            || self.dialog.is_some()
+            || !matches!(&self.document, Document::Notes(n) if n.managed)
+        {
+            return false;
+        }
+        if !repeat {
+            self.action(Action::RefreshNotebook);
+        }
+        true
+    }
+
     fn notebook_results_key(&mut self, key: &Key, mods: ModifiersState, repeat: bool) -> bool {
         // A held result Enter must not insert newlines into the opened document
         // or dismiss a modal save/load error on subsequent repeat events.
@@ -1332,7 +1362,9 @@ impl App {
     ) {
         self.caret = true;
         self.next_blink = Instant::now() + Duration::from_millis(500);
-        if self.notebook_results_key(&event.logical_key, mods, event.repeat) {
+        if self.notebook_refresh_key(&event.logical_key, mods, event.repeat)
+            || self.notebook_results_key(&event.logical_key, mods, event.repeat)
+        {
             return;
         }
         if self.dialog.is_some() {
@@ -1625,6 +1657,114 @@ impl Picker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn refresh_existing_notebook_filter_observes_external_writes_without_saving_editor() {
+        let dir = std::env::temp_dir().join(format!("jwm-external-refresh-{}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        let current = dir.join("current.txt");
+        let rename = dir.join("old-result.txt");
+        let inplace = dir.join("hidden.txt");
+        let new = dir.join("new.txt");
+        std::fs::write(&current, "Needle current").unwrap();
+        std::fs::write(&rename, "Needle rename").unwrap();
+        std::fs::write(&inplace, "previously hidden").unwrap();
+        let mut app = App::new(true, vec![current.clone()]).unwrap();
+        let (send, ready) = std::sync::mpsc::channel();
+        let due = if let Document::Notes(notes) = &mut app.document {
+            notes.managed = true;
+            notes.directory = dir.clone();
+            notes.search.text = "needle".into();
+            notes.refresh();
+            assert_eq!(notes.rows.len(), 2);
+            notes.editor = Editor::new("unsaved private buffer".into());
+            notes.edited();
+            notes.due
+        } else {
+            panic!("expected native Notes");
+        };
+        app.set_search_wake(std::sync::Arc::new(move || {
+            let _ = send.send(());
+        }));
+        let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 960, 680).unwrap();
+        let cr = cairo::Context::new(&surface).unwrap();
+        app.draw(&cr, 960., 680., false);
+        assert!(app.hits.iter().any(|h| h.action == Action::RefreshNotebook));
+        #[cfg(feature = "accessibility")]
+        let (semantics, refresh) = {
+            let mut semantics = accessibility::Semantics::default();
+            let tree = semantics.update(&app, 1.);
+            let refresh = tree
+                .nodes
+                .iter()
+                .find_map(|(id, node)| {
+                    (node.label() == Some("刷新列表 F5")
+                        && node.supports_action(accesskit::Action::Click))
+                    .then_some(*id)
+                })
+                .unwrap();
+            (semantics, refresh)
+        };
+        std::fs::write(&inplace, "Needle edited in place").unwrap();
+        let temp = dir.join("vim-write.tmp");
+        std::fs::write(&temp, "Needle atomically added").unwrap();
+        std::fs::rename(&temp, &new).unwrap();
+        let renamed = dir.join("renamed.txt");
+        std::fs::rename(&rename, &renamed).unwrap();
+
+        assert!(app.notebook_refresh_key(
+            &Key::Named(NamedKey::F5),
+            ModifiersState::empty(),
+            false
+        ));
+        assert!(app.notebook_refresh_key(&Key::Named(NamedKey::F5), ModifiersState::empty(), true));
+        assert!(app.focus == Focus::Editor);
+        ready.recv_timeout(Duration::from_secs(3)).unwrap();
+        assert!(app.poll_search());
+        let Document::Notes(notes) = &app.document else {
+            panic!("expected notebook");
+        };
+        assert_eq!(notes.search.text, "needle");
+        assert_eq!(notes.rows.len(), 4);
+        assert!(
+            notes
+                .rows
+                .iter()
+                .any(|(p, title)| p == &new && title == "Needle atomically added")
+        );
+        assert!(
+            notes
+                .rows
+                .iter()
+                .any(|(p, title)| p == &inplace && title == "Needle edited in place")
+        );
+        assert!(
+            notes
+                .rows
+                .iter()
+                .any(|(p, title)| p == &renamed && title == "Needle rename")
+        );
+        assert!(!notes.rows.iter().any(|(p, _)| p == &rename));
+        assert_eq!(notes.editor.text, "unsaved private buffer");
+        assert!(notes.dirty);
+        assert_eq!(notes.due, due);
+        assert_eq!(std::fs::read_to_string(current).unwrap(), "Needle current");
+        #[cfg(feature = "accessibility")]
+        {
+            assert!(semantics.action(
+                &mut app,
+                accesskit::ActionRequest {
+                    action: accesskit::Action::Click,
+                    target_tree: accesskit::TreeId::ROOT,
+                    target_node: refresh,
+                    data: None,
+                }
+            ));
+            ready.recv_timeout(Duration::from_secs(3)).unwrap();
+            assert!(app.poll_search());
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn autosave_tick_keeps_existing_sidebar_pixels_until_new_results_arrive() {
