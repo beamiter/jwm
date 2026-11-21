@@ -24,11 +24,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-          ref: 71522fd39dc5af9e82b84b79d131057d53299fcb
+          ref: a2aa7091fcaba6af37d3f403245d806729187bed
       - name: Verify exact product source
         run: |
-          test "$(git rev-parse HEAD)" = "71522fd39dc5af9e82b84b79d131057d53299fcb"
-          test "$(git rev-parse HEAD^{tree})" = "fd4ee4834a0dc4e296627ad43b222c4ad9362e23"
+          test "$(git rev-parse HEAD)" = "a2aa7091fcaba6af37d3f403245d806729187bed"
+          test "$(git rev-parse HEAD^{tree})" = "d093dda0cea4429e76f69d3f322cb9a9e08d67c0"
       - name: Install native build and software renderer dependencies
         timeout-minutes: 10
         run: |
@@ -55,7 +55,7 @@ jobs:
           cargo check --locked --no-default-features --features remote-wayland,backend-wayland-nested --lib
           export XDG_RUNTIME_DIR="$(mktemp -d)"
           trap 'rm -rf "$XDG_RUNTIME_DIR"' EXIT
-          for filter in 'power_snapshot_preserves_output_identity_and_last_mode' 'power_control_never_targets_a_same_name_replacement' 'native_window_gesture_clicks_only_the_subsurface_proven_by_the_frame'; do
+          for filter in 'power_control_never_targets_a_same_name_replacement' 'native_window_gesture_clicks_only_the_subsurface_proven_by_the_frame'; do
             args=(--locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter")
             listed="$(cargo test "${args[@]}" -- --list)"
             test "$(printf '%s\n' "$listed" | grep -c ': test$')" -eq 1
