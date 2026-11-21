@@ -56,7 +56,7 @@ retain a previous version as a `~` backup beside the file.
 | Ctrl+S | Save |
 | Ctrl+Shift+S | Export note / save text file as |
 | Ctrl+F | Search the notebook, or find text in an external document |
-| F5 | Refresh the managed notebook list without reloading the open note |
+| F5 | Refresh the notebook list, or reload a clean external file from disk |
 | Enter / Shift+Enter in find, F3 / Shift+F3 | Next / previous document match (wraps) |
 | Escape | Close document find and return to the selected source match |
 | Ctrl+Shift+P | Toggle Markdown split preview |
@@ -165,6 +165,13 @@ the first Enter only brings it back into view. Ctrl+F returns to the filter;
 Escape returns focus to the editor without opening the highlighted note.
 After changing notebook files from another editor, use **刷新列表 F5** to
 refresh the current filter without reloading or saving the document you are editing.
+
+In an external document, F5 or the circular-arrow toolbar button reloads the
+current path, including external atomic replacements. It never writes to disk
+or discards unsaved edits. If saving conflicts, save a separate copy and reopen
+the original; copying does not overwrite the original. When the disk text changes,
+reloading resets the selection, undo history and find state but keeps the code-font
+and Markdown-preview toggles. A failed reload leaves the existing buffer unchanged.
 
 ### Code-text view and document status
 

@@ -294,6 +294,43 @@ impl Notes {
         .into();
         Ok(())
     }
+    /// Explicitly re-read a clean external document. Do not change any
+    /// document state until the bounded, consistent read succeeds.
+    pub fn reload_external(&mut self) -> Result<bool, String> {
+        if self.managed {
+            return Ok(false);
+        }
+        if self.dirty {
+            return Err(
+                "当前有未保存的修改，未重新载入。请先保存，或另存副本后重新打开原文件。".into(),
+            );
+        }
+        if !self.editor.preedit.is_empty() || !self.find.query.preedit.is_empty() {
+            return Ok(false);
+        }
+        let file = self
+            .document
+            .as_ref()
+            .ok_or("没有可重新载入的文件。")?
+            .file
+            .clone();
+        let (document, text) = TextFile::load(file)?;
+        let changed = self.editor.text != text;
+        if changed {
+            let monospace = self.editor.monospace;
+            self.editor = Editor::new(text);
+            self.editor.monospace = monospace;
+            let preview_enabled = self.preview.enabled;
+            self.preview = crate::preview::Preview::default();
+            self.preview.enabled = preview_enabled;
+            self.find = crate::find::Find::default();
+        }
+        // Even a byte-for-byte replacement may have a new inode/etag.
+        // Also adopt any new BOM/newline format when decoded text matches.
+        self.document = Some(document);
+        self.status = "已从磁盘重新载入".into();
+        Ok(changed)
+    }
     pub fn title(&self) -> String {
         let title = if self.managed {
             note_title(&self.editor.text)

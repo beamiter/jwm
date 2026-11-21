@@ -257,6 +257,40 @@ def main():
                 wait(lambda: control_app.poll() is not None, "Backspace control editor did not close")
                 print("Mixed newline native editing and BOM preservation: PASS", flush=True)
 
+                external = work / "external-reload.md"
+                replacement = work / "external-reload.tmp"
+                external.write_text("old disk text\n", encoding="utf-8")
+                external_app = launch("jwm-notes", external)
+                external_window = window(r"external-reload\.md.*JWM 备忘录")
+                focus(external_window)
+                for trigger, text in (("key", b"new KEY disk text"), ("button", b"new BUTTON disk text")):
+                    on_disk = b"\xef\xbb\xbf" + text + b"\r\nsecond\r\n"
+                    replacement.write_bytes(on_disk)
+                    replacement.replace(external)
+                    if trigger == "key":
+                        key("F5")
+                    else:
+                        command("xdotool", "mousemove", "--window", external_window, 180, 86,
+                                "click", "1")
+                    # Appended text and current disk metadata both have to come
+                    # from the reload or this save cannot match the new bytes.
+                    key("ctrl+Home", "End")
+                    type_text(" marker")
+                    check_mixed(f"external reload via {trigger}", external, external_window,
+                                b"\xef\xbb\xbf" + text + b" marker\r\nsecond\r\n")
+                key("ctrl+Home", "End")
+                type_text(" unsaved")
+                acknowledge_title("dirty before reload", external, external_window, True)
+                before = external.read_bytes()
+                key("F5", "Escape")
+                acknowledge_title("dirty after refused reload", external, external_window, True)
+                assert external.read_bytes() == before, "Refused reload wrote to disk"
+                check_mixed("external unsaved text preserved", external, external_window,
+                            b"\xef\xbb\xbfnew BUTTON disk text marker unsaved\r\nsecond\r\n")
+                key("ctrl+w")
+                wait(lambda: external_app.poll() is not None, "External reload editor did not close")
+                print("External reload F5 and toolbar, format adoption and dirty buffer: PASS", flush=True)
+
                 external = work / 'file with spaces.txt'
                 external.write_bytes(b"\xef\xbb\xbfOriginal\r\n")
                 editor = launch("jwm-notes", external)

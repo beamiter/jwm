@@ -41,6 +41,7 @@ enum Action {
     Close,
     Search,
     RefreshNotebook,
+    ReloadExternal,
     Find,
     FindField,
     FindNext(bool),
@@ -412,6 +413,16 @@ impl App {
                 "刷新列表 F5",
                 Action::RefreshNotebook,
                 false,
+            );
+        }
+        if matches!(&self.document, Document::Notes(n) if !n.managed) {
+            self.button(
+                cr,
+                Rect::new(164., ui::header() + (ui::tools() - 32.) / 2., 32., 32.),
+                Icon::Reload,
+                Action::ReloadExternal,
+                "从磁盘重新载入 (F5)",
+                true,
             );
         }
         if matches!(&self.document, Document::Notes(n) if !n.managed) {
@@ -1096,6 +1107,12 @@ impl App {
                             n.refresh_notebook();
                             Ok(())
                         }
+                        Action::ReloadExternal => n.reload_external().map(|changed| {
+                            if changed {
+                                self.focus = Focus::Editor;
+                                self.dragging = false;
+                            }
+                        }),
                         Action::Edit => {
                             self.focus = Focus::Editor;
                             Ok(())
@@ -1264,16 +1281,19 @@ impl App {
         }
     }
 
-    fn notebook_refresh_key(&mut self, key: &Key, mods: ModifiersState, repeat: bool) -> bool {
-        if *key != Key::Named(NamedKey::F5)
-            || !mods.is_empty()
-            || self.dialog.is_some()
-            || !matches!(&self.document, Document::Notes(n) if n.managed)
-        {
+    fn refresh_key(&mut self, key: &Key, mods: ModifiersState, repeat: bool) -> bool {
+        if *key != Key::Named(NamedKey::F5) || !mods.is_empty() || self.dialog.is_some() {
             return false;
         }
+        let Document::Notes(notes) = &self.document else {
+            return false;
+        };
         if !repeat {
-            self.action(Action::RefreshNotebook);
+            self.action(if notes.managed {
+                Action::RefreshNotebook
+            } else {
+                Action::ReloadExternal
+            });
         }
         true
     }
@@ -1362,7 +1382,7 @@ impl App {
     ) {
         self.caret = true;
         self.next_blink = Instant::now() + Duration::from_millis(500);
-        if self.notebook_refresh_key(&event.logical_key, mods, event.repeat)
+        if self.refresh_key(&event.logical_key, mods, event.repeat)
             || self.notebook_results_key(&event.logical_key, mods, event.repeat)
         {
             return;
@@ -1659,6 +1679,109 @@ mod tests {
     use super::*;
 
     #[test]
+    fn external_reload_preserves_dirty_input_and_reuses_current_disk_format() {
+        let dir = std::env::temp_dir().join(format!("jwm-external-reload-{}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("external.md");
+        let replacement = dir.join("replacement");
+        std::fs::write(&path, "# Old\none\n").unwrap();
+        let mut app = App::new(true, vec![path.clone()]).unwrap();
+        let f5 = Key::Named(NamedKey::F5);
+        let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 540, 360).unwrap();
+        let cr = cairo::Context::new(&surface).unwrap();
+        app.draw(&cr, 540., 360., false);
+        let hit = app
+            .hits
+            .iter()
+            .find(|hit| hit.action == Action::ReloadExternal)
+            .unwrap();
+        let click = (hit.rect.x + 8., hit.rect.y + 8.);
+        assert!(!app.hits.iter().any(|h| h.action == Action::RefreshNotebook));
+        #[cfg(feature = "accessibility")]
+        {
+            let mut semantics = accessibility::Semantics::default();
+            let tree = semantics.update(&app, 1.);
+            assert!(tree.nodes.iter().any(|(_, node)| {
+                node.label() == Some("从磁盘重新载入 (F5)")
+                    && node.supports_action(accesskit::Action::Click)
+            }));
+        }
+        app.action(Action::ToggleCodeView);
+        app.action(Action::TogglePreview);
+        let Document::Notes(n) = &mut app.document else {
+            unreachable!()
+        };
+        n.editor.select(2..5);
+        app.action(Action::Find);
+        let Document::Notes(n) = &mut app.document else {
+            unreachable!()
+        };
+        n.find.query.text = "Old".into();
+        n.find.query.preedit = "待提交".into();
+        std::fs::write(&replacement, b"\xef\xbb\xbf# New\r\nupdated\r\n").unwrap();
+        std::fs::rename(&replacement, &path).unwrap();
+        assert!(app.refresh_key(&f5, ModifiersState::empty(), false));
+        let Document::Notes(n) = &mut app.document else {
+            unreachable!()
+        };
+        assert_eq!(n.editor.text, "# Old\none\n");
+        assert_eq!(n.find.query.preedit, "待提交");
+        n.find.query.preedit.clear();
+        assert!(app.refresh_key(&f5, ModifiersState::empty(), true));
+        app.pointer = click;
+        app.press(ModifiersState::empty());
+        let Document::Notes(n) = &mut app.document else {
+            unreachable!()
+        };
+        assert_eq!(n.editor.text, "# New\nupdated\n");
+        assert!(n.editor.monospace && n.preview.enabled);
+        assert!(!n.dirty && !n.find.enabled);
+        assert_eq!(n.editor.selection(), 0..0);
+        assert!(app.focus == Focus::Editor);
+
+        // Same decoded text with a new inode preserves the current selection,
+        // yet refreshes the etag so the next edit can be saved safely.
+        n.editor.select(2..5);
+        std::fs::write(&replacement, b"\xef\xbb\xbf# New\r\nupdated\r\n").unwrap();
+        std::fs::rename(&replacement, &path).unwrap();
+        assert!(app.refresh_key(&f5, ModifiersState::empty(), false));
+        let Document::Notes(n) = &mut app.document else {
+            unreachable!()
+        };
+        assert_eq!(n.editor.selection(), 2..5);
+        n.editor.insert("Local");
+        n.edited();
+        assert!(app.refresh_key(&f5, ModifiersState::empty(), false));
+        assert!(matches!(app.dialog, Some(Dialog::Error(_))));
+        app.action(Action::Cancel);
+        let Document::Notes(n) = &mut app.document else {
+            unreachable!()
+        };
+        assert!(n.dirty);
+        assert_eq!(n.editor.text, "# Local\nupdated\n");
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            b"\xef\xbb\xbf# New\r\nupdated\r\n"
+        );
+        n.save().unwrap();
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            b"\xef\xbb\xbf# Local\r\nupdated\r\n"
+        );
+
+        std::fs::write(&path, [0xff]).unwrap();
+        assert!(app.refresh_key(&f5, ModifiersState::empty(), false));
+        assert!(matches!(app.dialog, Some(Dialog::Error(_))));
+        let Document::Notes(n) = &app.document else {
+            unreachable!()
+        };
+        assert!(!n.dirty);
+        assert_eq!(n.editor.text, "# Local\nupdated\n");
+        assert_eq!(std::fs::read(&path).unwrap(), [0xff]);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn refresh_existing_notebook_filter_observes_external_writes_without_saving_editor() {
         let dir = std::env::temp_dir().join(format!("jwm-external-refresh-{}", std::process::id()));
         std::fs::create_dir(&dir).unwrap();
@@ -1712,12 +1835,8 @@ mod tests {
         let renamed = dir.join("renamed.txt");
         std::fs::rename(&rename, &renamed).unwrap();
 
-        assert!(app.notebook_refresh_key(
-            &Key::Named(NamedKey::F5),
-            ModifiersState::empty(),
-            false
-        ));
-        assert!(app.notebook_refresh_key(&Key::Named(NamedKey::F5), ModifiersState::empty(), true));
+        assert!(app.refresh_key(&Key::Named(NamedKey::F5), ModifiersState::empty(), false));
+        assert!(app.refresh_key(&Key::Named(NamedKey::F5), ModifiersState::empty(), true));
         assert!(app.focus == Focus::Editor);
         ready.recv_timeout(Duration::from_secs(3)).unwrap();
         assert!(app.poll_search());
