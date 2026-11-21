@@ -120,13 +120,18 @@ def main():
         run("xdotool", "windowactivate", "--sync", control_id)
         wait(lambda: focused(control_id), "control window was not focused")
         open_query(UNICODE_CONTROL)
+        # Wait for the real launcher panel transition before taking the witness.
+        time.sleep(.8)
         capture("unicode-control")
         keys("Return")
         wait(lambda: ui().get("kind") == "theme_picker",
              "the pre-existing Chinese control failed; no result can be attributed to indexing")
-        keys("Escape")
-        wait(lambda: not ui()["active"], "the Chinese control picker did not close")
         report["unicode_control"] = "theme_picker"
+        keys("Escape")
+        wait(lambda: ui().get("kind") == "control_center",
+             "Escape from Themes should return to its Shell Hub parent")
+        keys("Escape")
+        wait(lambda: not ui()["active"], "Escape from Shell Hub did not close the overlay")
         usage = root / "data/jwm/launcher-usage"
 
         for label, query, expected in CASES:
