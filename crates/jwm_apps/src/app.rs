@@ -1056,8 +1056,7 @@ impl App {
                                 }
                                 Ok(())
                             } else {
-                                n.save().and_then(|()| n.load(path)).map(|()| {
-                                    n.refresh();
+                                n.open_result(path).map(|()| {
                                     self.focus = Focus::Editor;
                                 })
                             }

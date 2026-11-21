@@ -194,6 +194,8 @@ pub(crate) struct Notes {
     pub due: Option<Instant>,
     pub status: String,
     pub list_scroll: f64,
+    #[cfg(test)]
+    refreshes: usize,
 }
 
 impl Notes {
@@ -211,6 +213,8 @@ impl Notes {
             due: None,
             status: "自动保存已开启 · Ctrl+N 新建 · Ctrl+F 搜索".into(),
             list_scroll: 0.,
+            #[cfg(test)]
+            refreshes: 0,
         };
         if let Some(path) = path {
             this.load(path)?;
@@ -292,10 +296,10 @@ impl Notes {
             .managed
             .then(|| Instant::now() + std::time::Duration::from_millis(700));
     }
-    pub fn save(&mut self) -> Result<(), String> {
+    fn persist(&mut self) -> Result<bool, String> {
         self.due = None;
         if !self.dirty {
-            return Ok(());
+            return Ok(false);
         }
         self.document
             .as_mut()
@@ -303,10 +307,24 @@ impl Notes {
             .save(&self.editor.text)?;
         self.dirty = false;
         self.status = "已保存".into();
-        if self.managed {
+        Ok(true)
+    }
+    pub fn save(&mut self) -> Result<(), String> {
+        if self.persist()? && self.managed {
             self.refresh();
         }
         Ok(())
+    }
+    pub fn open_result(&mut self, path: PathBuf) -> Result<(), String> {
+        // Save before loading another note, but scan the result list only
+        // once. If the save succeeded and the load failed, still refresh to
+        // reflect the saved file's new title, contents and modification time.
+        let saved = self.persist()?;
+        let opened = self.load(path);
+        if opened.is_ok() || (saved && self.managed) {
+            self.refresh();
+        }
+        opened
     }
     pub fn save_as(&mut self, path: &Path) -> Result<(), String> {
         let file = gio::File::for_path(path);
@@ -342,6 +360,10 @@ impl Notes {
         Ok(())
     }
     pub fn refresh(&mut self) {
+        #[cfg(test)]
+        {
+            self.refreshes += 1;
+        }
         let query = self.search.text.to_lowercase();
         let mut entries: Vec<_> = std::fs::read_dir(&self.directory)
             .into_iter()
@@ -395,6 +417,74 @@ impl Notes {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn open_result_refreshes_once_and_keeps_save_and_load_failures_distinct() {
+        let dir = std::env::temp_dir().join(format!("jwm-note-switch-{}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        let first = dir.join("first.txt");
+        let second = dir.join("second.txt");
+        let decoy = dir.join("decoy.txt");
+        std::fs::write(&first, "First").unwrap();
+        std::fs::write(&second, "Second needle").unwrap();
+        std::fs::write(&decoy, "Different").unwrap();
+        let mut notes = Notes::new(Some(first.clone())).unwrap();
+        notes.managed = true;
+        notes.directory = dir.clone();
+        notes.search.text = "needle".into();
+        notes.refresh();
+        let scans = notes.refreshes;
+
+        notes.editor.insert("needle ");
+        notes.edited();
+        std::fs::write(&decoy, "Externally changed needle").unwrap();
+        notes.open_result(second.clone()).unwrap();
+        assert_eq!(notes.refreshes, scans + 1);
+        assert_eq!(notes.editor.text, "Second needle");
+        assert_eq!(std::fs::read_to_string(&first).unwrap(), "needle First");
+        assert!(notes.rows.iter().any(|(path, _)| path == &decoy));
+
+        // A clean open also refreshes externally edited notes.
+        std::fs::write(&decoy, "Removed from results").unwrap();
+        notes.open_result(first.clone()).unwrap();
+        assert_eq!(notes.refreshes, scans + 2);
+        assert!(!notes.rows.iter().any(|(path, _)| path == &decoy));
+
+        notes.editor.insert("new ");
+        notes.edited();
+        let missing = dir.join("missing.txt");
+        assert!(notes.open_result(missing).is_err());
+        assert_eq!(notes.refreshes, scans + 3);
+        assert_eq!(
+            notes.document.as_ref().unwrap().file.path(),
+            Some(first.clone())
+        );
+        assert!(!notes.dirty);
+        assert_eq!(std::fs::read_to_string(&first).unwrap(), "new needle First");
+        assert!(
+            notes
+                .rows
+                .iter()
+                .any(|(path, title)| path == &first && title == "new needle First")
+        );
+
+        notes.editor.insert("pending ");
+        notes.edited();
+        std::fs::write(&first, "external file replacement").unwrap();
+        assert!(notes.open_result(second).is_err());
+        assert_eq!(notes.refreshes, scans + 3);
+        assert_eq!(
+            notes.document.as_ref().unwrap().file.path(),
+            Some(first.clone())
+        );
+        assert_eq!(notes.editor.text, "new pending needle First");
+        assert!(notes.dirty);
+        assert_eq!(
+            std::fs::read_to_string(&first).unwrap(),
+            "external file replacement"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn file_size_boundary_counts_bom_and_encoded_newlines() {
