@@ -1,0 +1,1785 @@
+{
+  "schema_version": 1,
+  "experiment": "X11 ReleaseAll software timing, two-host pipelined setup",
+  "release_proof_transport": "in_key_up_observer_reply_after_source_xquerykeymap",
+  "status": "partial",
+  "profiles": {
+    "dual": {
+      "profile": "dual",
+      "metric": "viewer_receive_upper_bound",
+      "capture": {
+        "bytes": 1201875,
+        "original_sha256": "1e65539f5a4cf25351f3e40314d7b5cf6ef919291a0866b2f44c7a2df267c9c8",
+        "status": "captured",
+        "checkpoints": {
+          "1": {
+            "bytes": 372755,
+            "original_sha256": "157fc4f483a520ca91033b5ea3c48bd4bfcd7d1bb6e5c52f387d46bb902139ea",
+            "status": "captured"
+          },
+          "2": {
+            "bytes": 543225,
+            "original_sha256": "11e7c32f993c9e772359ce9822ea6a7be4cd1586140f49de33257a4ad4c9e76a",
+            "status": "captured"
+          },
+          "3": {
+            "bytes": 115698,
+            "original_sha256": "9ea7d7d4aa66852e4305a95f80774006d239bac3faf7b384fbce02cc711ea1e2",
+            "status": "captured"
+          }
+        },
+        "ledgers": {
+          "1": {
+            "status": "captured",
+            "rows": 91,
+            "malformed_rows": 0,
+            "bytes": 214054,
+            "original_sha256": "2c4e35af2ec92cf031c1388dfc7bbcbab68dd9e0bb2f74a7751eebb9c200f179",
+            "source_xkb_retained_sha256": "f91a53b20c39bb4fcd1633233183648c99d7c68af3584f4ca6f9b4f5db53323a"
+          },
+          "2": {
+            "status": "captured",
+            "rows": 130,
+            "malformed_rows": 0,
+            "bytes": 313046,
+            "original_sha256": "9f9f300227593809d752407e969161f452015aaafa91c58b85ebfda57fe18d3c",
+            "source_xkb_retained_sha256": "f91a53b20c39bb4fcd1633233183648c99d7c68af3584f4ca6f9b4f5db53323a"
+          },
+          "3": {
+            "status": "captured",
+            "rows": 28,
+            "malformed_rows": 0,
+            "bytes": 65119,
+            "original_sha256": "4d47026991b46147c2910ec3f30a5a39f8f9c3ad4b210ed07dfb3a3809540611",
+            "source_xkb_retained_sha256": "f91a53b20c39bb4fcd1633233183648c99d7c68af3584f4ca6f9b4f5db53323a"
+          }
+        },
+        "controller_exit": 1
+      },
+      "binary_pins": {
+        "viewer_binary_sha256": "e89ce2f4069d83d6ad25637bae0dd52eae1d8e6890e8e87b5dc5bd2932ade72a",
+        "host_binary_sha256": "9d9bec7dd7db0e84080eed138965786c27de9337e5c11f63e83d628b51c26720",
+        "fixture_sha256": "c3f5ad983e08cff8f1988108f1638fc21c6735a2cdc5fe7d4e480ba9bb0f9616"
+      },
+      "software_timings": {
+        "deadline_ms": 2500,
+        "warmup_seconds": 30,
+        "score_seconds": 60,
+        "warmup_samples": 30
+      },
+      "profile_findings": [
+        "controller returned nonzero"
+      ],
+      "trials": [
+        {
+          "session_index": 1,
+          "fixture_setup_status": "passed",
+          "fixture_session_status": "failed",
+          "fixture_session_error_class": "TimeoutError",
+          "fixture_session_failure_code": null,
+          "missing_terminal_evidence": [],
+          "complete_trace": false,
+          "authenticated_scope_verified": true,
+          "endpoint_exits_clean": true,
+          "jpeg_x11_route_verified": true,
+          "endpoint_routing": {
+            "host_interface": "wlp3s0",
+            "viewer_interface": "eno1",
+            "keymap_alignment": {
+              "source_xkb_sha256": "f91a53b20c39bb4fcd1633233183648c99d7c68af3584f4ca6f9b4f5db53323a",
+              "viewer_map_loaded": true,
+              "authority_matches": true,
+              "before": {
+                "common_bound": 229,
+                "differing_keycodes": [
+                  203
+                ],
+                "modifiers_equal": false,
+                "compatible": false
+              },
+              "after": {
+                "common_bound": 229,
+                "differing_keycodes": [],
+                "modifiers_equal": true,
+                "compatible": true
+              }
+            },
+            "viewer_keyboard_and_pointer_granted": true,
+            "host_keyboard_and_pointer_granted": true,
+            "host_keymap_diagnostic_lines": 0
+          },
+          "attempted": 61,
+          "not_attempted": 39,
+          "warmup_records": 30,
+          "warmup_failures": [],
+          "samples": [
+            {
+              "slot": 1,
+              "seq": 31,
+              "status": "passed",
+              "latency_ns": 3319778,
+              "source_keymap_proof_ns_after_key_up": 277600
+            },
+            {
+              "slot": 2,
+              "seq": 32,
+              "status": "passed",
+              "latency_ns": 3089028,
+              "source_keymap_proof_ns_after_key_up": 266791
+            },
+            {
+              "slot": 3,
+              "seq": 33,
+              "status": "passed",
+              "latency_ns": 3952560,
+              "source_keymap_proof_ns_after_key_up": 207987
+            },
+            {
+              "slot": 4,
+              "seq": 34,
+              "status": "passed",
+              "latency_ns": 4872018,
+              "source_keymap_proof_ns_after_key_up": 296717
+            },
+            {
+              "slot": 5,
+              "seq": 35,
+              "status": "passed",
+              "latency_ns": 3310496,
+              "source_keymap_proof_ns_after_key_up": 100290
+            },
+            {
+              "slot": 6,
+              "seq": 36,
+              "status": "passed",
+              "latency_ns": 3454246,
+              "source_keymap_proof_ns_after_key_up": 68351
+            },
+            {
+              "slot": 7,
+              "seq": 37,
+              "status": "passed",
+              "latency_ns": 3767863,
+              "source_keymap_proof_ns_after_key_up": 319155
+            },
+            {
+              "slot": 8,
+              "seq": 38,
+              "status": "passed",
+              "latency_ns": 3701391,
+              "source_keymap_proof_ns_after_key_up": 147340
+            },
+            {
+              "slot": 9,
+              "seq": 39,
+              "status": "passed",
+              "latency_ns": 4601060,
+              "source_keymap_proof_ns_after_key_up": 89354
+            },
+            {
+              "slot": 10,
+              "seq": 40,
+              "status": "passed",
+              "latency_ns": 3117236,
+              "source_keymap_proof_ns_after_key_up": 77232
+            },
+            {
+              "slot": 11,
+              "seq": 41,
+              "status": "passed",
+              "latency_ns": 2982248,
+              "source_keymap_proof_ns_after_key_up": 219184
+            },
+            {
+              "slot": 12,
+              "seq": 42,
+              "status": "passed",
+              "latency_ns": 2451991,
+              "source_keymap_proof_ns_after_key_up": 75212
+            },
+            {
+              "slot": 13,
+              "seq": 43,
+              "status": "passed",
+              "latency_ns": 2861421,
+              "source_keymap_proof_ns_after_key_up": 139733
+            },
+            {
+              "slot": 14,
+              "seq": 44,
+              "status": "passed",
+              "latency_ns": 3017332,
+              "source_keymap_proof_ns_after_key_up": 124648
+            },
+            {
+              "slot": 15,
+              "seq": 45,
+              "status": "passed",
+              "latency_ns": 2723777,
+              "source_keymap_proof_ns_after_key_up": 148314
+            },
+            {
+              "slot": 16,
+              "seq": 46,
+              "status": "passed",
+              "latency_ns": 2888207,
+              "source_keymap_proof_ns_after_key_up": 121506
+            },
+            {
+              "slot": 17,
+              "seq": 47,
+              "status": "passed",
+              "latency_ns": 2715317,
+              "source_keymap_proof_ns_after_key_up": 95501
+            },
+            {
+              "slot": 18,
+              "seq": 48,
+              "status": "passed",
+              "latency_ns": 3834888,
+              "source_keymap_proof_ns_after_key_up": 266467
+            },
+            {
+              "slot": 19,
+              "seq": 49,
+              "status": "passed",
+              "latency_ns": 2491788,
+              "source_keymap_proof_ns_after_key_up": 92846
+            },
+            {
+              "slot": 20,
+              "seq": 50,
+              "status": "passed",
+              "latency_ns": 2256400,
+              "source_keymap_proof_ns_after_key_up": 67398
+            },
+            {
+              "slot": 21,
+              "seq": 51,
+              "status": "passed",
+              "latency_ns": 3019821,
+              "source_keymap_proof_ns_after_key_up": 244685
+            },
+            {
+              "slot": 22,
+              "seq": 52,
+              "status": "passed",
+              "latency_ns": 3603167,
+              "source_keymap_proof_ns_after_key_up": 130308
+            },
+            {
+              "slot": 23,
+              "seq": 53,
+              "status": "passed",
+              "latency_ns": 3315193,
+              "source_keymap_proof_ns_after_key_up": 109654
+            },
+            {
+              "slot": 24,
+              "seq": 54,
+              "status": "passed",
+              "latency_ns": 3082031,
+              "source_keymap_proof_ns_after_key_up": 90236
+            },
+            {
+              "slot": 25,
+              "seq": 55,
+              "status": "passed",
+              "latency_ns": 2628437,
+              "source_keymap_proof_ns_after_key_up": 157644
+            },
+            {
+              "slot": 26,
+              "seq": 56,
+              "status": "passed",
+              "latency_ns": 3345830,
+              "source_keymap_proof_ns_after_key_up": 263964
+            },
+            {
+              "slot": 27,
+              "seq": 57,
+              "status": "passed",
+              "latency_ns": 2951092,
+              "source_keymap_proof_ns_after_key_up": 271726
+            },
+            {
+              "slot": 28,
+              "seq": 58,
+              "status": "passed",
+              "latency_ns": 3121655,
+              "source_keymap_proof_ns_after_key_up": 212663
+            },
+            {
+              "slot": 29,
+              "seq": 59,
+              "status": "passed",
+              "latency_ns": 3424266,
+              "source_keymap_proof_ns_after_key_up": 269266
+            },
+            {
+              "slot": 30,
+              "seq": 60,
+              "status": "passed",
+              "latency_ns": 2854248,
+              "source_keymap_proof_ns_after_key_up": 126275
+            },
+            {
+              "slot": 31,
+              "seq": 61,
+              "status": "passed",
+              "latency_ns": 3164009,
+              "source_keymap_proof_ns_after_key_up": 95422
+            },
+            {
+              "slot": 32,
+              "seq": 62,
+              "status": "passed",
+              "latency_ns": 3345205,
+              "source_keymap_proof_ns_after_key_up": 268453
+            },
+            {
+              "slot": 33,
+              "seq": 63,
+              "status": "passed",
+              "latency_ns": 3692185,
+              "source_keymap_proof_ns_after_key_up": 94689
+            },
+            {
+              "slot": 34,
+              "seq": 64,
+              "status": "passed",
+              "latency_ns": 3099079,
+              "source_keymap_proof_ns_after_key_up": 258982
+            },
+            {
+              "slot": 35,
+              "seq": 65,
+              "status": "passed",
+              "latency_ns": 3027653,
+              "source_keymap_proof_ns_after_key_up": 284265
+            },
+            {
+              "slot": 36,
+              "seq": 66,
+              "status": "passed",
+              "latency_ns": 3509511,
+              "source_keymap_proof_ns_after_key_up": 240285
+            },
+            {
+              "slot": 37,
+              "seq": 67,
+              "status": "passed",
+              "latency_ns": 2753980,
+              "source_keymap_proof_ns_after_key_up": 85345
+            },
+            {
+              "slot": 38,
+              "seq": 68,
+              "status": "passed",
+              "latency_ns": 2641292,
+              "source_keymap_proof_ns_after_key_up": 107257
+            },
+            {
+              "slot": 39,
+              "seq": 69,
+              "status": "passed",
+              "latency_ns": 3279625,
+              "source_keymap_proof_ns_after_key_up": 227263
+            },
+            {
+              "slot": 40,
+              "seq": 70,
+              "status": "passed",
+              "latency_ns": 3831825,
+              "source_keymap_proof_ns_after_key_up": 260985
+            },
+            {
+              "slot": 41,
+              "seq": 71,
+              "status": "passed",
+              "latency_ns": 3190965,
+              "source_keymap_proof_ns_after_key_up": 87187
+            },
+            {
+              "slot": 42,
+              "seq": 72,
+              "status": "passed",
+              "latency_ns": 3357289,
+              "source_keymap_proof_ns_after_key_up": 133937
+            },
+            {
+              "slot": 43,
+              "seq": 73,
+              "status": "passed",
+              "latency_ns": 3923488,
+              "source_keymap_proof_ns_after_key_up": 242772
+            },
+            {
+              "slot": 44,
+              "seq": 74,
+              "status": "passed",
+              "latency_ns": 8811935,
+              "source_keymap_proof_ns_after_key_up": 143068
+            },
+            {
+              "slot": 45,
+              "seq": 75,
+              "status": "passed",
+              "latency_ns": 3205161,
+              "source_keymap_proof_ns_after_key_up": 103905
+            },
+            {
+              "slot": 46,
+              "seq": 76,
+              "status": "passed",
+              "latency_ns": 2986615,
+              "source_keymap_proof_ns_after_key_up": 75601
+            },
+            {
+              "slot": 47,
+              "seq": 77,
+              "status": "passed",
+              "latency_ns": 2893409,
+              "source_keymap_proof_ns_after_key_up": 247380
+            },
+            {
+              "slot": 48,
+              "seq": 78,
+              "status": "passed",
+              "latency_ns": 2841104,
+              "source_keymap_proof_ns_after_key_up": 191364
+            },
+            {
+              "slot": 49,
+              "seq": 79,
+              "status": "passed",
+              "latency_ns": 2865453,
+              "source_keymap_proof_ns_after_key_up": 88701
+            },
+            {
+              "slot": 50,
+              "seq": 80,
+              "status": "passed",
+              "latency_ns": 2715932,
+              "source_keymap_proof_ns_after_key_up": 97907
+            },
+            {
+              "slot": 51,
+              "seq": 81,
+              "status": "passed",
+              "latency_ns": 2659804,
+              "source_keymap_proof_ns_after_key_up": 229304
+            },
+            {
+              "slot": 52,
+              "seq": 82,
+              "status": "passed",
+              "latency_ns": 2987861,
+              "source_keymap_proof_ns_after_key_up": 125419
+            },
+            {
+              "slot": 53,
+              "seq": 83,
+              "status": "passed",
+              "latency_ns": 2605533,
+              "source_keymap_proof_ns_after_key_up": 149188
+            },
+            {
+              "slot": 54,
+              "seq": 84,
+              "status": "passed",
+              "latency_ns": 2485328,
+              "source_keymap_proof_ns_after_key_up": 95545
+            },
+            {
+              "slot": 55,
+              "seq": 85,
+              "status": "passed",
+              "latency_ns": 2967733,
+              "source_keymap_proof_ns_after_key_up": 298804
+            },
+            {
+              "slot": 56,
+              "seq": 86,
+              "status": "passed",
+              "latency_ns": 2743495,
+              "source_keymap_proof_ns_after_key_up": 93594
+            },
+            {
+              "slot": 57,
+              "seq": 87,
+              "status": "passed",
+              "latency_ns": 3299766,
+              "source_keymap_proof_ns_after_key_up": 149899
+            },
+            {
+              "slot": 58,
+              "seq": 88,
+              "status": "passed",
+              "latency_ns": 2669483,
+              "source_keymap_proof_ns_after_key_up": 155198
+            },
+            {
+              "slot": 59,
+              "seq": 89,
+              "status": "passed",
+              "latency_ns": 3215623,
+              "source_keymap_proof_ns_after_key_up": 150390
+            },
+            {
+              "slot": 60,
+              "seq": 90,
+              "status": "passed",
+              "latency_ns": 6361474,
+              "source_keymap_proof_ns_after_key_up": 94623
+            },
+            {
+              "slot": 61,
+              "seq": 91,
+              "status": "timeout",
+              "latency_ns": null,
+              "stage": "arm",
+              "error_class": "TimeoutError",
+              "shortcut_issued": false
+            }
+          ],
+          "distribution": {
+            "planned_observations": 100,
+            "replayed_slot_records": 61,
+            "verified_responses": 60,
+            "timeouts": 1,
+            "failed_or_invalid_attempts": 0,
+            "not_issued_slots": 0,
+            "absent_slot_records": 39,
+            "nearest_rank_p95_rank": 95,
+            "p95_ms_over_planned_rank": null,
+            "p95_planned_rank_unbounded": true,
+            "observed_only_ms": {
+              "minimum": 2.2564,
+              "p50": 3.089028,
+              "p95": 4.60106,
+              "maximum": 8.811935
+            },
+            "planned_rank_at_most_50_ms": false
+          },
+          "all_attempts_responded": false,
+          "threshold_evaluation": "not_evaluable",
+          "replayed_software_p95_meets_50_ms": false,
+          "release_proof_transport": "in_key_up_observer_reply_after_source_xquerykeymap",
+          "failed_measurement_teardown": {
+            "status": "observer_terminal_reply_received",
+            "terminal_only_late_replies": 1,
+            "finished_receipt_ns": 90385608658583,
+            "pending_control": {
+              "op": "arm",
+              "seq": 91,
+              "request_id": 91,
+              "viewer_request_ns": 90381604596952,
+              "held_keycode": 74
+            },
+            "finish_command": {
+              "op": "finish",
+              "seq": 90,
+              "request_id": 92,
+              "abandoned_arm_seq": 91
+            },
+            "late_replies": [
+              {
+                "event": "armed",
+                "seq": 91,
+                "viewer_receipt_ns": 90385599587138,
+                "request_id": 91,
+                "request_seq": 91,
+                "host_command_read_ns": 90467504719911,
+                "host_reply_ns": 90467505011791,
+                "host_held": []
+              }
+            ],
+            "abandoned_control_request_to_reply_ns": 3994990186,
+            "matched_abandoned_control_reply": true
+          },
+          "failure_closed_with_full_endpoint_witness": true,
+          "terminal_error": null,
+          "inline_source_keymap_check": {
+            "scored_key_up_edges_verified": 60,
+            "edge_to_keymap_check_p95_ms": 0.284265,
+            "edge_to_keymap_check_max_ms": 0.319155
+          },
+          "paired_setup_stage_ms": {
+            "arm_viewer_roundtrip": {
+              "p95": 101.636644,
+              "max": 362.211547
+            },
+            "arm_host_processing": {
+              "p95": 0.453166,
+              "max": 0.753667
+            },
+            "click_release_to_observer": {
+              "p95": 5.032243,
+              "max": 113.151651
+            },
+            "held_key_press_to_observer": {
+              "p95": 3.493144,
+              "max": 3.975757
+            },
+            "start_to_trigger": {
+              "p95": 122.96184,
+              "max": 371.653057
+            }
+          },
+          "retained_source": "result",
+          "status": "incomplete"
+        },
+        {
+          "session_index": 2,
+          "fixture_setup_status": "passed",
+          "fixture_session_status": "passed",
+          "fixture_session_error_class": null,
+          "fixture_session_failure_code": null,
+          "missing_terminal_evidence": [],
+          "complete_trace": true,
+          "authenticated_scope_verified": true,
+          "endpoint_exits_clean": true,
+          "jpeg_x11_route_verified": true,
+          "endpoint_routing": {
+            "host_interface": "wlp3s0",
+            "viewer_interface": "eno1",
+            "keymap_alignment": {
+              "source_xkb_sha256": "f91a53b20c39bb4fcd1633233183648c99d7c68af3584f4ca6f9b4f5db53323a",
+              "viewer_map_loaded": true,
+              "authority_matches": true,
+              "before": {
+                "common_bound": 229,
+                "differing_keycodes": [
+                  203
+                ],
+                "modifiers_equal": false,
+                "compatible": false
+              },
+              "after": {
+                "common_bound": 229,
+                "differing_keycodes": [],
+                "modifiers_equal": true,
+                "compatible": true
+              }
+            },
+            "viewer_keyboard_and_pointer_granted": true,
+            "host_keyboard_and_pointer_granted": true,
+            "host_keymap_diagnostic_lines": 0
+          },
+          "attempted": 100,
+          "not_attempted": 0,
+          "warmup_records": 30,
+          "warmup_failures": [],
+          "samples": [
+            {
+              "slot": 1,
+              "seq": 31,
+              "status": "passed",
+              "latency_ns": 95774504,
+              "source_keymap_proof_ns_after_key_up": 245025
+            },
+            {
+              "slot": 2,
+              "seq": 32,
+              "status": "passed",
+              "latency_ns": 5316731,
+              "source_keymap_proof_ns_after_key_up": 98001
+            },
+            {
+              "slot": 3,
+              "seq": 33,
+              "status": "passed",
+              "latency_ns": 5369640,
+              "source_keymap_proof_ns_after_key_up": 289147
+            },
+            {
+              "slot": 4,
+              "seq": 34,
+              "status": "passed",
+              "latency_ns": 4100076,
+              "source_keymap_proof_ns_after_key_up": 217861
+            },
+            {
+              "slot": 5,
+              "seq": 35,
+              "status": "passed",
+              "latency_ns": 3124164,
+              "source_keymap_proof_ns_after_key_up": 252418
+            },
+            {
+              "slot": 6,
+              "seq": 36,
+              "status": "passed",
+              "latency_ns": 7792489,
+              "source_keymap_proof_ns_after_key_up": 171155
+            },
+            {
+              "slot": 7,
+              "seq": 37,
+              "status": "passed",
+              "latency_ns": 3369981,
+              "source_keymap_proof_ns_after_key_up": 131921
+            },
+            {
+              "slot": 8,
+              "seq": 38,
+              "status": "passed",
+              "latency_ns": 3094916,
+              "source_keymap_proof_ns_after_key_up": 88462
+            },
+            {
+              "slot": 9,
+              "seq": 39,
+              "status": "passed",
+              "latency_ns": 4427288,
+              "source_keymap_proof_ns_after_key_up": 273844
+            },
+            {
+              "slot": 10,
+              "seq": 40,
+              "status": "passed",
+              "latency_ns": 3218628,
+              "source_keymap_proof_ns_after_key_up": 91976
+            },
+            {
+              "slot": 11,
+              "seq": 41,
+              "status": "passed",
+              "latency_ns": 3145748,
+              "source_keymap_proof_ns_after_key_up": 113199
+            },
+            {
+              "slot": 12,
+              "seq": 42,
+              "status": "passed",
+              "latency_ns": 2957934,
+              "source_keymap_proof_ns_after_key_up": 226109
+            },
+            {
+              "slot": 13,
+              "seq": 43,
+              "status": "passed",
+              "latency_ns": 4000103,
+              "source_keymap_proof_ns_after_key_up": 306596
+            },
+            {
+              "slot": 14,
+              "seq": 44,
+              "status": "passed",
+              "latency_ns": 3185384,
+              "source_keymap_proof_ns_after_key_up": 74039
+            },
+            {
+              "slot": 15,
+              "seq": 45,
+              "status": "passed",
+              "latency_ns": 3371349,
+              "source_keymap_proof_ns_after_key_up": 130959
+            },
+            {
+              "slot": 16,
+              "seq": 46,
+              "status": "passed",
+              "latency_ns": 4094591,
+              "source_keymap_proof_ns_after_key_up": 179466
+            },
+            {
+              "slot": 17,
+              "seq": 47,
+              "status": "passed",
+              "latency_ns": 2641245,
+              "source_keymap_proof_ns_after_key_up": 303219
+            },
+            {
+              "slot": 18,
+              "seq": 48,
+              "status": "passed",
+              "latency_ns": 2959718,
+              "source_keymap_proof_ns_after_key_up": 251443
+            },
+            {
+              "slot": 19,
+              "seq": 49,
+              "status": "passed",
+              "latency_ns": 3612802,
+              "source_keymap_proof_ns_after_key_up": 245817
+            },
+            {
+              "slot": 20,
+              "seq": 50,
+              "status": "passed",
+              "latency_ns": 3483039,
+              "source_keymap_proof_ns_after_key_up": 266884
+            },
+            {
+              "slot": 21,
+              "seq": 51,
+              "status": "passed",
+              "latency_ns": 2621761,
+              "source_keymap_proof_ns_after_key_up": 208206
+            },
+            {
+              "slot": 22,
+              "seq": 52,
+              "status": "passed",
+              "latency_ns": 4104163,
+              "source_keymap_proof_ns_after_key_up": 322447
+            },
+            {
+              "slot": 23,
+              "seq": 53,
+              "status": "passed",
+              "latency_ns": 3981382,
+              "source_keymap_proof_ns_after_key_up": 179288
+            },
+            {
+              "slot": 24,
+              "seq": 54,
+              "status": "passed",
+              "latency_ns": 3151891,
+              "source_keymap_proof_ns_after_key_up": 146854
+            },
+            {
+              "slot": 25,
+              "seq": 55,
+              "status": "passed",
+              "latency_ns": 3805464,
+              "source_keymap_proof_ns_after_key_up": 275249
+            },
+            {
+              "slot": 26,
+              "seq": 56,
+              "status": "passed",
+              "latency_ns": 3451107,
+              "source_keymap_proof_ns_after_key_up": 259149
+            },
+            {
+              "slot": 27,
+              "seq": 57,
+              "status": "passed",
+              "latency_ns": 3507674,
+              "source_keymap_proof_ns_after_key_up": 86626
+            },
+            {
+              "slot": 28,
+              "seq": 58,
+              "status": "passed",
+              "latency_ns": 3369632,
+              "source_keymap_proof_ns_after_key_up": 109405
+            },
+            {
+              "slot": 29,
+              "seq": 59,
+              "status": "passed",
+              "latency_ns": 3632832,
+              "source_keymap_proof_ns_after_key_up": 155187
+            },
+            {
+              "slot": 30,
+              "seq": 60,
+              "status": "passed",
+              "latency_ns": 3164577,
+              "source_keymap_proof_ns_after_key_up": 79092
+            },
+            {
+              "slot": 31,
+              "seq": 61,
+              "status": "passed",
+              "latency_ns": 5081029,
+              "source_keymap_proof_ns_after_key_up": 257462
+            },
+            {
+              "slot": 32,
+              "seq": 62,
+              "status": "passed",
+              "latency_ns": 3967489,
+              "source_keymap_proof_ns_after_key_up": 249810
+            },
+            {
+              "slot": 33,
+              "seq": 63,
+              "status": "passed",
+              "latency_ns": 4384236,
+              "source_keymap_proof_ns_after_key_up": 356386
+            },
+            {
+              "slot": 34,
+              "seq": 64,
+              "status": "passed",
+              "latency_ns": 2500082,
+              "source_keymap_proof_ns_after_key_up": 95110
+            },
+            {
+              "slot": 35,
+              "seq": 65,
+              "status": "passed",
+              "latency_ns": 3982578,
+              "source_keymap_proof_ns_after_key_up": 229628
+            },
+            {
+              "slot": 36,
+              "seq": 66,
+              "status": "passed",
+              "latency_ns": 3745134,
+              "source_keymap_proof_ns_after_key_up": 93212
+            },
+            {
+              "slot": 37,
+              "seq": 67,
+              "status": "passed",
+              "latency_ns": 3557370,
+              "source_keymap_proof_ns_after_key_up": 282299
+            },
+            {
+              "slot": 38,
+              "seq": 68,
+              "status": "passed",
+              "latency_ns": 3926456,
+              "source_keymap_proof_ns_after_key_up": 262719
+            },
+            {
+              "slot": 39,
+              "seq": 69,
+              "status": "passed",
+              "latency_ns": 2871604,
+              "source_keymap_proof_ns_after_key_up": 88191
+            },
+            {
+              "slot": 40,
+              "seq": 70,
+              "status": "passed",
+              "latency_ns": 2815270,
+              "source_keymap_proof_ns_after_key_up": 101673
+            },
+            {
+              "slot": 41,
+              "seq": 71,
+              "status": "passed",
+              "latency_ns": 2596602,
+              "source_keymap_proof_ns_after_key_up": 99038
+            },
+            {
+              "slot": 42,
+              "seq": 72,
+              "status": "passed",
+              "latency_ns": 3788543,
+              "source_keymap_proof_ns_after_key_up": 97079
+            },
+            {
+              "slot": 43,
+              "seq": 73,
+              "status": "passed",
+              "latency_ns": 3274872,
+              "source_keymap_proof_ns_after_key_up": 223127
+            },
+            {
+              "slot": 44,
+              "seq": 74,
+              "status": "passed",
+              "latency_ns": 3850814,
+              "source_keymap_proof_ns_after_key_up": 149419
+            },
+            {
+              "slot": 45,
+              "seq": 75,
+              "status": "passed",
+              "latency_ns": 4084555,
+              "source_keymap_proof_ns_after_key_up": 92007
+            },
+            {
+              "slot": 46,
+              "seq": 76,
+              "status": "passed",
+              "latency_ns": 7459801,
+              "source_keymap_proof_ns_after_key_up": 143196
+            },
+            {
+              "slot": 47,
+              "seq": 77,
+              "status": "passed",
+              "latency_ns": 3591549,
+              "source_keymap_proof_ns_after_key_up": 134362
+            },
+            {
+              "slot": 48,
+              "seq": 78,
+              "status": "passed",
+              "latency_ns": 4021617,
+              "source_keymap_proof_ns_after_key_up": 107597
+            },
+            {
+              "slot": 49,
+              "seq": 79,
+              "status": "passed",
+              "latency_ns": 3727508,
+              "source_keymap_proof_ns_after_key_up": 87130
+            },
+            {
+              "slot": 50,
+              "seq": 80,
+              "status": "passed",
+              "latency_ns": 3592579,
+              "source_keymap_proof_ns_after_key_up": 83820
+            },
+            {
+              "slot": 51,
+              "seq": 81,
+              "status": "passed",
+              "latency_ns": 2505033,
+              "source_keymap_proof_ns_after_key_up": 265075
+            },
+            {
+              "slot": 52,
+              "seq": 82,
+              "status": "passed",
+              "latency_ns": 3078431,
+              "source_keymap_proof_ns_after_key_up": 273780
+            },
+            {
+              "slot": 53,
+              "seq": 83,
+              "status": "passed",
+              "latency_ns": 5811335,
+              "source_keymap_proof_ns_after_key_up": 235433
+            },
+            {
+              "slot": 54,
+              "seq": 84,
+              "status": "passed",
+              "latency_ns": 3337137,
+              "source_keymap_proof_ns_after_key_up": 94273
+            },
+            {
+              "slot": 55,
+              "seq": 85,
+              "status": "passed",
+              "latency_ns": 3274950,
+              "source_keymap_proof_ns_after_key_up": 92877
+            },
+            {
+              "slot": 56,
+              "seq": 86,
+              "status": "passed",
+              "latency_ns": 3616828,
+              "source_keymap_proof_ns_after_key_up": 228844
+            },
+            {
+              "slot": 57,
+              "seq": 87,
+              "status": "passed",
+              "latency_ns": 3029283,
+              "source_keymap_proof_ns_after_key_up": 144946
+            },
+            {
+              "slot": 58,
+              "seq": 88,
+              "status": "passed",
+              "latency_ns": 2828364,
+              "source_keymap_proof_ns_after_key_up": 102559
+            },
+            {
+              "slot": 59,
+              "seq": 89,
+              "status": "passed",
+              "latency_ns": 2701765,
+              "source_keymap_proof_ns_after_key_up": 61807
+            },
+            {
+              "slot": 60,
+              "seq": 90,
+              "status": "passed",
+              "latency_ns": 2734012,
+              "source_keymap_proof_ns_after_key_up": 93948
+            },
+            {
+              "slot": 61,
+              "seq": 91,
+              "status": "passed",
+              "latency_ns": 2725624,
+              "source_keymap_proof_ns_after_key_up": 169029
+            },
+            {
+              "slot": 62,
+              "seq": 92,
+              "status": "passed",
+              "latency_ns": 3260107,
+              "source_keymap_proof_ns_after_key_up": 223798
+            },
+            {
+              "slot": 63,
+              "seq": 93,
+              "status": "passed",
+              "latency_ns": 2905447,
+              "source_keymap_proof_ns_after_key_up": 269514
+            },
+            {
+              "slot": 64,
+              "seq": 94,
+              "status": "passed",
+              "latency_ns": 3289272,
+              "source_keymap_proof_ns_after_key_up": 96731
+            },
+            {
+              "slot": 65,
+              "seq": 95,
+              "status": "passed",
+              "latency_ns": 3067560,
+              "source_keymap_proof_ns_after_key_up": 76925
+            },
+            {
+              "slot": 66,
+              "seq": 96,
+              "status": "passed",
+              "latency_ns": 3574614,
+              "source_keymap_proof_ns_after_key_up": 166207
+            },
+            {
+              "slot": 67,
+              "seq": 97,
+              "status": "passed",
+              "latency_ns": 3175687,
+              "source_keymap_proof_ns_after_key_up": 130467
+            },
+            {
+              "slot": 68,
+              "seq": 98,
+              "status": "passed",
+              "latency_ns": 4152158,
+              "source_keymap_proof_ns_after_key_up": 234418
+            },
+            {
+              "slot": 69,
+              "seq": 99,
+              "status": "passed",
+              "latency_ns": 4394730,
+              "source_keymap_proof_ns_after_key_up": 227818
+            },
+            {
+              "slot": 70,
+              "seq": 100,
+              "status": "passed",
+              "latency_ns": 3545012,
+              "source_keymap_proof_ns_after_key_up": 245517
+            },
+            {
+              "slot": 71,
+              "seq": 101,
+              "status": "passed",
+              "latency_ns": 3078301,
+              "source_keymap_proof_ns_after_key_up": 263158
+            },
+            {
+              "slot": 72,
+              "seq": 102,
+              "status": "passed",
+              "latency_ns": 2624736,
+              "source_keymap_proof_ns_after_key_up": 150839
+            },
+            {
+              "slot": 73,
+              "seq": 103,
+              "status": "passed",
+              "latency_ns": 3771661,
+              "source_keymap_proof_ns_after_key_up": 227353
+            },
+            {
+              "slot": 74,
+              "seq": 104,
+              "status": "passed",
+              "latency_ns": 2580068,
+              "source_keymap_proof_ns_after_key_up": 71803
+            },
+            {
+              "slot": 75,
+              "seq": 105,
+              "status": "passed",
+              "latency_ns": 4503840,
+              "source_keymap_proof_ns_after_key_up": 95010
+            },
+            {
+              "slot": 76,
+              "seq": 106,
+              "status": "passed",
+              "latency_ns": 3536786,
+              "source_keymap_proof_ns_after_key_up": 98054
+            },
+            {
+              "slot": 77,
+              "seq": 107,
+              "status": "passed",
+              "latency_ns": 3804209,
+              "source_keymap_proof_ns_after_key_up": 93475
+            },
+            {
+              "slot": 78,
+              "seq": 108,
+              "status": "passed",
+              "latency_ns": 2300451,
+              "source_keymap_proof_ns_after_key_up": 69261
+            },
+            {
+              "slot": 79,
+              "seq": 109,
+              "status": "passed",
+              "latency_ns": 3633668,
+              "source_keymap_proof_ns_after_key_up": 102093
+            },
+            {
+              "slot": 80,
+              "seq": 110,
+              "status": "passed",
+              "latency_ns": 3130595,
+              "source_keymap_proof_ns_after_key_up": 144176
+            },
+            {
+              "slot": 81,
+              "seq": 111,
+              "status": "passed",
+              "latency_ns": 3268596,
+              "source_keymap_proof_ns_after_key_up": 145765
+            },
+            {
+              "slot": 82,
+              "seq": 112,
+              "status": "passed",
+              "latency_ns": 3391565,
+              "source_keymap_proof_ns_after_key_up": 83437
+            },
+            {
+              "slot": 83,
+              "seq": 113,
+              "status": "passed",
+              "latency_ns": 2529659,
+              "source_keymap_proof_ns_after_key_up": 158489
+            },
+            {
+              "slot": 84,
+              "seq": 114,
+              "status": "passed",
+              "latency_ns": 3819647,
+              "source_keymap_proof_ns_after_key_up": 124561
+            },
+            {
+              "slot": 85,
+              "seq": 115,
+              "status": "passed",
+              "latency_ns": 3490485,
+              "source_keymap_proof_ns_after_key_up": 149492
+            },
+            {
+              "slot": 86,
+              "seq": 116,
+              "status": "passed",
+              "latency_ns": 3829634,
+              "source_keymap_proof_ns_after_key_up": 278763
+            },
+            {
+              "slot": 87,
+              "seq": 117,
+              "status": "passed",
+              "latency_ns": 4736613,
+              "source_keymap_proof_ns_after_key_up": 274727
+            },
+            {
+              "slot": 88,
+              "seq": 118,
+              "status": "passed",
+              "latency_ns": 3747535,
+              "source_keymap_proof_ns_after_key_up": 245720
+            },
+            {
+              "slot": 89,
+              "seq": 119,
+              "status": "passed",
+              "latency_ns": 3918618,
+              "source_keymap_proof_ns_after_key_up": 254538
+            },
+            {
+              "slot": 90,
+              "seq": 120,
+              "status": "passed",
+              "latency_ns": 3362305,
+              "source_keymap_proof_ns_after_key_up": 185367
+            },
+            {
+              "slot": 91,
+              "seq": 121,
+              "status": "passed",
+              "latency_ns": 3701771,
+              "source_keymap_proof_ns_after_key_up": 255660
+            },
+            {
+              "slot": 92,
+              "seq": 122,
+              "status": "passed",
+              "latency_ns": 2878030,
+              "source_keymap_proof_ns_after_key_up": 91716
+            },
+            {
+              "slot": 93,
+              "seq": 123,
+              "status": "passed",
+              "latency_ns": 3042092,
+              "source_keymap_proof_ns_after_key_up": 128437
+            },
+            {
+              "slot": 94,
+              "seq": 124,
+              "status": "passed",
+              "latency_ns": 3748960,
+              "source_keymap_proof_ns_after_key_up": 149892
+            },
+            {
+              "slot": 95,
+              "seq": 125,
+              "status": "passed",
+              "latency_ns": 2294656,
+              "source_keymap_proof_ns_after_key_up": 122787
+            },
+            {
+              "slot": 96,
+              "seq": 126,
+              "status": "passed",
+              "latency_ns": 5021686,
+              "source_keymap_proof_ns_after_key_up": 81594
+            },
+            {
+              "slot": 97,
+              "seq": 127,
+              "status": "passed",
+              "latency_ns": 2825312,
+              "source_keymap_proof_ns_after_key_up": 72742
+            },
+            {
+              "slot": 98,
+              "seq": 128,
+              "status": "passed",
+              "latency_ns": 3055372,
+              "source_keymap_proof_ns_after_key_up": 217730
+            },
+            {
+              "slot": 99,
+              "seq": 129,
+              "status": "passed",
+              "latency_ns": 2727325,
+              "source_keymap_proof_ns_after_key_up": 95778
+            },
+            {
+              "slot": 100,
+              "seq": 130,
+              "status": "passed",
+              "latency_ns": 3711132,
+              "source_keymap_proof_ns_after_key_up": 75478
+            }
+          ],
+          "distribution": {
+            "planned_observations": 100,
+            "replayed_slot_records": 100,
+            "verified_responses": 100,
+            "timeouts": 0,
+            "failed_or_invalid_attempts": 0,
+            "not_issued_slots": 0,
+            "absent_slot_records": 0,
+            "nearest_rank_p95_rank": 95,
+            "p95_ms_over_planned_rank": 5.316731,
+            "p95_planned_rank_unbounded": false,
+            "observed_only_ms": {
+              "minimum": 2.294656,
+              "p50": 3.483039,
+              "p95": 5.316731,
+              "maximum": 95.774504
+            },
+            "planned_rank_at_most_50_ms": true
+          },
+          "all_attempts_responded": true,
+          "threshold_evaluation": "met_by_measured_upper_bound",
+          "replayed_software_p95_meets_50_ms": true,
+          "release_proof_transport": "in_key_up_observer_reply_after_source_xquerykeymap",
+          "failed_measurement_teardown": null,
+          "failure_closed_with_full_endpoint_witness": false,
+          "terminal_error": null,
+          "inline_source_keymap_check": {
+            "scored_key_up_edges_verified": 100,
+            "edge_to_keymap_check_p95_ms": 0.282299,
+            "edge_to_keymap_check_max_ms": 0.356386
+          },
+          "paired_setup_stage_ms": {
+            "arm_viewer_roundtrip": {
+              "p95": 92.218516,
+              "max": 208.59372
+            },
+            "arm_host_processing": {
+              "p95": 0.470924,
+              "max": 0.567102
+            },
+            "click_release_to_observer": {
+              "p95": 9.832252,
+              "max": 105.798681
+            },
+            "held_key_press_to_observer": {
+              "p95": 5.436902,
+              "max": 15.805398
+            },
+            "start_to_trigger": {
+              "p95": 109.385198,
+              "max": 236.884574
+            }
+          },
+          "retained_source": "result",
+          "status": "complete"
+        },
+        {
+          "session_index": 3,
+          "fixture_setup_status": "passed",
+          "fixture_session_status": "failed",
+          "fixture_session_error_class": "TimeoutError",
+          "fixture_session_failure_code": null,
+          "missing_terminal_evidence": [],
+          "complete_trace": false,
+          "authenticated_scope_verified": true,
+          "endpoint_exits_clean": true,
+          "jpeg_x11_route_verified": true,
+          "endpoint_routing": {
+            "host_interface": "wlp3s0",
+            "viewer_interface": "eno1",
+            "keymap_alignment": {
+              "source_xkb_sha256": "f91a53b20c39bb4fcd1633233183648c99d7c68af3584f4ca6f9b4f5db53323a",
+              "viewer_map_loaded": true,
+              "authority_matches": true,
+              "before": {
+                "common_bound": 229,
+                "differing_keycodes": [
+                  203
+                ],
+                "modifiers_equal": false,
+                "compatible": false
+              },
+              "after": {
+                "common_bound": 229,
+                "differing_keycodes": [],
+                "modifiers_equal": true,
+                "compatible": true
+              }
+            },
+            "viewer_keyboard_and_pointer_granted": true,
+            "host_keyboard_and_pointer_granted": true,
+            "host_keymap_diagnostic_lines": 0
+          },
+          "attempted": 0,
+          "not_attempted": 100,
+          "warmup_records": 28,
+          "warmup_failures": [
+            {
+              "slot": 28,
+              "seq": 28,
+              "status": "timeout",
+              "latency_ns": null,
+              "stage": "arm",
+              "error_class": "TimeoutError",
+              "shortcut_issued": false
+            }
+          ],
+          "samples": [],
+          "distribution": {
+            "planned_observations": 100,
+            "replayed_slot_records": 0,
+            "verified_responses": 0,
+            "timeouts": 0,
+            "failed_or_invalid_attempts": 0,
+            "not_issued_slots": 0,
+            "absent_slot_records": 100,
+            "nearest_rank_p95_rank": 95,
+            "p95_ms_over_planned_rank": null,
+            "p95_planned_rank_unbounded": true,
+            "observed_only_ms": {
+              "minimum": null,
+              "p50": null,
+              "p95": null,
+              "maximum": null
+            },
+            "planned_rank_at_most_50_ms": false
+          },
+          "all_attempts_responded": false,
+          "threshold_evaluation": "not_evaluable",
+          "replayed_software_p95_meets_50_ms": false,
+          "release_proof_transport": "in_key_up_observer_reply_after_source_xquerykeymap",
+          "failed_measurement_teardown": {
+            "status": "observer_terminal_reply_received",
+            "terminal_only_late_replies": 1,
+            "finished_receipt_ns": 90511390424003,
+            "pending_control": {
+              "op": "arm",
+              "seq": 28,
+              "request_id": 28,
+              "viewer_request_ns": 90506958153556,
+              "held_keycode": 75
+            },
+            "finish_command": {
+              "op": "finish",
+              "seq": 27,
+              "request_id": 29,
+              "abandoned_arm_seq": 28
+            },
+            "late_replies": [
+              {
+                "event": "armed",
+                "seq": 28,
+                "viewer_receipt_ns": 90511218808306,
+                "request_id": 28,
+                "request_seq": 28,
+                "host_command_read_ns": 90588899265191,
+                "host_reply_ns": 90588899624688,
+                "host_held": []
+              }
+            ],
+            "abandoned_control_request_to_reply_ns": 4260654750,
+            "matched_abandoned_control_reply": true
+          },
+          "failure_closed_with_full_endpoint_witness": true,
+          "terminal_error": null,
+          "inline_source_keymap_check": {
+            "scored_key_up_edges_verified": 0,
+            "edge_to_keymap_check_p95_ms": null,
+            "edge_to_keymap_check_max_ms": null
+          },
+          "paired_setup_stage_ms": {
+            "arm_viewer_roundtrip": null,
+            "arm_host_processing": null,
+            "click_release_to_observer": null,
+            "held_key_press_to_observer": null,
+            "start_to_trigger": null
+          },
+          "retained_source": "result",
+          "status": "incomplete"
+        }
+      ],
+      "all_three_trials_complete": false,
+      "all_three_trials_replied_to_every_attempt": false,
+      "all_three_software_p95_at_most_50_ms": false
+    }
+  },
+  "source_pins": {
+    "dual/normal-release.py": {
+      "source_sha256": "c3f5ad983e08cff8f1988108f1638fc21c6735a2cdc5fe7d4e480ba9bb0f9616",
+      "archived_sha256": "c3f5ad983e08cff8f1988108f1638fc21c6735a2cdc5fe7d4e480ba9bb0f9616",
+      "private_peer_redacted": false
+    }
+  },
+  "recorded_fixture_source_manifest": null,
+  "planned_sessions_per_profile": 3,
+  "planned_attempts_per_session": 100,
+  "software_p95_target_ms": 50,
+  "method": "The viewer issues both reacquisition click edges before awaiting their ordered host observations. The actual held-key press reply includes the source X11 held-key query. The dual metric uses viewer F12 issuance through receipt of the matching actual host X11 release event. The source timestamps the edge, then queries the source X11 held-key state and includes that proof in the same observer reply. The viewer-timed interval includes the source query and return link and is an upper bound on the actual host edge delay. Host monotonic offsets are never subtracted from viewer timestamps. Late replies during controlled failure teardown remain outside the measured arrays. Per-trial nearest-rank p95 uses all 100 planned slots and gives unverified samples infinite rank. The physical input-to-pixel target is outside this measurement.",
+  "unscored_inline_dual_pilot": {
+    "scored": false,
+    "controller_exit": 0,
+    "capture": {
+      "bytes": 47859,
+      "original_sha256": "6749ef07f5bf64c3155b045009d09a0cdc1b4b9f7a6621643c9ca5af3529d7df",
+      "status": "captured"
+    },
+    "scope": "inline preflight",
+    "status": "completed",
+    "fixture_sha256": "c3f5ad983e08cff8f1988108f1638fc21c6735a2cdc5fe7d4e480ba9bb0f9616",
+    "endpoint_binary_sha256": {
+      "viewer": "e89ce2f4069d83d6ad25637bae0dd52eae1d8e6890e8e87b5dc5bd2932ade72a",
+      "host": "9d9bec7dd7db0e84080eed138965786c27de9337e5c11f63e83d628b51c26720"
+    },
+    "timing": {
+      "deadline_ms": 2500,
+      "warmup_seconds": 3,
+      "score_seconds": 6
+    },
+    "warmup_observed": 3,
+    "attempted": 6,
+    "not_attempted": 0,
+    "shortcut_issued": 6,
+    "keymap_alignment": {
+      "source_xkb_sha256": "f91a53b20c39bb4fcd1633233183648c99d7c68af3584f4ca6f9b4f5db53323a",
+      "viewer_map_loaded": true,
+      "authority_matches": true,
+      "before": {
+        "common_bound": 229,
+        "differing_keycodes": [
+          203
+        ],
+        "modifiers_equal": false,
+        "compatible": false
+      },
+      "after": {
+        "common_bound": 229,
+        "differing_keycodes": [],
+        "modifiers_equal": true,
+        "compatible": true
+      }
+    },
+    "diagnostic_only_distribution": {
+      "planned_observations": 6,
+      "replayed_slot_records": 6,
+      "verified_responses": 6,
+      "timeouts": 0,
+      "failed_or_invalid_attempts": 0,
+      "not_issued_slots": 0,
+      "absent_slot_records": 0,
+      "nearest_rank_p95_rank": 6,
+      "p95_ms_over_planned_rank": 5.167961,
+      "p95_planned_rank_unbounded": false,
+      "observed_only_ms": {
+        "minimum": 2.682347,
+        "p50": 2.788704,
+        "p95": 5.167961,
+        "maximum": 5.167961
+      },
+      "planned_rank_at_most_50_ms": true
+    },
+    "samples": [
+      {
+        "slot": 1,
+        "seq": 4,
+        "status": "passed",
+        "latency_ns": 3837280,
+        "source_keymap_proof_ns_after_key_up": 274068
+      },
+      {
+        "slot": 2,
+        "seq": 5,
+        "status": "passed",
+        "latency_ns": 2715535,
+        "source_keymap_proof_ns_after_key_up": 91805
+      },
+      {
+        "slot": 3,
+        "seq": 6,
+        "status": "passed",
+        "latency_ns": 5167961,
+        "source_keymap_proof_ns_after_key_up": 126977
+      },
+      {
+        "slot": 4,
+        "seq": 7,
+        "status": "passed",
+        "latency_ns": 4160929,
+        "source_keymap_proof_ns_after_key_up": 146591
+      },
+      {
+        "slot": 5,
+        "seq": 8,
+        "status": "passed",
+        "latency_ns": 2788704,
+        "source_keymap_proof_ns_after_key_up": 146422
+      },
+      {
+        "slot": 6,
+        "seq": 9,
+        "status": "passed",
+        "latency_ns": 2682347,
+        "source_keymap_proof_ns_after_key_up": 85732
+      }
+    ],
+    "authenticated_scope_verified": true,
+    "endpoint_exits_clean": true,
+    "jpeg_x11_route_verified": true,
+    "failed_measurement_teardown": null,
+    "terminal_error": null
+  },
+  "dual_adjacent_link_probes": {
+    "before": {
+      "original_sha256": "7e114dcfc051d0e682d39f5848a90f5fd9409e53db5c409ee615a6a2ece4778a",
+      "bytes": 705,
+      "packets": {
+        "transmitted": 8,
+        "received": 8
+      },
+      "rtt_ms": {
+        "min": 40.831,
+        "avg": 80.178,
+        "max": 166.656,
+        "mdev": 46.467
+      }
+    },
+    "after": {
+      "original_sha256": "44b34db280071a6b8698ae33432309d4dab0497238ade95c855bf7797942b5cc",
+      "bytes": 705,
+      "packets": {
+        "transmitted": 8,
+        "received": 8
+      },
+      "rtt_ms": {
+        "min": 24.768,
+        "avg": 38.681,
+        "max": 51.767,
+        "mdev": 9.554
+      }
+    }
+  },
+  "build_provenance": {
+    "schema_version": 1,
+    "profile": "release",
+    "cargo_default_features": false,
+    "cargo_features": [
+      "remote-h264"
+    ],
+    "tracked_source_sha256": {
+      "Cargo.lock": "511b8202d2d5793e5eac4c409d8cfcd0a512d5d4bb1cb212e5e28420e53a3eec",
+      "Cargo.toml": "9dd243ceb81417a3781afabf9b040a105ad39eb63d18af118ac43a232d1c0ae6",
+      "src/remote/client.rs": "5d5213e18a097a1cd66b037bb51a1a997049a787360c81f27d13f7f0dcdd1614",
+      "src/remote/h264.rs": "9bf6d22516f86eacffb1af2c4487118ee884a160799b34f84c63f871c3270dba",
+      "src/remote/host.rs": "401b64ca9687d1db48a7ff47929472ce78cafa073b994ea1af542c547157c5cc"
+    },
+    "mint": {
+      "binary_sha256": "e89ce2f4069d83d6ad25637bae0dd52eae1d8e6890e8e87b5dc5bd2932ade72a",
+      "build_exit": 0,
+      "compiler": "rustc 1.96.0 (ac68faa20 2026-05-25)",
+      "ffmpeg_link_sonames": [
+        "libavcodec.so.60",
+        "libavutil.so.58",
+        "libswscale.so.7"
+      ],
+      "mapped_nv12_layout_unit_test_exit": 0,
+      "vaapi_same_surface_fallback_test_exit": 0
+    },
+    "ubuntu": {
+      "binary_sha256": "9d9bec7dd7db0e84080eed138965786c27de9337e5c11f63e83d628b51c26720",
+      "build_exit": 0,
+      "compiler": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
+      "ffmpeg_link_sonames": [
+        "libavcodec.so.58",
+        "libavutil.so.56",
+        "libswscale.so.5"
+      ],
+      "source_manifest_matches_mint": true
+    },
+    "ubuntu_pre_fix": {
+      "build_exit": 101,
+      "compiler_error": "av_image_copy_plane_uc_from unavailable"
+    },
+    "input_sha256": "79c036c6f146094f658af4cf12371f66aae254e76f6038f385c4435c7afc3ff3",
+    "profile_associations": {
+      "dual": "both_endpoint_pins_matched",
+      "unscored_inline_pilot": "both_endpoint_pins_matched"
+    }
+  },
+  "archive": {
+    "name": "x11-release-all-software-latency-pipelined-setup-raw.zip",
+    "sha256": "14c41a727ed4bdbcec788c1d4911bd933ecc931698e30e80f4afe77125b06281",
+    "members_sha256": {
+      "run/dual/result.json": "44b5fb59823594d009e4d4ef7cfb0df791d9089c549ea2f9f1992372f1a020f2",
+      "run/dual/session-1/session.json": "b5ede37890a1544fdee5a58228ce49136a6186b30fa622fccf4393d10c565376",
+      "run/dual/session-1/samples.jsonl": "fd174308a1b7232a51a6f080c6ba68fcb1e010b0f01fb77a4aab385cf458f057",
+      "run/dual/session-2/session.json": "6c00e1b3c428843a593c77619a2b52f9ee218afd104845477fef5cbfd858cc3e",
+      "run/dual/session-2/samples.jsonl": "5caba761736b03e1e40667f82d1198e4fec2038e87aba52d0dad0650eb6f1ae3",
+      "run/dual/session-3/session.json": "3a76b96f851a8d3f548196b63e3fe5b84a9f9ebe96e19d7898d3812bafaba113",
+      "run/dual/session-3/samples.jsonl": "7ef0a51d363a66c372f82ae143e49672c8c75e1a7cd5d2847aabffef2065efde",
+      "run/dual/capture.json": "32821e17d3596640a6d50ca263279e10701486b7866618ce629395d4e49b2f23",
+      "fixture/dual/normal-release.py": "c3f5ad983e08cff8f1988108f1638fc21c6735a2cdc5fe7d4e480ba9bb0f9616",
+      "run/pilot/inline-dual.json": "02ef364b2c3f5e6bf9145542cc74ead31901253030c45bfd2b27f2c54d1178ab",
+      "run/dual/link-before.json": "3805524fdff2db39c0d6d2efb2635503f3d462369728e7ac389d42023d83ce74",
+      "run/dual/link-after.json": "7c212e1be3a6c5be03c8083ad1a0a0399b411af51474cf645727e342b4e35160",
+      "build/provenance.json": "2072bdae1544ba16473aa8d0cc04f5346853299d0d2851cafbe1a00aaf92ab39",
+      "replay/publish_release.py": "20bc128880026ac2e4c7ef317ba629830e9c21f60836e70ccc7bf68a7d9cfae1",
+      "replay/release_metrics.py": "fc00a676c44f474ace33d14588f8536d042717133e98b238ad3f63d5d33c42d0",
+      "fixture/index.json": "99def1c4788c96b6855cf56ae3eafbdb32ee1648ad4e7c8be96644d95ae7bc81"
+    }
+  }
+}

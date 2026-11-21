@@ -1,0 +1,332 @@
+{
+  "status": "complete",
+  "scope": "owned FFmpeg CLI at 1920x1080 H.264 NVENC with ptrace instrumentation",
+  "source_video_size": [
+    1920,
+    1080
+  ],
+  "requested_fps": 30,
+  "first_snapshot_seconds": 30,
+  "second_snapshot_seconds": 210,
+  "encoded_frames_between_snapshots": 5390,
+  "anonymous_rss_endpoints_kib": [
+    45988,
+    46076
+  ],
+  "observed_growing_extent": {
+    "size_kib": 3272,
+    "rss_kib": [
+      1100,
+      1184
+    ]
+  },
+  "mappings_created_before_first_snapshot": {
+    "covered_pages": 818,
+    "extent_pages": 818,
+    "origins": [
+      {
+        "pages": 452,
+        "syscall": "mmap",
+        "stack_modules_and_symbols": [
+          [
+            "libc.so.6",
+            "__mmap"
+          ],
+          [
+            "libc.so.6",
+            "timer_settime"
+          ],
+          [
+            "libc.so.6",
+            "__default_morecore"
+          ],
+          [
+            "libc.so.6",
+            "__default_morecore"
+          ],
+          [
+            "libc.so.6",
+            "__libc_calloc"
+          ],
+          [
+            "libcuda.so.580.178.04",
+            "cudbgMain"
+          ],
+          [
+            "libcuda.so.580.178.04",
+            "cuVDPAUCtxCreate"
+          ],
+          [
+            "libcuda.so.580.178.04",
+            "cuEGLApiInit"
+          ],
+          [
+            "libcuda.so.580.178.04",
+            "cuEGLApiInit"
+          ],
+          [
+            "libcuda.so.580.178.04",
+            "cuEGLApiInit"
+          ],
+          [
+            "libcuda.so.580.178.04",
+            "cuMemcpy3DAsync_v2"
+          ],
+          [
+            "libcuda.so.580.178.04",
+            "cuCtxCreate_v2"
+          ],
+          [
+            "libavcodec.so.58.134.100",
+            "av_dct_end"
+          ],
+          [
+            "libavcodec.so.58.134.100",
+            "avcodec_open2"
+          ],
+          [
+            "ffmpeg",
+            "main"
+          ],
+          [
+            "ffmpeg",
+            "main"
+          ],
+          [
+            "ffmpeg",
+            "main"
+          ],
+          [
+            "ffmpeg",
+            "main"
+          ],
+          [
+            "ffmpeg",
+            "main"
+          ],
+          [
+            "libc.so.6",
+            "__libc_init_first"
+          ],
+          [
+            "libc.so.6",
+            "__libc_start_main"
+          ],
+          [
+            "ffmpeg",
+            "main"
+          ]
+        ]
+      },
+      {
+        "pages": 252,
+        "syscall": "mmap",
+        "stack_modules_and_symbols": [
+          [
+            "libc.so.6",
+            "__mmap"
+          ],
+          [
+            "libc.so.6",
+            "timer_settime"
+          ],
+          [
+            "libc.so.6",
+            "__default_morecore"
+          ],
+          [
+            "libc.so.6",
+            "__default_morecore"
+          ],
+          [
+            "libc.so.6",
+            "__libc_calloc"
+          ],
+          [
+            "libcuda.so.580.178.04",
+            "cuVDPAUCtxCreate"
+          ],
+          [
+            "libcuda.so.580.178.04",
+            "cuEGLApiInit"
+          ],
+          [
+            "libcuda.so.580.178.04",
+            "cuEGLApiInit"
+          ],
+          [
+            "libcuda.so.580.178.04",
+            "cuEGLApiInit"
+          ],
+          [
+            "libcuda.so.580.178.04",
+            "cuMemcpy3DAsync_v2"
+          ],
+          [
+            "libcuda.so.580.178.04",
+            "cuCtxCreate_v2"
+          ],
+          [
+            "libavcodec.so.58.134.100",
+            "av_dct_end"
+          ],
+          [
+            "libavcodec.so.58.134.100",
+            "avcodec_open2"
+          ],
+          [
+            "ffmpeg",
+            "main"
+          ],
+          [
+            "ffmpeg",
+            "main"
+          ],
+          [
+            "ffmpeg",
+            "main"
+          ],
+          [
+            "ffmpeg",
+            "main"
+          ],
+          [
+            "ffmpeg",
+            "main"
+          ],
+          [
+            "libc.so.6",
+            "__libc_init_first"
+          ],
+          [
+            "libc.so.6",
+            "__libc_start_main"
+          ],
+          [
+            "ffmpeg",
+            "main"
+          ]
+        ]
+      },
+      {
+        "pages": 114,
+        "syscall": "mmap",
+        "stack_modules_and_symbols": [
+          [
+            "libc.so.6",
+            "__mmap"
+          ],
+          [
+            "libc.so.6",
+            "timer_settime"
+          ],
+          [
+            "libc.so.6",
+            "__default_morecore"
+          ],
+          [
+            "libc.so.6",
+            "__default_morecore"
+          ],
+          [
+            "libc.so.6",
+            "__libc_calloc"
+          ],
+          [
+            "libcuda.so.580.178.04",
+            "cuMemGetAttribute_v2"
+          ],
+          [
+            "libcuda.so.580.178.04",
+            "cuMemGetAttribute_v2"
+          ],
+          [
+            "libcuda.so.580.178.04",
+            "cuEGLApiInit"
+          ],
+          [
+            "libcuda.so.580.178.04",
+            "cuEGLApiInit"
+          ],
+          [
+            "libcuda.so.580.178.04",
+            "cuEGLApiInit"
+          ],
+          [
+            "libcuda.so.580.178.04",
+            "cuMemcpy3DAsync_v2"
+          ],
+          [
+            "libcuda.so.580.178.04",
+            "cuCtxCreate_v2"
+          ],
+          [
+            "libavcodec.so.58.134.100",
+            "av_dct_end"
+          ],
+          [
+            "libavcodec.so.58.134.100",
+            "avcodec_open2"
+          ],
+          [
+            "ffmpeg",
+            "main"
+          ],
+          [
+            "ffmpeg",
+            "main"
+          ],
+          [
+            "ffmpeg",
+            "main"
+          ],
+          [
+            "ffmpeg",
+            "main"
+          ],
+          [
+            "ffmpeg",
+            "main"
+          ],
+          [
+            "libc.so.6",
+            "__libc_init_first"
+          ],
+          [
+            "libc.so.6",
+            "__libc_start_main"
+          ],
+          [
+            "ffmpeg",
+            "main"
+          ]
+        ]
+      }
+    ],
+    "overlapping_mprotect_stacks": []
+  },
+  "observed_call_path": [
+    "ffmpeg",
+    "libavcodec.so.58.134.100:avcodec_open2",
+    "libcuda.so.580.178.04:cuCtxCreate_v2",
+    "libc.so.6:__libc_calloc",
+    "libc.so.6:__mmap"
+  ],
+  "scope_limits": [
+    "Coverage is limited to virtual mapping reservation and process RSS snapshots.",
+    "This 180-second traced run used a separate encoder process and its own virtual mapping."
+  ],
+  "tool_identity": {
+    "ffmpeg_sha256": "36d94a605d612e4090d1b8aec889d0c0801c6eafb1593c90f5c0dfd2e2966a45",
+    "strace_sha256": "38a5c75cb29dd85ddd7780d54f5bf595554d7a1b5c42524b23065f5dc4c4b01d",
+    "strace_version": "strace -- version 5.16"
+  },
+  "matched_library_sha256": {
+    "libcuda.so.580.178.04": "dcdf334aeb177c95b3385b797c9b871d03a287895713c6d107f79096b0985aa9",
+    "libnvidia-encode.so.580.178.04": "2a860b7fda50bb9eef572c5ea1495c5040d0741c1113e833f7881103d3c32bb3",
+    "libavcodec.so.58.134.100": "388b47f40685028998a161ebc9a541ff38146203bab60319b716e65670ee30b4",
+    "libavutil.so.56.70.100": "578d0772a3bd7a6d2bfcc44e989eb51044bff540e5ffa6cc2d074507dfb257e4"
+  },
+  "trace_parser_sha256": "d544423e293c468fa68aaffc9b1370a429204b07c495ed793d915b2f651587b6",
+  "private_raw_capture_sha256": "f287071bf30b22453d07e1834f9c4c3bc0f9626e0112a7071251136d7cafb3be"
+}
