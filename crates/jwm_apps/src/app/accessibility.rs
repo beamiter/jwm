@@ -12,6 +12,7 @@ const MODAL: NodeId = NodeId(4);
 
 pub(crate) struct Semantics {
     rows: HashMap<PathBuf, NodeId>,
+    row_generation: Option<u64>,
     next_id: u64,
     previous: Option<Vec<(NodeId, Node)>>,
 }
@@ -20,6 +21,7 @@ impl Default for Semantics {
     fn default() -> Self {
         Self {
             rows: HashMap::new(),
+            row_generation: None,
             next_id: 5,
             previous: None,
         }
@@ -36,6 +38,7 @@ impl Semantics {
     pub(crate) fn reset(&mut self) {
         self.previous = None;
         self.rows.clear();
+        self.row_generation = None;
     }
 
     pub(crate) fn update(&mut self, app: &App, scale: f64) -> TreeUpdate {
@@ -66,14 +69,24 @@ impl Semantics {
 
                 // Keep identity across reorder/rename of the visible label. A
                 // removed/filtered-out path cannot reuse its previous node ID.
-                let mut old_rows = std::mem::take(&mut self.rows);
+                let generation = notes.current_rows();
+                let mut old_rows = if self.row_generation == generation {
+                    std::mem::take(&mut self.rows)
+                } else {
+                    self.rows.clear();
+                    HashMap::new()
+                };
+                self.row_generation = generation;
                 let mut result_ids = Vec::new();
                 // The scene already materializes only rows inside the viewport.
                 // Offscreen notes become exposed when the user scrolls them into view.
                 for hit in &app.hits {
-                    let Action::Note(path) = &hit.action else {
+                    let Action::Note(path, drawn_generation) = &hit.action else {
                         continue;
                     };
+                    if generation != Some(*drawn_generation) {
+                        continue;
+                    }
                     let id = old_rows.remove(path).unwrap_or_else(|| {
                         let id = NodeId(self.next_id);
                         self.next_id = self
@@ -137,6 +150,12 @@ impl Semantics {
             (SEARCH, Request::Focus) if notes.managed => Action::Search,
             (EDITOR, Request::Focus) => Action::Edit,
             (id, Request::Click) if notes.managed => {
+                let Some(generation) = notes.current_rows() else {
+                    return false;
+                };
+                if self.row_generation != Some(generation) {
+                    return false;
+                }
                 let Some((path, _)) = notes
                     .rows
                     .iter()
@@ -144,11 +163,11 @@ impl Semantics {
                 else {
                     return false;
                 };
-                Action::Note(path.clone())
+                Action::Note(path.clone(), generation)
             }
             _ => return false,
         };
-        let opens_note = matches!(action, Action::Note(_));
+        let opens_note = matches!(action, Action::Note(..));
         app.dragging = false;
         app.action(action);
         if opens_note && app.dialog.is_none() {

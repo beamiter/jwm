@@ -19,10 +19,18 @@ use winit::{
     window::{CursorIcon, Fullscreen, ResizeDirection, Window, WindowId},
 };
 
+enum UserEvent {
+    NotesSearchReady(WindowId),
+    #[cfg(feature = "accessibility")]
+    Accessibility(accesskit_winit::Event),
+}
+
 #[cfg(feature = "accessibility")]
-type UserEvent = accesskit_winit::Event;
-#[cfg(not(feature = "accessibility"))]
-type UserEvent = ();
+impl From<accesskit_winit::Event> for UserEvent {
+    fn from(event: accesskit_winit::Event) -> Self {
+        Self::Accessibility(event)
+    }
+}
 
 type Error = Box<dyn std::error::Error>;
 struct NativeWindow {
@@ -40,8 +48,7 @@ struct NativeWindow {
     last_click: Option<Instant>,
 }
 struct Host {
-    #[cfg(feature = "accessibility")]
-    accessibility_proxy: winit::event_loop::EventLoopProxy<UserEvent>,
+    proxy: winit::event_loop::EventLoopProxy<UserEvent>,
     id: String,
     theme: crate::theme::ThemeWatcher,
     initial: Option<(bool, Vec<PathBuf>)>,
@@ -74,13 +81,9 @@ pub(crate) fn run(id: &str, notes: bool, paths: Vec<PathBuf>) -> Result<(), Erro
         }
         return Ok(());
     }
-    #[cfg(not(feature = "accessibility"))]
-    let event_loop = EventLoop::new()?;
-    #[cfg(feature = "accessibility")]
     let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
     let mut host = Host {
-        #[cfg(feature = "accessibility")]
-        accessibility_proxy: event_loop.create_proxy(),
+        proxy: event_loop.create_proxy(),
         id: id.into(),
         theme: crate::theme::ThemeWatcher::start(),
         initial: Some((notes, paths)),
@@ -117,7 +120,7 @@ impl Host {
                 }
             }
         }
-        let app = App::new(notes, paths)?;
+        let mut app = App::new(notes, paths)?;
         let identity = if notes {
             "org.jwm.Notes"
         } else {
@@ -133,12 +136,17 @@ impl Host {
         #[cfg(feature = "accessibility")]
         let attrs = attrs.with_visible(!notes);
         let window = Rc::new(event_loop.create_window(attrs)?);
+        let id = window.id();
+        let proxy = self.proxy.clone();
+        app.set_search_wake(std::sync::Arc::new(move || {
+            let _ = proxy.send_event(UserEvent::NotesSearchReady(id));
+        }));
         #[cfg(feature = "accessibility")]
         let accessibility = notes.then(|| {
             let adapter = accesskit_winit::Adapter::with_event_loop_proxy(
                 event_loop,
                 &window,
-                self.accessibility_proxy.clone(),
+                self.proxy.clone(),
             );
             window.set_visible(true);
             (adapter, crate::app::accessibility::Semantics::default())
@@ -211,9 +219,9 @@ impl Host {
         }
     }
 }
-impl ApplicationHandler<UserEvent> for Host {
+impl Host {
     #[cfg(feature = "accessibility")]
-    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
+    fn accessibility_event(&mut self, event_loop: &ActiveEventLoop, event: accesskit_winit::Event) {
         use accesskit_winit::WindowEvent as AccessibilityEvent;
         let id = event.window_id;
         let Some(native) = self.windows.get_mut(&id) else {
@@ -244,6 +252,21 @@ impl ApplicationHandler<UserEvent> for Host {
             }
         }
         self.effects(event_loop, id);
+    }
+}
+impl ApplicationHandler<UserEvent> for Host {
+    fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: UserEvent) {
+        match event {
+            UserEvent::NotesSearchReady(id) => {
+                if let Some(native) = self.windows.get_mut(&id)
+                    && native.app.poll_search()
+                {
+                    native.window.request_redraw();
+                }
+            }
+            #[cfg(feature = "accessibility")]
+            UserEvent::Accessibility(event) => self.accessibility_event(_event_loop, event),
+        }
     }
 
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
